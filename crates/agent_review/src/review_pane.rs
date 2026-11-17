@@ -22,7 +22,7 @@ use gpui::{
 use project::Project;
 use ui::{Button, ButtonStyle, Label, LabelSize, Tooltip, prelude::*};
 use workspace::{
-    Item, OpenOptions, Workspace,
+    HideStatusItem, Item, ItemHandle, OpenOptions, StatusItemView, Workspace,
     item::{ItemEvent, TabContentParams},
 };
 
@@ -133,6 +133,10 @@ pub(crate) fn init(cx: &mut App) {
         let Some(review) = AgentReview::global(cx) else {
             return;
         };
+        let status = cx.new(|cx| ReviewStatus::new(review.clone(), cx));
+        workspace.status_bar().update(cx, |status_bar, cx| {
+            status_bar.add_right_item(status, window, cx)
+        });
         cx.subscribe_in(
             &review,
             window,
@@ -784,6 +788,11 @@ impl ReviewPane {
             )
             .child(files)
             .children(unreviewed_section)
+            .child(
+                Label::new(crate::NOT_REVIEWED)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
     }
 
     fn render_file_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -980,6 +989,57 @@ impl Item for ReviewPane {
         match event {
             ReviewPaneEvent::Close => f(ItemEvent::CloseItem),
         }
+    }
+}
+
+/// Review mode and waiting reviews in the status bar. Shown while review mode is on or a review
+/// waits (e.g. one asked by an `always_ask` rule); clicking it brings the waiting reviews forward.
+pub struct ReviewStatus {
+    review: Entity<AgentReview>,
+    _observe: Subscription,
+}
+
+impl ReviewStatus {
+    fn new(review: Entity<AgentReview>, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&review, |_, _, cx| cx.notify());
+        Self {
+            review,
+            _observe: observe,
+        }
+    }
+}
+
+impl Render for ReviewStatus {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let review = self.review.read(cx);
+        let waiting = review.open_review_count();
+        let label = match (review.is_enabled(), waiting) {
+            (false, 0) => return div().into_any_element(),
+            (true, 0) => "Review on".to_string(),
+            (_, 1) => "Review: 1 waiting".to_string(),
+            (_, waiting) => format!("Review: {waiting} waiting"),
+        };
+        Button::new("agent-review-status", label)
+            .label_size(LabelSize::Small)
+            .style(ButtonStyle::Subtle)
+            .tooltip(Tooltip::text(crate::COVERAGE))
+            .on_click(|_, window, cx| window.dispatch_action(OpenReviews.boxed_clone(), cx))
+            .into_any_element()
+    }
+}
+
+impl StatusItemView for ReviewStatus {
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+
+    /// Shown only while the `agent_review.enabled` setting is on or a review waits.
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        None
     }
 }
 
