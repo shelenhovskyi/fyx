@@ -39,4 +39,9 @@
     "html": false,
   },
   "suggest_extensions": false,
+  // Review agent edits hunk by hunk before they land (`crates/agent_review`). Also in the
+  // agent panel's options menu; the FYX_AGENT_REVIEW environment variable overrides it.
+  "agent_review": {
+    "enabled": false,
+  },
 }
