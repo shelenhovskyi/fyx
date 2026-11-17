@@ -3,16 +3,20 @@
 This guide is for people who install and use Fyx. If you want to write a UI extension, read
 [Writing a Fyx UI extension](extension-authoring.md) instead.
 
-It describes the `integration` branch as of 2026-11-18. Features that are built but not merged
-yet are marked **(coming)**.
+It describes `origin/integration` as of 2026-11-18. Features that are built on a stream's branch
+but not merged into `integration` yet are marked **(coming)**.
 
 - [What Fyx is](#what-fyx-is)
 - [Privacy defaults](#privacy-defaults)
 - [Reviewing agent changes](#reviewing-agent-changes)
 - [UI extensions](#ui-extensions)
-- [Security modes for agents](#security-modes-for-agents)
+- [Security modes for agents (coming)](#security-modes-for-agents-coming)
 - [Where Fyx keeps its files](#where-fyx-keeps-its-files)
 - [Troubleshooting](#troubleshooting)
+
+<!-- Base: origin/integration 571c6826a5. (coming) sources: claude/fyx-w1-rebrand-904c67,
+claude/fyx-w3-renderer-e20d2b, the W5 commits 29999cd5f3 and a98221e345 (carried on the W1 and W4
+branches), claude/fyx-w9-guard, claude/fyx-w9-fixes. -->
 
 ## What Fyx is
 
@@ -23,10 +27,10 @@ themes, keymaps and the agent panel work as they do in Zed. Fyx adds the followi
   accept or reject them, hunk by hunk.
 - **UI extensions.** Sandboxed WASM extensions can add dock panels and status bar items. They
   never draw anything themselves: Fyx renders them with its own components and your theme.
-- **Security modes.** Optional modes keep private files, secret environment variables and agent
-  config files out of agents' reach.
 - **No Zed cloud.** Fyx does not sign in to zed.dev, collaborate, send telemetry or check for
   updates. See [Privacy defaults](#privacy-defaults).
+- **(coming) Security modes.** Optional modes keep private files, secret environment variables
+  and agent config files out of agents' reach.
 
 Things that differ from Zed:
 
@@ -94,7 +98,7 @@ Fyx still connects in these cases. None of them goes to zed.dev.
   - The default Prettier is installed from npm.
   - Git blame hovers load author avatars.
 
-<!-- tasks/reviews/network-audit-1.md "Verdict" and "Still phones home"; (coming): commit 4b83f766d2 on claude/fyx-w1-rebrand-904c67 -->
+<!-- tasks/reviews/network-audit-1.md "Verdict" and "Still phones home"; (coming): 4b83f766d2 on claude/fyx-w1-rebrand-904c67 -->
 
 To turn off every AI feature, including these requests, set `"disable_ai": true`.
 
@@ -132,14 +136,20 @@ Turning review off does not release edits that are already waiting. They still n
 | An ACP agent that asks permission and sends a diff, such as Claude Agent | Yes. Your decisions answer the permission request. |
 | An ACP v2 agent whose permission request carries a patch for one file | Yes, against the file as it is now. |
 | An agent that writes through Fyx (`fs/write_text_file`) | Yes. The write waits until you submit, and only accepted hunks land. |
-| The built-in agent's edit and write tools | Yes. Fyx holds the edit before saving it, keeps only accepted hunks and tells the agent about the rest. |
-| The built-in agent's delete, move and copy tools | No. They ask permission, as in Zed. |
+| Zed's built-in agent | No. Its edits land as in Zed. |
 | An ACP v2 edit that Fyx cannot show as a diff: several files in one request, no patch text, or a patch that does not apply | No. A notification says so. Decide in the agent panel. |
 | Shell and terminal commands (`sed -i`, `cat >`, scripts) | No. Nothing is blocked, but the turn's review pane lists the changed files under "changed without review". |
 
-A short version of this table is shown under every review pane and in the setting's description.
+A short version of this table is shown under every review pane, and the status bar item's tooltip
+shows the long version.
 
-<!-- crates/agent_review/src/agent_review.rs: COVERAGE, NOT_REVIEWED -->
+**(coming)** Review of the built-in agent:
+
+- Its edit and write tools will be reviewed. Fyx will hold the edit before saving it, keep only
+  accepted hunks and tell the agent about the rest.
+- Its delete, move and copy tools will still ask permission, as in Zed.
+
+<!-- crates/agent_review/src/agent_review.rs: COVERAGE, NOT_REVIEWED; (coming) 29999cd5f3 -->
 
 ### The review pane
 
@@ -171,14 +181,17 @@ These keys work while the pane has focus:
     write fails with a message that lists them.
   - An ACP permission answer carries no message, so an agent that asked permission only learns
     "allowed" or "rejected".
-- **Permission requests.** While Fyx reviews an edit that came with a permission request, the
-  request's card in the agent panel says so. It offers **Open review** instead of Allow and Reject.
 - **Your own unsaved edits.** If the file has unsaved edits of yours, Fyx applies the accepted
   hunks but does not save the file.
 - **The text moved.** If Fyx cannot apply the accepted hunks, for example because the text moved
   in the meantime, the review stays open with the reason. Submit again, or reject the file.
 - **Cancelled edits.** Waiting edits are cancelled when the agent's turn stops, its connection
   drops, or you close the last pane of the turn. The agent is told the file is unchanged.
+- **(coming) Permission cards.** While Fyx reviews an edit that came with a permission request,
+  the request's card in the agent panel will say so. It will offer **Open review** instead of
+  Allow and Reject.
+
+<!-- (coming) 29999cd5f3 -->
 
 ### The status bar
 
@@ -203,60 +216,75 @@ Nothing is blocked or undone.
 
 ### Review rules
 
-There are two places for rules:
-
-- **`.fyx/review.toml`**, at the root of a worktree, can only make review stricter. The file comes
-  with the repository, and an agent can write to it.
-  - `always_ask`: always reviewed, even after "accept all in the turn".
-  - `deny`: never written by an agent. The write fails with a message naming the rule.
-- **`agent_review.auto_accept`**, in your user settings, lists files whose edits land without
-  review. Only you can loosen review.
+Rules live in `.fyx/review.toml` at the root of a worktree. All three keys are optional:
 
 ```toml
 # .fyx/review.toml
-always_ask = ["Cargo.lock", ".github/**"]
-deny       = ["*.env", "secrets/**"]
+auto_accept = ["docs/**", "*.md"]          # lands without review
+always_ask  = ["Cargo.lock", ".github/**"] # always reviewed
+deny        = ["*.env", "secrets/**"]      # never written by an agent
 ```
 
-```json
-// settings.json
-"agent_review": {
-  "enabled": true,
-  "auto_accept": ["docs/**", "*.md"]
-}
-```
+What each kind does:
+
+- **`deny`**: the file is never written by an agent. The write fails with a message naming the
+  rule, and a permission request is answered "reject".
+- **`always_ask`**: the file is always reviewed, even after "accept all in the turn".
+- **`auto_accept`**: the edit lands without review.
 
 How the rules apply:
 
 - `deny` and `always_ask` apply even with review mode off. `auto_accept` applies only while review
   mode is on.
+- `auto_accept` applies only in worktrees you trust: the ones Zed's restricted mode lets you
+  trust, or all of them when `session.trust_all_worktrees` is on. The file comes with the
+  repository, so a cloned project could otherwise wave agent edits through.
 - When several rules match a file, the first kind in this order wins: `deny`, `always_ask`,
-  `auto_accept`. With the files above, `docs/security.md` lands without review. Add
-  `always_ask = ["docs/security.md"]` to the project file, and it is always reviewed.
+  `auto_accept`. With the file above, `docs/security.md` lands without review. Add it to
+  `always_ask`, and it is always reviewed.
 - A pattern without `/` matches the file name in any folder: `*.env` matches `config/prod.env`.
 - A pattern with `/` matches the path from the worktree root: `docs/**` matches
   `docs/guide/intro.md`.
-- On Windows and macOS, matching ignores case.
 - Each decision a rule made is listed in the review pane with its rule, for example
   "by rule `deny = "*.env"` in …/.fyx/review.toml".
 
-How Fyx handles changes to the file:
+How Fyx loads the file:
 
-- **Stricter rules** apply at once.
-- **Looser rules.** A change that removes a restriction (a pattern dropped, or the file deleted)
-  waits for you. A notification lists what would be removed and offers **Apply new review rules**.
-  Until you click it, the old rules stay in force. Fyx does not remember this across restarts: at
-  start, the file applies as it is.
-- **Bad file.** If the file has bad TOML, an unknown key or a bad pattern, the old rules stay in
-  force and a notification shows the error.
-- **`auto_accept` in the project file** is ignored, and a notification says so.
+- Fyx reads the file when an agent thread starts in the project.
+- **Changes while agents run.** If the file changes while agent sessions are running, the new
+  rules do not apply by themselves, because an agent may have written them. A notification
+  offers **Apply new review rules**. Until you click it, the previous rules stay in force.
+- **Bad file.** If the file does not parse (bad TOML, an unknown key, a bad pattern), Fyx ignores
+  the whole file and shows a notification with the error.
 
-<!-- crates/agent_review/src/review_rules.rs; agent_review.rs: "Apply new review rules", ignored_auto_accept notification -->
+<!-- crates/agent_review/src/review_rules.rs (trusted, auto_accept); agent_review.rs: "Apply new review rules" -->
+
+**(coming)** The project file will only make review stricter:
+
+- **`auto_accept` moves to your user settings**, `agent_review.auto_accept`. In
+  `.fyx/review.toml`, it will be ignored with a notification.
+
+  ```json
+  "agent_review": {
+    "enabled": true,
+    "auto_accept": ["docs/**", "*.md"]
+  }
+  ```
+
+- **Stricter rules** will apply at once. A change that removes a restriction (a pattern dropped,
+  or the file deleted) will wait for **Apply new review rules**. This also holds when a new
+  thread starts. At start, the file will apply as it is.
+- **Bad file.** A file that does not parse will keep the previous rules in force instead of
+  dropping them.
+- **Matching.** Rules will match the resolved path of the file, ignoring case on Windows and
+  macOS.
+
+<!-- (coming) a98221e345 -->
 
 ### Not covered yet
 
 - Shell and terminal commands. They are listed as "changed without review", but not held.
-- The built-in agent's delete, move and copy tools.
+- Zed's built-in agent. **(coming)** Its edit and write tools will be reviewed.
 - ACP v2 edits to several files at once, or edits without a usable patch.
 - Remote projects: `.fyx/review.toml` is read through the local file system only.
 - A rejected permission request cannot carry your comments to the agent. This is a limit of ACP.
@@ -269,17 +297,18 @@ style, with your theme. Each extension runs in its own sandbox:
 
 - no files, environment variables or arguments;
 - no network: every connection attempt fails with "access denied";
-- at most 256 MiB of memory;
+- at most 32 MiB of memory (**(coming)** 256 MiB);
 - a time limit on every call. An extension that runs too long or crashes is disabled until you
-  restart Fyx.
+  restart Fyx. **(coming)** You will be able to restart it in place (see
+  [Failures and restarts](#failures-and-restarts)).
 
-Links in an extension's markdown open only if they are `http(s)://` addresses, and only after you
-confirm the address.
+**(coming)** Links in an extension's markdown will open only if they are `http(s)://` addresses,
+and only after you confirm the address.
 
 UI extensions are separate from Zed extensions (languages, themes, slash commands). Those work as
 in Zed.
 
-<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs: deny_network, store limits; docs/fyx/limits-and-gotchas.md; tasks/progress/W3.md B4 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs: deny_network, UI_MEMORY_LIMIT; docs/fyx/limits-and-gotchas.md; (coming) 52a9103c61, b89ab63da9 -->
 
 ### Installing an extension from a folder
 
@@ -293,32 +322,31 @@ in Zed.
 Fyx links the folder into its installed-extensions directory and loads the extension. The
 extension loads again on every start. When you rebuild its component, Fyx reloads it.
 
-The folder's path cannot contain `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
+Every UI extension in the installed-extensions directory loads at start, including folders copied
+there by hand or linked by Zed's **Install Dev Extension**.
 
 To remove the extension, uninstall it on the Extensions page.
 
-<!-- crates/ui_ext_host/src/install.rs: InstallDevUiExtension, prompt_and_install, cmd_special_char; registry.rs: hot reload of linked dev extensions -->
+<!-- crates/ui_ext_host/src/install.rs: InstallDevUiExtension, prompt_and_install; registry.rs: scan_installed, hot reload of linked dev extensions -->
 
-### The consent prompt
+### The consent prompt (coming)
 
-Fyx loads an extension from the installed-extensions directory only after you have enabled it as
-it is now. The command above records your consent when you click **Install**. Anything else that
-appears there waits for you, for example a folder copied there by hand or linked by Zed's
-**Install Dev Extension**. Fyx then shows a notification:
+Fyx will load an extension from the installed-extensions directory only after you have enabled it
+as it is now. The install command will record your consent when you click **Install**. Anything
+else that appears there will wait for you, and Fyx will show a notification:
 
 > The UI extension `<id>` is installed but not enabled. It asks for: …
 
 - **Enable** loads the extension and remembers your answer.
 - **Not now** leaves it unloaded until the next start.
 
-Fyx asks again when the extension asks for more capabilities. It also asks again when its
+Fyx will ask again when the extension asks for more capabilities. It will also ask again when its
 component changes, unless the extension is installed from a folder: then any build in that folder
-counts as enabled. Answers are kept in `fyx-ui-consent.json` in the data folder.
+counts as enabled. Answers will be kept in `fyx-ui-consent.json` in the data folder.
 
-Extensions listed in `FYX_UI_DEV_EXTENSIONS` load without a prompt: setting the variable is your
-consent.
+The same change will refuse folders whose path contains `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
 
-<!-- crates/ui_ext_host/src/consent.rs; registry.rs: offer_consent -->
+<!-- (coming) 6ecd47980f on claude/fyx-w3-renderer-e20d2b: consent.rs, registry.rs offer_consent -->
 
 ### Capability chips
 
@@ -351,12 +379,32 @@ Inside a panel:
 
 For quick tests, set `FYX_UI_DEV_EXTENSIONS` to a list of extension folders before you start Fyx.
 Separate the folders with `;` on Windows and `:` elsewhere. Fyx reads the variable once, at
-startup.
+startup, and reloads these extensions when you rebuild them. They load without any prompt:
+setting the variable is your consent.
 
 ```bat
 set FYX_UI_DEV_EXTENSIONS=C:\src\fyx\extensions\fyx_demo_counter;C:\src\fyx\extensions\fyx_demo_todo
 fyx.exe --foreground
 ```
+
+<!-- crates/ui_ext_host/src/registry.rs: DEV_EXTENSIONS_ENV, watch_component -->
+
+### Failures and restarts
+
+Today, an extension that crashes or runs past its time limit is disabled until you restart Fyx.
+Some errors offer **Retry**.
+
+**(coming)** Restarting in place:
+
+- **Restart extension.** A stopped panel or status item will show the reason and
+  **Restart extension**, which loads the extension again on a fresh instance. The command
+  `fyx_ui: restart UI extension` does the same for any loaded extension.
+- **A rebuild that does not load.** If a rebuilt component does not load, the old one will keep
+  running. The surface's footer will show the error with **Retry**. The next good build will load
+  by itself and clear the error.
+- **Panels stay put.** A reload will remount the panels in place: they stay docked and open.
+
+<!-- crates/ui_ext_host/src/view.rs: "Retry"; (coming) 0004efba01 on claude/fyx-w3-renderer-e20d2b -->
 
 ### Dev folders in settings (coming)
 
@@ -370,7 +418,7 @@ folder stays where it is:
 - `fyx_ui: remove dev UI extension` takes a folder off the list. You can also edit the setting.
 - A folder you add to the setting by hand needs one **Enable**.
 
-<!-- (coming) commit db6619b9f8 on claude/fyx-w3-renderer-e20d2b -->
+<!-- (coming) db6619b9f8 on claude/fyx-w3-renderer-e20d2b -->
 
 ### Packages, updates, rollback and pinning (coming)
 
@@ -391,17 +439,20 @@ optional assets.
   folder.
 - Signed packages from a Fyx registry come later.
 
-<!-- (coming) commit d74c8bb2ac on claude/fyx-w3-renderer-e20d2b: install_store.rs, store_actions.rs -->
+<!-- (coming) d74c8bb2ac on claude/fyx-w3-renderer-e20d2b: install_store.rs, store_actions.rs -->
 
-## Security modes for agents
+## Security modes for agents (coming)
+
+None of this is on `integration` yet. It is built on `claude/fyx-w9-guard`, and the fixes from its
+review are on `claude/fyx-w9-fixes`.
 
 Agents run with your user's rights. A prompt injection in a README, an issue or a web page could
 make an agent read your secrets, send them out, or write to an agent config file so that code runs
-later. Security modes reduce that risk. The design and the full rules are in
-[Security modes](security-modes.md).
+later. Security modes will reduce that risk. The design and the full rules are on the W9 branch,
+in `docs/fyx/security-modes.md`.
 
-Every mode is **off by default**. Only your user settings can change the mode: a project's
-settings have no such key.
+Every mode will be **off by default**. Only your user settings will be able to change the mode: a
+project's settings have no such key.
 
 ```json
 "fyx_security": {
@@ -410,13 +461,13 @@ settings have no such key.
 }
 ```
 
-| Mode | What it does today |
+| Mode | What it does |
 |---|---|
 | `off` | Nothing. Fyx behaves like Zed. |
 | `audit` | Blocks nothing. Logs each action that `shield` would block, as `fyx_guard audit: would block …`. |
 | `shield` | Blocks the actions below and logs each block as `fyx_guard: blocked …`. |
 
-<!-- crates/fyx_guard/src/fyx_guard.rs: SecurityMode, log prefixes; assets/settings/fyx.json -->
+<!-- claude/fyx-w9-guard: crates/fyx_guard/src/fyx_guard.rs (SecurityMode, log prefixes) -->
 
 Under `shield`:
 
@@ -447,13 +498,13 @@ retry. A write that shield blocks never opens a review pane.
 We recommend running `audit` for a while first. Read the log, add the variables you need to
 `allow_env`, then switch to `shield`.
 
-**Shield is not a sandbox, and fixes for it are pending.** Until they are merged:
+**Shield is not a sandbox.** The first version (`claude/fyx-w9-guard`) also has gaps that its
+judge review asks to fix. The fixes are on `claude/fyx-w9-fixes`. Until they are merged:
 
-- **(coming)** The built-in agent's move, copy, delete and create-folder tools are not checked.
-- **(coming)** `.git/config` is not protected, and neither is Fyx's own config folder.
-- **(coming)** An agent's terminal can still edit your settings file and lower the mode, and the
-  change applies without asking you. With the fix, Fyx will ask you to confirm before it lowers
-  protection.
+- The built-in agent's move, copy, delete and create-folder tools are not checked.
+- `.git/config` is not protected, and neither is Fyx's own config folder.
+- An agent's terminal can edit your settings file and lower the mode, and the change applies
+  without asking you. With the fixes, Fyx asks you to confirm before it lowers protection.
 
 Limits that stay until a later step:
 
@@ -464,7 +515,7 @@ Limits that stay until a later step:
 
 Network control, placeholder secrets and an OS sandbox for agents are planned for later steps.
 
-<!-- docs/fyx/security-modes.md "Known limits of step 1"; tasks/reviews/w9-step1.md F2-F4; (coming) claude/fyx-w9-fixes 3851a95912 -->
+<!-- claude/fyx-w9-guard: docs/fyx/security-modes.md "Known limits of step 1"; tasks/reviews/w9-step1.md F2-F4; claude/fyx-w9-fixes 3851a95912 -->
 
 ## Where Fyx keeps its files
 
@@ -482,7 +533,7 @@ Inside the data folder:
 | Path | What |
 |---|---|
 | `extensions/installed/` | Installed extensions, including linked UI extension folders |
-| `fyx-ui-consent.json` | Your **Enable** answers for UI extensions |
+| `fyx-ui-consent.json` | **(coming)** Your **Enable** answers for UI extensions |
 | `extensions/fyx/` | **(coming)** The UI extension install store: one folder per version, plus `state.json` with the active, previous and pinned version of each extension |
 
 In each project, at the root of a worktree:
@@ -490,11 +541,11 @@ In each project, at the root of a worktree:
 | Path | What |
 |---|---|
 | `.fyx/review.toml` | Project review rules |
-| `.fyx/security.toml` | Extra private and read-only paths for shield mode |
+| `.fyx/security.toml` | **(coming)** Extra private and read-only paths for shield mode |
 
 `fyx --user-data-dir <DIR>` keeps all data and config in `<DIR>`. Use it for a throwaway profile.
 
-<!-- crates/paths/src/paths.rs: config_dir, data_dir, logs_dir, log_file, extensions_dir; crates/extension_host/src/extension_host.rs: installed_dir; crates/ui_ext_host/src/consent.rs -->
+<!-- crates/paths/src/paths.rs: config_dir, data_dir, logs_dir, log_file, extensions_dir; crates/extension_host/src/extension_host.rs: installed_dir -->
 
 ## Troubleshooting
 
@@ -504,13 +555,11 @@ start with these prefixes:
 - `fyx:ui:` for UI extensions. Messages an extension writes itself appear under `fyx_ui`, after
   its id.
 - `fyx: agent review:` for review.
-- `fyx_guard` for security modes. At start, Fyx logs the active mode, for example
+- **(coming)** `fyx_guard` for security modes. At start, Fyx will log the active mode, for example
   `fyx_guard: security mode Shield`.
 
 **A UI extension does not appear.**
 
-- Look for a notification asking you to **Enable** it. If you clicked **Not now**, restart Fyx to
-  get the notification again.
 - Look in the log for `fyx:ui: failed to load …`. Common causes:
   - The `extension.toml` has no `[fyx_ui]` table.
   - The component is not built.
@@ -518,32 +567,36 @@ start with these prefixes:
   - A panel is declared without the `ui:panel` capability.
 - Two extensions cannot use the same id. The second one is refused, with an error in the log.
 - `FYX_UI_DEV_EXTENSIONS` is read only at startup. Set it in the same shell that starts Fyx.
+- **(coming)** Look for a notification asking you to **Enable** it. If you clicked **Not now**,
+  restart Fyx to get the notification again.
 
 **A panel shows an error.** An extension that crashes or runs past its time limit is disabled.
-Restart Fyx to load it again. Some errors offer **Retry**.
+Restart Fyx to load it again. Some errors offer **Retry**. **(coming)** Use **Restart extension**
+or `fyx_ui: restart UI extension` instead of restarting Fyx.
 
 **Agent edits land without a review.**
 
 - Check the status bar: **Review on** means review mode is on.
 - Check whether `FYX_AGENT_REVIEW=0` is set in your environment.
-- The edit may come from a path that review does not cover (see
+- The edit may come from a path that review does not cover, such as the built-in agent (see
   [What is reviewed](#what-is-reviewed)). Terminal changes show up under
   "changed without review".
-- Check `agent_review.auto_accept` in your settings.
+- Check `auto_accept` in `.fyx/review.toml`, if the worktree is trusted.
 
 **A rule in `.fyx/review.toml` has no effect.**
 
-- Look for a notification with a parse error. A bad file keeps the previous rules.
-- If you removed a restriction, look for **Apply new review rules**.
-- `auto_accept` belongs in your user settings, not in this file.
+- Look for a notification with a parse error. Today, a bad file is ignored as a whole.
+- If the file changed while an agent ran, look for **Apply new review rules**.
+- `auto_accept` applies only in trusted worktrees and only with review mode on.
 
-**Shield blocks something you need.** Switch to `audit` and read the `fyx_guard audit:` lines:
+**(coming) Shield blocks something you need.** Switch to `audit` and read the
+`fyx_guard audit:` lines:
 
 - For a terminal variable, add it to `allow_env`.
 - For a file, check your `private_files` setting.
 
-**`git push` fails in an agent terminal under shield.** `SSH_AUTH_SOCK` is blanked. Add it to
-`allow_env` if you want agents to push.
+**(coming) `git push` fails in an agent terminal under shield.** `SSH_AUTH_SOCK` is blanked. Add it
+to `allow_env` if you want agents to push.
 
 **The agent asks you to sign in or has no model.** Fyx has no zed.dev models. Set an API key for
 Anthropic or another provider in the agent panel's settings, or use an external ACP agent.
