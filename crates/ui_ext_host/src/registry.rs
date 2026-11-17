@@ -427,6 +427,9 @@ fn attach_to_workspace(
     };
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
+    workspace.register_action(|workspace, _: &crate::InstallDevUiExtension, window, cx| {
+        crate::install::prompt_and_install(workspace, window, cx)
+    });
     workspace.register_action({
         let surfaces = surfaces.clone();
         move |workspace, action: &ToggleExtensionPanel, window, cx| {

@@ -587,3 +587,76 @@ async fn test_installed_extensions_load_reload_and_stop(cx: &mut TestAppContext)
         })
     });
 }
+
+/// Install UX (a): a folder with a `[fyx_ui]` table and a built component is linked into the
+/// installed directory and loads; a second install of the same dev extension replaces the link;
+/// a folder that is not a UI extension, or whose component is not built, is refused.
+#[gpui::test]
+async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let wasm = status_item_wasm();
+    let root = tempfile::tempdir().expect("temp dir");
+    let source = root.path().join("my-status-item");
+    let installed = root.path().join("extensions").join("installed");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status_item/extension.toml"),
+        source.join("extension.toml"),
+    )
+    .expect("manifest");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+
+    // Not built yet.
+    let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect_err("no component");
+    assert!(format!("{error:#}").contains("not built"), "{error:#}");
+
+    std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
+    let id = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect("installs");
+    assert_eq!(id.as_ref(), "fyx-test-status-item");
+    let link = installed.join("fyx-test-status-item");
+    assert!(std::fs::symlink_metadata(&link).expect("link").is_symlink());
+    // Installing again replaces the dev link.
+    crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect("reinstalls");
+
+    // The capabilities shown in the confirmation.
+    let (_, manifest) = extension_host::wasm_host::fyx_ui::UiManifest::read(fs.as_ref(), &source)
+        .await
+        .expect("reads")
+        .expect("a UI extension");
+    assert_eq!(
+        crate::describe_capabilities(&manifest),
+        ["ui:status-bar: add status bar items"]
+    );
+
+    // The loader finds it in the installed directory.
+    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    registry.update(cx, |registry, cx| {
+        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    });
+    run_until(cx, "the installed extension", |cx| {
+        registry.read_with(cx, |registry, _| {
+            registry.surface("fyx-test-status-item/status").is_some()
+        })
+    });
+
+    // A folder without [fyx_ui] is refused.
+    let plain = root.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("plain");
+    std::fs::write(
+        plain.join("extension.toml"),
+        "id = \"plain\"\nname = \"Plain\"\nversion = \"0.1.0\"\nschema_version = 1\n",
+    )
+    .expect("plain manifest");
+    let error = crate::install_dev_ui_extension(&plain, &installed, fs.as_ref())
+        .await
+        .expect_err("not a UI extension");
+    assert!(format!("{error:#}").contains("[fyx_ui]"), "{error:#}");
+}

@@ -11,6 +11,7 @@
 //! For the sprint, extensions are loaded from [`DEV_EXTENSIONS_ENV`] only.
 
 mod backend;
+mod install;
 mod keyboard;
 mod panel;
 mod registry;
@@ -29,6 +30,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 pub use backend::UiBackend;
+pub use install::{InstallDevUiExtension, describe_capabilities, install_dev_ui_extension};
 pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
 pub use panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo};
 pub use registry::{DEV_EXTENSIONS_ENV, LoadedSurface, UiExtensionRegistry};
