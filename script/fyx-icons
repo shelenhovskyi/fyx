@@ -13,6 +13,8 @@ Writes, at the paths Zed's build and bundle scripts already use (tasks/progress/
   of zed, cli and auto_update_helper, and the installer;
 - crates/zed/resources/Document.icns: the macOS document type icon (one `ic10` entry, as Zed's);
 - docs/theme/favicon.png (64): the docs site;
+- crates/zed/resources/windows/logo_150x150.png and logo_70x70.png: the Explorer context-menu
+  package tiles (AppxManifest*.xml);
 - assets/images/fyx_logo.svg: the in-app mark (welcome page, onboarding), copied from the source.
 """
 
@@ -95,6 +97,12 @@ def main():
                 favicon = ROOT / "docs" / "theme" / "favicon.png"
                 resize(master, 64, favicon, crop=TILE_CROP)
                 written.append(favicon)
+                # Tiles of the Explorer context-menu package. Every channel's AppxManifest names
+                # the same two files, so they come from the Stable icon.
+                for size in (150, 70):
+                    tile_png = RESOURCES / "windows" / f"logo_{size}x{size}.png"
+                    resize(master, size, tile_png, crop=TILE_CROP)
+                    written.append(tile_png)
 
         document = scratch / "document.png"
         render(SOURCES / "fyx-document.svg", document)

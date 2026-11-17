@@ -88,7 +88,9 @@ members = [
     "crates/fs_benchmarks",
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
+    "crates/fyx_api_docs", # fyx
     "crates/fyx_ext", # fyx
+    "crates/fyx_ext_harness", # fyx
     "crates/fyx_guard", # fyx
     "crates/fyx_registry", # fyx
     "crates/git",
@@ -377,6 +379,7 @@ file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
+fyx_ext_harness = { path = "crates/fyx_ext_harness" } # fyx
 fyx_guard = { path = "crates/fyx_guard" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 git = { path = "crates/git" }

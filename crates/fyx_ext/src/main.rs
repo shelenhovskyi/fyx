@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use fyx_ext::CheckDepth;
 use fyx_ext::build::{BuildOptions, DevOptions};
 use fyx_ext::template::{GitReference, NewExtension, SdkSource};
 
@@ -73,6 +74,15 @@ enum Command {
         /// Fail on warnings too.
         #[arg(long)]
         deny_warnings: bool,
+    },
+    /// Build, check, run every surface headless, then the crate's own `cargo test` with
+    /// FYX_EXT_COMPONENT set to the built component.
+    Test {
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Arguments for cargo test, after `--`.
+        #[arg(last = true)]
+        cargo_args: Vec<String>,
     },
     /// Build for release, check, and write <id>-<version>.fyxext.
     Package {
@@ -145,7 +155,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     cargo_args,
                 },
             )?;
-            let (_, report) = fyx_ext::check(&path)?;
+            let (_, report) = fyx_ext::check(&path, CheckDepth::Load)?;
             report.print();
             Ok(exit_code(report.has_errors()))
         }
@@ -172,13 +182,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             path,
             deny_warnings,
         } => {
-            let (manifest, report) = fyx_ext::check(&path)?;
+            let (manifest, report) = fyx_ext::check(&path, CheckDepth::Load)?;
             report.print();
             let failed = report.has_errors() || (deny_warnings && !report.warnings.is_empty());
             if !failed {
                 eprintln!("fyx-ext: {} {} passes", manifest.id, manifest.version);
             }
             Ok(exit_code(failed))
+        }
+        Command::Test { path, cargo_args } => {
+            let passed = fyx_ext::run::test(&path, &cargo_args)?;
+            Ok(exit_code(!passed))
         }
         Command::Package {
             path,
@@ -195,7 +209,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 )?;
             }
             let out = out.unwrap_or_else(|| path.clone());
-            fyx_ext::package::package(&path, &out)?;
+            fyx_ext::package::package(&path, &out, CheckDepth::Load)?;
             Ok(ExitCode::SUCCESS)
         }
     }

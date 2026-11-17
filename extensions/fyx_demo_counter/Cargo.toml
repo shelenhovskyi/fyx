@@ -16,3 +16,7 @@ doctest = false
 
 [dependencies]
 ui_ext_sdk.workspace = true
+
+[dev-dependencies]
+# tests/headless.rs runs the built component; `fyx-ext test --path extensions/fyx_demo_counter`.
+fyx_ext_harness.workspace = true
