@@ -19277,9 +19277,11 @@ dependencies = [
  "futures 0.3.34",
  "gpui",
  "gpui_tokio",
+ "language",
  "log",
  "markdown",
  "menu",
+ "project",
  "schemars 1.0.4",
  "serde",
  "settings",
@@ -19287,6 +19289,7 @@ dependencies = [
  "theme_settings",
  "ui",
  "ui_ext",
+ "util",
  "workspace",
 ]
 
