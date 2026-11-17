@@ -1,6 +1,6 @@
-// DRAFT for the integrator (W0); not built by anything. Design and rationale: design.md next to
-// this file. Once accepted it moves to crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit, next to the
-// frozen 0.1.0 world (migration.md).
+// Decided 2026-11-17, not frozen yet; not built by anything. Design and rationale: design.md next
+// to this file. It moves to crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit, next to the frozen 0.1.0
+// world, as step 2 of migration.md's order of work.
 package fyx:ui@0.2.0;
 
 interface types {
@@ -422,9 +422,10 @@ interface host {
     remove-surface: func(surface-id: string) -> result<_, host-error>;
 
     /// Opens a modal in the active workspace window and focuses it, or reveals a panel there
-    /// (opens its dock and activates it, without moving focus). Showing a modal needs a user
-    /// gesture: it is allowed during `handle-event` for a user event, or within 5 s after one,
-    /// once. Showing a surface that is already shown does nothing.
+    /// (opens its dock and activates it, without moving focus). Showing a modal needs a click or
+    /// Enter: it is allowed during `handle-event` for `click`, `row-click` or `input-submitted`,
+    /// or within 5 s after one, once. Typing (`input-changed`), `row-selected` and `dismissed`
+    /// do not count. Showing a surface that is already shown does nothing.
     show-surface: func(surface-id: string) -> result<_, host-error>;
 
     /// Closes a modal (no `dismissed` event) or hides a panel's dock if that panel is active.
