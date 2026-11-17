@@ -1,0 +1,42 @@
+// Fyx's default settings, layered over Zed's `default.json` when Fyx starts
+// (`fyx_default_settings` in `crates/zed/src/main.rs`). Only the values that
+// differ from Zed's defaults live here; `default.json` stays as upstream ships
+// it, so rebases do not conflict and upstream tests keep Zed's defaults.
+//
+// Objects are merged key by key: to turn off an entry Zed enables, set it to
+// `false` rather than removing it.
+{
+  // No requests to zed.dev. Every Zed cloud URL (sign-in, collaboration, the
+  // extension registry, telemetry upload, update checks) is derived from this
+  // value; port 0 on loopback fails before a packet is sent. Set it to
+  // "https://zed.dev" in your settings to use Zed's services (their terms
+  // apply). The ZED_SERVER_URL environment variable still overrides it.
+  "server_url": "http://127.0.0.1:0",
+  // No telemetry: Fyx has no endpoint for it.
+  "telemetry": {
+    "diagnostics": false,
+    "metrics": false,
+  },
+  // No update feed yet.
+  "auto_update": false,
+  // No zed.dev account, so no sign-in button, onboarding banners or
+  // collaboration panel.
+  "title_bar": {
+    "show_sign_in": false,
+    "show_onboarding_banner": false,
+  },
+  "collaboration_panel": {
+    "button": false,
+  },
+  // The "zed" edit prediction provider needs a zed.dev account. Bring your own
+  // provider instead (see `edit_predictions.provider`).
+  "edit_predictions": {
+    "provider": "none",
+  },
+  // Fyx does not use Zed's extension registry by default, so nothing to
+  // auto-install or suggest from it.
+  "auto_install_extensions": {
+    "html": false,
+  },
+  "suggest_extensions": false,
+}
