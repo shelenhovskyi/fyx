@@ -1351,6 +1351,49 @@ async fn test_typing_survives_a_remount_that_renumbers_the_input(cx: &mut TestAp
     assert_eq!(backend.calls(), [], "nothing is sent twice");
 }
 
+/// Integration-4 finding 8: when the extension itself swaps the input for a new, empty one (a
+/// form cleared after a submit), the user's old text is not written into it or sent again.
+#[gpui::test]
+async fn test_own_rebuild_does_not_carry_typing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let editor = view.read_with(vcx, |view, _| view.inputs[&INPUT].editor.clone());
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("hello");
+    backend.take_calls();
+
+    const CLEARED: NodeId = 41;
+    let applied = state.update(vcx, |state, cx| {
+        state.apply_update(
+            Update::Patches(vec![
+                Patch::Remove(INPUT),
+                Patch::Insert(ui_ext::InsertOp {
+                    node: node(CLEARED, Some(1), input("")),
+                    before: None,
+                }),
+            ]),
+            cx,
+        )
+    });
+    assert!(applied);
+    vcx.run_until_parked();
+
+    let editor = view.read_with(vcx, |view, _| view.inputs[&CLEARED].editor.clone());
+    assert_eq!(editor.read_with(vcx, |editor, cx| editor.text(cx)), "");
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert!(
+        !backend
+            .take_calls()
+            .iter()
+            .any(|call| matches!(call, Call::Event(UiEvent::InputChanged(CLEARED, _)))),
+        "the old text is not sent for the new input"
+    );
+}
+
 // (c) Names, titles and status item order.
 
 fn panel_surface(id: &str, title: &str) -> ui_ext::Surface {
@@ -1441,7 +1484,7 @@ async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
 async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
     init_test(cx);
     let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
-    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     let panel = panel_surface("main", "Main");
     let status = ui_ext::Surface {
         id: "status".into(),
@@ -1485,7 +1528,7 @@ async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_extension_ids_belong_to_their_source(cx: &mut TestAppContext) {
     init_test(cx);
-    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     let id: std::sync::Arc<str> = "fake".into();
     let first = crate::ExtensionSource::Directory("/ext/fake".into());
     let impostor = crate::ExtensionSource::Directory("/elsewhere/fake".into());

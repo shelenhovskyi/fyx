@@ -174,9 +174,20 @@ RUSTC_WRAPPER= cargo build --target wasm32-wasip2 --release
 
 ## Installing as a dev extension
 
-For the sprint, UI extensions load **only** from the environment variable
-`FYX_UI_DEV_EXTENSIONS`, which Fyx reads once at startup. Upstream's "Install Dev Extension"
-command does not load `[fyx_ui]` components, and when the variable is unset nothing loads.
+UI extensions load from the installed-extensions directory and from the environment variable
+`FYX_UI_DEV_EXTENSIONS`.
+
+- **`fyx_ui: install dev UI extension`** asks for a folder, shows the capabilities its
+  `extension.toml` asks for, and links the folder into the installed-extensions directory. Fyx
+  loads it now and on every start, and reloads it when its component is rebuilt. The folder's
+  path may not contain `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
+- **Anything else in the installed-extensions directory** (a folder copied there, or linked by
+  upstream's "Install Dev Extension") waits for consent: Fyx shows a notification with the
+  capabilities it asks for and loads it only after **Enable**. The answer is kept in
+  `<data dir>/fyx-ui-consent.json`, for those capabilities and that component (for a linked
+  folder, that folder). Asking for more capabilities, or a different component, asks again on the
+  next start.
+- **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
 
 <!-- crates/ui_ext_host/src/ui_ext_host.rs:11, crates/ui_ext_host/src/registry.rs:29-33, 172, 305-312 -->
 

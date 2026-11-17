@@ -287,6 +287,9 @@ you that a surface was closed (0.2 items 5–7).
   other extensions are not affected. The pushes of one call may carry 4096 patches plus nodes
   together, and at most 64 pushes. The strings passed to `push-update` and `log` in one call may
   total 16 MiB; a `log` message is cut at 16 KiB.
+- An installed extension loads only after the user enables it, for the capabilities and the
+  component (or linked folder) it has then; see "Installing as a dev extension" in
+  `extension-authoring.md`.
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
 - Fyx's own host functions: `push-update` and `log`.
