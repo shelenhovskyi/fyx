@@ -8,6 +8,7 @@
 // Cancelling is `fyx/surfaceClosed`, outside the WIT world.
 
 import type { HostContext } from "../context.ts";
+import { notSupported } from "../coverage.ts";
 import { node, props, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
 import { EventEmitter, QuickPickItemKind } from "../shim/types.ts";
 import { splitCodicons, type SurfaceModel } from "./surfaces.ts";
@@ -227,14 +228,42 @@ export class QuickPickImpl<T extends QuickPickItem> extends QuickInputBase {
   }
 }
 
+type ValidationMessage = string | { message: string; severity: number } | undefined;
+
 export class InputBoxImpl extends QuickInputBase {
-  prompt: string | undefined;
-  password = false;
   valueSelection: readonly [number, number] | undefined;
-  validationMessage: string | { message: string; severity: number } | undefined;
+  private promptState: string | undefined;
+  private validationState: ValidationMessage;
 
   constructor(ctx: HostContext) {
     super(ctx, "input-box");
+  }
+
+  get prompt(): string | undefined {
+    return this.promptState;
+  }
+  set prompt(v: string | undefined) {
+    this.promptState = v;
+    this.update();
+  }
+
+  get validationMessage(): ValidationMessage {
+    return this.validationState;
+  }
+  set validationMessage(v: ValidationMessage) {
+    this.validationState = v;
+    this.update();
+  }
+
+  get password(): boolean {
+    return false;
+  }
+  // fyx:ui 0.1 has no masked input, so a secret typed here would show in plain text. Refuse it
+  // until the `input` props gain a mask (0.2 candidate).
+  set password(v: boolean) {
+    if (!v) return;
+    this.ctx.coverage.missing("vscode.InputBox.password");
+    throw notSupported("vscode.InputBox.password", "masked input (password: true)");
   }
 
   render(): Node[] {
@@ -305,10 +334,10 @@ export async function showInputBox(
   token?: { onCancellationRequested(l: () => void): unknown },
 ): Promise<string | undefined> {
   const box = new InputBoxImpl(ctx);
+  box.password = options.password ?? false;
   box.title = options.title;
   box.prompt = options.prompt;
   box.placeholder = options.placeHolder;
-  box.password = options.password ?? false;
   box.value = options.value ?? "";
   box.show();
   const validate = async (value: string) => {
