@@ -33,6 +33,12 @@ const PUSHER: NodeId = 13;
 const SET_INPUT: NodeId = 15;
 /// Pushes, then fails with an extension-reported error.
 const PUSH_THEN_FAIL: NodeId = 17;
+/// Pushes an own patch that does not fit, then a push for another surface, then replies.
+const BAD_OWN_THEN_OTHER: NodeId = 19;
+/// Fails like a trapped or disabled instance: an error without a `ReplyError`.
+const FATAL: NodeId = 21;
+/// Its reply removes it.
+const REMOVER: NodeId = 23;
 const ROW_ROOT: NodeId = 0x8000_0000;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,6 +63,32 @@ struct FakeBackend {
     /// Surfaces that pushes for other surfaces were routed to.
     routed: RefCell<Vec<String>>,
     short_rows: Cell<bool>,
+    /// `list-rows` pushes an own patch that does not fit, every time.
+    bad_rows_push: Cell<bool>,
+    /// Surfaces that reported the whole extension as failed.
+    failed_from: RefCell<Vec<String>>,
+}
+
+struct FakeLink(Rc<FakeBackend>);
+
+impl crate::surface::SurfaceLink for FakeLink {
+    fn route_push(&self, push: PushedUpdate, _: &mut App) {
+        self.0.routed.borrow_mut().push(push.surface_id);
+    }
+
+    fn extension_failed(&self, from_surface: &str, _: gpui::SharedString, _: &mut App) {
+        self.0
+            .failed_from
+            .borrow_mut()
+            .push(from_surface.to_string());
+    }
+}
+
+fn unfit_push() -> PushedUpdate {
+    PushedUpdate {
+        surface_id: "counter".into(),
+        update: Update::Patches(vec![Patch::SetProps(99, text("no such node"))]),
+    }
 }
 
 impl FakeBackend {
@@ -141,6 +173,9 @@ impl UiBackend for FakeBackend {
             node(PUSHER, Some(1), button("Push")),
             node(SET_INPUT, Some(1), button("Set input")),
             node(PUSH_THEN_FAIL, Some(1), button("Push then fail")),
+            node(BAD_OWN_THEN_OTHER, Some(1), button("Bad push")),
+            node(FATAL, Some(1), button("Trap")),
+            node(REMOVER, Some(1), button("Remove me")),
             node(INPUT, Some(1), input("")),
             node(LIST, Some(1), list(count)),
         ];
@@ -160,6 +195,29 @@ impl UiBackend for FakeBackend {
         event: UiEvent,
     ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         self.calls.borrow_mut().push(Call::Event(event.clone()));
+        if event == UiEvent::Click(BAD_OWN_THEN_OTHER) {
+            let reply = Reply {
+                pushed: vec![
+                    unfit_push(),
+                    PushedUpdate {
+                        surface_id: "other".into(),
+                        update: Update::Unchanged,
+                    },
+                ],
+                value: Update::Patches(vec![Patch::SetProps(LABEL, text("never applied"))]),
+            };
+            return async move { Ok(reply) }.boxed_local();
+        }
+        if event == UiEvent::Click(FATAL) {
+            return async move { Err(anyhow!("wasm trap: interrupt")) }.boxed_local();
+        }
+        if event == UiEvent::Click(REMOVER) {
+            let reply = Reply {
+                pushed: Vec::new(),
+                value: Update::Patches(vec![Patch::Remove(REMOVER)]),
+            };
+            return async move { Ok(reply) }.boxed_local();
+        }
         if event == UiEvent::Click(PUSH_THEN_FAIL) {
             let error = anyhow::Error::new(ReplyError {
                 pushed: vec![PushedUpdate {
@@ -228,7 +286,11 @@ impl UiBackend for FakeBackend {
             .borrow_mut()
             .push(Call::Rows { list, start, count });
         let result = if self.fail_rows.get() {
-            Err(anyhow!("rows unavailable"))
+            // An extension-reported error: the instance lives on.
+            Err(anyhow::Error::new(ReplyError {
+                pushed: Vec::new(),
+                message: "rows unavailable".into(),
+            }))
         } else {
             let total = self.count.get();
             let end = (start + count).min(total);
@@ -251,13 +313,12 @@ impl UiBackend for FakeBackend {
                 })
                 .collect())
         };
-        async move {
-            result.map(|value| Reply {
-                pushed: Vec::new(),
-                value,
-            })
-        }
-        .boxed_local()
+        let pushed = if self.bad_rows_push.get() {
+            vec![unfit_push()]
+        } else {
+            Vec::new()
+        };
+        async move { result.map(|value| Reply { pushed, value }) }.boxed_local()
     }
 }
 
@@ -281,12 +342,9 @@ fn new_state(backend: &Rc<FakeBackend>, cx: &mut TestAppContext) -> Entity<Surfa
             default_size: 320,
         }),
     };
-    let routed = backend.clone();
-    let route_push: crate::surface::PushRouter = Rc::new(move |push: PushedUpdate, _: &mut App| {
-        routed.routed.borrow_mut().push(push.surface_id);
-    });
+    let link: Rc<dyn crate::surface::SurfaceLink> = Rc::new(FakeLink(backend.clone()));
     let backend: Rc<dyn UiBackend> = backend.clone();
-    let state = cx.new(|cx| SurfaceState::new(backend, surface, Some(route_push), cx));
+    let state = cx.new(|cx| SurfaceState::new(backend, surface, Some(link), cx));
     cx.run_until_parked();
     state
 }
@@ -661,4 +719,236 @@ fn test_icon_names_and_fetch_range() {
     assert_eq!(fetch_range(50..60, 100), 42..68);
     assert_eq!(fetch_range(95..100, 100), 87..100);
     assert_eq!(fetch_range(0..0, 0), 0..0);
+}
+
+// Judge review w3-deep-1 (tasks/reviews/w3-deep-1.md), one test per finding still open at
+// cd82d83856. Finding 1 is `test_pushes_before_a_failure_still_apply`.
+
+fn mounts(backend: &FakeBackend) -> usize {
+    backend
+        .calls()
+        .iter()
+        .filter(|call| **call == Call::Mount)
+        .count()
+}
+
+fn failure(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> Option<String> {
+    state.read_with(cx, |state, _| match state.phase() {
+        crate::Phase::Failed(message) => Some(message.to_string()),
+        crate::Phase::Mounting | crate::Phase::Ready(_) => None,
+    })
+}
+
+/// Finding 2: typing still waiting for its pause reaches the extension before a later click.
+#[gpui::test]
+async fn test_pending_typing_is_sent_before_a_click(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+
+    let editor = view.read_with(vcx, |view, _| view.inputs[&INPUT].editor.clone());
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("foo");
+    let bounds = vcx.debug_bounds("fyx-node-5").expect("increment is drawn");
+    vcx.simulate_click(bounds.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    assert_eq!(
+        backend.events(),
+        [
+            UiEvent::InputChanged(INPUT, "foo".into()),
+            UiEvent::Click(INCREMENT)
+        ]
+    );
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert_eq!(backend.events().len(), 2, "the typing is not sent twice");
+}
+
+/// Finding 3: an own push that does not fit stops the own updates, not the routing of the others.
+#[gpui::test]
+async fn test_pushes_for_other_surfaces_survive_an_own_failure(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(BAD_OWN_THEN_OTHER), cx)
+    });
+    cx.run_until_parked();
+
+    assert_eq!(backend.routed.borrow().as_slice(), ["other"]);
+    assert_eq!(mounts(&backend), 1, "the bad own push remounts the surface");
+    assert_eq!(
+        props_of(&state, LABEL, cx),
+        text("Count: 0"),
+        "the reply was skipped"
+    );
+}
+
+/// Finding 4: an extension that keeps sending unfit updates without user input is stopped.
+#[gpui::test]
+async fn test_remounts_without_input_are_bounded(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(5);
+    backend.bad_rows_push.set(true);
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    // Every layout asks for the visible rows again; every answer pushes an unfit patch.
+    for _ in 0..10 {
+        state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(mounts(&backend), 3);
+    let message = failure(&state, cx).expect("the surface gave up");
+    assert!(message.contains("keeps sending updates"), "{message}");
+
+    // A retry by the user starts over.
+    backend.bad_rows_push.set(false);
+    state.update(cx, |state, cx| state.retry(cx));
+    cx.run_until_parked();
+    assert_eq!(failure(&state, cx), None);
+    assert_eq!(props_of(&state, LABEL, cx), text("Count: 5"));
+}
+
+/// Finding 5: an error without a `ReplyError` (trap, budget, disabled) stops every surface of the
+/// extension; nothing is dispatched any more until a retry.
+#[gpui::test]
+async fn test_a_dead_instance_stops_the_extension(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    state.update(cx, |state, cx| state.dispatch(UiEvent::Click(FATAL), cx));
+    cx.run_until_parked();
+    let message = failure(&state, cx).expect("the surface stopped");
+    assert!(
+        message.contains("fake stopped") && message.contains("wasm trap"),
+        "{message}"
+    );
+    assert_eq!(backend.failed_from.borrow().as_slice(), ["counter"]);
+
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(INCREMENT), cx);
+        state.request_rows(LIST, 0..1, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(backend.calls(), [], "a stopped surface makes no calls");
+
+    state.update(cx, |state, cx| state.retry(cx));
+    cx.run_until_parked();
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+    assert_eq!(failure(&state, cx), None);
+}
+
+/// Finding 6: short answers for two ranges (measuring and visible, or two windows) do not make
+/// the ranges refetch each other forever.
+#[gpui::test]
+async fn test_short_answers_for_two_ranges_are_fetched_once(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(50);
+    backend.short_rows.set(true);
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    for _ in 0..3 {
+        for range in [0..9, 20..29] {
+            state.update(cx, |state, cx| state.request_rows(LIST, range, cx));
+            cx.run_until_parked();
+        }
+    }
+    assert_eq!(
+        backend.take_calls(),
+        [
+            Call::Rows {
+                list: LIST,
+                start: 0,
+                count: 9
+            },
+            Call::Rows {
+                list: LIST,
+                start: 20,
+                count: 9
+            },
+        ]
+    );
+    // The rows it left out are empty, not stale.
+    assert!(row_text(&state, LIST, 0, cx).is_some());
+    assert!(row_text(&state, LIST, 1, cx).is_none());
+}
+
+/// Finding 7: a queued event is checked again when its turn comes.
+#[gpui::test]
+async fn test_queued_events_are_checked_before_sending(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(5);
+    let state = new_state(&backend, cx);
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+    cx.run_until_parked();
+    backend.take_calls();
+
+    // The increment's reply changes the list, so row 2 is no longer the row the user clicked.
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(INCREMENT), cx);
+        state.dispatch(UiEvent::RowClick(LIST, 2), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(backend.events(), [UiEvent::Click(INCREMENT)]);
+
+    // A double click on a button whose reply removes it sends one click.
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(REMOVER), cx);
+        state.dispatch(UiEvent::Click(REMOVER), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(backend.events(), [UiEvent::Click(REMOVER)]);
+
+    // A row click with the list unchanged still goes through.
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::RowClick(LIST, 1), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(backend.events(), [UiEvent::RowClick(LIST, 1)]);
+}
+
+/// Finding 8: a remount (which sets every input) does not overwrite typing not yet sent; the
+/// typing is sent at once instead.
+#[gpui::test]
+async fn test_a_remount_keeps_unsent_typing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+
+    let editor = view.read_with(vcx, |view, _| view.inputs[&INPUT].editor.clone());
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("abc");
+    state.update(vcx, |state, cx| state.mount(cx));
+    vcx.run_until_parked();
+
+    assert_eq!(editor.read_with(vcx, |editor, cx| editor.text(cx)), "abc");
+    assert_eq!(
+        backend.take_calls(),
+        [
+            Call::Mount,
+            Call::Event(UiEvent::InputChanged(INPUT, "abc".into()))
+        ]
+    );
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert_eq!(backend.calls(), [], "nothing is sent twice");
 }
