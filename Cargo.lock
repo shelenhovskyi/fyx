@@ -19286,6 +19286,7 @@ dependencies = [
  "schemars 1.0.4",
  "serde",
  "settings",
+ "tempfile",
  "theme",
  "theme_settings",
  "ui",
