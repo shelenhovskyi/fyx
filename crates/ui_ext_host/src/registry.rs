@@ -33,8 +33,7 @@ use extension_host::{
 use fs::{Fs, MTime, PathEvent};
 use futures::{FutureExt as _, StreamExt as _, channel::mpsc};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, Focusable as _, Global, SharedString, Task,
-    WeakEntity, Window,
+    App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity, Window,
 };
 use settings::Settings as _;
 use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
@@ -43,7 +42,10 @@ use workspace::{Workspace, WorkspaceSettings};
 use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
-    panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo},
+    panel::{
+        AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
+        add_extension_panel,
+    },
     surface::{SurfaceLink, SurfaceState},
 };
 
@@ -523,7 +525,9 @@ fn watch_installed_extensions(cx: &mut App) {
 /// The extension containers of one workspace, by surface key.
 #[derive(Default)]
 struct WorkspaceSurfaces {
-    panels: HashMap<SharedString, WeakEntity<ExtensionPanel>>,
+    panels: HashMap<SharedString, Box<dyn AnyExtensionPanel>>,
+    /// One status bar entry per side, holding that side's extension status items.
+    status_groups: HashMap<bool, Entity<ExtensionStatusGroup>>,
     status_items: HashSet<SharedString>,
 }
 
@@ -547,9 +551,22 @@ fn attach_to_workspace(
                 .borrow()
                 .panels
                 .get(action.key.as_str())
-                .and_then(WeakEntity::upgrade);
+                .and_then(|panel| {
+                    Some((
+                        panel.panel_id(),
+                        panel.panel_focus(cx)?,
+                        panel.surface_focus(cx)?,
+                    ))
+                });
             match panel {
-                Some(panel) => toggle_panel_focus(workspace, &panel, window, cx),
+                Some((panel_id, panel_focus, surface_focus)) => toggle_panel_focus(
+                    workspace,
+                    panel_id,
+                    &panel_focus,
+                    &surface_focus,
+                    window,
+                    cx,
+                ),
                 None => log::debug!("fyx:ui: no extension panel {:?}", action.key),
             }
         }
@@ -595,45 +612,55 @@ fn add_missing_surfaces(
                     continue;
                 }
                 let key = info.key.clone();
-                let panel = cx.new(|cx| ExtensionPanel::new(info, state, window, cx));
-                surfaces.borrow_mut().panels.insert(key, panel.downgrade());
-                workspace.add_panel(panel, window, cx);
+                let panel = add_extension_panel(workspace, info, state, window, cx);
+                surfaces.borrow_mut().panels.insert(key, panel);
             }
             SurfaceKind::StatusItem(descriptor) => {
                 if !surfaces.borrow_mut().status_items.insert(info.key.clone()) {
                     continue;
                 }
-                // The status bar keeps insertion order; `priority` is not honoured yet.
                 let item = cx.new(|cx| ExtensionStatusItem::new(state, window, cx));
-                workspace
-                    .status_bar()
-                    .update(cx, |status_bar, cx| match descriptor.side {
-                        StatusBarSide::Left => status_bar.add_left_item(item, window, cx),
-                        StatusBarSide::Right => status_bar.add_right_item(item, window, cx),
-                    });
+                let left = descriptor.side == StatusBarSide::Left;
+                let existing = surfaces.borrow().status_groups.get(&left).cloned();
+                let group = match existing {
+                    Some(group) => group,
+                    None => {
+                        let group = cx.new(|_| ExtensionStatusGroup::new(descriptor.side));
+                        workspace.status_bar().update(cx, |status_bar, cx| {
+                            if left {
+                                status_bar.add_left_item(group.clone(), window, cx)
+                            } else {
+                                status_bar.add_right_item(group.clone(), window, cx)
+                            }
+                        });
+                        surfaces
+                            .borrow_mut()
+                            .status_groups
+                            .insert(left, group.clone());
+                        group
+                    }
+                };
+                group.update(cx, |group, cx| group.add(descriptor.priority, item, cx));
             }
         }
     }
 }
 
 /// `Workspace::toggle_panel_focus` for one panel instance (that one picks the first panel of a
-/// type, and every extension panel has the same type).
+/// type, and panels beyond `PANEL_SLOTS` share a type).
 fn toggle_panel_focus(
     workspace: &mut Workspace,
-    panel: &Entity<ExtensionPanel>,
+    panel_id: gpui::EntityId,
+    panel_focus: &gpui::FocusHandle,
+    surface_focus: &gpui::FocusHandle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let focus_handle = panel.focus_handle(cx);
-    if focus_handle.contains_focused(window, cx) {
+    if panel_focus.contains_focused(window, cx) {
         workspace.focus_center_pane(window, cx);
         if WorkspaceSettings::get_global(cx).close_panel_on_toggle {
             for dock in workspace.all_docks() {
-                if dock
-                    .read(cx)
-                    .panel_index_for_id(panel.entity_id())
-                    .is_some()
-                {
+                if dock.read(cx).panel_index_for_id(panel_id).is_some() {
                     dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
                 }
             }
@@ -641,18 +668,12 @@ fn toggle_panel_focus(
         return;
     }
     for dock in workspace.all_docks() {
-        if let Some(index) = dock.read(cx).panel_index_for_id(panel.entity_id()) {
+        if let Some(index) = dock.read(cx).panel_index_for_id(panel_id) {
             dock.update(cx, |dock, cx| {
                 dock.activate_panel(index, window, cx);
                 dock.set_open(true, window, cx);
             });
-            panel
-                .read(cx)
-                .view()
-                .read(cx)
-                .focus_handle
-                .clone()
-                .focus(window, cx);
+            surface_focus.focus(window, cx);
             break;
         }
     }

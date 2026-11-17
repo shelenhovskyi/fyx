@@ -145,8 +145,9 @@ async fn test_counter_panel_increments(cx: &mut TestAppContext) {
         &extension.surfaces()[0],
         100,
     ));
-    let (_panel, vcx) = cx
-        .add_window_view(|window, cx| ExtensionPanel::new(info.clone(), state.clone(), window, cx));
+    let (_panel, vcx) = cx.add_window_view(|window, cx| {
+        ExtensionPanel::<0>::new(info.clone(), state.clone(), window, cx)
+    });
 
     click("fyx-node-5", vcx);
     run_until(vcx, "the first increment", |cx| {
@@ -362,7 +363,7 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
         .expect("the status item is drawn");
 
     let (panel, cx) = cx.add_window_view(|window, cx| {
-        ExtensionPanel::new(panel_info.clone(), panel_state.clone(), window, cx)
+        ExtensionPanel::<0>::new(panel_info.clone(), panel_state.clone(), window, cx)
     });
     // A tall dock panel.
     cx.simulate_resize(gpui::size(gpui::px(420.), gpui::px(800.)));

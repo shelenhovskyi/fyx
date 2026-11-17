@@ -32,7 +32,10 @@ use serde::Deserialize;
 pub use backend::UiBackend;
 pub use install::{InstallDevUiExtension, describe_capabilities, install_dev_ui_extension};
 pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
-pub use panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo};
+pub use panel::{
+    ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
+    SurfaceInfo,
+};
 pub use registry::{DEV_EXTENSIONS_ENV, LoadedSurface, UiExtensionRegistry};
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};

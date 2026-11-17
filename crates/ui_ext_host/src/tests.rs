@@ -682,7 +682,7 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
         100,
     ));
     let (panel, vcx) = cx.add_window_view(|window, cx| {
-        crate::ExtensionPanel::new(info.clone(), state.clone(), window, cx)
+        crate::ExtensionPanel::<0>::new(info.clone(), state.clone(), window, cx)
     });
     vcx.run_until_parked();
 
@@ -698,6 +698,12 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
         );
         assert_eq!(panel.default_size(window, cx), gpui::px(320.));
         assert_eq!(panel.activation_priority(), 100);
+        let slot = info.slot.expect("a panel slot");
+        assert_eq!(slot, 0, "the first panel surface of the process");
+        assert_eq!(
+            <crate::ExtensionPanel<0> as workspace::Panel>::persistent_name(),
+            "fyx-ui:fake/counter"
+        );
     });
 
     let bounds = vcx
@@ -1343,4 +1349,89 @@ async fn test_typing_survives_a_remount_that_renumbers_the_input(cx: &mut TestAp
     vcx.executor().advance_clock(TYPING_DEBOUNCE);
     vcx.run_until_parked();
     assert_eq!(backend.calls(), [], "nothing is sent twice");
+}
+
+// (c) Names, titles and status item order.
+
+fn panel_surface(id: &str, title: &str) -> ui_ext::Surface {
+    ui_ext::Surface {
+        id: id.into(),
+        title: title.into(),
+        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
+            position: ui_ext::DockPosition::Left,
+            icon: "hash".into(),
+            default_size: 300,
+        }),
+    }
+}
+
+/// Every panel surface gets a type slot of its own, so its `persistent_name` and `panel_key`
+/// (sizes, the restored open panel) are its own: `fyx-ui:<extension>/<surface>`. The same surface
+/// keeps its slot for the process (a reload does not take another), and titles are interned
+/// rather than leaked per load.
+#[test]
+fn test_panels_get_names_of_their_own() {
+    use workspace::Panel as _;
+    let first = crate::SurfaceInfo::new("names-test", &panel_surface("a", "Alpha"), 100);
+    let second = crate::SurfaceInfo::new("names-test", &panel_surface("b", "Beta"), 101);
+    let status = crate::SurfaceInfo::new(
+        "names-test",
+        &ui_ext::Surface {
+            id: "s".into(),
+            title: "Status".into(),
+            kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+                side: ui_ext::StatusBarSide::Right,
+                priority: 0,
+            }),
+        },
+        102,
+    );
+    let (first_slot, second_slot) = (first.slot.expect("a slot"), second.slot.expect("a slot"));
+    assert_ne!(first_slot, second_slot);
+    assert_eq!(status.slot, None, "status items are not dock panels");
+    assert_eq!(
+        crate::panel::slot_name(first_slot),
+        Some("fyx-ui:names-test/a")
+    );
+    assert_eq!(
+        crate::panel::slot_name(second_slot),
+        Some("fyx-ui:names-test/b")
+    );
+    assert_eq!(
+        <crate::ExtensionPanel<{ crate::SHARED_SLOT }>>::persistent_name(),
+        "Extension Panel",
+        "panels past the slots share one name"
+    );
+
+    let reloaded = crate::SurfaceInfo::new("names-test", &panel_surface("a", "Alpha"), 103);
+    assert_eq!(reloaded.slot, Some(first_slot));
+    assert!(
+        std::ptr::eq(reloaded.title, first.title),
+        "the title is interned"
+    );
+}
+
+#[gpui::test]
+async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (_, vcx) = open_view(&state, cx);
+    for (side, expected) in [
+        (ui_ext::StatusBarSide::Left, [10, 5, 5, 1]),
+        (ui_ext::StatusBarSide::Right, [1, 5, 5, 10]),
+    ] {
+        let group = vcx.update(|_, cx| cx.new(|_| crate::ExtensionStatusGroup::new(side)));
+        for priority in [5, 10, 1, 5] {
+            let item = vcx.update(|window, cx| {
+                cx.new(|cx| crate::ExtensionStatusItem::new(state.clone(), window, cx))
+            });
+            group.update(vcx, |group, cx| group.add(priority, item, cx));
+        }
+        assert_eq!(
+            group.read_with(vcx, |group, _| group.priorities()),
+            expected,
+            "higher priority sits closer to the {side:?} edge"
+        );
+    }
 }
