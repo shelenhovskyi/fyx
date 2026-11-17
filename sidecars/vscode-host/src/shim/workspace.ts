@@ -84,6 +84,7 @@ export class WorkspaceApi {
   readonly foldersChanged = new EventEmitter<{ added: WorkspaceFolder[]; removed: WorkspaceFolder[] }>();
   readonly contentProviders = new Map<string, { provideTextDocumentContent(uri: Uri, token: unknown): string | PromiseLike<string> }>();
   folders: WorkspaceFolder[];
+  private watchers = new Set<FileWatcher>();
 
   constructor(ctx: HostContext, editors: EditorStore) {
     this.ctx = ctx;
@@ -205,11 +206,26 @@ export class WorkspaceApi {
     return edits.map(encodeTextEdit);
   }
 
-  createFileSystemWatcher(_glob: unknown, ignoreCreate = false, ignoreChange = false, ignoreDelete = false) {
-    this.ctx.coverage.note("vscode.workspace.createFileSystemWatcher", "returns a watcher whose events never fire (no host file events yet)");
-    const created = new EventEmitter<Uri>();
-    const changed = new EventEmitter<Uri>();
-    const deleted = new EventEmitter<Uri>();
+  /**
+   * File events come from the host (`vscode/didChangeWatchedFiles`), which watches the workspace;
+   * the sidecar filters them per watcher by glob and the ignore flags.
+   */
+  createFileSystemWatcher(glob: string | RelativePattern, ignoreCreate = false, ignoreChange = false, ignoreDelete = false) {
+    const pattern = glob instanceof RelativePattern ? glob.pattern : glob;
+    const re = globToRegExp(pattern);
+    const base = glob instanceof RelativePattern ? glob.baseUri.path.replace(/\/$/, "") : undefined;
+    const matches = (uri: Uri) => {
+      if (base === undefined) return re.test(uri.path);
+      return uri.path.startsWith(`${base}/`) && re.test(uri.path.slice(base.length + 1));
+    };
+    const watcher: FileWatcher = {
+      matches,
+      ignore: [ignoreCreate, ignoreChange, ignoreDelete],
+      emitters: [new EventEmitter<Uri>(), new EventEmitter<Uri>(), new EventEmitter<Uri>()],
+    };
+    this.watchers.add(watcher);
+    const [created, changed, deleted] = watcher.emitters;
+    const watchers = this.watchers;
     return {
       ignoreCreateEvents: ignoreCreate,
       ignoreChangeEvents: ignoreChange,
@@ -218,12 +234,30 @@ export class WorkspaceApi {
       onDidChange: changed.event,
       onDidDelete: deleted.event,
       dispose() {
-        created.dispose();
-        changed.dispose();
-        deleted.dispose();
+        watchers.delete(watcher);
+        for (const emitter of watcher.emitters) emitter.dispose();
       },
     };
   }
+
+  /** `vscode/didChangeWatchedFiles`; `type` is LSP's FileChangeType: 1 created, 2 changed, 3 deleted. */
+  didChangeWatchedFiles(changes: readonly { uri: string; type: number }[]): void {
+    for (const change of changes) {
+      const kind = change.type - 1;
+      if (kind < 0 || kind > 2) throw new Error(`didChangeWatchedFiles: unknown change type ${change.type}`);
+      const uri = toUri(change.uri);
+      for (const watcher of [...this.watchers]) {
+        if (!watcher.ignore[kind] && watcher.matches(uri)) watcher.emitters[kind].fire(uri);
+      }
+    }
+  }
+}
+
+interface FileWatcher {
+  matches(uri: Uri): boolean;
+  /** Indexed by change kind: created, changed, deleted. */
+  ignore: [boolean, boolean, boolean];
+  emitters: [EventEmitter<Uri>, EventEmitter<Uri>, EventEmitter<Uri>];
 }
 
 export function isDirectory(path: string): boolean {

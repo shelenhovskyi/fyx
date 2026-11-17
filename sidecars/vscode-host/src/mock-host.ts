@@ -46,6 +46,7 @@ export class MockHost {
   readonly diagnostics = new Map<string, unknown[]>();
   readonly decorationTypes = new Map<string, unknown>();
   readonly decorations = new Map<string, unknown[]>();
+  readonly languageConfigurations = new Map<string, unknown>();
   readonly hostCommands: { command: string; args: unknown[] }[] = [];
   readonly providers = new Map<number, unknown>();
   readonly buffers = new Map<string, { text: string; version: number }>();
@@ -67,7 +68,8 @@ export class MockHost {
   }
 
   /** Sidecar in a child process, optionally under Node's permission model. */
-  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string> } = {}): MockHost {
+  /** `probe` starts the sidecar in coverage probe mode (missing APIs become inert stubs). */
+  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string>; probe?: boolean } = {}): MockHost {
     const main = join(import.meta.dirname, "main.ts");
     const flags = options.permission
       ? [
@@ -79,7 +81,7 @@ export class MockHost {
     // Under --permission even `existsSync("")` throws unless the cwd is readable, so default the
     // cwd to the first granted folder.
     const cwd = options.cwd ?? options.permission?.read[0];
-    const child = spawn(process.execPath, [...flags, main], {
+    const child = spawn(process.execPath, [...flags, main, ...(options.probe ? ["--fyx-coverage-probe"] : [])], {
       stdio: ["pipe", "pipe", "pipe"],
       ...(cwd ? { cwd } : {}),
       ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
@@ -300,6 +302,7 @@ export class MockHost {
     rpc.on("vscode/setSelections", (p: { uri: string; selections: unknown[] }) => void this.selections.set(p.uri, p.selections));
     rpc.on("vscode/setEditorOptions", (p: { uri: string; options: Record<string, unknown> }) => void this.editorOptions.set(p.uri, { ...((this.editorOptions.get(p.uri) as object) ?? {}), ...p.options }));
     rpc.on("vscode/setContext", (p: { key: string; value: unknown }) => void this.contextKeys.set(p.key, p.value));
+    rpc.on("vscode/setLanguageConfiguration", (p: { language: string; configuration: unknown }) => void this.languageConfigurations.set(p.language, p.configuration));
     rpc.on("vscode/showTextDocument", () => true);
     rpc.on("vscode/saveTextDocument", () => true);
     rpc.on("vscode/saveAll", () => true);

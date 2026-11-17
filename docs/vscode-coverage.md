@@ -145,6 +145,51 @@ reach the host (EditorConfig, change-case). An extension's own command that neve
 must fail with "command not found", not fall through to the host. `languages.getDiagnostics` must
 include the host's diagnostics (errorlens).
 
+### Partial APIs (after the W8b review fixes)
+
+Nothing in the shim is a silent no-op any more: an API either works as listed here, throws
+`NotImplementedInFyx` (JSON-RPC `-32001` with `data.api`), or is a presentation hint that is
+accepted and recorded in the coverage report's `partial` notes.
+
+**Work now** (were no-ops):
+
+| API | What happens |
+|---|---|
+| `workspace.createFileSystemWatcher` | fires for `vscode/didChangeWatchedFiles` from the host, filtered by glob (string or `RelativePattern`) and the three ignore flags; `dispose` stops it |
+| `languages.setLanguageConfiguration` | `wordPattern` drives `TextDocument.getWordRangeAtPosition`; the whole configuration goes to the host as `vscode/setLanguageConfiguration` (`null` on dispose) |
+| `window.registerTreeDataProvider().dispose()`, `TreeView.dispose()` | removes the provider; the view shows "No data provider" |
+| `TreeView.title`, `description`, `badge` | re-render as a header row (`fyx:ui` cannot rename a surface, so a changed title is a bold header, not the panel title) |
+| `TreeView.reveal` | expands the element's ancestors (needs `getParent`, as in VS Code) and `expand` levels up to 3, then selects it. It cannot scroll the row into view or take focus: `fyx:ui` has no scroll-to-row |
+| `QuickPick`/`InputBox` `buttons` | rendered as buttons; a click fires `onDidTriggerButton` |
+| `QuickPick`/`InputBox` `title`, `step`, `totalSteps`, `busy` after `show()` | re-render |
+| `QuickPick`/`InputBox` `enabled` | `false` ignores accept (Enter, row clicks) |
+| `InputBox.validationMessage`, `prompt` | re-render |
+| `window.withProgress` cancellation | `vscode/cancelProgress {id}` from the host cancels the task's token |
+
+**Throw `NotImplementedInFyx`:**
+
+| API | Why |
+|---|---|
+| `InputBox.password = true`, `showInputBox({password: true})` | "masked input (password: true) is not supported in Fyx 0.1": a plain `input` node would show the secret. Masking is a 0.2 candidate for the `input` props |
+| `TreeView.onDidChangeCheckboxState` | tree item checkboxes are not rendered |
+| `QuickPick.onDidTriggerItemButton` | item buttons would sit inside list rows, whose node ids are row-local, so a click could not name its row |
+| every API in the VS Code catalog the shim lacks | as before |
+
+Probe mode (missing APIs become inert stubs) now needs `main.ts --fyx-coverage-probe`, which only
+the coverage runner passes (`MockHost.spawn({ probe: true })`). `FYX_VSCODE_PROBE` in the
+environment is ignored with a warning, so a launcher cannot turn it on by accident.
+
+**Accepted hints with no visible effect** (each recorded in the coverage report):
+`StatusBarItem.tooltip` and `color`, raw colours in decoration types, `QuickPick.keepScrollPosition`,
+`QuickPick.sortByLabel = false`, `QuickPickItem.buttons`, `InputBox.valueSelection`, and
+`TreeView.reveal`'s `focus`. `QuickPick.ignoreFocusOut` needs nothing: the panel never closes on
+focus loss.
+
+**Events for values that are fixed in Fyx 0.1** never fire, because the value never changes:
+`window.onDidChangeWindowState`, `onDidChangeActiveColorTheme`, `workspace.onDidGrantWorkspaceTrust`
+(the workspace is always trusted), `env.onDidChangeTelemetryEnabled`, `onDidChangeShell`,
+`onDidChangeLogLevel`, `extensions.onDidChange`.
+
 ### Known limits of this run
 
 - The host is mocked: no rendering, no real buffers, no LSP. "Works" means the extension did what
@@ -155,8 +200,8 @@ include the host's diagnostics (errorlens).
 - change-case reports an uncaught `Position` error: it splits a multi-line selection by `os.EOL`
   (`\r\n` on Windows) on an LF document, computes a negative column, and VS Code's `Position`
   throws the same way. Not a shim bug.
-- `workspace.createFileSystemWatcher` returns a watcher that never fires; `setLanguageConfiguration`
-  is stored, not applied.
+- `workspace.createFileSystemWatcher` and `setLanguageConfiguration` depended on host traffic the
+  mock did not send during this run (see "Partial APIs" below for what they do now).
 
 ## Protocol
 
@@ -201,6 +246,11 @@ channel), `<id>/view/<viewId>` per contributed tree view (panel; expandable rows
 | sidecar → host | `vscode/registerCommand`, `unregisterCommand`, `registerProvider`, `unregisterProvider` | what the extension offers |
 | sidecar → host | `vscode/executeCommand` | built-in commands the sidecar does not handle |
 | sidecar → host | `vscode/applyEdit` (→ bool), `showTextDocument`, `saveTextDocument`, `saveAll`, `insertSnippet`, `setSelections`, `setEditorOptions`, `revealRange` | editor actions |
+| sidecar → host | `vscode/publishDiagnostics`, `createDecorationType`, `setDecorations`, `disposeDecorationType` | diagnostics, decorations (layer 4) |
+| sidecar → host | `vscode/showMessage` (→ chosen item), `progress`, `setContext`, `updateConfiguration`, `clipboard/readText`, `clipboard/writeText`, `openExternal` | window services |
+| host → sidecar | `vscode/cancelProgress` `{id}` | the user cancelled a `cancellable` progress (`id` from `vscode/progress` start) |
+| host → sidecar | `vscode/didChangeWatchedFiles` `{changes: [{uri, type}]}` (`type`: 1 created, 2 changed, 3 deleted, as LSP) | file events for `createFileSystemWatcher`; the host watches the workspace, the sidecar filters per watcher |
+| sidecar → host | `vscode/setLanguageConfiguration` `{language, configuration}` (RegExps as `{regexp, flags}`; `configuration: null` when disposed) | comments, brackets, indentation and on-enter rules for the host to apply |
 
 `vscode/applyEdit` carries `{edits: [{uri, version, edits}], fileOperations?}`. The host applies it
 all or nothing and answers `true`, or `false` when it applied nothing, including when a `version`
@@ -208,8 +258,6 @@ is not the buffer's current one. The sidecar changes its copy of a document only
 `version + 1`; if a `didChangeTextDocument` arrived before the answer, that text already holds the
 edit. Versions come from the host: a full-text sync is dropped only when its version is older than
 the sidecar's.
-| sidecar → host | `vscode/publishDiagnostics`, `createDecorationType`, `setDecorations`, `disposeDecorationType` | diagnostics, decorations (layer 4) |
-| sidecar → host | `vscode/showMessage` (→ chosen item), `progress`, `setContext`, `updateConfiguration`, `clipboard/readText`, `clipboard/writeText`, `openExternal` | window services |
 
 Error codes: `-32000` extension error (WIT `err`), `-32001` not implemented in Fyx, plus the
 JSON-RPC standard codes.

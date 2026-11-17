@@ -361,6 +361,8 @@ export class ExtensionHost {
       this.s.editors.setSelections(this.s.editors.editorFor(doc), p.selections.map((sel) => clampSelection(doc, decodeSelection(sel))), p.kind);
     }));
     rpc.on("vscode/didChangeDiagnostics", wrap((p: { uri: string; diagnostics: never[] }) => this.s.languages.setHostDiagnostics(toUri(p.uri), p.diagnostics.map(decodeDiagnostic))));
+    rpc.on("vscode/didChangeWatchedFiles", wrap((p: { changes: { uri: string; type: number }[] }) => this.s.workspace.didChangeWatchedFiles(p.changes)));
+    rpc.on("vscode/cancelProgress", wrap((p: { id: number }) => this.s.cancelProgress(p.id)));
     rpc.on("vscode/didChangeConfiguration", wrap((p: { settings: Record<string, unknown> }) => this.c.config.setUserSettings(p.settings)));
     rpc.on("vscode/provideFormatting", wrap((p: any) => this.s.languages.provideFormatting(p)));
     rpc.on("vscode/provideOnTypeFormatting", wrap((p: any) => this.s.languages.provideOnTypeFormatting(p)));

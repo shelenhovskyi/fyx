@@ -42,12 +42,21 @@ export class TextDocument {
   private text = "";
   private lineStarts: number[] = [0];
   private saveHook: (doc: TextDocument) => Promise<boolean>;
+  private wordPatternFor: (languageId: string) => RegExp | undefined;
 
-  constructor(uri: Uri, languageId: string, version: number, text: string, saveHook: (doc: TextDocument) => Promise<boolean>) {
+  constructor(
+    uri: Uri,
+    languageId: string,
+    version: number,
+    text: string,
+    saveHook: (doc: TextDocument) => Promise<boolean>,
+    wordPatternFor: (languageId: string) => RegExp | undefined = () => undefined,
+  ) {
     this.uri = uri;
     this.languageId = languageId;
     this.version = version;
     this.saveHook = saveHook;
+    this.wordPatternFor = wordPatternFor;
     this.setText(text);
   }
 
@@ -122,7 +131,9 @@ export class TextDocument {
 
   getWordRangeAtPosition(position: Position, regex?: RegExp): Range | undefined {
     const line = this.lineAt(this.validatePosition(position).line);
-    const re = new RegExp(regex?.source ?? /(-?\d*\.\d\w*)|([^`~!@#$%^&*()\-=+[{\]}\\|;:'",.<>/?\s]+)/.source, `${regex?.flags.replace("g", "") ?? ""}g`);
+    // As in VS Code: an explicit regex, else the language's `wordPattern`, else the default.
+    const pattern = regex ?? this.wordPatternFor(this.languageId);
+    const re = new RegExp(pattern?.source ?? /(-?\d*\.\d\w*)|([^`~!@#$%^&*()\-=+[{\]}\\|;:'",.<>/?\s]+)/.source, `${pattern?.flags.replace("g", "") ?? ""}g`);
     for (const m of line.text.matchAll(re)) {
       const start = m.index!;
       const end = start + m[0].length;
@@ -238,6 +249,8 @@ export class DocumentStore {
   readonly onDidClose = new EventEmitter<TextDocument>();
   readonly onDidChange = new EventEmitter<DocumentChangeEvent>();
   readonly onDidSave = new EventEmitter<TextDocument>();
+  /** `wordPattern` from `languages.setLanguageConfiguration`, by language id. */
+  readonly wordPatterns = new Map<string, RegExp>();
   saveHook: (doc: TextDocument) => Promise<boolean> = async () => false;
 
   get all(): TextDocument[] {
@@ -254,7 +267,7 @@ export class DocumentStore {
       if (version > existing.version || existing.getText() !== text) this.replace(uri, version, text);
       return existing;
     }
-    const doc = new TextDocument(uri, languageId, version, text, (d) => this.saveHook(d));
+    const doc = new TextDocument(uri, languageId, version, text, (d) => this.saveHook(d), (language) => this.wordPatterns.get(language));
     this.docs.set(uri.toString(), doc);
     this.onDidOpen.fire(doc);
     return doc;
