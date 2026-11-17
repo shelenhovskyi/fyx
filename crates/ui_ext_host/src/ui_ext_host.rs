@@ -18,6 +18,8 @@ mod view;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wasm_tests;
 
 use gpui::{Action, App};
 use schemars::JsonSchema;

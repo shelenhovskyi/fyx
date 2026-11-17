@@ -17,7 +17,7 @@ use ui_ext::{
 
 use crate::{
     SurfaceState, SurfaceView, TYPING_DEBOUNCE,
-    backend::{PushedUpdate, Reply, UiBackend},
+    backend::{PushedUpdate, Reply, ReplyError, UiBackend},
     surface::fetch_range,
     view::{DiffLine, diff_lines, icon_name},
 };
@@ -31,6 +31,8 @@ const BROKEN: NodeId = 11;
 const PUSHER: NodeId = 13;
 /// Sets the input's value without a submit.
 const SET_INPUT: NodeId = 15;
+/// Pushes, then fails with an extension-reported error.
+const PUSH_THEN_FAIL: NodeId = 17;
 const ROW_ROOT: NodeId = 0x8000_0000;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +140,7 @@ impl UiBackend for FakeBackend {
             node(BROKEN, Some(1), button("Broken")),
             node(PUSHER, Some(1), button("Push")),
             node(SET_INPUT, Some(1), button("Set input")),
+            node(PUSH_THEN_FAIL, Some(1), button("Push then fail")),
             node(INPUT, Some(1), input("")),
             node(LIST, Some(1), list(count)),
         ];
@@ -157,6 +160,20 @@ impl UiBackend for FakeBackend {
         event: UiEvent,
     ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         self.calls.borrow_mut().push(Call::Event(event.clone()));
+        if event == UiEvent::Click(PUSH_THEN_FAIL) {
+            let error = anyhow::Error::new(ReplyError {
+                pushed: vec![PushedUpdate {
+                    surface_id: "counter".into(),
+                    update: Update::Patches(vec![Patch::SetProps(
+                        LABEL,
+                        text("pushed, then failed"),
+                    )]),
+                }],
+                message: "the extension gave up".into(),
+            })
+            .context("from fyx:ui extension fake");
+            return async move { Err(error) }.boxed_local();
+        }
         if event == UiEvent::Click(PUSHER) {
             let reply = Reply {
                 pushed: vec![
@@ -244,7 +261,7 @@ impl UiBackend for FakeBackend {
     }
 }
 
-fn init_test(cx: &mut TestAppContext) {
+pub(crate) fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let settings = SettingsStore::test(cx);
         cx.set_global(settings);
@@ -395,6 +412,31 @@ async fn test_events_are_serialized_and_typing_is_coalesced(cx: &mut TestAppCont
     assert_eq!(backend.events(), [UiEvent::Click(PUSHER)]);
     assert_eq!(props_of(&state, LABEL, cx), text("replied"));
     assert_eq!(backend.routed.borrow().as_slice(), ["other"]);
+}
+
+#[gpui::test]
+async fn test_pushes_before_a_failure_still_apply(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(PUSH_THEN_FAIL), cx)
+    });
+    cx.run_until_parked();
+
+    // The guest counts its pushes as applied even though the call failed, so the host applies
+    // them too, then shows the error; no remount is needed.
+    assert_eq!(props_of(&state, LABEL, cx), text("pushed, then failed"));
+    assert_eq!(
+        backend.take_calls(),
+        [Call::Event(UiEvent::Click(PUSH_THEN_FAIL))]
+    );
+    state.read_with(cx, |state, _| {
+        let error = state.last_error().expect("error is shown");
+        assert!(error.contains("the extension gave up"), "{error}");
+    });
 }
 
 #[gpui::test]

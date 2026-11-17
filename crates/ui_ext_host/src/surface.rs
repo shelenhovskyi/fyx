@@ -9,7 +9,7 @@ use collections::HashMap;
 use gpui::{App, Context, SharedString, Task};
 use ui_ext::{NodeId, Patch, Props, Surface, Tree, UiEvent, Update};
 
-use crate::backend::{PushedUpdate, Reply, UiBackend};
+use crate::backend::{PushedUpdate, Reply, ReplyError, UiBackend};
 
 /// Delivers a push that a call on one surface made for another surface of the same extension.
 pub type PushRouter = Rc<dyn Fn(PushedUpdate, &mut App)>;
@@ -145,6 +145,7 @@ impl SurfaceState {
                         this.set_tree(value);
                     }
                     Err(error) => {
+                        this.apply_error_pushes(&error, cx);
                         log::error!(
                             "fyx:ui {}/{}: mount failed: {error:#}",
                             this.extension_id(),
@@ -251,6 +252,7 @@ impl SurfaceState {
                 }
             }
             Err(error) => {
+                self.apply_error_pushes(&error, cx);
                 log::error!(
                     "fyx:ui {}/{}: handle-event({event:?}) failed: {error:#}",
                     self.extension_id(),
@@ -282,6 +284,18 @@ impl SurfaceState {
             }
         }
         true
+    }
+
+    /// A call whose result the host rejected (the extension returned an error, or its reply did
+    /// not validate) still carries the pushes made before the failure; they apply like a reply's,
+    /// so the tree stays in step with the extension's mirror. Other errors carry none.
+    fn apply_error_pushes(&mut self, error: &anyhow::Error, cx: &mut Context<Self>) {
+        if let Some(reply_error) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ReplyError>())
+        {
+            self.apply_pushes(reply_error.pushed.clone(), cx);
+        }
     }
 
     /// Applies an update from an event reply or a push. An update that does not fit the retained
@@ -409,12 +423,18 @@ impl SurfaceState {
         result: anyhow::Result<Reply<Vec<(u32, Tree)>>>,
         cx: &mut Context<Self>,
     ) {
-        let result = result.map(|Reply { pushed, value }| {
-            // A push that touches this list bumps its generation, so these rows are stored as
-            // stale and fetched again.
-            self.apply_pushes(pushed, cx);
-            value
-        });
+        let result = match result {
+            Ok(Reply { pushed, value }) => {
+                // A push that touches this list bumps its generation, so these rows are stored
+                // as stale and fetched again.
+                self.apply_pushes(pushed, cx);
+                Ok(value)
+            }
+            Err(error) => {
+                self.apply_error_pushes(&error, cx);
+                Err(error)
+            }
+        };
         let Some(cache) = self.lists.get_mut(&list) else {
             return;
         };
