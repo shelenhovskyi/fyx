@@ -536,3 +536,76 @@ fn module_with_version_section(data: &[u8]) -> Vec<u8> {
     module.extend(data);
     module
 }
+
+/// Sandbox: extension and surface ids are restricted (they name panels, settings keys and files,
+/// and `<extension>/<surface>` must stay unambiguous).
+#[test]
+fn test_id_rules() {
+    for good in ["fyx-demo-counter", "a", "a1_b-2", "9lives"] {
+        validate_id("extension", good).unwrap_or_else(|error| panic!("{good}: {error:#}"));
+    }
+    let too_long = "a".repeat(MAX_ID_LEN + 1);
+    for bad in [
+        "",
+        "Counter",
+        "a/b",
+        "../x",
+        "-dash",
+        "_under",
+        "with space",
+        "dot.ted",
+        "ünï",
+        too_long.as_str(),
+    ] {
+        let error = validate_id("extension", bad).expect_err(bad);
+        assert!(format!("{error:#}").contains("extension id"), "{error:#}");
+    }
+
+    let surface = |id: &str| ui_ext::Surface {
+        id: id.into(),
+        title: "T".into(),
+        kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+            side: ui_ext::StatusBarSide::Left,
+            priority: 0,
+        }),
+    };
+    validate_surfaces(&[surface("main"), surface("status")]).expect("valid");
+    let error = validate_surfaces(&[surface("main"), surface("main")]).expect_err("duplicate");
+    assert!(format!("{error:#}").contains("declared twice"), "{error:#}");
+    let error = validate_surfaces(&[surface("Main")]).expect_err("bad id");
+    assert!(format!("{error:#}").contains("surface id"), "{error:#}");
+}
+
+/// A component cannot be loaded under an invalid id, and a manifest with one is refused with its
+/// path in the error.
+#[gpui::test]
+async fn test_invalid_ids_are_refused_at_load(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let error = cx
+        .update(|cx| UiExtension::load("Bad/Id".into(), probe_wasm(), &cx.to_async()))
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        format!("{error:#}").contains("extension id \"Bad/Id\""),
+        "{error:#}"
+    );
+
+    let fs = fs::FakeFs::new(cx.executor());
+    fs.create_dir(Path::new("/ext/bad")).await.expect("dir");
+    fs.insert_file(
+        "/ext/bad/extension.toml",
+        b"id = \"../escape\"\nname = \"Bad\"\nversion = \"0.1.0\"\nschema_version = 1\n\
+          [fyx_ui]\napi_version = \"0.1.0\"\ncomponent = \"fyx_ui.wasm\"\n"
+            .to_vec(),
+    )
+    .await;
+    let error = UiManifest::read(fs.as_ref(), Path::new("/ext/bad"))
+        .await
+        .err()
+        .expect("refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("extension id \"../escape\""), "{message}");
+    assert!(message.contains("extension.toml"), "{message}");
+}

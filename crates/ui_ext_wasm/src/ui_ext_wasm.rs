@@ -226,6 +226,7 @@ impl UiManifest {
             return Ok(None);
         };
         let id = toml.id;
+        validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
             "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
@@ -393,6 +394,39 @@ fn deny_network(wasi: &mut WasiCtxBuilder) {
         .socket_addr_check(|_, _| Box::pin(async { false }));
 }
 
+/// Longest extension or surface id.
+pub const MAX_ID_LEN: usize = 64;
+
+/// Extension and surface ids name panels, settings keys and files, so they are restricted to
+/// lowercase ASCII letters, digits, `-` and `_`, start with a letter or digit, and are at most
+/// `MAX_ID_LEN` long. That also keeps `<extension id>/<surface id>` unambiguous.
+pub fn validate_id(kind: &str, id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > MAX_ID_LEN {
+        anyhow::bail!("{kind} id {id:?} must be 1 to {MAX_ID_LEN} characters long");
+    }
+    if !id.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+    }) {
+        anyhow::bail!("{kind} id {id:?} may only use lowercase ASCII letters, digits, '-' and '_'");
+    }
+    if !id.as_bytes()[0].is_ascii_alphanumeric() {
+        anyhow::bail!("{kind} id {id:?} must start with a letter or a digit");
+    }
+    Ok(())
+}
+
+/// The surfaces a component declares: valid ids, none twice.
+pub fn validate_surfaces(surfaces: &[ui_ext::Surface]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for surface in surfaces {
+        validate_id("surface", &surface.id)?;
+        if !seen.insert(surface.id.as_str()) {
+            anyhow::bail!("surface id {:?} is declared twice", surface.id);
+        }
+    }
+    Ok(())
+}
+
 /// Resource caps of every UI component's store. Growing past one traps (rather than failing the
 /// guest's allocation quietly), which disables the extension with an explicit error.
 fn ui_store_limits() -> wasmtime::StoreLimits {
@@ -509,6 +543,9 @@ impl UiExtension {
         wasm_bytes: Vec<u8>,
         cx: &AsyncApp,
     ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        if let Err(error) = validate_id("extension", &extension_id) {
+            return Task::ready(Err(error));
+        }
         let compile_task = cx.background_executor().spawn({
             let extension_id = extension_id.clone();
             async move {
@@ -593,6 +630,7 @@ impl UiExtension {
                     .context("fyx:ui surfaces() failed")?;
                     let surfaces: Arc<[ui_ext::Surface]> =
                         surfaces.into_iter().map(Into::into).collect();
+                    validate_surfaces(&surfaces).context("invalid surfaces()")?;
                     // Nothing replies to instantiation, so its pushes go to the channel; the
                     // receiver is still in hand here, so sending cannot fail.
                     for pushed in store.data_mut().pushes.drain(..) {

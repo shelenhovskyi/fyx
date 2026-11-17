@@ -45,7 +45,7 @@ pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
 };
-pub use registry::{DEV_EXTENSIONS_ENV, LoadedSurface, UiExtensionRegistry};
+pub use registry::{DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, UiExtensionRegistry};
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};
 

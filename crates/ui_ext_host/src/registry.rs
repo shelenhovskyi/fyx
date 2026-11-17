@@ -61,8 +61,22 @@ pub const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 const FIRST_ACTIVATION_PRIORITY: u32 = 100;
 
 pub struct LoadedSurface {
+    /// The surface's structured key; `info.key` is only its display and persistence form.
+    pub extension_id: Arc<str>,
+    pub surface_id: Arc<str>,
     pub info: Rc<SurfaceInfo>,
     pub state: Entity<SurfaceState>,
+}
+
+/// Where an extension was loaded from. An extension id belongs to the first source that loads it:
+/// a reinstall from the same source reloads it, another source with the same id is refused, so
+/// one extension cannot take over another's surfaces by declaring its id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionSource {
+    /// A directory (installed, or a dev path).
+    Directory(PathBuf),
+    /// A bare component file (`FYX_UI_DEV_EXTENSIONS`).
+    File(PathBuf),
 }
 
 #[derive(Default)]
@@ -75,6 +89,8 @@ pub struct UiExtensionRegistry {
     rescan_requested: bool,
     /// The component watch of each dev extension, by id.
     watches: HashMap<Arc<str>, Task<()>>,
+    /// The source each loaded extension id belongs to.
+    sources: HashMap<Arc<str>, ExtensionSource>,
 }
 
 /// How a watched dev extension is loaded again.
@@ -117,19 +133,55 @@ impl UiExtensionRegistry {
         &self.surfaces
     }
 
+    /// By display key, `<extension id>/<surface id>` (unambiguous: ids cannot contain `/`).
     pub fn surface(&self, key: &str) -> Option<&LoadedSurface> {
         self.surfaces.iter().find(|surface| surface.info.key == key)
+    }
+
+    pub fn surface_of(&self, extension_id: &str, surface_id: &str) -> Option<&LoadedSurface> {
+        self.surfaces.iter().find(|surface| {
+            surface.extension_id.as_ref() == extension_id
+                && surface.surface_id.as_ref() == surface_id
+        })
+    }
+
+    pub fn surfaces_of<'a>(
+        &'a self,
+        extension_id: &'a str,
+    ) -> impl Iterator<Item = &'a LoadedSurface> + 'a {
+        self.surfaces
+            .iter()
+            .filter(move |surface| surface.extension_id.as_ref() == extension_id)
+    }
+
+    /// Claims `extension_id` for `source`. Fails when another source already holds it.
+    pub fn claim_extension_id(
+        &mut self,
+        extension_id: &Arc<str>,
+        source: ExtensionSource,
+    ) -> anyhow::Result<()> {
+        match self.sources.get(extension_id) {
+            Some(owner) if *owner != source => anyhow::bail!(
+                "extension id {extension_id:?} is already used by {owner:?}; not loading {source:?}"
+            ),
+            Some(_) => Ok(()),
+            None => {
+                self.sources.insert(extension_id.clone(), source);
+                Ok(())
+            }
+        }
+    }
+
+    fn release_extension_id(&mut self, extension_id: &str) {
+        self.sources.remove(extension_id);
     }
 
     /// The capabilities a loaded UI extension uses, from the surfaces it declared: `ui:panel` for
     /// dock panels, `ui:status-bar` for status items. Empty when `extension_id` is not a loaded
     /// UI extension.
     pub fn capabilities(&self, extension_id: &str, cx: &App) -> Vec<&'static str> {
-        let prefix = format!("{extension_id}/");
         let kinds: Vec<SurfaceKind> = self
-            .surfaces
-            .iter()
-            .filter(|surface| surface.info.key.starts_with(prefix.as_str()))
+            .surfaces_of(extension_id)
             .map(|surface| surface.state.read(cx).surface().kind.clone())
             .collect();
         let mut capabilities = Vec::new();
@@ -159,12 +211,12 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
-        let prefix = format!("{}/", backend.extension_id());
-        for loaded in &self.surfaces {
-            let Some(surface_id) = loaded.info.key.strip_prefix(prefix.as_str()) else {
-                continue;
-            };
-            if !surfaces.iter().any(|surface| surface.id == surface_id) {
+        for loaded in self.surfaces_of(backend.extension_id()) {
+            let surface_id = &loaded.surface_id;
+            if !surfaces
+                .iter()
+                .any(|surface| surface.id.as_str() == surface_id.as_ref())
+            {
                 let message = format!(
                     "{} no longer has the surface {surface_id:?}",
                     backend.extension_id()
@@ -180,7 +232,7 @@ impl UiExtensionRegistry {
                 surface,
                 FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
             );
-            if let Some(loaded) = self.surface(&info.key) {
+            if let Some(loaded) = self.surface_of(backend.extension_id(), &surface.id) {
                 log::info!("fyx:ui: reloading surface {}", info.key);
                 loaded.state.update(cx, |state, cx| {
                     state.replace_backend(backend.clone(), surface.clone(), cx)
@@ -195,6 +247,8 @@ impl UiExtensionRegistry {
             let state =
                 cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), Some(link), cx));
             self.surfaces.push(LoadedSurface {
+                extension_id: backend.extension_id().into(),
+                surface_id: surface.id.as_str().into(),
                 info: Rc::new(info),
                 state,
             });
@@ -258,6 +312,13 @@ impl UiExtensionRegistry {
                                 extension.surfaces().len()
                             );
                             this.update(cx, |this, cx| {
+                                if let Err(error) = this.claim_extension_id(
+                                    extension.extension_id(),
+                                    ExtensionSource::Directory(found.dir.clone()),
+                                ) {
+                                    log::error!("fyx:ui: {error:#}");
+                                    return;
+                                }
                                 this.installed
                                     .insert(found.extension_id.clone(), found.fingerprint);
                                 this.register_extension(extension, pushed, cx);
@@ -373,6 +434,7 @@ impl UiExtensionRegistry {
         for extension_id in gone {
             self.installed.remove(&extension_id);
             self.watches.remove(&extension_id);
+            self.release_extension_id(&extension_id);
             log::info!("fyx:ui: {extension_id} was uninstalled");
             self.fail_extension(
                 &extension_id,
@@ -395,12 +457,8 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
-        let prefix = format!("{extension_id}/");
-        for surface in &self.surfaces {
-            let Some(surface_id) = surface.info.key.strip_prefix(prefix.as_str()) else {
-                continue;
-            };
-            if surface_id != except_surface {
+        for surface in self.surfaces_of(extension_id) {
+            if surface.surface_id.as_ref() != except_surface {
                 surface
                     .state
                     .update(cx, |state, cx| state.fail(message.clone(), false, cx));
@@ -415,8 +473,7 @@ impl UiExtensionRegistry {
         update: Update,
         cx: &mut Context<Self>,
     ) {
-        let key = format!("{extension_id}/{surface_id}");
-        match self.surface(&key) {
+        match self.surface_of(extension_id, surface_id) {
             Some(surface) => surface.state.update(cx, |state, cx| {
                 state.apply_pushed_update(update, cx);
             }),
@@ -755,6 +812,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
                     .file_stem()
                     .and_then(|stem| stem.to_str())
                     .context("dev extension path has no usable name")?
+                    .to_lowercase()
                     .replace('_', "-");
                 let bytes = std::fs::read(&path)
                     .with_context(|| format!("failed to read {}", path.display()))?;
@@ -773,6 +831,12 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             UiExtensionRegistry::global(cx).context("ui_ext_host::init was not called")?;
         registry.update(cx, |registry, cx| {
             let extension_id = extension.extension_id().clone();
+            let source = if reload_path.is_dir() {
+                ExtensionSource::Directory(reload_path.clone())
+            } else {
+                ExtensionSource::File(reload_path.clone())
+            };
+            registry.claim_extension_id(&extension_id, source)?;
             registry.register_extension(extension, pushed, cx);
             if let Some(component) = component {
                 registry.watch_component(
@@ -783,7 +847,8 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
                     cx,
                 );
             }
-        });
+            anyhow::Ok(())
+        })?;
         anyhow::Ok(())
     })
 }
