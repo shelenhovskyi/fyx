@@ -570,6 +570,10 @@ impl AgentReview {
             self.pending_rules.remove(&root);
             return false;
         }
+        log::info!(
+            "fyx: agent review: the review rules of {} changed; they apply once the user applies them",
+            root.display()
+        );
         self.pending_rules.insert(root, rules);
         cx.notify();
         true
