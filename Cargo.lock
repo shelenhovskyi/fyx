@@ -6870,12 +6870,18 @@ dependencies = [
 name = "fyx_guard"
 version = "0.1.0"
 dependencies = [
+ "acp_thread",
+ "action_log",
+ "agent",
  "agent-client-protocol",
+ "agent_settings",
  "anyhow",
  "collections",
+ "feature_flags",
  "fs",
  "gpui",
  "log",
+ "paths",
  "project",
  "serde",
  "serde_json",
