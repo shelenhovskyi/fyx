@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
 use ui_ext::{Patch, Props, TreeNode, UiEvent, Update};
@@ -37,67 +34,12 @@ mod probe {
     pub const PUSH_FLOOD: NodeId = 6;
 }
 
-fn workspace_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Builds a guest for `wasm32-wasip2` with `cargo build <args>` in `dir`, into a target directory
-/// next to the test binary's own, and returns `<target>/wasm32-wasip2/<output>`.
-fn build_guest(dir: &Path, args: &[&str], output: &str) -> Result<PathBuf, String> {
-    // <target>/debug/deps/<test binary>
-    let target_dir = std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .ancestors()
-        .nth(3)
-        .ok_or("test binary is not inside a cargo target directory")?
-        .join("fyx-ui-fixtures");
-    // Blocking is fine: this runs once per test process, before any executor work.
-    #[allow(clippy::disallowed_methods)]
-    let status = Command::new(option_env!("CARGO").unwrap_or("cargo"))
-        .arg("build")
-        .args(args)
-        .args(["--locked", "--target", "wasm32-wasip2", "--target-dir"])
-        .arg(&target_dir)
-        .current_dir(dir)
-        .status()
-        .map_err(|error| format!("failed to run cargo: {error}"))?;
-    if !status.success() {
-        return Err(format!("cargo build {args:?} in {dir:?} failed: {status}"));
-    }
-    Ok(target_dir.join("wasm32-wasip2").join(output))
-}
-
-fn read_guest(
-    built: &'static OnceLock<Result<PathBuf, String>>,
-    build: fn() -> Result<PathBuf, String>,
-) -> Vec<u8> {
-    let path = built
-        .get_or_init(build)
-        .as_ref()
-        .unwrap_or_else(|error| panic!("{error}"));
-    std::fs::read(path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
-}
-
 fn demo_counter_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    read_guest(&BUILT, || {
-        build_guest(
-            &workspace_dir(),
-            &["-p", "fyx_demo_counter"],
-            "debug/fyx_demo_counter.wasm",
-        )
-    })
+    crate::test_support::demo_wasm("fyx_demo_counter")
 }
 
 fn probe_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    read_guest(&BUILT, || {
-        build_guest(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/probe"),
-            &["--release"],
-            "release/fyx_ui_test_probe.wasm",
-        )
-    })
+    crate::test_support::fixture_wasm("fyx_ui_test_probe")
 }
 
 async fn load(

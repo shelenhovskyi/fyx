@@ -4,9 +4,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     rc::Rc,
-    sync::OnceLock,
     time::Duration,
 };
 
@@ -16,66 +14,17 @@ use ui_ext_wasm::UiExtension;
 
 use crate::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo, SurfaceState, backend::UiBackend};
 
-fn workspace_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Builds a guest for `wasm32-wasip2` with `cargo build <args>` in `dir`, into
-/// `<target>/fyx-ui-fixtures` (shared with extension_host's tests), and reads
-/// `<that>/wasm32-wasip2/<output>`. Once per test process.
-fn build_guest(
-    built: &'static OnceLock<Result<PathBuf, String>>,
-    dir: PathBuf,
-    args: &'static [&'static str],
-    output: &'static str,
-) -> Vec<u8> {
-    let path = built
-        .get_or_init(|| {
-            // <target>/debug/deps/<test binary>
-            let target_dir = std::env::current_exe()
-                .map_err(|error| error.to_string())?
-                .ancestors()
-                .nth(3)
-                .ok_or("test binary is not inside a cargo target directory")?
-                .join("fyx-ui-fixtures");
-            // Blocking is fine: this runs once per test process, before any executor work.
-            #[allow(clippy::disallowed_methods)]
-            let status = Command::new(option_env!("CARGO").unwrap_or("cargo"))
-                .arg("build")
-                .args(args)
-                .args(["--locked", "--target", "wasm32-wasip2", "--target-dir"])
-                .arg(&target_dir)
-                .current_dir(&dir)
-                .status()
-                .map_err(|error| format!("failed to run cargo: {error}"))?;
-            if !status.success() {
-                return Err(format!("cargo build {args:?} in {dir:?} failed: {status}"));
-            }
-            Ok(target_dir.join("wasm32-wasip2").join(output))
-        })
-        .as_ref()
-        .unwrap_or_else(|error| panic!("{error}"));
-    std::fs::read(path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
-}
-
 fn counter_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    build_guest(
-        &BUILT,
-        workspace_dir(),
-        &["-p", "fyx_demo_counter"],
-        "debug/fyx_demo_counter.wasm",
-    )
+    ui_ext_wasm::test_support::demo_wasm("fyx_demo_counter")
 }
 
 fn status_item_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    build_guest(
-        &BUILT,
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status_item"),
-        &["--release"],
-        "release/fyx_ui_test_status_item.wasm",
-    )
+    ui_ext_wasm::test_support::fixture_wasm("fyx_ui_test_status_item")
+}
+
+/// The status-item fixture's manifest, next to its source in `ui_ext_wasm`'s fixture workspace.
+fn status_item_manifest() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui_ext_wasm/fixtures/status_item/extension.toml")
 }
 
 async fn load(name: &str, wasm: Vec<u8>, cx: &mut TestAppContext) -> UiExtension {
@@ -198,13 +147,7 @@ async fn test_status_item_click_updates_label(cx: &mut TestAppContext) {
 }
 
 fn gallery_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    build_guest(
-        &BUILT,
-        workspace_dir(),
-        &["-p", "fyx_demo_gallery"],
-        "debug/fyx_demo_gallery.wasm",
-    )
+    ui_ext_wasm::test_support::demo_wasm("fyx_demo_gallery")
 }
 
 /// The nodes under `root` (included), parents first.
@@ -515,11 +458,7 @@ async fn test_installed_extensions_load_reload_and_stop(cx: &mut TestAppContext)
     let plain_dir = installed.join("plain");
     std::fs::create_dir_all(&ui_dir).expect("ui dir");
     std::fs::create_dir_all(&plain_dir).expect("plain dir");
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status_item/extension.toml"),
-        ui_dir.join("extension.toml"),
-    )
-    .expect("manifest");
+    std::fs::copy(status_item_manifest(), ui_dir.join("extension.toml")).expect("manifest");
     std::fs::write(ui_dir.join("fyx_ui.wasm"), &wasm).expect("component");
     std::fs::write(
         plain_dir.join("extension.toml"),
@@ -602,11 +541,7 @@ async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
     let source = root.path().join("my-status-item");
     let installed = root.path().join("extensions").join("installed");
     std::fs::create_dir_all(&source).expect("source");
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status_item/extension.toml"),
-        source.join("extension.toml"),
-    )
-    .expect("manifest");
+    std::fs::copy(status_item_manifest(), source.join("extension.toml")).expect("manifest");
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
 
     // Not built yet.
@@ -675,11 +610,7 @@ async fn test_dev_extension_hot_reloads(cx: &mut TestAppContext) {
     let source = root.path().join("my-status-item");
     let installed = root.path().join("installed");
     std::fs::create_dir_all(&source).expect("source");
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status_item/extension.toml"),
-        source.join("extension.toml"),
-    )
-    .expect("manifest");
+    std::fs::copy(status_item_manifest(), source.join("extension.toml")).expect("manifest");
     std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
     crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
