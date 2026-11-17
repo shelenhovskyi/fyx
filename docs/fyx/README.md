@@ -9,7 +9,8 @@ branch are listed under [Coming](#coming).
 
 - [user-guide.md](user-guide.md): for people who install and use Fyx. Covers privacy defaults, agent change review, UI extensions, security modes, where Fyx keeps its files and troubleshooting.
 - [agent-review.md](agent-review.md): reference for agent change review: turning it on, what is reviewed, the review pane and its keys.
-- [review-rules.md](review-rules.md): reference for `.fyx/review.toml` (`auto_accept`, `always_ask`, `deny`), matching, trust and loading.
+- [review-rules.md](review-rules.md): reference for `.fyx/review.toml` (`always_ask`, `deny`) and the user setting `agent_review.auto_accept`.
+- [security-modes.md](security-modes.md): design and rules of the `fyx_security` modes (`off`, `audit`, `shield`) and the later steps.
 
 ## Writing UI extensions
 
@@ -21,14 +22,17 @@ branch are listed under [Coming](#coming).
 
 - [platform/spec.md](platform/spec.md): Platform 1 spec, a home for third-party UI extensions (install, permissions, registry), with numbered decisions.
 - [platform/plan.md](platform/plan.md): Platform 1 work plan: the tasks for each phase, with owners and their "done when" checks.
+- [platform/registry-format.md](platform/registry-format.md): the formats of the registry index, block list, keysets, cache and CLI, as `crates/fyx_registry` implements them.
 - [platform/registry-repo.md](platform/registry-repo.md): design of the future `shelenhovskyi/fyx-extensions` repository: layout, entry format, review rules, CI, keys and the block-list process (plan 3.1, 3.2).
 - [wit-0.2/design.md](wit-0.2/design.md): `fyx:ui@0.2.0` design and the decisions of 2026-11-17.
-- [wit-0.2/fyx-ui-0.2.wit](wit-0.2/fyx-ui-0.2.wit): the decided 0.2 WIT world, before it moves to `crates/ui_ext/wit/since_v0.2.0/`.
-- [wit-0.2/migration.md](wit-0.2/migration.md): 0.1 → 0.2 coexistence, version gating, SDK and test plan.
+- [wit-0.2/migration.md](wit-0.2/migration.md): 0.1 → 0.2 coexistence, version gating, SDK and test plan. The 0.2 WIT itself is in `crates/ui_ext/wit/since_v0.2.0/`.
+- [wit-0.3/design.md](wit-0.3/design.md): `fyx:ui@0.3.0` design draft, for review.
+- [wit-0.3/fyx-ui-0.3.wit](wit-0.3/fyx-ui-0.3.wit): the draft 0.3 WIT world.
+- [wit-0.3/migration.md](wit-0.3/migration.md): 0.2 → 0.3 coexistence, version gating, SDK and test plan.
 
 ## Development
 
-- [ci.md](ci.md): Fyx's own GitHub workflows and the merge gate.
+- [ci.md](ci.md): Fyx's own GitHub workflows, the merge gate and the advisory triage.
 - [manual-tests.md](manual-tests.md): phase 4 manual test scripts for the running editor.
 
 ## Reviews and audits (`tasks/reviews/`)
@@ -36,8 +40,10 @@ branch are listed under [Coming](#coming).
 - [integration-1.md](../../tasks/reviews/integration-1.md): judge review of the first integration (W2 host bindings and W4 SDK).
 - [integration-2.md](../../tasks/reviews/integration-2.md): judge review of the second integration.
 - [integration-3.md](../../tasks/reviews/integration-3.md): judge review of the third integration (W5 agent review on `fyx/main`).
+- [integration-4.md](../../tasks/reviews/integration-4.md): judge review of everything merged after integration-3.
 - [w3-deep-1.md](../../tasks/reviews/w3-deep-1.md): deep review of W3's renderer, containers and hooks.
 - [w5-deep-1.md](../../tasks/reviews/w5-deep-1.md): deep review of W5's agent change review.
+- [w9-step1.md](../../tasks/reviews/w9-step1.md): judge review of security step 1 (`fyx_guard`), with the fixes it asks for.
 - [wit-0.2-design.md](../../tasks/reviews/wit-0.2-design.md): judge review of the `fyx:ui@0.2.0` design draft.
 - [network-audit-1.md](../../tasks/reviews/network-audit-1.md): every outbound request Fyx can still make, and the fixes.
 - [license-audit-1.md](../../tasks/reviews/license-audit-1.md): license audit of a GPL fork with Apache-2.0 SDK crates.
@@ -52,16 +58,9 @@ links get added when the document lands.
 
 | Document | Branch | What it is |
 |---|---|---|
-| `docs/fyx/security-modes.md` | `claude/fyx-w9-guard`, `claude/fyx-w9-fixes` | Design and rules of the `fyx_security` modes (`off`, `audit`, `shield`) and the later steps. |
-| `docs/fyx/platform/registry-format.md` | `claude/fyx-registry-core` | The registry index, block list, cache and CLI formats, as `crates/fyx_registry` implements them. |
-| `docs/fyx/wit-0.3/design.md` | `claude/fyx-wit-0.3-design` | `fyx:ui@0.3.0` design draft, for review. |
-| `docs/fyx/wit-0.3/fyx-ui-0.3.wit` | `claude/fyx-wit-0.3-design` | The draft 0.3 WIT world. |
-| `docs/fyx/wit-0.3/migration.md` | `claude/fyx-wit-0.3-design` | 0.2 → 0.3 coexistence, version gating, SDK and test plan. |
 | `docs/fyx/api/fyx-ui-0.1.0.md` | `claude/fyx-w4-sdk-demos-5d1497` | Generated reference of the `fyx:ui@0.1.0` WIT world. |
 | `docs/fyx/api/ui_ext_sdk.md` | `claude/fyx-w4-sdk-demos-5d1497` | Generated list of the `ui_ext_sdk` public items. |
 | `docs/fyx/api/fyx_ext_harness.md` | `claude/fyx-w4-sdk-demos-5d1497` | Generated list of the `fyx_ext_harness` public items, for `fyx-ext test`. |
-| `tasks/reviews/integration-4.md` | `claude/fyx-w7-judge-cd66a5` | Judge review of everything merged after integration-3. |
-| `tasks/reviews/w9-step1.md` | `claude/fyx-w7-judge-cd66a5` | Judge review of security step 1 (`fyx_guard`), with the fixes it asks for. |
 | `tasks/reviews/triage-3.md` | `claude/fyx-w7-judge-cd66a5` | Five specialist reports sorted into action lists for each owner. |
 | `tasks/reviews/async-1.md` | `claude/fyx-review-async` | Concurrency, async and GPUI lifecycle review. |
 | `tasks/reviews/bugs-1.md` | `claude/fyx-review-bugs` | Logic-bug review. |
