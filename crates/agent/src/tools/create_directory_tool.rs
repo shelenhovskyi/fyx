@@ -111,6 +111,7 @@ impl AgentTool for CreateDirectoryTool {
         let project = self.project.clone();
         cx.spawn(async move |cx| {
             let input = input.recv().await.map_err(|e| e.to_string())?;
+            fyx_guard::check_agent_create(&project, &input.path, cx)?; // fyx: read-only agent configs
 
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
 

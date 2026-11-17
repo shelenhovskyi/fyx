@@ -93,6 +93,7 @@ impl AgentTool for DeletePathTool {
             if let ToolPermissionDecision::Deny(reason) = decision {
                 return Err(reason);
             }
+            fyx_guard::check_agent_delete(&project, &path, cx)?; // fyx: read-only agent configs
 
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
             let canonical_roots = canonicalize_worktree_roots(&project, &fs, cx).await;

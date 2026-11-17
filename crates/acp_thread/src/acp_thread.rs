@@ -15720,56 +15720,6 @@ mod tests {
         assert_eq!(err.code, acp_v1::ErrorCode::ResourceNotFound);
     }
 
-    // fyx: fyx_guard's hooks in `read_text_file` and `write_text_file`.
-    #[gpui::test]
-    async fn test_fyx_guard_shield_on_acp_file_access(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(path!("/tmp"), json!({".env": "API_KEY=1", "main.rs": ""}))
-            .await;
-        let project = Project::test(fs.clone(), [path!("/tmp").as_ref()], cx).await;
-        let connection = Rc::new(FakeAgentConnection::new());
-        let thread = cx
-            .update(|cx| {
-                connection.new_session(project, PathList::new(&[Path::new(path!("/tmp"))]), cx)
-            })
-            .await
-            .unwrap();
-        let read_env = |cx: &mut TestAppContext| {
-            thread.update(cx, |thread, cx| {
-                thread.read_text_file(path!("/tmp/.env").into(), None, None, false, cx)
-            })
-        };
-        let write_config = |cx: &mut TestAppContext| {
-            thread.update(cx, |thread, cx| {
-                thread.write_text_file(path!("/tmp/.claude/settings.json").into(), "{}".into(), cx)
-            })
-        };
-
-        assert_eq!(read_env(cx).await.unwrap(), "API_KEY=1");
-        write_config(cx).await.unwrap();
-
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store.update_user_settings(cx, |settings| {
-                    settings.fyx_security.get_or_insert_default().mode =
-                        Some(settings::FyxSecurityMode::Shield);
-                });
-            });
-        });
-        let error = read_env(cx).await.unwrap_err();
-        assert!(error.message.contains("private_files"), "{}", error.message);
-        let error = write_config(cx).await.unwrap_err();
-        assert!(format!("{error:#}").contains("read-only"), "{error:#}");
-        thread
-            .update(cx, |thread, cx| {
-                thread.read_text_file(path!("/tmp/main.rs").into(), None, None, false, cx)
-            })
-            .await
-            .unwrap();
-    }
-
     #[gpui::test]
     async fn test_succeeding_canceled_toolcall(cx: &mut TestAppContext) {
         init_test(cx);

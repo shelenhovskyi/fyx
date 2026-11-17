@@ -29,7 +29,8 @@ pub struct AgentReviewSettingsContent {
 }
 
 /// Security modes for agents (`crates/fyx_guard`, `docs/fyx/security-modes.md`). Read only from
-/// user settings: project settings have no `fyx_security` key.
+/// user settings: project settings have no `fyx_security` key. While Fyx runs, a change that lowers
+/// protection asks for confirmation.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct FyxSecuritySettingsContent {
