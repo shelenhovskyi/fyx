@@ -32,23 +32,38 @@ pub(crate) const ROW_OVERSCAN: u32 = 8;
 pub enum Phase {
     Mounting,
     Ready(Tree),
-    Failed(SharedString),
+    /// `retryable` is false when the extension's instance is gone (trap, time budget, disabled):
+    /// mounting again would be refused, so only a reinstall or a restart brings it back.
+    Failed {
+        message: SharedString,
+        retryable: bool,
+    },
 }
 
 /// The rows of one virtualized list or table node. Rows are subtrees with row-local node ids, so
 /// they are kept apart from the surface tree and addressed by `(list node, index)`.
 #[derive(Default)]
 struct RowCache {
-    /// Bumped whenever the list's props change; rows from older generations are still shown
-    /// until their replacement arrives, which avoids flicker.
+    /// Changes whenever the list's props change. Taken from `SurfaceState::next_row_generation`,
+    /// which never goes back, so a reply to a fetch made before a remount (which starts every
+    /// cache again) can never pass for a current one (integration-3 finding 8). Rows from older
+    /// generations are still shown until their replacement arrives, which avoids flicker.
     generation: u64,
     rows: HashMap<u32, CachedRow>,
-    in_flight: Option<Range<u32>>,
-    /// The latest range asked for while a fetch was in flight.
-    queued: Option<Range<u32>>,
+    /// The generation of the fetch in flight, if any.
+    in_flight: Option<u64>,
+    /// Rows asked for and not yet fetched: the union of every request since the last fetch, so
+    /// the measuring call and the visible range of one layout make one `list-rows` call.
+    wanted: Option<Range<u32>>,
+    /// A fetch of `wanted` is scheduled for after the current layout.
+    scheduled: bool,
     /// A fetch for this generation failed; do not retry until the list changes.
     failed_generation: Option<u64>,
 }
+
+/// A union of wanted rows wider than this is replaced by the latest request instead (two
+/// windows scrolled far apart, say).
+const MAX_WANTED_ROWS: u32 = 256;
 
 /// One index of a list. Every index of an answered range gets an entry, `tree: None` for a row the
 /// extension left out, so a short answer is not asked for again in the same generation however
@@ -83,8 +98,11 @@ pub struct SurfaceState {
     /// Bumped on every change to the tree, so views know when to reconcile their editors.
     revision: u64,
     resyncing: bool,
-    /// Remounts caused by bad updates since the last applied reply to user input.
+    /// Remounts caused by bad updates since the last update that applied (a reply, a push, a row
+    /// answer).
     remounts_without_input: u32,
+    /// The source of row generations; see `RowCache::generation`.
+    next_row_generation: u64,
     _mount: Option<Task<()>>,
 }
 
@@ -108,6 +126,7 @@ impl SurfaceState {
             revision: 0,
             resyncing: false,
             remounts_without_input: 0,
+            next_row_generation: 0,
             _mount: None,
         };
         this.mount(cx);
@@ -129,7 +148,7 @@ impl SurfaceState {
     pub fn tree(&self) -> Option<&Tree> {
         match &self.phase {
             Phase::Ready(tree) => Some(tree),
-            Phase::Mounting | Phase::Failed(_) => None,
+            Phase::Mounting | Phase::Failed { .. } => None,
         }
     }
 
@@ -178,7 +197,7 @@ impl SurfaceState {
                                 .filter(|push| push.surface_id != this.surface.id)
                                 .collect();
                             this.apply_pushes(others, cx);
-                            this.fail(format!("{error:#}").into(), cx);
+                            this.fail(format!("{error:#}").into(), true, cx);
                         } else {
                             this.fail_extension(&error, cx);
                         }
@@ -201,9 +220,9 @@ impl SurfaceState {
     }
 
     /// Stops the surface: no events, no rows, the message in place of the tree. `retry` mounts
-    /// again.
-    pub fn fail(&mut self, message: SharedString, cx: &mut Context<Self>) {
-        self.phase = Phase::Failed(message);
+    /// again when `retryable`.
+    pub fn fail(&mut self, message: SharedString, retryable: bool, cx: &mut Context<Self>) {
+        self.phase = Phase::Failed { message, retryable };
         self.events.clear();
         self.lists.clear();
         self.resyncing = false;
@@ -219,7 +238,7 @@ impl SurfaceState {
         if let Some(link) = self.link.clone() {
             link.extension_failed(&self.surface.id, message.clone(), cx);
         }
-        self.fail(message, cx);
+        self.fail(message, false, cx);
     }
 
     fn set_tree(&mut self, tree: Tree) {
@@ -253,7 +272,9 @@ impl SurfaceState {
             self.events.pop_back();
         }
         let row_generation = match &event {
-            UiEvent::RowClick(list, _) => Some(self.row_generation(*list)),
+            // The generation of the row the user saw, which may be older than the list's
+            // current one while its replacement is on the way (integration-3 finding 9).
+            UiEvent::RowClick(list, index) => Some(self.drawn_row_generation(*list, *index)),
             _ => None,
         };
         self.events.push_back(QueuedEvent {
@@ -313,6 +334,35 @@ impl SurfaceState {
             log::debug!("fyx:ui: dropping {event:?}, an earlier reply changed its target");
         }
         None
+    }
+
+    fn drawn_row_generation(&self, list: NodeId, index: u32) -> u64 {
+        self.lists
+            .get(&list)
+            .and_then(|cache| cache.rows.get(&index))
+            .map_or_else(|| self.row_generation(list), |row| row.generation)
+    }
+
+    /// Applies an update pushed outside a reply to this surface's own events (by another
+    /// surface's call, or after instantiation). One that applies counts as progress for the
+    /// remount bound, like an applied reply.
+    pub fn apply_pushed_update(&mut self, update: Update, cx: &mut Context<Self>) {
+        if self.apply_update(update, cx) {
+            self.remounts_without_input = 0;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_row_generation(&self, list: NodeId) -> u64 {
+        self.row_generation(list)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_events(&self) -> Vec<UiEvent> {
+        self.events
+            .iter()
+            .map(|queued| queued.event.clone())
+            .collect()
     }
 
     fn row_generation(&self, list: NodeId) -> u64 {
@@ -415,7 +465,8 @@ impl SurfaceState {
                         // usually) has its rows fetched again, once, for the visible range.
                         Some(Props::List(_) | Props::Table(_)) => {
                             if let Some(cache) = self.lists.get_mut(&id) {
-                                cache.invalidate();
+                                self.next_row_generation += 1;
+                                cache.invalidate(self.next_row_generation);
                             }
                         }
                         // Set, inserted or replaced by the extension: the views write the value.
@@ -449,6 +500,7 @@ impl SurfaceState {
                                 self.backend.extension_id()
                             )
                             .into(),
+                            true,
                             cx,
                         );
                         return false;
@@ -474,30 +526,74 @@ impl SurfaceState {
     }
 
     /// Makes sure rows `range` of `list` are fetched, without waiting for them. Cheap when they
-    /// are cached, so views call it for the visible range on every layout.
+    /// are cached, so views call it for the visible range on every layout. Requests made during
+    /// one layout are merged into one `list-rows` call, made right after it.
     pub fn request_rows(&mut self, list: NodeId, range: Range<u32>, cx: &mut Context<Self>) {
         if range.is_empty() || self.tree().is_none_or(|tree| !tree.contains(list)) {
             return;
         }
-        let cache = self.lists.entry(list).or_default();
-        if cache.failed_generation == Some(cache.generation) {
+        if !self.lists.contains_key(&list) {
+            self.next_row_generation += 1;
+            let cache = RowCache {
+                generation: self.next_row_generation,
+                ..RowCache::default()
+            };
+            self.lists.insert(list, cache);
+        }
+        let Some(cache) = self.lists.get_mut(&list) else {
+            return;
+        };
+        if cache.failed_generation == Some(cache.generation) || !cache.missing(&range) {
+            return;
+        }
+        cache.wanted = Some(match cache.wanted.take() {
+            Some(wanted) => {
+                let union = wanted.start.min(range.start)..wanted.end.max(range.end);
+                if union.len() as u32 > MAX_WANTED_ROWS {
+                    range
+                } else {
+                    union
+                }
+            }
+            None => range,
+        });
+        self.schedule_fetch(list, cx);
+    }
+
+    fn schedule_fetch(&mut self, list: NodeId, cx: &mut Context<Self>) {
+        let Some(cache) = self.lists.get_mut(&list) else {
+            return;
+        };
+        if cache.scheduled || cache.in_flight.is_some() || cache.wanted.is_none() {
+            return;
+        }
+        cache.scheduled = true;
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, cx| this.fetch_rows(list, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn fetch_rows(&mut self, list: NodeId, cx: &mut Context<Self>) {
+        if self.tree().is_none_or(|tree| !tree.contains(list)) {
+            return;
+        }
+        let Some(cache) = self.lists.get_mut(&list) else {
+            return;
+        };
+        cache.scheduled = false;
+        if cache.in_flight.is_some() {
+            return;
+        }
+        let Some(range) = cache.wanted.take() else {
+            return;
+        };
+        // Answered in the meantime, or the list changed so that nothing is missing.
+        if cache.failed_generation == Some(cache.generation) || !cache.missing(&range) {
             return;
         }
         let generation = cache.generation;
-        let missing = range.clone().any(|index| {
-            cache
-                .rows
-                .get(&index)
-                .is_none_or(|row| row.generation != generation)
-        });
-        if !missing {
-            return;
-        }
-        if cache.in_flight.is_some() {
-            cache.queued = Some(range);
-            return;
-        }
-        cache.in_flight = Some(range.clone());
+        cache.in_flight = Some(generation);
         let call = self
             .backend
             .list_rows(&self.surface.id, list, range.start, range.len() as u32);
@@ -511,7 +607,7 @@ impl SurfaceState {
         .detach();
     }
 
-    fn receive_rows(
+    pub(crate) fn receive_rows(
         &mut self,
         list: NodeId,
         generation: u64,
@@ -521,9 +617,11 @@ impl SurfaceState {
     ) {
         let result = match result {
             Ok(Reply { pushed, value }) => {
-                // A push that touches this list bumps its generation, so these rows are stored
-                // as stale and fetched again.
-                self.apply_pushes(pushed, cx);
+                // A push that touches this list gives it a new generation, so these rows no
+                // longer count and are fetched again.
+                if self.apply_pushes(pushed, cx) {
+                    self.remounts_without_input = 0;
+                }
                 Ok(value)
             }
             Err(error) => match reply_error_pushes(&error) {
@@ -540,52 +638,53 @@ impl SurfaceState {
         let Some(cache) = self.lists.get_mut(&list) else {
             return;
         };
-        cache.in_flight = None;
-        match result {
-            Ok(rows) => {
-                let mut answered: HashMap<u32, Tree> = rows.into_iter().collect();
-                for index in range.clone() {
-                    // Never replace an entry of a newer generation with this older answer.
-                    if cache
-                        .rows
-                        .get(&index)
-                        .is_some_and(|row| row.generation > generation)
-                    {
-                        continue;
+        if cache.in_flight == Some(generation) {
+            cache.in_flight = None;
+        }
+        // An answer for an older generation (the list changed, or the surface was mounted again
+        // while it was in flight) is dropped: storing it would mark rows the current generation
+        // still needs.
+        if generation == cache.generation {
+            match result {
+                Ok(rows) => {
+                    let mut answered: HashMap<u32, Tree> = rows.into_iter().collect();
+                    for index in range.clone() {
+                        let tree = answered.remove(&index);
+                        cache.rows.insert(index, CachedRow { generation, tree });
                     }
-                    let tree = answered.remove(&index);
-                    cache.rows.insert(index, CachedRow { generation, tree });
+                    if cache.rows.len() > MAX_CACHED_ROWS {
+                        let keep = range.start.saturating_sub(MAX_CACHED_ROWS as u32 / 4)
+                            ..range.end.saturating_add(MAX_CACHED_ROWS as u32 / 4);
+                        cache.rows.retain(|index, _| keep.contains(index));
+                    }
                 }
-                if cache.rows.len() > MAX_CACHED_ROWS {
-                    let keep = range.start.saturating_sub(MAX_CACHED_ROWS as u32 / 4)
-                        ..range.end.saturating_add(MAX_CACHED_ROWS as u32 / 4);
-                    cache.rows.retain(|index, _| keep.contains(index));
+                Err(error) => {
+                    log::error!(
+                        "fyx:ui {}/{}: list-rows({list}, {range:?}) failed: {error:#}",
+                        self.backend.extension_id(),
+                        self.surface.id
+                    );
+                    cache.failed_generation = Some(generation);
+                    self.last_error = Some(format!("{error:#}").into());
                 }
             }
-            Err(error) => {
-                log::error!(
-                    "fyx:ui {}/{}: list-rows({list}, {range:?}) failed: {error:#}",
-                    self.backend.extension_id(),
-                    self.surface.id
-                );
-                cache.failed_generation = Some(generation);
-                self.last_error = Some(format!("{error:#}").into());
-            }
         }
-        if let Some(queued) = self
-            .lists
-            .get_mut(&list)
-            .and_then(|cache| cache.queued.take())
-        {
-            self.request_rows(list, queued, cx);
-        }
+        self.schedule_fetch(list, cx);
         cx.notify();
     }
 }
 
 impl RowCache {
-    fn invalidate(&mut self) {
-        self.generation += 1;
+    fn missing(&self, range: &Range<u32>) -> bool {
+        range.clone().any(|index| {
+            self.rows
+                .get(&index)
+                .is_none_or(|row| row.generation != self.generation)
+        })
+    }
+
+    fn invalidate(&mut self, generation: u64) {
+        self.generation = generation;
         self.failed_generation = None;
     }
 }
