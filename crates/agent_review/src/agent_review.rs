@@ -7,6 +7,7 @@
 
 mod proposed_edit;
 mod review_pane;
+mod script_driver;
 
 use std::{ops::Range, rc::Rc};
 
@@ -54,6 +55,7 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     review_pane::init(cx);
+    script_driver::init(cx); // dev-only, off unless FYX_AGENT_REVIEW_SCRIPT is set
 }
 
 struct GlobalAgentReview(Entity<AgentReview>);
