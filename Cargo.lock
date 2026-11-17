@@ -6096,6 +6096,7 @@ dependencies = [
  "theme_settings",
  "toml 0.9.8",
  "tracing",
+ "ui_ext",
  "url",
  "util",
  "wasmparser 0.254.2",
@@ -6815,6 +6816,20 @@ dependencies = [
  "nucleo-matcher",
  "parking_lot",
  "path",
+]
+
+[[package]]
+name = "fyx_demo_counter"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
+name = "fyx_demo_todo"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
 ]
 
 [[package]]

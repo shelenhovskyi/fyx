@@ -50,6 +50,7 @@ telemetry.workspace = true
 tempfile.workspace = true
 toml = { workspace = true, features = ["display"] }
 tracing.workspace = true
+ui_ext.workspace = true # fyx: fyx:ui host bindings (W2)
 url.workspace = true
 util.workspace = true
 wasmparser.workspace = true

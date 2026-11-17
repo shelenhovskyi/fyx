@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# fyx: same rules as script/check-licenses, but reads symlinks from the git index instead of the
+# working tree. Used by script/gate.sh on checkouts with core.symlinks=false (Windows without
+# Developer Mode), where git writes every symlink as a small text file holding its target.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+fail() { echo "Error: $*"; exit 1; }
+
+git ls-files -s -- "*/LICENSE-AGPL" "LICENSE-AGPL" | grep -q . && fail "an AGPL license file is tracked"
+
+# mode, blob and path of every tracked LICENSE-GPL / LICENSE-APACHE outside the root
+declare -A mode_of blob_of
+while read -r mode blob _ path; do
+    mode_of[$path]=$mode
+    blob_of[$path]=$blob
+done < <(git ls-files -s -- "*/LICENSE-GPL" "*/LICENSE-APACHE")
+
+while IFS= read -r -d '' cargo_toml; do
+    grep -Eiq '(agpl|affero)' "$cargo_toml" && fail "$cargo_toml references an AGPL license"
+    grep -Eiq '^[[:space:]]*license-file[[:space:]]*=' "$cargo_toml" && fail "$cargo_toml uses license-file"
+    [[ "$cargo_toml" == */Cargo.toml ]] || continue
+
+    dir=$(dirname "$cargo_toml")
+    depth=$(echo "$dir" | tr '/' '\n' | wc -l)
+    prefix=""
+    for ((i = 0; i < depth; i++)); do prefix="../$prefix"; done
+
+    found=""
+    for license in LICENSE-GPL LICENSE-APACHE; do
+        path="$dir/$license"
+        [[ -n "${mode_of[$path]:-}" ]] || continue
+        [[ "${mode_of[$path]}" == 120000 ]] || fail "$path is tracked but is not a symlink"
+        target=$(git cat-file -p "${blob_of[$path]}")
+        [[ "$target" == "${prefix}${license}" ]] || fail "$path points to '$target' but should point to '${prefix}${license}'"
+        [[ -f "$license" ]] || fail "$path targets missing root file $license"
+        found=1
+        break
+    done
+    [[ -n "$found" ]] || fail "$dir does not contain a LICENSE-GPL or LICENSE-APACHE symlink"
+done < <(git ls-files -z -- "Cargo.toml" "**/Cargo.toml")
+
+echo "check-licenses (index) succeeded"

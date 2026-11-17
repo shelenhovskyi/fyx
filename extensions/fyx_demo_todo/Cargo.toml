@@ -1,0 +1,18 @@
+[package]
+name = "fyx_demo_todo"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_demo_todo.rs"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+ui_ext_sdk.workspace = true

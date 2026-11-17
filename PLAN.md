@@ -2,10 +2,11 @@
 
 Goal: a narrow vertical slice. One WIT world, 5–7 primitives, a dock panel showing 1–2 demo
 extensions, the loop "click → WASM callback → new patch → repaint", a rebranded cloud-free build, and
-basic hunk-level approval of edits from an ACP agent. Behind a feature flag, verified on macOS only.
+basic hunk-level approval of edits from an ACP agent. Behind a feature flag, verified on one OS: the
+dev machine is Windows 11 since 2026-11-17 (Phase 0 was done on macOS).
 
 Out of scope: permission prompts, ABI stability, frame budgets, sidecar transport, a second SDK
-language, Windows/Linux builds, notarization, marketplace.
+language, builds for a second OS, notarization, marketplace.
 
 ## Status
 
@@ -24,8 +25,9 @@ language, Windows/Linux builds, notarization, marketplace.
 - `Cargo.toml` (workspace), `Cargo.lock` and `crates/ui_ext/wit/` belong to the integrator (W0).
   Need a dependency or a WIT change? Ask W0.
 - Iterate with `cargo check -p <crate>`. Only W0 builds the `zed` binary.
-- Own worktree, own `CARGO_TARGET_DIR`. Seed it from the warm `target/` with `cp -c` (APFS clone),
-  never start cold.
+- Own worktree, own `CARGO_TARGET_DIR`. Seed it from the warm `target/`, never start cold: `cp -c`
+  (APFS clone) on macOS; on Windows `robocopy target D:\fyx-targets\<stream> /E /MT:16` (a full
+  copy, NTFS has no clones).
 - Keep `tasks/progress/<stream>.md` current; log failures on one line starting with `ERROR`.
 - Reference implementations: `ProjectPanel` and `AgentPanel` show how to implement `Panel`.
 - Green tests are not done. Done is the behaviour seen in the running editor.
@@ -47,7 +49,9 @@ language, Windows/Linux builds, notarization, marketplace.
 Scale the non-compiling streams (W7, W8, demo authors, `ui_ext` unit tests) to use spare capacity;
 compiling streams (W3, W5, W6) are capped by disk and CPU.
 
-Disk budget: the warm `target/` is 24 GB and the machine had 35 GB free after it. APFS clones share
+Disk budget (Windows dev machine, Ryzen 5 7500F 6c/12t, 32 GB RAM): warm `target/` 27 GB, 640+ GB
+free on D:, so CPU is the limit: run 2 compiling streams at once, 3 at most. Earlier, on macOS: the
+warm `target/` was 24 GB and the machine had 35 GB free after it. APFS clones share
 blocks until rebuilt, but each compiling worktree still grows by several GB, so free disk before
 running more than 2–3 compiling streams at once.
 

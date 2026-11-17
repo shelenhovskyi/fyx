@@ -9,4 +9,6 @@ to code style. Fyx-specific rules:
 - `Cargo.toml`, `Cargo.lock` and `crates/ui_ext/wit/` are integrator-only.
 - Iterate with `cargo check -p <crate>`; gate merges with `script/gate.sh`.
 - Do not open this repository in a dev build of Fyx/Zed: it triggers rebuilds of the root crates.
-- Rust lives at `/opt/homebrew/opt/rustup/bin` (keg-only Homebrew rustup); prepend it to `PATH`.
+- Rust comes from rustup; `rust-toolchain.toml` pins the version and targets. If `cargo` is not on
+  `PATH`, add rustup's bin dir (`~/.cargo/bin`; on macOS with keg-only Homebrew rustup,
+  `/opt/homebrew/opt/rustup/bin`). `sccache` must be on `PATH` too (`.cargo/config.toml` uses it).
