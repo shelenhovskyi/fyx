@@ -21,6 +21,7 @@ branch are listed under [Coming](#coming).
 
 - [platform/spec.md](platform/spec.md): Platform 1 spec, a home for third-party UI extensions (install, permissions, registry), with numbered decisions.
 - [platform/plan.md](platform/plan.md): Platform 1 work plan: the tasks for each phase, with owners and their "done when" checks.
+- [platform/registry-repo.md](platform/registry-repo.md): design of the future `shelenhovskyi/fyx-extensions` repository: layout, entry format, review rules, CI, keys and the block-list process (plan 3.1, 3.2).
 - [wit-0.2/design.md](wit-0.2/design.md): `fyx:ui@0.2.0` design and the decisions of 2026-11-17.
 - [wit-0.2/fyx-ui-0.2.wit](wit-0.2/fyx-ui-0.2.wit): the decided 0.2 WIT world, before it moves to `crates/ui_ext/wit/since_v0.2.0/`.
 - [wit-0.2/migration.md](wit-0.2/migration.md): 0.1 → 0.2 coexistence, version gating, SDK and test plan.
