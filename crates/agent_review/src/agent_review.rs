@@ -7,6 +7,9 @@
 
 mod proposed_edit;
 mod review_pane;
+// dev-only: never compiled into release builds unless the `review-script` feature asks for it, because a
+// script can approve agent edits the user never saw.
+#[cfg(any(debug_assertions, feature = "review-script"))]
 mod script_driver;
 
 use std::{ops::Range, rc::Rc};
@@ -24,6 +27,7 @@ use gpui::{
 };
 use language::BufferEditSource;
 use project::Project;
+use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
@@ -55,8 +59,12 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     review_pane::init(cx);
+    #[cfg(any(debug_assertions, feature = "review-script"))]
     script_driver::init(cx); // dev-only, off unless FYX_AGENT_REVIEW_SCRIPT is set
 }
+
+/// Whether this build contains the dev-only review script driver.
+pub const SCRIPT_DRIVER_COMPILED: bool = cfg!(any(debug_assertions, feature = "review-script"));
 
 struct GlobalAgentReview(Entity<AgentReview>);
 
@@ -501,12 +509,14 @@ fn permission_preview(
                 match thread_parts {
                     Ok((project, action_log)) => {
                         if let Err(error) =
-                            write_accepted_hunks(project, action_log, &edit, cx).await
+                            write_accepted_hunks(project.clone(), action_log, &edit, cx).await
                         {
-                            log::error!(
-                                "could not write the accepted hunks of {}: {error:#}",
+                            let message = format!(
+                                "Agent review: the accepted hunks of {} could not be written:                                  {error:#}. The agent's edit was rejected.",
                                 edit.abs_path().display()
                             );
+                            log::error!("{message}");
+                            cx.update(|cx| report_host_write_failure(&project, message, cx));
                         }
                     }
                     Err(error) => {
@@ -523,6 +533,32 @@ fn permission_preview(
         .detach();
     });
     Some((edit, respond))
+}
+
+struct HostWriteFailed;
+
+/// Shows a failed host write in the workspaces of `project`. ACP has no way to attach a message to a
+/// permission answer, so the user is the one who has to learn that approved hunks did not land.
+fn report_host_write_failure(project: &Entity<Project>, message: String, cx: &mut App) {
+    for window in cx.windows() {
+        let Some(multi_workspace) = window.downcast::<MultiWorkspace>() else {
+            continue;
+        };
+        let result = multi_workspace.update(cx, |multi_workspace, _, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            if workspace.read(cx).project() == project {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        Toast::new(NotificationId::unique::<HostWriteFailed>(), message.clone()),
+                        cx,
+                    )
+                });
+            }
+        });
+        if let Err(error) = result {
+            log::debug!("could not show the review failure: {error}");
+        }
+    }
 }
 
 /// Writes a preview's accepted hunks into the file, through the action log like an agent write, so
@@ -858,6 +894,45 @@ mod tests {
         assert!(locate_fragment("a\nb\nb\n", "b\n").is_err());
         assert!(locate_fragment("a\n", "z").is_err());
         assert!(locate_fragment("a\n", "").is_err());
+    }
+
+    #[test]
+    fn script_driver_is_only_in_dev_builds() {
+        // Release builds compile the driver only when the `review-script` feature asks for it.
+        assert_eq!(
+            SCRIPT_DRIVER_COMPILED,
+            cfg!(debug_assertions) || cfg!(feature = "review-script")
+        );
+        #[cfg(not(any(debug_assertions, feature = "review-script")))]
+        assert!(!SCRIPT_DRIVER_COMPILED);
+    }
+
+    #[gpui::test]
+    async fn failed_host_write_is_shown_in_the_workspace(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": "x
+" }),
+        )
+        .await;
+        let project = Project::test(fs, [util::path!("/p").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+
+        // Outside any window update, as the permission responder runs.
+        cx.cx
+            .update(|cx| report_host_write_failure(&project, "could not be written".into(), cx));
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.has_notification(&NotificationId::unique::<HostWriteFailed>())
+        }));
     }
 
     #[gpui::test]

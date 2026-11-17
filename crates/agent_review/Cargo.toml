@@ -13,6 +13,10 @@ workspace = true
 path = "src/agent_review.rs"
 doctest = false
 
+[features]
+# dev-only: compiles the review script driver (`FYX_AGENT_REVIEW_SCRIPT`) into release builds.
+review-script = []
+
 [dependencies]
 acp_thread.workspace = true
 action_log.workspace = true

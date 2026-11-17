@@ -306,12 +306,12 @@ impl ReviewPane {
         self.review_id
     }
 
-    pub(crate) fn diff_focus_handle(&self, cx: &App) -> FocusHandle {
+    pub fn diff_focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.focus_handle(cx)
     }
 
     /// Makes `hunk` the target of the hunk actions, as moving the cursor into it would.
-    pub(crate) fn select_hunk(
+    pub fn select_hunk(
         &mut self,
         hunk: usize,
         cx: &mut Context<Self>,
@@ -324,7 +324,7 @@ impl ReviewPane {
     }
 
     /// Types `text` into the comment field of `hunk`.
-    pub(crate) fn set_comment_text(
+    pub fn set_comment_text(
         &mut self,
         hunk: usize,
         text: String,
@@ -337,7 +337,7 @@ impl ReviewPane {
         Ok(())
     }
 
-    pub(crate) fn edit<'a>(&self, cx: &'a App) -> Option<&'a ProposedEdit> {
+    pub fn edit<'a>(&self, cx: &'a App) -> Option<&'a ProposedEdit> {
         Some(self.review.read(cx).review(self.review_id)?.edit())
     }
 
