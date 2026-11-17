@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use fyx_ext::build::{BuildOptions, DevOptions};
 use fyx_ext::template::{GitReference, NewExtension, SdkSource};
@@ -15,23 +15,16 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Language {
-    Rust,
-    Ts,
-}
-
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new extension crate.
+    /// Create a new Rust extension crate. Fyx extensions are Rust only until 1.0 (platform spec,
+    /// decision 3).
     New {
         /// Crate name, such as my_panel or my-panel. The extension id uses `-`.
         name: String,
         /// Parent directory of the new crate.
         #[arg(long, default_value = ".")]
         out: PathBuf,
-        #[arg(long, value_enum, default_value = "rust")]
-        lang: Language,
         /// Depend on the SDK in this Fyx checkout (default: the checkout fyx-ext was built from).
         #[arg(long, conflicts_with = "sdk_git")]
         sdk_path: Option<PathBuf>,
@@ -109,17 +102,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::New {
             name,
             out,
-            lang,
             sdk_path,
             sdk_git,
             sdk_branch,
             sdk_rev,
         } => {
-            if let Language::Ts = lang {
-                anyhow::bail!(
-                    "TypeScript extensions arrive with the TypeScript SDK (platform plan 2.5); use --lang rust"
-                );
-            }
             let sdk = match sdk_git {
                 Some(url) => SdkSource::Git {
                     url,
