@@ -54,8 +54,8 @@ pub(crate) fn init(cx: &mut App) {
             return;
         }
     };
-    log::info!(
-        "fyx: review script: {} steps from {}",
+    log::warn!(
+        "fyx: review script driver active ({SCRIPT_VAR}): {} steps from {} will decide agent reviews",
         steps.len(),
         path.display()
     );
