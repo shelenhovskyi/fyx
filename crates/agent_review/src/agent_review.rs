@@ -12,10 +12,16 @@ mod review_pane;
 #[cfg(any(debug_assertions, feature = "review-script"))]
 mod script_driver;
 
-use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use acp_thread::{
-    AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ToolCallContent,
+    AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ThreadStatus,
+    ToolCallContent,
     fyx_review::{AgentWrite, AgentWriteGate, AgentWriteOutcome, set_agent_write_gate},
 };
 use action_log::ActionLog;
@@ -28,7 +34,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity,
 };
 use language::BufferEditSource;
-use project::Project;
+use project::{PathChange, Project};
 use settings::{RegisterSetting, Settings, SettingsStore};
 use ui::{ContextMenu, IconPosition};
 use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
@@ -114,8 +120,10 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
-    cx.observe_new(|_: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
+    cx.observe_new(|thread: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
+        let project = thread.project().clone();
+        cx.subscribe(&project, on_project_event).detach();
         cx.on_release(|thread, cx| {
             if let Some(review) = AgentReview::global(cx) {
                 let session_id = thread.session_id().clone();
@@ -176,6 +184,9 @@ pub enum AgentReviewEvent {
     Closed(ReviewId),
     /// The agent's turn stopped; no more edits will join it.
     TurnEnded(TurnId),
+    /// Files changed on disk during the turn without going through review (see
+    /// [`AgentReview::unreviewed_changes`]).
+    UnreviewedChanges(TurnId),
 }
 
 type PermissionResponder = Box<dyn FnOnce(PermissionVerdict, ProposedEdit, &mut App)>;
@@ -232,7 +243,14 @@ pub struct AgentReview {
     /// "Accept all in turn" / "reject all in turn": also decides edits that arrive later in the turn.
     turn_decisions: HashMap<TurnId, HunkDecision>,
     turn_history: HashMap<TurnId, Vec<TurnEntry>>,
+    /// Files that changed on disk during a turn but never went through its review.
+    turn_unreviewed: HashMap<TurnId, BTreeSet<PathBuf>>,
+    /// Ended turns whose summaries are kept for open panes, oldest first.
+    ended_turns: VecDeque<TurnId>,
 }
+
+/// How many ended turns keep their summary (decided files, unreviewed changes).
+const ENDED_TURNS_KEPT: usize = 16;
 
 impl EventEmitter<AgentReviewEvent> for AgentReview {}
 
@@ -286,12 +304,67 @@ impl AgentReview {
         })
     }
 
-    /// Ends the session's turn: later edits start a new one.
+    /// Starts the session's turn if none is running (the agent began generating).
+    pub fn begin_turn(&mut self, session_id: &acp_v2::SessionId) -> TurnId {
+        self.turn_for(session_id)
+    }
+
+    /// Ends the session's turn: later edits start a new one. The turn's summary stays for its pane.
     pub fn end_turn(&mut self, session_id: &acp_v2::SessionId, cx: &mut Context<Self>) {
         if let Some(turn) = self.turns.remove(session_id) {
             self.turn_decisions.remove(&turn);
-            self.turn_history.remove(&turn);
+            self.ended_turns.push_back(turn);
+            while self.ended_turns.len() > ENDED_TURNS_KEPT {
+                if let Some(old) = self.ended_turns.pop_front() {
+                    self.turn_history.remove(&old);
+                    self.turn_unreviewed.remove(&old);
+                }
+            }
             cx.emit(AgentReviewEvent::TurnEnded(turn));
+            cx.notify();
+        }
+    }
+
+    /// Files that changed on disk during `turn` without going through its review: the agent wrote
+    /// them another way (a shell command, its own file tools). Observed only; nothing is blocked.
+    pub fn unreviewed_changes(&self, turn: TurnId) -> impl Iterator<Item = &PathBuf> {
+        self.turn_unreviewed.get(&turn).into_iter().flatten()
+    }
+
+    /// Records files that changed on disk while the session's turn runs. Files the turn reviewed are
+    /// skipped: their writes are the reviewed ones.
+    pub fn note_changed_paths(
+        &mut self,
+        session_id: &acp_v2::SessionId,
+        paths: impl IntoIterator<Item = PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(turn) = self.turns.get(session_id).copied() else {
+            return;
+        };
+        let reviewed = self
+            .turn_history(turn)
+            .iter()
+            .map(|entry| entry.path.clone())
+            .chain(
+                self.reviews
+                    .iter()
+                    .filter(|review| review.turn == turn)
+                    .map(|review| review.edit.abs_path().to_path_buf()),
+            )
+            .collect::<HashSet<_>>();
+        let unreviewed = self.turn_unreviewed.entry(turn).or_default();
+        let mut added = false;
+        for path in paths {
+            if !reviewed.contains(&path) {
+                added |= unreviewed.insert(path);
+            }
+        }
+        if added {
+            cx.emit(AgentReviewEvent::UnreviewedChanges(turn));
             cx.notify();
         }
     }
@@ -639,12 +712,68 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
         AcpThreadEvent::ToolAuthorizationReceived(request_id) => {
             review.update(cx, |review, cx| review.permission_answered(*request_id, cx));
         }
+        AcpThreadEvent::StatusChanged if thread.status() == ThreadStatus::Generating => {
+            if review.read(cx).is_enabled() {
+                let session_id = thread.session_id().clone();
+                review.update(cx, |review, _| {
+                    review.begin_turn(&session_id);
+                });
+            }
+        }
         AcpThreadEvent::Stopped { .. } | AcpThreadEvent::Error => {
             let session_id = thread.session_id().clone();
             review.update(cx, |review, cx| review.end_turn(&session_id, cx));
         }
         _ => {}
     }
+}
+
+/// Files that changed on disk in the thread's project, for the turn's unreviewed changes.
+fn on_project_event(
+    thread: &mut AcpThread,
+    project: Entity<Project>,
+    event: &project::Event,
+    cx: &mut Context<AcpThread>,
+) {
+    let project::Event::WorktreeUpdatedEntries(worktree_id, changes) = event else {
+        return;
+    };
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    if !review.read(cx).is_enabled() {
+        return;
+    }
+    let Some(worktree) = project.read(cx).worktree_for_id(*worktree_id, cx) else {
+        return;
+    };
+    let worktree = worktree.read(cx);
+    let paths = changes
+        .iter()
+        .filter(|(_, _, change)| {
+            matches!(
+                change,
+                PathChange::Added
+                    | PathChange::Updated
+                    | PathChange::AddedOrUpdated
+                    | PathChange::Removed
+            )
+        })
+        .filter(|(_, entry_id, _)| {
+            !worktree
+                .entry_for_id(*entry_id)
+                .is_some_and(|entry| entry.is_dir())
+        })
+        .filter(|(path, _, _)| !path.components().any(|component| component == ".git"))
+        .map(|(path, _, _)| worktree.absolutize(path))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return;
+    }
+    let session_id = thread.session_id().clone();
+    review.update(cx, |review, cx| {
+        review.note_changed_paths(&session_id, paths, cx)
+    });
 }
 
 /// The diff of a pending edit permission and the host's way to answer it. Only legacy (v1) diffs carry
@@ -1134,6 +1263,129 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(next.await.unwrap().content, None);
+    }
+
+    #[gpui::test]
+    async fn unreviewed_changes_are_recorded_per_turn(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        let path = |name: &str| PathBuf::from(format!("/p/{name}"));
+        review.update(cx, |review, cx| {
+            review.note_changed_paths(&session(), [path("x.txt")], cx);
+            assert!(review.turns.is_empty(), "review mode off: nothing tracked");
+            review.set_enabled(true, cx);
+            review.note_changed_paths(&session(), [path("x.txt")], cx);
+            assert!(review.turns.is_empty(), "no running turn: nothing tracked");
+        });
+
+        // a.txt goes through review, x.txt changes on disk directly.
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let turn = review.read_with(cx, |review, _| review.reviews()[0].turn());
+        review.update(cx, |review, cx| {
+            review.note_changed_paths(&session(), [path("a.txt"), path("x.txt")], cx);
+            review.note_changed_paths(&session(), [path("x.txt")], cx);
+        });
+        review.read_with(cx, |review, _| {
+            assert_eq!(
+                review.unreviewed_changes(turn).collect::<Vec<_>>(),
+                [&path("x.txt")]
+            );
+        });
+        let unreviewed_events = events
+            .borrow()
+            .iter()
+            .filter(|event| **event == AgentReviewEvent::UnreviewedChanges(turn))
+            .count();
+        assert_eq!(unreviewed_events, 1, "one event per new file");
+
+        // The summary outlives the turn for its pane.
+        let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            review.submit(id, cx).unwrap();
+            review.end_turn(&session(), cx);
+            assert_eq!(review.unreviewed_changes(turn).count(), 1);
+            assert_eq!(review.turn_history(turn).len(), 1);
+        });
+        held.await.unwrap();
+    }
+
+    #[gpui::test]
+    async fn files_written_around_review_are_noticed(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": "a\n", "sub": { "b.txt": "b\n" } }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        cx.run_until_parked();
+
+        // Nothing is tracked outside a turn.
+        fs.save(
+            Path::new(util::path!("/p/a.txt")),
+            &"changed before the turn\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        let turn = review.update(cx, |review, _| review.begin_turn(&session_id));
+        assert_eq!(
+            review.read_with(cx, |review, _| review.unreviewed_changes(turn).count()),
+            0
+        );
+
+        // The agent's shell rewrites a file during its turn.
+        fs.save(
+            Path::new(util::path!("/p/sub/b.txt")),
+            &"rewritten by sed\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        review.read_with(cx, |review, _| {
+            assert_eq!(
+                review.unreviewed_changes(turn).cloned().collect::<Vec<_>>(),
+                [PathBuf::from(util::path!("/p/sub/b.txt"))]
+            );
+        });
+        let pane_turns = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<ReviewPane>(cx)
+                .map(|pane| pane.read(cx).turn())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            pane_turns,
+            [turn],
+            "the turn's pane opens to show the change"
+        );
+        drop(thread);
     }
 
     #[gpui::test]
