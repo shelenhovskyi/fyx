@@ -6,6 +6,7 @@
 //! edit lands.
 
 mod proposed_edit;
+mod review_pane;
 
 use std::{ops::Range, rc::Rc};
 
@@ -24,9 +25,21 @@ use language::BufferEditSource;
 use project::Project;
 
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
+pub use review_pane::{
+    AcceptAllHunks, AcceptHunk, CommentHunk, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks,
+    RejectHunk, ReviewPane, SubmitReview, ToggleReviewMode,
+};
+
+/// Review mode starts on when this variable is set to anything but `0`; `agent_review: toggle review
+/// mode` switches it at runtime.
+const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
 
 pub fn init(cx: &mut App) {
-    let review = cx.new(|_| AgentReview::default());
+    let enabled = std::env::var_os(REVIEW_MODE_VAR).is_some_and(|value| value != "0");
+    let review = cx.new(|_| AgentReview {
+        enabled,
+        ..AgentReview::default()
+    });
     cx.set_global(GlobalAgentReview(review.clone()));
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
     cx.observe_new(|_: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
@@ -40,6 +53,7 @@ pub fn init(cx: &mut App) {
         .detach();
     })
     .detach();
+    review_pane::init(cx);
 }
 
 struct GlobalAgentReview(Entity<AgentReview>);

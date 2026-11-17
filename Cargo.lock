@@ -379,6 +379,8 @@ dependencies = [
  "action_log",
  "agent-client-protocol",
  "anyhow",
+ "buffer_diff",
+ "editor",
  "futures 0.3.34",
  "gpui",
  "language",
@@ -386,8 +388,12 @@ dependencies = [
  "project",
  "serde_json",
  "settings",
+ "theme",
+ "theme_settings",
+ "ui",
  "util",
  "uuid",
+ "workspace",
 ]
 
 [[package]]
@@ -480,6 +486,7 @@ dependencies = [
  "action_log",
  "agent",
  "agent-client-protocol",
+ "agent_review",
  "agent_servers",
  "agent_settings",
  "agent_skills",

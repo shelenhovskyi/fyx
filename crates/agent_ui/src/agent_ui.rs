@@ -684,6 +684,7 @@ pub fn init(
 ) {
     agent::ThreadStore::init_global(cx);
     prompt_store::init(cx);
+    agent_review::init(cx); // fyx: host review of agent edits
 
     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {
         let workspaces: Vec<_> = workspace::AppState::global(cx)

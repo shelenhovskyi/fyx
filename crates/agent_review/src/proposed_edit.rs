@@ -105,6 +105,18 @@ impl ProposedEdit {
         &self.hunks
     }
 
+    /// The hunk shown at `row` of the new text. A pure deletion is shown at the row that follows it.
+    pub fn hunk_at_new_row(&self, row: u32) -> Option<usize> {
+        self.hunks
+            .iter()
+            .position(|hunk| hunk.new_rows.contains(&row))
+            .or_else(|| {
+                self.hunks
+                    .iter()
+                    .position(|hunk| hunk.new_rows.is_empty() && hunk.new_rows.start == row)
+            })
+    }
+
     pub fn set_decision(&mut self, hunk_index: usize, decision: HunkDecision) -> Result<()> {
         self.hunk_mut(hunk_index)?.decision = decision;
         Ok(())
@@ -335,6 +347,24 @@ mod tests {
         assert_eq!(hunks[1].new_text, "    five();\n");
         assert_eq!(edit.resolution(), Resolution::Pending { undecided: 2 });
         assert!(edit.apply_accepted().is_err());
+        assert_eq!(edit.hunk_at_new_row(1), Some(0));
+        assert_eq!(edit.hunk_at_new_row(5), Some(1));
+        assert_eq!(edit.hunk_at_new_row(2), None);
+
+        let deletion = super::ProposedEdit::new(
+            PathBuf::from("/a"),
+            "a
+b
+c
+"
+            .into(),
+            "a
+c
+"
+            .into(),
+        );
+        assert_eq!(deletion.hunks()[0].new_rows, 1..1);
+        assert_eq!(deletion.hunk_at_new_row(1), Some(0));
     }
 
     #[test]
