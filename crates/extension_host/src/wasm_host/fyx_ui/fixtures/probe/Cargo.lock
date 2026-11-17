@@ -178,7 +178,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fyx_ui_test_counter"
+name = "fyx_ui_test_probe"
 version = "0.1.0"
 dependencies = [
  "ui_ext_sdk",
