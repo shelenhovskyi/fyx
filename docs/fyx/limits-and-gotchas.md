@@ -35,7 +35,9 @@ Contents:
   is also raced against a deadline of budget + 50 ms, and dropped when that passes.
 - **Over budget means disabled.** A call that is interrupted or dropped, traps, or panics (a Rust
   panic on `wasm32-wasip2` is a trap) disables the extension. Every later call fails at once with
-  `disabled after an earlier failure: <reason>`. Restart Fyx to load it again.
+  `disabled after an earlier failure: <reason>`. **Restart extension** on the stopped surface (or
+  `fyx_ui: restart UI extension`) loads it again on a fresh instance; a dev extension also
+  restarts by itself on its next build.
 - Calls of one extension are serialized on its own queue. A slow call delays that extension's
   next event, but never Fyx itself or other extensions.
 - Every 10 ms tick, a running call also yields to the executor.
@@ -83,7 +85,7 @@ Exceeding a host cap in an update is not fatal: the update is rejected as a whol
 | `handle-event` returns `Err` | Logged; the message shows in the panel footer (click to dismiss). The tree is unchanged. | stays enabled |
 | an update (reply or push) that does not apply to the retained tree | Logged; `Invalid update from the extension: …` in the footer; the surface is mounted again, at most one remount in flight at a time | stays enabled |
 | `list-rows` answer with an invalid row or an index outside `start..start+count` | The whole answer is rejected and the error shown. That list is not asked again until it changes. | stays enabled |
-| trap, panic, time budget, push cap | The call fails. | **disabled** until restart |
+| trap, panic, time budget, push cap | The call fails. | **stopped** until Restart extension (or, for a dev extension, its next build) |
 
 <!-- crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 404-443; crates/ui_ext_host/src/view.rs:289-346; crates/ui_ext_wasm/src/ui_ext_wasm.rs:579-592, 640-660, 663-689, 716-721 -->
 

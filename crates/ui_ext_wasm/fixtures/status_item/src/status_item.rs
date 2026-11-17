@@ -7,8 +7,10 @@
 //! | 2 | 1 | icon `bell` |
 //! | 3 | 1 | text `Pings: 0`, muted |
 //! | 4 | 1 | button `Ping`, subtle |
+//! | 5 | 1 | button `Crash`, subtle |
 //!
-//! `click(4)` answers with `set-props` on 3 reading `Pings: {n}`; other events are `unchanged`.
+//! `click(4)` answers with `set-props` on 3 reading `Pings: {n}`; `click(5)` panics, which traps
+//! the instance (for Restart extension); other events are `unchanged`.
 
 use ui_ext_sdk::*;
 
@@ -20,6 +22,7 @@ struct StatusItem {
     tree: SurfaceTree,
     label: NodeId,
     ping: NodeId,
+    crash: NodeId,
 }
 
 impl StatusItem {
@@ -47,17 +50,19 @@ impl Extension for StatusItem {
             return Err(format!("unknown surface {surface_id:?}"));
         }
         let mut tree = std::mem::take(&mut self.tree);
-        let (mut label, mut ping) = (0, 0);
+        let (mut label, mut ping, mut crash) = (0, 0, 0);
         let mounted = tree.mount(|tree| {
             tree.flex(FlexProps::row().gap(4), |tree| {
                 tree.icon(IconProps::new("bell"));
                 label = tree.text(self.label());
                 ping = tree.button(ButtonProps::new("Ping").style(ButtonStyle::Subtle));
+                crash = tree.button(ButtonProps::new("Crash").style(ButtonStyle::Subtle));
             });
         });
         self.tree = tree;
         self.label = label;
         self.ping = ping;
+        self.crash = crash;
         Ok(mounted?)
     }
 
@@ -72,6 +77,7 @@ impl Extension for StatusItem {
                 self.tree.set_props(self.label, label)?;
                 Ok(self.tree.take_update())
             }
+            UiEvent::Click(id) if id == self.crash => panic!("crashed on request"),
             _ => Ok(Update::Unchanged),
         }
     }

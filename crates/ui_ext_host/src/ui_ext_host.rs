@@ -53,7 +53,8 @@ pub use panel::{
 };
 pub use registry::{DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, UiExtensionRegistry};
 pub use store_actions::{
-    InstallUiExtensionFromFile, RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
+    InstallUiExtensionFromFile, RestartUiExtension, RollBackUiExtension, TogglePinUiExtension,
+    UninstallUiExtension,
 };
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};

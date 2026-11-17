@@ -194,6 +194,41 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// Loads an extension again on a fresh instance, from where it came from; its surfaces
+    /// remount on it (Restart extension, Retry after a failed reload).
+    pub fn restart_extension(&mut self, extension_id: &str, cx: &mut Context<Self>) {
+        log::info!("fyx:ui: restarting {extension_id}");
+        // Installed, store and `dev_paths` extensions: forget the fingerprint, so the scan
+        // loads it again even though nothing changed on disk.
+        if self.installed.remove(extension_id).is_some() {
+            self.rescan(cx);
+            return;
+        }
+        match self.sources.get(extension_id).cloned() {
+            Some(ExtensionSource::Directory(path) | ExtensionSource::File(path)) => {
+                let fs = match &self.last_scan {
+                    Some((_, fs)) => fs.clone(),
+                    None => <dyn Fs>::global(cx),
+                };
+                self.reload(Reload::DevPath(path), fs, cx)
+            }
+            Some(ExtensionSource::Store) | None => {
+                log::error!("fyx:ui: cannot restart {extension_id}: unknown source")
+            }
+        }
+    }
+
+    /// A reload of a loaded extension failed: its surfaces keep the old instance and show the
+    /// error with Retry.
+    fn reload_failed(&mut self, extension_id: &str, error: &anyhow::Error, cx: &mut Context<Self>) {
+        let message: SharedString = format!("Reload failed: {error:#}").into();
+        for surface in self.surfaces_of(extension_id) {
+            surface
+                .state
+                .update(cx, |state, cx| state.show_reload_error(message.clone(), cx));
+        }
+    }
+
     /// Scans again what the last scan did (after an install-store change).
     pub fn rescan(&mut self, cx: &mut Context<Self>) {
         if let Some((dir, fs)) = self.last_scan.clone() {
@@ -519,10 +554,16 @@ impl UiExtensionRegistry {
                             .ok();
                         }
                         Ok(None) => {}
-                        Err(error) => log::error!(
-                            "fyx:ui: failed to load installed extension {}: {error:#}",
-                            found.dir.display()
-                        ),
+                        Err(error) => {
+                            log::error!(
+                                "fyx:ui: failed to load installed extension {}: {error:#}",
+                                found.dir.display()
+                            );
+                            this.update(cx, |this, cx| {
+                                this.reload_failed(&found.extension_id, &error, cx)
+                            })
+                            .ok();
+                        }
                     }
                 }
                 let again = this.update(cx, |this, _| {
@@ -594,12 +635,26 @@ impl UiExtensionRegistry {
             // The scan compares the component's fingerprint and loads it again if it changed.
             Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
             Reload::DevPath(path) => {
-                cx.spawn(async move |_, cx| {
+                cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
                             "fyx:ui: failed to reload dev extension {}: {error:#}",
                             path.display()
                         );
+                        this.update(cx, |this, cx| {
+                            let extension_id = this.sources.iter().find_map(|(id, source)| {
+                                matches!(
+                                    source,
+                                    ExtensionSource::Directory(p) | ExtensionSource::File(p)
+                                        if *p == path
+                                )
+                                .then(|| id.clone())
+                            });
+                            if let Some(extension_id) = extension_id {
+                                this.reload_failed(&extension_id, &error, cx);
+                            }
+                        })
+                        .ok();
                     }
                 })
                 .detach();
@@ -821,6 +876,14 @@ impl SurfaceLink for RegistryLink {
         self.registry
             .update(cx, |registry, cx| {
                 registry.fail_extension(&self.extension_id, from_surface, message, cx)
+            })
+            .ok();
+    }
+
+    fn restart_extension(&self, cx: &mut App) {
+        self.registry
+            .update(cx, |registry, cx| {
+                registry.restart_extension(&self.extension_id, cx)
             })
             .ok();
     }

@@ -11,9 +11,9 @@ Related pages:
   and what is planned for 0.2.
 
 > **Status: sprint prototype.** `fyx:ui@0.1.0` is frozen for the sprint, but it is not a stable
-> API. The only way to load a UI extension is an environment variable read at startup. There is no
-> registry, no install UI and no hot reload. The SDK is not published to crates.io, and `diff-view`
-> is a placeholder. Expect breaking changes in 0.2. These docs describe what the code on the
+> API. UI extensions load from dev folders, `.fyxext` packages installed from disk and an
+> environment variable (see "Installing as a dev extension"); there is no registry yet. The SDK is
+> not published to crates.io, and `diff-view` is a placeholder. Expect breaking changes in 0.2. These docs describe what the code on the
 > `integration` branch does, limits included.
 
 Rule sources are cited in HTML comments as `file:line`, so you can check every claim against the
@@ -241,7 +241,12 @@ extension id.
 
 <!-- crates/ui_ext_host/src/registry.rs:316-325, 352-356; crates/ui_ext_wasm/src/ui_ext_wasm.rs:297 -->
 
-To pick up a new build, restart Fyx. Nothing reloads a running extension.
+A dev extension (from `fyx.extensions.dev_paths`, `FYX_UI_DEV_EXTENSIONS` or a link in the
+installed directory) reloads by itself when its component changes: once writes pause for 300 ms,
+the new build loads and every surface remounts in place (panels stay docked and open). If the new
+build does not load, the old instance keeps running and the surface's footer shows
+`Reload failed: …` with **Retry**. `fyx_ui: restart UI extension` loads any extension again on a
+fresh instance.
 
 Each panel gets a button in its dock. The action `fyx_ui::ToggleExtensionPanel { key }` focuses or
 unfocuses a panel by its key `"<extension id>/<surface id>"`, so you can bind it to a key. If two
@@ -310,10 +315,11 @@ work on your side.
 
 <!-- crates/ui_ext/wit/fyx-ui.wit:9-21; crates/ui_ext_host/src/view.rs:763-794 -->
 
-**9. Slow or crashing extensions are disabled.** Each call has a 200 ms budget (2 s for
-instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps or panics disables the extension
-until Fyx restarts. Returning `Err(String)` is different: it is shown to the user and the extension
-keeps running.
+**9. Slow or crashing extensions are stopped.** Each call has a 200 ms budget (2 s for
+instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps
+or panics stops the extension: its surfaces show the reason and **Restart extension**, which loads
+it again on a fresh instance, and a dev extension restarts by itself on its next build. Returning
+`Err(String)` is different: it is shown to the user and the extension keeps running.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 693-734, 663-675 -->
 

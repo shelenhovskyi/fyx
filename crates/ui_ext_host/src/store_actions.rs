@@ -29,6 +29,8 @@ actions!(
         TogglePinUiExtension,
         /// Removes a UI extension from the install store.
         UninstallUiExtension,
+        /// Loads a UI extension again on a fresh instance, after a failure or to pick up changes.
+        RestartUiExtension,
     ]
 );
 
@@ -45,6 +47,44 @@ pub(crate) fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &UninstallUiExtension, window, cx| {
         run(workspace, window, cx, StoreCommand::Uninstall)
     });
+    workspace.register_action(|_, _: &RestartUiExtension, window, cx| prompt_restart(window, cx));
+}
+
+/// Picks a loaded extension and restarts it.
+fn prompt_restart(window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return;
+    };
+    let mut ids: Vec<Arc<str>> = registry
+        .read(cx)
+        .surfaces()
+        .iter()
+        .map(|surface| surface.extension_id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids.truncate(MAX_PICKER_CHOICES);
+    if ids.is_empty() {
+        return;
+    }
+    let mut answers: Vec<&str> = ids.iter().map(|id| id.as_ref()).collect();
+    answers.push("Cancel");
+    let answer = window.prompt(
+        PromptLevel::Info,
+        "Restart which UI extension?",
+        Some("It loads again on a fresh instance and its panels and status items remount."),
+        &answers,
+        cx,
+    );
+    cx.spawn(async move |_, cx| {
+        let Ok(choice) = answer.await else {
+            return;
+        };
+        if let Some(id) = ids.get(choice) {
+            registry.update(cx, |registry, cx| registry.restart_extension(id, cx));
+        }
+    })
+    .detach();
 }
 
 fn store(cx: &gpui::App) -> Option<InstallStore> {

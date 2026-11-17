@@ -844,6 +844,107 @@ async fn test_dev_folder_ids_are_checked(cx: &mut TestAppContext) {
     }
 }
 
+/// Plan 1.3: Restart extension gives a stopped extension a fresh instance and its surface
+/// remounts; a rebuild that does not load keeps the old instance running and shows "Reload
+/// failed" with Retry; the next good build loads by itself and clears it.
+#[gpui::test]
+async fn test_restart_and_failed_reload(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let wasm = status_item_wasm();
+    let root = tempfile::tempdir().expect("temp dir");
+    let source = root.path().join("my-status-item");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::copy(status_item_manifest(), source.join("extension.toml")).expect("manifest");
+    std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    registry.update(cx, |registry, cx| {
+        registry.set_dev_paths(vec![source.clone()], cx);
+        registry.scan_installed(root.path().join("installed"), fs.clone(), cx)
+    });
+    const ID: &str = "fyx-test-status-item";
+    const LABEL: NodeId = 3;
+    const PING: NodeId = 4;
+    run_until(cx, "the dev extension", |cx| {
+        registry.read_with(cx, |registry, _| {
+            registry.surface_of(ID, "status").is_some()
+        })
+    });
+    let surface = registry.read_with(cx, |registry, _| {
+        registry.surface_of(ID, "status").unwrap().state.clone()
+    });
+    run_until(cx, "the mount", |cx| text_of(&surface, LABEL, cx).is_some());
+    let ping = |cx: &mut TestAppContext, expected: &str| {
+        surface.update(cx, |state, cx| state.dispatch(UiEvent::Click(PING), cx));
+        run_until(cx, expected, |cx| {
+            text_of(&surface, LABEL, cx).as_deref() == Some(expected)
+        });
+    };
+    ping(cx, "Pings: 1");
+
+    // A crash (a guest panic traps the instance) stops it for good, until a restart.
+    const CRASH: NodeId = 5;
+    surface.update(cx, |state, cx| state.dispatch(UiEvent::Click(CRASH), cx));
+    run_until(cx, "the crash", |cx| {
+        surface.read_with(cx, |state, _| {
+            matches!(
+                state.phase(),
+                crate::Phase::Failed {
+                    retryable: false,
+                    ..
+                }
+            ) && state.can_restart()
+        })
+    });
+    surface.update(cx, |state, cx| state.restart_extension(cx));
+    run_until(cx, "the restart", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0")
+    });
+
+    // Real time for the file watcher, test time for the debounce timer.
+    let settle = |cx: &mut TestAppContext| {
+        std::thread::sleep(Duration::from_millis(20));
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+    };
+
+    // A broken build: the old instance keeps running, the footer says why.
+    ping(cx, "Pings: 1");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(source.join("fyx_ui.wasm"), b"not a component").expect("broken build");
+    for _ in 0..250 {
+        settle(cx);
+        if surface.read_with(cx, |state, _| state.reload_failed()) {
+            break;
+        }
+    }
+    surface.read_with(cx, |state, _| {
+        assert!(state.reload_failed(), "no reload error shown");
+        assert!(
+            state
+                .last_error()
+                .is_some_and(|error| error.contains("Reload failed")),
+            "{:?}",
+            state.last_error()
+        );
+    });
+    ping(cx, "Pings: 2");
+
+    // The next good build loads by itself and clears the error.
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("fixed build");
+    for _ in 0..250 {
+        settle(cx);
+        if text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0") {
+            break;
+        }
+    }
+    assert_eq!(text_of(&surface, LABEL, cx).as_deref(), Some("Pings: 0"));
+    surface.read_with(cx, |state, _| assert!(!state.reload_failed()));
+}
+
 /// Hot reload (b): when the component of a dev extension (from `fyx.extensions.dev_paths`) is
 /// rebuilt, the extension loads again by itself, after the writes pause, and its surfaces remount;
 /// another file changing in the folder does nothing.

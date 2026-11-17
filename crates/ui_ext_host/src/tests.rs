@@ -69,6 +69,8 @@ struct FakeBackend {
     failed_from: RefCell<Vec<String>>,
     /// The input's id in the next mount, as an SDK remount hands out new ids.
     renumbered_input: Cell<Option<NodeId>>,
+    /// Restart requests that reached the link.
+    restarts: Cell<u32>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -83,6 +85,10 @@ impl crate::surface::SurfaceLink for FakeLink {
             .failed_from
             .borrow_mut()
             .push(from_surface.to_string());
+    }
+
+    fn restart_extension(&self, _: &mut App) {
+        self.0.restarts.set(self.0.restarts.get() + 1);
     }
 }
 
@@ -367,6 +373,47 @@ fn new_state(backend: &Rc<FakeBackend>, cx: &mut TestAppContext) -> Entity<Surfa
     let state = cx.new(|cx| SurfaceState::new(backend, surface, Some(link), cx));
     cx.run_until_parked();
     state
+}
+
+/// Plan 1.3: a dead instance is no longer final: the failed surface can ask the registry for a
+/// restart (the "Restart extension" button), and a failed reload is a footer error with Retry,
+/// cleared when the surface mounts again.
+#[gpui::test]
+async fn test_dead_instance_can_restart(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    state.update(cx, |state, cx| state.dispatch(UiEvent::Click(FATAL), cx));
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert!(matches!(
+            state.phase(),
+            crate::Phase::Failed {
+                retryable: false,
+                ..
+            }
+        ));
+        assert!(state.can_restart());
+    });
+    state.update(cx, |state, cx| state.restart_extension(cx));
+    cx.run_until_parked();
+    assert_eq!(backend.restarts.get(), 1);
+
+    state.update(cx, |state, cx| state.retry(cx));
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        state.show_reload_error("Reload failed: broken".into(), cx)
+    });
+    state.read_with(cx, |state, _| {
+        assert!(state.reload_failed());
+        assert!(state.tree().is_some(), "the old instance keeps the surface");
+    });
+    state.update(cx, |state, cx| state.retry(cx));
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert!(!state.reload_failed());
+        assert_eq!(state.last_error(), None);
+    });
 }
 
 fn props_of(state: &Entity<SurfaceState>, id: NodeId, cx: &mut TestAppContext) -> Props {
