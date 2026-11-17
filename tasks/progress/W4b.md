@@ -112,7 +112,7 @@ switching (above). There is never a `replace`.
 | Event | Result |
 |---|---|
 | `click(<Buttons section button>)` | `set-props` on `Last clicked` (89): `Last clicked: <name>`. Names are the labels; the icon-only one is `Icon only (settings)`. A click on a **disabled** button reads `Last clicked: <name> (disabled: the host should not have sent this)`, so a host bug shows on screen. Repeating the same click returns `unchanged`. |
-| `input-changed(<input>, v)` | `unchanged`. The value is recorded with `set_props_from_host` (no echo), so it survives leaving and re-showing the section. |
+| `input-changed(<input>, v)` | `unchanged`. The value is recorded with `SurfaceTree::apply_event`, as the host records it (no echo), so it survives leaving and re-showing the section. |
 | `input-submitted(<input>, v)` | one `set-props` on `Submitted` (73): `Submitted: v`, or `Submitted: (empty)` for `""`. The input itself is **not** patched: its text stays the user's. |
 | `row-click(<list>, i)`, `i < 1000` | one `set-props` on `Selected` (72): `Selected: Row {i + 1}`, plus a **push** to `gallery-status` (below). The same row again returns `unchanged` and pushes nothing. |
 | `row-click(<list>, i ≥ 1000)` | `unchanged` |

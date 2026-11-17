@@ -732,6 +732,7 @@ impl Gallery {
     }
 
     fn handle_gallery_event(&mut self, event: UiEvent) -> Result<Update, String> {
+        self.gallery.apply_event(&event);
         let Some(nodes) = &self.gallery_nodes else {
             return Err(TreeError::NotMounted.into());
         };
@@ -756,16 +757,12 @@ impl Gallery {
             (UiEvent::InputChanged((id, value)), &SectionNodes::Input { input, .. })
                 if id == input =>
             {
-                Action::Typed { input, value }
+                Action::Typed { value }
             }
             (UiEvent::InputSubmitted((id, value)), &SectionNodes::Input { input, submitted })
                 if id == input =>
             {
-                Action::Submitted {
-                    input,
-                    submitted,
-                    value,
-                }
+                Action::Submitted { submitted, value }
             }
             (UiEvent::RowClick((list_node, index)), &SectionNodes::List { list, selected })
                 if list_node == list && index < LIST_ROW_COUNT =>
@@ -793,19 +790,10 @@ impl Gallery {
                 self.gallery
                     .set_props(last_clicked, self.state.last_clicked_label())?;
             }
-            Action::Typed { input, value } => {
-                self.state.input_value = value;
-                self.gallery
-                    .set_props_from_host(input, self.state.input())?;
-            }
-            Action::Submitted {
-                input,
-                submitted,
-                value,
-            } => {
+            // `apply_event` already put the typed value into the mirror, as the host did.
+            Action::Typed { value } => self.state.input_value = value,
+            Action::Submitted { submitted, value } => {
                 self.state.input_value = value.clone();
-                self.gallery
-                    .set_props_from_host(input, self.state.input())?;
                 self.state.submitted = Some(value);
                 self.gallery
                     .set_props(submitted, self.state.submitted_label())?;
@@ -825,11 +813,9 @@ enum Action {
         last_clicked: NodeId,
     },
     Typed {
-        input: NodeId,
         value: String,
     },
     Submitted {
-        input: NodeId,
         submitted: NodeId,
         value: String,
     },
