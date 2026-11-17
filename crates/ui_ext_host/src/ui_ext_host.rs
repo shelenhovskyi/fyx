@@ -53,8 +53,8 @@ pub use panel::{
 };
 pub use registry::{DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, UiExtensionRegistry};
 pub use store_actions::{
-    InstallUiExtensionFromFile, RestartUiExtension, RollBackUiExtension, TogglePinUiExtension,
-    UninstallUiExtension,
+    InstallUiExtensionFromFile, RestartUiExtension, RevokeUiExtensionPermission,
+    RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
 };
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};
@@ -72,15 +72,34 @@ pub struct ToggleExtensionPanel {
 /// that is not a loaded UI extension.
 pub fn capability_chips(extension_id: &str, cx: &App) -> Option<gpui::AnyElement> {
     use gpui::{IntoElement as _, ParentElement as _, Styled as _};
+    use ui_ext_wasm::permissions::Tier;
     let registry = UiExtensionRegistry::global(cx)?;
-    let capabilities = registry.read(cx).capabilities(extension_id, cx);
-    if capabilities.is_empty() {
+    let registry = registry.read(cx);
+    // What the manifest declared, with the tier; extensions loaded without one (a bare component)
+    // show what their surfaces use.
+    let mut labels: Vec<String> = registry
+        .declared_capabilities(extension_id)
+        .into_iter()
+        .map(|(capability, tier, granted)| match tier {
+            Tier::T0 => format!("{capability} · T0"),
+            _ if granted => format!("{capability} · {tier} granted"),
+            _ => format!("{capability} · {tier} not granted"),
+        })
+        .collect();
+    if labels.is_empty() {
+        labels = registry
+            .capabilities(extension_id, cx)
+            .into_iter()
+            .map(|capability| format!("{capability} · T0"))
+            .collect();
+    }
+    if labels.is_empty() {
         return None;
     }
     Some(
         ui::h_flex()
             .gap_1()
-            .children(capabilities.into_iter().map(ui::Chip::new))
+            .children(labels.into_iter().map(ui::Chip::new))
             .into_any_element(),
     )
 }

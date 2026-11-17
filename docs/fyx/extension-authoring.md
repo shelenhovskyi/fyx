@@ -196,6 +196,22 @@ package"), from Zed's installed-extensions directory, and from the environment v
   next start.
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
 
+### Capabilities and permissions
+
+Every capability in `[fyx_ui].capabilities` has a tier:
+
+| Tier | Capabilities | Granted |
+|---|---|---|
+| T0 | `ui:panel`, `ui:status-bar` (and the 0.2+ UI ones: `ui:modal`, `ui:notifications`, …) | no prompt; listed in the install dialog and on the extension's chips |
+| T1 | `workspace:read-buffers`, `workspace:read-files`, `workspace:diagnostics` | once, in the install dialog; `fyx_ui: revoke UI extension permission` takes it back |
+| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | not available yet: a manifest that asks for one is refused |
+
+An unknown capability is refused at load, with its name in the error. An update that adds only
+T0 capabilities (or only changes the component) loads silently; one that adds a T1 capability is
+held: the old version keeps running and Fyx asks you to **Approve** it. A revoked T1 capability is
+denied from the extension's next call and asked for again on its next load. `fyx:ui@0.1.0` has no
+T1 host imports yet, so today T1 only matters for what the dialogs show and hold.
+
 ### Installing a package
 
 A `.fyxext` package is a zip of `extension.toml` (with `id`, a semver `version` and the

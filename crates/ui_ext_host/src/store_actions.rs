@@ -31,6 +31,8 @@ actions!(
         UninstallUiExtension,
         /// Loads a UI extension again on a fresh instance, after a failure or to pick up changes.
         RestartUiExtension,
+        /// Takes back a permission (T1) granted to a UI extension.
+        RevokeUiExtensionPermission,
     ]
 );
 
@@ -48,6 +50,63 @@ pub(crate) fn register(workspace: &mut Workspace) {
         run(workspace, window, cx, StoreCommand::Uninstall)
     });
     workspace.register_action(|_, _: &RestartUiExtension, window, cx| prompt_restart(window, cx));
+    workspace.register_action(|workspace, _: &RevokeUiExtensionPermission, window, cx| {
+        prompt_revoke(workspace, window, cx)
+    });
+}
+
+/// Picks a granted T1 permission and revokes it.
+fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return;
+    };
+    let grants: Vec<(String, String)> = registry
+        .read(cx)
+        .revocable()
+        .into_iter()
+        .take(MAX_PICKER_CHOICES)
+        .collect();
+    if grants.is_empty() {
+        toast(
+            workspace,
+            "No UI extension holds a T1 permission".into(),
+            cx,
+        );
+        return;
+    }
+    let labels: Vec<String> = grants
+        .iter()
+        .map(|(id, capability)| format!("{id}: {capability}"))
+        .collect();
+    let mut answers: Vec<&str> = labels.iter().map(String::as_str).collect();
+    answers.push("Cancel");
+    let answer = window.prompt(
+        PromptLevel::Info,
+        "Revoke which permission?",
+        Some("The extension is denied it from its next call, and asks again on its next load."),
+        &answers,
+        cx,
+    );
+    let fs = workspace.app_state().fs.clone();
+    cx.spawn(async move |workspace, cx| {
+        let Ok(choice) = answer.await else {
+            return;
+        };
+        let Some((id, capability)) = grants.get(choice) else {
+            return;
+        };
+        let result = registry.update(cx, |registry, cx| {
+            registry.revoke(id, capability, fs.clone(), cx)
+        });
+        let message = match result {
+            Ok(()) => format!("Revoked {capability} from {id}"),
+            Err(error) => format!("{error:#}"),
+        };
+        workspace
+            .update(cx, |workspace, cx| toast(workspace, message, cx))
+            .ok();
+    })
+    .detach();
 }
 
 /// Picks a loaded extension and restarts it.

@@ -24,3 +24,7 @@ capped the text lifted per call; still open:
 - A memory bound for the whole store instead of per memory: a `ResourceLimiter` that sums every
   memory's size against `UI_MEMORY_LIMIT` (8 memories are allowed now), or one memory if every
   supported guest (Rust, componentize-js) needs only one.
+
+**Packer** (coordinator, 2026-11-18): when W4's `fyx-ext package` (`crates/fyx_ext`) is on
+integration, switch `tasks/progress/W3-user-check.md` and `docs/fyx/extension-authoring.md` to it
+and delete `script/fyx-pack-ui-extension.py` (or make it a thin wrapper).

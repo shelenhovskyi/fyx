@@ -39,8 +39,9 @@ use gpui::{
 use settings::Settings as _;
 use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
 use ui_ext_wasm::{
-    CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, PrecompiledCache, PushedUpdate, UiExtension,
-    UiManifest,
+    CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, PushedUpdate,
+    UiExtension, UiManifest,
+    permissions::{Tier, tier_of},
 };
 use workspace::{
     Workspace, WorkspaceSettings,
@@ -50,7 +51,7 @@ use workspace::{
 use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
-    consent::{self, ConsentRecord, ConsentStore},
+    consent::{self, ConsentRecord, ConsentState, ConsentStore},
     install_store::InstallStore,
     panel::{
         AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
@@ -128,6 +129,9 @@ pub struct PendingConsent {
     /// As `extension.toml` declares them.
     pub capabilities: Vec<String>,
     pub is_dev: bool,
+    /// Not empty for a held update: an extension enabled before that now asks for these T1
+    /// capabilities as well (its old version keeps running, if loaded).
+    pub new_capabilities: Vec<String>,
     record: ConsentRecord,
 }
 
@@ -227,6 +231,48 @@ impl UiExtensionRegistry {
                 .state
                 .update(cx, |state, cx| state.show_reload_error(message.clone(), cx));
         }
+    }
+
+    /// The capabilities a loaded extension declared, with their tier and whether each is granted
+    /// (T0 always is), for the chips and the revoke command.
+    pub fn declared_capabilities(&self, extension_id: &str) -> Vec<(String, Tier, bool)> {
+        self.consent
+            .declared(extension_id)
+            .into_iter()
+            .filter_map(|capability| {
+                let tier = tier_of(&capability)?;
+                let granted = self.consent.is_granted(extension_id, &capability);
+                Some((capability, tier, granted))
+            })
+            .collect()
+    }
+
+    /// Granted capabilities that can be taken back, as (extension id, capability).
+    pub fn revocable(&self) -> Vec<(String, String)> {
+        self.consent.revocable()
+    }
+
+    /// Takes a granted capability back: host imports are denied it from the next call, and the
+    /// extension asks again on its next load.
+    pub fn revoke(
+        &mut self,
+        extension_id: &str,
+        capability: &str,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        if let Some((path, text)) = self.consent.revoke(extension_id, capability)? {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        log::info!("fyx:ui: revoked {capability} from {extension_id}");
+        cx.notify();
+        Ok(())
+    }
+
+    /// The broker's check, as host imports get it.
+    pub fn capability_check(&self) -> Arc<dyn ui_ext_wasm::permissions::CapabilityCheck> {
+        self.consent.checker()
     }
 
     /// Scans again what the last scan did (after an install-store change).
@@ -516,9 +562,13 @@ impl UiExtensionRegistry {
                             continue;
                         }
                     }
-                    let loaded = UiExtension::load_from_dir_with_cache(
+                    let checker = this.update(cx, |this, _| this.consent.checker()).ok();
+                    let loaded = UiExtension::load_from_dir_with_options(
                         &found.dir,
-                        found.cache.clone(),
+                        LoadOptions {
+                            cache: found.cache.clone(),
+                            capability_check: checker,
+                        },
                         fs.clone(),
                         cx,
                     )
@@ -540,6 +590,8 @@ impl UiExtensionRegistry {
                                 }
                                 this.installed
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
+                                this.consent
+                                    .declare(&found.extension_id, found.capabilities.clone());
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
                                     this.watch_component(
@@ -673,20 +725,33 @@ impl UiExtensionRegistry {
     ) -> bool {
         self.pending_consent
             .retain(|pending| pending.extension_id != found.extension_id);
-        if self.consent.allows(&found.extension_id, &record) {
-            cx.notify();
-            return true;
-        }
-        log::info!(
-            "fyx:ui: {} is installed but not enabled (as it is now); waiting for the user",
-            found.extension_id
-        );
+        let new_capabilities = match self.consent.state(&found.extension_id, &record) {
+            ConsentState::Allowed => {
+                cx.notify();
+                return true;
+            }
+            ConsentState::NotEnabled => {
+                log::info!(
+                    "fyx:ui: {} is installed but not enabled; waiting for the user",
+                    found.extension_id
+                );
+                Vec::new()
+            }
+            ConsentState::NeedsApproval { new_capabilities } => {
+                log::info!(
+                    "fyx:ui: {} now asks for {new_capabilities:?}; the update waits for approval",
+                    found.extension_id
+                );
+                new_capabilities
+            }
+        };
         self.pending_consent.push(PendingConsent {
             extension_id: found.extension_id.clone(),
             dir: found.dir.clone(),
             installed_dir: installed_dir.to_path_buf(),
             capabilities: found.capabilities.clone(),
             is_dev: found.is_dev,
+            new_capabilities,
             record,
         });
         cx.notify();
@@ -1048,11 +1113,20 @@ fn offer_consent(
         } else {
             String::new()
         };
-        let message = format!(
-            "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
-            pending.extension_id,
-            crate::install::describe_capability_ids(&pending.capabilities).join("; "),
-        );
+        let message = if pending.new_capabilities.is_empty() {
+            format!(
+                "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
+                pending.extension_id,
+                crate::install::describe_capability_ids(&pending.capabilities).join("; "),
+            )
+        } else {
+            format!(
+                "An update of the UI extension {} needs approval. It now also asks for: {}.{folder}",
+                pending.extension_id,
+                crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
+            )
+        };
+        let update = !pending.new_capabilities.is_empty();
         let extension_id = pending.extension_id.clone();
         let registry = registry.downgrade();
         let fs = workspace.app_state().fs.clone();
@@ -1062,7 +1136,7 @@ fn offer_consent(
             move |cx| {
                 cx.new(|cx| {
                     MessageNotification::new(message, cx)
-                        .primary_message("Enable")
+                        .primary_message(if update { "Approve" } else { "Enable" })
                         .primary_on_click(move |_, cx| {
                             registry
                                 .update(cx, |registry, cx| {
@@ -1208,9 +1282,20 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     } else {
         Some(path.clone())
     };
+    let checker = cx.update(|cx| {
+        UiExtensionRegistry::global(cx).map(|registry| registry.read(cx).capability_check())
+    });
+    let options = LoadOptions {
+        capability_check: checker,
+        ..LoadOptions::default()
+    };
+    let mut declared = Vec::new();
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
-        UiExtension::load_from_dir(&path, fs.clone(), cx)
+        if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
+            declared = manifest.capabilities;
+        }
+        UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?
             .with_context(|| format!("{}: extension.toml has no [fyx_ui] table", path.display()))?
     } else {
@@ -1228,7 +1313,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
                 anyhow::Ok((extension_id, bytes))
             })
             .await?;
-        UiExtension::load(extension_id.into(), bytes, cx).await?
+        UiExtension::load_with_options(extension_id.into(), bytes, options, cx).await?
     };
     log::info!(
         "fyx:ui: loaded {} with {} surface(s)",
@@ -1246,6 +1331,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
                 ExtensionSource::File(reload_path.clone())
             };
             registry.claim_extension_id(&extension_id, source)?;
+            registry.consent.declare(&extension_id, declared);
             registry.register_extension(extension, pushed, cx);
             if let Some(component) = component {
                 registry.watch_component(

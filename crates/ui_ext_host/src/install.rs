@@ -16,7 +16,7 @@ use anyhow::{Result, bail};
 use fs::Fs;
 use gpui::{App, Context, PathPromptOptions, PromptLevel, Window, actions};
 use settings::{RegisterSetting, Settings};
-use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest};
+use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest, permissions::tier_of};
 use workspace::{Toast, Workspace, notifications::NotificationId};
 
 use crate::{UiExtensionRegistry, consent::ConsentRecord};
@@ -75,7 +75,19 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
         .map(|capability| match capability.as_str() {
             CAPABILITY_PANEL => format!("{capability}: add dock panels"),
             CAPABILITY_STATUS_BAR => format!("{capability}: add status bar items"),
-            other => format!("{other}: unknown to this version"),
+            "workspace:read-buffers" => {
+                format!("{capability}: read your open buffers (T1: approved here, revocable)")
+            }
+            "workspace:read-files" => {
+                format!("{capability}: read files in your worktrees (T1: approved here, revocable)")
+            }
+            "workspace:diagnostics" => {
+                format!("{capability}: read diagnostics (T1: approved here, revocable)")
+            }
+            other => match tier_of(other) {
+                Some(tier) => format!("{other}: {tier}, not used by this version"),
+                None => format!("{other}: unknown to this version"),
+            },
         })
         .collect()
 }

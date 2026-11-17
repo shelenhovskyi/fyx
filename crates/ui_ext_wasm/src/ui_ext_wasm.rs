@@ -243,6 +243,10 @@ impl UiManifest {
         };
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
+        for capability in &manifest.capabilities {
+            permissions::grantable_tier(capability)
+                .with_context(|| format!("extension {id}, in {path:?}"))?;
+        }
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
             "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
@@ -332,11 +336,28 @@ pub struct UiState {
     /// [`UI_FIRST_MOUNT_BUDGET`].
     mounted: std::collections::HashSet<String>,
     disabled: Option<String>,
+    capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
 }
 
 impl UiState {
-    fn new(extension_id: Arc<str>, ctx: WasiCtx) -> Self {
+    /// For host imports that read or act for the extension: whether it may use `capability`
+    /// now. Answers from the host's permission broker each time, so a revocation applies to the
+    /// next call. Without a broker, T1 and T2 are denied.
+    pub fn check_capability(&self, capability: &str) -> Result<(), permissions::CapabilityDenied> {
+        permissions::check_without_broker(
+            self.capability_check.as_ref(),
+            &self.extension_id,
+            capability,
+        )
+    }
+
+    fn new(
+        extension_id: Arc<str>,
+        ctx: WasiCtx,
+        capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+    ) -> Self {
         Self {
+            capability_check,
             extension_id,
             table: ResourceTable::new(),
             ctx,
@@ -735,6 +756,14 @@ fn write_precompiled(component: &Component, file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// How [`UiExtension::load_with_options`] loads a component.
+#[derive(Clone, Default)]
+pub struct LoadOptions {
+    pub cache: Option<PrecompiledCache>,
+    /// The host's permission broker, for [`UiState::check_capability`].
+    pub capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+}
+
 impl UiExtension {
     /// Compiles and instantiates a component and asks it for its surfaces.
     ///
@@ -757,6 +786,28 @@ impl UiExtension {
         cache: Option<PrecompiledCache>,
         cx: &AsyncApp,
     ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_with_options(
+            extension_id,
+            wasm_bytes,
+            LoadOptions {
+                cache,
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+    }
+
+    /// [`UiExtension::load`] with a precompiled cache and a permission broker.
+    pub fn load_with_options(
+        extension_id: Arc<str>,
+        wasm_bytes: Vec<u8>,
+        options: LoadOptions,
+        cx: &AsyncApp,
+    ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        let LoadOptions {
+            cache,
+            capability_check,
+        } = options;
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
@@ -798,8 +849,10 @@ impl UiExtension {
                     deny_network(&mut wasi);
                     // No preopened directories, no environment variables, no arguments: the
                     // builder starts empty and only stderr is inherited.
-                    let mut store =
-                        Store::new(&runtime.engine, UiState::new(extension_id, wasi.build()));
+                    let mut store = Store::new(
+                        &runtime.engine,
+                        UiState::new(extension_id, wasi.build(), capability_check),
+                    );
                     store.limiter(|state| &mut state.limits);
                     store.epoch_deadline_callback(|context| {
                         let state = context.data();
@@ -876,13 +929,13 @@ impl UiExtension {
         fs: Arc<dyn Fs>,
         cx: &AsyncApp,
     ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
-        Self::load_from_dir_with_cache(extension_dir, None, fs, cx).await
+        Self::load_from_dir_with_options(extension_dir, LoadOptions::default(), fs, cx).await
     }
 
-    /// [`UiExtension::load_from_dir`] with a precompiled cache; see [`PrecompiledCache`].
-    pub async fn load_from_dir_with_cache(
+    /// [`UiExtension::load_from_dir`] with a precompiled cache and a permission broker.
+    pub async fn load_from_dir_with_options(
         extension_dir: &Path,
-        cache: Option<PrecompiledCache>,
+        options: LoadOptions,
         fs: Arc<dyn Fs>,
         cx: &AsyncApp,
     ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
@@ -896,7 +949,7 @@ impl UiExtension {
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
         let (extension, pushed) =
-            Self::load_with_cache(extension_id.clone(), wasm_bytes, cache, cx)
+            Self::load_with_options(extension_id.clone(), wasm_bytes, options, cx)
                 .await
                 .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
         anyhow::ensure!(
@@ -1248,6 +1301,7 @@ impl From<ui_ext::UiEvent> for wit::UiEvent {
     }
 }
 
+pub mod permissions;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
