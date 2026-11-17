@@ -13,7 +13,7 @@ language, builds for a second OS, notarization, marketplace.
 | Phase | Hours | What | State |
 |---|---|---|---|
 | 0 | 0–2 | Freeze interfaces: fork at stable tag, warm build, this plan, WIT, crate skeletons | done (2026-11-17) |
-| 1 | 2–14 | Parallel workers W1–W8 | pending |
+| 1 | 2–14 | Parallel workers W1–W8 | in progress: W2, W4, W8 and W5 phase A merged into `integration` (2026-11-17; reviews `tasks/reviews/integration-1.md`, `integration-2.md`); W1, W3 running; W5 phase B waits for W3 |
 | 2 | 14–20 | First integration, run the app, judge pass, fresh restart of drifting agents | pending |
 | 3 | 20–30 | Second wave: agent review, decorations, polish | pending |
 | 4 | last 6–8 | Integration only, manual testing in the running editor, human review | pending |
