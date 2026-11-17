@@ -46,8 +46,9 @@ export function unpackVsix(vsixPath: string, cacheDir: string): string {
   const digest = createHash("sha256").update(data).digest("hex").slice(0, 16);
   const root = join(cacheDir, digest);
   if (existsSync(join(root, "package.json"))) return root;
-  for (const [name, content] of readZip(data)) {
+  for (const [name, entry] of readZip(data)) {
     if (!name.startsWith("extension/")) continue;
+    const content = entry.read();
     const target = join(root, ...name.slice("extension/".length).split("/"));
     if (!resolve(target).startsWith(resolve(root) + sep)) throw new Error(`vsix: entry escapes the extension folder: ${name}`);
     mkdirSync(dirname(target), { recursive: true });

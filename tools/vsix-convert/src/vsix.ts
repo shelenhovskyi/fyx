@@ -25,7 +25,7 @@ export function openExtension(path: string): ExtensionFiles {
     };
   }
   const entries = readZip(readFileSync(path));
-  return { read: (p) => entries.get(posix.join("extension", posix.normalize(p))) };
+  return { read: (p) => entries.get(posix.join("extension", posix.normalize(p)))?.read() };
 }
 
 function tryRead(path: string): Buffer | undefined {
