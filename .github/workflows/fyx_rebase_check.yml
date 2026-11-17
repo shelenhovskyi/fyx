@@ -1,0 +1,159 @@
+# fyx: weekly signal that rebasing the Fyx stack onto Zed's newest stable tag would conflict.
+# Never pushes anything; see docs/fyx/ci.md.
+name: Fyx rebase check
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to try (default: newest stable v*.*.* of zed-industries/zed)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fyx-rebase-check
+  cancel-in-progress: false
+
+jobs:
+  rebase_check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      UPSTREAM_URL: https://github.com/zed-industries/zed.git
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REQUESTED_TAG: ${{ inputs.tag }}
+      GIT_AUTHOR_NAME: fyx-rebase-check
+      GIT_AUTHOR_EMAIL: fyx-rebase-check@users.noreply.github.com
+      GIT_COMMITTER_NAME: fyx-rebase-check
+      GIT_COMMITTER_EMAIL: fyx-rebase-check@users.noreply.github.com
+    steps:
+      - name: Check out integration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: integration
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find the newest stable upstream tag
+        id: tag
+        run: |
+          base=$(tr -d '[:space:]' < FYX_UPSTREAM)
+          if [[ -n "$REQUESTED_TAG" ]]; then
+              tag=$REQUESTED_TAG
+          else
+              tag=$(
+                  git ls-remote --tags --refs "$UPSTREAM_URL" 'v*' \
+                      | sed 's#.*refs/tags/##' \
+                      | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                      | sort -V | tail -1
+              )
+          fi
+          [[ -n "$tag" ]] || { echo "no stable tag found at $UPSTREAM_URL"; exit 1; }
+          git rev-parse --verify --quiet "refs/tags/$base^{commit}" >/dev/null \
+              || { echo "FYX_UPSTREAM tag $base is not in this repository"; exit 1; }
+          # A namespace of its own, so the fork's copies of upstream tags are never overwritten.
+          git fetch --no-tags "$UPSTREAM_URL" "+refs/tags/$tag:refs/zed-upstream/$tag"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "FYX_UPSTREAM=$base, newest upstream stable tag: $tag"
+
+      - name: Try the rebase in a throwaway branch
+        id: rebase
+        env:
+          BASE: ${{ steps.tag.outputs.base }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          onto="refs/zed-upstream/$TAG"
+          # shellcheck disable=SC2016 # the backticks are Markdown
+          bullets() { sed '/^$/d; s/.*/- `&`/'; }
+          report="$RUNNER_TEMP/rebase-report.md"
+          commits=$(git rev-list --count --no-merges "$BASE..HEAD")
+          git switch --quiet -c "fyx-rebase-check/$TAG"
+
+          if [[ "$(git rev-parse "$BASE^{commit}")" == "$(git rev-parse "$onto^{commit}")" ]]; then
+              echo "integration is already based on $TAG"
+              echo "result=up-to-date" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+
+          if git rebase --onto "$onto" "$BASE" > "$RUNNER_TEMP/rebase.log" 2>&1; then
+              echo "rebasing $commits commits of $BASE..integration onto $TAG: clean"
+              echo "result=clean" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+          cat "$RUNNER_TEMP/rebase.log"
+
+          stopped_at=$(git rev-parse --short REBASE_HEAD 2>/dev/null || echo unknown)
+          stopped_subject=$(git log -1 --format=%s REBASE_HEAD 2>/dev/null || echo unknown)
+          stopped_files=$(git diff --name-only --diff-filter=U)
+          git rebase --abort
+
+          # The rebase stops at the first conflicting commit. A three-way merge of the whole stack
+          # (base -> integration) into the tag lists every file that conflicts with upstream.
+          stack_files=$(
+              git merge-tree --write-tree --name-only --no-messages \
+                  --merge-base="$BASE" "$onto" HEAD | tail -n +2 | sed '/^$/d'
+          ) || true
+
+          {
+              echo "Rebasing the Fyx stack (\`$BASE..integration\`, $commits commits) onto upstream \`$TAG\` conflicts."
+              echo
+              echo "- integration: \`$(git rev-parse --short HEAD)\`"
+              echo "- upstream \`$TAG\`: \`$(git rev-parse --short "$onto^{commit}")\`"
+              echo "- run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              echo
+              echo "### The rebase stopped at \`$stopped_at\` ($stopped_subject)"
+              echo
+              bullets <<< "$stopped_files"
+              echo
+              echo "### Files where the whole stack conflicts with \`$TAG\`"
+              echo
+              if [[ -n "$stack_files" ]]; then
+                  bullets <<< "$stack_files"
+              else
+                  echo "None: the squashed stack merges cleanly, so the conflict is between Fyx commits replayed one by one."
+              fi
+              echo
+              echo "Nothing was pushed; the rebased branch existed only on the runner."
+          } > "$report"
+          cat "$report"
+          echo "result=conflict" >> "$GITHUB_OUTPUT"
+          echo "report=$report" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the conflict issue
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          RESULT: ${{ steps.rebase.outputs.result }}
+          REPORT: ${{ steps.rebase.outputs.report }}
+        run: |
+          title="Rebase onto $TAG conflicts"
+          existing=$(
+              gh issue list --state open --limit 200 --json number,title,author \
+                  --jq '.[] | select(.author.is_bot and (.title | startswith("Rebase onto "))) | "\(.number)\t\(.title)"' \
+                  | head -1
+          )
+          number=${existing%%$'\t'*}
+          old_title=${existing#*$'\t'}
+
+          if [[ "$RESULT" == "conflict" ]]; then
+              if [[ -z "$existing" ]]; then
+                  gh issue create --title "$title" --body-file "$REPORT"
+              else
+                  gh issue edit "$number" --title "$title" --body-file "$REPORT"
+                  if [[ "$old_title" != "$title" ]]; then
+                      gh issue comment "$number" --body "Now conflicts with \`$TAG\` (was: $old_title). Body updated."
+                  fi
+              fi
+          elif [[ -n "$existing" ]]; then
+              gh issue close "$number" --reason completed \
+                  --comment "Rebasing onto \`$TAG\` is now $RESULT ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          else
+              echo "no conflict and no open issue: nothing to do"
+          fi
