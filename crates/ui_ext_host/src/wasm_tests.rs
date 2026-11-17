@@ -459,6 +459,29 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
                 run_until(cx, "the routed push", |cx| {
                     text_of(&status_state, STATUS_LABEL, cx).as_deref() == Some("Gallery: Row 3")
                 });
+
+                // The mouse wheel over the list scrolls the list (24 px rows): 20 rows down, row 0
+                // leaves the view and row 20 is fetched and drawn at the top.
+                let row0 = cx
+                    .debug_bounds(leak(format!("fyx-row-{list}-0")))
+                    .expect("row 0 is drawn");
+                cx.simulate_event(gpui::ScrollEvent {
+                    position: row0.center(),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-480.))),
+                    ..Default::default()
+                });
+                run_until(cx, "rows after scrolling", |cx| {
+                    panel_state.read_with(cx, |state, _| state.row(list, 25).is_some())
+                });
+                cx.update(|window, _| window.refresh());
+                cx.run_until_parked();
+                let row20 = cx
+                    .debug_bounds(leak(format!("fyx-row-{list}-20")))
+                    .expect("row 20 is drawn after scrolling");
+                assert!(
+                    (row20.top() - row0.top()).abs() < gpui::px(1.),
+                    "row 20 took row 0's place: {row20:?} vs {row0:?}"
+                );
             }
             "Table" => {
                 let table = find(&nodes, |props| matches!(props, Props::Table(_)));
