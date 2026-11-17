@@ -378,8 +378,13 @@ impl AgentReview {
         }
         if added {
             log::info!(
-                "fyx: agent review: {} files changed without review in {turn:?}: {:?}",
+                "fyx: agent review: {} {} changed without review in {turn:?}: {:?}",
                 unreviewed.len(),
+                if unreviewed.len() == 1 {
+                    "file"
+                } else {
+                    "files"
+                },
                 unreviewed
             );
             cx.emit(AgentReviewEvent::UnreviewedChanges(turn));
