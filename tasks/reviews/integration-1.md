@@ -1,8 +1,12 @@
 # Judge review: integration-1 (W2 + W4)
 
 Scope: `git diff fyx/main...integration` at `52317345a4` (W2 `3d022ab7a8`, `429ddaf400`; W4
-`ed374f89d8`; W0 `52317345a4`). Code read, nothing compiled. Progress-file claims were checked
-against the code, not taken on trust.
+`ed374f89d8`; W0 `52317345a4`). Updated for the follow-ups up to `8d76a5dbf9`; see
+[Follow-up](#follow-up-52317345a48d76a5dbf9). Code read, nothing compiled. Progress-file claims
+were checked against the code, not taken on trust.
+
+Still open after the follow-up: findings 1–7 and 9–13. Finding 8 and the counter duplication are
+resolved.
 
 ## Verdict
 
@@ -106,7 +110,7 @@ counter to show up in the dock, so this blocks phase 2.
 **Proposal:** W2 parses `[fyx_ui]` inside the `fyx_ui` module with `toml`, without touching
 upstream's `ExtensionManifest`, and exposes `load_from_dir`. W3 calls it and registers the surfaces.
 
-### 8. Low: the SDK does not emit the `fyx:ui-api-version` section (W4)
+### 8. Low: the SDK does not emit the `fyx:ui-api-version` section (W4). **Resolved in `a945b18fd9`**
 
 W2 asked for it (shared note `W2-host-api.md`); `ui_ext_sdk.rs` has no `link_section`. Loading still
 works through the fallback, because both demos import `fyx:ui/types@0.1.0`
@@ -155,7 +159,7 @@ through patches, but it can never be mounted or replaced at that size. Use `max_
 | What | Where | Who changes |
 |---|---|---|
 | Patch semantics are implemented three times, with different validation | `ui_ext::Tree` (`tree.rs`), `SurfaceTree` (`ui_ext_sdk.rs:495-729`), the SDK's test `apply` (`ui_ext_sdk.rs:984`) | **W4.** `ui_ext` is Apache-licensed and free of wasmtime and GPUI, so the SDK can take it as a dev-dependency and test that its emitted updates apply cleanly to `ui_ext::Tree` (W0 adds the dep and the lock entry). That test would have caught finding 2. |
-| Two counter guests with different contracts | W2 fixture `fyx_ui/fixtures/counter` (ids 1–5, left dock, 240 px, `SPIN`, push on reset) and W4 `fyx_demo_counter` (ids 1–7, right dock, 320 px) | **W2.** Keep the fixture only for what the demo cannot do (runaway call, push, blocking sleep from finding 1), rename it `fyx_ui_test_guest`, and add one test that loads the real `fyx_demo_counter`. |
+| Two counter guests with different contracts | W2 fixture `fyx_ui/fixtures/counter` (ids 1–5, left dock, 240 px, `SPIN`, push on reset) and W4 `fyx_demo_counter` (ids 1–7, right dock, 320 px) | **Resolved in `27dae415d8`:** the e2e test now drives `fyx_demo_counter`, and the fixture became `fixtures/probe` (push and spin only). The original advice was: **W2.** Keep the fixture only for what the demo cannot do (runaway call, push, blocking sleep from finding 1), rename it `fyx_ui_test_guest`, and add one test that loads the real `fyx_demo_counter`. |
 | Row index clamping | SDK `row_range` (`ui_ext_sdk.rs:364`) and the host range check (`fyx_ui.rs:418-425`) | Nobody. These are complementary checks, not duplication. |
 
 ## Contract points W3 needs, in one place
@@ -186,3 +190,54 @@ Measured with
 The hand-edited upstream surface is 20 lines in 4 files. That is well within the "few dozen lines"
 target. Baseline for the next cycles: W1 and W3 are expected to add hooks in `crates/zed`,
 `crates/workspace`, `crates/client` and `crates/paths`.
+
+## Follow-up `52317345a4..8d76a5dbf9`
+
+Commits reviewed:
+- W2 `27dae415d8`: the e2e test now runs on `fyx_demo_counter`, and the old fixture became the probe.
+- W4 `a945b18fd9`: `register_extension!` emits the version section.
+- W0 `8d76a5dbf9`: removed the probe's own copy of the section.
+
+All three are sound:
+- The section is emitted in the extension's own crate, so the linker cannot drop it from the SDK
+  rlib.
+- The bytes are pinned to the WIT package line by `api_version_matches_the_wit_package`.
+- `tests.rs:145-235` now checks the demo's documented contract id by id.
+
+**Pinned decision.** `tests.rs:23-24` pins the row-local ids `0x8000_0000` and `0x8000_0001` in a
+host test. That makes finding 4's decision (keep row-local ids) part of the tested contract. W3
+builds to it.
+
+New findings:
+
+### F1. Low: two copies of the version section make the component unloadable (W2)
+
+Two copies of the section concatenate into 12 bytes. `parse_api_version` (`fyx_ui.rs:70-89`) then
+rejects the component as having an invalid section, and loading fails. This is what broke 3 tests
+on merge. The shared note `W2-host-api.md` (lines 24-27) still tells extension authors to add that
+static by hand. Anyone who follows it, or who copies the code from the old probe, gets a component
+that cannot load.
+**Fix (W2):**
+- Update the note to say the SDK emits the section and authors must not add it.
+- Have `parse_api_version` say so in its error message when the section length is a multiple of 6
+  and greater than 6. Alternatively, accept repeated identical 6-byte copies.
+
+### F2. Low: the import-based version fallback has no test any more (W2)
+
+`tasks/progress/W2.md` §6 says the demo-counter test "also covers the import fallback" because the
+demo has no section. W4's merge added the section to the demo, so no test reaches
+`api_version_from_imports` (`fyx_ui.rs:93-103`) any more. The same paragraph also still describes
+the probe as carrying "an explicit version section", which `8d76a5dbf9` removed.
+**Fix (W2):**
+- Add a case to `test_api_version_gating` that strips the section, for example with
+  `wasm_encoder`, or uses a hand-written component that only imports `fyx:ui/types@0.1.0`.
+- Correct the progress file.
+
+### Still not covered by tests
+
+- Finding 1: the probe has no event that blocks in a WASI call, only `spin_loop`.
+- Finding 3: the probe pushes and then returns `unchanged`, so the order of the push and the reply
+  is never exercised.
+
+Add a blocking `sleep` event and a "push, then return patches that depend on the push" event to
+the probe when those findings are fixed.
