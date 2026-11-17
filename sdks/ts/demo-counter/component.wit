@@ -1,0 +1,279 @@
+package root:component;
+
+world root {
+  import fyx:ui/types@0.1.0;
+  import fyx:ui/host@0.1.0;
+  import wasi:io/poll@0.2.12;
+  import wasi:clocks/monotonic-clock@0.2.12;
+  import wasi:io/error@0.2.12;
+  import wasi:io/streams@0.2.12;
+  import wasi:cli/stderr@0.2.12;
+  import wasi:clocks/wall-clock@0.2.12;
+  import wasi:random/random@0.2.12;
+  use fyx:ui/types@0.1.0.{surface, node, node-id, ui-event, update, list-row};
+
+  export surfaces: func() -> list<surface>;
+  export mount: func(surface-id: string) -> result<list<node>, string>;
+  export handle-event: func(surface-id: string, event: ui-event) -> result<update, string>;
+  export list-rows: func(surface-id: string, list-node: node-id, start: u32, count: u32) -> list<list-row>;
+}
+package fyx:ui@0.1.0 {
+  interface types {
+    enum dock-position {
+      left,
+      right,
+      bottom,
+    }
+
+    record panel-descriptor {
+      position: dock-position,
+      icon: string,
+      default-size: u32,
+    }
+
+    enum status-bar-side {
+      left,
+      right,
+    }
+
+    record status-item-descriptor {
+      side: status-bar-side,
+      priority: s32,
+    }
+
+    variant surface-kind {
+      panel(panel-descriptor),
+      status-item(status-item-descriptor),
+    }
+
+    record surface {
+      id: string,
+      title: string,
+      kind: surface-kind,
+    }
+
+    type node-id = u32;
+
+    enum flex-direction {
+      row,
+      column,
+    }
+
+    enum align {
+      start,
+      center,
+      end,
+      stretch,
+    }
+
+    enum color-token {
+      text,
+      text-muted,
+      text-accent,
+      error,
+      warning,
+      success,
+      border,
+      surface,
+      elevated-surface,
+    }
+
+    record flex-props {
+      direction: flex-direction,
+      gap: u16,
+      padding: u16,
+      grow: bool,
+      align: align,
+      background: option<color-token>,
+    }
+
+    record text-props {
+      content: string,
+      color: option<color-token>,
+      bold: bool,
+      monospace: bool,
+    }
+
+    enum button-style {
+      default,
+      filled,
+      subtle,
+      danger,
+    }
+
+    record button-props {
+      label: string,
+      icon: option<string>,
+      style: button-style,
+      disabled: bool,
+    }
+
+    record input-props {
+      value: string,
+      placeholder: string,
+    }
+
+    record list-props {
+      row-count: u32,
+      row-height: u16,
+    }
+
+    record table-props {
+      columns: list<string>,
+      row-count: u32,
+    }
+
+    record icon-props {
+      name: string,
+      color: option<color-token>,
+    }
+
+    record diff-view-props {
+      old-text: string,
+      new-text: string,
+      language: option<string>,
+    }
+
+    variant props {
+      flex(flex-props),
+      text(text-props),
+      button(button-props),
+      input(input-props),
+      %list(list-props),
+      table(table-props),
+      icon(icon-props),
+      markdown(string),
+      diff-view(diff-view-props),
+    }
+
+    record node {
+      id: node-id,
+      parent: option<node-id>,
+      props: props,
+    }
+
+    variant ui-event {
+      click(node-id),
+      input-changed(tuple<node-id, string>),
+      input-submitted(tuple<node-id, string>),
+      row-click(tuple<node-id, u32>),
+    }
+
+    record insert-op {
+      node: node,
+      before: option<node-id>,
+    }
+
+    variant patch {
+      set-props(tuple<node-id, props>),
+      insert(insert-op),
+      remove(node-id),
+    }
+
+    variant update {
+      unchanged,
+      replace(list<node>),
+      patches(list<patch>),
+    }
+
+    record list-row {
+      index: u32,
+      nodes: list<node>,
+    }
+  }
+  interface host {
+    use types.{update};
+
+    enum log-level {
+      trace,
+      debug,
+      info,
+      warn,
+      error,
+    }
+
+    push-update: func(surface-id: string, update: update);
+
+    log: func(level: log-level, message: string);
+  }
+}
+
+
+package wasi:io@0.2.12 {
+  interface poll {
+    resource pollable {
+      block: func();
+    }
+
+    poll: func(in: list<borrow<pollable>>) -> list<u32>;
+  }
+  interface error {
+    resource error;
+  }
+  interface streams {
+    use error.{error};
+    use poll.{pollable};
+
+    resource input-stream {
+      read: func(len: u64) -> result<list<u8>, stream-error>;
+      blocking-read: func(len: u64) -> result<list<u8>, stream-error>;
+      subscribe: func() -> pollable;
+    }
+
+    resource output-stream {
+      check-write: func() -> result<u64, stream-error>;
+      write: func(contents: list<u8>) -> result<_, stream-error>;
+      blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;
+      blocking-flush: func() -> result<_, stream-error>;
+      subscribe: func() -> pollable;
+    }
+
+    variant stream-error {
+      last-operation-failed(error),
+      closed,
+    }
+  }
+}
+
+
+package wasi:clocks@0.2.12 {
+  interface monotonic-clock {
+    use wasi:io/poll@0.2.12.{pollable};
+
+    type instant = u64;
+
+    type duration = u64;
+
+    now: func() -> instant;
+
+    subscribe-instant: func(when: instant) -> pollable;
+
+    subscribe-duration: func(when: duration) -> pollable;
+  }
+  interface wall-clock {
+    record datetime {
+      seconds: u64,
+      nanoseconds: u32,
+    }
+
+    now: func() -> datetime;
+  }
+}
+
+
+package wasi:cli@0.2.12 {
+  interface stderr {
+    use wasi:io/streams@0.2.12.{output-stream};
+
+    get-stderr: func() -> output-stream;
+  }
+}
+
+
+package wasi:random@0.2.12 {
+  interface random {
+    get-random-bytes: func(len: u64) -> list<u8>;
+
+    get-random-u64: func() -> u64;
+  }
+}
