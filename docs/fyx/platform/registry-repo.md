@@ -12,10 +12,19 @@ It builds on:
   `fyx-registry` CI tool, as `crates/fyx_registry` implements them. That file is on
   `claude/fyx-registry-core` until it merges.
 
-**Owner's review rule (2026-11-18).** An entry whose release is tier **T0 or T1** merges by itself
-when CI is green. A **T2** entry needs the owner's approval. This replaces the reviews that spec
-decision 16 asks a maintainer for (a new extension, a new T1 capability). CI still enforces
-everything else decision 16 protects; see [Review rules](#review-rules).
+**Decided (owner, 2026-11-18; recorded in spec decisions 16 and 18):**
+
+- **T0 and T1 merge by themselves.** An entry whose release is tier T0 or T1 merges when CI is
+  green. A new T0–T1 extension needs no review.
+- **Owners of the entry.** A new version needs one of the entry's own owners. An owner change
+  needs an existing owner.
+- **T2 needs the owner.** The owner of the registry approves every T2 version, not only the first
+  one.
+- **`urgent` needs the owner.** The owner approves every `urgent = true`.
+- **Separate keys.** Releases and the block list are signed by separate keys, held apart. The
+  client verifies each against its own keyset, so a stolen release key cannot forge a block list.
+
+See [Review rules](#review-rules) and [Keys](#keys).
 
 ## Goals
 
@@ -37,7 +46,8 @@ fyx-extensions/
 ├── blocklist/
 │   └── blocklist.toml         # the block list source; CI signs it into blocklist.json
 ├── keys/
-│   └── keyset.json            # public keys only (registry key + rotation key)
+│   ├── releases.json          # public keys only: release key + its rotation key
+│   └── blocklist.json         # public keys only: block-list key + its rotation key
 ├── policy/
 │   ├── builder.toml           # pinned builder image digest and fyx-ext version
 │   └── reserved-ids.txt       # ids nobody may register (fyx, fyx-*, zed, …)
@@ -146,7 +156,7 @@ only.
 | **New extension, tier T2** | The owner (`@shelenhovskyi`). |
 | **New version of an extension, tier T0 or T1**, no owner change | One of the entry's owners: as the PR's author, or by an approving review. Auto-merges once that holds. |
 | **Any PR whose release is T2**: a new version, a new T2 capability, a new network domain or a new process | The owner, for every version. A T2 update changes code that can reach the network or your files. |
-| **Owners added or removed** | An existing owner, plus the owner of the registry when the last original owner is removed. This stops an account takeover from moving an extension to a new account in one step. |
+| **Owners added or removed** | An existing owner of the entry. |
 | **`urgent = true`** | The owner. It skips the 24 h age gate. |
 | **Entry deleted** | Refused. Releases are permanent; block the extension instead. |
 | **Anything under CODEOWNERS paths** | The owner, through Code Owners review. |
@@ -209,28 +219,32 @@ time and `index add` never races.
    - The mismatch becomes a failure once the builds are shown to be reproducible (open question
      1).
    - This job also has no secrets.
-2. **Sign and publish**, in a separate job in the GitHub Environment `registry-signing`. Only this
-   job can read the signing key. It runs no extension code: it receives the package and the
+2. **Sign and publish**, in a separate job in the GitHub Environment `release-signing`. Only this
+   job can read the release key. It runs no extension code: it receives the package and the
    unsigned release as artifacts.
    1. Set `published_at` to now. Run
       `fyx-registry sign release release.json --package <pkg> --out signed.json`, with the key in
       `FYX_REGISTRY_SIGNING_KEY`.
-   2. Run `fyx-registry verify release signed.json --package <pkg> --keyset keys/keyset.json`.
+   2. Run `fyx-registry verify release signed.json --package <pkg> --keyset keys/releases.json`.
    3. Upload the package to the release `<id>-v<version>`, creating it. Do this before the index
       names it.
    4. Download the current `index.json`. Run
-      `fyx-registry index add --index index.json --release signed.json --keyset keys/keyset.json`,
-      then `fyx-registry verify index index.json --keyset keys/keyset.json`.
+      `fyx-registry index add --index index.json --release signed.json --keyset keys/releases.json`,
+      then `fyx-registry verify index index.json --keyset keys/releases.json`.
    5. Upload `index.json` to the release `index`, replacing it (`gh release upload --clobber`).
 
 ### `blocklist.yml`: trusted
 
-Triggered by a push to `main` that changes `blocklist/`. It runs in the same environment:
+Triggered by a push to `main` that changes `blocklist/`. It runs in its own Environment,
+`blocklist-signing`, which holds the block-list key and nothing else. `publish.yml` cannot read
+this key, and this workflow cannot read the release key.
 
 1. Convert `blocklist.toml` to the unsigned block list, with `sequence` set to the published
    list's sequence + 1 and `generated_at` set to now.
-2. Run `fyx-registry sign blocklist`, then `fyx-registry verify blocklist`.
-3. Upload `blocklist.json` to the release `index`.
+2. Run `fyx-registry sign blocklist blocklist-unsigned.json --out blocklist.json`, with the
+   block-list key in `FYX_REGISTRY_SIGNING_KEY`.
+3. Run `fyx-registry verify blocklist blocklist.json --keyset keys/blocklist.json`.
+4. Upload `blocklist.json` to the release `index`.
 
 ## Publishing
 
@@ -253,57 +267,87 @@ them.
 
 ## Keys
 
-There are two Ed25519 keys, as decision 18 says. **No real key exists yet, and none may ever be
-written into a repository, an issue, a log, a document or an agent session.** Every key in this
-document and in tests is a placeholder or is generated per test run.
+There are four Ed25519 keys: two **keysets** with two keys each (spec decision 18). **No real key
+exists yet, and none may ever be written into a repository, an issue, a log, a document or an
+agent session.** Every key in this document and in tests is a placeholder or is generated per test
+run.
 
-| Key | Key id | Where the seed lives | Used for |
-|---|---|---|---|
-| Registry key | `fyx-2026-a` | GitHub Environment secret `FYX_REGISTRY_SIGNING_KEY` in `registry-signing`, plus an offline backup | Every release and block list |
-| Rotation key | `fyx-2026-b` | Offline only: the owner's password manager and a paper or hardware backup. Never in GitHub. | Taking over when the registry key is retired or compromised |
+| Keyset | Key | Key id (example) | Where the seed lives | Signs |
+|---|---|---|---|---|
+| Release | current | `fyx-rel-2026-a` | Secret `FYX_REGISTRY_SIGNING_KEY` in the Environment `release-signing`, plus an offline backup | Every release |
+| Release | rotation | `fyx-rel-2026-b` | Offline only | Nothing, until it replaces the current key |
+| Block list | current | `fyx-bl-2026-a` | Secret `FYX_REGISTRY_SIGNING_KEY` in the Environment `blocklist-signing`, plus an offline backup | Every block list |
+| Block list | rotation | `fyx-bl-2026-b` | Offline only | Nothing, until it replaces the current key |
 
-Both public keys are in `keys/keyset.json` and are compiled into the client. Only the client
-release decides which keys are trusted: changing `keyset.json` in this repository changes only
-what CI checks against.
+- **Offline** means the owner's password manager plus a paper or hardware backup. An offline key
+  is never stored in GitHub.
+- **Where the public keys go.** The release keys are in `keys/releases.json` and the block-list
+  keys in `keys/blocklist.json`. Both keysets are compiled into the client.
+- **Each document has its own keyset.** The client checks a release only against the release
+  keyset, and the block list only against the block-list keyset. A release key therefore cannot
+  sign a block list that a client accepts, and the other way round.
+- **No format change.** The documents already carry a domain tag, and every `fyx_registry` verify
+  call takes the keyset to check against. The client (plan 3.3, 3.4) passes the right keyset.
+  The "Keys" section of registry-format.md describes one keyset and needs this split.
+- **The client decides.** Only a client release decides which keys are trusted. Changing a keyset
+  file in this repository changes only what CI checks against.
 
 ### Creating the keys
 
 The owner does this by hand, on their own machine. An agent never does it and never sees a seed.
+For each of the four keys:
 
 1. Generate the seed: `openssl rand -base64 32`. Write it into the key file JSON
-   (`{"key_id": "fyx-2026-a", "seed": "…"}`). Use a RAM disk or a folder that is not synced.
-2. Run `fyx-registry public-key --key-file key.json`. Commit the printed entry to
-   `keys/keyset.json` through a PR, and send it to the Fyx client so it is compiled in.
-3. Store the key file's JSON as the Environment secret, and in the password manager.
-4. Delete the key file. Repeat for the rotation key, but skip the GitHub secret.
+   (`{"key_id": "fyx-rel-2026-a", "seed": "…"}`). Use a RAM disk or a folder that is not synced.
+2. Run `fyx-registry public-key --key-file key.json`. Add the printed entry to its keyset file
+   through a PR, and send it to the Fyx client so it is compiled in.
+3. Store the key file's JSON in the password manager. For a current key, also store it as the
+   secret of its Environment.
+4. Delete the key file.
 
-The `registry-signing` Environment:
+The two Environments:
 
-- **Deployment branches:** `main` only. A PR run can never get the secret.
-- **No required reviewers.** A required reviewer would block T0–T1 auto-merge. The protection is
-  that only workflows on `main` run there, and `/.github/` is the owner's.
-- The secret is not available to forks. `pr.yml` never references it.
+| | `release-signing` | `blocklist-signing` |
+|---|---|---|
+| Used by | `publish.yml` only | `blocklist.yml` only |
+| Deployment branches | `main` only | `main` only |
+| Required reviewers | none: a reviewer would block T0–T1 auto-merge | the owner: a block-list publish is always the owner's action |
+
+Neither secret is available to forks, and `pr.yml` references neither. The protection of
+`release-signing` is that only workflows on `main` run there, and `/.github/` is the owner's.
 
 ### Rotation, planned
 
-1. Create the next rotation key (`fyx-2027-a`) offline, and ship a client whose keyset holds the
-   current rotation key and the new one.
-2. Move the current rotation key into the secret: it becomes the registry key. New documents are
-   signed with it.
-3. Re-sign every published release with the new registry key, and publish a new `index.json`.
-4. Once the client that drops the old key is current, remove the old key from `keys/keyset.json`.
+The same steps apply to each keyset. Old clients know the current and the rotation key, so
+documents are always signed with a key that both old and new clients accept.
+
+1. **Promote the rotation key.** Put it into the Environment's secret. It is now the current key.
+   - For releases, re-sign every published release with it and publish a new `index.json`.
+   - For the block list, sign the next list with it.
+2. **Make a new rotation key** offline. Ship a client whose keyset holds the promoted key and the
+   new rotation key.
+3. **Drop the old key.** Once that client is current, remove the old key from the keyset file.
 
 ### Compromise
 
-If the registry key leaks:
+If a **release key** leaks:
 
-1. Delete the secret, which stops publishing.
-2. Switch the secret to the rotation key, and re-sign the index and the block list with it.
-3. Ship a client release whose keyset drops the leaked key.
-4. Review every release signed since the suspected leak. Block what you cannot vouch for.
+1. Delete the secret. This stops publishing.
+2. Promote the release rotation key, and re-sign the index with it.
+3. Ship a client release whose release keyset drops the leaked key.
+4. Review every release signed since the suspected leak. Block what you cannot vouch for: the
+   block-list key is untouched, so the block list still works.
 
-An attacker with the key can also sign a block list with a very high `sequence`. Clients would
-then refuse every real list until the client update ships (open question 2).
+If the **block-list key** leaks, an attacker can block extensions or publish a list with a huge
+`sequence`. Clients would then refuse every real list. The attacker cannot ship code.
+
+1. Delete the secret.
+2. Promote the block-list rotation key.
+3. Ship a client release whose block-list keyset drops the leaked key.
+   - The client verifies its cached copy again when it loads it. A forged list signed by the
+     dropped key then fails verification and is discarded, so the client starts with no cached
+     list.
+   - The next real list is accepted whatever its `sequence`.
 
 ## Block list
 
@@ -359,11 +403,8 @@ Task 3.2:
 1. **Reproducible builds.** Should a mismatch between the PR build and the publish build fail the
    publish? Proposed: yes, once three demo extensions build bit-for-bit identically twice in the
    pinned image.
-2. **A separate block-list key.** With one keyset, the key that signs releases can also sign block
-   lists, including a list with a huge `sequence`. A second key that only block lists accept would
-   need a schema 2 for the client's verification (registry-format.md, "Schema changes").
-3. **New T0–T1 extensions with no human review**, as the owner decided. The CI checks above
+2. **New T0–T1 extensions with no human review**, as the owner decided. The CI checks above
    (reserved and near-copy ids, owner identity) cover squatting, not intent: a T0 panel can still
    show misleading text. Is a review after publishing, plus the block list, enough?
-4. **Where T2 manifest fields live.** `network_domains` and `processes` need `[fyx_ui]` keys and
+3. **Where T2 manifest fields live.** `network_domains` and `processes` need `[fyx_ui]` keys and
    `fyx-ext check` support before any T2 entry can pass `build`.

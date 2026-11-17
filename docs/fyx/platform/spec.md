@@ -71,17 +71,25 @@ line decorations, code lenses, read-only documents, network and processes behind
 15. Registry CI builds every entry **from source** in a pinned toolchain image, runs
     `fyx-ext check` and `fyx-ext test`, signs the package (Ed25519) and publishes package plus
     `index.json` to GitHub Releases. Authors never upload binaries.
-16. A maintainer review of the PR is required for: a new extension, a new T1 or T2 capability, a
-    new network domain or process name, an owner change. A version bump with none of these merges
-    after green CI and one owner approval.
+16. Review by tier (owner, 2026-11-18). An entry whose release is **T0 or T1** merges by itself on
+    green CI. A new T0–T1 extension needs no review. A new version of one needs one of the entry's
+    own owners, as the PR's author or by an approving review. Any release that is **T2** needs the
+    owner of the registry, for every version. So does anything that adds a T2 capability, a network
+    domain or a process name. The owner also approves every `urgent` flag. An owner change needs
+    an existing owner of the entry. Design:
+    [registry-repo.md](registry-repo.md#review-rules).
 17. Client: the Extensions page gets a Fyx tab with search, install, update, uninstall,
     enable/disable, **pin version**, **roll back**, capability list in plain language, publisher,
     source link. Auto-update is on, but a new version installs only when it is **at least 24 h
     old** in the index (security fixes flagged `urgent` skip the wait).
-18. Signatures: the registry public key and one rotation key are compiled in. A package from the
-    registry with a bad signature is refused. A `.fyxext` file installed from disk is allowed
+18. Signatures: releases and the block list are signed by **separate keys**, held apart (owner,
+    2026-11-18). The client compiles in two keysets: release keys and block-list keys, each with a
+    current key and one rotation key. It verifies each document only against its own keyset, so a
+    stolen release key cannot forge a block list. A package from the registry with a bad signature
+    is refused. A `.fyxext` file installed from disk is allowed
     with an "Unsigned, not from the registry" badge and never auto-updates.
-19. Block list: signed `blocklist.json` (id, version range, reason, `urgent`), fetched at startup
+19. Block list: `blocklist.json` (id, version range, reason, `urgent`), signed with the block-list
+    key (decision 18), fetched at startup
     and every **6 h**. A matching installed version is **disabled at once**, the user gets a
     notification, and if the kept previous version is not blocked the host rolls back to it. The
     last good block list is cached; a fetch failure never disables anything.
