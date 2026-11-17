@@ -3,12 +3,12 @@
 # extension.toml as fyx_ui.wasm, so each demo directory loads as a UI extension.
 # Usage: script/fyx-build-demos [--release] [extra cargo build args, e.g. -j 2]
 # Then point the dev build at the directories, e.g. on Windows:
-#   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo
+#   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;<repo>\extensions\fyx_demo_gallery
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-demos=(fyx_demo_counter fyx_demo_todo)
+demos=(fyx_demo_counter fyx_demo_todo fyx_demo_gallery)
 profile=debug
 cargo_args=()
 if [[ "${1:-}" == "--release" ]]; then
