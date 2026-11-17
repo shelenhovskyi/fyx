@@ -1,5 +1,5 @@
 // Fyx's default settings, layered over Zed's `default.json` when Fyx starts
-// (`fyx_default_settings` in `crates/zed/src/main.rs`). Only the values that
+// (`crates/zed/src/zed/fyx.rs`, called from `main.rs`). Only the values that
 // differ from Zed's defaults live here; `default.json` stays as upstream ships
 // it, so rebases do not conflict and upstream tests keep Zed's defaults.
 //
@@ -43,5 +43,13 @@
   // agent panel's options menu; the FYX_AGENT_REVIEW environment variable overrides it.
   "agent_review": {
     "enabled": false,
+  },
+  // The agent's default model is a bring-your-own-key provider, not Zed's hosted models
+  // (zed.dev). Set an Anthropic API key, or pick any other configured provider.
+  "agent": {
+    "default_model": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+    },
   },
 }

@@ -211,10 +211,7 @@ fn main() {
     util::prevent_root_execution();
 
     let mut args = Args::parse();
-    // fyx: accept fyx:// links on the command line (and forwarded to a running instance).
-    for arg in &mut args.paths_or_urls {
-        *arg = zed::fyx_url_to_internal(std::mem::take(arg));
-    }
+    zed::fyx::rewrite_url_args(&mut args.paths_or_urls); // fyx: accept fyx:// links
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
@@ -495,14 +492,12 @@ fn main() {
         zed_actions::init();
 
         release_channel::init(app_version, cx);
-        let fyx_channel = ReleaseChannel::global(cx); // fyx: AppUserModelID dev.fyx.Fyx, not the exe path
-        cx.set_app_identity(fyx_channel.app_id(), fyx_channel.display_name());
         gpui_tokio::init(cx);
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
         settings::init(cx);
-        fyx_default_settings(cx); // fyx: telemetry off, no zed.dev (assets/settings/fyx.json)
+        zed::fyx::init(cx); // fyx: app identity, Fyx default settings, no zed.dev onboarding
         zlog_settings::init(cx);
         zed::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
@@ -1817,23 +1812,6 @@ impl ToString for IdType {
             IdType::New(id) | IdType::Existing(id) => id.clone(),
         }
     }
-}
-
-/// fyx: layers Fyx's defaults (`assets/settings/fyx.json`) over Zed's `default.json`. Only the
-/// app does this, so `default.json` stays upstream's and tests keep Zed's defaults.
-fn fyx_default_settings(cx: &mut App) {
-    let parse = |path: &str| {
-        let content = util::asset_str::<settings::SettingsAssets>(path);
-        settings::parse_json_with_comments::<serde_json::Value>(&content)
-            .unwrap_or_else(|error| panic!("failed to parse {path}: {error}"))
-    };
-    let mut defaults = parse("settings/default.json");
-    util::merge_non_null_json_value_into(parse("settings/fyx.json"), &mut defaults);
-    SettingsStore::update_global(cx, |store, cx| {
-        store
-            .set_default_settings(&defaults.to_string(), cx)
-            .expect("Fyx default settings are invalid");
-    });
 }
 
 fn parse_url_arg(arg: &str, cx: &App) -> String {
