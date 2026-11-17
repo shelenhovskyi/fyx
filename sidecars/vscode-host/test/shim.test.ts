@@ -4,7 +4,11 @@ import { ConfigStore, flatten } from "../src/shim/config.ts";
 import { DocumentStore } from "../src/shim/documents.ts";
 import { globToRegExp, matchSelector } from "../src/shim/languages.ts";
 import { DiagnosticSeverity, Position, Range, Selection, TextEdit, Uri } from "../src/shim/types.ts";
-import { splitCodicons } from "../src/ui/surfaces.ts";
+import { SurfaceRegistry, splitCodicons } from "../src/ui/surfaces.ts";
+import { InputBoxImpl, showInputBox } from "../src/ui/quickpick.ts";
+import { Coverage, isNotImplemented } from "../src/coverage.ts";
+import type { HostContext } from "../src/context.ts";
+import type { Update } from "../src/schema.ts";
 import { tokenForColor } from "../src/ui/theme.ts";
 
 test("Uri parses, prints and joins like VS Code", () => {
@@ -43,9 +47,11 @@ test("TextDocument line and offset math, edits and change events", () => {
   assert.deepEqual(doc.positionAt(6).toJSON(), { line: 1, character: 1 });
   assert.equal(doc.getText(new Range(1, 0, 2, 3)), "two\nthr");
   assert.deepEqual(doc.getWordRangeAtPosition(new Position(2, 2))?.toJSON(), { start: { line: 2, character: 0 }, end: { line: 2, character: 5 } });
-  store.edit(doc, [TextEdit.insert(new Position(0, 0), ">"), TextEdit.replace(new Range(2, 0, 2, 5), "3")]);
+  store.applyConfirmed(doc, 1, [TextEdit.insert(new Position(0, 0), ">"), TextEdit.replace(new Range(2, 0, 2, 5), "3")]);
   assert.equal(doc.getText(), ">one\r\ntwo\n3");
   assert.equal(doc.version, 2);
+  store.applyConfirmed(doc, 1, [TextEdit.insert(new Position(0, 0), "again")]);
+  assert.equal(doc.getText(), ">one\r\ntwo\n3", "a host sync that arrived first already holds the confirmed edit");
   store.replace(doc.uri, 1, "stale");
   assert.equal(doc.getText(), ">one\r\ntwo\n3", "older host versions are ignored");
   store.replace(doc.uri, 5, "fresh");
@@ -92,4 +98,40 @@ test("codicons and colours", () => {
   assert.deepEqual(tokenForColor({ id: "statusBarItem.errorBackground" }), { token: "error" });
   assert.deepEqual(tokenForColor({ id: "editorWarning.foreground" }), { token: "warning" });
   assert.deepEqual(tokenForColor("rgba(255,0,0,0.3)"), { token: null, dropped: "rgba(255,0,0,0.3)" });
+});
+
+/** Enough of a HostContext for the UI models: surfaces, coverage and an extension id. */
+function uiContext(): { ctx: HostContext; sent: Update[]; coverage: Coverage } {
+  const sent: Update[] = [];
+  const coverage = new Coverage();
+  const surfaces = new SurfaceRegistry({
+    pushUpdate: async (_id, update) => void sent.push(update),
+    surfacesChanged: () => {},
+  });
+  return { ctx: { ext: { id: "p.x" }, surfaces, coverage } as unknown as HostContext, sent, coverage };
+}
+
+const tick = () => new Promise((r) => setImmediate(r));
+
+test("InputBox: validationMessage and prompt re-render, password is refused", async () => {
+  const { ctx, sent, coverage } = uiContext();
+  const box = new InputBoxImpl(ctx);
+  box.prompt = "Name?";
+  box.show();
+  const mounted = await ctx.surfaces.mount(box.surface.id);
+  assert.ok(mounted.some((n) => "text" in n.props && n.props.text.content === "Name?"));
+
+  box.validationMessage = "too short";
+  await tick();
+  assert.deepEqual(sent.at(-1), { patches: [{ "set-props": [4, { text: { content: "too short", color: "error", bold: false, monospace: false } }] }] });
+  box.validationMessage = undefined;
+  box.prompt = "Full name?";
+  await tick();
+  assert.deepEqual(sent.at(-1), { patches: [{ "set-props": [4, { text: { content: "Full name?", color: "text-muted", bold: false, monospace: false } }] }] });
+
+  box.password = false;
+  assert.throws(() => (box.password = true), (err: unknown) => isNotImplemented(err) && err.api === "vscode.InputBox.password" && /not supported in Fyx 0\.1/.test(err.message));
+  assert.equal(box.password, false);
+  await assert.rejects(showInputBox(ctx, { password: true }), /vscode\.InputBox\.password: masked input \(password: true\) is not supported in Fyx 0\.1/);
+  assert.equal(coverage.report().notImplemented["vscode.InputBox.password"], 2);
 });

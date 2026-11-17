@@ -13,10 +13,33 @@ language, builds for a second OS, notarization, marketplace.
 | Phase | Hours | What | State |
 |---|---|---|---|
 | 0 | 0–2 | Freeze interfaces: fork at stable tag, warm build, this plan, WIT, crate skeletons | done (2026-11-17) |
-| 1 | 2–14 | Parallel workers W1–W8 | in progress: W2, W4, W8 and W5 phase A merged into `integration` (2026-11-17; reviews `tasks/reviews/integration-1.md`, `integration-2.md`); W1, W3 running; W5 phase B waits for W3 |
-| 2 | 14–20 | First integration, run the app, judge pass, fresh restart of drifting agents | pending |
-| 3 | 20–30 | Second wave: agent review, decorations, polish | pending |
+| 1 | 2–14 | Parallel workers W1–W8 | done (2026-11-17): W1–W5 and W8 merged on `fyx/main` (`2e91298e4a`); W2 and W8 sessions archived; reviews in `tasks/reviews/` |
+| 2 | 14–20 | First integration, run the app, judge pass, fresh restart of drifting agents | done (2026-11-17): the dev build runs the demo panels (W3 user check closed); W5's end-to-end review check passed in the dev build (`b2e90dfdea`); judge passes integration-1 to 3 |
+| 3 | 20–30 | Second wave: agent review, decorations, polish | in progress: W6 decorations; W5 phase B merged |
 | 4 | last 6–8 | Integration only, manual testing in the running editor, human review | pending |
+| 5 | after the sprint | Phase 5 backlog (below) | planned |
+
+## Phase 5 backlog
+
+After the sprint, in this order within each owner. The headline is W5's review policy. Open review
+findings that belong to an item are noted next to it (`tasks/reviews/integration-3.md`).
+
+| # | Owner | Item | Notes |
+|---|---|---|---|
+| 1 | W5 | **Review policy (headline).** Ship it in four steps, each building on the previous one: (a) a review-mode setting, replacing the `FYX_AGENT_REVIEW` env var; (b) review per agent turn, not per write; (c) detection of writes that bypass the gate (disk changes with no `fs/write_text_file`); (d) project rules in `.fyx/review.toml` (paths that always need review or never do) | First, gate the script driver to dev builds (integration-3 #1). Then surface failures of host-applied hunks (#3) |
+| 2 | W3 | Install UX: an installed-extensions folder and an install action, replacing `FYX_UI_DEV_EXTENSIONS` | integration-3 #2 |
+| 3 | W3 | Hot reload of a UI extension's component | |
+| 4 | W3 | Keybindings for panels (`ToggleExtensionPanel` per surface) | |
+| 5 | W3 | A real `diff-view` on Zed's diff editor, replacing the placeholder | |
+| 6 | W3 | Renderer fixes from the cycle-3 review: the `list-rows` loop after a resync, stale row clicks, the remount counter, Retry on a disabled instance, input lost on remount | integration-3 #8–#10 |
+| 7 | W1 | Remaining brand gaps: the CLI binary and its `Zed.exe` lookup, the clap name, the installer | integration-3 #5 |
+| 8 | W1 | Review the cloud-off defaults (`assets/settings/fyx.json`) and measure a `cloud` cargo feature that compiles out Zed's cloud crates | Move `fyx_default_settings` and `fyx_url_to_internal` out of upstream files (integration-3 #4) |
+| 9 | W2c (later) | Move `crates/extension_host/src/wasm_host/fyx_ui*` into a Fyx-owned crate, leaving one hook in `extension_host` | Also integration-1 #11 and F2 |
+| 10 | W0 | `fyx:ui` 0.2 design as one world: `request-tick` and `modal` first, then the rest of `tasks/wit-0.2.md` | Add `push-update -> result` (integration-3 #6) |
+| 11 | W0 | Own CI: `fyx_*` GitHub workflows (gate, lockfile check, licenses, demo build). All 46 upstream Zed workflows are disabled on the fork | Mark the `Cargo.toml` members (integration-1 #13) |
+| 12 | W8 | VS Code adapter, Rust side: launch the sidecar under `--permission`, bridge JSON-RPC to the `ui_ext` tree and answer `push-update` | W8-7 to W8-10, `main.ts` sandbox check (W8-9) |
+| 13 | W5 + W3 | One shared end-to-end dev driver, built from W5's review script driver, that also drives `fyx:ui` panels. Compiled only into dev builds | Replaces per-stream drivers |
+| 14 | W7 | Fix the author docs' drift (D1–D10), then keep `docs/fyx/` checked against each merge | integration-3, docs section |
 
 ## Rules for every agent
 

@@ -1,10 +1,10 @@
 // Reads a .vsix (or an unpacked extension folder) and converts its declarative contributions:
 // `contributes.themes`, `contributes.snippets`, `contributes.keybindings`.
 
-import { readFileSync, statSync, readdirSync } from "node:fs";
-import { join, posix, relative, sep } from "node:path";
+import { mkdirSync, readFileSync, statSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { parseJsonc } from "./jsonc.ts";
-import { readZip } from "./zip.ts";
+import { readZip, unsafePathReason } from "./zip.ts";
 import { appearanceOf, convertTheme, themeFamily, type ConvertWarning, type VsCodeTheme, type ZedThemeFamily } from "./theme.ts";
 import { convertSnippetFile, mergeSnippetFiles, type VsCodeSnippet, type ZedSnippet } from "./snippets.ts";
 import { convertKeybindings, type Platform, type VsCodeKeybinding, type ZedKeymapSection } from "./keybindings.ts";
@@ -16,10 +16,16 @@ export interface ExtensionFiles {
 
 export function openExtension(path: string): ExtensionFiles {
   if (statSync(path).isDirectory()) {
-    return { read: (p) => tryRead(join(path, ...posix.normalize(p).split("/"))) };
+    const root = resolve(path);
+    return {
+      read: (p) => {
+        const full = resolve(root, ...posix.normalize(p).split("/"));
+        return isInside(root, full) ? tryRead(full) : undefined;
+      },
+    };
   }
   const entries = readZip(readFileSync(path));
-  return { read: (p) => entries.get(posix.join("extension", posix.normalize(p))) };
+  return { read: (p) => entries.get(posix.join("extension", posix.normalize(p)))?.read() };
 }
 
 function tryRead(path: string): Buffer | undefined {
@@ -86,7 +92,7 @@ export interface ConversionResult {
 
 export function convertExtension(files: ExtensionFiles, options: { platform?: Platform } = {}): ConversionResult {
   const manifest = readManifest(files);
-  const id = `${manifest.publisher ?? "unknown"}.${manifest.name}`;
+  const id = extensionId(manifest);
   const contributes = manifest.contributes ?? {};
   const warnings: string[] = [];
   const result: ConversionResult = { id, manifest, snippets: new Map(), warnings };
@@ -144,6 +150,21 @@ export function convertExtension(files: ExtensionFiles, options: { platform?: Pl
   return result;
 }
 
+// The same character set `vsce` accepts for `name` and `publisher`. The id names the output
+// folder, and it comes from an untrusted package.json.
+const ID_SEGMENT = /^[a-z0-9][a-z0-9._-]*$/i;
+
+/** `publisher.name`, after checking both are plain names that cannot form a path. */
+export function extensionId(manifest: ExtensionManifest): string {
+  const publisher = manifest.publisher ?? "unknown";
+  for (const [field, value] of [["publisher", publisher], ["name", manifest.name]] as const) {
+    if (typeof value !== "string" || !ID_SEGMENT.test(value) || value.includes("..")) {
+      throw new Error(`package.json ${field} ${JSON.stringify(value)} is not a valid extension name`);
+    }
+  }
+  return `${publisher}.${manifest.name}`;
+}
+
 /** Loads a theme file, following `include` (base theme) and string `tokenColors` (path to a JSON file). */
 export function loadTheme(files: ExtensionFiles, path: string, depth = 0): VsCodeTheme {
   if (depth > 8) throw new Error("theme include chain too deep");
@@ -189,8 +210,14 @@ export function outputFiles(result: ConversionResult): Map<string, string> {
     themes.push(p);
   }
   const snippetPaths: string[] = [];
+  const warnings = [...result.warnings];
   for (const [scope, snippets] of [...result.snippets].sort(([a], [b]) => a.localeCompare(b))) {
     const p = `snippets/${scope}.json`;
+    const unsafe = unsafePathReason(p);
+    if (unsafe) {
+      warnings.push(`ERROR snippets scope ${JSON.stringify(scope)} skipped: not a safe file name (${unsafe})`);
+      continue;
+    }
     files.set(p, json(snippets));
     snippetPaths.push(p);
   }
@@ -212,8 +239,40 @@ export function outputFiles(result: ConversionResult): Map<string, string> {
     ];
     files.set("extension.toml", toml.join("\n"));
   }
-  if (result.warnings.length > 0) files.set("CONVERSION-WARNINGS.txt", `${result.warnings.join("\n")}\n`);
+  if (warnings.length > 0) files.set("CONVERSION-WARNINGS.txt", `${warnings.join("\n")}\n`);
   return files;
+}
+
+/**
+ * Writes `outputFiles(result)` to `<outRoot>/<result.id>/` and returns that folder. Every path is
+ * checked before anything is written: none may leave the output folder.
+ */
+export function writeOutput(outRoot: string, result: ConversionResult, files = outputFiles(result)): string {
+  const root = resolve(outRoot);
+  const idProblem = unsafePathReason(result.id);
+  const outDir = resolve(root, result.id);
+  if (idProblem || result.id.includes("/") || !isInside(root, outDir)) {
+    throw new Error(`refusing to write: extension id ${JSON.stringify(result.id)} is not a safe folder name`);
+  }
+  const targets: [string, string][] = [];
+  for (const [path, content] of files) {
+    const problem = unsafePathReason(path);
+    const full = resolve(outDir, ...path.split("/"));
+    if (problem || !isInside(outDir, full)) {
+      throw new Error(`refusing to write ${JSON.stringify(path)}: outside the output folder${problem ? ` (${problem})` : ""}`);
+    }
+    targets.push([full, content]);
+  }
+  for (const [full, content] of targets) {
+    mkdirSync(dirname(full), { recursive: true });
+    writeFileSync(full, content);
+  }
+  return outDir;
+}
+
+function isInside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 function tomlString(s: string): string {

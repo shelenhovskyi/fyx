@@ -6,7 +6,7 @@
 use std::{path::PathBuf, rc::Rc};
 
 use agent_client_protocol::v2::schema as acp_v2;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use gpui::{App, AsyncApp, Entity, Global, Task, WeakEntity};
 use language::{Buffer, BufferSnapshot};
 
@@ -65,11 +65,41 @@ pub(crate) async fn gate_agent_write(
         old_text: snapshot.text(),
         new_text,
     };
-    let outcome = cx.update(|cx| gate.review_write(write, cx)).await?;
+    let outcome = cx
+        .update(|cx| gate.review_write(write, cx))
+        .await
+        .map_err(|error| feedback_error(format!("{error:#}")))?;
     match outcome.content {
         Some(content) => Ok((content, outcome.feedback)),
-        None => Err(anyhow!(outcome.feedback.unwrap_or_else(|| {
+        None => Err(feedback_error(outcome.feedback.unwrap_or_else(|| {
             "The user rejected this edit; the file is unchanged.".into()
         }))),
+    }
+}
+
+/// An error that reaches the agent with the review feedback as its JSON-RPC message (and, as for any
+/// other error, its data). A plain `anyhow` error would reach it as "Internal error" with the text
+/// only in `data`, which many agents never show to the model.
+pub(crate) fn feedback_error(feedback: String) -> anyhow::Error {
+    anyhow::Error::new(
+        agent_client_protocol::Error::new(
+            agent_client_protocol::ErrorCode::INTERNAL_ERROR,
+            feedback.clone(),
+        )
+        .data(feedback),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feedback_reaches_the_agent_as_the_error_message() {
+        // The conversion `agent_servers` applies to a failed `fs/write_text_file`.
+        let error = agent_client_protocol::Error::from(feedback_error("Hunk 2 rejected".into()));
+        assert_eq!(error.code, agent_client_protocol::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(error.message, "Hunk 2 rejected");
+        assert_eq!(error.data, Some(serde_json::json!("Hunk 2 rejected")));
     }
 }

@@ -105,6 +105,18 @@ impl ProposedEdit {
         &self.hunks
     }
 
+    /// The hunk shown at `row` of the new text. A pure deletion is shown at the row that follows it.
+    pub fn hunk_at_new_row(&self, row: u32) -> Option<usize> {
+        self.hunks
+            .iter()
+            .position(|hunk| hunk.new_rows.contains(&row))
+            .or_else(|| {
+                self.hunks
+                    .iter()
+                    .position(|hunk| hunk.new_rows.is_empty() && hunk.new_rows.start == row)
+            })
+    }
+
     pub fn set_decision(&mut self, hunk_index: usize, decision: HunkDecision) -> Result<()> {
         self.hunk_mut(hunk_index)?.decision = decision;
         Ok(())
@@ -201,15 +213,17 @@ impl ProposedEdit {
         let path = self.abs_path.display();
         let mut feedback = match resolution {
             Resolution::Unchanged | Resolution::AcceptedAll if !has_comments => return None,
-            Resolution::Unchanged | Resolution::AcceptedAll => {
-                format!("The user applied your edit to {path} and left comments.")
-            }
+            Resolution::Unchanged | Resolution::AcceptedAll => format!(
+                "Your edit to {path} was applied in full; do not write it again. The user left \
+                 comments on it:"
+            ),
             Resolution::RejectedAll => {
                 format!("The user rejected your edit to {path}; the file is unchanged.")
             }
             Resolution::Partial { accepted, .. } => format!(
                 "The user applied {accepted} of {} hunks of your edit to {path}; the rejected hunks \
-                 were not written. Re-read the file before editing it again.",
+                 were not written and must not be written again. Re-read the file before editing \
+                 it.",
                 self.hunks.len()
             ),
             Resolution::Pending { undecided } => {
@@ -333,6 +347,24 @@ mod tests {
         assert_eq!(hunks[1].new_text, "    five();\n");
         assert_eq!(edit.resolution(), Resolution::Pending { undecided: 2 });
         assert!(edit.apply_accepted().is_err());
+        assert_eq!(edit.hunk_at_new_row(1), Some(0));
+        assert_eq!(edit.hunk_at_new_row(5), Some(1));
+        assert_eq!(edit.hunk_at_new_row(2), None);
+
+        let deletion = super::ProposedEdit::new(
+            PathBuf::from("/a"),
+            "a
+b
+c
+"
+            .into(),
+            "a
+c
+"
+            .into(),
+        );
+        assert_eq!(deletion.hunks()[0].new_rows, 1..1);
+        assert_eq!(deletion.hunk_at_new_row(1), Some(0));
     }
 
     #[test]

@@ -13,5 +13,6 @@ blocks Phase 1–4. Decide them together after Phase 4, as one 0.2 world.
 | 6 | Runtime add/remove of surfaces | VS Code creates pickers/output channels after `surfaces()` | sidecar notification `fyx/surfacesChanged` | W8 |
 | 7 | `ui-event::dismissed` | user closed a surface | sidecar request `fyx/surfaceClosed` | W8 |
 | 8 | `indent` prop on rows, `tooltip` on button | tree views, icon buttons | flattened labels, no tooltip | W8 |
+| 9 | `push-update: func(...) -> result<_, string>` | push-update returns a result (accepted/rejected) so the guest can resync; the sidecar's `push-update` is already a request (W8b) | guest cannot see a rejected push; re-mount after an error reply | judge integration-3 #6 |
 
 Details for 5–8: `docs/vscode-coverage.md` ("Schema gaps").

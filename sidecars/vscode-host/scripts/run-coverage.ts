@@ -105,7 +105,8 @@ async function runSidecar(id: string, extRoot: string, manifest: Record<string, 
   const host = MockHost.spawn({
     permission: { read: [extRoot, work], write: [work] },
     cwd: work,
-    env: { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: join(home, ".cache"), XDG_CONFIG_HOME: join(home, ".config"), ...(probe ? { FYX_VSCODE_PROBE: "1" } : {}) },
+    probe,
+    env: { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: join(home, ".cache"), XDG_CONFIG_HOME: join(home, ".config") },
   });
   const started = Date.now();
   const commandResults: Record<string, string> = {};

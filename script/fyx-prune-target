@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# fyx: prune superseded test/bin artifacts from a cargo target dir.
+#
+# Cargo never deletes old hashes of test and bin outputs, so every rebuild with
+# different flags or deps leaves another `<stem>-<hash>.exe` + `.pdb` (often
+# 0.5-1.6 GB each) behind. For each stem in `debug/deps` and
+# `wasm32-wasip2/*/deps` this keeps the newest output (by mtime) and deletes the
+# `.exe`/`.pdb`/`.wasm`/`.d` files of older hashes. Library hashes (rlib-only)
+# are never touched. Cargo relinks anything it still needs.
+#
+# Usage: script/fyx-prune-target [--dry-run] [--keep N] [--alias PATH]... TARGET_DIR
+#
+# Refuses to run while any cargo/rustc/nextest/link.exe command line, or any
+# running executable, refers to TARGET_DIR, its resolved path, or an --alias
+# (pass the other spellings of the same dir, e.g. the junction path).
+# Windows-only (Git Bash): uses PowerShell for process and volume queries.
+set -euo pipefail
+
+dry_run=0
+keep=1
+aliases=()
+target=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) dry_run=1 ;;
+        --keep) keep="$2"; shift ;;
+        --alias) aliases+=("$2"); shift ;;
+        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        *) target="$1" ;;
+    esac
+    shift
+done
+[[ -n "$target" && -d "$target" ]] || { echo "usage: $0 [--dry-run] [--keep N] [--alias PATH]... TARGET_DIR" >&2; exit 2; }
+
+win() { cygpath -w "$1"; }
+target_win="$(win "$target")"
+# Resolve junctions/symlinks to the real directory.
+real_win="$(powershell -NoProfile -Command "\$p = Get-Item -LiteralPath '$target_win'; while (\$p.LinkType) { \$p = Get-Item -LiteralPath (\$p.Target | Select-Object -First 1) }; \$p.FullName")"
+real_win="${real_win%$'\r'}"
+
+patterns=("$target_win" "$real_win")
+for a in "${aliases[@]}"; do patterns+=("$(win "$a")"); done
+# The repo's default `target` dir, if it resolves to the same place.
+repo_target="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)/target" || true
+if [[ -d "$repo_target" ]]; then
+    rt_win="$(win "$repo_target")"
+    rt_real="$(powershell -NoProfile -Command "\$p = Get-Item -LiteralPath '$rt_win'; while (\$p.LinkType) { \$p = Get-Item -LiteralPath (\$p.Target | Select-Object -First 1) }; \$p.FullName")"
+    [[ "${rt_real%$'\r'}" == "$real_win" ]] && patterns+=("$rt_win")
+fi
+# Loose match on the last two path components (catches junction spellings like D:\fyx-targets\w3).
+patterns+=("\\$(basename "$(dirname "$real_win")")\\$(basename "$real_win")\\")
+
+pat_list="$(printf "'%s'," "${patterns[@]//\'/\'\'}")"
+busy="$(powershell -NoProfile -Command "
+\$pats = @(${pat_list%,}) | ForEach-Object { \$_.ToLower().TrimEnd('\\') }
+Get-CimInstance Win32_Process | Where-Object {
+    # Build tools: match their command line. Anything else: only its executable
+    # path (a running test binary), so this script's own shells don't match.
+    if (\$_.Name -match '^(cargo|cargo-nextest|cargo-clippy|rustc|link|rust-lld|lld-link)\.exe$') {
+        \$s = '' + \$_.CommandLine
+    } else {
+        \$s = '' + \$_.ExecutablePath
+    }
+    \$s = \$s.ToLower().Replace('/', '\\')
+    \$s -and (\$pats | Where-Object { \$s.Contains(\$_) })
+} | ForEach-Object { '{0} {1}' -f \$_.ProcessId, \$_.Name }
+")"
+if [[ -n "${busy//[$'\r\n ']/}" ]]; then
+    echo "refusing: processes refer to $target_win:" >&2
+    echo "$busy" >&2
+    exit 1
+fi
+
+drive="${real_win:0:1}"
+free_gb() { powershell -NoProfile -Command "[math]::Round((Get-Volume $drive).SizeRemaining/1GB,1)" | tr -d '\r'; }
+before="$(free_gb)"
+
+dirs=("$target/debug/deps")
+for d in "$target"/wasm32-wasip2/*/deps; do [[ -d "$d" ]] && dirs+=("$d"); done
+
+total=0
+count=0
+for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    # stem, hash, mtime of each test/bin output (.exe/.wasm). Hashes without one
+    # (rlibs, proc-macro .dll/.pdb) are never touched.
+    victims="$(
+        find "$dir" -maxdepth 1 -type f \( -name '*.exe' -o -name '*.wasm' \) -printf '%T@ %f\n' |
+        sed -nE 's/^([0-9.]+) (.+)-([0-9a-f]{16})\.(exe|wasm)$/\2 \3 \1/p' |
+        sort -k1,1 -k3,3nr |
+        awk -v keep="$keep" '
+            { if (seen[$1 SUBSEP $2]++) next
+              n[$1]++
+              if (n[$1] > keep) print $1 "-" $2 }'
+    )"
+    [[ -n "$victims" ]] || continue
+    while read -r base; do
+        for ext in exe pdb wasm d; do
+            f="$dir/$base.$ext"
+            [[ -f "$f" ]] || continue
+            sz=$(stat -c %s "$f")
+            total=$((total + sz))
+            count=$((count + 1))
+            if [[ $dry_run -eq 1 ]]; then echo "would delete $f"; else rm -f -- "$f"; fi
+        done
+    done <<< "$victims"
+done
+
+after="$(free_gb)"
+printf '%s %d files, %.1f GB logical; %s: free %s GB -> %s GB\n' \
+    "$([[ $dry_run -eq 1 ]] && echo 'would delete' || echo 'deleted')" \
+    "$count" "$(awk -v t="$total" 'BEGIN{print t/1073741824}')" "$drive" "$before" "$after"

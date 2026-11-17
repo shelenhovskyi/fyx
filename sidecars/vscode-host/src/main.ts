@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { builtinModules } from "node:module";
 import { format } from "node:util";
 import { ExtensionHost } from "./host.ts";
+import { enableProbeMode } from "./shim/api.ts";
 import { RpcPeer } from "./rpc.ts";
 import type { LogLevel } from "./schema.ts";
 
@@ -40,6 +41,13 @@ fs.existsSync = ((path: fs.PathLike) => {
     return false;
   }
 }) as typeof fs.existsSync;
+
+if (process.argv.includes("--fyx-coverage-probe")) {
+  enableProbeMode();
+  writeErr("[warn] coverage probe mode: missing vscode.* APIs return inert stubs instead of throwing\n");
+} else if (process.env.FYX_VSCODE_PROBE) {
+  writeErr("[warn] FYX_VSCODE_PROBE is ignored; probe mode needs --fyx-coverage-probe (coverage runs only)\n");
+}
 
 const rpc = new RpcPeer((line) => void writeOut(line));
 const host = new ExtensionHost(rpc);

@@ -1,6 +1,6 @@
 # W2 WIT and host bindings
 
-**Owns:** `crates/ui_ext/src/`, a new `fyx_ui` module inside `crates/extension_host/src/wasm_host/`.
+**Owns:** `crates/ui_ext/src/` and `crates/ui_ext/tests/`, the `fyx_ui` module inside `crates/extension_host/src/wasm_host/` (moves to a Fyx crate in W2c, Phase 5).
 
 **Deliverable**
 - Host bindings for `fyx:ui@0.1.0` via `wasmtime::component::bindgen!` (path `ui_ext::WIT_DIR`), on the wasmtime version Zed pins.

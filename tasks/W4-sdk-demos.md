@@ -1,6 +1,6 @@
 # W4 Guest SDK and demos
 
-**Owns:** `crates/ui_ext_sdk/`, `extensions/fyx_demo_*`.
+**Owns:** `crates/ui_ext_sdk/`, `extensions/fyx_demo_*`, `script/fyx-build-demos`.
 
 **Deliverable**
 - Ergonomic Rust SDK over the generated bindings: a node builder, `register_extension!`-style macro, patch helpers. Apache-2.0.

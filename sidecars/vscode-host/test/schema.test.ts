@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyUpdate, diff, node, props, validateNodes, type Node } from "../src/schema.ts";
+import { applyUpdate, diff, MAX_PATCHES_PER_UPDATE, node, props, validateNodes, type Node, type Update } from "../src/schema.ts";
+import { SurfaceRegistry, type SurfaceModel } from "../src/ui/surfaces.ts";
 
 const tree: Node[] = [
   node(1, null, props.flex({ direction: "row" })),
@@ -58,4 +59,65 @@ test("applyUpdate rejects invalid patches", () => {
   assert.throws(() => applyUpdate(tree, { patches: [{ insert: { node: node(9, 1, props.text("x")), before: 4 } }] }), /not a sibling/);
   assert.deepEqual(applyUpdate(tree, { patches: [{ remove: 3 }] }).map((n) => n.id), [1, 2], "remove takes the subtree");
   assert.throws(() => applyUpdate(tree, { patches: Array.from({ length: 2049 }, () => ({ remove: 2 })) }), /host cap/);
+});
+
+test("diff falls back to replace above the per-update patch cap", () => {
+  const rows = (n: number, label: string): Node[] => [node(1, null, props.flex()), ...Array.from({ length: n }, (_, k) => node(k + 2, 1, props.text(`${label}${k}`)))];
+  const atCap = diff(rows(MAX_PATCHES_PER_UPDATE, "a"), rows(MAX_PATCHES_PER_UPDATE, "b"));
+  assert.ok(typeof atCap === "object" && "patches" in atCap && atCap.patches.length === MAX_PATCHES_PER_UPDATE);
+  const next = rows(MAX_PATCHES_PER_UPDATE + 1, "b");
+  assert.deepEqual(diff(rows(MAX_PATCHES_PER_UPDATE + 1, "a"), next), { replace: next });
+});
+
+test("surface registry: one push in flight, replace after a refusal, no retry loop", async () => {
+  let label = "a";
+  const model: SurfaceModel = {
+    surface: { id: "s", title: "S", kind: "panel", "default-size": null } as never,
+    render: () => [node(1, null, props.flex()), node(2, 1, props.text(label))],
+    handleEvent: () => {},
+  };
+  const sent: Update[] = [];
+  const answers: ((refuse: boolean) => void)[] = [];
+  const registry = new SurfaceRegistry({
+    pushUpdate: (_id, update) => {
+      sent.push(update);
+      return new Promise((resolve, reject) => answers.push((refuse) => (refuse ? reject(new Error("no")) : resolve(null))));
+    },
+    surfacesChanged: () => {},
+  });
+  registry.add(model);
+  await registry.mount("s");
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  label = "b";
+  registry.invalidate("s");
+  await tick();
+  assert.equal(sent.length, 1);
+  label = "c";
+  registry.invalidate("s");
+  await tick();
+  assert.equal(sent.length, 1, "no second push while the first is unanswered");
+
+  answers[0](true);
+  await tick();
+  await tick();
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], { replace: model.render() }, "a refused diff is followed by the whole tree");
+
+  answers[1](true);
+  await tick();
+  await tick();
+  assert.equal(sent.length, 2, "a refused replace is not retried until the model changes");
+  assert.ok(registry.needsResync("s"));
+
+  label = "d";
+  registry.invalidate("s");
+  await tick();
+  assert.deepEqual(sent[2], { replace: model.render() });
+  answers[2](false);
+  await tick();
+  label = "e";
+  registry.invalidate("s");
+  await tick();
+  assert.ok(typeof sent[3] === "object" && "patches" in sent[3], "accepted replace: patches again");
 });

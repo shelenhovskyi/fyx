@@ -6205,6 +6205,7 @@ mod tests {
                 "action",
                 "activity_indicator",
                 "agent",
+                "agent_review", // fyx: agent_review pane actions
                 "agents_sidebar",
                 "app_menu",
                 "assistant",

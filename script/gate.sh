@@ -2,13 +2,15 @@
 # Merge gate for the integration branch: nothing red gets merged.
 # Usage: script/gate.sh [base-ref]   (default base: the upstream tag in FYX_UPSTREAM)
 #        FULL=1 script/gate.sh       also builds the `zed` binary (W0 only, on a schedule)
+# Gates only crates under crates/ and extensions/ that changed since base; never crates/collab
+# (server-only, not built by Fyx) and never docs/.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"
 
 changed_crates=$(
-    git diff --name-only "$base"...HEAD -- crates extensions \
+    git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \
         | awk -F/ '{print $1"/"$2"/Cargo.toml"}' | sort -u \
         | while read -r manifest; do
             [[ -f "$manifest" ]] && sed -n 's/^name = "\(.*\)"/\1/p' "$manifest" | head -1

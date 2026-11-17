@@ -310,7 +310,8 @@ export function applyUpdate(tree: readonly Node[], update: Update): Node[] {
 /**
  * Turns `prev` into `next` with the fewest simple patches: `set-props` for changed nodes, `remove`
  * for vanished subtrees, `insert` for new nodes. Falls back to `replace` when a surviving node moved
- * (new parent or new sibling order), since the patch set has no move.
+ * (new parent or new sibling order), since the patch set has no move, and when the patches would
+ * exceed the host's per-update cap.
  */
 export function diff(prev: readonly Node[], next: readonly Node[]): Update {
   const prevById = new Map(prev.map((n) => [n.id, n]));
@@ -344,6 +345,7 @@ export function diff(prev: readonly Node[], next: readonly Node[]): Update {
     const after = siblings.slice(siblings.indexOf(n) + 1).find((m) => prevById.has(m.id));
     patches.push({ insert: { node: n, before: after ? after.id : null } });
   }
+  if (patches.length > MAX_PATCHES_PER_UPDATE) return { replace: [...next] };
   return patches.length === 0 ? "unchanged" : { patches };
 }
 

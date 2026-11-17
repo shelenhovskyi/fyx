@@ -1,6 +1,6 @@
 # W7 Judge / reviewer / docs (does not compile)
 
-**Owns:** `docs/`, `tasks/`, `PLAN.md` status column, PR reviews.
+**Owns:** `docs/` (except `docs/research/`, frozen, and `docs/vscode-coverage.md`, W8's), `tasks/` (except `tasks/progress/<stream>.md` and `tasks/wit-0.2.md`), `PLAN.md` status and backlog, reviews in `tasks/reviews/`.
 
 **Deliverable**
 - Each cycle: check every merged change against the WIT and ARCHITECTURE.md rules (no WASM in `render()`, theme tokens only, `fyx:` markers on upstream edits).
