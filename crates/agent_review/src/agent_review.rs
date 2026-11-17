@@ -62,6 +62,54 @@ pub const COVERAGE: &str = "Agent review covers edits that ACP agents propose wi
 pub const NOT_REVIEWED: &str = "Not reviewed: terminal commands (files they change are listed above), \
     the built-in agent's delete, move and copy tools, edits Fyx cannot show as a diff.";
 
+/// Remembers the review rules the user agreed to, per worktree, across restarts.
+pub trait RulesMemory {
+    fn save(&self, records: HashMap<String, String>, cx: &App);
+}
+
+/// The JSON file in Fyx's data directory that holds the confirmed rules.
+struct FileRulesMemory(PathBuf);
+
+impl FileRulesMemory {
+    fn path() -> PathBuf {
+        paths::data_dir()
+            .join("agent_review")
+            .join("confirmed_rules.json")
+    }
+
+    /// An unreadable record counts as none: the files on disk then apply as they are, which can only
+    /// add restrictions.
+    fn load(path: &Path) -> HashMap<String, String> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return HashMap::default();
+        };
+        serde_json::from_str(&text)
+            .inspect_err(|error| log::error!("fyx: {}: {error}", path.display()))
+            .unwrap_or_default()
+    }
+}
+
+impl RulesMemory for FileRulesMemory {
+    fn save(&self, records: HashMap<String, String>, cx: &App) {
+        let path = self.0.clone();
+        cx.background_spawn(async move {
+            let result = serde_json::to_string_pretty(&records)
+                .map_err(anyhow::Error::from)
+                .and_then(|text| {
+                    if let Some(directory) = path.parent() {
+                        std::fs::create_dir_all(directory)?;
+                    }
+                    std::fs::write(&path, text)?;
+                    anyhow::Ok(())
+                });
+            if let Err(error) = result {
+                log::error!("fyx: could not remember the confirmed review rules: {error:#}");
+            }
+        })
+        .detach();
+    }
+}
+
 /// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
 const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
 
@@ -136,6 +184,11 @@ pub fn init(cx: &mut App) {
     cx.set_global(GlobalAgentReview(review.clone()));
     review.update(cx, |review, cx| {
         review.user_auto_accept = user_auto_accept(cx)
+    });
+    let memory_path = FileRulesMemory::path();
+    let records = FileRulesMemory::load(&memory_path);
+    review.update(cx, |review, _| {
+        review.set_rules_memory(Rc::new(FileRulesMemory(memory_path)), records)
     });
     cx.observe_global::<SettingsStore>({
         let review = review.downgrade();
@@ -320,6 +373,10 @@ pub struct AgentReview {
     rules: Vec<ReviewRules>,
     /// The user's `agent_review.auto_accept` patterns: only user settings may loosen review.
     user_auto_accept: UserAutoAccept,
+    /// The rules file each worktree had when the user last agreed to it (or when Fyx first saw it),
+    /// by [`review_rules::memory_key`]; remembered across restarts through `memory`.
+    confirmed_rules: HashMap<String, String>,
+    memory: Option<Rc<dyn RulesMemory>>,
     /// Rules files that changed while sessions ran, waiting for the user to apply them (`None`: the
     /// file was removed).
     pending_rules: HashMap<PathBuf, Option<ReviewRules>>,
@@ -582,29 +639,62 @@ impl AgentReview {
     /// or the whole file) waits until the user applies it: the agent under review may have written the
     /// file, through the terminal or a write the user accepted, and a new thread (a subagent the agent
     /// opens, say) must not apply it either. Returns the restrictions waiting to be removed.
+    ///
+    /// The comparison is with the rules the user last agreed to, remembered across restarts: an agent
+    /// that deletes a `deny` and waits for the next start gets nothing. Until the user agrees, every
+    /// remembered restriction stays in force together with anything stricter in the file. The first
+    /// time Fyx sees a worktree, its file applies as it is; a project file can only add restrictions.
     pub fn load_rules(&mut self, rules: ReviewRules, cx: &mut Context<Self>) -> Vec<String> {
         let root = rules.root().to_path_buf();
-        let current = self.rules.iter().find(|existing| existing.root() == root);
-        if current.is_some_and(|current| current.same_as(&rules)) {
-            self.pending_rules.remove(&root);
-            return Vec::new();
-        }
-        let loosened = current
-            .map(|current| current.loosened_by(&rules))
+        let confirmed = self
+            .confirmed_rules
+            .get(&review_rules::memory_key(&root))
+            .and_then(|source| ReviewRules::parse(root.clone(), source).ok());
+        let loosened = confirmed
+            .as_ref()
+            .map(|confirmed| confirmed.loosened_by(&rules))
             .unwrap_or_default();
-        if loosened.is_empty() {
-            self.set_rules(root, Some(rules), cx);
+        let Some(confirmed) = confirmed.filter(|_| !loosened.is_empty()) else {
+            self.confirm_rules(&rules, cx);
+            self.pending_rules.remove(&root);
+            let current = self.rules.iter().find(|existing| existing.root() == root);
+            if !current.is_some_and(|current| current.same_as(&rules)) {
+                self.set_rules(root, Some(rules), cx);
+            }
             return Vec::new();
-        }
+        };
         log::info!(
             "fyx: agent review: the review rules of {} changed and would remove {}; they apply once \
              the user applies them",
             root.display(),
             loosened.join(", ")
         );
+        self.set_rules(root.clone(), Some(confirmed.union(&rules)), cx);
         self.pending_rules.insert(root, Some(rules));
         cx.notify();
         loosened
+    }
+
+    /// Remembers `rules` as the ones the user agreed to for their worktree.
+    fn confirm_rules(&mut self, rules: &ReviewRules, cx: &mut Context<Self>) {
+        let key = review_rules::memory_key(rules.root());
+        if self.confirmed_rules.get(&key).map(String::as_str) == Some(rules.source()) {
+            return;
+        }
+        self.confirmed_rules.insert(key, rules.source().to_string());
+        if let Some(memory) = &self.memory {
+            memory.save(self.confirmed_rules.clone(), cx);
+        }
+    }
+
+    /// Where confirmed rules are remembered; loads what is remembered there.
+    pub fn set_rules_memory(
+        &mut self,
+        memory: Rc<dyn RulesMemory>,
+        records: HashMap<String, String>,
+    ) {
+        self.confirmed_rules = records;
+        self.memory = Some(memory);
     }
 
     /// Whether a changed rules file of the worktree at `root` waits for the user.
@@ -619,7 +709,9 @@ impl AgentReview {
                 "fyx: agent review: applying the changed rules of {}",
                 root.display()
             );
-            self.set_rules(root.to_path_buf(), rules, cx);
+            let rules = rules.unwrap_or_else(|| ReviewRules::none(root.to_path_buf()));
+            self.confirm_rules(&rules, cx);
+            self.set_rules(root.to_path_buf(), Some(rules), cx);
         }
     }
 
@@ -2284,6 +2376,83 @@ mod tests {
         assert_eq!(rule("src/main.rs", cx), None);
     }
 
+    /// Stands in for the JSON file: survives the store, like the file survives a restart.
+    #[derive(Clone, Default)]
+    struct TestMemory(Rc<RefCell<HashMap<String, String>>>);
+
+    impl RulesMemory for TestMemory {
+        fn save(&self, records: HashMap<String, String>, _: &App) {
+            *self.0.borrow_mut() = records;
+        }
+    }
+
+    #[gpui::test]
+    async fn a_removed_restriction_waits_across_restarts(cx: &mut TestAppContext) {
+        let memory = TestMemory::default();
+        let root = PathBuf::from("/p");
+        let parse = |text: &str| ReviewRules::parse(root.clone(), text).unwrap();
+        let start = |cx: &mut TestAppContext| {
+            let review = cx.new(|_| AgentReview::default());
+            let records = memory.0.borrow().clone();
+            review.update(cx, |review, _| {
+                review.set_rules_memory(Rc::new(memory.clone()), records)
+            });
+            review
+        };
+        let kind = |review: &Entity<AgentReview>, name: &str, cx: &mut TestAppContext| {
+            review.read_with(cx, |review, _| {
+                review
+                    .rule_for(&Path::new("/p").join(name))
+                    .map(|rule| rule.kind)
+            })
+        };
+
+        // First run: the file as it is applies and is remembered.
+        let review = start(cx);
+        review.update(cx, |review, cx| {
+            assert!(
+                review
+                    .load_rules(parse(r#"deny = ["*.env"]"#), cx)
+                    .is_empty()
+            )
+        });
+        drop(review);
+
+        // The agent deleted the deny; Fyx restarts.
+        let review = start(cx);
+        let waiting = review.update(cx, |review, cx| review.load_rules(parse(""), cx));
+        assert_eq!(waiting, ["deny = \"*.env\""]);
+        assert_eq!(
+            kind(&review, ".env", cx),
+            Some(RuleKind::Deny),
+            "still denied after a restart"
+        );
+
+        // Something stricter on disk applies together with the remembered deny.
+        review.update(cx, |review, cx| {
+            review.load_rules(parse(r#"always_ask = ["Cargo.lock"]"#), cx)
+        });
+        assert_eq!(kind(&review, ".env", cx), Some(RuleKind::Deny));
+        assert_eq!(kind(&review, "Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
+        drop(review);
+
+        // The user agrees, in a later run; from then on the new file is the remembered one.
+        let review = start(cx);
+        review.update(cx, |review, cx| {
+            review.load_rules(parse(r#"always_ask = ["Cargo.lock"]"#), cx);
+            review.apply_pending_rules(&root, cx);
+        });
+        assert_eq!(kind(&review, ".env", cx), None);
+        drop(review);
+        let review = start(cx);
+        let waiting = review.update(cx, |review, cx| {
+            review.load_rules(parse(r#"always_ask = ["Cargo.lock"]"#), cx)
+        });
+        assert!(waiting.is_empty());
+        assert_eq!(kind(&review, ".env", cx), None);
+        assert_eq!(kind(&review, "Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
+    }
+
     #[gpui::test]
     async fn stricter_rules_apply_at_once_and_read_errors_keep_the_rules(cx: &mut TestAppContext) {
         let (review, _) = setup(cx);
@@ -2368,9 +2537,10 @@ mod tests {
         .await
         .unwrap();
         cx.run_until_parked();
-        // Changed during a session: nothing applies until the user confirms.
+        // Changed during a session: the removed deny stays until the user confirms; the added
+        // always_ask, being stricter, applies at once.
         assert_eq!(kind(".env", cx), Some(RuleKind::Deny));
-        assert_eq!(kind("Cargo.lock", cx), None);
+        assert_eq!(kind("Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
         let root = PathBuf::from(util::path!("/p"));
         review.update(cx, |review, cx| {
             assert!(review.has_pending_rules(&root));
