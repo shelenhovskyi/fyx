@@ -6845,9 +6845,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_api_docs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "syn 2.0.117",
+ "wit-parser 0.254.2",
+]
+
+[[package]]
 name = "fyx_demo_counter"
 version = "0.1.0"
 dependencies = [
+ "fyx_ext_harness",
  "ui_ext_sdk",
 ]
 
@@ -6898,14 +6908,28 @@ dependencies = [
  "async_zip",
  "clap",
  "futures 0.3.34",
+ "fyx_ext_harness",
  "semver",
  "serde",
  "serde_json",
  "smol",
  "tempfile",
  "toml 0.9.8",
+ "ui_ext",
  "walkdir",
  "wasmparser 0.254.2",
+]
+
+[[package]]
+name = "fyx_ext_harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "semver",
+ "ui_ext",
+ "wasmparser 0.254.2",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -19363,6 +19387,7 @@ version = "0.1.0"
 dependencies = [
  "acp_thread",
  "anyhow",
+ "async_zip",
  "collections",
  "editor",
  "extension_host",
@@ -19377,6 +19402,7 @@ dependencies = [
  "paths",
  "project",
  "schemars 1.0.4",
+ "semver",
  "serde",
  "serde_json",
  "settings",
@@ -19384,6 +19410,7 @@ dependencies = [
  "tempfile",
  "theme",
  "theme_settings",
+ "toml 0.9.8",
  "ui",
  "ui_ext",
  "ui_ext_wasm",
@@ -19406,12 +19433,15 @@ dependencies = [
  "anyhow",
  "fs",
  "futures 0.3.34",
+ "fyx_ext_harness",
  "gpui",
  "gpui_tokio",
  "log",
  "moka",
  "semver",
  "serde",
+ "sha2",
+ "tempfile",
  "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",
