@@ -21,6 +21,13 @@ use serde::Deserialize;
 /// Where the rules live, relative to a worktree root.
 pub const RULES_FILE: &str = ".fyx/review.toml";
 
+/// The rules file of the worktree at `root`, with the platform's separators.
+pub fn rules_file_path(root: &Path) -> PathBuf {
+    RULES_FILE
+        .split('/')
+        .fold(root.to_path_buf(), |path, component| path.join(component))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleKind {
     AutoAccept,
@@ -153,7 +160,7 @@ impl ReviewRules {
             Some(RuleMatch {
                 kind,
                 pattern: pattern.source.clone(),
-                rules_file: self.root.join(RULES_FILE),
+                rules_file: rules_file_path(&self.root),
             })
         })
     }

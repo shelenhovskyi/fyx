@@ -26,12 +26,7 @@ use std::{
 
 use anyhow::Context as _;
 use collections::{HashMap, HashSet};
-use extension_host::{
-    ExtensionStore,
-    wasm_host::fyx_ui::{
-        CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, PushedUpdate, UiExtension, UiManifest,
-    },
-};
+use extension_host::ExtensionStore;
 use fs::{Fs, MTime, PathEvent};
 use futures::{FutureExt as _, StreamExt as _, channel::mpsc};
 use gpui::{
@@ -39,6 +34,7 @@ use gpui::{
 };
 use settings::Settings as _;
 use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
+use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, PushedUpdate, UiExtension, UiManifest};
 use workspace::{Workspace, WorkspaceSettings};
 
 use crate::{

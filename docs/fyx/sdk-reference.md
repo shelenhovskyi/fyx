@@ -10,7 +10,7 @@ Source: `crates/ui_ext_sdk/src/ui_ext_sdk.rs` (cited below as `sdk:<line>`) and
 
 The page lists every public item. For each one it gives what it does, the host rule it enforces,
 and the error it returns. "Host" means Fyx's side: `crates/ui_ext` (the tree model),
-`crates/extension_host/src/wasm_host/fyx_ui.rs` (the WASM runtime), and `crates/ui_ext_host` (the
+`crates/ui_ext_wasm/src/ui_ext_wasm.rs` (the WASM runtime), and `crates/ui_ext_host` (the
 renderer).
 
 Contents:
@@ -114,7 +114,7 @@ export at a time from a single thread and never calls back into the extension du
 Every call has a 200 ms budget (2 s for instantiation and `surfaces`). A call that exceeds it,
 traps or panics disables the extension for the session.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
 
 ```rust
 register_extension!(MyExtension);
@@ -134,7 +134,7 @@ Do not emit the version section yourself as well. The linker concatenates both c
 host refuses a section of 12 bytes with "N copies … emit it only via
 ui_ext_sdk::register_extension!".
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:94-103 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:94-103 -->
 
 ## Props builders
 
@@ -410,7 +410,7 @@ pub fn row_range(start: u32, count: u32, row_count: u32) -> Range<u32>;
 Use `list_rows` rather than building `ListRow`s by hand. The host rejects the whole answer if any
 row is invalid or has an index outside `start..start + count`.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:640-658 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:640-658 -->
 
 `Extension::list_rows` is also called for `table` nodes, with the table's id. See
 [Rows](limits-and-gotchas.md#rows-row-local-ids-row-click-and-refresh) for row-local ids,
@@ -469,7 +469,7 @@ pub fn take_pushed_updates() -> Vec<(String, Update)>;
 under target `fyx_ui`, prefixed with the extension id. Off WASM it prints `[Level] message` to
 stderr.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:289-299 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:289-299 -->
 
 **`push_update`** sends an update the extension initiated for `surface_id`. The surface can be
 another surface of the same extension. Rules:
@@ -492,7 +492,7 @@ another surface of the same extension. Rules:
   treated like a bad reply: the error is shown and the surface remounts.
 - Build the update with `SurfaceTree::take_update()`, so your mirror matches what the host draws.
 
-<!-- tasks/progress/W2.md:21-32 (push ordering rule); crates/extension_host/src/wasm_host/fyx_ui.rs:206-241, 277-287 (cap 64), 498-502, 693-734; crates/ui_ext_host/src/surface.rs:137-145, 240-285 (apply_reply: the Err arm never downcasts ReplyError), 291-298, 404-417; crates/ui_ext_host/src/registry.rs:109-156 -->
+<!-- tasks/progress/W2.md:21-32 (push ordering rule); crates/ui_ext_wasm/src/ui_ext_wasm.rs:206-241, 277-287 (cap 64), 498-502, 693-734; crates/ui_ext_host/src/surface.rs:137-145, 240-285 (apply_reply: the Err arm never downcasts ReplyError), 291-298, 404-417; crates/ui_ext_host/src/registry.rs:109-156 -->
 
 Off WASM, `push_update` records the update in a thread local, and `take_pushed_updates()`
 returns and clears what was recorded on the current thread. The SDK does this because

@@ -263,6 +263,12 @@ impl ReviewPane {
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
+        review.update(cx, |review, _| review.pane_opened(turn));
+        cx.on_release(move |this, cx| {
+            this.review
+                .update(cx, |review, cx| review.pane_closed(turn, cx));
+        })
+        .detach();
         Self {
             review,
             turn,
@@ -402,6 +408,7 @@ impl ReviewPane {
         });
         let renderer: Arc<dyn DiffHunkRenderer> = Arc::new(ReviewHunkRenderer {
             review: self.review.downgrade(),
+            pane: cx.weak_entity(),
             review_id: id,
         });
         let project = self.project.clone();
@@ -467,6 +474,20 @@ impl ReviewPane {
         self.current_hunk = Some(hunk);
         cx.notify();
         Ok(())
+    }
+
+    /// Makes `hunk` the target of the hunk actions and shows its comment.
+    fn focus_hunk(&mut self, hunk: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.select_hunk(hunk, cx).is_err() {
+            return;
+        }
+        let comment = self
+            .edit(cx)
+            .and_then(|edit| edit.hunks().get(hunk)?.comment.clone())
+            .unwrap_or_default();
+        if let Some(comment_editor) = self.comment_editor.clone() {
+            comment_editor.update(cx, |editor, cx| editor.set_text(comment, window, cx));
+        }
     }
 
     /// Types `text` into the comment field of `hunk`.
@@ -790,6 +811,13 @@ impl ReviewPane {
             Some(format!("Asked by rule {}", review.rule()?.describe()))
         });
         let can_submit = resolution.is_some_and(|resolution| !resolution.is_pending());
+        let error = self.current_review_id().and_then(|id| {
+            let review = self.review.read(cx).review(id)?;
+            Some(format!(
+                "Could not apply: {}. Change the decisions and submit again, or reject the file.",
+                review.error()?
+            ))
+        });
 
         v_flex()
             .p_2()
@@ -822,6 +850,9 @@ impl ReviewPane {
                             .style(ButtonStyle::Filled)
                             .disabled(!can_submit),
                     ),
+            )
+            .children(
+                error.map(|error| Label::new(error).size(LabelSize::Small).color(Color::Error)),
             )
             .children(self.comment_editor.clone().map(|comment_editor| {
                 h_flex()
@@ -954,6 +985,7 @@ impl Item for ReviewPane {
 
 struct ReviewHunkRenderer {
     review: WeakEntity<AgentReview>,
+    pane: WeakEntity<ReviewPane>,
     review_id: ReviewId,
 }
 
@@ -974,6 +1006,7 @@ impl DiffHunkRenderer for ReviewHunkRenderer {
             return div().into_any_element();
         };
         let review_id = self.review_id;
+        let pane = self.pane.clone();
         let hunk = buffer_row(&snapshot, hunk_range.start).and_then(|row| {
             let edit = review.read(cx).review(review_id)?.edit();
             let index = edit.hunk_at_new_row(row)?;
@@ -991,12 +1024,21 @@ impl DiffHunkRenderer for ReviewHunkRenderer {
                     ButtonStyle::Subtle
                 })
                 .toggle_state(decision == choice)
-                .on_click(move |_, _, cx| {
-                    review.update(cx, |review, cx| {
-                        if let Err(error) = review.set_decision(review_id, index, choice, cx) {
-                            log::debug!("review update failed: {error:#}");
+                .on_click({
+                    let pane = pane.clone();
+                    move |_, window, cx| {
+                        review.update(cx, |review, cx| {
+                            if let Err(error) = review.set_decision(review_id, index, choice, cx) {
+                                log::debug!("review update failed: {error:#}");
+                            }
+                        });
+                        // A comment typed next belongs to the hunk just decided.
+                        if let Err(error) =
+                            pane.update(cx, |pane, cx| pane.focus_hunk(index, window, cx))
+                        {
+                            log::debug!("review pane closed: {error}");
                         }
-                    });
+                    }
                 })
         };
         h_flex()

@@ -52,6 +52,53 @@ mod bindings {
 
 use bindings::fyx::ui::{host as wit_host, types as wit};
 
+/// Compiled code of UI components, kept for the process so a reload of an unchanged component
+/// skips most of the compilation. The same scheme as `extension_host`'s cache, sized for UI
+/// components.
+#[derive(Debug)]
+struct IncrementalCompilationCache {
+    cache: moka::sync::Cache<Vec<u8>, Vec<u8>>,
+}
+
+impl wasmtime::CacheStore for IncrementalCompilationCache {
+    fn get(&self, key: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+        self.cache.get(key).map(|value| value.into())
+    }
+
+    fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
+        self.cache.insert(key.to_vec(), value);
+        true
+    }
+}
+
+fn cache_store() -> Arc<IncrementalCompilationCache> {
+    static CACHE_STORE: std::sync::LazyLock<Arc<IncrementalCompilationCache>> =
+        std::sync::LazyLock::new(|| {
+            Arc::new(IncrementalCompilationCache {
+                cache: moka::sync::Cache::builder()
+                    .max_capacity(32 * 1024 * 1024)
+                    .weigher(|key: &Vec<u8>, value: &Vec<u8>| {
+                        (key.len() + value.len()).try_into().unwrap_or(u32::MAX)
+                    })
+                    .build(),
+            })
+        });
+    CACHE_STORE.clone()
+}
+
+/// Three big-endian `u16`s, as in `zed:api-version` (the same parser as `extension_host`'s).
+fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
+    if data.len() == 6 {
+        Some(Version::new(
+            u16::from_be_bytes([data[0], data[1]]) as _,
+            u16::from_be_bytes([data[2], data[3]]) as _,
+            u16::from_be_bytes([data[4], data[5]]) as _,
+        ))
+    } else {
+        None
+    }
+}
+
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
 pub const MAX_VERSION: Version = Version::new(0, 1, 0);
 
@@ -72,7 +119,7 @@ pub const MAX_PUSHES_PER_CALL: usize = 64;
 
 /// The `fyx:ui` versions this host can load, on every release channel.
 ///
-/// Unlike [`super::wit::wasm_api_version_range`], which caps stable and preview at Zed's v0.6.0
+/// Unlike `extension_host`'s `wasm_api_version_range`, which caps stable and preview at Zed's v0.6.0
 /// while it stages its own extension API, `fyx:ui` is versioned by its WIT package alone.
 pub fn api_version_range() -> RangeInclusive<Version> {
     MIN_VERSION..=MAX_VERSION
@@ -101,15 +148,12 @@ pub fn parse_api_version(extension_id: &str, wasm_bytes: &[u8]) -> Result<Option
                     data.len(),
                 );
             }
-            version = Some(
-                super::parse_wasm_extension_version_custom_section(data)
-                    .with_context(|| {
-                        format!(
-                            "extension {extension_id} has an invalid {API_VERSION_SECTION} section: {:?}",
-                            section.data()
-                        )
-                    })?,
-            );
+            version = Some(parse_version_custom_section(data).with_context(|| {
+                format!(
+                    "extension {extension_id} has an invalid {API_VERSION_SECTION} section: {:?}",
+                    section.data()
+                )
+            })?);
         }
     }
     Ok(version)
@@ -316,7 +360,7 @@ fn build_ui_runtime() -> Result<UiRuntime> {
     let mut config = wasmtime::Config::new();
     config.wasm_component_model(true);
     config.epoch_interruption(true);
-    config.enable_incremental_compilation(super::cache_store())?;
+    config.enable_incremental_compilation(cache_store())?;
     let engine = Engine::new(&config)?;
 
     // A plain thread rather than an executor timer: the tick has to keep coming while executor
