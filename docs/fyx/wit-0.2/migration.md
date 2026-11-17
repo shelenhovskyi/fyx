@@ -1,7 +1,51 @@
 # `fyx:ui` 0.1 → 0.2: coexistence, gating, SDK, test plan
 
-Companion to [`design.md`](design.md) and [`fyx-ui-0.2.wit`](fyx-ui-0.2.wit). Nothing here has
-been implemented yet. Every path is relative to the repository root, at `integration` `2e91298`.
+Companion to [`design.md`](design.md) and the WIT,
+[`crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit`](../../../crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit).
+Every path is relative to the repository root; line references are to `integration` `2e91298`.
+
+## Status (2026-11-17)
+
+Platform plan 2.1, the data layer, has landed on `claude/fyx-p2-wit`. Nothing outside
+`crates/ui_ext` and these docs changed: the host, the renderer, the SDK, the demos and the sidecar
+still build and run against 0.1 exactly as before.
+
+| What | Where | Notes |
+|---|---|---|
+| The 0.2 world, next to 0.1 | `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` | The design's WIT with a "STAGED" header and a `TODO` for section M. Parses with `wasm-tools component wit` 1.263.0; a dummy component embeds, builds and validates. The docs copy is gone, so there is one source. |
+| 0.1 world | `crates/ui_ext/wit/fyx-ui.wit` | Not moved and not edited (section 1). |
+| WIT paths | `ui_ext::WIT_DIR` (still 0.1), `WIT_DIR_V0_1_0`, `WIT_DIR_V0_2_0`, `ApiVersion::wit_dir` | |
+| 0.2 data model | `ui_ext::v0_2` (`crates/ui_ext/src/v0_2.rs`) | Every type of the 0.2 `types` interface plus `host-error`; the frozen `Icon` enum (101 cases, checked against the WIT by a test) and `IconRef { Frozen, Upstream }`; `From` every 0.1 type, `TryFrom<v0_2::UiEvent>` back to 0.1 (section 2, "Conversions"); `SurfaceKind::capability`; `Update::check_caps` (F's checks at the call); `ButtonProps::tooltip_text` (1024 bytes, cut at a character boundary); `ListRow::indent_levels` (clamped to 32). |
+| Version enum and rules | `ui_ext::ApiVersion`, `LiveIds`, `check_decoration_path` (`crates/ui_ext/src/api_version.rs`) | The explicit version set; the 0.2 id rule (0.1 accepts every id); the live surface and decoration ids of one extension with the E and L checks in the design's order and their `host-error-code`s; the caps (32 surfaces, 512 decorations, 16384 nodes per `replace`, `mount` or decoration). |
+| Tests | `crates/ui_ext/src/{v0_2,api_version,tree}.rs`, `crates/ui_ext/tests/properties.rs` | Unit tests for every rule above, and proptests: 0.2 JSON round trips, lossless 0.1 → 0.2 conversion, 0.1 static surfaces checked as the 0.1 host checks them, the id and path rules, tooltip truncation, indent clamp, `check_caps` against `Tree`, and `LiveIds` against a reference model. |
+
+Why `ui_ext::v0_2` is a module of its own, not new fields on the 0.1 types as section 2 and
+design.md's file table assume: the host (`extension_host`, and W3's `ui_ext_wasm`) and the
+renderer build the 0.1 types with struct literals and match `SurfaceKind` exhaustively, so a new
+field or case breaks both, and both were being changed by other streams. `v0_2` is the superset
+model section 2 describes (0.1 converts in without loss); the 0.1 types and their JSON form are
+untouched. Plan 2.2 and 2.3 move the host and the renderer onto `v0_2`.
+
+Design points this step had to settle (flag them in review):
+
+- **Decoration ids** share one id space with surface ids (design L: "Ids share one namespace"),
+  but are counted and capped separately (512, not the 32 surfaces). `LiveIds` keeps them in two
+  sets and refuses an id that is live in the other.
+- **`remove-decoration` of an id that is not live** returns `unknown-surface`, the code for "no
+  live target with that id"; the design names no code for it.
+- **The decoration path rule** also rejects `\`, `:` and NUL, which the design does not list:
+  on Windows `\` is a separator (`..\x` would leave the worktree) and `C:` makes a join absolute.
+- **`IconRef` JSON**: a frozen icon is its bare WIT name; a 0.1 upstream name is
+  `{"upstream": name}`, so the two never collide and a misspelled frozen name fails to parse.
+- **0.1 static surfaces** in `LiveIds::new(V0_1_0, …)` are checked only for the capability of
+  their kind, as `check_surfaces` does today: any id, duplicates and any count are accepted. A
+  modal is refused, since 0.1 cannot declare one.
+- **Section M** is not in the WIT: design.md has only a placeholder row, with no types for actions
+  or progress, no capability and no error codes. The WIT has a `TODO` where the interface goes.
+- **Not done here, because they change `Tree` under the renderer:** design G (`Patch::InvalidateRows`
+  applied by `Tree`, `TreeError::NotAList`, the `Touched` result). They move to plan 2.3. The
+  `replace` / `mount` cap of 16384 needed no change: `Tree` already checks `max_nodes` for both
+  (integration-1 #11), now pinned by a test.
 
 **Goal.** A Fyx build that ships 0.2 loads both 0.1 and 0.2 components side by side, and treats
 each one exactly as its world promises. A 0.1 component keeps 0.1 behaviour: it gets no ticks, has
@@ -13,15 +57,22 @@ from a custom section before instantiation.
 
 ```
 crates/ui_ext/wit/
-  since_v0.1.0/fyx-ui.wit   # today's crates/ui_ext/wit/fyx-ui.wit, moved byte-identical, then never edited
-  since_v0.2.0/fyx-ui.wit   # docs/fyx/wit-0.2/fyx-ui-0.2.wit (decided 2026-11-17), minus its header comment
+  fyx-ui.wit                # 0.1.0, frozen, where it always was
+  since_v0.2.0/fyx-ui.wit   # 0.2.0 (decided 2026-11-17), staged
 ```
 
-This mirrors `crates/extension_api/wit/since_v0.x.y/`. Every package keeps its full world. Zed
-copies files forward rather than sharing them across versions, and so does Fyx. A frozen version
-cannot then change by accident when a shared file is edited.
+**As landed (plan 2.1).** 0.1 stays at `crates/ui_ext/wit/fyx-ui.wit`. WIT tools read only the
+`.wit` files directly in a directory (and its `deps/`), so `path: "../ui_ext/wit"` in the host's
+`bindgen!` and the SDK's `generate!`, and `wasm-tools component wit crates/ui_ext/wit`, still see
+only `fyx:ui@0.1.0`; the 0.2 directory inside it is invisible to them. Moving 0.1 would have had to
+edit the host's `bindgen!` path in `extension_host` and in W3's `ui_ext_wasm` (on
+`claude/fyx-w3-renderer-e20d2b`), which other streams own and were changing. Every package keeps
+its full world, as in `crates/extension_api/wit/since_v0.x.y/`: Zed copies files forward rather
+than sharing them across versions, and so does Fyx, so a frozen version cannot change by accident
+when a shared file is edited.
 
-Every reference to the old path moves in the same commit:
+The move to `since_v0.1.0/` is optional now. If plan 2.2 wants the symmetric layout when it
+splits the host bindings per version, every reference to the old path moves in the same commit:
 
 | Reference | Change |
 |---|---|
@@ -31,7 +82,8 @@ Every reference to the old path moves in the same commit:
 | `crates/ui_ext/src/ui_ext.rs:11` (`WIT_DIR`) | `WIT_DIR_V0_1_0`, `WIT_DIR_V0_2_0` |
 | comments: `crates/ui_ext/src/types.rs:1`, `fyx_ui.rs:1`, `ARCHITECTURE.md:23`, `sidecars/vscode-host/README.md:6`, `docs/fyx/sdk-reference.md`, `docs/fyx/limits-and-gotchas.md` (`<!-- … -->` source anchors) | new path; anchors to line numbers in the 0.1 file stay valid, because the file is moved unchanged |
 
-Commit order: (1) move 0.1 alone and run `script/gate.sh`; no behaviour may change. (2) Add 0.2.
+Commit order, if the move happens: move 0.1 alone and run `script/gate.sh`; no behaviour may
+change.
 
 ## 2. Host bindings (W2)
 
@@ -410,8 +462,8 @@ Every new rule gets a test at the lowest layer that owns it. GPUI tests use exec
 
 | Step | Owner | Depends on | Gate |
 |---|---|---|---|
-| 1. Move 0.1 WIT to `since_v0.1.0`, update paths | W0 | — | `script/gate.sh` green, no behaviour change |
-| 2. Add `since_v0.2.0`; `ui_ext` types and `Touched` | W0, then W2 | 1 | `cargo test -p ui_ext` |
+| 1. ~~Move 0.1 WIT to `since_v0.1.0`~~ not needed (section 1, "As landed"); optional in step 3 | W0 | — | — |
+| 2. Add `since_v0.2.0`; `ui_ext::v0_2` types, `ApiVersion`, `LiveIds` (**done**, plan 2.1); `Touched` and `InvalidateRows` in `Tree` move to step 5 | W0 | — | `cargo test -p ui_ext` |
 | 3. Host bindings split, dispatch, effects, 0.2 imports, staging by channel | W2 | 2 | host tests on both probe builds |
 | 4. SDK version modules, 0.2 APIs | W4 | 2 | SDK tests; the 0.1 build check from section 4; demos still build on 0.2 |
 | 5. Renderer: ticks, modals, runtime surfaces, rows, icons, fields; status-bar hook | W3 (hook reviewed by W0) | 3 | renderer tests, manual 1–7 |

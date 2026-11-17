@@ -1,6 +1,6 @@
-// Decided 2026-11-17, not frozen yet; not built by anything. Design and rationale: design.md next
-// to this file. It moves to crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit, next to the frozen 0.1.0
-// world, as step 2 of migration.md's order of work.
+// STAGED, not frozen: decided 2026-11-17 (docs/fyx/wit-0.2/design.md). Only the integrator (W0)
+// edits this file. It becomes FROZEN, like ../fyx-ui.wit (0.1.0), in the commit that declares 0.2
+// frozen and lifts the Stable/Preview cap (docs/fyx/wit-0.2/migration.md, section 2).
 package fyx:ui@0.2.0;
 
 interface types {
@@ -458,6 +458,13 @@ interface decorations {
     /// Removes a live decoration in every editor; no event is sent. The id may be placed again.
     remove-decoration: func(id: string) -> result<_, host-error>;
 }
+
+// TODO(design.md section M, platform plan 2.1): notifications and progress (platform spec
+// decision 22: `notify(level, text, actions)`, `progress-start` / `progress-update` /
+// `progress-end`, at most 5 notifications per minute per extension). design.md has only a
+// placeholder row for M: the action and progress types, how an action reaches the extension,
+// the ids, the capability and the error codes are not specified yet. Add the interface here,
+// before 0.2 is frozen, once M is drafted.
 
 world ui-extension {
     use types.{surface, node, node-id, ui-event, update, list-row};
