@@ -6,6 +6,7 @@ mod connection;
 pub mod content;
 mod diff;
 pub mod elicitation;
+pub mod fyx_review; // fyx: agent write review gate
 mod mention;
 pub mod notices;
 pub mod prompt_capabilities;
@@ -8013,6 +8014,9 @@ impl AcpThread {
                     .cloned()
                     .unwrap_or_else(|| buffer.read(cx).snapshot())
             })?;
+            // fyx: the host review gate (crates/agent_review) decides which hunks land.
+            let (content, feedback) =
+                fyx_review::gate_agent_write(&this, path, &buffer, &snapshot, content, cx).await?;
             let edits = cx
                 .background_executor()
                 .spawn(async move {
@@ -8081,7 +8085,9 @@ impl AcpThread {
 
             project
                 .update(cx, |project, cx| project.save_buffer(buffer, cx))
-                .await
+                .await?;
+            // fyx: report hunks the host review rejected.
+            feedback.map_or(Ok(()), |feedback| Err(anyhow::anyhow!(feedback)))
         })
     }
 
