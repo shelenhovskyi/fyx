@@ -555,6 +555,57 @@ async fn test_call_blocked_in_host_is_cut_off_and_disables_extension(cx: &mut Te
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
+/// Plan 1.1: the first load compiles and writes a `.cwasm`; the next uses it; a broken copy is
+/// compiled again and replaced; another component gets a file of its own.
+#[gpui::test]
+async fn test_precompiled_cache(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cache = PrecompiledCache {
+        dir: dir.path().join("probe"),
+        stem: "0.1.0".into(),
+    };
+    let wasm = probe_wasm();
+    let file = cache.file_for(&wasm).expect("cache file");
+    assert!(file.starts_with(dir.path().join("probe")));
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("0.1.0-")
+    );
+
+    let load = |cx: &mut TestAppContext| {
+        let wasm = wasm.clone();
+        let cache = cache.clone();
+        cx.update(|cx| {
+            UiExtension::load_with_cache("probe".into(), wasm, Some(cache), &cx.to_async())
+        })
+    };
+    let (first, _) = load(cx).await.expect("compiles");
+    assert!(!first.from_precompiled());
+    assert!(file.is_file(), "written after compiling");
+
+    let (second, _) = load(cx).await.expect("loads the copy");
+    assert!(second.from_precompiled());
+    second
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("the precompiled component works");
+
+    std::fs::write(&file, b"not a cwasm").expect("break the copy");
+    let (third, _) = load(cx).await.expect("compiles again");
+    assert!(!third.from_precompiled());
+    let (fourth, _) = load(cx).await.expect("uses the rewritten copy");
+    assert!(fourth.from_precompiled());
+
+    let other = cache
+        .file_for(&demo_counter_wasm())
+        .expect("other cache file");
+    assert_ne!(other, file, "keyed by the component");
+}
+
 #[test]
 fn test_api_version_gating() {
     assert!(is_supported_api_version(&Version::new(0, 1, 0)));

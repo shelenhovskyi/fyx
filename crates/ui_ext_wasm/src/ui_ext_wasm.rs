@@ -13,7 +13,7 @@
 use std::{
     future::Future,
     ops::RangeInclusive,
-    path::{Component as PathComponent, Path},
+    path::{Component as PathComponent, Path, PathBuf},
     pin::{Pin, pin},
     sync::{Arc, Mutex, OnceLock, PoisonError},
     task::{Context, Poll, Waker},
@@ -30,6 +30,7 @@ use futures::{
 use gpui::{AsyncApp, Task};
 use semver::Version;
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use ui_ext::{Tree, TreeLimits};
 use wasmtime::{
     Engine, Store, UpdateDeadline,
@@ -642,6 +643,96 @@ pub struct UiExtension {
     limits: TreeLimits,
     tx: mpsc::UnboundedSender<UiCall>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
+    from_precompiled: bool,
+}
+
+/// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
+/// hashes the engine's compatibility hash (wasmtime version and configuration) and the
+/// component's SHA-256, so a different engine or component never matches a stale file.
+///
+/// Loading one is loading trusted machine code, so the caller must only ever name a place that
+/// Fyx alone writes (the install store), never a path inside an extension package.
+#[derive(Clone, Debug)]
+pub struct PrecompiledCache {
+    pub dir: PathBuf,
+    pub stem: String,
+}
+
+impl PrecompiledCache {
+    /// The file for this component under the current engine.
+    pub fn file_for(&self, wasm_bytes: &[u8]) -> Result<PathBuf> {
+        let engine = &ui_runtime()?.engine;
+        struct Sha256Hasher(Sha256);
+        impl std::hash::Hasher for Sha256Hasher {
+            fn finish(&self) -> u64 {
+                0
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.update(bytes);
+            }
+        }
+        let mut hasher = Sha256Hasher(Sha256::new());
+        std::hash::Hash::hash(&engine.precompile_compatibility_hash(), &mut hasher);
+        hasher.0.update(Sha256::digest(wasm_bytes));
+        let key = format!("{:x}", hasher.0.finalize());
+        Ok(self.dir.join(format!("{}-{}.cwasm", self.stem, &key[..32])))
+    }
+}
+
+/// Compiles `wasm_bytes`, or loads the precompiled copy in `cache` when it is there and fits this
+/// engine. A missing, stale or unreadable copy is (re)written after compiling. Returns whether the
+/// copy was used.
+fn compile_component(
+    engine: &Engine,
+    wasm_bytes: &[u8],
+    cache: Option<&PrecompiledCache>,
+) -> Result<(Component, bool)> {
+    let file = match cache.map(|cache| cache.file_for(wasm_bytes)).transpose() {
+        Ok(file) => file,
+        Err(error) => {
+            log::warn!("fyx:ui: no precompiled cache: {error:#}");
+            None
+        }
+    };
+    // Read into memory rather than `deserialize_file`, which maps the file: on Windows a mapped
+    // file can be neither replaced nor deleted, which would pin old versions in the install store.
+    if let Some(file) = &file
+        && let Ok(bytes) = std::fs::read(file)
+    {
+        // SAFETY: `file` is only ever written by `compile_component` below, from a component
+        // this engine compiled, at a path the caller guarantees only Fyx writes (see
+        // `PrecompiledCache`). wasmtime still checks the header against this engine.
+        match unsafe { Component::deserialize(engine, &bytes) } {
+            Ok(component) => return Ok((component, true)),
+            Err(error) => log::warn!(
+                "fyx:ui: precompiled {} is unusable, compiling again: {error:#}",
+                file.display()
+            ),
+        }
+    }
+    let component = Component::from_binary(engine, wasm_bytes)
+        .map_err(anyhow::Error::from)
+        .context("failed to compile fyx:ui component")?;
+    if let Some(file) = &file {
+        if let Err(error) = write_precompiled(&component, file) {
+            log::warn!(
+                "fyx:ui: could not save precompiled {}: {error:#}",
+                file.display()
+            );
+        }
+    }
+    Ok((component, false))
+}
+
+/// Writes through a temporary file and a rename, so a crash never leaves a torn `.cwasm`.
+fn write_precompiled(component: &Component, file: &Path) -> Result<()> {
+    let bytes = component.serialize().map_err(anyhow::Error::from)?;
+    let dir = file.parent().context("no parent directory")?;
+    std::fs::create_dir_all(dir)?;
+    let temp = file.with_extension("cwasm.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, file)?;
+    Ok(())
 }
 
 impl UiExtension {
@@ -655,6 +746,17 @@ impl UiExtension {
         wasm_bytes: Vec<u8>,
         cx: &AsyncApp,
     ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_with_cache(extension_id, wasm_bytes, None, cx)
+    }
+
+    /// [`UiExtension::load`], using and filling a precompiled cache. Compiling runs on the
+    /// background executor and instantiation on tokio, so no window waits on either.
+    pub fn load_with_cache(
+        extension_id: Arc<str>,
+        wasm_bytes: Vec<u8>,
+        cache: Option<PrecompiledCache>,
+        cx: &AsyncApp,
+    ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
@@ -663,9 +765,8 @@ impl UiExtension {
             async move {
                 let runtime = ui_runtime()?;
                 let section_version = parse_api_version(&extension_id, &wasm_bytes)?;
-                let component = Component::from_binary(&runtime.engine, &wasm_bytes)
-                    .map_err(anyhow::Error::from)
-                    .context("failed to compile fyx:ui component")?;
+                let (component, from_precompiled) =
+                    compile_component(&runtime.engine, &wasm_bytes, cache.as_ref())?;
                 let api_version = section_version
                     .or_else(|| api_version_from_imports(&component, &runtime.engine))
                     .with_context(|| {
@@ -680,12 +781,12 @@ impl UiExtension {
                     MIN_VERSION,
                     MAX_VERSION,
                 );
-                anyhow::Ok((api_version, component))
+                anyhow::Ok((api_version, component, from_precompiled))
             }
         });
 
         cx.spawn(async move |cx| {
-            let (api_version, component) = compile_task.await?;
+            let (api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
 
             let instantiate = {
@@ -761,6 +862,7 @@ impl UiExtension {
                     limits: TreeLimits::default(),
                     tx,
                     _task: Arc::new(task),
+                    from_precompiled,
                 },
                 pushed_rx,
             ))
@@ -774,6 +876,16 @@ impl UiExtension {
         fs: Arc<dyn Fs>,
         cx: &AsyncApp,
     ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_from_dir_with_cache(extension_dir, None, fs, cx).await
+    }
+
+    /// [`UiExtension::load_from_dir`] with a precompiled cache; see [`PrecompiledCache`].
+    pub async fn load_from_dir_with_cache(
+        extension_dir: &Path,
+        cache: Option<PrecompiledCache>,
+        fs: Arc<dyn Fs>,
+        cx: &AsyncApp,
+    ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
         let Some((extension_id, manifest)) = UiManifest::read(fs.as_ref(), extension_dir).await?
         else {
             return Ok(None);
@@ -783,9 +895,10 @@ impl UiExtension {
             .load_bytes(&component_path)
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
-        let (extension, pushed) = Self::load(extension_id.clone(), wasm_bytes, cx)
-            .await
-            .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
+        let (extension, pushed) =
+            Self::load_with_cache(extension_id.clone(), wasm_bytes, cache, cx)
+                .await
+                .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
         anyhow::ensure!(
             extension.api_version == manifest.api_version,
             "extension {extension_id}: extension.toml says fyx:ui {}, the component targets {}",
@@ -802,6 +915,11 @@ impl UiExtension {
 
     pub fn api_version(&self) -> &Version {
         &self.api_version
+    }
+
+    /// Whether the component came from a precompiled cache rather than a fresh compile.
+    pub fn from_precompiled(&self) -> bool {
+        self.from_precompiled
     }
 
     /// What `surfaces` returned right after instantiation.

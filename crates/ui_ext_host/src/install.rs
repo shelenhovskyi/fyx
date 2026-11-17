@@ -189,6 +189,7 @@ pub(crate) fn prompt_and_install(
                 &link.join(&manifest.component),
                 true,
                 fs.as_ref(),
+                &cx.background_executor(),
             )
             .await?;
             cx.update(|_, cx| {

@@ -443,6 +443,99 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
     }
 }
 
+/// Plan 1.1: an extension installed from a `.fyxext` package loads from the install store and
+/// writes its precompiled component; an update loads the new version in place of the old (the
+/// surface remounts), and a rollback brings the previous one back.
+#[gpui::test]
+async fn test_store_installs_load_update_and_roll_back(cx: &mut TestAppContext) {
+    use crate::install_store::{InstallStore, test_support::package};
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let wasm = status_item_wasm();
+    let root = tempfile::tempdir().expect("temp dir");
+    let installed = root.path().join("installed");
+    let store = InstallStore::new(root.path().join("fyx"));
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    let install = |version: &str| {
+        let path = root.path().join(format!("{version}.fyxext"));
+        let store = store.clone();
+        let fs = fs.clone();
+        let wasm = wasm.clone();
+        let version = version.to_string();
+        async move {
+            std::fs::write(
+                &path,
+                package("fyx-test-status-item", &version, &wasm).await,
+            )
+            .expect("package");
+            store.install_package(&path, fs.as_ref()).await
+        }
+    };
+    let cwasm_files = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(store.root().join("fyx-test-status-item"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".cwasm"))
+            .map(|name| name.split('-').next().unwrap().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+
+    install("0.1.0").await.expect("installs");
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting().with_store(store.clone()));
+    registry.update(cx, |registry, cx| {
+        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    });
+    const KEY: &str = "fyx-test-status-item/status";
+    const LABEL: NodeId = 3;
+    const PING: NodeId = 4;
+    let state = |cx: &mut TestAppContext| {
+        registry.read_with(cx, |registry, _| {
+            registry.surface(KEY).map(|surface| surface.state.clone())
+        })
+    };
+    run_until(cx, "the store install", |cx| {
+        state(cx).is_some_and(|state| text_of(&state, LABEL, cx).is_some())
+    });
+    run_until(cx, "the precompiled component", |_| {
+        cwasm_files() == ["0.1.0"]
+    });
+    let surface = state(cx).unwrap();
+    surface.update(cx, |state, cx| state.dispatch(UiEvent::Click(PING), cx));
+    run_until(cx, "a ping", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 1")
+    });
+
+    // An update: the same surface remounts on the new version.
+    install("0.2.0").await.expect("updates");
+    registry.update(cx, |registry, cx| registry.rescan(cx));
+    run_until(cx, "the updated extension", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0")
+            && cwasm_files() == ["0.1.0", "0.2.0"]
+    });
+    assert_eq!(
+        state(cx).map(|state| state.entity_id()),
+        Some(surface.entity_id()),
+        "the surface is kept, its backend replaced"
+    );
+
+    // Rollback.
+    surface.update(cx, |state, cx| state.dispatch(UiEvent::Click(PING), cx));
+    run_until(cx, "a ping on 0.2.0", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 1")
+    });
+    store
+        .rollback("fyx-test-status-item", fs.as_ref())
+        .await
+        .unwrap();
+    registry.update(cx, |registry, cx| registry.rescan(cx));
+    run_until(cx, "the rolled back extension", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0")
+    });
+}
+
 /// Integration-4 finding 3: an installed extension without consent is not loaded; it waits with
 /// its capabilities until "Enable", which is remembered across restarts (the consent file). When
 /// `extension.toml` later asks for more, it waits again.

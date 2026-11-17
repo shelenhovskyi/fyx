@@ -189,6 +189,23 @@ UI extensions load from the installed-extensions directory and from the environm
   next start.
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
 
+### Installing a package
+
+A `.fyxext` package is a zip of `extension.toml` (with `id`, a semver `version` and the
+`[fyx_ui]` table), the component it names, and optional `assets/` and `signature.json`.
+**`fyx_ui: install UI extension from file`** shows its id, version and capabilities, marks it
+"Unsigned, not from the registry", and installs it into `<data dir>/extensions/fyx/<id>/<version>/`.
+Installing another version of the same id is an update: the replaced version is kept for
+**`fyx_ui: roll back UI extension`**, and older ones are deleted. **`fyx_ui: toggle pin UI
+extension`** keeps an id on its version (an install of another version is refused until it is
+unpinned); **`fyx_ui: uninstall UI extension`** removes every version.
+
+A package is refused when it is over 50 MiB, its component is over 32 MiB, it unpacks to more
+than 128 MiB or 1024 entries, or an entry name is not a plain relative path (no `..`, drive,
+root, backslash or `:`). On first load Fyx precompiles the component next to the version folder
+(`<id>/<version>-<key>.cwasm`), so later starts skip compiling; the file is Fyx's own, and one
+inside a package is never loaded.
+
 <!-- crates/ui_ext_host/src/ui_ext_host.rs:11, crates/ui_ext_host/src/registry.rs:29-33, 172, 305-312 -->
 
 The value is a `PATH`-style list (`;` on Windows, `:` elsewhere). Each entry is one of:

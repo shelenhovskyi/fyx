@@ -18,6 +18,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use fs::Fs;
+use gpui::BackgroundExecutor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -39,13 +40,15 @@ pub enum Grant {
 }
 
 impl ConsentRecord {
-    /// The record for the extension in `extension_dir` as it is now.
+    /// The record for the extension in `extension_dir` as it is now. The component (up to
+    /// 32 MiB) is hashed on `executor`, off the thread that awaits this.
     pub async fn current(
         extension_dir: &Path,
         capabilities: &[String],
         component: &Path,
         is_dev: bool,
         fs: &dyn Fs,
+        executor: &BackgroundExecutor,
     ) -> Result<Self> {
         let mut capabilities = capabilities.to_vec();
         capabilities.sort();
@@ -63,7 +66,9 @@ impl ConsentRecord {
                 .await
                 .with_context(|| format!("reading {}", component.display()))?;
             Grant::Component {
-                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                sha256: executor
+                    .spawn(async move { format!("{:x}", Sha256::digest(&bytes)) })
+                    .await,
             }
         };
         Ok(Self {

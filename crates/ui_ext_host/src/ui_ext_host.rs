@@ -16,9 +16,11 @@ mod backend;
 mod consent;
 mod decorations;
 mod install;
+pub mod install_store;
 mod keyboard;
 mod panel;
 mod registry;
+mod store_actions;
 mod surface;
 mod view;
 
@@ -47,6 +49,9 @@ pub use panel::{
     SurfaceInfo,
 };
 pub use registry::{DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, UiExtensionRegistry};
+pub use store_actions::{
+    InstallUiExtensionFromFile, RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
+};
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};
 
