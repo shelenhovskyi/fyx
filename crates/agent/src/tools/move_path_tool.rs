@@ -199,6 +199,15 @@ impl AgentTool for MovePathTool {
             if let Some(authorize) = authorize {
                 authorize.await.map_err(|e| e.to_string())?;
             }
+            // fyx: host review (crates/agent_review); W9's guard comes after it.
+            super::fyx_file_operations::move_path(
+                &project,
+                &event_stream,
+                &input.source_path,
+                &input.destination_path,
+                cx,
+            )
+            .await?;
 
             if global_source_path.is_some() || global_destination_path.is_some() {
                 let source_path = if let Some(global_source_path) = global_source_path {

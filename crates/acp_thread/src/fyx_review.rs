@@ -30,8 +30,52 @@ pub struct AgentWriteOutcome {
     pub feedback: Option<String>,
 }
 
+/// A file operation of an agent other than writing text: Zed's built-in agent deletes, moves and
+/// copies files and directories.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentFileOperation {
+    /// `text` is the file's content, when it is a text file.
+    Delete { path: PathBuf, text: Option<String> },
+    Move { from: PathBuf, to: PathBuf },
+    Copy { from: PathBuf, to: PathBuf },
+}
+
+impl AgentFileOperation {
+    /// Every path the operation reads or writes.
+    pub fn paths(&self) -> Vec<&std::path::Path> {
+        match self {
+            AgentFileOperation::Delete { path, .. } => vec![path],
+            AgentFileOperation::Move { from, to } | AgentFileOperation::Copy { from, to } => {
+                vec![from, to]
+            }
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            AgentFileOperation::Delete { path, .. } => format!("Delete {}", path.display()),
+            AgentFileOperation::Move { from, to } => {
+                format!("Move {} to {}", from.display(), to.display())
+            }
+            AgentFileOperation::Copy { from, to } => {
+                format!("Copy {} to {}", from.display(), to.display())
+            }
+        }
+    }
+}
+
 pub trait AgentWriteGate: 'static {
     fn review_write(&self, write: AgentWrite, cx: &mut App) -> Task<Result<AgentWriteOutcome>>;
+
+    /// Resolves to an error, whose message is the feedback, when the operation must not happen.
+    fn review_operation(
+        &self,
+        _session_id: acp_v2::SessionId,
+        _operation: AgentFileOperation,
+        _cx: &mut App,
+    ) -> Task<Result<()>> {
+        Task::ready(Ok(()))
+    }
 }
 
 struct GlobalAgentWriteGate(Rc<dyn AgentWriteGate>);
@@ -60,6 +104,24 @@ pub(crate) async fn gate_agent_write(
     }
     let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone())?;
     review_agent_edit(session_id, abs_path, buffer, snapshot.text(), new_text, cx).await
+}
+
+/// Reviews an agent's file operation; without a gate it may happen, as upstream.
+pub async fn review_agent_operation(
+    session_id: acp_v2::SessionId,
+    operation: AgentFileOperation,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let gate = cx.update(|cx| {
+        cx.try_global::<GlobalAgentWriteGate>()
+            .map(|gate| gate.0.clone())
+    });
+    let Some(gate) = gate else {
+        return Ok(());
+    };
+    cx.update(|cx| gate.review_operation(session_id, operation, cx))
+        .await
+        .map_err(|error| feedback_error(format!("{error:#}")))
 }
 
 /// Reviews an agent's change of `buffer` from `old_text` to `new_text` (ACP writes, and the native

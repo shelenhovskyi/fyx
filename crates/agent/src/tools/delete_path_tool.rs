@@ -158,6 +158,8 @@ impl AgentTool for DeletePathTool {
             if let Some(authorize) = authorize {
                 authorize.await.map_err(|e| e.to_string())?;
             }
+            // fyx: host review (crates/agent_review); W9's guard comes after it.
+            super::fyx_file_operations::delete(&project, &event_stream, &path, cx).await?;
 
             if let Some(global_skill_path) = global_skill_path {
                 let metadata = fs

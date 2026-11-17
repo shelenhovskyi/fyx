@@ -26,7 +26,7 @@ their count; click it to bring the waiting reviews forward.
 | ACP v2 edits Fyx cannot show as a diff: several files in one request, no patch text, or a patch that does not apply | No. A notification says so; decide in the agent panel. |
 | Shell and terminal commands (`sed -i`, `cat >`, scripts) | No. Files that change on disk during the agent's turn without going through review are listed in the turn's review pane as "changed without review". Nothing is blocked. |
 | Zed's built-in agent: edit and write tools | Yes: what the agent streamed into the file is held before it is saved; only accepted hunks are kept, and the agent is told about the rest. |
-| Zed's built-in agent: delete, move and copy tools | No. They ask permission as in Zed. |
+| Zed's built-in agent: delete, move and copy tools | Yes: the operation waits for your decision. A deleted text file shows as its removed content, a move or copy as one line saying what happens. Accept lets it happen, Reject stops it. Rules apply to every path involved. |
 
 The same summary is in the setting's description and under every review pane.
 
