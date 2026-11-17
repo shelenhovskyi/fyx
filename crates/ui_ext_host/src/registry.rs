@@ -28,7 +28,9 @@ use anyhow::Context as _;
 use collections::{HashMap, HashSet};
 use extension_host::{
     ExtensionStore,
-    wasm_host::fyx_ui::{PushedUpdate, UiExtension, UiManifest},
+    wasm_host::fyx_ui::{
+        CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, PushedUpdate, UiExtension, UiManifest,
+    },
 };
 use fs::{Fs, MTime, PathEvent};
 use futures::{FutureExt as _, StreamExt as _, channel::mpsc};
@@ -121,6 +123,33 @@ impl UiExtensionRegistry {
 
     pub fn surface(&self, key: &str) -> Option<&LoadedSurface> {
         self.surfaces.iter().find(|surface| surface.info.key == key)
+    }
+
+    /// The capabilities a loaded UI extension uses, from the surfaces it declared: `ui:panel` for
+    /// dock panels, `ui:status-bar` for status items. Empty when `extension_id` is not a loaded
+    /// UI extension.
+    pub fn capabilities(&self, extension_id: &str, cx: &App) -> Vec<&'static str> {
+        let prefix = format!("{extension_id}/");
+        let kinds: Vec<SurfaceKind> = self
+            .surfaces
+            .iter()
+            .filter(|surface| surface.info.key.starts_with(prefix.as_str()))
+            .map(|surface| surface.state.read(cx).surface().kind.clone())
+            .collect();
+        let mut capabilities = Vec::new();
+        if kinds
+            .iter()
+            .any(|kind| matches!(kind, SurfaceKind::Panel(_)))
+        {
+            capabilities.push(CAPABILITY_PANEL);
+        }
+        if kinds
+            .iter()
+            .any(|kind| matches!(kind, SurfaceKind::StatusItem(_)))
+        {
+            capabilities.push(CAPABILITY_STATUS_BAR);
+        }
+        capabilities
     }
 
     /// Adds every surface of a loaded extension and mounts it. Open workspaces pick them up.

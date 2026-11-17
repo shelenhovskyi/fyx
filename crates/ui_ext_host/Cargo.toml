@@ -17,6 +17,7 @@ doctest = false
 test-support = ["gpui/test-support"]
 
 [dependencies]
+acp_thread.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 editor.workspace = true

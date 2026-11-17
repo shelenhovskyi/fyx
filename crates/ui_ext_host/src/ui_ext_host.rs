@@ -57,6 +57,24 @@ pub struct ToggleExtensionPanel {
     pub key: String,
 }
 
+/// Chips for the extensions page: the `fyx:ui` capabilities of a loaded UI extension, next to the
+/// card's other feature chips (the one `fyx:` hook in `extensions_ui`). `None` for an extension
+/// that is not a loaded UI extension.
+pub fn capability_chips(extension_id: &str, cx: &App) -> Option<gpui::AnyElement> {
+    use gpui::{IntoElement as _, ParentElement as _, Styled as _};
+    let registry = UiExtensionRegistry::global(cx)?;
+    let capabilities = registry.read(cx).capabilities(extension_id, cx);
+    if capabilities.is_empty() {
+        return None;
+    }
+    Some(
+        ui::h_flex()
+            .gap_1()
+            .children(capabilities.into_iter().map(ui::Chip::new))
+            .into_any_element(),
+    )
+}
+
 pub fn init(cx: &mut App) {
     registry::init(cx);
     keyboard::intercept_keys(cx);

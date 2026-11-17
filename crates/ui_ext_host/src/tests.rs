@@ -1435,3 +1435,46 @@ async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// The extensions page shows a loaded UI extension's capabilities, from the surfaces it declared.
+#[gpui::test]
+async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    let panel = panel_surface("main", "Main");
+    let status = ui_ext::Surface {
+        id: "status".into(),
+        title: "Status".into(),
+        kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+            side: ui_ext::StatusBarSide::Right,
+            priority: 0,
+        }),
+    };
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), std::slice::from_ref(&status), cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(
+            registry.read(cx).capabilities("fake", cx),
+            ["ui:status-bar"]
+        );
+    });
+    // A reload that adds a panel shows both.
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel, status], cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let registry = registry.read(cx);
+        assert_eq!(
+            registry.capabilities("fake", cx),
+            ["ui:panel", "ui:status-bar"]
+        );
+        assert!(
+            registry.capabilities("not-a-ui-extension", cx).is_empty(),
+            "a regular Zed extension gets no chips"
+        );
+    });
+}
