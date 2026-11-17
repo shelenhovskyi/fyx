@@ -14,6 +14,7 @@
 
 mod backend;
 mod decorations;
+mod install;
 mod keyboard;
 mod panel;
 mod registry;
@@ -38,8 +39,12 @@ pub use decorations::{
     DEV_DECORATIONS_ENV, DecorationId, DecorationPlacement, DecorationTarget, Decorations,
     text_tree,
 };
+pub use install::{InstallDevUiExtension, describe_capabilities, install_dev_ui_extension};
 pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
-pub use panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo};
+pub use panel::{
+    ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
+    SurfaceInfo,
+};
 pub use registry::{DEV_EXTENSIONS_ENV, LoadedSurface, UiExtensionRegistry};
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};

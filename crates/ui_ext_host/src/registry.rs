@@ -3,17 +3,37 @@
 //! Panels are registered dynamically: when an extension finishes loading, each open workspace
 //! gets a panel (or status item) per surface, and new workspaces get them on creation. Nothing
 //! is listed statically in `crates/zed`.
+//!
+//! Extensions come from the installed-extensions directory (`ExtensionStore::installed_dir`):
+//! every directory there whose `extension.toml` has a `[fyx_ui]` table is loaded with
+//! `UiExtension::load_from_dir`, including dev extensions, which Zed's "Install Dev Extension"
+//! links into that directory. The directory is scanned again when the extension store reports an
+//! install, an uninstall or an update: a new or changed component (by modification time and size)
+//! is loaded and its surfaces move to the new instance; a removed one stops its surfaces.
+//! `FYX_UI_DEV_EXTENSIONS` adds paths outside that directory.
+//!
+//! Dev extensions (installed as links, or from `FYX_UI_DEV_EXTENSIONS`) reload by themselves:
+//! their component file is watched, and a change, once writes have paused for
+//! `HOT_RELOAD_DEBOUNCE`, loads it again and remounts its surfaces.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context as _;
 use collections::{HashMap, HashSet};
-use extension_host::wasm_host::fyx_ui::{PushedUpdate, UiExtension};
-use fs::Fs;
-use futures::{StreamExt as _, channel::mpsc};
+use extension_host::{
+    ExtensionStore,
+    wasm_host::fyx_ui::{PushedUpdate, UiExtension, UiManifest},
+};
+use fs::{Fs, MTime, PathEvent};
+use futures::{FutureExt as _, StreamExt as _, channel::mpsc};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, Focusable as _, Global, SharedString,
-    WeakEntity, Window,
+    App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity, Window,
 };
 use settings::Settings as _;
 use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
@@ -22,7 +42,10 @@ use workspace::{Workspace, WorkspaceSettings};
 use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
-    panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo},
+    panel::{
+        AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
+        add_extension_panel,
+    },
     surface::{SurfaceLink, SurfaceState},
 };
 
@@ -31,6 +54,10 @@ use crate::{
 /// `extension.toml` with a `[fyx_ui]` table plus the component it names, loaded with
 /// `UiExtension::load_from_dir`), or a bare `.wasm` component whose file name becomes its id.
 pub const DEV_EXTENSIONS_ENV: &str = "FYX_UI_DEV_EXTENSIONS";
+
+/// A dev extension's component is loaded again once writes to it have paused this long (a build
+/// writes the file in several steps).
+pub const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Extension panels sort after every built-in panel (those use 0..=7).
 const FIRST_ACTIVATION_PRIORITY: u32 = 100;
@@ -44,6 +71,38 @@ pub struct LoadedSurface {
 pub struct UiExtensionRegistry {
     surfaces: Vec<LoadedSurface>,
     next_activation_priority: u32,
+    /// Extensions loaded from the installed-extensions directory, by id.
+    installed: HashMap<Arc<str>, Fingerprint>,
+    scanning: bool,
+    rescan_requested: bool,
+    /// The component watch of each dev extension, by id.
+    watches: HashMap<Arc<str>, Task<()>>,
+}
+
+/// How a watched dev extension is loaded again.
+#[derive(Clone, Debug)]
+enum Reload {
+    /// Linked into this installed-extensions directory: rescan it.
+    Installed(PathBuf),
+    /// A `FYX_UI_DEV_EXTENSIONS` entry: load it again.
+    DevPath(PathBuf),
+}
+
+/// What tells a reinstalled component from an unchanged one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fingerprint {
+    mtime: MTime,
+    len: u64,
+}
+
+/// A UI extension found in the installed-extensions directory.
+struct Found {
+    dir: PathBuf,
+    extension_id: Arc<str>,
+    fingerprint: Fingerprint,
+    component: PathBuf,
+    /// A link (Zed's dev install): its component is watched for changes.
+    is_dev: bool,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -65,20 +124,42 @@ impl UiExtensionRegistry {
     }
 
     /// Adds every surface of a loaded extension and mounts it. Open workspaces pick them up.
+    ///
+    /// If the extension is already loaded (a reinstall), its surfaces move to the new instance
+    /// and mount again; panels and status items stay where they are. Surfaces the new version no
+    /// longer declares stop.
     pub fn register_backend(
         &mut self,
         backend: Rc<dyn UiBackend>,
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
+        let prefix = format!("{}/", backend.extension_id());
+        for loaded in &self.surfaces {
+            let Some(surface_id) = loaded.info.key.strip_prefix(prefix.as_str()) else {
+                continue;
+            };
+            if !surfaces.iter().any(|surface| surface.id == surface_id) {
+                let message = format!(
+                    "{} no longer has the surface {surface_id:?}",
+                    backend.extension_id()
+                );
+                loaded
+                    .state
+                    .update(cx, |state, cx| state.fail(message.into(), false, cx));
+            }
+        }
         for surface in surfaces {
             let info = SurfaceInfo::new(
                 backend.extension_id(),
                 surface,
                 FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
             );
-            if self.surface(&info.key).is_some() {
-                log::error!("fyx:ui: surface {} is already loaded, skipping", info.key);
+            if let Some(loaded) = self.surface(&info.key) {
+                log::info!("fyx:ui: reloading surface {}", info.key);
+                loaded.state.update(cx, |state, cx| {
+                    state.replace_backend(backend.clone(), surface.clone(), cx)
+                });
                 continue;
             }
             self.next_activation_priority += 1;
@@ -127,6 +208,160 @@ impl UiExtensionRegistry {
         .detach();
     }
 
+    /// Loads the UI extensions of the installed-extensions directory that are new or changed since
+    /// the last scan, and stops the surfaces of those that are gone. Scans do not overlap: a
+    /// request during a scan makes it run once more at the end.
+    pub fn scan_installed(&mut self, dir: PathBuf, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        if self.scanning {
+            self.rescan_requested = true;
+            return;
+        }
+        self.scanning = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let found = find_ui_extensions(&dir, fs.as_ref()).await;
+                let Ok(to_load) = this.update(cx, |this, cx| this.plan_scan(found, cx)) else {
+                    return;
+                };
+                for found in to_load {
+                    let loaded = UiExtension::load_from_dir(&found.dir, fs.clone(), cx).await;
+                    match loaded {
+                        Ok(Some((extension, pushed))) => {
+                            log::info!(
+                                "fyx:ui: loaded installed extension {} with {} surface(s)",
+                                extension.extension_id(),
+                                extension.surfaces().len()
+                            );
+                            this.update(cx, |this, cx| {
+                                this.installed
+                                    .insert(found.extension_id.clone(), found.fingerprint);
+                                this.register_extension(extension, pushed, cx);
+                                if found.is_dev {
+                                    this.watch_component(
+                                        found.extension_id.clone(),
+                                        found.component.clone(),
+                                        Reload::Installed(dir.clone()),
+                                        fs.clone(),
+                                        cx,
+                                    );
+                                }
+                            })
+                            .ok();
+                        }
+                        Ok(None) => {}
+                        Err(error) => log::error!(
+                            "fyx:ui: failed to load installed extension {}: {error:#}",
+                            found.dir.display()
+                        ),
+                    }
+                }
+                let again = this.update(cx, |this, _| {
+                    let again = std::mem::take(&mut this.rescan_requested);
+                    this.scanning = again;
+                    again
+                });
+                if !matches!(again, Ok(true)) {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Watches a dev extension's component and loads it again when it changes (once per id).
+    fn watch_component(
+        &mut self,
+        extension_id: Arc<str>,
+        component: PathBuf,
+        reload: Reload,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.watches.contains_key(&extension_id) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            // Through the link of a dev install, to the file that a build rewrites.
+            let component = fs.canonicalize(&component).await.unwrap_or(component);
+            let Some(dir) = component.parent().map(Path::to_path_buf) else {
+                return;
+            };
+            let (mut events, _watcher) = fs.watch(&dir, Duration::from_millis(50)).await;
+            let touches = |events: &[PathEvent]| {
+                events.iter().any(|event| {
+                    event.path == component || event.path.file_name() == component.file_name()
+                })
+            };
+            while let Some(batch) = events.next().await {
+                if !touches(&batch) {
+                    continue;
+                }
+                // Wait until the writes pause.
+                loop {
+                    let mut pause = cx.background_executor().timer(HOT_RELOAD_DEBOUNCE).fuse();
+                    futures::select_biased! {
+                        more = events.next().fuse() => {
+                            if more.is_none() {
+                                return;
+                            }
+                        }
+                        _ = pause => break,
+                    }
+                }
+                log::info!("fyx:ui: {} changed, reloading", component.display());
+                let reloaded =
+                    this.update(cx, |this, cx| this.reload(reload.clone(), fs.clone(), cx));
+                if reloaded.is_err() {
+                    return;
+                }
+            }
+        });
+        self.watches.insert(extension_id, task);
+    }
+
+    fn reload(&mut self, reload: Reload, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        match reload {
+            // The scan compares the component's fingerprint and loads it again if it changed.
+            Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
+            Reload::DevPath(path) => {
+                cx.spawn(async move |_, cx| {
+                    if let Err(error) = load_dev_extension(path.clone(), cx).await {
+                        log::error!(
+                            "fyx:ui: failed to reload dev extension {}: {error:#}",
+                            path.display()
+                        );
+                    }
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Which found extensions need loading; stops the surfaces of uninstalled ones.
+    fn plan_scan(&mut self, found: Vec<Found>, cx: &mut Context<Self>) -> Vec<Found> {
+        let gone: Vec<Arc<str>> = self
+            .installed
+            .keys()
+            .filter(|id| !found.iter().any(|found| &found.extension_id == *id))
+            .cloned()
+            .collect();
+        for extension_id in gone {
+            self.installed.remove(&extension_id);
+            self.watches.remove(&extension_id);
+            log::info!("fyx:ui: {extension_id} was uninstalled");
+            self.fail_extension(
+                &extension_id,
+                "",
+                format!("{extension_id} was uninstalled").into(),
+                cx,
+            );
+        }
+        found
+            .into_iter()
+            .filter(|found| self.installed.get(&found.extension_id) != Some(&found.fingerprint))
+            .collect()
+    }
+
     /// Stops every surface of an extension except `except_surface` (which stops itself).
     fn fail_extension(
         &mut self,
@@ -143,7 +378,7 @@ impl UiExtensionRegistry {
             if surface_id != except_surface {
                 surface
                     .state
-                    .update(cx, |state, cx| state.fail(message.clone(), cx));
+                    .update(cx, |state, cx| state.fail(message.clone(), false, cx));
             }
         }
     }
@@ -158,13 +393,67 @@ impl UiExtensionRegistry {
         let key = format!("{extension_id}/{surface_id}");
         match self.surface(&key) {
             Some(surface) => surface.state.update(cx, |state, cx| {
-                state.apply_update(update, cx);
+                state.apply_pushed_update(update, cx);
             }),
             None => log::error!(
                 "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
             ),
         }
     }
+}
+
+/// The UI extensions in `dir`: subdirectories (or links to them, as dev installs are) whose
+/// `extension.toml` has a `[fyx_ui]` table. Others are regular Zed extensions and are skipped.
+async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
+    let mut entries = match fs.read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::debug!(
+                "fyx:ui: no installed extensions at {}: {error:#}",
+                dir.display()
+            );
+            return Vec::new();
+        }
+    };
+    let mut found = Vec::new();
+    while let Some(entry) = entries.next().await {
+        let Ok(extension_dir) = entry else {
+            continue;
+        };
+        let manifest = match UiManifest::read(fs, &extension_dir).await {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => continue,
+            Err(error) => {
+                log::debug!("fyx:ui: skipping {}: {error:#}", extension_dir.display());
+                continue;
+            }
+        };
+        let (extension_id, manifest) = manifest;
+        let component = extension_dir.join(&manifest.component);
+        let is_dev = fs
+            .metadata(&extension_dir)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.is_symlink);
+        match fs.metadata(&component).await {
+            Ok(Some(metadata)) => found.push(Found {
+                dir: extension_dir,
+                extension_id,
+                fingerprint: Fingerprint {
+                    mtime: metadata.mtime,
+                    len: metadata.len,
+                },
+                component,
+                is_dev,
+            }),
+            Ok(None) | Err(_) => log::error!(
+                "fyx:ui: {extension_id}: component {} is missing (build it first)",
+                component.display()
+            ),
+        }
+    }
+    found
 }
 
 /// A surface's way back to the registry, for the other surfaces of its extension.
@@ -204,12 +493,41 @@ pub fn init(cx: &mut App) {
     .detach();
 
     load_dev_extensions(cx);
+    watch_installed_extensions(cx);
+}
+
+/// Loads the installed UI extensions now and again whenever the extension store changes.
+fn watch_installed_extensions(cx: &mut App) {
+    let (Some(store), Some(registry)) = (
+        ExtensionStore::try_global(cx),
+        UiExtensionRegistry::global(cx),
+    ) else {
+        return;
+    };
+    let dir = store.read(cx).installed_dir.clone();
+    let fs = <dyn Fs>::global(cx);
+    let scan = move |registry: &Entity<UiExtensionRegistry>, cx: &mut App| {
+        registry.update(cx, |registry, cx| {
+            registry.scan_installed(dir.clone(), fs.clone(), cx)
+        })
+    };
+    scan(&registry, cx);
+    cx.subscribe(&store, move |_, event, cx| match event {
+        extension_host::Event::ExtensionInstalled(_)
+        | extension_host::Event::ExtensionUninstalled(_)
+        | extension_host::Event::ExtensionsUpdated => scan(&registry, cx),
+        extension_host::Event::StartedReloading
+        | extension_host::Event::ExtensionFailedToLoad(_) => {}
+    })
+    .detach();
 }
 
 /// The extension containers of one workspace, by surface key.
 #[derive(Default)]
 struct WorkspaceSurfaces {
-    panels: HashMap<SharedString, WeakEntity<ExtensionPanel>>,
+    panels: HashMap<SharedString, Box<dyn AnyExtensionPanel>>,
+    /// One status bar entry per side, holding that side's extension status items.
+    status_groups: HashMap<bool, Entity<ExtensionStatusGroup>>,
     status_items: HashSet<SharedString>,
 }
 
@@ -223,6 +541,9 @@ fn attach_to_workspace(
     };
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
+    workspace.register_action(|workspace, _: &crate::InstallDevUiExtension, window, cx| {
+        crate::install::prompt_and_install(workspace, window, cx)
+    });
     workspace.register_action({
         let surfaces = surfaces.clone();
         move |workspace, action: &ToggleExtensionPanel, window, cx| {
@@ -230,9 +551,22 @@ fn attach_to_workspace(
                 .borrow()
                 .panels
                 .get(action.key.as_str())
-                .and_then(WeakEntity::upgrade);
+                .and_then(|panel| {
+                    Some((
+                        panel.panel_id(),
+                        panel.panel_focus(cx)?,
+                        panel.surface_focus(cx)?,
+                    ))
+                });
             match panel {
-                Some(panel) => toggle_panel_focus(workspace, &panel, window, cx),
+                Some((panel_id, panel_focus, surface_focus)) => toggle_panel_focus(
+                    workspace,
+                    panel_id,
+                    &panel_focus,
+                    &surface_focus,
+                    window,
+                    cx,
+                ),
                 None => log::debug!("fyx:ui: no extension panel {:?}", action.key),
             }
         }
@@ -278,45 +612,55 @@ fn add_missing_surfaces(
                     continue;
                 }
                 let key = info.key.clone();
-                let panel = cx.new(|cx| ExtensionPanel::new(info, state, window, cx));
-                surfaces.borrow_mut().panels.insert(key, panel.downgrade());
-                workspace.add_panel(panel, window, cx);
+                let panel = add_extension_panel(workspace, info, state, window, cx);
+                surfaces.borrow_mut().panels.insert(key, panel);
             }
             SurfaceKind::StatusItem(descriptor) => {
                 if !surfaces.borrow_mut().status_items.insert(info.key.clone()) {
                     continue;
                 }
-                // The status bar keeps insertion order; `priority` is not honoured yet.
                 let item = cx.new(|cx| ExtensionStatusItem::new(state, window, cx));
-                workspace
-                    .status_bar()
-                    .update(cx, |status_bar, cx| match descriptor.side {
-                        StatusBarSide::Left => status_bar.add_left_item(item, window, cx),
-                        StatusBarSide::Right => status_bar.add_right_item(item, window, cx),
-                    });
+                let left = descriptor.side == StatusBarSide::Left;
+                let existing = surfaces.borrow().status_groups.get(&left).cloned();
+                let group = match existing {
+                    Some(group) => group,
+                    None => {
+                        let group = cx.new(|_| ExtensionStatusGroup::new(descriptor.side));
+                        workspace.status_bar().update(cx, |status_bar, cx| {
+                            if left {
+                                status_bar.add_left_item(group.clone(), window, cx)
+                            } else {
+                                status_bar.add_right_item(group.clone(), window, cx)
+                            }
+                        });
+                        surfaces
+                            .borrow_mut()
+                            .status_groups
+                            .insert(left, group.clone());
+                        group
+                    }
+                };
+                group.update(cx, |group, cx| group.add(descriptor.priority, item, cx));
             }
         }
     }
 }
 
 /// `Workspace::toggle_panel_focus` for one panel instance (that one picks the first panel of a
-/// type, and every extension panel has the same type).
+/// type, and panels beyond `PANEL_SLOTS` share a type).
 fn toggle_panel_focus(
     workspace: &mut Workspace,
-    panel: &Entity<ExtensionPanel>,
+    panel_id: gpui::EntityId,
+    panel_focus: &gpui::FocusHandle,
+    surface_focus: &gpui::FocusHandle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let focus_handle = panel.focus_handle(cx);
-    if focus_handle.contains_focused(window, cx) {
+    if panel_focus.contains_focused(window, cx) {
         workspace.focus_center_pane(window, cx);
         if WorkspaceSettings::get_global(cx).close_panel_on_toggle {
             for dock in workspace.all_docks() {
-                if dock
-                    .read(cx)
-                    .panel_index_for_id(panel.entity_id())
-                    .is_some()
-                {
+                if dock.read(cx).panel_index_for_id(panel_id).is_some() {
                     dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
                 }
             }
@@ -324,18 +668,12 @@ fn toggle_panel_focus(
         return;
     }
     for dock in workspace.all_docks() {
-        if let Some(index) = dock.read(cx).panel_index_for_id(panel.entity_id()) {
+        if let Some(index) = dock.read(cx).panel_index_for_id(panel_id) {
             dock.update(cx, |dock, cx| {
                 dock.activate_panel(index, window, cx);
                 dock.set_open(true, window, cx);
             });
-            panel
-                .read(cx)
-                .view()
-                .read(cx)
-                .focus_handle
-                .clone()
-                .focus(window, cx);
+            surface_focus.focus(window, cx);
             break;
         }
     }
@@ -367,10 +705,21 @@ fn load_dev_extensions(cx: &mut App) {
 }
 
 async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let fs = cx.update(|cx| <dyn Fs>::global(cx));
+    let reload_path = path.clone();
+    // The file to watch for hot reload.
+    let component = if path.is_dir() {
+        UiManifest::read(fs.as_ref(), &path)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, manifest)| path.join(manifest.component))
+    } else {
+        Some(path.clone())
+    };
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
-        let fs = cx.update(|cx| <dyn Fs>::global(cx));
-        UiExtension::load_from_dir(&path, fs, cx)
+        UiExtension::load_from_dir(&path, fs.clone(), cx)
             .await?
             .with_context(|| format!("{}: extension.toml has no [fyx_ui] table", path.display()))?
     } else {
@@ -398,7 +747,17 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         let registry =
             UiExtensionRegistry::global(cx).context("ui_ext_host::init was not called")?;
         registry.update(cx, |registry, cx| {
-            registry.register_extension(extension, pushed, cx)
+            let extension_id = extension.extension_id().clone();
+            registry.register_extension(extension, pushed, cx);
+            if let Some(component) = component {
+                registry.watch_component(
+                    extension_id,
+                    component,
+                    Reload::DevPath(reload_path),
+                    fs,
+                    cx,
+                );
+            }
         });
         anyhow::Ok(())
     })

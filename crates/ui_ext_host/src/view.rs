@@ -9,9 +9,9 @@ use collections::HashMap;
 use editor::{Editor, EditorEvent};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    FontWeight, Hsla, IntoElement, ListSizingBehavior, ParentElement, Pixels, Render, RenderOnce,
-    ScrollHandle, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    FontWeight, Global, Hsla, IntoElement, ListSizingBehavior, ParentElement, Pixels, Render,
+    RenderOnce, ScrollHandle, SharedString, Styled, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
@@ -80,6 +80,12 @@ impl SurfaceView {
             this.sync(window, cx);
             cx.notify();
         });
+        let extension_id = state.read(cx).extension_id().to_string();
+        let me = cx.entity().downgrade();
+        let views = cx.default_global::<ExtensionViews>();
+        let siblings = views.0.entry(extension_id).or_default();
+        siblings.retain(|view| view.upgrade().is_some());
+        siblings.push(me);
         let mut this = Self {
             state,
             compact,
@@ -108,8 +114,27 @@ impl SurfaceView {
         // its pause goes first (judge review w3-deep-1, finding 2).
         if !matches!(event, UiEvent::InputChanged(..)) {
             self.flush_pending_inputs(cx);
+            self.flush_sibling_views(cx);
         }
         self.state.update(cx, |state, cx| state.dispatch(event, cx));
+    }
+
+    /// The same for the extension's other views (its other surfaces, other windows): one
+    /// extension, one order of events (integration-3 finding 9).
+    fn flush_sibling_views(&mut self, cx: &mut Context<Self>) {
+        let extension_id = self.state.read(cx).extension_id().to_string();
+        let me = cx.entity_id();
+        let siblings: Vec<Entity<SurfaceView>> = cx
+            .try_global::<ExtensionViews>()
+            .and_then(|views| views.0.get(&extension_id))
+            .into_iter()
+            .flatten()
+            .filter_map(|view| view.upgrade())
+            .filter(|view| view.entity_id() != me)
+            .collect();
+        for view in siblings {
+            view.update(cx, |view, cx| view.flush_pending_inputs(cx));
+        }
     }
 
     fn flush_pending_inputs(&mut self, cx: &mut Context<Self>) {
@@ -191,10 +216,51 @@ impl SurfaceView {
         }
         let lists: Vec<NodeId> = lists.into_iter().map(|(id, _)| id).collect();
 
+        // An SDK remount gives every node a new id, so an input with typing the extension has not
+        // seen (or with focus) would lose it with its old editor. Carry it to the input at the
+        // same position among the surface's inputs (integration-3 finding 10).
+        let old_inputs: Vec<NodeId> = old_order
+            .iter()
+            .filter(|id| self.inputs.contains_key(id))
+            .copied()
+            .collect();
+        let new_inputs: Vec<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let carried: Vec<(usize, String, bool)> = old_inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| !new_inputs.contains(id))
+            .filter_map(|(position, id)| {
+                let input = self.inputs.get(id)?;
+                let focused = focused_before == Some(*id);
+                (input.debounce.is_some() || focused)
+                    .then(|| (position, input.editor.read(cx).text(cx), focused))
+            })
+            .collect();
+
         self.inputs
             .retain(|id, _| inputs.iter().any(|(input, _)| input == id));
         for (id, props) in inputs {
             self.sync_input(id, props, window, cx);
+        }
+        for (position, text, focused) in carried {
+            let Some(&id) = new_inputs.get(position) else {
+                continue;
+            };
+            if old_inputs.contains(&id) {
+                continue;
+            }
+            let Some(input) = self.inputs.get_mut(&id) else {
+                continue;
+            };
+            let editor = input.editor.clone();
+            if editor.read(cx).text(cx) != text {
+                input.last_known = text.clone();
+                editor.update(cx, |editor, cx| editor.set_text(text.as_str(), window, cx));
+                self.dispatch(UiEvent::InputChanged(id, text), cx);
+            }
+            if focused {
+                editor.focus_handle(cx).focus(window, cx);
+            }
         }
 
         self.markdown
@@ -368,21 +434,24 @@ impl Render for SurfaceView {
                 .color(Color::Muted)
                 .size(LabelSize::Small)
                 .into_any_element(),
-            Phase::Failed(error) => h_flex()
+            Phase::Failed { message, retryable } => h_flex()
                 .gap_1()
                 .when(!compact, |this| this.p_2().flex_wrap())
                 .child(
-                    Label::new(error.clone())
+                    Label::new(message.clone())
                         .color(Color::Error)
                         .size(LabelSize::Small),
                 )
-                .child(
-                    Button::new("fyx-ui-retry", "Retry")
-                        .style(UiButtonStyle::Subtle)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.state.update(cx, |state, cx| state.retry(cx))
-                        })),
-                )
+                // A dead instance refuses every call, so a retry could only fail again.
+                .when(*retryable, |this| {
+                    this.child(
+                        Button::new("fyx-ui-retry", "Retry")
+                            .style(UiButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.state.update(cx, |state, cx| state.retry(cx))
+                            })),
+                    )
+                })
                 .into_any_element(),
             Phase::Ready(tree) => {
                 let renderer = Renderer {
@@ -953,6 +1022,12 @@ pub(crate) fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(DiffLine, &'a s
     );
     lines
 }
+
+/// Every view of each extension, by extension id, so a view can flush the typing of the others.
+#[derive(Default)]
+struct ExtensionViews(HashMap<String, Vec<WeakEntity<SurfaceView>>>);
+
+impl Global for ExtensionViews {}
 
 /// The focus ring: the theme's focused border, or a transparent one of the same width so focusing
 /// does not move anything.

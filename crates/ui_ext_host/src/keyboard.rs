@@ -318,6 +318,9 @@ impl SurfaceView {
         let Some(gone) = focused_before else {
             return;
         };
+        if self.focused_node(window, cx).is_some() {
+            return;
+        }
         if self.focus_handle_of(gone, cx).is_some() {
             return;
         }
