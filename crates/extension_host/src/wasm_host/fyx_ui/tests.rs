@@ -32,6 +32,8 @@ mod probe {
     pub const PUSH: NodeId = 1;
     pub const SPIN: NodeId = 2;
     pub const SLEEP: NodeId = 3;
+    pub const PUSH_THEN_PATCH: NodeId = 4;
+    pub const PUSH_THEN_FAIL: NodeId = 5;
 }
 
 fn workspace_dir() -> PathBuf {
@@ -163,7 +165,7 @@ async fn test_demo_counter_round_trip(cx: &mut TestAppContext) {
         }]
     );
 
-    let mut tree = extension.mount(SURFACE).await.expect("mount");
+    let mut tree = extension.mount(SURFACE).await.expect("mount").value;
     assert_eq!(tree.len(), 7);
     assert_eq!(tree.roots(), &[ROOT]);
     assert_eq!(tree.children(Some(ROOT)), &[LABEL, BUTTONS, LIST]);
@@ -178,6 +180,7 @@ async fn test_demo_counter_round_trip(cx: &mut TestAppContext) {
             .handle_event(SURFACE, UiEvent::Click(id))
             .await
             .unwrap_or_else(|error| panic!("click({id}): {error:#}"))
+            .value
     };
 
     // Decrement at 0 changes nothing.
@@ -202,7 +205,8 @@ async fn test_demo_counter_round_trip(cx: &mut TestAppContext) {
     let rows = extension
         .list_rows(SURFACE, LIST, 1, 10)
         .await
-        .expect("rows");
+        .expect("rows")
+        .value;
     assert_eq!(rows.len(), 1);
     let (index, row) = &rows[0];
     assert_eq!(*index, 1);
@@ -231,25 +235,62 @@ async fn test_demo_counter_round_trip(cx: &mut TestAppContext) {
             .list_rows(SURFACE, LIST, 0, 10)
             .await
             .expect("rows")
+            .value
             .is_empty()
     );
 }
 
 #[gpui::test]
-async fn test_pushed_update_reaches_the_host(cx: &mut TestAppContext) {
+async fn test_pushes_come_back_with_the_reply_in_order(cx: &mut TestAppContext) {
     let (extension, mut pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
 
-    let update = extension
+    let reply = extension
         .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
         .await
         .expect("click");
-    assert_eq!(update, Update::Unchanged);
     assert_eq!(
-        pushed.next().await.expect("a pushed update"),
+        reply,
+        Reply {
+            pushed: vec![PushedUpdate {
+                surface_id: probe::SURFACE.into(),
+                update: Update::Patches(vec![Patch::Remove(probe::PUSH)]),
+            }],
+            value: Update::Unchanged,
+        }
+    );
+
+    // The reply inserts under a node the push inserted: it applies only after the push.
+    let reply = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_PATCH))
+        .await
+        .expect("click");
+    let mut tree = Tree::default();
+    for pushed in reply.pushed {
+        tree.apply_update(pushed.update).expect("push applies");
+    }
+    tree.apply_update(reply.value)
+        .expect("reply applies after the push");
+    assert_eq!(tree.children(Some(10)), &[11]);
+
+    // Nothing went through the channel so far; the pushes of a failed call do.
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_FAIL))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("failed after pushing"),
+        "{error:#}"
+    );
+    assert_eq!(
+        pushed.try_recv().expect("a forwarded push"),
         PushedUpdate {
             surface_id: probe::SURFACE.into(),
             update: Update::Patches(vec![Patch::Remove(probe::PUSH)]),
         }
+    );
+    assert!(
+        pushed.try_recv().is_err(),
+        "no other push reached the channel"
     );
 }
 

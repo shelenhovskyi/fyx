@@ -120,19 +120,29 @@ fn api_version_from_imports(component: &Component, engine: &Engine) -> Option<Ve
         })
 }
 
-/// An update the extension pushed on its own (timers, background work), not as the reply to an
-/// event. The renderer coalesces these and applies them on its next frame.
+/// An update the extension sent through `host.push-update`, for any of its surfaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushedUpdate {
     pub surface_id: String,
     pub update: ui_ext::Update,
 }
 
+/// The result of a call together with the updates the guest pushed while it ran.
+///
+/// Apply `pushed` in order, then `value`: the guest emitted them in that order, and a reply may
+/// depend on nodes a push inserted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reply<T> {
+    pub pushed: Vec<PushedUpdate>,
+    pub value: T,
+}
+
 pub struct UiState {
     extension_id: Arc<str>,
     table: ResourceTable,
     ctx: WasiCtx,
-    pushed_updates: mpsc::UnboundedSender<PushedUpdate>,
+    /// Pushes of the running call, returned with its reply.
+    pushes: Vec<PushedUpdate>,
     call_started: Instant,
     call_budget: Duration,
     disabled: Option<String>,
@@ -142,6 +152,7 @@ impl UiState {
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
+        self.pushes.clear();
     }
 }
 
@@ -162,16 +173,10 @@ impl wit::Host for UiState {}
 
 impl wit_host::Host for UiState {
     fn push_update(&mut self, surface_id: String, update: wit::Update) {
-        let pushed = PushedUpdate {
+        self.pushes.push(PushedUpdate {
             surface_id,
             update: update.into(),
-        };
-        if self.pushed_updates.unbounded_send(pushed).is_err() {
-            log::debug!(
-                "fyx:ui extension {}: dropped a pushed update, nothing listens for it",
-                self.extension_id
-            );
-        }
+        });
     }
 
     fn log(&mut self, level: wit_host::LogLevel, message: String) {
@@ -288,12 +293,16 @@ pub struct UiExtension {
     surfaces: Arc<[ui_ext::Surface]>,
     limits: TreeLimits,
     tx: mpsc::UnboundedSender<UiCall>,
+    pushed_tx: mpsc::UnboundedSender<PushedUpdate>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
 }
 
 impl UiExtension {
-    /// Compiles and instantiates a component and asks it for its surfaces. The receiver yields the
-    /// updates the extension pushes through `host.push-update`.
+    /// Compiles and instantiates a component and asks it for its surfaces.
+    ///
+    /// Pushes made during a call come back in that call's [`Reply`]. The receiver yields only the
+    /// pushes that have no reply to go with: those made during instantiation and those of a call
+    /// that failed with an error the extension reported (the guest already counts them as sent).
     pub fn load(
         extension_id: Arc<str>,
         wasm_bytes: Vec<u8>,
@@ -341,7 +350,7 @@ impl UiExtension {
                             extension_id,
                             table: ResourceTable::new(),
                             ctx: wasi.build(),
-                            pushed_updates: pushed_tx,
+                            pushes: Vec::new(),
                             call_started: Instant::now(),
                             call_budget: UI_INIT_BUDGET,
                             disabled: None,
@@ -379,10 +388,15 @@ impl UiExtension {
                     .context("fyx:ui surfaces() failed")?;
                     let surfaces: Arc<[ui_ext::Surface]> =
                         surfaces.into_iter().map(Into::into).collect();
-                    anyhow::Ok((extension, store, surfaces))
+                    // Nothing replies to instantiation, so its pushes go to the channel; the
+                    // receiver is still in hand here, so sending cannot fail.
+                    for pushed in store.data_mut().pushes.drain(..) {
+                        pushed_tx.unbounded_send(pushed).ok();
+                    }
+                    anyhow::Ok((extension, store, surfaces, pushed_tx))
                 }
             };
-            let (mut extension, mut store, surfaces) =
+            let (mut extension, mut store, surfaces, pushed_tx) =
                 gpui_tokio::Tokio::spawn(cx, instantiate).await??;
 
             let (tx, mut rx) = mpsc::unbounded::<UiCall>();
@@ -401,6 +415,7 @@ impl UiExtension {
                     surfaces,
                     limits: TreeLimits::default(),
                     tx,
+                    pushed_tx,
                     _task: Arc::new(task),
                 },
                 pushed_rx,
@@ -426,18 +441,19 @@ impl UiExtension {
     }
 
     /// The initial tree of a surface, validated.
-    pub async fn mount(&self, surface_id: &str) -> Result<Tree> {
-        let nodes = self
+    pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
+        let (result, pushed) = self
             .call({
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move { extension.call_mount(store, &surface_id).await }.boxed()
                 }
             })
-            .await?
-            .map_err(|message| self.extension_error(message))?;
-        Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
-            .with_context(|| format!("invalid tree from mount({surface_id:?})"))
+            .await?;
+        let nodes = self.guest_result(result, &pushed)?;
+        let tree = Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
+            .with_context(|| format!("invalid tree from mount({surface_id:?})"));
+        self.reply(tree, pushed)
     }
 
     /// The extension's reply to one input event. The caller applies it to its tree, which
@@ -446,8 +462,8 @@ impl UiExtension {
         &self,
         surface_id: &str,
         event: ui_ext::UiEvent,
-    ) -> Result<ui_ext::Update> {
-        let update = self
+    ) -> Result<Reply<ui_ext::Update>> {
+        let (result, pushed) = self
             .call({
                 let surface_id = surface_id.to_string();
                 let event = wit::UiEvent::from(event);
@@ -460,9 +476,9 @@ impl UiExtension {
                     .boxed()
                 }
             })
-            .await?
-            .map_err(|message| self.extension_error(message))?;
-        Ok(update.into())
+            .await?;
+        let update = self.guest_result(result, &pushed)?;
+        self.reply(Ok(update.into()), pushed)
     }
 
     /// Rows `start..start + count` of a virtualized list, each validated as a single-root tree.
@@ -472,8 +488,8 @@ impl UiExtension {
         list_node: ui_ext::NodeId,
         start: u32,
         count: u32,
-    ) -> Result<Vec<(u32, Tree)>> {
-        let rows = self
+    ) -> Result<Reply<Vec<(u32, Tree)>>> {
+        let (rows, pushed) = self
             .call({
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
@@ -487,7 +503,8 @@ impl UiExtension {
             })
             .await?;
         let requested = start..start.saturating_add(count);
-        rows.into_iter()
+        let rows = rows
+            .into_iter()
             .map(|row| {
                 anyhow::ensure!(
                     requested.contains(&row.index),
@@ -503,10 +520,46 @@ impl UiExtension {
                 })?;
                 Ok((row.index, tree))
             })
-            .collect()
+            .collect();
+        self.reply(rows, pushed)
     }
 
-    async fn call<T, F>(&self, f: F) -> Result<T>
+    /// Turns an error the guest reported into an error, forwarding the call's pushes.
+    fn guest_result<T>(
+        &self,
+        result: std::result::Result<T, String>,
+        pushed: &[PushedUpdate],
+    ) -> Result<T> {
+        result.map_err(|message| {
+            self.forward_pushes(pushed.to_vec());
+            self.extension_error(message)
+        })
+    }
+
+    fn reply<T>(&self, value: Result<T>, pushed: Vec<PushedUpdate>) -> Result<Reply<T>> {
+        match value {
+            Ok(value) => Ok(Reply { pushed, value }),
+            Err(error) => {
+                self.forward_pushes(pushed);
+                Err(error)
+            }
+        }
+    }
+
+    fn forward_pushes(&self, pushed: Vec<PushedUpdate>) {
+        for pushed in pushed {
+            if self.pushed_tx.unbounded_send(pushed).is_err() {
+                log::debug!(
+                    "fyx:ui extension {}: dropped a pushed update, nothing listens for it",
+                    self.extension_id
+                );
+            }
+        }
+    }
+
+    /// Runs one guest call on the extension's queue and returns its result with the updates the
+    /// guest pushed during it. A failed call (trap, budget) disables the extension and drops them.
+    async fn call<T, F>(&self, f: F) -> Result<(T, Vec<PushedUpdate>)>
     where
         T: 'static + Send,
         F: 'static
@@ -529,12 +582,13 @@ impl UiExtension {
                             f(extension, store).await.map_err(anyhow::Error::from)
                         })
                         .await;
+                        let pushes = std::mem::take(&mut store.data_mut().pushes);
                         // A trap or a dropped call, the time budget included, leaves the instance
                         // unusable.
                         if let Err(error) = &result {
                             store.data_mut().disabled = Some(format!("{error:#}"));
                         }
-                        result
+                        result.map(|value| (value, pushes))
                     };
                     // The caller may have stopped waiting; then nobody needs the result.
                     return_tx.send(result).ok();
