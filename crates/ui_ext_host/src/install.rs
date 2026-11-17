@@ -9,12 +9,10 @@
 use std::{path::Path, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
-use extension_host::{
-    ExtensionStore,
-    wasm_host::fyx_ui::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest},
-};
+use extension_host::ExtensionStore;
 use fs::{Fs, RemoveOptions};
 use gpui::{Context, PathPromptOptions, PromptLevel, Window, actions};
+use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest};
 use workspace::{Toast, Workspace, notifications::NotificationId};
 
 use crate::UiExtensionRegistry;

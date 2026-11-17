@@ -93,7 +93,7 @@ fn probe_wasm() -> Vec<u8> {
     static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     read_guest(&BUILT, || {
         build_guest(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/wasm_host/fyx_ui/fixtures/probe"),
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/probe"),
             &["--release"],
             "release/fyx_ui_test_probe.wasm",
         )

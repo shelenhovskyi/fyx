@@ -13,7 +13,7 @@ path = "src/probe.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-ui_ext_sdk = { path = "../../../../../../ui_ext_sdk" }
+ui_ext_sdk = { path = "../../../ui_ext_sdk" }
 
 [workspace]
 

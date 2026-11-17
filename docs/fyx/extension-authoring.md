@@ -42,13 +42,13 @@ wasmtime `Store` with its own call queue, on its own engine. A slow call in the 
 `zed:extension` component therefore never delays click handling. The `[fyx_ui]` manifest table is
 ignored by upstream Zed's manifest parser, so one directory can hold both kinds.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:3-9, 137-138 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:3-9, 137-138 -->
 
 The sandbox: the component gets WASI with stderr inherited and nothing else configured. It has no
 preopened directories, no environment variables and no arguments. It cannot read the worktree or
 buffers yet. The only host functions are `push-update` and `log`.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 
 ## Project layout
 
@@ -94,7 +94,7 @@ ui_ext_sdk = { path = "../fyx/crates/ui_ext_sdk" }
   `[workspace]` table to its `Cargo.toml`. Without it, cargo refuses to build a package that is
   inside a workspace but not a member of it. The host's test fixture `probe` does the same.
 
-<!-- crates/ui_ext_sdk/Cargo.toml (wit-bindgen = "0.41", edition.workspace), ARCHITECTURE.md crate table ("Published later as fyx-sdk"), crates/extension_host/src/wasm_host/fyx_ui/fixtures/probe/Cargo.toml -->
+<!-- crates/ui_ext_sdk/Cargo.toml (wit-bindgen = "0.41", edition.workspace), ARCHITECTURE.md crate table ("Published later as fyx-sdk"), crates/ui_ext_wasm/fixtures/probe/Cargo.toml -->
 
 The SDK is built and tested with the toolchain pinned in `rust-toolchain.toml` (1.98.1, which has
 the `wasm32-wasip2` target). Older toolchains are untested.
@@ -118,7 +118,7 @@ capabilities = ["ui:panel"]
 Fyx reads `id` and the `[fyx_ui]` table. It ignores the other top-level keys, but keep them: they
 are what upstream Zed's manifest parser expects.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:151-155 (ExtensionToml { id, fyx_ui }) -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:151-155 (ExtensionToml { id, fyx_ui }) -->
 
 `[fyx_ui]` accepts exactly these three keys. Unknown keys are an error (`deny_unknown_fields`).
 
@@ -128,7 +128,7 @@ are what upstream Zed's manifest parser expects.
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. |
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:139-149 (UiManifest, deny_unknown_fields, capabilities default), 171-183 (version supported, component path: all components Normal), 188-203 (check_surfaces), 551-557 (manifest version == component version, check_surfaces) -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:139-149 (UiManifest, deny_unknown_fields, capabilities default), 171-183 (version supported, component path: all components Normal), 188-203 (check_surfaces), 551-557 (manifest version == component version, check_surfaces) -->
 
 The capability check runs only when Fyx loads the extension from its directory. A bare `.wasm`
 loaded for quick iteration (below) skips it.
@@ -201,7 +201,7 @@ The log reports each step: `fyx:ui: loading dev extension <path>`, then
 Messages the extension writes with `log` appear under the log target `fyx_ui`, prefixed with the
 extension id.
 
-<!-- crates/ui_ext_host/src/registry.rs:316-325, 352-356; crates/extension_host/src/wasm_host/fyx_ui.rs:297 -->
+<!-- crates/ui_ext_host/src/registry.rs:316-325, 352-356; crates/ui_ext_wasm/src/ui_ext_wasm.rs:297 -->
 
 To pick up a new build, restart Fyx. Nothing reloads a running extension.
 
@@ -277,7 +277,7 @@ instantiation and `surfaces`). A call that runs past it, traps or panics disable
 until Fyx restarts. Returning `Err(String)` is different: it is shown to the user and the extension
 keeps running.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:62-71, 693-734, 663-675 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 693-734, 663-675 -->
 
 ## Walkthrough: a counter in 60 lines
 
@@ -419,7 +419,7 @@ Reset (5).
 - Use `saturating_add` rather than `+= 1`: a panic aborts the call, and a trapped call disables
   the extension.
 
-<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs:677-690, 769-772, 479-486; crates/extension_host/src/wasm_host/fyx_ui.rs:716-721 -->
+<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs:677-690, 769-772, 479-486; crates/ui_ext_wasm/src/ui_ext_wasm.rs:716-721 -->
 
 ### Step 6: export it
 

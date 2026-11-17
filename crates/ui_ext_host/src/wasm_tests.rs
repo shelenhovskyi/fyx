@@ -10,9 +10,9 @@ use std::{
     time::Duration,
 };
 
-use extension_host::wasm_host::fyx_ui::UiExtension;
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use ui_ext::{NodeId, Props, TextProps, UiEvent};
+use ui_ext_wasm::UiExtension;
 
 use crate::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo, SurfaceState, backend::UiBackend};
 
@@ -628,7 +628,7 @@ async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
         .expect("reinstalls");
 
     // The capabilities shown in the confirmation.
-    let (_, manifest) = extension_host::wasm_host::fyx_ui::UiManifest::read(fs.as_ref(), &source)
+    let (_, manifest) = ui_ext_wasm::UiManifest::read(fs.as_ref(), &source)
         .await
         .expect("reads")
         .expect("a UI extension");
