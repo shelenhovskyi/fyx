@@ -6,7 +6,7 @@ use extension_host::wasm_host::fyx_ui::UiExtension;
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use ui_ext::{NodeId, Tree, UiEvent, Update};
 
-pub use extension_host::wasm_host::fyx_ui::{PushedUpdate, Reply};
+pub use extension_host::wasm_host::fyx_ui::{PushedUpdate, Reply, ReplyError};
 
 /// One loaded UI extension. Every call is asynchronous and runs off the frame; the renderer never
 /// awaits one inside `render()`.

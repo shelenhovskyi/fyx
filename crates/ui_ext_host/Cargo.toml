@@ -38,5 +38,6 @@ workspace.workspace = true
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+gpui_tokio.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 theme_settings.workspace = true
