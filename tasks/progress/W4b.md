@@ -95,7 +95,7 @@ get by clicking that section's button right after the first mount. They all star
 | Section | Contents (in order) | Nodes, from a fresh mount |
 |---|---|---|
 | Layout | heading `Flex layouts`; row (gap 4, padding 4, bg `surface`) of 3 swatches `A` `B` `C`; column (gap 8, padding 8, bg `elevated-surface`) with `First`, `Second`; 4 columns (padding 4, bg `surface`) with align `start`/`center`/`end`/`stretch`, each holding a swatch `align <name>`; row (gap 4) `fixed` swatch + grow row (padding 4, bg `border`) `grow` + `fixed` swatch; one row (padding 4) per colour token as background, holding the token name. A swatch is a row flex (padding 4, bg `elevated-surface`) with one text. | 15–68 (first mount) |
-| Text | heading `Text`; caption; `no colour (the default)`; one text per token, coloured with it and naming it (all 9: `text`, `text-muted`, `text-accent`, `error`, `warning`, `success`, `border`, `surface`, `elevated-surface`); caption; `bold`; `monospace`; `bold monospace` | 69–85 |
+| Text | heading `Text`; caption; `no colour (the default)`; one text per text token, coloured with it and naming it (`text`, `text-muted`, `text-accent`, `error`, `warning`, `success`, `border`); then `surface` and `elevated-surface`, which are invisible as text colour by design, each as a row (padding 4, bg the token) holding a default-colour text `<token> (background)`; caption; `bold`; `monospace`; `bold monospace` | 69–87 |
 | Buttons | heading; three groups, each a caption plus a row (gap 4, align center) of 4 buttons: **Styles** `Default`/`Filled`/`Subtle`/`Danger` (73–76); **Disabled**, the same four disabled (79–82); **With icon** `Add` (`plus`, filled), `Search` (`magnifying_glass`, default), `Delete` (`trash`, danger), icon-only (empty label, `settings`, subtle) (85–88); then text `Last clicked: none` (muted) (89) | 69–89 |
 | Input | heading; caption; input (value `""`, placeholder `Type and press Enter`) (72); text `Submitted: nothing yet` (muted) (73) | 69–73 |
 | List | heading `Virtualized list`; caption; text `Selected: none` (muted) (72); list (`row-count` 1000, `row-height` 24) (73) | 69–73 |
@@ -152,8 +152,8 @@ selection. `handle-event` on `gallery-status` returns `unchanged` (error before 
 
 ## Notes for W3
 
-- **What to look at, section by section:** Layout (gap/padding/align/grow/backgrounds), Text (9
-  token colours, bold, monospace), Buttons (4 styles, disabled, start icon, icon-only
+- **What to look at, section by section:** Layout (gap/padding/align/grow/backgrounds), Text (7
+  text colours, the 2 surface tokens as backgrounds, bold, monospace), Buttons (4 styles, disabled, start icon, icon-only
   `IconButton`), Input (submit echo, no per-keystroke echo), List (1,000 rows, scrolling, row
   click, status item update), Table (header plus equal-width cells), Icons (12 names plus fallback),
   Markdown, Diff (the placeholder, with and without a language).
@@ -175,8 +175,9 @@ does.
   switch patch sequence (69–73), rows 998–999, row click, unknown surface.
 - `every_section_shows_and_patches_cleanly`: all 72 ordered section pairs. Checks the patch
   prefix and that one section stays under 14. Over all sections, all nine primitive kinds appear.
-- `sections_cover_their_primitives`: the kinds per section; all 9 tokens as text colour and as
-  background.
+- `sections_cover_their_primitives`: the kinds per section; the 7 text tokens as text colour and
+  `surface`/`elevated-surface` as backgrounds with default-colour labels in Text; all 9 tokens as
+  background in Layout.
 - `buttons_report_the_last_click`, `input_echoes_only_on_submit`,
   `row_click_updates_the_label_and_the_status_item`, `table_rows_fill_every_column`,
   `list_rows_only_for_the_shown_list`, `remount_keeps_the_shown_section_with_new_ids`.
