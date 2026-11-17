@@ -88,6 +88,7 @@ members = [
     "crates/fs_benchmarks",
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
+    "crates/fyx_api_docs", # fyx
     "crates/fyx_ext", # fyx
     "crates/fyx_ext_harness", # fyx
     "crates/fyx_registry", # fyx

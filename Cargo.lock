@@ -6842,6 +6842,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_api_docs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "syn 2.0.117",
+ "wit-parser 0.254.2",
+]
+
+[[package]]
 name = "fyx_demo_counter"
 version = "0.1.0"
 dependencies = [
