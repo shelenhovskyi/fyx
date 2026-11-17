@@ -1,6 +1,6 @@
 // Minimal ZIP reader for .vsix packages (stored and deflate entries, no ZIP64).
-// tools/vsix-convert carries an identical copy (tools/vsix-convert/src/zip.ts): the two
-// packages are deliberately independent.
+// tools/vsix-convert/src/zip.ts and sidecars/vscode-host/src/zip.ts are byte-identical copies:
+// the two packages are deliberately independent, and a test in each fails when they differ.
 import { crc32, inflateRawSync } from "node:zlib";
 
 export type ZipEntries = Map<string, Buffer>;
@@ -21,9 +21,8 @@ export function readZip(data: Buffer): ZipEntries {
     const name = data.toString("utf8", offset + 46, offset + 46 + nameLength);
     offset += 46 + nameLength + extraLength + commentLength;
     if (name.endsWith("/")) continue;
-    if (name.split("/").includes("..") || name.startsWith("/")) {
-      throw new Error(`zip: unsafe entry name ${name}`);
-    }
+    const unsafe = unsafePathReason(name);
+    if (unsafe) throw new Error(`zip: unsafe entry name ${JSON.stringify(name)}: ${unsafe}`);
     const localNameLength = data.readUInt16LE(localOffset + 26);
     const localExtraLength = data.readUInt16LE(localOffset + 28);
     const start = localOffset + 30 + localNameLength + localExtraLength;
@@ -33,6 +32,23 @@ export function readZip(data: Buffer): ZipEntries {
     else throw new Error(`zip: unsupported compression method ${method} for ${name}`);
   }
   return entries;
+}
+
+/**
+ * Why `path` is not a safe relative POSIX path, or `undefined` when it is. Rejected: absolute
+ * paths, `.`/`..`/empty segments, backslashes (a separator on Windows), `:` (drive letters and
+ * NTFS alternate data streams) and control characters.
+ */
+export function unsafePathReason(path: string): string | undefined {
+  if (path.length === 0) return "empty path";
+  if (path.startsWith("/")) return "absolute path";
+  if (path.includes("\\")) return "backslash";
+  if (path.includes(":")) return "colon (drive letter or stream name)";
+  if (/[\x00-\x1f]/.test(path)) return "control character";
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") return `segment ${JSON.stringify(segment)}`;
+  }
+  return undefined;
 }
 
 function findEndOfCentralDirectory(data: Buffer): number {

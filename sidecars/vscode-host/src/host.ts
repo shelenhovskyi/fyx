@@ -107,7 +107,7 @@ export class ExtensionHost {
     const root = params.extensionPath.toLowerCase().endsWith(".vsix") ? unpackVsix(params.extensionPath, join(storageDir, "unpacked")) : resolve(params.extensionPath);
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
     localizeManifest(root, manifest);
-    const id = `${manifest.publisher ?? "unknown"}.${manifest.name}`;
+    const id = extensionId(manifest);
     const ext: ExtensionInfo = { id, displayName: manifest.displayName ?? manifest.name, version: manifest.version ?? "0.0.0", path: root, uri: Uri.file(root), manifest };
 
     const rpc = this.rpc;
@@ -307,6 +307,20 @@ export class ExtensionHost {
     rpc.on("vscode/provideCompletion", wrap((p: any) => this.s.languages.provideCompletion(p)));
     rpc.on("vscode/provideHover", wrap((p: any) => this.s.languages.provideHover(p)));
   }
+}
+
+// The character set `vsce` accepts for `name` and `publisher`. The id names the extension's
+// storage folder, and it comes from an untrusted package.json.
+const ID_SEGMENT = /^[a-z0-9][a-z0-9._-]*$/i;
+
+export function extensionId(manifest: { publisher?: unknown; name?: unknown }): string {
+  const publisher = manifest.publisher ?? "unknown";
+  for (const [field, value] of [["publisher", publisher], ["name", manifest.name]] as const) {
+    if (typeof value !== "string" || !ID_SEGMENT.test(value) || value.includes("..")) {
+      throw new Error(`package.json ${field} ${JSON.stringify(value)} is not a valid extension name`);
+    }
+  }
+  return `${publisher}.${manifest.name}`;
 }
 
 /** VS Code never hands an extension a selection outside its document. */

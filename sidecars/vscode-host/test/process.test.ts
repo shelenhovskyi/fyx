@@ -78,3 +78,27 @@ test("probe mode records missing APIs without throwing", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a crafted publisher or name cannot steer the storage folder", async () => {
+  const dir = tempDir("fyx-crafted-");
+  try {
+    for (const [k, fields] of [
+      { publisher: "../../escaped", name: "x" },
+      { publisher: "p", name: "..\\..\\escaped" },
+      { publisher: "C:", name: "x" },
+    ].entries()) {
+      const vsix = join(dir, `crafted-${k}.vsix`);
+      writeFileSync(vsix, writeZip({ "extension/package.json": JSON.stringify({ ...fields, version: "1.0.0" }) }));
+      const { host } = MockHost.inProcess();
+      try {
+        await assert.rejects(host.initialize({ extensionPath: vsix, storageDir: join(dir, "storage") }), /is not a valid extension name/);
+      } finally {
+        await host.close();
+      }
+    }
+    assert.deepEqual(readdirSync(dir).filter((f) => !f.endsWith(".vsix")).sort(), ["storage"]);
+    assert.deepEqual(readdirSync(join(dir, "storage")), ["unpacked"], "no storage folder was created for a crafted id");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
