@@ -5,13 +5,17 @@
 //! sits in front of click handling. UI components run on a separate [`Engine`] whose epoch ticks
 //! every [`UI_EPOCH_INTERVAL`] instead of Zed's 100 ms, so a UI call yields to the executor that
 //! often, and a call that runs past [`UI_CALL_BUDGET`] is interrupted; the trapped instance is
-//! then disabled.
+//! then disabled. Epoch callbacks only run while guest code executes, so every call is also raced
+//! against a wall-clock deadline that catches a guest blocked in a WASI host call.
 //!
 //! The renderer never sees wasmtime types: everything crosses as `ui_ext` types.
 
 use std::{
+    future::Future,
     ops::RangeInclusive,
-    sync::{Arc, OnceLock},
+    pin::{Pin, pin},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
+    task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 
@@ -19,7 +23,7 @@ use anyhow::{Context as _, Result, anyhow};
 use futures::{
     FutureExt as _, StreamExt as _,
     channel::{mpsc, oneshot},
-    future::BoxFuture,
+    future::{BoxFuture, Either},
 };
 use gpui::{AsyncApp, Task};
 use semver::Version;
@@ -53,6 +57,9 @@ pub const UI_EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 pub const UI_CALL_BUDGET: Duration = Duration::from_millis(200);
 /// Instantiation and `surfaces` run once per load and may set up state, so they get more time.
 const UI_INIT_BUDGET: Duration = Duration::from_secs(2);
+/// On top of a budget before a call is dropped outright. Long enough that a busy guest is stopped
+/// by the epoch interrupt first, which leaves a clearer error.
+const UI_DEADLINE_SLACK: Duration = Duration::from_millis(50);
 
 /// The `fyx:ui` versions this host can load, on every release channel.
 ///
@@ -211,6 +218,7 @@ fn build_ui_runtime() -> Result<UiRuntime> {
                     break;
                 };
                 engine.increment_epoch();
+                wake_deadlines();
             }
         })
         .context("failed to spawn the fyx:ui epoch thread")?;
@@ -219,6 +227,52 @@ fn build_ui_runtime() -> Result<UiRuntime> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     bindings::UiExtension::add_to_linker::<_, UiState>(&mut linker, |state| state)?;
     Ok(UiRuntime { engine, linker })
+}
+
+/// Wakers of pending [`Deadline`]s, woken on every epoch tick.
+static DEADLINE_WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
+
+fn wake_deadlines() {
+    let wakers = std::mem::take(
+        &mut *DEADLINE_WAKERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    );
+    for waker in wakers {
+        waker.wake();
+    }
+}
+
+/// Completes once `Instant::now()` passes the deadline, at the resolution of the epoch thread.
+/// It needs no executor timer, so it works on tokio and in GPUI tests alike.
+struct Deadline(Instant);
+
+impl Future for Deadline {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if Instant::now() >= self.0 {
+            return Poll::Ready(());
+        }
+        DEADLINE_WAKERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// Runs a guest call with `budget`. The epoch callback interrupts a guest that keeps executing;
+/// this drops the call when the guest is blocked in a host call instead (`wasi:io/poll` behind
+/// `thread::sleep`, for example), where no epoch callback runs.
+async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
+    let deadline = Deadline(Instant::now() + budget + UI_DEADLINE_SLACK);
+    match futures::future::select(pin!(call), deadline).await {
+        Either::Left((result, _)) => result,
+        Either::Right(((), _)) => Err(anyhow!(
+            "exceeded its time budget of {budget:?} while blocked in a host call"
+        )),
+    }
 }
 
 type UiCall = Box<
@@ -303,20 +357,26 @@ impl UiExtension {
                     });
                     store.set_epoch_deadline(1);
 
-                    let extension = bindings::UiExtension::instantiate_async(
-                        &mut store,
-                        &component,
-                        &runtime.linker,
-                    )
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .context("failed to instantiate fyx:ui component")?;
-                    store.data_mut().begin_call(UI_INIT_BUDGET);
-                    let surfaces = extension
-                        .call_surfaces(&mut store)
+                    let extension = with_budget(UI_INIT_BUDGET, async {
+                        bindings::UiExtension::instantiate_async(
+                            &mut store,
+                            &component,
+                            &runtime.linker,
+                        )
                         .await
                         .map_err(anyhow::Error::from)
-                        .context("fyx:ui surfaces() failed")?;
+                    })
+                    .await
+                    .context("failed to instantiate fyx:ui component")?;
+                    store.data_mut().begin_call(UI_INIT_BUDGET);
+                    let surfaces = with_budget(UI_INIT_BUDGET, async {
+                        extension
+                            .call_surfaces(&mut store)
+                            .await
+                            .map_err(anyhow::Error::from)
+                    })
+                    .await
+                    .context("fyx:ui surfaces() failed")?;
                     let surfaces: Arc<[ui_ext::Surface]> =
                         surfaces.into_iter().map(Into::into).collect();
                     anyhow::Ok((extension, store, surfaces))
@@ -465,8 +525,12 @@ impl UiExtension {
                     } else {
                         store.data_mut().begin_call(UI_CALL_BUDGET);
                         store.set_epoch_deadline(1);
-                        let result = f(extension, store).await.map_err(anyhow::Error::from);
-                        // A trap, the time budget included, leaves the instance unusable.
+                        let result = with_budget(UI_CALL_BUDGET, async {
+                            f(extension, store).await.map_err(anyhow::Error::from)
+                        })
+                        .await;
+                        // A trap or a dropped call, the time budget included, leaves the instance
+                        // unusable.
                         if let Err(error) = &result {
                             store.data_mut().disabled = Some(format!("{error:#}"));
                         }

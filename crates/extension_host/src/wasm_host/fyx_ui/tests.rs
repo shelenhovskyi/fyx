@@ -31,6 +31,7 @@ mod probe {
     pub const SURFACE: &str = "probe";
     pub const PUSH: NodeId = 1;
     pub const SPIN: NodeId = 2;
+    pub const SLEEP: NodeId = 3;
 }
 
 fn workspace_dir() -> PathBuf {
@@ -272,6 +273,29 @@ async fn test_runaway_call_is_interrupted_and_disables_extension(cx: &mut TestAp
             .any(|cause| cause.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)),
         "{error:#}"
     );
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("disabled"), "{error:#}");
+}
+
+#[gpui::test]
+async fn test_call_blocked_in_host_is_cut_off_and_disables_extension(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let started = Instant::now();
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::SLEEP))
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= UI_CALL_BUDGET && elapsed < Duration::from_millis(600),
+        "cut off after {elapsed:?}"
+    );
+    assert!(format!("{error:#}").contains("time budget"), "{error:#}");
 
     let error = extension
         .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
