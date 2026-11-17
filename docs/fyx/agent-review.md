@@ -30,6 +30,9 @@ their count; click it to bring the waiting reviews forward.
 
 The same summary is in the setting's description and under every review pane.
 
+A write that the security guard (`crates/fyx_guard`, docs/fyx/security-modes.md) refuses is
+refused before review, so it never opens a review pane.
+
 ## Reviewing
 
 - One review pane per agent turn. It lists the turn's files and shows one diff at a time.

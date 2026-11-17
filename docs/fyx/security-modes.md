@@ -161,6 +161,9 @@ off.
 | H10 | `crates/http_proxy` | allowlist + approval callback, LLM-host `Authorization` overwrite | 3 |
 | H11 | `crates/markdown` (agent output only) | no remote image fetch, explicit links | 3 |
 
+Order with agent review (`crates/agent_review`): H2 and H3 run before the review gate, so a path
+the guard refuses never reaches the review pane.
+
 H9 needs care: `fyx_guard` depends on `project`, which depends on `context_server`, so
 `context_server` cannot call `fyx_guard` directly. Either the wrapper is installed as a GPUI global
 by `fyx_guard::init` and called through a two-line module in `context_server` (the pattern of

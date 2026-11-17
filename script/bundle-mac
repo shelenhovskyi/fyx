@@ -290,7 +290,7 @@ function sign_app_binaries() {
 
         echo "Adding license agreement to DMG"
         npm install --global dmg-license minimist
-        dmg-license script/terms/terms.json "${dmg_file_path}"
+        dmg-license script/fyx-dmg-license.json "${dmg_file_path}" # fyx: Fyx's GPL license, not Zed's Terms of Service
 
         if [[ $can_code_sign = true ]]; then
             echo "Notarizing DMG with Apple"
