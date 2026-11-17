@@ -1,14 +1,15 @@
-# Guest fixture for the fyx:ui host tests, built for wasm32-wasip2 by the tests themselves.
+# Guest fixture for the fyx:ui host tests (push-update, time budget, version section), built for
+# wasm32-wasip2 by the tests themselves.
 # Not a workspace member: it has its own `[workspace]` and lockfile.
 [package]
-name = "fyx_ui_test_counter"
+name = "fyx_ui_test_probe"
 version = "0.1.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
 
 [lib]
-path = "src/counter.rs"
+path = "src/probe.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
