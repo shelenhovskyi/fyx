@@ -54,8 +54,10 @@ restricted mode lets you trust, or every worktree when `session.trust_all_worktr
 
 ## Loading and errors
 
-- Fyx reads the file when an agent thread starts in the project.
-- It reads the file again whenever the file changes on disk.
+- Fyx reads the file when an agent thread starts in the project, and applies it as it is.
+- When the file changes while agent sessions are running, the new rules do not apply on their own:
+  an agent may have written them, through a write you accepted or a shell command. A notification
+  offers **Apply new review rules**; until you click it, the previous rules stay in force.
 - If the file does not parse (bad TOML, an unknown key, an invalid pattern), Fyx ignores the whole
   file and shows a notification with the error. It never applies half a file.
 - Remote projects are not supported yet: the file is read through the local file system.

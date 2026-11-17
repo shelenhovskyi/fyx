@@ -32,7 +32,7 @@ use fs::Fs;
 use futures::channel::oneshot;
 use gpui::Action as _;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity, Window,
 };
 use language::BufferEditSource;
 use project::{PathChange, Project, trusted_worktrees::TrustedWorktrees};
@@ -136,7 +136,7 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|thread: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
         let project = thread.project().clone();
-        reload_rules(&project, cx);
+        reload_rules(&project, RulesLoad::ThreadStarted, cx);
         cx.subscribe(&project, on_project_event).detach();
         cx.on_release(|thread, cx| {
             if let Some(review) = AgentReview::global(cx) {
@@ -285,6 +285,9 @@ pub struct AgentReview {
     ended_turns: VecDeque<TurnId>,
     /// `.fyx/review.toml` of each worktree that has one.
     rules: Vec<ReviewRules>,
+    /// Rules files that changed while sessions ran, waiting for the user to apply them (`None`: the
+    /// file was removed).
+    pending_rules: HashMap<PathBuf, Option<ReviewRules>>,
     /// Open review panes per turn, across workspaces.
     panes: HashMap<TurnId, usize>,
 }
@@ -504,9 +507,50 @@ impl AgentReview {
 
     /// Replaces the rules of the worktree at `root` (`None`: it has no rules file).
     pub fn set_rules(&mut self, root: PathBuf, rules: Option<ReviewRules>, cx: &mut Context<Self>) {
+        self.pending_rules.remove(&root);
         self.rules.retain(|existing| existing.root() != root);
         self.rules.extend(rules);
         cx.notify();
+    }
+
+    /// Holds rules that changed during a session until the user applies them. The agent under review
+    /// may have written the file (through a reviewed write or a shell command), so a change never
+    /// applies on its own. Returns whether anything changed.
+    pub fn propose_rules(
+        &mut self,
+        root: PathBuf,
+        rules: Option<ReviewRules>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let current = self.rules.iter().find(|existing| existing.root() == root);
+        let unchanged = match (current, &rules) {
+            (None, None) => true,
+            (Some(current), Some(new)) => current.same_as(new),
+            _ => false,
+        };
+        if unchanged {
+            self.pending_rules.remove(&root);
+            return false;
+        }
+        self.pending_rules.insert(root, rules);
+        cx.notify();
+        true
+    }
+
+    /// Whether a changed rules file of the worktree at `root` waits for the user.
+    pub fn has_pending_rules(&self, root: &Path) -> bool {
+        self.pending_rules.contains_key(root)
+    }
+
+    /// Applies the changed rules file of the worktree at `root`; the user confirmed it.
+    pub fn apply_pending_rules(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if let Some(rules) = self.pending_rules.remove(root) {
+            log::info!(
+                "fyx: agent review: applying the changed rules of {}",
+                root.display()
+            );
+            self.set_rules(root.to_path_buf(), rules, cx);
+        }
     }
 
     pub fn set_decision(
@@ -982,7 +1026,7 @@ fn on_project_event(
         .iter()
         .any(|(path, _, _)| path.as_unix_str() == RULES_FILE)
     {
-        reload_rules(&project, cx);
+        reload_rules(&project, RulesLoad::FileChanged, cx);
     }
     let Some(review) = AgentReview::global(cx) else {
         return;
@@ -1237,9 +1281,19 @@ fn report_host_write_failure(project: &Entity<Project>, message: String, cx: &mu
     notify_project::<HostWriteFailed>(project, message, cx);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RulesLoad {
+    /// A thread starts: the file as it is applies.
+    ThreadStarted,
+    /// The file changed while sessions run: the user has to apply it.
+    FileChanged,
+}
+
+struct RulesChanged;
+
 /// Loads `.fyx/review.toml` of every visible worktree of `project`. A file that does not parse is
 /// reported and ignored rather than half applied.
-fn reload_rules(project: &Entity<Project>, cx: &mut App) {
+fn reload_rules(project: &Entity<Project>, load: RulesLoad, cx: &mut App) {
     let Some(review) = AgentReview::global(cx) else {
         return;
     };
@@ -1279,8 +1333,38 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
                 },
                 Err(_) => None,
             };
-            if let Err(error) = review.update(cx, |review, cx| review.set_rules(root, rules, cx)) {
-                log::debug!("review closed before its rules loaded: {error}");
+            let result = review.update(cx, |review, cx| match load {
+                RulesLoad::ThreadStarted => {
+                    review.set_rules(root.clone(), rules, cx);
+                    false
+                }
+                RulesLoad::FileChanged => review.propose_rules(root.clone(), rules, cx),
+            });
+            match result {
+                Ok(true) => cx.update(|cx| {
+                    let Some(project) = project.upgrade() else {
+                        return;
+                    };
+                    let message = format!(
+                        "Agent review: {} changed. Review rules may have been changed by an agent, \
+                         so the new rules apply only when you apply them.",
+                        rules_path.display()
+                    );
+                    let review = review.clone();
+                    let apply: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                        if let Some(review) = review.upgrade() {
+                            review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
+                        }
+                    });
+                    notify_project_with_action::<RulesChanged>(
+                        &project,
+                        message,
+                        Some(("Apply new review rules", apply)),
+                        cx,
+                    );
+                }),
+                Ok(false) => {}
+                Err(error) => log::debug!("review closed before its rules loaded: {error}"),
             }
         })
         .detach();
@@ -1288,6 +1372,15 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
 }
 
 fn notify_project<T: 'static>(project: &Entity<Project>, message: String, cx: &mut App) {
+    notify_project_with_action::<T>(project, message, None, cx);
+}
+
+fn notify_project_with_action<T: 'static>(
+    project: &Entity<Project>,
+    message: String,
+    action: Option<(&'static str, Rc<dyn Fn(&mut Window, &mut App)>)>,
+    cx: &mut App,
+) {
     for window in cx.windows() {
         let Some(multi_workspace) = window.downcast::<MultiWorkspace>() else {
             continue;
@@ -1295,12 +1388,11 @@ fn notify_project<T: 'static>(project: &Entity<Project>, message: String, cx: &m
         let result = multi_workspace.update(cx, |multi_workspace, _, cx| {
             let workspace = multi_workspace.workspace().clone();
             if workspace.read(cx).project() == project {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.show_toast(
-                        Toast::new(NotificationId::unique::<T>(), message.clone()),
-                        cx,
-                    )
-                });
+                let mut toast = Toast::new(NotificationId::unique::<T>(), message.clone());
+                if let Some((label, action)) = action.clone() {
+                    toast = toast.on_click(label, move |window, cx| action(window, cx));
+                }
+                workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
             }
         });
         if let Err(error) = result {
@@ -2033,6 +2125,14 @@ mod tests {
         .await
         .unwrap();
         cx.run_until_parked();
+        // Changed during a session: nothing applies until the user confirms.
+        assert_eq!(kind(".env", cx), Some(RuleKind::Deny));
+        assert_eq!(kind("Cargo.lock", cx), None);
+        let root = PathBuf::from(util::path!("/p"));
+        review.update(cx, |review, cx| {
+            assert!(review.has_pending_rules(&root));
+            review.apply_pending_rules(&root, cx);
+        });
         assert_eq!(kind(".env", cx), None);
         assert_eq!(kind("Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
     }
@@ -2356,6 +2456,95 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(!review.read_with(cx, |review, _| review.is_enabled()));
+    }
+
+    #[gpui::test]
+    async fn only_user_settings_turn_review_off(cx: &mut TestAppContext) {
+        if review_mode_override().is_some() {
+            return;
+        }
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.agent_review.get_or_insert_default().enabled = Some(true);
+                });
+                // A project's `.zed/settings.json` tries to turn review off.
+                store
+                    .set_local_settings(
+                        settings::WorktreeId::from_usize(1),
+                        settings::LocalSettingsPath::InWorktree(
+                            util::rel_path::rel_path("").into(),
+                        ),
+                        settings::LocalSettingsKind::Settings,
+                        Some(r#"{ "agent_review": { "enabled": false } }"#),
+                        cx,
+                    )
+                    .unwrap();
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|cx| review_mode(cx)),
+            "a project cannot turn review off"
+        );
+    }
+
+    #[gpui::test]
+    async fn changing_the_setting_keeps_held_writes(cx: &mut TestAppContext) {
+        if review_mode_override().is_some() {
+            return;
+        }
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let set_enabled = |enabled: bool, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.agent_review.get_or_insert_default().enabled = Some(enabled);
+                    });
+                });
+            });
+            cx.run_until_parked();
+        };
+        set_enabled(true, cx);
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        set_enabled(false, cx);
+        assert!(!review.read_with(cx, |review, _| review.is_enabled()));
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1,
+            "turning review off does not release a held write"
+        );
+        let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        assert_eq!(held.await.unwrap().content, None);
+    }
+
+    #[test]
+    fn vscode_import_never_sets_agent_review() {
+        let vscode = settings::VsCodeSettings::from_str(
+            r#"{
+                "chat.editing.autoAcceptDelay": 1,
+                "chat.tools.autoApprove": true,
+                "github.copilot.chat.agent.autoFix": true,
+                "files.autoSave": "afterDelay"
+            }"#,
+            settings::VsCodeSettingsSource::VsCode,
+        )
+        .unwrap();
+        assert_eq!(vscode.settings_content().agent_review, None);
     }
 
     #[test]
