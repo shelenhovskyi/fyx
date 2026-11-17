@@ -114,6 +114,8 @@ pub struct UiExtensionRegistry {
     store: Option<InstallStore>,
     /// The directory and file system of the last scan, for `rescan`.
     last_scan: Option<(PathBuf, Arc<dyn Fs>)>,
+    /// `fyx.extensions.dev_paths`: folders scanned with the installed ones, as dev extensions.
+    dev_paths: Vec<PathBuf>,
 }
 
 /// An installed extension waiting for the user's "Enable".
@@ -182,6 +184,14 @@ impl UiExtensionRegistry {
 
     pub fn install_store(&self) -> Option<&InstallStore> {
         self.store.as_ref()
+    }
+
+    /// Follows `fyx.extensions.dev_paths`: a new folder loads, a removed one stops.
+    pub fn set_dev_paths(&mut self, dev_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.dev_paths != dev_paths {
+            self.dev_paths = dev_paths;
+            self.rescan(cx);
+        }
     }
 
     /// Scans again what the last scan did (after an install-store change).
@@ -416,6 +426,20 @@ impl UiExtensionRegistry {
                 let mut found = find_ui_extensions(&dir, fs.as_ref()).await;
                 if let Some(store) = &store {
                     found.extend(find_store_extensions(store, fs.as_ref()).await);
+                }
+                // Read again on every round: a change during the scan asks for another round.
+                let dev_paths = this
+                    .update(cx, |this, _| this.dev_paths.clone())
+                    .unwrap_or_default();
+                for path in dev_paths {
+                    let source = ExtensionSource::Directory(path.clone());
+                    match found_at(path.clone(), true, source, None, fs.as_ref()).await {
+                        Some(extension) => found.push(extension),
+                        None => log::error!(
+                            "fyx:ui: fyx.extensions.dev_paths: {} is not a built UI extension",
+                            path.display()
+                        ),
+                    }
                 }
                 let Ok((to_load, consent_file)) = this.update(cx, |this, cx| {
                     (this.plan_scan(found, cx), this.consent.path_to_load())
@@ -818,7 +842,24 @@ pub fn init(cx: &mut App) {
     .detach();
 
     load_dev_extensions(cx);
+    follow_dev_paths_setting(cx);
     watch_installed_extensions(cx);
+}
+
+/// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
+fn follow_dev_paths_setting(cx: &mut App) {
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return;
+    };
+    let dev_paths = crate::install::dev_paths_setting(cx);
+    registry.update(cx, |registry, cx| registry.set_dev_paths(dev_paths, cx));
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(move |cx| {
+            let dev_paths = crate::install::dev_paths_setting(cx);
+            registry.update(cx, |registry, cx| registry.set_dev_paths(dev_paths, cx));
+        })
+        .detach();
+    }
 }
 
 /// Loads the installed UI extensions now and again whenever the extension store changes.
@@ -871,6 +912,9 @@ fn attach_to_workspace(
     crate::store_actions::register(workspace);
     workspace.register_action(|workspace, _: &crate::InstallDevUiExtension, window, cx| {
         crate::install::prompt_and_install(workspace, window, cx)
+    });
+    workspace.register_action(|workspace, _: &crate::RemoveDevUiExtension, window, cx| {
+        crate::install::prompt_and_remove(workspace, window, cx)
     });
     workspace.register_action({
         let surfaces = surfaces.clone();

@@ -44,4 +44,11 @@
   "agent_review": {
     "enabled": false,
   },
+  "fyx": {
+    "extensions": {
+      // Folders of UI extensions in development, loaded on every start and reloaded when
+      // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".
+      "dev_paths": [],
+    },
+  },
 }

@@ -711,11 +711,11 @@ async fn test_installed_extensions_load_reload_and_stop(cx: &mut TestAppContext)
     });
 }
 
-/// Install UX (a): a folder with a `[fyx_ui]` table and a built component is linked into the
-/// installed directory and loads; a second install of the same dev extension replaces the link;
-/// a folder that is not a UI extension, or whose component is not built, is refused.
+/// Plan 1.2: a dev folder is checked (a `[fyx_ui]` table, a built component), loads from
+/// `fyx.extensions.dev_paths`, loads again on the next start without `FYX_UI_DEV_EXTENSIONS`, and
+/// stops when it leaves the list. The setting is read from the user's settings.
 #[gpui::test]
-async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
+async fn test_dev_paths_load_and_survive_restart(cx: &mut TestAppContext) {
     crate::tests::init_test(cx);
     cx.executor().allow_parking();
     cx.update(gpui_tokio::init);
@@ -728,41 +728,61 @@ async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
 
     // Not built yet.
-    let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+    let error = crate::check_dev_folder(&source, fs.as_ref())
         .await
         .expect_err("no component");
     assert!(format!("{error:#}").contains("not built"), "{error:#}");
-
     std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
-    let id = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+    let (id, manifest) = crate::check_dev_folder(&source, fs.as_ref())
         .await
-        .expect("installs");
+        .expect("a dev folder");
     assert_eq!(id.as_ref(), "fyx-test-status-item");
-    let link = installed.join("fyx-test-status-item");
-    assert!(std::fs::symlink_metadata(&link).expect("link").is_symlink());
-    // Installing again replaces the dev link.
-    crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
-        .await
-        .expect("reinstalls");
-
     // The capabilities shown in the confirmation.
-    let (_, manifest) = ui_ext_wasm::UiManifest::read(fs.as_ref(), &source)
-        .await
-        .expect("reads")
-        .expect("a UI extension");
     assert_eq!(
         crate::describe_capabilities(&manifest),
         ["ui:status-bar: add status bar items"]
     );
 
-    // The loader finds it in the installed directory.
-    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
-    registry.update(cx, |registry, cx| {
-        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    // The setting, from the user's settings.
+    let setting = format!(
+        r#"{{"fyx": {{"extensions": {{"dev_paths": [{:?}]}}}}}}"#,
+        source.to_string_lossy()
+    );
+    cx.update(|cx| {
+        gpui::BorrowAppContext::update_global::<settings::SettingsStore, _>(cx, |store, cx| {
+            let _ = store.set_user_settings(&setting, cx);
+        })
     });
-    run_until(cx, "the installed extension", |cx| {
-        registry.read_with(cx, |registry, _| {
-            registry.surface("fyx-test-status-item/status").is_some()
+    let dev_paths = cx.update(|cx| crate::install::dev_paths_setting(cx));
+    assert_eq!(dev_paths, std::slice::from_ref(&source));
+
+    const KEY: &str = "fyx-test-status-item/status";
+    let start = |cx: &mut TestAppContext| {
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        registry.update(cx, |registry, cx| {
+            registry.set_dev_paths(dev_paths.clone(), cx);
+            registry.scan_installed(installed.clone(), fs.clone(), cx)
+        });
+        registry
+    };
+    let registry = start(cx);
+    run_until(cx, "the dev extension", |cx| {
+        registry.read_with(cx, |registry, _| registry.surface(KEY).is_some())
+    });
+    // The next start, with only the setting.
+    let registry = start(cx);
+    run_until(cx, "the dev extension after a restart", |cx| {
+        registry.read_with(cx, |registry, _| registry.surface(KEY).is_some())
+    });
+    let surface = registry.read_with(cx, |registry, _| {
+        registry.surface(KEY).unwrap().state.clone()
+    });
+
+    // Off the list: its surfaces stop.
+    registry.update(cx, |registry, cx| registry.set_dev_paths(Vec::new(), cx));
+    run_until(cx, "the removal", |cx| {
+        surface.read_with(cx, |state, _| {
+            matches!(state.phase(), crate::Phase::Failed { message, .. } if message.contains("uninstalled"))
         })
     });
 
@@ -774,40 +794,21 @@ async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
         "id = \"plain\"\nname = \"Plain\"\nversion = \"0.1.0\"\nschema_version = 1\n",
     )
     .expect("plain manifest");
-    let error = crate::install_dev_ui_extension(&plain, &installed, fs.as_ref())
+    let error = crate::check_dev_folder(&plain, fs.as_ref())
         .await
         .expect_err("not a UI extension");
     assert!(format!("{error:#}").contains("[fyx_ui]"), "{error:#}");
 }
 
-/// Review integration-4 #2: an id from `extension.toml` cannot run a command through
-/// `cmd /C mklink` or put the link outside the installed directory, and neither can the name of
-/// the folder being installed. Nothing is created or removed for a refused install.
+/// Review integration-4 #2: an id from `extension.toml` is checked before a dev folder is added
+/// (ids name folders and settings keys). Dev installs no longer link through `cmd`, so the folder
+/// name itself needs no check.
 #[gpui::test]
-async fn test_install_refuses_injection_and_traversal(cx: &mut TestAppContext) {
+async fn test_dev_folder_ids_are_checked(cx: &mut TestAppContext) {
     crate::tests::init_test(cx);
     cx.executor().allow_parking();
     let root = tempfile::tempdir().expect("temp dir");
-    let installed = root.path().join("extensions").join("installed");
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
-    // A file the `..` vectors would land on or replace.
-    let bystander = root.path().join("extensions").join("evil");
-    std::fs::create_dir_all(&bystander).expect("bystander");
-
-    let write_extension = |dir: &std::path::Path, id: &str| {
-        std::fs::create_dir_all(dir).expect("source");
-        std::fs::write(
-            dir.join("extension.toml"),
-            format!(
-                "id = {id:?}\nname = \"X\"\nversion = \"0.1.0\"\nschema_version = 1\n\n\
-                 [fyx_ui]\napi_version = \"0.1.0\"\ncomponent = \"fyx_ui.wasm\"\n\
-                 capabilities = [\"ui:panel\"]\n"
-            ),
-        )
-        .expect("manifest");
-        std::fs::write(dir.join("fyx_ui.wasm"), b"not checked by install").expect("component");
-    };
-
     for (index, id) in [
         "x&calc",
         r"x&\\host\s\p.exe",
@@ -825,47 +826,25 @@ async fn test_install_refuses_injection_and_traversal(cx: &mut TestAppContext) {
     .enumerate()
     {
         let source = root.path().join(format!("source-{index}"));
-        write_extension(&source, id);
-        let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::write(
+            source.join("extension.toml"),
+            format!(
+                "id = {id:?}\nname = \"X\"\nversion = \"0.1.0\"\nschema_version = 1\n\n\
+                 [fyx_ui]\napi_version = \"0.1.0\"\ncomponent = \"fyx_ui.wasm\"\n\
+                 capabilities = [\"ui:panel\"]\n"
+            ),
+        )
+        .expect("manifest");
+        std::fs::write(source.join("fyx_ui.wasm"), b"not checked here").expect("component");
+        let error = crate::check_dev_folder(&source, fs.as_ref())
             .await
             .expect_err(id);
         assert!(format!("{error:#}").contains("id"), "{id:?}: {error:#}");
-        assert!(
-            !installed.exists() || std::fs::read_dir(&installed).unwrap().next().is_none(),
-            "{id:?} created something in the installed directory"
-        );
-        assert!(
-            std::fs::symlink_metadata(&bystander).unwrap().is_dir()
-                && !std::fs::symlink_metadata(&bystander).unwrap().is_symlink(),
-            "{id:?} touched a folder outside the installed directory"
-        );
     }
-
-    // A valid id in a folder whose name `cmd` would interpret (Windows allows these three in a
-    // name; `|`, `<`, `>` and `"` it does not, and they are refused elsewhere).
-    let mut names = vec!["dl&calc", "dl^x", "dl%PATH%"];
-    if cfg!(not(windows)) {
-        names.push("dl|calc");
-    }
-    for name in names {
-        let source = root.path().join(name);
-        write_extension(&source, "fine-id");
-        let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
-            .await
-            .expect_err(name);
-        assert!(
-            format!("{error:#}").contains("cannot link safely"),
-            "{name}: {error:#}"
-        );
-        assert!(!installed.join("fine-id").exists(), "{name} was linked");
-    }
-    assert_eq!(
-        crate::install::cmd_special_char(std::path::Path::new("a(1) b")),
-        None
-    );
 }
 
-/// Hot reload (b): when the component of a dev extension (a link in the installed directory) is
+/// Hot reload (b): when the component of a dev extension (from `fyx.extensions.dev_paths`) is
 /// rebuilt, the extension loads again by itself, after the writes pause, and its surfaces remount;
 /// another file changing in the folder does nothing.
 #[gpui::test]
@@ -881,12 +860,10 @@ async fn test_dev_extension_hot_reloads(cx: &mut TestAppContext) {
     std::fs::copy(status_item_manifest(), source.join("extension.toml")).expect("manifest");
     std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
-    crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
-        .await
-        .expect("dev install");
 
     let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     registry.update(cx, |registry, cx| {
+        registry.set_dev_paths(vec![source.clone()], cx);
         registry.scan_installed(installed.clone(), fs.clone(), cx)
     });
     const LABEL: NodeId = 3;

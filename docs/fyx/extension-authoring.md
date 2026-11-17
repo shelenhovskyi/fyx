@@ -174,15 +174,22 @@ RUSTC_WRAPPER= cargo build --target wasm32-wasip2 --release
 
 ## Installing as a dev extension
 
-UI extensions load from the installed-extensions directory and from the environment variable
+UI extensions load from `fyx.extensions.dev_paths`, from the install store (see "Installing a
+package"), from Zed's installed-extensions directory, and from the environment variable
 `FYX_UI_DEV_EXTENSIONS`.
 
 - **`fyx_ui: install dev UI extension`** asks for a folder, shows the capabilities its
-  `extension.toml` asks for, and links the folder into the installed-extensions directory. Fyx
-  loads it now and on every start, and reloads it when its component is rebuilt. The folder's
-  path may not contain `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
-- **Anything else in the installed-extensions directory** (a folder copied there, or linked by
-  upstream's "Install Dev Extension") waits for consent: Fyx shows a notification with the
+  `extension.toml` asks for, and adds the folder to `fyx.extensions.dev_paths` in your user
+  settings. Fyx loads it now and on every start, and reloads it when its component is rebuilt;
+  the folder stays where it is. **`fyx_ui: remove dev UI extension`** takes it off the list (or
+  edit the setting).
+
+  ```json
+  { "fyx": { "extensions": { "dev_paths": ["C:/src/my_counter"] } } }
+  ```
+- **A folder added to `dev_paths` by hand, or anything else in the installed-extensions
+  directory** (a folder copied there, or linked by upstream's "Install Dev Extension") waits for
+  consent: Fyx shows a notification with the
   capabilities it asks for and loads it only after **Enable**. The answer is kept in
   `<data dir>/fyx-ui-consent.json`, for those capabilities and that component (for a linked
   folder, that folder). Asking for more capabilities, or a different component, asks again on the
