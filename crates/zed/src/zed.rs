@@ -1638,7 +1638,8 @@ fn open_about_window(cx: &mut App) {
                                     .color(Color::Muted)
                                     .size(LabelSize::XSmall),
                             )
-                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small)),
+                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small))
+                            .child(fyx::about_notices()), // fyx: copyright, non-affiliation
                     )
                     .child(
                         h_flex()
@@ -1713,7 +1714,7 @@ fn open_about_window(cx: &mut App) {
 
     let window_size = Size {
         width: px(440.),
-        height: px(300.),
+        height: px(360.), // fyx: room for the notices
     };
 
     cx.open_window(

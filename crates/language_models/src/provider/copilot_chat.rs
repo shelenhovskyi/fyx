@@ -130,6 +130,9 @@ impl LanguageModelProvider for CopilotChatLanguageModelProvider {
     }
 
     fn authenticate(&self, cx: &mut App) -> Task<Result<(), AuthenticateError>> {
+        if let Some(copilot_chat) = CopilotChat::global(cx) {
+            copilot_chat.update(cx, |chat, cx| chat.ensure_models(cx)); // fyx: first use
+        }
         if self.is_authenticated(cx) {
             return Task::ready(Ok(()));
         }
