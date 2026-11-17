@@ -36,7 +36,11 @@ function notify(method, params) {
 }
 
 function log(text) {
-  process.stderr.write(`[review-stub] ${text}\n`);
+  const line = `[review-stub] ${new Date().toISOString()} ${text}\n`;
+  process.stderr.write(line);
+  if (process.env.REVIEW_STUB_LOG) {
+    require("fs").appendFileSync(process.env.REVIEW_STUB_LOG, line);
+  }
 }
 
 function update(sessionId, value) {
@@ -72,6 +76,7 @@ async function prompt(params) {
 }
 
 async function runEdit(sessionId, file, direct) {
+  log(`proposing an edit to ${path.basename(file)} (${direct ? "direct write" : "permission request"})`);
   const { content: oldText } = await request("fs/read_text_file", { sessionId, path: file });
   const newText = propose(oldText);
   const toolCallId = `edit-${nextId++}`;
@@ -108,6 +113,7 @@ async function runEdit(sessionId, file, direct) {
   try {
     await request("fs/write_text_file", { sessionId, path: file, content: newText });
     update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+    log(`write of ${path.basename(file)} succeeded`);
     say(sessionId, `Wrote ${path.basename(file)}.`);
   } catch (error) {
     const message = error && error.message ? error.message : String(error);

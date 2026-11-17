@@ -302,7 +302,42 @@ impl ReviewPane {
         self.update_current_hunk(window, cx);
     }
 
-    fn edit<'a>(&self, cx: &'a App) -> Option<&'a ProposedEdit> {
+    pub fn review_id(&self) -> ReviewId {
+        self.review_id
+    }
+
+    pub(crate) fn diff_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
+    }
+
+    /// Makes `hunk` the target of the hunk actions, as moving the cursor into it would.
+    pub(crate) fn select_hunk(
+        &mut self,
+        hunk: usize,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let hunk_count = self.edit(cx).map_or(0, |edit| edit.hunks().len());
+        anyhow::ensure!(hunk < hunk_count, "hunk {} of {hunk_count}", hunk + 1);
+        self.current_hunk = Some(hunk);
+        cx.notify();
+        Ok(())
+    }
+
+    /// Types `text` into the comment field of `hunk`.
+    pub(crate) fn set_comment_text(
+        &mut self,
+        hunk: usize,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.select_hunk(hunk, cx)?;
+        self.comment_editor
+            .update(cx, |editor, cx| editor.set_text(text, window, cx));
+        Ok(())
+    }
+
+    pub(crate) fn edit<'a>(&self, cx: &'a App) -> Option<&'a ProposedEdit> {
         Some(self.review.read(cx).review(self.review_id)?.edit())
     }
 
