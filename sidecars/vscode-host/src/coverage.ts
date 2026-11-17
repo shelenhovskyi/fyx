@@ -6,11 +6,16 @@ import { ErrorCodes } from "./rpc.ts";
 export class NotImplementedInFyx extends Error {
   readonly api: string;
   readonly code = ErrorCodes.NotImplemented;
-  constructor(api: string, detail?: string) {
-    super(`${api} is not implemented in Fyx${detail ? ` (${detail})` : ""}`);
+  constructor(api: string, detail?: string, message?: string) {
+    super(message ?? `${api} is not implemented in Fyx${detail ? ` (${detail})` : ""}`);
     this.name = "NotImplementedInFyx";
     this.api = api;
   }
+}
+
+/** An API that exists in Fyx, used in a way 0.1 cannot honour (for example a masked input). */
+export function notSupported(api: string, what: string): NotImplementedInFyx {
+  return new NotImplementedInFyx(api, undefined, `${api}: ${what} is not supported in Fyx 0.1`);
 }
 
 export function isNotImplemented(err: unknown): err is NotImplementedInFyx {

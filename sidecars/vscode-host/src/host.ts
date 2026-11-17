@@ -3,7 +3,7 @@
 // JSON-RPC methods listed in docs/vscode-coverage.md ("Protocol").
 
 import Module from "node:module";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -40,21 +40,76 @@ function installRequireHook(): void {
   };
 }
 
-/** Unpacks a .vsix (`extension/` subtree) into `cacheDir`; returns the extension root. */
+/**
+ * Default storage root. The temp folder is shared between users on Linux and macOS, so the folder
+ * name carries the uid and `ensurePrivateDir` refuses one that another user created first. On
+ * Windows the temp folder is already per user.
+ */
+export function defaultStorageDir(): string {
+  const uid = process.getuid?.();
+  return join(tmpdir(), uid === undefined ? "fyx-vscode-host" : `fyx-vscode-host-${uid}`);
+}
+
+/**
+ * Creates `dir` (mode 0700) or checks an existing one: a real folder, not a symlink, owned by this
+ * user, and closed to group and others. Only POSIX modes and owners are checked.
+ */
+export function ensurePrivateDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const uid = process.getuid?.();
+  if (uid === undefined) return;
+  const stat = lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`refusing to use ${dir}: not a folder (a symlink?)`);
+  if (stat.uid !== uid) throw new Error(`refusing to use ${dir}: owned by uid ${stat.uid}, not ${uid}`);
+  if ((stat.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+}
+
+// Written last into a finished unpack. It holds the full SHA-256 of the .vsix, which the archive
+// cannot contain, so a packed file of the same name never passes for it.
+const UNPACK_MARKER = ".fyx-unpack-complete";
+
+/**
+ * Unpacks a .vsix (`extension/` subtree) into `<cacheDir>/<sha16>/` and returns that folder. The
+ * archive is unpacked into a temporary folder that is renamed into place only once complete, so a
+ * crashed or partial unpack is never reused.
+ */
 export function unpackVsix(vsixPath: string, cacheDir: string): string {
   const data = readFileSync(vsixPath);
-  const digest = createHash("sha256").update(data).digest("hex").slice(0, 16);
-  const root = join(cacheDir, digest);
-  if (existsSync(join(root, "package.json"))) return root;
-  for (const [name, content] of readZip(data)) {
-    if (!name.startsWith("extension/")) continue;
-    const target = join(root, ...name.slice("extension/".length).split("/"));
-    if (!resolve(target).startsWith(resolve(root) + sep)) throw new Error(`vsix: entry escapes the extension folder: ${name}`);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, content);
+  const digest = createHash("sha256").update(data).digest("hex");
+  ensurePrivateDir(cacheDir);
+  const root = join(cacheDir, digest.slice(0, 16));
+  if (isCompleteUnpack(root, digest)) return root;
+  const entries = readZip(data);
+  if (!entries.has("extension/package.json")) throw new Error("vsix has no extension/package.json");
+  const staging = mkdtempSync(join(cacheDir, `.staging-${digest.slice(0, 16)}-`));
+  try {
+    for (const [name, entry] of entries) {
+      if (!name.startsWith("extension/")) continue;
+      const target = join(staging, ...name.slice("extension/".length).split("/"));
+      if (!resolve(target).startsWith(resolve(staging) + sep)) throw new Error(`vsix: entry escapes the extension folder: ${name}`);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, entry.read());
+    }
+    writeFileSync(join(staging, UNPACK_MARKER), digest);
+    if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+    try {
+      renameSync(staging, root);
+    } catch (err) {
+      // Another sidecar finished the same unpack first.
+      if (!isCompleteUnpack(root, digest)) throw err;
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
-  if (!existsSync(join(root, "package.json"))) throw new Error("vsix has no extension/package.json");
   return root;
+}
+
+function isCompleteUnpack(root: string, digest: string): boolean {
+  try {
+    return readFileSync(join(root, UNPACK_MARKER), "utf8") === digest && existsSync(join(root, "package.json"));
+  } catch {
+    return false;
+  }
 }
 
 export interface InitializeParams {
@@ -62,7 +117,7 @@ export interface InitializeParams {
   extensionPath: string;
   workspaceFolders?: string[];
   settings?: Record<string, unknown>;
-  /** Where unpacked .vsix files and extension storage go (default: OS temp). */
+  /** Where unpacked .vsix files and extension storage go (default: `defaultStorageDir()`). */
   storageDir?: string;
 }
 
@@ -103,16 +158,21 @@ export class ExtensionHost {
 
   async initialize(params: InitializeParams): Promise<InitializeResult> {
     if (this.ctx) throw new RpcError(ErrorCodes.InvalidRequest, "already initialized");
-    const storageDir = params.storageDir ?? join(tmpdir(), "fyx-vscode-host");
+    const storageDir = params.storageDir ?? defaultStorageDir();
+    ensurePrivateDir(storageDir);
     const root = params.extensionPath.toLowerCase().endsWith(".vsix") ? unpackVsix(params.extensionPath, join(storageDir, "unpacked")) : resolve(params.extensionPath);
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
     localizeManifest(root, manifest);
-    const id = `${manifest.publisher ?? "unknown"}.${manifest.name}`;
+    const id = extensionId(manifest);
     const ext: ExtensionInfo = { id, displayName: manifest.displayName ?? manifest.name, version: manifest.version ?? "0.0.0", path: root, uri: Uri.file(root), manifest };
 
     const rpc = this.rpc;
     const surfaces = new SurfaceRegistry({
-      pushUpdate: (surfaceId, update) => rpc.notify("push-update", { "surface-id": surfaceId, update }),
+      pushUpdate: (surfaceId, update) =>
+        rpc.request("push-update", { "surface-id": surfaceId, update }).catch((err: unknown) => {
+          rpc.notify("log", { level: "warn", message: `host refused push-update for ${surfaceId}, resending the whole tree: ${(err as Error).message}` });
+          throw err;
+        }),
       surfacesChanged: (added, removed) => rpc.notify("fyx/surfacesChanged", { added, removed }),
     });
     const documents = new DocumentStore();
@@ -301,12 +361,28 @@ export class ExtensionHost {
       this.s.editors.setSelections(this.s.editors.editorFor(doc), p.selections.map((sel) => clampSelection(doc, decodeSelection(sel))), p.kind);
     }));
     rpc.on("vscode/didChangeDiagnostics", wrap((p: { uri: string; diagnostics: never[] }) => this.s.languages.setHostDiagnostics(toUri(p.uri), p.diagnostics.map(decodeDiagnostic))));
+    rpc.on("vscode/didChangeWatchedFiles", wrap((p: { changes: { uri: string; type: number }[] }) => this.s.workspace.didChangeWatchedFiles(p.changes)));
+    rpc.on("vscode/cancelProgress", wrap((p: { id: number }) => this.s.cancelProgress(p.id)));
     rpc.on("vscode/didChangeConfiguration", wrap((p: { settings: Record<string, unknown> }) => this.c.config.setUserSettings(p.settings)));
     rpc.on("vscode/provideFormatting", wrap((p: any) => this.s.languages.provideFormatting(p)));
     rpc.on("vscode/provideOnTypeFormatting", wrap((p: any) => this.s.languages.provideOnTypeFormatting(p)));
     rpc.on("vscode/provideCompletion", wrap((p: any) => this.s.languages.provideCompletion(p)));
     rpc.on("vscode/provideHover", wrap((p: any) => this.s.languages.provideHover(p)));
   }
+}
+
+// The character set `vsce` accepts for `name` and `publisher`. The id names the extension's
+// storage folder, and it comes from an untrusted package.json.
+const ID_SEGMENT = /^[a-z0-9][a-z0-9._-]*$/i;
+
+export function extensionId(manifest: { publisher?: unknown; name?: unknown }): string {
+  const publisher = manifest.publisher ?? "unknown";
+  for (const [field, value] of [["publisher", publisher], ["name", manifest.name]] as const) {
+    if (typeof value !== "string" || !ID_SEGMENT.test(value) || value.includes("..")) {
+      throw new Error(`package.json ${field} ${JSON.stringify(value)} is not a valid extension name`);
+    }
+  }
+  return `${publisher}.${manifest.name}`;
 }
 
 /** VS Code never hands an extension a selection outside its document. */

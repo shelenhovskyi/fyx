@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExtensionHost, type InitializeParams, type InitializeResult } from "./host.ts";
-import { RpcPeer, pairedPeers, type RpcMessage } from "./rpc.ts";
+import { ErrorCodes, RpcError, RpcPeer, pairedPeers, type RpcMessage } from "./rpc.ts";
 import { applyUpdate, validateNodes, validateProps, type ListRow, type Node, type Surface, type UiEvent, type Update } from "./schema.ts";
 
 export interface TrafficEntry {
@@ -37,11 +37,16 @@ export class MockHost {
   readonly trees = new Map<string, Node[]>();
   readonly surfaces = new Map<string, Surface>();
   readonly schemaErrors: string[] = [];
+  /** Test hook: refuse the next `push-update` for this surface, as a host whose tree diverged would. */
+  refuseNextPush: string | undefined;
+  /** Test hook: answer every `vscode/applyEdit` with `false`. */
+  refuseEdits = false;
   readonly logs: { level: string; message: string }[] = [];
   readonly messages: { severity: string; message: string; items: string[] }[] = [];
   readonly diagnostics = new Map<string, unknown[]>();
   readonly decorationTypes = new Map<string, unknown>();
   readonly decorations = new Map<string, unknown[]>();
+  readonly languageConfigurations = new Map<string, unknown>();
   readonly hostCommands: { command: string; args: unknown[] }[] = [];
   readonly providers = new Map<number, unknown>();
   readonly buffers = new Map<string, { text: string; version: number }>();
@@ -63,7 +68,8 @@ export class MockHost {
   }
 
   /** Sidecar in a child process, optionally under Node's permission model. */
-  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string> } = {}): MockHost {
+  /** `probe` starts the sidecar in coverage probe mode (missing APIs become inert stubs). */
+  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string>; probe?: boolean } = {}): MockHost {
     const main = join(import.meta.dirname, "main.ts");
     const flags = options.permission
       ? [
@@ -75,7 +81,7 @@ export class MockHost {
     // Under --permission even `existsSync("")` throws unless the cwd is readable, so default the
     // cwd to the first granted folder.
     const cwd = options.cwd ?? options.permission?.read[0];
-    const child = spawn(process.execPath, [...flags, main], {
+    const child = spawn(process.execPath, [...flags, main, ...(options.probe ? ["--fyx-coverage-probe"] : [])], {
       stdio: ["pipe", "pipe", "pipe"],
       ...(cwd ? { cwd } : {}),
       ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
@@ -216,7 +222,8 @@ export class MockHost {
     for (const e of errors) this.schemaErrors.push(`${where}: ${e}`);
   }
 
-  private apply(surfaceId: string, update: Update, where: string): void {
+  /** Applies `update` as the Fyx host would; returns why it was refused, if it was. */
+  private apply(surfaceId: string, update: Update, where: string): string | undefined {
     if (update !== "unchanged" && "patches" in update) {
       for (const p of update.patches) {
         if ("set-props" in p) this.check(where, validateProps(p["set-props"][1]));
@@ -226,20 +233,30 @@ export class MockHost {
     const tree = this.trees.get(surfaceId);
     if (!tree) {
       if (update !== "unchanged" && !this.closedSurfaces.has(surfaceId)) this.schemaErrors.push(`${where}: update for unmounted surface ${surfaceId}`);
-      return;
+      return undefined;
+    }
+    if (this.refuseNextPush === surfaceId && where === "push-update") {
+      this.refuseNextPush = undefined;
+      return "refused by the test";
     }
     try {
       const next = applyUpdate(tree, update);
       this.check(`${where} ${surfaceId}`, validateNodes(next));
       this.trees.set(surfaceId, next);
+      return undefined;
     } catch (err) {
       this.schemaErrors.push(`${where} ${surfaceId}: ${(err as Error).message}`);
+      return (err as Error).message;
     }
   }
 
   private registerHandlers(): void {
     const rpc = this.rpc;
-    rpc.on("push-update", (p: { "surface-id": string; update: Update }) => this.apply(p["surface-id"], p.update, "push-update"));
+    rpc.on("push-update", (p: { "surface-id": string; update: Update }) => {
+      const refused = this.apply(p["surface-id"], p.update, "push-update");
+      if (refused) throw new RpcError(ErrorCodes.InvalidParams, `push-update refused: ${refused}`);
+      return null;
+    });
     rpc.on("log", (p: { level: string; message: string }) => void this.logs.push(p));
     rpc.on("fyx/surfacesChanged", (p: { added: Surface[]; removed: string[] }) => {
       for (const s of p.added) {
@@ -257,7 +274,13 @@ export class MockHost {
       const ix = this.options.messageChoice;
       return ix !== undefined && p.items[ix] !== undefined ? p.items[ix] : null;
     });
-    rpc.on("vscode/applyEdit", (p: { edits: { uri: string; edits: WireEdit[] }[] }) => {
+    // All or nothing, refused when a document's version is not the buffer's (the user typed).
+    rpc.on("vscode/applyEdit", (p: { edits: { uri: string; version: number | null; edits: WireEdit[] }[] }) => {
+      if (this.refuseEdits) return false;
+      for (const change of p.edits) {
+        const buffer = this.buffers.get(change.uri);
+        if (buffer && change.version !== null && change.version !== buffer.version) return false;
+      }
       for (const change of p.edits) {
         const buffer = this.buffers.get(change.uri);
         if (!buffer) continue;
@@ -279,6 +302,7 @@ export class MockHost {
     rpc.on("vscode/setSelections", (p: { uri: string; selections: unknown[] }) => void this.selections.set(p.uri, p.selections));
     rpc.on("vscode/setEditorOptions", (p: { uri: string; options: Record<string, unknown> }) => void this.editorOptions.set(p.uri, { ...((this.editorOptions.get(p.uri) as object) ?? {}), ...p.options }));
     rpc.on("vscode/setContext", (p: { key: string; value: unknown }) => void this.contextKeys.set(p.key, p.value));
+    rpc.on("vscode/setLanguageConfiguration", (p: { language: string; configuration: unknown }) => void this.languageConfigurations.set(p.language, p.configuration));
     rpc.on("vscode/showTextDocument", () => true);
     rpc.on("vscode/saveTextDocument", () => true);
     rpc.on("vscode/saveAll", () => true);
