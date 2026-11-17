@@ -671,7 +671,12 @@ impl ReviewPane {
                         Label::new(resolution_label(entry.resolution))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
-                    ),
+                    )
+                    .children(entry.rule.as_ref().map(|rule| {
+                        Label::new(format!("by rule {}", rule.describe()))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                    })),
             );
         }
         for (id, path) in open {
@@ -780,6 +785,10 @@ impl ReviewPane {
             _ => "Move the cursor into a hunk (alt-j / alt-k)".into(),
         };
         let path = edit.map_or_else(String::new, |edit| edit.abs_path().display().to_string());
+        let rule = self.current_review_id().and_then(|id| {
+            let review = self.review.read(cx).review(id)?;
+            Some(format!("Asked by rule {}", review.rule()?.describe()))
+        });
         let can_submit = resolution.is_some_and(|resolution| !resolution.is_pending());
 
         v_flex()
@@ -791,6 +800,11 @@ impl ReviewPane {
                 h_flex()
                     .gap_2()
                     .child(Label::new(path).size(LabelSize::Small))
+                    .children(
+                        rule.map(|rule| {
+                            Label::new(rule).size(LabelSize::Small).color(Color::Accent)
+                        }),
+                    )
                     .child(div().flex_1())
                     .child(Label::new(status).size(LabelSize::Small)),
             )
