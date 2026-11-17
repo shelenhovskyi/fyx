@@ -1,6 +1,8 @@
-# `fyx:ui@0.2.0`: design draft
+# `fyx:ui@0.2.0`: design
 
-Status: **draft for the integrator (W0)**. No code has been changed. The world is in
+Status: **decided 2026-11-17**; see [Decisions](#decisions-2026-11-17). Ready for implementation,
+not frozen: the world stays staged (Stable and Preview capped at 0.1) until the commit that
+declares it frozen. No code has been changed yet. The world is in
 [`fyx-ui-0.2.wit`](fyx-ui-0.2.wit), next to this file. It parses with
 `wasm-tools component wit` (1.263.0). A dummy component embedded from it validates with
 `wasm-tools component embed --dummy` + `component new` + `validate`. How 0.1 and 0.2 components
@@ -22,16 +24,16 @@ Cargo features (finding 3, migration.md §4), and the small points of finding 5.
 |---|---|---|---|
 | A | Effects of host imports are ordered, checked at the call, and applied after it | integration-1 #3, integration-2 #7 | **accepted**: the base for B–F |
 | B | `request-tick` / `cancel-tick` imports, `tick` export | backlog #2, integration-1 #9 | **accepted (priority)** |
-| C | `surface-kind::modal`, `show-surface` / `hide-surface`, list `selected` + `row-selected` | backlog #5, W8 | **accepted (priority)** |
+| C | `surface-kind::modal`, `show-surface` / `hide-surface`, list `selected` + `row-selected` | backlog #5, W8 | **accepted (priority)**, keyboard selection included; a modal opens only after a click or Enter (decided 2026-11-17) |
 | D | `ui-event::dismissed(dismiss-reason)` | backlog #7, W8 | **accepted**, for modals only |
 | E | `add-surface` / `remove-surface` | backlog #6, W8 | **accepted** |
 | F | `push-update` returns `result<_, host-error>` | backlog #9, W8-3 (integration-2), integration-1 #2 | **accepted** |
 | G | `invalidate-rows` patch | backlog #1, integration-1 #5 | **accepted**, with an optional range |
 | H | Row-local ids documented in the WIT | backlog #3, integration-1 #4 | **accepted** (docs only) |
-| I | Frozen `icon` enum instead of upstream `IconName` strings | backlog #4, integration-1 #12 | **accepted**: 101 icons |
+| I | Frozen `icon` enum instead of upstream `IconName` strings | backlog #4, integration-1 #12 | **accepted**: 101 icons (decided 2026-11-17) |
 | J | `list-row.indent`, `button-props.tooltip` | backlog #8, W8 | **accepted**: indent on the row, not on flex |
 | K | `input-props.secret` | integration-2 W8-5 | **accepted** |
-| L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **proposed; scope is the owner's decision** (in as drafted, or deferred to 0.3) |
+| L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **accepted**, in 0.2 (decided 2026-11-17) |
 | — | Panel visibility events, surface rename, commands, raw colours, in-row node clicks, `ignoreFocusOut` | various | **rejected or deferred**; see [Rejected and deferred](#rejected-and-deferred) |
 
 Not changed: the flat tree, theme tokens only, the `mount` / `handle-event` / `list-rows`
@@ -195,13 +197,15 @@ pickers. The title is drawn as a header when it is not empty. The capability is 
 
 **Rules.**
 
-- **User gesture.** A modal steals focus, so `show-surface` on a modal returns `not-permitted`
-  unless the extension has a *transient activation*. That is granted while `handle-event` runs
-  for a user event (`click`, `input-submitted`, `row-click`, `row-selected`, `input-changed`; not
-  `dismissed`). It lasts until 5 s after that call returns, or until one successful
-  `show-surface` consumes it. The 5 s window covers "click → fetch → show the picker from a tick".
-  The rule follows browsers' popup blocking. Revealing a panel needs no gesture: it does not move
-  focus.
+- **User gesture** (decided 2026-11-17). A modal steals focus, so `show-surface` on a modal
+  returns `not-permitted` unless the extension has a *transient activation*. Only a click or
+  Enter grants one: `handle-event` for `click`, `row-click` (a mouse click on a row, or Enter on
+  a focused list) or `input-submitted` (Enter in an input). `input-changed` does not, so typing in
+  an extension's own input never opens a focus-stealing modal (judge wit-0.2-design #4). Neither do
+  `row-selected` (arrow keys) and `dismissed`. The activation lasts until 5 s after that call
+  returns, or until one successful `show-surface` consumes it. The 5 s window covers "click →
+  fetch → show the picker from a tick". The rule follows browsers' popup blocking. Revealing a
+  panel needs no gesture: it does not move focus.
 - **One modal per window.** Zed's `ModalLayer` holds one. Opening any modal, an extension's or
   Zed's own, closes the active one, and the closed modal gets `dismissed(replaced)`. An extension
   modal can never veto its dismissal: `on_before_dismiss` always returns `Dismiss(true)`, because
@@ -221,8 +225,8 @@ pickers. The title is drawn as a header when it is not empty. The capability is 
     modal itself, so Escape still works.
   - Tab and Shift-Tab move through inputs and enabled buttons in tree order.
   - On close, `ModalLayer` restores the previous focus (`modal_layer.rs:233`).
-- **Keyboard selection.** Without it, a picker cannot be driven by keyboard. This is the one
-  addition beyond the backlog row:
+- **Keyboard selection** (ships with 0.2, decided 2026-11-17). Without it, a picker cannot be
+  driven by keyboard. This is the one addition beyond the backlog row:
   - `list-props.selected: option<u32>` is the highlighted row. It is drawn in every surface
     kind, and scrolled into view (`UniformListScrollHandle::scroll_to_item`) when the extension
     sets it. That also gives the sidecar's `TreeView.reveal` the scroll it lacks
@@ -251,7 +255,8 @@ pickers. The title is drawn as a header when it is not empty. The capability is 
 - Host, `fyx_ui.rs`:
   - `CAPABILITY_MODAL = "ui:modal"`, added to `check_surfaces` (`fyx_ui.rs:188-203`).
   - `HostEffect::{Show, Hide}`.
-  - The transient-activation timestamp in `UiState`, set by `handle_event` for user events.
+  - The transient-activation timestamp in `UiState`, set by `handle_event` for `click`,
+    `row-click` and `input-submitted` only.
 - Renderer, new file `crates/ui_ext_host/src/modal.rs`: `ExtensionModal: ModalView` wraps a
   `SurfaceView`, handles `menu::Cancel`, the dismiss reason, focus and the selection keys. This is
   a new logical component, so a new file.
@@ -351,8 +356,9 @@ activation. The sidecar invented `fyx/surfacesChanged` (`host.ts:176`).
 **Upstream hook.** `StatusBar` can only remove by position, and `position_of_item::<T>` finds the
 first item of a type (`status_bar.rs:374-419`). Every extension status item has the same type. It
 needs `StatusBar::remove_item_by_id(EntityId)`, about 8 lines marked `fyx:`, the same pattern as
-`Dock::panel_index_for_id` (`dock.rs:550-555`). Alternative without a hook: keep a removed item
-and render nothing. That leaks one empty view per removal, so it is not recommended.
+`Dock::panel_index_for_id` (`dock.rs:550-555`). Decided 2026-11-17: the hook is accepted. The
+alternative, keeping a removed item and rendering nothing, would leak one empty view per removal.
+The hook goes into the upstream-diff table of the next integration review when it lands.
 
 **Changes.**
 
@@ -630,10 +636,8 @@ sidecar throws `NotImplementedInFyx` (`vscode-coverage.md:173`).
 
 ## L. Editor decorations (`fyx:ui/decorations`)
 
-**Status: proposed; whether it ships in 0.2 is the owner's decision** (judge wit-0.2-design,
-decision 1). To defer it to 0.3 instead, delete `interface decorations`, the two `decoration-*`
-types and `import decorations` from the WIT, and keep W6's dev data source
-(`FYX_UI_DEV_DECORATIONS`) until then. Nothing in A–K depends on this section.
+**Status: accepted, in 0.2** (decided 2026-11-17; judge wit-0.2-design, decision 1). W6's dev
+data source (`FYX_UI_DEV_DECORATIONS`) stays as a host-side test aid.
 
 **Motivation.** Backlog #10, W6. Layer 4 of `ARCHITECTURE.md`: blocks above or below buffer
 lines that survive edits, such as test results, blame or diagnostics. W6 built the host side.
@@ -742,7 +746,7 @@ error it can handle. Checked per call, the same component works either way.
 
 | Component | Files | Changes |
 |---|---|---|
-| WIT (W0) | `crates/ui_ext/wit/fyx-ui.wit` → `crates/ui_ext/wit/since_v0.1.0/fyx-ui.wit` (moved, byte-identical); new `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` (this draft) | migration.md |
+| WIT (W0) | `crates/ui_ext/wit/fyx-ui.wit` → `crates/ui_ext/wit/since_v0.1.0/fyx-ui.wit` (moved, byte-identical); new `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` (this design's WIT) | migration.md |
 | Model | `crates/ui_ext/src/types.rs` | `Icon`, `IconRef`, `ModalDescriptor`, `ModalWidth`, `DismissReason`, `RowRange`; new fields `ButtonProps.tooltip`, `InputProps.secret`, `ListProps.selected`, `ListRow.indent`; `Patch::InvalidateRows`; `UiEvent::{RowSelected, Dismissed}`; `UiEvent::target() -> Option<NodeId>`; `SurfaceKind::Modal` (B, C, G, I, J, K) |
 | Model | `crates/ui_ext/src/tree.rs` | `InvalidateRows` validation, `TreeError::NotAList`, `Touched` result with row invalidations (G); `replace` checks `max_nodes` (16384) instead of `max_nodes_per_update`, for both versions, since 0.1 only gains (Summary) |
 | Host | `crates/extension_host/src/wasm_host/fyx_ui.rs` | version dispatch, `HostEffect` list replacing `pushes`, `Reply { effects, value }`, `ReplyError { effects, .. }`, live surface set, activation timestamp, `tick()`, `ui:modal`, `MAX_VERSION = 0.2.0` (A–F) |
@@ -760,15 +764,19 @@ error it can handle. Checked per call, the same component works either way.
 | Sidecar | `sidecars/vscode-host/src/schema.ts`, `host.ts`, `mock-host.ts`, `ui/surfaces.ts`, `ui/quickpick.ts`, `ui/treeview.ts`, `ui/output.ts`, `ui/statusbar.ts`, `test/*.test.ts` | the JSON mirror of every type change, version negotiation in `initialize`, `fyx/surfacesChanged` and `fyx/surfaceClosed` replaced by WIT-equivalent requests (C–K) |
 | Docs | `docs/fyx/sdk-reference.md`, `extension-authoring.md`, `limits-and-gotchas.md`, `docs/vscode-coverage.md`, `tasks/wit-0.2.md` | new APIs, the limits table from B, C and E, coverage updates, close the backlog rows |
 
-## Open questions for the integrator
+## Decisions (2026-11-17)
 
-1. **Tick floor:** 100 ms, as drafted, or 250 ms? The CPU-share throttle makes 100 ms safe;
-   250 ms would be simpler to explain.
-2. **Transient activation:** a 5 s window, as drafted, or strictly inside `handle-event`? The
-   strict rule breaks "click, then fetch, then show the picker".
-3. **Keyboard selection (C)** is the one addition beyond the backlog. Accept it with the modal, or
-   ship modals in 0.2 driven by mouse and Enter only and add selection in 0.3?
-4. **Status-bar hook (E):** accept the 8-line `fyx:` hook in `status_bar.rs`, or render removed
-   items empty?
-5. **Decorations (L), for the owner:** ship them in 0.2 as drafted, or defer them to 0.3 and keep
-   W6's dev data source until then?
+The owner decided the judge's three owner questions (wit-0.2-design, "Decisions for the user"),
+and the integrator took the judge's recommendations for the rest. They are applied in the sections
+above.
+
+| Question | Decision | Where |
+|---|---|---|
+| Decorations in 0.2? | **In.** `fyx:ui/decorations` as drafted. | L, WIT |
+| Frozen icon enum or strings? | **The frozen 101-icon enum.** A new icon needs a new world version. | I |
+| May a modal open after a gesture, and what is a gesture? | **Within 5 s after a click or Enter only**: `click`, `row-click`, `input-submitted`. Typing (`input-changed`) is not a gesture, nor are `row-selected` and `dismissed`. | C, WIT `show-surface` |
+| Keyboard selection in pickers? | **Ships with 0.2.** | C |
+| Tick floor | **100 ms.** | B, WIT `request-tick` |
+| `StatusBar::remove_item_by_id` hook | **Accepted**, about 8 lines marked `fyx:`. | E |
+| `replace` / `mount` cap | **16384 nodes**, the tree cap. | Summary, F, WIT |
+| Staging | **Stable and Preview capped at 0.1** until the commit that declares 0.2 frozen; Dev and Nightly accept 0.2. | migration.md §2 |

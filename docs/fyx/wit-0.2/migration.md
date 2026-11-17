@@ -14,7 +14,7 @@ from a custom section before instantiation.
 ```
 crates/ui_ext/wit/
   since_v0.1.0/fyx-ui.wit   # today's crates/ui_ext/wit/fyx-ui.wit, moved byte-identical, then never edited
-  since_v0.2.0/fyx-ui.wit   # docs/fyx/wit-0.2/fyx-ui-0.2.wit once accepted, minus the DRAFT header
+  since_v0.2.0/fyx-ui.wit   # docs/fyx/wit-0.2/fyx-ui-0.2.wit (decided 2026-11-17), minus its header comment
 ```
 
 This mirrors `crates/extension_api/wit/since_v0.x.y/`. Every package keeps its full world. Zed
@@ -110,7 +110,7 @@ the same `effects: Vec<HostEffect>`.
 - `check_surfaces` gains `ui:modal`. A 0.1 manifest that declares `ui:modal` is accepted: it is
   harmless, because a 0.1 component cannot declare a modal surface.
 
-**Staging 0.2 before it is final.** Zed caps stable at an older version while it stages a new API
+**Staging 0.2 before it is final** (decided 2026-11-17). Zed caps stable at an older version while it stages a new API
 (`wit.rs:60-70`). Fyx does the same with upstream's `ReleaseChannel`:
 
 ```rust
@@ -210,7 +210,7 @@ design above, with the unification trap documented in `docs/fyx/sdk-reference.md
   - `Extension::tick`;
   - `request_tick`, `cancel_tick`, `add_surface`, `remove_surface`, `show_surface` and
     `hide_surface`;
-  - `place_decoration` and `remove_decoration`, if L ships;
+  - `place_decoration` and `remove_decoration`;
   - `SurfaceTree::invalidate_rows`, `SurfaceTree::push` and `SurfaceTree::place`;
   - `Surface::modal`;
   - the builders for `tooltip`, `secret`, `selected` and `indent`.
@@ -307,7 +307,9 @@ Every new rule gets a test at the lowest layer that owns it. GPUI tests use exec
   the delay clamped to 100 ms.
 - `show-surface`:
   - a modal from `list-rows` or a tick without a recent user event → `not-permitted`;
-  - from `handle-event(click)` → OK;
+  - from `handle-event(click)`, `row-click` or `input-submitted` → OK, also from a tick
+    within 5 s after it;
+  - after only `input-changed`, `row-selected` or `dismissed` → `not-permitted`;
   - a second show in the same activation window → `not-permitted`.
 - `add-surface`:
   - a bad id → `invalid-argument`;
