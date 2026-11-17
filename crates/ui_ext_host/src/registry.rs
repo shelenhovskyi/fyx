@@ -11,12 +11,17 @@
 //! install, an uninstall or an update: a new or changed component (by modification time and size)
 //! is loaded and its surfaces move to the new instance; a removed one stops its surfaces.
 //! `FYX_UI_DEV_EXTENSIONS` adds paths outside that directory.
+//!
+//! Dev extensions (installed as links, or from `FYX_UI_DEV_EXTENSIONS`) reload by themselves:
+//! their component file is watched, and a change, once writes have paused for
+//! `HOT_RELOAD_DEBOUNCE`, loads it again and remounts its surfaces.
 
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context as _;
@@ -25,10 +30,10 @@ use extension_host::{
     ExtensionStore,
     wasm_host::fyx_ui::{PushedUpdate, UiExtension, UiManifest},
 };
-use fs::{Fs, MTime};
-use futures::{StreamExt as _, channel::mpsc};
+use fs::{Fs, MTime, PathEvent};
+use futures::{FutureExt as _, StreamExt as _, channel::mpsc};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, Focusable as _, Global, SharedString,
+    App, AppContext as _, AsyncApp, Context, Entity, Focusable as _, Global, SharedString, Task,
     WeakEntity, Window,
 };
 use settings::Settings as _;
@@ -48,6 +53,10 @@ use crate::{
 /// `UiExtension::load_from_dir`), or a bare `.wasm` component whose file name becomes its id.
 pub const DEV_EXTENSIONS_ENV: &str = "FYX_UI_DEV_EXTENSIONS";
 
+/// A dev extension's component is loaded again once writes to it have paused this long (a build
+/// writes the file in several steps).
+pub const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
+
 /// Extension panels sort after every built-in panel (those use 0..=7).
 const FIRST_ACTIVATION_PRIORITY: u32 = 100;
 
@@ -64,6 +73,17 @@ pub struct UiExtensionRegistry {
     installed: HashMap<Arc<str>, Fingerprint>,
     scanning: bool,
     rescan_requested: bool,
+    /// The component watch of each dev extension, by id.
+    watches: HashMap<Arc<str>, Task<()>>,
+}
+
+/// How a watched dev extension is loaded again.
+#[derive(Clone, Debug)]
+enum Reload {
+    /// Linked into this installed-extensions directory: rescan it.
+    Installed(PathBuf),
+    /// A `FYX_UI_DEV_EXTENSIONS` entry: load it again.
+    DevPath(PathBuf),
 }
 
 /// What tells a reinstalled component from an unchanged one.
@@ -78,6 +98,9 @@ struct Found {
     dir: PathBuf,
     extension_id: Arc<str>,
     fingerprint: Fingerprint,
+    component: PathBuf,
+    /// A link (Zed's dev install): its component is watched for changes.
+    is_dev: bool,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -211,6 +234,15 @@ impl UiExtensionRegistry {
                                 this.installed
                                     .insert(found.extension_id.clone(), found.fingerprint);
                                 this.register_extension(extension, pushed, cx);
+                                if found.is_dev {
+                                    this.watch_component(
+                                        found.extension_id.clone(),
+                                        found.component.clone(),
+                                        Reload::Installed(dir.clone()),
+                                        fs.clone(),
+                                        cx,
+                                    );
+                                }
                             })
                             .ok();
                         }
@@ -234,6 +266,75 @@ impl UiExtensionRegistry {
         .detach();
     }
 
+    /// Watches a dev extension's component and loads it again when it changes (once per id).
+    fn watch_component(
+        &mut self,
+        extension_id: Arc<str>,
+        component: PathBuf,
+        reload: Reload,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.watches.contains_key(&extension_id) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            // Through the link of a dev install, to the file that a build rewrites.
+            let component = fs.canonicalize(&component).await.unwrap_or(component);
+            let Some(dir) = component.parent().map(Path::to_path_buf) else {
+                return;
+            };
+            let (mut events, _watcher) = fs.watch(&dir, Duration::from_millis(50)).await;
+            let touches = |events: &[PathEvent]| {
+                events.iter().any(|event| {
+                    event.path == component || event.path.file_name() == component.file_name()
+                })
+            };
+            while let Some(batch) = events.next().await {
+                if !touches(&batch) {
+                    continue;
+                }
+                // Wait until the writes pause.
+                loop {
+                    let mut pause = cx.background_executor().timer(HOT_RELOAD_DEBOUNCE).fuse();
+                    futures::select_biased! {
+                        more = events.next().fuse() => {
+                            if more.is_none() {
+                                return;
+                            }
+                        }
+                        _ = pause => break,
+                    }
+                }
+                log::info!("fyx:ui: {} changed, reloading", component.display());
+                let reloaded =
+                    this.update(cx, |this, cx| this.reload(reload.clone(), fs.clone(), cx));
+                if reloaded.is_err() {
+                    return;
+                }
+            }
+        });
+        self.watches.insert(extension_id, task);
+    }
+
+    fn reload(&mut self, reload: Reload, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        match reload {
+            // The scan compares the component's fingerprint and loads it again if it changed.
+            Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
+            Reload::DevPath(path) => {
+                cx.spawn(async move |_, cx| {
+                    if let Err(error) = load_dev_extension(path.clone(), cx).await {
+                        log::error!(
+                            "fyx:ui: failed to reload dev extension {}: {error:#}",
+                            path.display()
+                        );
+                    }
+                })
+                .detach();
+            }
+        }
+    }
+
     /// Which found extensions need loading; stops the surfaces of uninstalled ones.
     fn plan_scan(&mut self, found: Vec<Found>, cx: &mut Context<Self>) -> Vec<Found> {
         let gone: Vec<Arc<str>> = self
@@ -244,6 +345,7 @@ impl UiExtensionRegistry {
             .collect();
         for extension_id in gone {
             self.installed.remove(&extension_id);
+            self.watches.remove(&extension_id);
             log::info!("fyx:ui: {extension_id} was uninstalled");
             self.fail_extension(
                 &extension_id,
@@ -326,6 +428,12 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
         };
         let (extension_id, manifest) = manifest;
         let component = extension_dir.join(&manifest.component);
+        let is_dev = fs
+            .metadata(&extension_dir)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.is_symlink);
         match fs.metadata(&component).await {
             Ok(Some(metadata)) => found.push(Found {
                 dir: extension_dir,
@@ -334,6 +442,8 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
                     mtime: metadata.mtime,
                     len: metadata.len,
                 },
+                component,
+                is_dev,
             }),
             Ok(None) | Err(_) => log::error!(
                 "fyx:ui: {extension_id}: component {} is missing (build it first)",
@@ -574,10 +684,21 @@ fn load_dev_extensions(cx: &mut App) {
 }
 
 async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    let fs = cx.update(|cx| <dyn Fs>::global(cx));
+    let reload_path = path.clone();
+    // The file to watch for hot reload.
+    let component = if path.is_dir() {
+        UiManifest::read(fs.as_ref(), &path)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, manifest)| path.join(manifest.component))
+    } else {
+        Some(path.clone())
+    };
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
-        let fs = cx.update(|cx| <dyn Fs>::global(cx));
-        UiExtension::load_from_dir(&path, fs, cx)
+        UiExtension::load_from_dir(&path, fs.clone(), cx)
             .await?
             .with_context(|| format!("{}: extension.toml has no [fyx_ui] table", path.display()))?
     } else {
@@ -605,7 +726,17 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         let registry =
             UiExtensionRegistry::global(cx).context("ui_ext_host::init was not called")?;
         registry.update(cx, |registry, cx| {
-            registry.register_extension(extension, pushed, cx)
+            let extension_id = extension.extension_id().clone();
+            registry.register_extension(extension, pushed, cx);
+            if let Some(component) = component {
+                registry.watch_component(
+                    extension_id,
+                    component,
+                    Reload::DevPath(reload_path),
+                    fs,
+                    cx,
+                );
+            }
         });
         anyhow::Ok(())
     })
