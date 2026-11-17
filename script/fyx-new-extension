@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Scaffolds a standalone Fyx UI extension crate: Cargo.toml (own [workspace]), extension.toml with
+# a [fyx_ui] table, a minimal panel with a unit test, rust-toolchain.toml, .gitignore and README.
+#
+# Usage: script/fyx-new-extension <name> [--out <dir>] [--sdk-path <fyx checkout>]
+#                                 [--sdk-git <url> [--sdk-branch <branch> | --sdk-rev <rev>]]
+#
+#   <name>        crate name, e.g. my_panel or my-panel. The crate is <name> with `-` as `_`, the
+#                 extension and surface id is <name> with `_` as `-`.
+#   --out <dir>   parent directory of the new crate (default: the current directory). The crate
+#                 goes to <dir>/<crate name>, which must not exist yet or be empty.
+#   --sdk-path    path dependency on <fyx checkout>/crates/ui_ext_sdk (default: this checkout).
+#   --sdk-git     git dependency on ui_ext_sdk from <url> instead, at --sdk-branch (default
+#                 `integration`) or --sdk-rev.
+set -euo pipefail
+
+usage() {
+    sed -n '5,14p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+fail() {
+    echo "fyx-new-extension: $*" >&2
+    exit 1
+}
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+fyx_root=$(cd "$script_dir/.." && pwd)
+
+name=""
+out_dir="."
+sdk_path="$fyx_root"
+sdk_git=""
+sdk_branch=""
+sdk_rev=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out) [[ $# -ge 2 ]] || usage; out_dir="$2"; shift 2 ;;
+        --sdk-path) [[ $# -ge 2 ]] || usage; sdk_path="$2"; shift 2 ;;
+        --sdk-git) [[ $# -ge 2 ]] || usage; sdk_git="$2"; shift 2 ;;
+        --sdk-branch) [[ $# -ge 2 ]] || usage; sdk_branch="$2"; shift 2 ;;
+        --sdk-rev) [[ $# -ge 2 ]] || usage; sdk_rev="$2"; shift 2 ;;
+        -h | --help) usage ;;
+        -*) fail "unknown option $1" ;;
+        *)
+            [[ -z "$name" ]] || fail "unexpected argument $1"
+            name="$1"
+            shift
+            ;;
+    esac
+done
+
+[[ -n "$name" ]] || usage
+if [[ ! "$name" =~ ^[a-z][a-z0-9]*([_-][a-z0-9]+)*$ ]]; then
+    fail "name must be lower-case letters and digits separated by single '-' or '_', starting with a letter: $name"
+fi
+if [[ -n "$sdk_branch" && -n "$sdk_rev" ]]; then
+    fail "--sdk-branch and --sdk-rev are mutually exclusive"
+fi
+if [[ -z "$sdk_git" && ( -n "$sdk_branch" || -n "$sdk_rev" ) ]]; then
+    fail "--sdk-branch and --sdk-rev need --sdk-git"
+fi
+
+crate_name="${name//-/_}"
+extension_id="${name//_/-}"
+title=$(echo "$extension_id" | tr '-' ' ' | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')
+
+crate_dir="$out_dir/$crate_name"
+if [[ -e "$crate_dir" && -n "$(ls -A "$crate_dir" 2>/dev/null)" ]]; then
+    fail "$crate_dir already exists and is not empty"
+fi
+
+# Cargo on Windows does not understand Git Bash paths like /c/src/fyx.
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        echo "$1"
+    fi
+}
+
+if [[ -n "$sdk_git" ]]; then
+    sdk_dependency="ui_ext_sdk = { git = \"$sdk_git\""
+    if [[ -n "$sdk_rev" ]]; then
+        sdk_dependency+=", rev = \"$sdk_rev\""
+    else
+        sdk_dependency+=", branch = \"${sdk_branch:-integration}\""
+    fi
+    sdk_dependency+=" }"
+    sdk_note="# The SDK is not on crates.io yet. Cargo clones the Fyx repository to build it."
+else
+    [[ -f "$sdk_path/crates/ui_ext_sdk/Cargo.toml" ]] \
+        || fail "$sdk_path is not a Fyx checkout (no crates/ui_ext_sdk/Cargo.toml)"
+    sdk_path=$(native_path "$(cd "$sdk_path" && pwd)")
+    sdk_dependency="ui_ext_sdk = { path = \"$sdk_path/crates/ui_ext_sdk\" }"
+    sdk_note="# The SDK is not on crates.io yet, and it inherits settings from the Fyx workspace, so this
+# path must point into a full Fyx checkout."
+fi
+
+toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$fyx_root/rust-toolchain.toml")
+[[ -n "$toolchain" ]] || fail "could not read the toolchain channel from $fyx_root/rust-toolchain.toml"
+
+mkdir -p "$crate_dir/src"
+
+cat > "$crate_dir/Cargo.toml" <<EOF
+[package]
+name = "$crate_name"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A workspace of its own, so the crate also builds when it sits inside another workspace (such as
+# a Fyx checkout) without being one of its members.
+[workspace]
+
+[lib]
+path = "src/$crate_name.rs"
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+$sdk_note
+$sdk_dependency
+EOF
+
+cat > "$crate_dir/extension.toml" <<EOF
+id = "$extension_id"
+name = "$title"
+description = "A Fyx UI panel."
+version = "0.1.0"
+schema_version = 1
+authors = []
+
+# Read by Fyx's extension host; upstream Zed ignores this table.
+[fyx_ui]
+api_version = "0.1.0"
+component = "fyx_ui.wasm"
+capabilities = ["ui:panel"]
+EOF
+
+cat > "$crate_dir/rust-toolchain.toml" <<EOF
+# The toolchain the Fyx SDK is built and tested with.
+[toolchain]
+channel = "$toolchain"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-wasip2"]
+EOF
+
+cat > "$crate_dir/.gitignore" <<'EOF'
+/target
+/fyx_ui.wasm
+EOF
+
+cat > "$crate_dir/src/$crate_name.rs" <<EOF
+use ui_ext_sdk::*;
+
+const SURFACE_ID: &str = "$extension_id";
+
+#[derive(Default)]
+struct Panel {
+    clicks: u32,
+    tree: SurfaceTree,
+    label: NodeId,
+    button: NodeId,
+}
+
+impl Panel {
+    fn label(&self) -> TextProps {
+        TextProps::new(format!("Clicked {} times", self.clicks)).color(ColorToken::TextMuted)
+    }
+}
+
+fn check_surface(surface_id: &str) -> Result<(), String> {
+    if surface_id == SURFACE_ID {
+        Ok(())
+    } else {
+        Err(format!("unknown surface {surface_id:?}"))
+    }
+}
+
+impl Extension for Panel {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn surfaces(&self) -> Vec<Surface> {
+        vec![Surface::panel(
+            SURFACE_ID,
+            "$title",
+            DockPosition::Right,
+            "sparkle",
+            280,
+        )]
+    }
+
+    fn mount(&mut self, surface_id: &str) -> Result<Vec<Node>, String> {
+        check_surface(surface_id)?;
+        let label = self.label();
+        let mut ids = (0, 0);
+        let nodes = self.tree.mount(|tree| {
+            tree.flex(FlexProps::column().gap(8).padding(8), |tree| {
+                tree.text(TextProps::new("$title").bold());
+                ids.0 = tree.text(label);
+                ids.1 = tree.button(ButtonProps::new("Click me").icon("plus"));
+            });
+        })?;
+        // A remount builds new nodes with new ids, so they are stored on every mount.
+        (self.label, self.button) = ids;
+        Ok(nodes)
+    }
+
+    fn handle_event(&mut self, surface_id: &str, event: UiEvent) -> Result<Update, String> {
+        check_surface(surface_id)?;
+        match event {
+            UiEvent::Click(id) if id == self.button => {
+                // A panic traps the call, and a trapped call disables the extension.
+                self.clicks = self.clicks.saturating_add(1);
+                self.tree.set_props(self.label, self.label())?;
+                Ok(self.tree.take_update())
+            }
+            _ => Ok(Update::Unchanged),
+        }
+    }
+}
+
+register_extension!(Panel);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn click_patches_the_label() {
+        let mut panel = Panel::new();
+        let nodes = panel.mount(SURFACE_ID).expect("mount");
+        assert_eq!(nodes.len(), 4);
+
+        let update = panel
+            .handle_event(SURFACE_ID, UiEvent::Click(panel.button))
+            .expect("click");
+        let label = Props::Text(TextProps::new("Clicked 1 times").color(ColorToken::TextMuted));
+        assert_eq!(
+            update,
+            Update::Patches(vec![Patch::SetProps((panel.label, label))])
+        );
+
+        let update = panel
+            .handle_event(SURFACE_ID, UiEvent::Click(panel.label))
+            .expect("click on text");
+        assert_eq!(update, Update::Unchanged);
+    }
+}
+EOF
+
+cat > "$crate_dir/README.md" <<EOF
+# $title (\`$extension_id\`)
+
+A Fyx UI extension with one right-dock panel. Scaffolded by \`script/fyx-new-extension\`; the guide
+is \`docs/fyx/extension-authoring.md\` in the Fyx repository.
+
+## Build
+
+\`rust-toolchain.toml\` pins the toolchain the SDK is tested with and adds the \`wasm32-wasip2\`
+target, so rustup installs both on the first build.
+
+\`\`\`bash
+cargo build --target wasm32-wasip2 --release
+\`\`\`
+
+\`\`\`bash
+cp target/wasm32-wasip2/release/$crate_name.wasm fyx_ui.wasm
+\`\`\`
+
+If the crate sits inside a Fyx checkout, that checkout's \`.cargo/config.toml\` asks for
+\`sccache\`. Without sccache installed, build with \`RUSTC_WRAPPER= cargo build ...\`.
+
+## Test
+
+The unit tests run on your machine, not in WASM:
+
+\`\`\`bash
+cargo test
+\`\`\`
+
+## Run
+
+Fyx loads UI extensions only from \`FYX_UI_DEV_EXTENSIONS\` (\`:\`-separated, \`;\` on Windows), read
+at startup:
+
+\`\`\`bash
+FYX_UI_DEV_EXTENSIONS=\$PWD /path/to/fyx --foreground
+\`\`\`
+
+Open the right dock and click the sparkle button. Restart Fyx to pick up a new build.
+EOF
+
+echo "fyx-new-extension: created $crate_dir ($crate_name, id $extension_id)"
+echo "Next:"
+echo "  cd $crate_dir"
+echo "  cargo test"
+echo "  cargo build --target wasm32-wasip2 --release && cp target/wasm32-wasip2/release/$crate_name.wasm fyx_ui.wasm"

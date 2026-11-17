@@ -6845,7 +6845,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_form"
+version = "0.1.0"
+dependencies = [
+ "ui_ext",
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_gallery"
+version = "0.1.0"
+dependencies = [
+ "ui_ext",
+ "ui_ext_sdk",
+]
+
+[[package]]
+name = "fyx_demo_gitstatus"
+version = "0.1.0"
+dependencies = [
+ "ui_ext",
+ "ui_ext_sdk",
+]
+
+[[package]]
+name = "fyx_demo_markdown"
 version = "0.1.0"
 dependencies = [
  "ui_ext",
