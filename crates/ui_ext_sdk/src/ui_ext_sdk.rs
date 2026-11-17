@@ -67,6 +67,25 @@ pub mod bindings {
 pub use bindings::fyx::ui::host::LogLevel;
 pub use bindings::fyx::ui::types::*;
 
+/// The `fyx:ui` WIT version this SDK is generated from, as (major, minor, patch).
+pub const API_VERSION: (u16, u16, u16) = (0, 1, 0);
+
+/// Name of the custom section [`register_extension!`] adds to every component, from which the host
+/// reads [`API_VERSION`] before instantiating it.
+pub const API_VERSION_SECTION: &str = "fyx:ui-api-version";
+
+/// [`API_VERSION`] as stored in the section: three big-endian `u16`s, as in Zed's
+/// `zed:api-version`.
+pub const API_VERSION_SECTION_BYTES: [u8; 6] = {
+    let (major, minor, patch) = API_VERSION;
+    let [major_high, major_low] = major.to_be_bytes();
+    let [minor_high, minor_low] = minor.to_be_bytes();
+    let [patch_high, patch_low] = patch.to_be_bytes();
+    [
+        major_high, major_low, minor_high, minor_low, patch_high, patch_low,
+    ]
+};
+
 /// First id handed out inside a [`ListRow`] subtree.
 ///
 /// Rows are addressed by `(list node, index)` and rebuilt on every scroll, so their node ids are
@@ -183,6 +202,13 @@ macro_rules! register_extension {
                 })
             }
         }
+
+        // In the extension's own crate rather than the SDK's rlib, so the linker cannot drop it
+        // as an unreferenced archive member.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(link_section = "fyx:ui-api-version")]
+        #[used]
+        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_SECTION_BYTES;
 
         $crate::bindings::export!(__FyxUiExtension with_types_in $crate::bindings);
     };
@@ -1340,6 +1366,14 @@ mod tests {
             [("echo".to_string(), Update::Unchanged)]
         );
         assert!(take_pushed_updates().is_empty());
+    }
+
+    #[test]
+    fn api_version_matches_the_wit_package() {
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
+        let wit = include_str!("../../ui_ext/wit/fyx-ui.wit");
+        let (major, minor, patch) = API_VERSION;
+        assert!(wit.contains(&format!("package fyx:ui@{major}.{minor}.{patch};")));
     }
 
     struct Echo {
