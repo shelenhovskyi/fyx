@@ -716,4 +716,24 @@ mod tests {
         let back: Update = serde_json::from_value(json).expect("deserializes");
         assert_eq!(back, update);
     }
+
+    /// The 0.2 design keeps this for both worlds: `push-update` accepts a `replace` of a whole
+    /// tree, so applying it must not fail on size alone (judge wit-0.2-design #2).
+    #[test]
+    fn default_limits_take_a_whole_tree_in_a_mount_and_a_replace() {
+        let roots = |count: u32| (0..count).map(|id| text(id, None, "")).collect::<Vec<_>>();
+        let mut tree =
+            Tree::from_nodes(roots(16384), TreeLimits::default()).expect("16384 nodes mount");
+        assert_eq!(
+            Tree::from_nodes(roots(16385), TreeLimits::default()),
+            Err(TreeError::TreeTooLarge { max: 16384 })
+        );
+        tree.apply_update(Update::Replace(roots(16384)))
+            .expect("16384 nodes replace");
+        assert_eq!(
+            tree.apply_update(Update::Replace(roots(16385))),
+            Err(TreeError::TreeTooLarge { max: 16384 })
+        );
+        assert_eq!(tree.len(), 16384);
+    }
 }
