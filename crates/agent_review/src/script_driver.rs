@@ -207,7 +207,7 @@ fn next_pane(
         .items_of_type::<ReviewPane>(cx)
         .collect::<Vec<_>>();
     panes.into_iter().find_map(|pane| {
-        let id = pane.read(cx).review_id();
+        let id = pane.read(cx).current_review_id()?;
         let open = review
             .read(cx)
             .review(id)

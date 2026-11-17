@@ -12,7 +12,7 @@ mod review_pane;
 #[cfg(any(debug_assertions, feature = "review-script"))]
 mod script_driver;
 
-use std::{ops::Range, rc::Rc};
+use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc};
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ToolCallContent,
@@ -35,8 +35,8 @@ use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
-    AcceptAllHunks, AcceptHunk, CommentHunk, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks,
-    RejectHunk, ReviewPane, SubmitReview, ToggleReviewMode,
+    AcceptAllHunks, AcceptHunk, AcceptTurn, CommentHunk, NextHunk, OpenReviews, PreviousHunk,
+    RejectAllHunks, RejectHunk, RejectTurn, ReviewPane, SubmitReview, ToggleReviewMode,
 };
 
 /// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
@@ -140,6 +140,17 @@ impl Global for GlobalAgentReview {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReviewId(u64);
 
+/// One agent turn of one session: every edit the agent proposes until its turn stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TurnId(u64);
+
+/// A file already decided in a turn, for the turn's summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnEntry {
+    pub path: PathBuf,
+    pub resolution: Resolution,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewSource {
     /// A diff shown with an ACP permission request, before the agent writes anything.
@@ -163,6 +174,8 @@ pub enum AgentReviewEvent {
     Updated(ReviewId),
     Resolved(ReviewId),
     Closed(ReviewId),
+    /// The agent's turn stopped; no more edits will join it.
+    TurnEnded(TurnId),
 }
 
 type PermissionResponder = Box<dyn FnOnce(PermissionVerdict, ProposedEdit, &mut App)>;
@@ -174,6 +187,7 @@ enum Responder {
 
 pub struct Review {
     id: ReviewId,
+    turn: TurnId,
     session_id: acp_v2::SessionId,
     source: ReviewSource,
     edit: ProposedEdit,
@@ -187,6 +201,10 @@ impl Review {
 
     pub fn session_id(&self) -> &acp_v2::SessionId {
         &self.session_id
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
     }
 
     pub fn source(&self) -> ReviewSource {
@@ -209,6 +227,11 @@ pub struct AgentReview {
     enabled: bool,
     reviews: Vec<Review>,
     next_id: u64,
+    turns: HashMap<acp_v2::SessionId, TurnId>,
+    next_turn: u64,
+    /// "Accept all in turn" / "reject all in turn": also decides edits that arrive later in the turn.
+    turn_decisions: HashMap<TurnId, HunkDecision>,
+    turn_history: HashMap<TurnId, Vec<TurnEntry>>,
 }
 
 impl EventEmitter<AgentReviewEvent> for AgentReview {}
@@ -236,6 +259,71 @@ impl AgentReview {
 
     pub fn review(&self, id: ReviewId) -> Option<&Review> {
         self.reviews.iter().find(|review| review.id == id)
+    }
+
+    /// Reviews of `turn` still waiting for a decision, oldest first.
+    pub fn open_reviews_in_turn(&self, turn: TurnId) -> impl Iterator<Item = &Review> {
+        self.reviews
+            .iter()
+            .filter(move |review| review.turn == turn && !review.is_submitted())
+    }
+
+    pub fn turn_history(&self, turn: TurnId) -> &[TurnEntry] {
+        self.turn_history.get(&turn).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn turn_decision(&self, turn: TurnId) -> Option<HunkDecision> {
+        self.turn_decisions.get(&turn).copied()
+    }
+
+    /// The session's current turn, started by its first reviewed edit.
+    fn turn_for(&mut self, session_id: &acp_v2::SessionId) -> TurnId {
+        let next_turn = &mut self.next_turn;
+        *self.turns.entry(session_id.clone()).or_insert_with(|| {
+            let turn = TurnId(*next_turn);
+            *next_turn += 1;
+            turn
+        })
+    }
+
+    /// Ends the session's turn: later edits start a new one.
+    pub fn end_turn(&mut self, session_id: &acp_v2::SessionId, cx: &mut Context<Self>) {
+        if let Some(turn) = self.turns.remove(session_id) {
+            self.turn_decisions.remove(&turn);
+            self.turn_history.remove(&turn);
+            cx.emit(AgentReviewEvent::TurnEnded(turn));
+            cx.notify();
+        }
+    }
+
+    /// Accepts or rejects every open review of `turn`, and every edit that joins the turn later.
+    pub fn decide_turn(
+        &mut self,
+        turn: TurnId,
+        decision: HunkDecision,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            decision != HunkDecision::Pending,
+            "a turn is accepted or rejected, not reset"
+        );
+        self.turn_decisions.insert(turn, decision);
+        let ids = self
+            .open_reviews_in_turn(turn)
+            .map(|review| review.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.open_review_mut(id)?.edit.decide_pending(decision);
+            self.submit(id, cx)?;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, turn: TurnId, edit: &ProposedEdit) {
+        self.turn_history.entry(turn).or_default().push(TurnEntry {
+            path: edit.abs_path().to_path_buf(),
+            resolution: edit.resolution(),
+        });
     }
 
     pub fn set_decision(
@@ -290,9 +378,12 @@ impl AgentReview {
             .responder
             .take()
             .context("review was already submitted")?;
+        let turn = review.turn;
+        let edit = review.edit.clone();
+        self.record(turn, &edit);
         match responder {
             Responder::Write(sender) => {
-                let outcome = write_outcome(&review.edit)?;
+                let outcome = write_outcome(&edit)?;
                 if sender.send(outcome).is_err() {
                     log::debug!("agent write finished before its review was submitted");
                 }
@@ -301,8 +392,7 @@ impl AgentReview {
                 cx.emit(AgentReviewEvent::Closed(id));
             }
             Responder::Permission(respond) => {
-                let verdict = permission_verdict(review.edit.resolution());
-                let edit = review.edit.clone();
+                let verdict = permission_verdict(edit.resolution());
                 // Answering the permission makes the thread emit an event this entity handles, so it
                 // must not run while this entity is being updated.
                 cx.defer(move |cx| respond(verdict, edit, cx));
@@ -330,6 +420,7 @@ impl AgentReview {
         for id in ids {
             self.close(id, cx);
         }
+        self.end_turn(session_id, cx);
     }
 
     /// Closes a review without a decision. A held write then fails without touching the file.
@@ -365,8 +456,10 @@ impl AgentReview {
     ) -> ReviewId {
         let id = ReviewId(self.next_id);
         self.next_id += 1;
+        let turn = self.turn_for(&session_id);
         self.reviews.push(Review {
             id,
+            turn,
             session_id,
             source,
             edit,
@@ -402,6 +495,16 @@ impl AgentReview {
             .collect::<Vec<_>>();
         for id in superseded {
             self.close(id, cx);
+        }
+        let turn = self.turn_for(&session_id);
+        if let Some(decision) = self.turn_decision(turn) {
+            let mut edit = edit;
+            edit.decide_pending(decision);
+            self.record(turn, &edit);
+            let verdict = permission_verdict(edit.resolution());
+            cx.defer(move |cx| respond(verdict, edit, cx));
+            cx.notify();
+            return None;
         }
         Some(self.insert(
             session_id,
@@ -457,7 +560,13 @@ impl AgentReview {
             self.close(*id, cx);
         }
 
+        let turn = self.turn_for(&write.session_id);
+        if let Some(decision) = self.turn_decision(turn) {
+            edit.decide_pending(decision);
+        }
         if !edit.resolution().is_pending() {
+            self.record(turn, &edit);
+            cx.notify();
             return Task::ready(write_outcome(&edit));
         }
         let (sender, receiver) = oneshot::channel();
@@ -529,6 +638,10 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
         }
         AcpThreadEvent::ToolAuthorizationReceived(request_id) => {
             review.update(cx, |review, cx| review.permission_answered(*request_id, cx));
+        }
+        AcpThreadEvent::Stopped { .. } | AcpThreadEvent::Error => {
+            let session_id = thread.session_id().clone();
+            review.update(cx, |review, cx| review.end_turn(&session_id, cx));
         }
         _ => {}
     }
@@ -687,8 +800,8 @@ mod tests {
 
     use super::*;
     use gpui::TestAppContext;
-    use language::Buffer;
     use gpui::UpdateGlobal as _;
+    use language::Buffer;
 
     const OLD: &str = "one\ntwo\nthree\nfour\nfive\n";
     const NEW: &str = "ONE\ntwo\nthree\nfour\nFIVE\n";
@@ -961,6 +1074,66 @@ mod tests {
         assert!(locate_fragment("a\nb\nb\n", "b\n").is_err());
         assert!(locate_fragment("a\n", "z").is_err());
         assert!(locate_fragment("a\n", "").is_err());
+    }
+
+    #[gpui::test]
+    async fn turn_decision_covers_open_and_later_edits(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let first = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let second = gate_write(&review, agent_write("/p/b.txt", cx), cx);
+        let turn = review.read_with(cx, |review, _| {
+            let turns = review
+                .reviews()
+                .iter()
+                .map(|review| review.turn())
+                .collect::<Vec<_>>();
+            assert_eq!(turns.len(), 2);
+            assert_eq!(turns[0], turns[1], "edits of one turn share it");
+            turns[0]
+        });
+
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap();
+            assert_eq!(review.open_reviews_in_turn(turn).count(), 0);
+            assert_eq!(review.turn_history(turn).len(), 2);
+        });
+        assert_eq!(first.await.unwrap().content.as_deref(), Some(NEW));
+        assert_eq!(second.await.unwrap().content.as_deref(), Some(NEW));
+
+        // A later edit of the same turn is accepted without a review.
+        let opened_before = events.borrow().len();
+        let later = gate_write(&review, agent_write("/p/c.txt", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(later.content.as_deref(), Some(NEW));
+        assert!(
+            !events.borrow()[opened_before..]
+                .iter()
+                .any(|event| matches!(event, AgentReviewEvent::Opened(_)))
+        );
+        assert_eq!(
+            review.read_with(cx, |review, _| review.turn_history(turn).len()),
+            3
+        );
+
+        // The next turn asks again.
+        review.update(cx, |review, cx| review.end_turn(&session(), cx));
+        assert!(events.borrow().contains(&AgentReviewEvent::TurnEnded(turn)));
+        let next = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let next_turn = review.read_with(cx, |review, _| {
+            assert_eq!(review.reviews().len(), 1, "held for review again");
+            review.reviews()[0].turn()
+        });
+        assert_ne!(next_turn, turn);
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(next_turn, HunkDecision::Rejected, cx)
+                .unwrap()
+        });
+        assert_eq!(next.await.unwrap().content, None);
     }
 
     #[gpui::test]
