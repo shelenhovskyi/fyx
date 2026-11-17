@@ -231,6 +231,7 @@ members = [
     "crates/ui_ext", # fyx
     "crates/ui_ext_host", # fyx
     "crates/ui_ext_sdk", # fyx
+    "crates/ui_ext_wasm", # fyx
     "crates/ui_input",
     "crates/ui_macros",
     "crates/ui_prompt",
@@ -511,6 +512,7 @@ ui = { path = "crates/ui" }
 ui_ext = { path = "crates/ui_ext" } # fyx
 ui_ext_host = { path = "crates/ui_ext_host" } # fyx
 ui_ext_sdk = { path = "crates/ui_ext_sdk" } # fyx
+ui_ext_wasm = { path = "crates/ui_ext_wasm" } # fyx
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
