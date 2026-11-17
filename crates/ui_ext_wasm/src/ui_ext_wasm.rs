@@ -116,6 +116,20 @@ const UI_DEADLINE_SLACK: Duration = Duration::from_millis(50);
 /// Pushes one call may make before it traps and the extension is disabled. Pushes are queued
 /// unvalidated until the call returns, so this bounds what a looping guest can pile up.
 pub const MAX_PUSHES_PER_CALL: usize = 64;
+/// Patches plus nodes all of one call's pushes may carry together. Each push is also capped by
+/// `TreeLimits` when it is applied, but pushes queue unapplied until the call returns, so their
+/// total is capped here: past it the call traps and the extension is disabled.
+pub const MAX_PUSHED_ITEMS_PER_CALL: usize = 4096;
+/// Linear memory one UI component may grow to. A UI component holds a tree mirror and some state,
+/// not data sets. This also bounds every string and list a call can make the host copy out of the
+/// guest (arguments of `push-update` and `log`, replies), since they come from that memory.
+pub const UI_MEMORY_LIMIT: usize = 32 << 20;
+/// Table elements per table (function references; a Rust component uses a few thousand).
+pub const UI_TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
+/// Core instances, tables and memories per component (a component and its adapters use a handful).
+pub const UI_INSTANCES_LIMIT: usize = 32;
+pub const UI_TABLES_LIMIT: usize = 32;
+pub const UI_MEMORIES_LIMIT: usize = 8;
 
 /// The `fyx:ui` versions this host can load, on every release channel.
 ///
@@ -212,6 +226,7 @@ impl UiManifest {
             return Ok(None);
         };
         let id = toml.id;
+        validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
             "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
@@ -290,6 +305,9 @@ pub struct UiState {
     ctx: WasiCtx,
     /// Pushes of the running call, returned with its reply.
     pushes: Vec<PushedUpdate>,
+    /// Patches plus nodes in `pushes`.
+    pushed_items: usize,
+    limits: wasmtime::StoreLimits,
     call_started: Instant,
     call_budget: Duration,
     disabled: Option<String>,
@@ -300,6 +318,7 @@ impl UiState {
         self.call_started = Instant::now();
         self.call_budget = budget;
         self.pushes.clear();
+        self.pushed_items = 0;
     }
 }
 
@@ -323,10 +342,18 @@ impl wit_host::Host for UiState {
         if self.pushes.len() >= MAX_PUSHES_PER_CALL {
             wasmtime::bail!("pushed more than {MAX_PUSHES_PER_CALL} updates in one call");
         }
-        self.pushes.push(PushedUpdate {
-            surface_id,
-            update: update.into(),
-        });
+        let update: ui_ext::Update = update.into();
+        self.pushed_items += match &update {
+            ui_ext::Update::Unchanged => 0,
+            ui_ext::Update::Replace(nodes) => nodes.len(),
+            ui_ext::Update::Patches(patches) => patches.len(),
+        };
+        if self.pushed_items > MAX_PUSHED_ITEMS_PER_CALL {
+            wasmtime::bail!(
+                "pushed more than {MAX_PUSHED_ITEMS_PER_CALL} patches and nodes in one call"
+            );
+        }
+        self.pushes.push(PushedUpdate { surface_id, update });
         Ok(())
     }
 
@@ -354,6 +381,63 @@ fn ui_runtime() -> Result<&'static UiRuntime> {
         .get_or_init(|| build_ui_runtime().map_err(|error| format!("{error:#}")))
         .as_ref()
         .map_err(|error| anyhow!("failed to set up the fyx:ui wasm runtime: {error}"))
+}
+
+/// All of WASI p2 is linked (Rust's std imports parts of it, and a component that imports an
+/// interface the linker lacks would not instantiate), but no network use is allowed: no TCP or
+/// UDP socket, no name lookup, and no address passes the check. A guest's `connect` fails with
+/// "access denied" instead of reaching the network.
+fn deny_network(wasi: &mut WasiCtxBuilder) {
+    wasi.allow_tcp(false)
+        .allow_udp(false)
+        .allow_ip_name_lookup(false)
+        .socket_addr_check(|_, _| Box::pin(async { false }));
+}
+
+/// Longest extension or surface id.
+pub const MAX_ID_LEN: usize = 64;
+
+/// Extension and surface ids name panels, settings keys and files, so they are restricted to
+/// lowercase ASCII letters, digits, `-` and `_`, start with a letter or digit, and are at most
+/// `MAX_ID_LEN` long. That also keeps `<extension id>/<surface id>` unambiguous.
+pub fn validate_id(kind: &str, id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > MAX_ID_LEN {
+        anyhow::bail!("{kind} id {id:?} must be 1 to {MAX_ID_LEN} characters long");
+    }
+    if !id.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+    }) {
+        anyhow::bail!("{kind} id {id:?} may only use lowercase ASCII letters, digits, '-' and '_'");
+    }
+    if !id.as_bytes()[0].is_ascii_alphanumeric() {
+        anyhow::bail!("{kind} id {id:?} must start with a letter or a digit");
+    }
+    Ok(())
+}
+
+/// The surfaces a component declares: valid ids, none twice.
+pub fn validate_surfaces(surfaces: &[ui_ext::Surface]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for surface in surfaces {
+        validate_id("surface", &surface.id)?;
+        if !seen.insert(surface.id.as_str()) {
+            anyhow::bail!("surface id {:?} is declared twice", surface.id);
+        }
+    }
+    Ok(())
+}
+
+/// Resource caps of every UI component's store. Growing past one traps (rather than failing the
+/// guest's allocation quietly), which disables the extension with an explicit error.
+fn ui_store_limits() -> wasmtime::StoreLimits {
+    wasmtime::StoreLimitsBuilder::new()
+        .memory_size(UI_MEMORY_LIMIT)
+        .table_elements(UI_TABLE_ELEMENTS_LIMIT)
+        .instances(UI_INSTANCES_LIMIT)
+        .tables(UI_TABLES_LIMIT)
+        .memories(UI_MEMORIES_LIMIT)
+        .trap_on_grow_failure(true)
+        .build()
 }
 
 fn build_ui_runtime() -> Result<UiRuntime> {
@@ -459,6 +543,9 @@ impl UiExtension {
         wasm_bytes: Vec<u8>,
         cx: &AsyncApp,
     ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        if let Err(error) = validate_id("extension", &extension_id) {
+            return Task::ready(Err(error));
+        }
         let compile_task = cx.background_executor().spawn({
             let extension_id = extension_id.clone();
             async move {
@@ -495,6 +582,7 @@ impl UiExtension {
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
                     wasi.inherit_stderr();
+                    deny_network(&mut wasi);
                     let mut store = Store::new(
                         &runtime.engine,
                         UiState {
@@ -502,11 +590,14 @@ impl UiExtension {
                             table: ResourceTable::new(),
                             ctx: wasi.build(),
                             pushes: Vec::new(),
+                            pushed_items: 0,
+                            limits: ui_store_limits(),
                             call_started: Instant::now(),
                             call_budget: UI_INIT_BUDGET,
                             disabled: None,
                         },
                     );
+                    store.limiter(|state| &mut state.limits);
                     store.epoch_deadline_callback(|context| {
                         let state = context.data();
                         if state.call_started.elapsed() > state.call_budget {
@@ -539,6 +630,7 @@ impl UiExtension {
                     .context("fyx:ui surfaces() failed")?;
                     let surfaces: Arc<[ui_ext::Surface]> =
                         surfaces.into_iter().map(Into::into).collect();
+                    validate_surfaces(&surfaces).context("invalid surfaces()")?;
                     // Nothing replies to instantiation, so its pushes go to the channel; the
                     // receiver is still in hand here, so sending cannot fail.
                     for pushed in store.data_mut().pushes.drain(..) {
@@ -934,6 +1026,9 @@ impl From<ui_ext::UiEvent> for wit::UiEvent {
         }
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[cfg(test)]
 mod tests;

@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
 use ui_ext::{Patch, Props, TreeNode, UiEvent, Update};
@@ -35,69 +32,17 @@ mod probe {
     pub const PUSH_THEN_PATCH: NodeId = 4;
     pub const PUSH_THEN_FAIL: NodeId = 5;
     pub const PUSH_FLOOD: NodeId = 6;
-}
-
-fn workspace_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Builds a guest for `wasm32-wasip2` with `cargo build <args>` in `dir`, into a target directory
-/// next to the test binary's own, and returns `<target>/wasm32-wasip2/<output>`.
-fn build_guest(dir: &Path, args: &[&str], output: &str) -> Result<PathBuf, String> {
-    // <target>/debug/deps/<test binary>
-    let target_dir = std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .ancestors()
-        .nth(3)
-        .ok_or("test binary is not inside a cargo target directory")?
-        .join("fyx-ui-fixtures");
-    // Blocking is fine: this runs once per test process, before any executor work.
-    #[allow(clippy::disallowed_methods)]
-    let status = Command::new(option_env!("CARGO").unwrap_or("cargo"))
-        .arg("build")
-        .args(args)
-        .args(["--locked", "--target", "wasm32-wasip2", "--target-dir"])
-        .arg(&target_dir)
-        .current_dir(dir)
-        .status()
-        .map_err(|error| format!("failed to run cargo: {error}"))?;
-    if !status.success() {
-        return Err(format!("cargo build {args:?} in {dir:?} failed: {status}"));
-    }
-    Ok(target_dir.join("wasm32-wasip2").join(output))
-}
-
-fn read_guest(
-    built: &'static OnceLock<Result<PathBuf, String>>,
-    build: fn() -> Result<PathBuf, String>,
-) -> Vec<u8> {
-    let path = built
-        .get_or_init(build)
-        .as_ref()
-        .unwrap_or_else(|error| panic!("{error}"));
-    std::fs::read(path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
+    pub const ALLOCATE: NodeId = 7;
+    pub const PUSH_BULK: NodeId = 8;
+    pub const CONNECT: NodeId = 9;
 }
 
 fn demo_counter_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    read_guest(&BUILT, || {
-        build_guest(
-            &workspace_dir(),
-            &["-p", "fyx_demo_counter"],
-            "debug/fyx_demo_counter.wasm",
-        )
-    })
+    crate::test_support::demo_wasm("fyx_demo_counter")
 }
 
 fn probe_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    read_guest(&BUILT, || {
-        build_guest(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/probe"),
-            &["--release"],
-            "release/fyx_ui_test_probe.wasm",
-        )
-    })
+    crate::test_support::fixture_wasm("fyx_ui_test_probe")
 }
 
 async fn load(
@@ -399,6 +344,78 @@ async fn test_push_flood_traps_and_disables_extension(cx: &mut TestAppContext) {
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
+/// Sandbox: a component cannot grow its memory past `UI_MEMORY_LIMIT`; trying traps the call
+/// with an explicit error and disables the extension.
+#[gpui::test]
+async fn test_memory_past_the_limit_traps_and_disables_extension(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("memory"), "{message}");
+    assert!(
+        error.downcast_ref::<ReplyError>().is_none(),
+        "a trap, not a rejection"
+    );
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("disabled"), "{error:#}");
+}
+
+/// Sandbox: the pushes of one call may carry at most `MAX_PUSHED_ITEMS_PER_CALL` patches and
+/// nodes together, even when each push is small and there are fewer than `MAX_PUSHES_PER_CALL`.
+#[gpui::test]
+async fn test_pushed_items_past_the_cap_trap(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_BULK))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "more than {MAX_PUSHED_ITEMS_PER_CALL} patches and nodes"
+        )),
+        "{error:#}"
+    );
+    assert!(error.downcast_ref::<ReplyError>().is_none());
+}
+
+/// Sandbox: WASI sockets are linked but every network use is denied, so a guest's
+/// `TcpStream::connect` fails inside the guest. The extension reports the error and stays usable.
+#[gpui::test]
+async fn test_guest_cannot_open_a_socket(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::CONNECT))
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("connect failed"), "{message}");
+    // Denied by the sandbox, not refused by a closed port.
+    let lower = message.to_lowercase();
+    assert!(
+        lower.contains("denied") || lower.contains("not permitted"),
+        "{message}"
+    );
+    assert!(
+        error.downcast_ref::<ReplyError>().is_some(),
+        "the guest's own error, not a trap: {message}"
+    );
+    // Not disabled: the next call works.
+    extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("the extension is still usable");
+}
+
 #[gpui::test]
 async fn test_version_falls_back_to_imports(cx: &mut TestAppContext) {
     // Renaming the section in place keeps every size field valid; the probe still imports
@@ -518,4 +535,77 @@ fn module_with_version_section(data: &[u8]) -> Vec<u8> {
     module.extend(name);
     module.extend(data);
     module
+}
+
+/// Sandbox: extension and surface ids are restricted (they name panels, settings keys and files,
+/// and `<extension>/<surface>` must stay unambiguous).
+#[test]
+fn test_id_rules() {
+    for good in ["fyx-demo-counter", "a", "a1_b-2", "9lives"] {
+        validate_id("extension", good).unwrap_or_else(|error| panic!("{good}: {error:#}"));
+    }
+    let too_long = "a".repeat(MAX_ID_LEN + 1);
+    for bad in [
+        "",
+        "Counter",
+        "a/b",
+        "../x",
+        "-dash",
+        "_under",
+        "with space",
+        "dot.ted",
+        "ünï",
+        too_long.as_str(),
+    ] {
+        let error = validate_id("extension", bad).expect_err(bad);
+        assert!(format!("{error:#}").contains("extension id"), "{error:#}");
+    }
+
+    let surface = |id: &str| ui_ext::Surface {
+        id: id.into(),
+        title: "T".into(),
+        kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+            side: ui_ext::StatusBarSide::Left,
+            priority: 0,
+        }),
+    };
+    validate_surfaces(&[surface("main"), surface("status")]).expect("valid");
+    let error = validate_surfaces(&[surface("main"), surface("main")]).expect_err("duplicate");
+    assert!(format!("{error:#}").contains("declared twice"), "{error:#}");
+    let error = validate_surfaces(&[surface("Main")]).expect_err("bad id");
+    assert!(format!("{error:#}").contains("surface id"), "{error:#}");
+}
+
+/// A component cannot be loaded under an invalid id, and a manifest with one is refused with its
+/// path in the error.
+#[gpui::test]
+async fn test_invalid_ids_are_refused_at_load(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let error = cx
+        .update(|cx| UiExtension::load("Bad/Id".into(), probe_wasm(), &cx.to_async()))
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        format!("{error:#}").contains("extension id \"Bad/Id\""),
+        "{error:#}"
+    );
+
+    let fs = fs::FakeFs::new(cx.executor());
+    fs.create_dir(Path::new("/ext/bad")).await.expect("dir");
+    fs.insert_file(
+        "/ext/bad/extension.toml",
+        b"id = \"../escape\"\nname = \"Bad\"\nversion = \"0.1.0\"\nschema_version = 1\n\
+          [fyx_ui]\napi_version = \"0.1.0\"\ncomponent = \"fyx_ui.wasm\"\n"
+            .to_vec(),
+    )
+    .await;
+    let error = UiManifest::read(fs.as_ref(), Path::new("/ext/bad"))
+        .await
+        .err()
+        .expect("refused");
+    let message = format!("{error:#}");
+    assert!(message.contains("extension id \"../escape\""), "{message}");
+    assert!(message.contains("extension.toml"), "{message}");
 }

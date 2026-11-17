@@ -1478,3 +1478,38 @@ async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// Sandbox: an extension id belongs to the source that first loaded it. The same source may load
+/// it again (a reinstall); another source declaring the same id is refused until it is released
+/// (uninstalled). Lookups use the structured `(extension, surface)` key.
+#[gpui::test]
+async fn test_extension_ids_belong_to_their_source(cx: &mut TestAppContext) {
+    init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    let id: std::sync::Arc<str> = "fake".into();
+    let first = crate::ExtensionSource::Directory("/ext/fake".into());
+    let impostor = crate::ExtensionSource::Directory("/elsewhere/fake".into());
+    registry.update(cx, |registry, _| {
+        registry
+            .claim_extension_id(&id, first.clone())
+            .expect("first claim");
+        registry
+            .claim_extension_id(&id, first.clone())
+            .expect("a reinstall from the same source");
+        let error = registry
+            .claim_extension_id(&id, impostor.clone())
+            .expect_err("another source");
+        assert!(format!("{error:#}").contains("already used"), "{error:#}");
+    });
+
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend, &[panel_surface("main", "Main")], cx)
+    });
+    cx.update(|cx| {
+        let registry = registry.read(cx);
+        assert!(registry.surface_of("fake", "main").is_some());
+        assert!(registry.surface_of("fak", "e/main").is_none());
+        assert_eq!(registry.surfaces_of("fake").count(), 1);
+    });
+}

@@ -274,12 +274,17 @@ you that a surface was closed (0.2 items 5–7).
 
 ## Sandbox
 
-- WASI with only stderr inherited (Rust `eprintln!` reaches Fyx's stderr). There are no preopened
-  directories, environment variables or arguments, and nothing else is configured on the WASI
-  context.
+- All of WASI p2 is linked (Rust's std imports parts of it), with only stderr inherited (Rust
+  `eprintln!` reaches Fyx's stderr). There are no preopened directories, environment variables or
+  arguments.
+- No network: TCP, UDP and name lookup are denied and no address passes the check, so `connect`
+  fails with "access denied" inside the component.
+- Store caps: 32 MiB of linear memory, 64 Ki table elements, 32 core instances, 32 tables,
+  8 memories. Growing past one traps the call and disables the extension. The pushes of one call
+  may carry 4096 patches plus nodes together, and at most 64 pushes.
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
-- Host functions: `push-update` and `log` only.
+- Fyx's own host functions: `push-update` and `log`.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453; extensions/fyx_demo_todo/src/fyx_demo_todo.rs:3-4; crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 
