@@ -156,7 +156,7 @@ fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
 
 fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
     eprintln!(
-        "Zed failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
+        "Fyx failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps." // fyx: product name
     );
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
@@ -211,10 +211,7 @@ fn main() {
     util::prevent_root_execution();
 
     let mut args = Args::parse();
-    // fyx: accept fyx:// links on the command line (and forwarded to a running instance).
-    for arg in &mut args.paths_or_urls {
-        *arg = zed::fyx_url_to_internal(std::mem::take(arg));
-    }
+    zed::fyx::rewrite_url_args(&mut args.paths_or_urls); // fyx: accept fyx:// links
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
@@ -319,7 +316,7 @@ fn main() {
             client::telemetry::os_name(),
             client::telemetry::os_version(),
         );
-        println!("Zed System Specs (from CLI):\n{}", system_specs);
+        println!("Fyx System Specs (from CLI):\n{}", system_specs); // fyx: product name
         return;
     }
 
@@ -495,14 +492,12 @@ fn main() {
         zed_actions::init();
 
         release_channel::init(app_version, cx);
-        let fyx_channel = ReleaseChannel::global(cx); // fyx: AppUserModelID dev.fyx.Fyx, not the exe path
-        cx.set_app_identity(fyx_channel.app_id(), fyx_channel.display_name());
         gpui_tokio::init(cx);
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
         settings::init(cx);
-        fyx_default_settings(cx); // fyx: telemetry off, no zed.dev (assets/settings/fyx.json)
+        zed::fyx::init(cx); // fyx: app identity, Fyx default settings, no zed.dev onboarding
         zlog_settings::init(cx);
         zed::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
@@ -596,6 +591,7 @@ fn main() {
         #[cfg(target_os = "macos")]
         zed::move_to_applications::init(cx);
         project::Project::init(&client, cx);
+        fyx_guard::init(cx); // fyx: security modes for agents, before any project exists
         debugger_ui::init(cx);
         debugger_tools::init(cx);
         client::init(&client, cx);
@@ -1702,14 +1698,14 @@ fn stdout_is_a_pty() -> bool {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "zed", disable_version_flag = true, max_term_width = 100)]
+#[command(name = "fyx", disable_version_flag = true, max_term_width = 100)] // fyx: binary and product name in --help (doc comments below)
 struct Args {
     /// A sequence of space-separated paths or urls that you want to open.
     ///
     /// Use `path:line:row` syntax to open a file at a specific location.
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
-    /// URLs can either be `file://` or `zed://` scheme, or relative to <https://zed.dev>.
+    /// URLs can either be `file://`, `fyx://` or `zed://` scheme, or relative to <https://zed.dev>.
     paths_or_urls: Vec<String>,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
@@ -1720,14 +1716,14 @@ struct Args {
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     ///
     /// This overrides the default platform-specific data directory location.
-    /// On macOS, the default is `~/Library/Application Support/Zed`.
-    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/zed`.
-    /// On Windows, the default is `%LOCALAPPDATA%\Zed`.
+    /// On macOS, the default is `~/Library/Application Support/Fyx`.
+    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/fyx`.
+    /// On Windows, the default is `%LOCALAPPDATA%\Fyx`.
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
     user_data_dir: Option<String>,
 
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// Fyx will attempt to open the paths directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -1746,24 +1742,24 @@ struct Args {
     #[arg(long)]
     dev_container: bool,
 
-    /// Instructs zed to run as a dev server on this machine. (not implemented)
+    /// Instructs Fyx to run as a dev server on this machine. (not implemented)
     #[arg(long)]
     dev_server_token: Option<String>,
 
     /// Prints system specs.
     ///
     /// Useful for submitting issues on GitHub when encountering a bug that
-    /// prevents Zed from starting, so you can't run `zed: copy system specs to
+    /// prevents Fyx from starting, so you can't run `zed: copy system specs to
     /// clipboard`
     #[arg(long)]
     system_specs: bool,
 
-    /// Used for recording minidumps on crashes by having Zed run a separate
+    /// Used for recording minidumps on crashes by having Fyx run a separate
     /// process communicating over a socket.
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
 
-    /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
+    /// Run Fyx in the foreground, only used on Windows, to match the behavior on macOS.
     #[arg(long)]
     #[cfg(target_os = "windows")]
     #[arg(hide = true)]
@@ -1776,7 +1772,7 @@ struct Args {
     dock_action: Option<usize>,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having Fyx act like netcat communicating over a Unix socket.
     #[arg(long)]
     #[cfg(not(target_os = "windows"))]
     #[arg(hide = true)]
@@ -1794,12 +1790,12 @@ struct Args {
     #[arg(long, hide = true)]
     record_etw_trace: bool,
 
-    /// The PID of the Zed process to trace for heap analysis.
+    /// The PID of the Fyx process to trace for heap analysis.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     etw_zed_pid: Option<u32>,
 
-    /// Unix socket path for IPC with the parent Zed process.
+    /// Unix socket path for IPC with the parent Fyx process.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     etw_socket: Option<PathBuf>,
@@ -1817,23 +1813,6 @@ impl ToString for IdType {
             IdType::New(id) | IdType::Existing(id) => id.clone(),
         }
     }
-}
-
-/// fyx: layers Fyx's defaults (`assets/settings/fyx.json`) over Zed's `default.json`. Only the
-/// app does this, so `default.json` stays upstream's and tests keep Zed's defaults.
-fn fyx_default_settings(cx: &mut App) {
-    let parse = |path: &str| {
-        let content = util::asset_str::<settings::SettingsAssets>(path);
-        settings::parse_json_with_comments::<serde_json::Value>(&content)
-            .unwrap_or_else(|error| panic!("failed to parse {path}: {error}"))
-    };
-    let mut defaults = parse("settings/default.json");
-    util::merge_non_null_json_value_into(parse("settings/fyx.json"), &mut defaults);
-    SettingsStore::update_global(cx, |store, cx| {
-        store
-            .set_default_settings(&defaults.to_string(), cx)
-            .expect("Fyx default settings are invalid");
-    });
 }
 
 fn parse_url_arg(arg: &str, cx: &App) -> String {

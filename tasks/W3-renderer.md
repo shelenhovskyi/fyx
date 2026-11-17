@@ -1,6 +1,6 @@
 # W3 Renderer and containers
 
-**Owns:** `crates/ui_ext_host/`, one registration hook in `crates/workspace`.
+**Owns:** `crates/ui_ext_host/`, the panel hook in `crates/workspace/src/dock.rs`, the `ui_ext_host::init` line and dependency in `crates/zed`.
 
 **Deliverable**
 - `ExtensionPanel` implementing `workspace::Panel` on behalf of an extension surface; status-bar item via `StatusItemView`.

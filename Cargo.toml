@@ -6,7 +6,7 @@ members = [
     "crates/action_log",
     "crates/activity_indicator",
     "crates/agent",
-    "crates/agent_review",
+    "crates/agent_review", # fyx
     "crates/agent_servers",
     "crates/agent_settings",
     "crates/agent_skills",
@@ -88,6 +88,9 @@ members = [
     "crates/fs_benchmarks",
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
+    "crates/fyx_ext", # fyx
+    "crates/fyx_guard", # fyx
+    "crates/fyx_registry", # fyx
     "crates/git",
     "crates/git_hosting_providers",
     "crates/git_ui",
@@ -228,9 +231,10 @@ members = [
     "crates/title_bar",
     "crates/toolchain_selector",
     "crates/ui",
-    "crates/ui_ext",
-    "crates/ui_ext_host",
-    "crates/ui_ext_sdk",
+    "crates/ui_ext", # fyx
+    "crates/ui_ext_host", # fyx
+    "crates/ui_ext_sdk", # fyx
+    "crates/ui_ext_wasm", # fyx
     "crates/ui_input",
     "crates/ui_macros",
     "crates/ui_prompt",
@@ -265,6 +269,9 @@ members = [
     "extensions/fyx_demo_counter", # fyx
     "extensions/fyx_demo_todo", # fyx
     "extensions/fyx_demo_gallery", # fyx
+    "extensions/fyx_demo_markdown", # fyx
+    "extensions/fyx_demo_gitstatus", # fyx
+    "extensions/fyx_demo_form", # fyx
     "extensions/glsl",
     "extensions/html",
     "extensions/proto",
@@ -296,7 +303,7 @@ acp_tools = { path = "crates/acp_tools" }
 action_log = { path = "crates/action_log" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent = { path = "crates/agent" }
-agent_review = { path = "crates/agent_review" }
+agent_review = { path = "crates/agent_review" } # fyx
 agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
 agent_skills = { path = "crates/agent_skills" }
@@ -370,6 +377,8 @@ file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
+fyx_guard = { path = "crates/fyx_guard" } # fyx
+fyx_registry = { path = "crates/fyx_registry" } # fyx
 git = { path = "crates/git" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }
@@ -508,9 +517,10 @@ time_format = { path = "crates/time_format" }
 title_bar = { path = "crates/title_bar" }
 toolchain_selector = { path = "crates/toolchain_selector" }
 ui = { path = "crates/ui" }
-ui_ext = { path = "crates/ui_ext" }
-ui_ext_host = { path = "crates/ui_ext_host" }
-ui_ext_sdk = { path = "crates/ui_ext_sdk" }
+ui_ext = { path = "crates/ui_ext" } # fyx
+ui_ext_host = { path = "crates/ui_ext_host" } # fyx
+ui_ext_sdk = { path = "crates/ui_ext_sdk" } # fyx
+ui_ext_wasm = { path = "crates/ui_ext_wasm" } # fyx
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
@@ -890,6 +900,7 @@ resvg = { version = "0.46.0", default-features = false, features = [
     "memmap-fonts",
     "raster-images",
 ] }
+ring = "0.17.14" # fyx
 rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit"] }
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"

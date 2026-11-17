@@ -67,6 +67,8 @@ struct FakeBackend {
     bad_rows_push: Cell<bool>,
     /// Surfaces that reported the whole extension as failed.
     failed_from: RefCell<Vec<String>>,
+    /// The input's id in the next mount, as an SDK remount hands out new ids.
+    renumbered_input: Cell<Option<NodeId>>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -176,7 +178,11 @@ impl UiBackend for FakeBackend {
             node(BAD_OWN_THEN_OTHER, Some(1), button("Bad push")),
             node(FATAL, Some(1), button("Trap")),
             node(REMOVER, Some(1), button("Remove me")),
-            node(INPUT, Some(1), input("")),
+            node(
+                self.renumbered_input.get().unwrap_or(INPUT),
+                Some(1),
+                input(""),
+            ),
             node(LIST, Some(1), list(count)),
         ];
         let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
@@ -676,7 +682,7 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
         100,
     ));
     let (panel, vcx) = cx.add_window_view(|window, cx| {
-        crate::ExtensionPanel::new(info.clone(), state.clone(), window, cx)
+        crate::ExtensionPanel::<0>::new(info.clone(), state.clone(), window, cx)
     });
     vcx.run_until_parked();
 
@@ -692,6 +698,12 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
         );
         assert_eq!(panel.default_size(window, cx), gpui::px(320.));
         assert_eq!(panel.activation_priority(), 100);
+        let slot = info.slot.expect("a panel slot");
+        assert_eq!(slot, 0, "the first panel surface of the process");
+        assert_eq!(
+            <crate::ExtensionPanel<0> as workspace::Panel>::persistent_name(),
+            "fyx-ui:fake/counter"
+        );
     });
 
     let bounds = vcx
@@ -746,9 +758,21 @@ fn mounts(backend: &FakeBackend) -> usize {
         .count()
 }
 
+fn retryable(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> bool {
+    state.read_with(cx, |state, _| {
+        matches!(
+            state.phase(),
+            crate::Phase::Failed {
+                retryable: true,
+                ..
+            }
+        )
+    })
+}
+
 fn failure(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> Option<String> {
     state.read_with(cx, |state, _| match state.phase() {
-        crate::Phase::Failed(message) => Some(message.to_string()),
+        crate::Phase::Failed { message, .. } => Some(message.to_string()),
         crate::Phase::Mounting | crate::Phase::Ready(_) => None,
     })
 }
@@ -822,6 +846,10 @@ async fn test_remounts_without_input_are_bounded(cx: &mut TestAppContext) {
     assert_eq!(mounts(&backend), 3);
     let message = failure(&state, cx).expect("the surface gave up");
     assert!(message.contains("keeps sending updates"), "{message}");
+    assert!(
+        retryable(&state, cx),
+        "the instance lives, so Retry is offered"
+    );
 
     // A retry by the user starts over.
     backend.bad_rows_push.set(false);
@@ -848,6 +876,10 @@ async fn test_a_dead_instance_stops_the_extension(cx: &mut TestAppContext) {
         "{message}"
     );
     assert_eq!(backend.failed_from.borrow().as_slice(), ["counter"]);
+    assert!(
+        !retryable(&state, cx),
+        "a dead instance refuses every call, so no Retry (integration-3 finding 9)"
+    );
 
     backend.take_calls();
     state.update(cx, |state, cx| {
@@ -928,7 +960,17 @@ async fn test_queued_events_are_checked_before_sending(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert_eq!(backend.events(), [UiEvent::Click(REMOVER)]);
 
-    // A row click with the list unchanged still goes through.
+    // The increment changed the list and nothing has fetched its rows again, so row 1 on screen
+    // is stale: a click on it is not sent (integration-3 finding 9)...
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::RowClick(LIST, 1), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(backend.events(), []);
+    // ...while a click on a fresh row goes through.
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..6, cx));
+    cx.run_until_parked();
     backend.take_calls();
     state.update(cx, |state, cx| {
         state.dispatch(UiEvent::RowClick(LIST, 1), cx)
@@ -1134,4 +1176,410 @@ async fn test_escape_returns_to_the_editor(cx: &mut TestAppContext) {
     key("escape", vcx);
     assert_eq!(returned.get(), 1);
     assert_eq!(backend.calls(), [], "Escape calls nothing");
+}
+
+// Judge review integration-3 (tasks/reviews/integration-3.md), W3 findings 8, 9 and 10.
+
+/// Finding 8: an answer to a fetch made before a remount cannot pose as the new list's rows.
+#[gpui::test]
+async fn test_a_stale_row_answer_after_a_remount_is_dropped(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(5);
+    let state = new_state(&backend, cx);
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+    cx.run_until_parked();
+    let old_generation = state.read_with(cx, |state, _| state.current_row_generation(LIST));
+
+    // A remount (the list keeps its fixed id), then the new list asks for rows...
+    state.update(cx, |state, cx| state.mount(cx));
+    cx.run_until_parked();
+    backend.take_calls();
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+    // ...and the answer to the fetch from before the remount arrives first.
+    state.update(cx, |state, cx| {
+        let rows = (0..5)
+            .map(|index| {
+                let row = vec![node(ROW_ROOT, None, text("stale"))];
+                (
+                    index,
+                    Tree::from_row(row, TreeLimits::default()).expect("valid row"),
+                )
+            })
+            .collect();
+        let reply = Reply {
+            pushed: Vec::new(),
+            value: rows,
+        };
+        state.receive_rows(LIST, old_generation, 0..5, Ok(reply), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(row_text(&state, LIST, 0, cx), Some(text("Row 1 of 5")));
+
+    // Layout keeps asking; nothing is missing, so nothing is fetched again.
+    for _ in 0..5 {
+        state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        backend.take_calls(),
+        [Call::Rows {
+            list: LIST,
+            start: 0,
+            count: 5
+        }]
+    );
+}
+
+/// w3-deep-1 finding 6, the rest of it: the measuring request and the visible range of one
+/// layout make one `list-rows` call.
+#[gpui::test]
+async fn test_one_layout_makes_one_row_call(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(100);
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    state.update(cx, |state, cx| {
+        state.request_rows(LIST, 40..49, cx);
+        state.request_rows(LIST, 32..60, cx);
+        state.request_rows(LIST, 40..49, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        backend.take_calls(),
+        [Call::Rows {
+            list: LIST,
+            start: 32,
+            count: 28
+        }]
+    );
+}
+
+/// Finding 9: an update pushed from elsewhere that applies is progress, like an event reply, so a
+/// surface fed only by pushes does not fail after a few recovered desyncs over a session.
+#[gpui::test]
+async fn test_applied_pushes_reset_the_remount_bound(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    for round in 0..6 {
+        state.update(cx, |state, cx| {
+            state.apply_pushed_update(unfit_push().update, cx)
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            state.apply_pushed_update(
+                Update::Patches(vec![Patch::SetProps(LABEL, text(format!("round {round}")))]),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(failure(&state, cx), None);
+    assert_eq!(mounts(&backend), 6, "every desync remounted and recovered");
+}
+
+/// Finding 9: typing pending in one view of an extension is sent before a click in another
+/// view of the same extension (another surface, another window).
+#[gpui::test]
+async fn test_typing_in_one_view_precedes_a_click_in_another(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let typing_state = new_state(&backend, cx);
+    let clicking_state = new_state(&backend, cx);
+    let (typing_view, typing_cx) = open_view(&typing_state, cx);
+    let editor = typing_view.read_with(typing_cx, |view, _| view.inputs[&INPUT].editor.clone());
+    typing_cx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    typing_cx.run_until_parked();
+    typing_cx.simulate_input("abc");
+    let (clicking_view, clicking_cx) = open_view(&clicking_state, cx);
+    backend.take_calls();
+
+    clicking_view.update(clicking_cx, |view, cx| {
+        view.dispatch(UiEvent::Click(INCREMENT), cx)
+    });
+    // Before either queue runs, the typing is already queued: it goes out first.
+    assert_eq!(
+        typing_state.read_with(clicking_cx, |state, _| state.queued_events()),
+        [UiEvent::InputChanged(INPUT, "abc".into())]
+    );
+    clicking_cx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [
+            UiEvent::InputChanged(INPUT, "abc".into()),
+            UiEvent::Click(INCREMENT)
+        ]
+    );
+}
+
+/// Finding 10: a remount that gives the input a new id keeps the user's unsent typing and
+/// focus, and sends the typing under the new id.
+#[gpui::test]
+async fn test_typing_survives_a_remount_that_renumbers_the_input(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let editor = view.read_with(vcx, |view, _| view.inputs[&INPUT].editor.clone());
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("abc");
+    backend.take_calls();
+
+    const RENUMBERED: NodeId = 31;
+    backend.renumbered_input.set(Some(RENUMBERED));
+    state.update(vcx, |state, cx| state.mount(cx));
+    vcx.run_until_parked();
+
+    let editor = view.read_with(vcx, |view, _| view.inputs[&RENUMBERED].editor.clone());
+    assert_eq!(editor.read_with(vcx, |editor, cx| editor.text(cx)), "abc");
+    assert_eq!(focused(&view, vcx), Some(RENUMBERED));
+    assert_eq!(
+        backend.take_calls(),
+        [
+            Call::Mount,
+            Call::Event(UiEvent::InputChanged(RENUMBERED, "abc".into()))
+        ]
+    );
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert_eq!(backend.calls(), [], "nothing is sent twice");
+}
+
+/// Integration-4 finding 8: when the extension itself swaps the input for a new, empty one (a
+/// form cleared after a submit), the user's old text is not written into it or sent again.
+#[gpui::test]
+async fn test_own_rebuild_does_not_carry_typing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let editor = view.read_with(vcx, |view, _| view.inputs[&INPUT].editor.clone());
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("hello");
+    backend.take_calls();
+
+    const CLEARED: NodeId = 41;
+    let applied = state.update(vcx, |state, cx| {
+        state.apply_update(
+            Update::Patches(vec![
+                Patch::Remove(INPUT),
+                Patch::Insert(ui_ext::InsertOp {
+                    node: node(CLEARED, Some(1), input("")),
+                    before: None,
+                }),
+            ]),
+            cx,
+        )
+    });
+    assert!(applied);
+    vcx.run_until_parked();
+
+    let editor = view.read_with(vcx, |view, _| view.inputs[&CLEARED].editor.clone());
+    assert_eq!(editor.read_with(vcx, |editor, cx| editor.text(cx)), "");
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert!(
+        !backend
+            .take_calls()
+            .iter()
+            .any(|call| matches!(call, Call::Event(UiEvent::InputChanged(CLEARED, _)))),
+        "the old text is not sent for the new input"
+    );
+}
+
+// (c) Names, titles and status item order.
+
+fn panel_surface(id: &str, title: &str) -> ui_ext::Surface {
+    ui_ext::Surface {
+        id: id.into(),
+        title: title.into(),
+        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
+            position: ui_ext::DockPosition::Left,
+            icon: "hash".into(),
+            default_size: 300,
+        }),
+    }
+}
+
+/// Every panel surface gets a type slot of its own, so its `persistent_name` and `panel_key`
+/// (sizes, the restored open panel) are its own: `fyx-ui:<extension>/<surface>`. The same surface
+/// keeps its slot for the process (a reload does not take another), and titles are interned
+/// rather than leaked per load.
+#[test]
+fn test_panels_get_names_of_their_own() {
+    use workspace::Panel as _;
+    let first = crate::SurfaceInfo::new("names-test", &panel_surface("a", "Alpha"), 100);
+    let second = crate::SurfaceInfo::new("names-test", &panel_surface("b", "Beta"), 101);
+    let status = crate::SurfaceInfo::new(
+        "names-test",
+        &ui_ext::Surface {
+            id: "s".into(),
+            title: "Status".into(),
+            kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+                side: ui_ext::StatusBarSide::Right,
+                priority: 0,
+            }),
+        },
+        102,
+    );
+    let (first_slot, second_slot) = (first.slot.expect("a slot"), second.slot.expect("a slot"));
+    assert_ne!(first_slot, second_slot);
+    assert_eq!(status.slot, None, "status items are not dock panels");
+    assert_eq!(
+        crate::panel::slot_name(first_slot),
+        Some("fyx-ui:names-test/a")
+    );
+    assert_eq!(
+        crate::panel::slot_name(second_slot),
+        Some("fyx-ui:names-test/b")
+    );
+    assert_eq!(
+        <crate::ExtensionPanel<{ crate::SHARED_SLOT }>>::persistent_name(),
+        "Extension Panel",
+        "panels past the slots share one name"
+    );
+
+    let reloaded = crate::SurfaceInfo::new("names-test", &panel_surface("a", "Alpha"), 103);
+    assert_eq!(reloaded.slot, Some(first_slot));
+    assert!(
+        std::ptr::eq(reloaded.title, first.title),
+        "the title is interned"
+    );
+}
+
+#[gpui::test]
+async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (_, vcx) = open_view(&state, cx);
+    for (side, expected) in [
+        (ui_ext::StatusBarSide::Left, [10, 5, 5, 1]),
+        (ui_ext::StatusBarSide::Right, [1, 5, 5, 10]),
+    ] {
+        let group = vcx.update(|_, cx| cx.new(|_| crate::ExtensionStatusGroup::new(side)));
+        for priority in [5, 10, 1, 5] {
+            let item = vcx.update(|window, cx| {
+                cx.new(|cx| crate::ExtensionStatusItem::new(state.clone(), window, cx))
+            });
+            group.update(vcx, |group, cx| group.add(priority, item, cx));
+        }
+        assert_eq!(
+            group.read_with(vcx, |group, _| group.priorities()),
+            expected,
+            "higher priority sits closer to the {side:?} edge"
+        );
+    }
+}
+
+/// The extensions page shows a loaded UI extension's capabilities, from the surfaces it declared.
+#[gpui::test]
+async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let panel = panel_surface("main", "Main");
+    let status = ui_ext::Surface {
+        id: "status".into(),
+        title: "Status".into(),
+        kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+            side: ui_ext::StatusBarSide::Right,
+            priority: 0,
+        }),
+    };
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), std::slice::from_ref(&status), cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(
+            registry.read(cx).capabilities("fake", cx),
+            ["ui:status-bar"]
+        );
+    });
+    // A reload that adds a panel shows both.
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel, status], cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let registry = registry.read(cx);
+        assert_eq!(
+            registry.capabilities("fake", cx),
+            ["ui:panel", "ui:status-bar"]
+        );
+        assert!(
+            registry.capabilities("not-a-ui-extension", cx).is_empty(),
+            "a regular Zed extension gets no chips"
+        );
+    });
+}
+
+/// Sandbox: an extension id belongs to the source that first loaded it. The same source may load
+/// it again (a reinstall); another source declaring the same id is refused until it is released
+/// (uninstalled). Lookups use the structured `(extension, surface)` key.
+#[gpui::test]
+async fn test_extension_ids_belong_to_their_source(cx: &mut TestAppContext) {
+    init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let id: std::sync::Arc<str> = "fake".into();
+    let first = crate::ExtensionSource::Directory("/ext/fake".into());
+    let impostor = crate::ExtensionSource::Directory("/elsewhere/fake".into());
+    registry.update(cx, |registry, _| {
+        registry
+            .claim_extension_id(&id, first.clone())
+            .expect("first claim");
+        registry
+            .claim_extension_id(&id, first.clone())
+            .expect("a reinstall from the same source");
+        let error = registry
+            .claim_extension_id(&id, impostor.clone())
+            .expect_err("another source");
+        assert!(format!("{error:#}").contains("already used"), "{error:#}");
+    });
+
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend, &[panel_surface("main", "Main")], cx)
+    });
+    cx.update(|cx| {
+        let registry = registry.read(cx);
+        assert!(registry.surface_of("fake", "main").is_some());
+        assert!(registry.surface_of("fak", "e/main").is_none());
+        assert_eq!(registry.surfaces_of("fake").count(), 1);
+    });
+}
+
+/// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
+#[test]
+fn test_markdown_links_are_filtered() {
+    use crate::view::link_is_allowed;
+    for allowed in [
+        "https://zed.dev",
+        "http://example.com/a?b=c",
+        "HTTPS://EXAMPLE.COM",
+    ] {
+        assert!(link_is_allowed(allowed), "{allowed}");
+    }
+    for refused in [
+        "file:///C:/Windows/System32/calc.exe",
+        "javascript:alert(1)",
+        "zed://settings",
+        "fyx://extension/install",
+        "mailto:someone@example.com",
+        "ftp://example.com",
+        "relative/path.md",
+        "https:",
+        "https:/one-slash",
+        "",
+    ] {
+        assert!(!link_is_allowed(refused), "{refused}");
+    }
 }

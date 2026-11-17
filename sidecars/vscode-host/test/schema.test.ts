@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyUpdate, diff, MAX_PATCHES_PER_UPDATE, node, props, validateNodes, type Node, type Update } from "../src/schema.ts";
+import { applyUpdate, diff, MAX_NODES, MAX_NODES_PER_ROW, MAX_PATCHES_PER_UPDATE, node, props, validateNodes, validateRow, type Node, type Update } from "../src/schema.ts";
 import { SurfaceRegistry, type SurfaceModel } from "../src/ui/surfaces.ts";
 
 const tree: Node[] = [
@@ -59,6 +59,24 @@ test("applyUpdate rejects invalid patches", () => {
   assert.throws(() => applyUpdate(tree, { patches: [{ insert: { node: node(9, 1, props.text("x")), before: 4 } }] }), /not a sibling/);
   assert.deepEqual(applyUpdate(tree, { patches: [{ remove: 3 }] }).map((n) => n.id), [1, 2], "remove takes the subtree");
   assert.throws(() => applyUpdate(tree, { patches: Array.from({ length: 2049 }, () => ({ remove: 2 })) }), /host cap/);
+});
+
+test("applyUpdate refuses what the host's Tree refuses: replace, tree rules and the tree cap", () => {
+  const wide = (n: number): Node[] => [node(1, null, props.flex()), ...Array.from({ length: n - 1 }, (_, k) => node(k + 2, 1, props.text(`${k}`)))];
+  assert.equal(applyUpdate(tree, { replace: wide(MAX_NODES) }).length, MAX_NODES, "a replace may carry a whole tree, above the per-update cap");
+  assert.throws(() => applyUpdate(tree, { replace: wide(MAX_NODES + 1) }), /replace: 16385 nodes exceed the host cap of 16384/);
+  assert.throws(() => applyUpdate(tree, { replace: [node(1, null, props.button("b")), node(2, 1, props.text("x"))] }), /replace: .*only flex nodes have children/);
+  assert.throws(() => applyUpdate(tree, { patches: [{ insert: { node: node(9, 2, props.text("x")), before: null } }] }), /patches: .*parent 2 is not a flex/);
+  const full = wide(MAX_NODES);
+  assert.throws(() => applyUpdate(full, { patches: [{ insert: { node: node(MAX_NODES + 1, 1, props.text("x")), before: null } }] }), /exceed the host cap of 16384/);
+});
+
+test("validateRow applies the host's per-row cap, unlike a mount", () => {
+  const row = (n: number): Node[] => [node(1, null, props.flex()), ...Array.from({ length: n - 1 }, (_, k) => node(k + 2, 1, props.text(`${k}`)))];
+  assert.deepEqual(validateRow(row(MAX_NODES_PER_ROW)), []);
+  assert.match(validateRow(row(MAX_NODES_PER_ROW + 1)).join(), /2049 nodes in one row exceed the host cap of 2048/);
+  assert.deepEqual(validateNodes(row(MAX_NODES_PER_ROW + 1)), [], "the same nodes are a valid mount");
+  assert.match(validateRow([node(1, null, props.text("a")), node(2, null, props.text("b"))]).join(), /exactly one root/);
 });
 
 test("diff falls back to replace above the per-update patch cap", () => {

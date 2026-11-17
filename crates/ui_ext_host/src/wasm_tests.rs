@@ -4,78 +4,27 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     rc::Rc,
-    sync::OnceLock,
     time::Duration,
 };
 
-use extension_host::wasm_host::fyx_ui::UiExtension;
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
-use ui_ext::{NodeId, Props, TextProps};
+use ui_ext::{NodeId, Props, TextProps, UiEvent};
+use ui_ext_wasm::UiExtension;
 
 use crate::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo, SurfaceState, backend::UiBackend};
 
-fn workspace_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Builds a guest for `wasm32-wasip2` with `cargo build <args>` in `dir`, into
-/// `<target>/fyx-ui-fixtures` (shared with extension_host's tests), and reads
-/// `<that>/wasm32-wasip2/<output>`. Once per test process.
-fn build_guest(
-    built: &'static OnceLock<Result<PathBuf, String>>,
-    dir: PathBuf,
-    args: &'static [&'static str],
-    output: &'static str,
-) -> Vec<u8> {
-    let path = built
-        .get_or_init(|| {
-            // <target>/debug/deps/<test binary>
-            let target_dir = std::env::current_exe()
-                .map_err(|error| error.to_string())?
-                .ancestors()
-                .nth(3)
-                .ok_or("test binary is not inside a cargo target directory")?
-                .join("fyx-ui-fixtures");
-            // Blocking is fine: this runs once per test process, before any executor work.
-            #[allow(clippy::disallowed_methods)]
-            let status = Command::new(option_env!("CARGO").unwrap_or("cargo"))
-                .arg("build")
-                .args(args)
-                .args(["--locked", "--target", "wasm32-wasip2", "--target-dir"])
-                .arg(&target_dir)
-                .current_dir(&dir)
-                .status()
-                .map_err(|error| format!("failed to run cargo: {error}"))?;
-            if !status.success() {
-                return Err(format!("cargo build {args:?} in {dir:?} failed: {status}"));
-            }
-            Ok(target_dir.join("wasm32-wasip2").join(output))
-        })
-        .as_ref()
-        .unwrap_or_else(|error| panic!("{error}"));
-    std::fs::read(path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
-}
-
 fn counter_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    build_guest(
-        &BUILT,
-        workspace_dir(),
-        &["-p", "fyx_demo_counter"],
-        "debug/fyx_demo_counter.wasm",
-    )
+    ui_ext_wasm::test_support::demo_wasm("fyx_demo_counter")
 }
 
 fn status_item_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    build_guest(
-        &BUILT,
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/status_item"),
-        &["--release"],
-        "release/fyx_ui_test_status_item.wasm",
-    )
+    ui_ext_wasm::test_support::fixture_wasm("fyx_ui_test_status_item")
+}
+
+/// The status-item fixture's manifest, next to its source in `ui_ext_wasm`'s fixture workspace.
+fn status_item_manifest() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui_ext_wasm/fixtures/status_item/extension.toml")
 }
 
 async fn load(name: &str, wasm: Vec<u8>, cx: &mut TestAppContext) -> UiExtension {
@@ -145,8 +94,9 @@ async fn test_counter_panel_increments(cx: &mut TestAppContext) {
         &extension.surfaces()[0],
         100,
     ));
-    let (_panel, vcx) = cx
-        .add_window_view(|window, cx| ExtensionPanel::new(info.clone(), state.clone(), window, cx));
+    let (_panel, vcx) = cx.add_window_view(|window, cx| {
+        ExtensionPanel::<0>::new(info.clone(), state.clone(), window, cx)
+    });
 
     click("fyx-node-5", vcx);
     run_until(vcx, "the first increment", |cx| {
@@ -197,13 +147,7 @@ async fn test_status_item_click_updates_label(cx: &mut TestAppContext) {
 }
 
 fn gallery_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    build_guest(
-        &BUILT,
-        workspace_dir(),
-        &["-p", "fyx_demo_gallery"],
-        "debug/fyx_demo_gallery.wasm",
-    )
+    ui_ext_wasm::test_support::demo_wasm("fyx_demo_gallery")
 }
 
 /// The nodes under `root` (included), parents first.
@@ -328,7 +272,7 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
     crate::tests::init_test(cx);
     let extension = load("fyx-demo-gallery", gallery_wasm(), cx).await;
     // Through the registry, so a push for the status item made during a panel event is routed.
-    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     registry.update(cx, |registry, cx| {
         registry.register_backend(Rc::new(extension.clone()), extension.surfaces(), cx)
     });
@@ -362,7 +306,7 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
         .expect("the status item is drawn");
 
     let (panel, cx) = cx.add_window_view(|window, cx| {
-        ExtensionPanel::new(panel_info.clone(), panel_state.clone(), window, cx)
+        ExtensionPanel::<0>::new(panel_info.clone(), panel_state.clone(), window, cx)
     });
     // A tall dock panel.
     cx.simulate_resize(gpui::size(gpui::px(420.), gpui::px(800.)));
@@ -497,4 +441,405 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
             _ => {}
         }
     }
+}
+
+/// Integration-4 finding 3: an installed extension without consent is not loaded; it waits with
+/// its capabilities until "Enable", which is remembered across restarts (the consent file). When
+/// `extension.toml` later asks for more, it waits again.
+#[gpui::test]
+async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let root = tempfile::tempdir().expect("temp dir");
+    let installed = root.path().join("installed");
+    let consent_path = root.path().join("data").join("fyx-ui-consent.json");
+    let ui_dir = installed.join("fyx-test-status-item");
+    std::fs::create_dir_all(&ui_dir).expect("ui dir");
+    std::fs::copy(status_item_manifest(), ui_dir.join("extension.toml")).expect("manifest");
+    std::fs::write(ui_dir.join("fyx_ui.wasm"), status_item_wasm()).expect("component");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    const KEY: &str = "fyx-test-status-item/status";
+
+    // A start: a fresh registry reading the same consent file.
+    let start = |cx: &mut TestAppContext| {
+        let registry = cx.new(|_| crate::UiExtensionRegistry::new(consent_path.clone()));
+        registry.update(cx, |registry, cx| {
+            registry.scan_installed(installed.clone(), fs.clone(), cx)
+        });
+        registry
+    };
+    let pending = |registry: &Entity<crate::UiExtensionRegistry>, cx: &mut TestAppContext| {
+        registry.read_with(cx, |registry, _| {
+            registry
+                .pending_consent()
+                .iter()
+                .map(|pending| {
+                    (
+                        pending.extension_id.to_string(),
+                        pending.capabilities.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let loaded = |registry: &Entity<crate::UiExtensionRegistry>, cx: &mut TestAppContext| {
+        registry.read_with(cx, |registry, _| registry.surface(KEY).is_some())
+    };
+
+    let registry = start(cx);
+    run_until(cx, "the consent request", |cx| {
+        !pending(&registry, cx).is_empty()
+    });
+    assert_eq!(
+        pending(&registry, cx),
+        [(
+            "fyx-test-status-item".to_string(),
+            vec!["ui:status-bar".to_string()]
+        )]
+    );
+    assert!(!loaded(&registry, cx), "not loaded without consent");
+
+    registry.update(cx, |registry, cx| {
+        registry.enable("fyx-test-status-item", fs.clone(), cx)
+    });
+    run_until(cx, "the enabled extension", |cx| loaded(&registry, cx));
+    assert!(pending(&registry, cx).is_empty());
+    run_until(cx, "the consent file", |_| consent_path.exists());
+
+    // The next start remembers it.
+    let registry = start(cx);
+    run_until(cx, "the remembered extension", |cx| loaded(&registry, cx));
+    assert!(pending(&registry, cx).is_empty());
+
+    // Asking for more needs consent again.
+    let manifest = std::fs::read_to_string(ui_dir.join("extension.toml")).expect("manifest");
+    std::fs::write(
+        ui_dir.join("extension.toml"),
+        manifest.replace(
+            r#"capabilities = ["ui:status-bar"]"#,
+            r#"capabilities = ["ui:status-bar", "ui:panel"]"#,
+        ),
+    )
+    .expect("edited manifest");
+    let registry = start(cx);
+    run_until(cx, "the second consent request", |cx| {
+        !pending(&registry, cx).is_empty()
+    });
+    assert_eq!(
+        pending(&registry, cx)[0].1,
+        ["ui:status-bar".to_string(), "ui:panel".to_string()]
+    );
+    assert!(!loaded(&registry, cx));
+}
+
+/// integration-3 finding 2: UI extensions load from the installed-extensions directory (any
+/// subdirectory with a `[fyx_ui]` table; a regular Zed extension is skipped), reload when their
+/// component changes, and stop when they are uninstalled.
+#[gpui::test]
+async fn test_installed_extensions_load_reload_and_stop(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let wasm = status_item_wasm();
+    let root = tempfile::tempdir().expect("temp dir");
+    let installed = root.path().join("installed");
+    let ui_dir = installed.join("fyx-test-status-item");
+    let plain_dir = installed.join("plain");
+    std::fs::create_dir_all(&ui_dir).expect("ui dir");
+    std::fs::create_dir_all(&plain_dir).expect("plain dir");
+    std::fs::copy(status_item_manifest(), ui_dir.join("extension.toml")).expect("manifest");
+    std::fs::write(ui_dir.join("fyx_ui.wasm"), &wasm).expect("component");
+    std::fs::write(
+        plain_dir.join("extension.toml"),
+        "id = \"plain\"\nname = \"Plain\"\nversion = \"0.1.0\"\nschema_version = 1\n",
+    )
+    .expect("plain manifest");
+
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let scan = |cx: &mut TestAppContext| {
+        registry.update(cx, |registry, cx| {
+            registry.scan_installed(installed.clone(), fs.clone(), cx)
+        })
+    };
+    const KEY: &str = "fyx-test-status-item/status";
+    const LABEL: NodeId = 3;
+    const PING: NodeId = 4;
+    let state = |cx: &mut TestAppContext| {
+        registry.read_with(cx, |registry, _| {
+            registry.surface(KEY).map(|surface| surface.state.clone())
+        })
+    };
+
+    scan(cx);
+    run_until(cx, "the installed extension", |cx| {
+        state(cx).is_some_and(|state| text_of(&state, LABEL, cx).is_some())
+    });
+    assert_eq!(
+        registry.read_with(cx, |registry, _| registry.surfaces().len()),
+        1,
+        "the extension without [fyx_ui] is not a UI extension"
+    );
+    let surface = state(cx).expect("loaded");
+    surface.update(cx, |state, cx| state.dispatch(UiEvent::Click(PING), cx));
+    run_until(cx, "a ping", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 1")
+    });
+
+    // Nothing changed: a rescan keeps the running instance (and its count).
+    scan(cx);
+    std::thread::sleep(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(text_of(&surface, LABEL, cx).as_deref(), Some("Pings: 1"));
+
+    // Reinstall: a new component file. The same surface moves to a fresh instance.
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(ui_dir.join("fyx_ui.wasm"), &wasm).expect("component");
+    scan(cx);
+    run_until(cx, "the reload", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0")
+    });
+    assert!(
+        state(cx).is_some_and(|state| state == surface),
+        "the panel or status item keeps its state entity"
+    );
+
+    // Uninstall: the surface stops for good.
+    std::fs::remove_dir_all(&ui_dir).expect("uninstall");
+    scan(cx);
+    run_until(cx, "the uninstall", |cx| {
+        surface.read_with(cx, |state, _| {
+            matches!(
+                state.phase(),
+                crate::Phase::Failed { message, retryable: false } if message.contains("uninstalled")
+            )
+        })
+    });
+}
+
+/// Install UX (a): a folder with a `[fyx_ui]` table and a built component is linked into the
+/// installed directory and loads; a second install of the same dev extension replaces the link;
+/// a folder that is not a UI extension, or whose component is not built, is refused.
+#[gpui::test]
+async fn test_install_dev_ui_extension(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let wasm = status_item_wasm();
+    let root = tempfile::tempdir().expect("temp dir");
+    let source = root.path().join("my-status-item");
+    let installed = root.path().join("extensions").join("installed");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::copy(status_item_manifest(), source.join("extension.toml")).expect("manifest");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+
+    // Not built yet.
+    let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect_err("no component");
+    assert!(format!("{error:#}").contains("not built"), "{error:#}");
+
+    std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
+    let id = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect("installs");
+    assert_eq!(id.as_ref(), "fyx-test-status-item");
+    let link = installed.join("fyx-test-status-item");
+    assert!(std::fs::symlink_metadata(&link).expect("link").is_symlink());
+    // Installing again replaces the dev link.
+    crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect("reinstalls");
+
+    // The capabilities shown in the confirmation.
+    let (_, manifest) = ui_ext_wasm::UiManifest::read(fs.as_ref(), &source)
+        .await
+        .expect("reads")
+        .expect("a UI extension");
+    assert_eq!(
+        crate::describe_capabilities(&manifest),
+        ["ui:status-bar: add status bar items"]
+    );
+
+    // The loader finds it in the installed directory.
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    registry.update(cx, |registry, cx| {
+        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    });
+    run_until(cx, "the installed extension", |cx| {
+        registry.read_with(cx, |registry, _| {
+            registry.surface("fyx-test-status-item/status").is_some()
+        })
+    });
+
+    // A folder without [fyx_ui] is refused.
+    let plain = root.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("plain");
+    std::fs::write(
+        plain.join("extension.toml"),
+        "id = \"plain\"\nname = \"Plain\"\nversion = \"0.1.0\"\nschema_version = 1\n",
+    )
+    .expect("plain manifest");
+    let error = crate::install_dev_ui_extension(&plain, &installed, fs.as_ref())
+        .await
+        .expect_err("not a UI extension");
+    assert!(format!("{error:#}").contains("[fyx_ui]"), "{error:#}");
+}
+
+/// Review integration-4 #2: an id from `extension.toml` cannot run a command through
+/// `cmd /C mklink` or put the link outside the installed directory, and neither can the name of
+/// the folder being installed. Nothing is created or removed for a refused install.
+#[gpui::test]
+async fn test_install_refuses_injection_and_traversal(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    let root = tempfile::tempdir().expect("temp dir");
+    let installed = root.path().join("extensions").join("installed");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    // A file the `..` vectors would land on or replace.
+    let bystander = root.path().join("extensions").join("evil");
+    std::fs::create_dir_all(&bystander).expect("bystander");
+
+    let write_extension = |dir: &std::path::Path, id: &str| {
+        std::fs::create_dir_all(dir).expect("source");
+        std::fs::write(
+            dir.join("extension.toml"),
+            format!(
+                "id = {id:?}\nname = \"X\"\nversion = \"0.1.0\"\nschema_version = 1\n\n\
+                 [fyx_ui]\napi_version = \"0.1.0\"\ncomponent = \"fyx_ui.wasm\"\n\
+                 capabilities = [\"ui:panel\"]\n"
+            ),
+        )
+        .expect("manifest");
+        std::fs::write(dir.join("fyx_ui.wasm"), b"not checked by install").expect("component");
+    };
+
+    for (index, id) in [
+        "x&calc",
+        r"x&\\host\s\p.exe",
+        "x|calc",
+        "x^calc",
+        "x%PATH%",
+        "../evil",
+        r"..\evil",
+        "/abs",
+        r"C:\abs",
+        "..",
+        "",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = root.path().join(format!("source-{index}"));
+        write_extension(&source, id);
+        let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+            .await
+            .expect_err(id);
+        assert!(format!("{error:#}").contains("id"), "{id:?}: {error:#}");
+        assert!(
+            !installed.exists() || std::fs::read_dir(&installed).unwrap().next().is_none(),
+            "{id:?} created something in the installed directory"
+        );
+        assert!(
+            std::fs::symlink_metadata(&bystander).unwrap().is_dir()
+                && !std::fs::symlink_metadata(&bystander).unwrap().is_symlink(),
+            "{id:?} touched a folder outside the installed directory"
+        );
+    }
+
+    // A valid id in a folder whose name `cmd` would interpret (Windows allows these three in a
+    // name; `|`, `<`, `>` and `"` it does not, and they are refused elsewhere).
+    let mut names = vec!["dl&calc", "dl^x", "dl%PATH%"];
+    if cfg!(not(windows)) {
+        names.push("dl|calc");
+    }
+    for name in names {
+        let source = root.path().join(name);
+        write_extension(&source, "fine-id");
+        let error = crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+            .await
+            .expect_err(name);
+        assert!(
+            format!("{error:#}").contains("cannot link safely"),
+            "{name}: {error:#}"
+        );
+        assert!(!installed.join("fine-id").exists(), "{name} was linked");
+    }
+    assert_eq!(
+        crate::install::cmd_special_char(std::path::Path::new("a(1) b")),
+        None
+    );
+}
+
+/// Hot reload (b): when the component of a dev extension (a link in the installed directory) is
+/// rebuilt, the extension loads again by itself, after the writes pause, and its surfaces remount;
+/// another file changing in the folder does nothing.
+#[gpui::test]
+async fn test_dev_extension_hot_reloads(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let wasm = status_item_wasm();
+    let root = tempfile::tempdir().expect("temp dir");
+    let source = root.path().join("my-status-item");
+    let installed = root.path().join("installed");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::copy(status_item_manifest(), source.join("extension.toml")).expect("manifest");
+    std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("component");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    crate::install_dev_ui_extension(&source, &installed, fs.as_ref())
+        .await
+        .expect("dev install");
+
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    registry.update(cx, |registry, cx| {
+        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    });
+    const LABEL: NodeId = 3;
+    const PING: NodeId = 4;
+    run_until(cx, "the dev extension", |cx| {
+        registry.read_with(cx, |registry, _| {
+            registry.surface("fyx-test-status-item/status").is_some()
+        })
+    });
+    let surface = registry.read_with(cx, |registry, _| {
+        registry
+            .surface("fyx-test-status-item/status")
+            .map(|surface| surface.state.clone())
+            .expect("loaded")
+    });
+    run_until(cx, "the mount", |cx| text_of(&surface, LABEL, cx).is_some());
+    surface.update(cx, |state, cx| state.dispatch(UiEvent::Click(PING), cx));
+    run_until(cx, "a ping", |cx| {
+        text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 1")
+    });
+
+    // Real time for the file watcher, test time for the debounce timer.
+    let settle = |cx: &mut TestAppContext, steps: usize| {
+        for _ in 0..steps {
+            std::thread::sleep(Duration::from_millis(20));
+            cx.executor().advance_clock(Duration::from_millis(50));
+            cx.run_until_parked();
+        }
+    };
+
+    // Another file in the folder: no reload.
+    std::fs::write(source.join("notes.txt"), "unrelated").expect("notes");
+    settle(cx, 20);
+    assert_eq!(text_of(&surface, LABEL, cx).as_deref(), Some("Pings: 1"));
+
+    // A rebuilt component: the surface remounts on a fresh instance by itself.
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("rebuilt component");
+    for _ in 0..250 {
+        settle(cx, 1);
+        if text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0") {
+            return;
+        }
+    }
+    panic!(
+        "the dev extension did not reload; label is {:?}",
+        text_of(&surface, LABEL, cx)
+    );
 }

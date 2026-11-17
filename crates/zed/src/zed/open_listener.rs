@@ -122,14 +122,6 @@ impl std::fmt::Debug for OpenRequestKind {
     }
 }
 
-/// fyx: `fyx://` is the public URL scheme; `zed://` stays the internal link namespace.
-pub fn fyx_url_to_internal(url: String) -> String {
-    match url.strip_prefix("fyx://") {
-        Some(rest) => format!("zed://{rest}"),
-        None => url,
-    }
-}
-
 impl OpenRequest {
     pub fn is_focus_app_only(&self) -> bool {
         matches!(self.kind, Some(OpenRequestKind::FocusApp))
@@ -163,7 +155,7 @@ impl OpenRequest {
         }
 
         for url in request.urls {
-            let url = fyx_url_to_internal(url); // fyx: accept fyx:// links
+            let url = super::fyx::url_to_internal(url); // fyx: accept fyx:// links
             if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {

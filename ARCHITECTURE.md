@@ -20,13 +20,14 @@ The fork is measured by the size of its diff outside its own crates. Keep it at 
 
 | Crate | License | Role |
 |---|---|---|
-| `crates/ui_ext` | Apache-2.0 | The `fyx:ui@0.1.0` WIT world (`wit/fyx-ui.wit`) and the transport-independent tree/patch model. No wasmtime, no GPUI. |
+| `crates/ui_ext` | Apache-2.0 | The `fyx:ui@0.1.0` WIT world (`wit/fyx-ui.wit`), the staged `fyx:ui@0.2.0` world (`wit/since_v0.2.0/fyx-ui.wit`, model in `ui_ext::v0_2`) and the transport-independent tree/patch model. No wasmtime, no GPUI. |
 | `crates/ui_ext_host` | GPL-3.0-or-later | `ExtensionPanel: Panel` / status items; maps tree nodes to GPUI elements and theme tokens; routes events by node id. |
 | `crates/ui_ext_sdk` | Apache-2.0 | Guest SDK (`wit-bindgen`) for Rust extensions targeting `wasm32-wasip2`. Published later as `fyx-sdk`. |
+| `crates/ui_ext_wasm` | GPL-3.0-or-later | Runs `fyx:ui` components in wasmtime: host bindings, own `Store` and call queue per component, time budget, version gating, `Reply<T>`/`ReplyError`, the `[fyx_ui]` manifest and `load_from_dir`. |
 | `crates/agent_review` | GPL-3.0-or-later | Host model of agent-proposed edits; hunk-level accept/reject; fed by ACP `session/request_permission`. |
 
-Host-side WIT bindings live in a new module inside `extension_host` (the one place that already owns
-the wasmtime engine).
+Host-side WIT bindings live in `crates/ui_ext_wasm`, a Fyx crate next to `extension_host`; it runs UI
+components on its own wasmtime engine, so `extension_host` carries no Fyx code.
 
 ## The UI contract
 
@@ -66,7 +67,7 @@ the wasmtime engine).
 | `Cargo.toml` | workspace members + deps for Fyx crates | W0 |
 | `.cargo/config.toml` | sccache, lighter dev debug info | W0 |
 | `crates/workspace` | dynamic panel registration from the extension host | W3 |
-| `crates/extension_host` | `fyx:ui` bindings module, version gating without the nightly limit | W2 |
+| `crates/extensions_ui` | capability chips on a UI extension's card (`ui_ext_host::capability_chips`) | W3 |
 | `crates/zed` | `ui_ext_host::init`, `agent_review::init`; brand/paths | W1, W3 |
 | `crates/acp_thread` / `agent_ui` | route permission requests into `agent_review` | W5 |
 | `crates/editor` | decoration hook | W6 |

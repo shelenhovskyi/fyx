@@ -1,6 +1,6 @@
 # W1 Rebrand and de-cloud
 
-**Owns:** `crates/zed` (brand and paths only), default settings in `assets/settings/`, `crates/client` (URL stub), `crates/paths`.
+**Owns:** `crates/zed` (brand and paths only), `assets/settings/fyx.json`, `crates/client` (URL scheme), `crates/paths`, `crates/cli` (binary name and lookup), `crates/release_channel`, `crates/windows_resources`, `crates/zed/resources/windows/zed.iss`, the startup-network hook in `crates/project/src/agent_registry_store.rs`.
 
 **Deliverable**
 - Name Fyx, bundle ID `dev.fyx.Fyx`, data/config dirs `~/.config/fyx` etc., URL scheme `fyx://`, so it coexists with an installed Zed.

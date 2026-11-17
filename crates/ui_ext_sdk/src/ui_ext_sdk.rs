@@ -106,10 +106,15 @@ pub fn log(level: LogLevel, message: &str) {
     eprintln!("[{level:?}] {message}");
 }
 
-/// Sends an update the extension initiated itself (timers, background work) for `surface_id`.
+/// Sends an update for `surface_id` during a call only: from `mount`, `handle-event` or
+/// `list-rows`, typically for a surface other than the one the call is about, such as a status
+/// item that follows a panel.
 ///
-/// The host applies it on its next frame. Use [`SurfaceTree::take_update`] to produce it, so the
-/// tree the extension remembers matches the one the host draws. Off WASM the update is kept for
+/// A component runs only while the host is calling it, so `fyx:ui` 0.1 cannot push from timers or
+/// background work, whatever the WIT comment says; `tasks/wit-0.2.md` item 2 (`request-tick`) is
+/// the proposal for that. The host applies the pushes of a call in order, before the call's own
+/// reply. Use [`SurfaceTree::take_update`] to produce the update, so the tree the extension
+/// remembers matches the one the host draws. Off WASM the update is kept for
 /// [`take_pushed_updates`].
 pub fn push_update(surface_id: &str, update: &Update) {
     #[cfg(target_arch = "wasm32")]
@@ -689,8 +694,30 @@ impl SurfaceTree {
         Ok(true)
     }
 
-    /// Records props the host already shows without queuing a patch, such as an input's value
-    /// after an `input-changed` event: echoing the user's text back could fight their typing.
+    /// Applies to the mirror what the host does to its own tree when it sends `event`. On
+    /// `input-changed` and `input-submitted` the host writes the typed value into the input node
+    /// (keeping its placeholder) without a patch, because the text is the user's; other events
+    /// change nothing. Call it with every event of this surface before handling it. Then the
+    /// mirror holds what the host holds: echoing the typed value back queues nothing (it would
+    /// fight the user's typing), and clearing the field afterwards does queue the `set-props`,
+    /// which a stale mirror would have dropped as unchanged.
+    pub fn apply_event(&mut self, event: &UiEvent) {
+        let (UiEvent::InputChanged((id, value)) | UiEvent::InputSubmitted((id, value))) = event
+        else {
+            return;
+        };
+        if let Some(LiveNode {
+            props: Props::Input(input),
+            ..
+        }) = self.nodes.get_mut(id)
+        {
+            input.value.clone_from(value);
+        }
+    }
+
+    /// Records props the host already shows without queuing a patch. [`SurfaceTree::apply_event`]
+    /// covers typed input text; this is for other cases where the host and the extension agree on
+    /// a change the host made itself.
     pub fn set_props_from_host(
         &mut self,
         id: NodeId,
@@ -1625,6 +1652,7 @@ mod tests {
         let limits = TreeLimits {
             max_nodes_per_update: 4,
             max_nodes: 100,
+            ..TreeLimits::default()
         };
         let (mut surface, column, text_id, row_id) = small_surface(limits);
         for index in 0..4 {
@@ -1684,6 +1712,7 @@ mod tests {
         let limits = TreeLimits {
             max_nodes_per_update: 10,
             max_nodes: 5,
+            ..TreeLimits::default()
         };
         let (mut surface, column, text_id, _) = small_surface(limits);
         surface
@@ -1717,6 +1746,86 @@ mod tests {
                 })
                 .is_ok()
         );
+    }
+
+    /// What the host does on `input-changed` / `input-submitted` before it sends the event.
+    fn host_types(host: &mut ui_ext::Tree, id: NodeId, value: &str) {
+        let Some(ui_ext::Props::Input(input)) = host.get(id).map(|node| node.props().clone())
+        else {
+            panic!("not an input");
+        };
+        let typed = ui_ext::InputProps {
+            value: value.into(),
+            ..input
+        };
+        host.apply_patches(vec![ui_ext::Patch::SetProps(
+            id,
+            ui_ext::Props::Input(typed),
+        )])
+        .expect("the host records typed text");
+    }
+
+    #[test]
+    fn apply_event_keeps_typed_text_in_sync_with_the_host() {
+        let mut surface = SurfaceTree::new();
+        let (mut input, mut label) = (0, 0);
+        let mounted = surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    input = tree.input(InputProps::new("").placeholder("Name"));
+                    label = tree.text("label");
+                });
+            })
+            .expect("mount");
+        let mut host = host_tree(&mounted);
+
+        for event in [
+            UiEvent::InputChanged((input, "ab".into())),
+            UiEvent::InputSubmitted((input, "abc".into())),
+        ] {
+            let (UiEvent::InputChanged((_, value)) | UiEvent::InputSubmitted((_, value))) = &event
+            else {
+                unreachable!();
+            };
+            host_types(&mut host, input, value);
+            surface.apply_event(&event);
+            assert_eq!(host.to_nodes(), to_host(&surface.to_nodes()));
+        }
+        assert_eq!(
+            surface.props(input),
+            Some(&InputProps::new("abc").placeholder("Name").into())
+        );
+
+        // Echoing the typed text queues nothing; clearing the field does reach the host.
+        let typed = InputProps::new("abc").placeholder("Name");
+        assert_eq!(surface.set_props(input, typed), Ok(false));
+        let cleared = InputProps::new("").placeholder("Name");
+        assert_eq!(surface.set_props(input, cleared), Ok(true));
+        apply(&mut host, &mut surface);
+
+        // Events for other nodes, or unknown ones, change nothing.
+        let before = surface.to_nodes();
+        surface.apply_event(&UiEvent::InputChanged((label, "x".into())));
+        surface.apply_event(&UiEvent::InputChanged((999, "x".into())));
+        surface.apply_event(&UiEvent::Click(input));
+        assert_eq!(surface.to_nodes(), before);
+        assert_eq!(surface.take_update(), Update::Unchanged);
+    }
+
+    #[test]
+    fn without_apply_event_clearing_a_typed_field_is_lost() {
+        // The failure `apply_event` prevents (judge integration-1 #6): the mirror still holds ""
+        // after the user typed, so clearing the field looks like no change.
+        let mut surface = SurfaceTree::new();
+        let mut input = 0;
+        surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    input = tree.input(InputProps::new(""));
+                });
+            })
+            .expect("mount");
+        assert_eq!(surface.set_props(input, InputProps::new("")), Ok(false));
     }
 
     struct Echo {

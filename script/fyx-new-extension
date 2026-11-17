@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Scaffolds a standalone Fyx UI extension crate. The template lives in `fyx-ext new`
+# (crates/fyx_ext); this wrapper keeps the old command working with the same options.
+#
+# Usage: script/fyx-new-extension <name> [--out <dir>] [--sdk-path <fyx checkout>]
+#                                 [--sdk-git <url> [--sdk-branch <branch> | --sdk-rev <rev>]]
+set -euo pipefail
+
+fyx_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+exec cargo run --quiet --manifest-path "$fyx_root/Cargo.toml" -p fyx_ext -- new "$@"

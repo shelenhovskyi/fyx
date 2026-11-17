@@ -23,10 +23,11 @@ Contents:
 
 | Call | Budget |
 |---|---|
-| `mount`, `handle-event`, `list-rows` | **200 ms** each |
+| `handle-event`, `list-rows`, and `mount` after a surface's first | **200 ms** each |
+| the first `mount` of each surface | **2 s** |
 | instantiation, then `surfaces` (your `Extension::new` runs inside `surfaces`) | **2 s** each |
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:63-65, 476-495, 710-715; crates/ui_ext_sdk/src/ui_ext_sdk.rs:225-238 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:63-65, 476-495, 710-715; crates/ui_ext_sdk/src/ui_ext_sdk.rs:225-238 -->
 
 - The budget is **wall-clock and includes time blocked in WASI**. A guest that keeps executing is
   interrupted by an epoch tick (every 10 ms) once it passes the budget. A guest blocked in a host
@@ -39,10 +40,11 @@ Contents:
   next event, but never Fyx itself or other extensions.
 - Every 10 ms tick, a running call also yields to the executor.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:5-9, 62, 66-68, 378-389, 466-474, 693-734; tasks/progress/W2.md:47-48 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:5-9, 62, 66-68, 378-389, 466-474, 693-734; tasks/progress/W2.md:47-48 -->
 
 What to do: keep every call well under 200 ms, including debug builds, which are much slower
-than release builds. Do heavy setup lazily, or in `new`/`surfaces` (2 s). Never sleep or spin
+than release builds. Do heavy setup lazily, in `new`/`surfaces` or in a surface's first `mount`
+(2 s each); a remount (after **Retry**, say) gets 200 ms. Never sleep or spin
 waiting for something: there is nothing to wait for, since no other code runs while your call
 does.
 
@@ -54,6 +56,7 @@ does.
 |---|---|---|---|
 | `max_nodes_per_update` | **2048** | patches in one `patches` update; nodes in one list row | queued patches (an inserted subtree counts one per node), **and** the nodes of a `mount`/`replace` |
 | `max_nodes` | **16384** | nodes in the whole tree, so also in a `mount` or `replace` | the mirror after any edit |
+| `max_depth` | **64** | levels from a root to its deepest node (a root is level 1), in the tree and in each list row; a deeper insert fails as `TooDeep` and the whole update is rejected | the same, on the mirror |
 
 <!-- crates/ui_ext/src/tree.rs:9-25, 96-104, 168-173, 190-191, 255-258; crates/ui_ext_sdk/src/ui_ext_sdk.rs:605-618, 685, 717-718, 752-753 -->
 
@@ -68,7 +71,7 @@ Other caps:
 | pushes per call | 64. The 65th traps the call and disables the extension. |
 | rows cached per list on the host | 1024, then pruned around the latest request (invisible to you, except as extra `list-rows` calls) |
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:69-71, 277-287; crates/ui_ext_host/src/surface.rs:17-18, 428-432 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:69-71, 277-287; crates/ui_ext_host/src/surface.rs:17-18, 428-432 -->
 
 Exceeding a host cap in an update is not fatal: the update is rejected as a whole (next section).
 
@@ -82,7 +85,7 @@ Exceeding a host cap in an update is not fatal: the update is rejected as a whol
 | `list-rows` answer with an invalid row or an index outside `start..start+count` | The whole answer is rejected and the error shown. That list is not asked again until it changes. | stays enabled |
 | trap, panic, time budget, push cap | The call fails. | **disabled** until restart |
 
-<!-- crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 404-443; crates/ui_ext_host/src/view.rs:289-346; crates/extension_host/src/wasm_host/fyx_ui.rs:579-592, 640-660, 663-689, 716-721 -->
+<!-- crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 404-443; crates/ui_ext_host/src/view.rs:289-346; crates/ui_ext_wasm/src/ui_ext_wasm.rs:579-592, 640-660, 663-689, 716-721 -->
 
 Gotchas:
 
@@ -222,7 +225,7 @@ What happens to pushes:
 | a call that returns `Err` or fails validation | The runtime returns them inside `ReplyError`, but the current renderer **drops them**. |
 | a call that traps or runs out of time | Discarded; the extension is disabled. |
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:206-241, 498-502, 716-722; crates/ui_ext_host/src/surface.rs:137-145, 240-285, 291-298, 412-417; crates/ui_ext_host/src/registry.rs:109-156 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:206-241, 498-502, 716-722; crates/ui_ext_host/src/surface.rs:137-145, 240-285, 291-298, 412-417; crates/ui_ext_host/src/registry.rs:109-156 -->
 
 Gotcha: **do not push and then return `Err` in the same call.** The runtime keeps those pushes for
 the renderer, as `tasks/progress/W2.md` specifies, but `ui_ext_host` does not apply them yet. If
@@ -274,14 +277,27 @@ you that a surface was closed (0.2 items 5–7).
 
 ## Sandbox
 
-- WASI with only stderr inherited (Rust `eprintln!` reaches Fyx's stderr). There are no preopened
-  directories, environment variables or arguments, and nothing else is configured on the WASI
-  context.
+- All of WASI p2 is linked (Rust's std imports parts of it), with only stderr inherited (Rust
+  `eprintln!` reaches Fyx's stderr). There are no preopened directories, environment variables or
+  arguments.
+- No network: TCP, UDP and name lookup are denied and no address passes the check, so `connect`
+  fails with "access denied" inside the component.
+- Store caps: 256 MiB of linear memory (room for a JS engine), 64 Ki table elements, 32 core
+  instances, 32 tables, 8 memories. Growing past one traps the call and disables the extension;
+  other extensions are not affected. The pushes of one call may carry 4096 patches plus nodes
+  together, and at most 64 pushes. The strings passed to `push-update` and `log` in one call may
+  total 16 MiB; a `log` message is cut at 16 KiB.
+- An installed extension loads only after the user enables it, for the capabilities and the
+  component (or linked folder) it has then; see "Installing as a dev extension" in
+  `extension-authoring.md`.
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
-- Host functions: `push-update` and `log` only.
+- Fyx's own host functions: `push-update` and `log`.
+- Links in `markdown` nodes open only if they are `http` or `https`, and only after the user
+  confirms the address; other schemes (`file:`, `javascript:`, custom ones, relative paths) do
+  nothing.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:452-453; extensions/fyx_demo_todo/src/fyx_demo_todo.rs:3-4; crates/ui_ext/wit/fyx-ui.wit:163-173 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453; extensions/fyx_demo_todo/src/fyx_demo_todo.rs:3-4; crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 
 ## Versions
 
@@ -296,7 +312,7 @@ you that a surface was closed (0.2 items 5–7).
   version, or loading fails with `extension.toml says fyx:ui X, the component targets Y`.
 - The SDK's `API_VERSION` is `(0, 1, 0)`. Rebuild against the matching SDK when the world changes.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:55-60, 73-130, 171-175, 420-440, 551-556; crates/ui_ext_sdk/src/ui_ext_sdk.rs:74-91, 210-215 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:55-60, 73-130, 171-175, 420-440, 551-556; crates/ui_ext_sdk/src/ui_ext_sdk.rs:74-91, 210-215 -->
 
 Expect 0.2 to be a breaking change. Nothing in 0.1 promises that a 0.1 component will load in a
 host that supports 0.2.

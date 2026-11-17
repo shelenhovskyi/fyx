@@ -42,13 +42,71 @@ wasmtime `Store` with its own call queue, on its own engine. A slow call in the 
 `zed:extension` component therefore never delays click handling. The `[fyx_ui]` manifest table is
 ignored by upstream Zed's manifest parser, so one directory can hold both kinds.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:3-9, 137-138 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:3-9, 137-138 -->
 
-The sandbox: the component gets WASI with stderr inherited and nothing else configured. It has no
-preopened directories, no environment variables and no arguments. It cannot read the worktree or
-buffers yet. The only host functions are `push-update` and `log`.
+The sandbox: the component gets WASI p2, all of it linked (Rust's std imports parts of it), with
+stderr inherited and nothing else granted. It has no preopened directories, no environment
+variables and no arguments, and no network: TCP, UDP and name lookup are denied, so `connect`
+fails with "access denied". It cannot read the worktree or buffers yet. Its store is capped (256 MiB
+of memory; see "Limits" in `limits-and-gotchas.md`). Besides WASI, the host functions are
+`push-update` and `log`.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
+
+## Quick start: `script/fyx-new-extension`
+
+One command in a Fyx checkout scaffolds a standalone extension crate that builds as-is:
+
+```bash
+script/fyx-new-extension my-panel --out ~/src
+```
+
+This creates `~/src/my_panel/` (the crate name is the name with `-` as `_`; the extension id and
+the surface id are the name with `_` as `-`):
+
+```
+my_panel/
+├── Cargo.toml           # cdylib, its own empty [workspace], ui_ext_sdk dependency
+├── extension.toml       # id "my-panel" + [fyx_ui] with capabilities = ["ui:panel"]
+├── rust-toolchain.toml  # the toolchain Fyx pins, plus the wasm32-wasip2 target
+├── README.md            # build, test and run instructions
+├── .gitignore           # /target and /fyx_ui.wasm
+└── src/
+    └── my_panel.rs      # a right-dock panel with a button that patches a label, and a unit test
+```
+
+Then:
+
+```bash
+cd ~/src/my_panel && cargo test
+```
+
+```bash
+cargo build --target wasm32-wasip2 --release && cp target/wasm32-wasip2/release/my_panel.wasm fyx_ui.wasm
+```
+
+```bash
+FYX_UI_DEV_EXTENSIONS=$PWD /path/to/fyx --foreground
+```
+
+Options:
+
+| Option | Effect |
+|---|---|
+| `--out <dir>` | Parent directory of the new crate, default the current directory. `<dir>/<crate>` must not exist or must be empty. |
+| `--sdk-path <checkout>` | Path dependency on `<checkout>/crates/ui_ext_sdk`. The default is the checkout the script runs from, written as an absolute path. |
+| `--sdk-git <url>` | Git dependency on `ui_ext_sdk` instead, at `--sdk-branch <branch>` (default `integration`) or `--sdk-rev <rev>`. Cargo then clones the whole Fyx repository on the first build. |
+
+The name must be lower-case letters and digits, separated by single `-` or `_`, and start with a
+letter. The empty `[workspace]` table lets the crate build inside a Fyx checkout too (for example
+`--out extensions`) without becoming a member of the Fyx workspace. Inside a Fyx checkout, build
+with `RUSTC_WRAPPER=` if you do not have sccache (see [Building](#building)).
+
+The generated panel is the walkthrough below in miniature: one `SurfaceTree`, node ids stored on
+every mount, and a `set-props` patch in reply to a click. The rest of this guide explains each
+piece.
+
+<!-- script/fyx-new-extension; verified by scaffolding a crate and running cargo test, cargo clippy (host and wasm32-wasip2) and cargo build --target wasm32-wasip2 --release, then wasm-tools component wit on the output -->
 
 ## Project layout
 
@@ -64,9 +122,9 @@ my_counter/
     └── lib.rs          # implements ui_ext_sdk::Extension, ends with register_extension!
 ```
 
-The demo extensions in this repository (`extensions/fyx_demo_counter`,
-`extensions/fyx_demo_todo`) have this layout. Each one also has a `.gitignore` that ignores
-`/fyx_ui.wasm`.
+The demo extensions in this repository (`extensions/fyx_demo_*`) have this layout, except that
+they are members of the Fyx workspace and name their crate root `src/<crate>.rs`. Each one also
+has a `.gitignore` that ignores `/fyx_ui.wasm`.
 
 `Cargo.toml` of a standalone extension:
 
@@ -94,7 +152,7 @@ ui_ext_sdk = { path = "../fyx/crates/ui_ext_sdk" }
   `[workspace]` table to its `Cargo.toml`. Without it, cargo refuses to build a package that is
   inside a workspace but not a member of it. The host's test fixture `probe` does the same.
 
-<!-- crates/ui_ext_sdk/Cargo.toml (wit-bindgen = "0.41", edition.workspace), ARCHITECTURE.md crate table ("Published later as fyx-sdk"), crates/extension_host/src/wasm_host/fyx_ui/fixtures/probe/Cargo.toml -->
+<!-- crates/ui_ext_sdk/Cargo.toml (wit-bindgen = "0.41", edition.workspace), ARCHITECTURE.md crate table ("Published later as fyx-sdk"), crates/ui_ext_wasm/fixtures/probe/Cargo.toml -->
 
 The SDK is built and tested with the toolchain pinned in `rust-toolchain.toml` (1.98.1, which has
 the `wasm32-wasip2` target). Older toolchains are untested.
@@ -118,7 +176,7 @@ capabilities = ["ui:panel"]
 Fyx reads `id` and the `[fyx_ui]` table. It ignores the other top-level keys, but keep them: they
 are what upstream Zed's manifest parser expects.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:151-155 (ExtensionToml { id, fyx_ui }) -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:151-155 (ExtensionToml { id, fyx_ui }) -->
 
 `[fyx_ui]` accepts exactly these three keys. Unknown keys are an error (`deny_unknown_fields`).
 
@@ -128,7 +186,7 @@ are what upstream Zed's manifest parser expects.
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. |
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:139-149 (UiManifest, deny_unknown_fields, capabilities default), 171-183 (version supported, component path: all components Normal), 188-203 (check_surfaces), 551-557 (manifest version == component version, check_surfaces) -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:139-149 (UiManifest, deny_unknown_fields, capabilities default), 171-183 (version supported, component path: all components Normal), 188-203 (check_surfaces), 551-557 (manifest version == component version, check_surfaces) -->
 
 The capability check runs only when Fyx loads the extension from its directory. A bare `.wasm`
 loaded for quick iteration (below) skips it.
@@ -171,9 +229,20 @@ RUSTC_WRAPPER= cargo build --target wasm32-wasip2 --release
 
 ## Installing as a dev extension
 
-For the sprint, UI extensions load **only** from the environment variable
-`FYX_UI_DEV_EXTENSIONS`, which Fyx reads once at startup. Upstream's "Install Dev Extension"
-command does not load `[fyx_ui]` components, and when the variable is unset nothing loads.
+UI extensions load from the installed-extensions directory and from the environment variable
+`FYX_UI_DEV_EXTENSIONS`.
+
+- **`fyx_ui: install dev UI extension`** asks for a folder, shows the capabilities its
+  `extension.toml` asks for, and links the folder into the installed-extensions directory. Fyx
+  loads it now and on every start, and reloads it when its component is rebuilt. The folder's
+  path may not contain `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
+- **Anything else in the installed-extensions directory** (a folder copied there, or linked by
+  upstream's "Install Dev Extension") waits for consent: Fyx shows a notification with the
+  capabilities it asks for and loads it only after **Enable**. The answer is kept in
+  `<data dir>/fyx-ui-consent.json`, for those capabilities and that component (for a linked
+  folder, that folder). Asking for more capabilities, or a different component, asks again on the
+  next start.
+- **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
 
 <!-- crates/ui_ext_host/src/ui_ext_host.rs:11, crates/ui_ext_host/src/registry.rs:29-33, 172, 305-312 -->
 
@@ -201,7 +270,7 @@ The log reports each step: `fyx:ui: loading dev extension <path>`, then
 Messages the extension writes with `log` appear under the log target `fyx_ui`, prefixed with the
 extension id.
 
-<!-- crates/ui_ext_host/src/registry.rs:316-325, 352-356; crates/extension_host/src/wasm_host/fyx_ui.rs:297 -->
+<!-- crates/ui_ext_host/src/registry.rs:316-325, 352-356; crates/ui_ext_wasm/src/ui_ext_wasm.rs:297 -->
 
 To pick up a new build, restart Fyx. Nothing reloads a running extension.
 
@@ -273,11 +342,11 @@ work on your side.
 <!-- crates/ui_ext/wit/fyx-ui.wit:9-21; crates/ui_ext_host/src/view.rs:763-794 -->
 
 **9. Slow or crashing extensions are disabled.** Each call has a 200 ms budget (2 s for
-instantiation and `surfaces`). A call that runs past it, traps or panics disables the extension
+instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps or panics disables the extension
 until Fyx restarts. Returning `Err(String)` is different: it is shown to the user and the extension
 keeps running.
 
-<!-- crates/extension_host/src/wasm_host/fyx_ui.rs:62-71, 693-734, 663-675 -->
+<!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 693-734, 663-675 -->
 
 ## Walkthrough: a counter in 60 lines
 
@@ -419,7 +488,7 @@ Reset (5).
 - Use `saturating_add` rather than `+= 1`: a panic aborts the call, and a trapped call disables
   the extension.
 
-<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs:677-690, 769-772, 479-486; crates/extension_host/src/wasm_host/fyx_ui.rs:716-721 -->
+<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs:677-690, 769-772, 479-486; crates/ui_ext_wasm/src/ui_ext_wasm.rs:716-721 -->
 
 ### Step 6: export it
 
@@ -556,3 +625,19 @@ Note the double parentheses in `UiEvent::InputChanged((id, text))`: a WIT tuple 
 Rust tuple field.
 
 `extensions/fyx_demo_todo` shows inputs, filter buttons, row clicks and list rebuilding together.
+
+### More demos
+
+Each demo's crate docs pin its first mount and the patches every event produces, and its tests
+replay every update through the host's own tree model (`ui_ext::Tree`).
+
+| Demo | Shows |
+|---|---|
+| `extensions/fyx_demo_counter` | the smallest complete extension: a mount, `set-props` replies, `list-rows` |
+| `extensions/fyx_demo_todo` | inputs without echo, filter buttons, `row-click`, rebuilding a list |
+| `extensions/fyx_demo_gallery` | every node kind, and a status item |
+| `extensions/fyx_demo_markdown` | an input previewed live in a `markdown` node, clearing an input after Enter |
+| `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
+| `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
+
+`script/fyx-build-demos` builds all of them.

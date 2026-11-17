@@ -1,0 +1,13 @@
+id = "fyx-demo-counter-ts"
+name = "Counter demo (TypeScript)"
+description = "Fyx UI demo: the counter panel of fyx-demo-counter, written in TypeScript."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Read by Fyx's extension host (`fyx_ui::UiManifest`). `npm run build` in sdks/ts writes the
+# component to dist/fyx_ui.wasm.
+[fyx_ui]
+api_version = "0.1.0"
+component = "dist/fyx_ui.wasm"
+capabilities = ["ui:panel"]

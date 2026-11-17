@@ -116,6 +116,7 @@ feedback.workspace = true
 file_finder.workspace = true
 fs.workspace = true
 futures.workspace = true
+fyx_guard.workspace = true # fyx: security modes for agents
 git.workspace = true
 git_hosting_providers.workspace = true
 git_ui = { workspace = true, features = ["call"] }
@@ -285,41 +286,41 @@ search = { workspace = true, features = ["test-support"] }
 repl = { workspace = true, features = ["test-support"] }
 
 
-[package.metadata.bundle-dev]
+[package.metadata.bundle-dev] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "dev.zed.Zed-Dev"
-name = "Zed Dev"
+identifier = "dev.fyx.Fyx-Dev"
+name = "Fyx Dev"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["fyx"]
 
-[package.metadata.bundle-nightly]
+[package.metadata.bundle-nightly] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
-identifier = "dev.zed.Zed-Nightly"
-name = "Zed Nightly"
+identifier = "dev.fyx.Fyx-Nightly"
+name = "Fyx Nightly"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["fyx"]
 
-[package.metadata.bundle-preview]
+[package.metadata.bundle-preview] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
-identifier = "dev.zed.Zed-Preview"
-name = "Zed Preview"
+identifier = "dev.fyx.Fyx-Preview"
+name = "Fyx Preview"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["fyx"]
 
-[package.metadata.bundle-stable]
+[package.metadata.bundle-stable] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+identifier = "dev.fyx.Fyx"
+name = "Fyx"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["fyx"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

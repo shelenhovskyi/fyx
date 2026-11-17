@@ -1,0 +1,16 @@
+# Guest fixture for the fyx:ui host tests (push-update, time budget, version section, sandbox).
+# A member of the fixture workspace in `crates/ui_ext_wasm/fixtures`.
+[package]
+name = "fyx_ui_test_probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/probe.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ui_ext_sdk = { path = "../../../ui_ext_sdk" }
+
