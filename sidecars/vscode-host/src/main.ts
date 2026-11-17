@@ -7,10 +7,18 @@
 import fs from "node:fs";
 import { builtinModules } from "node:module";
 import { format } from "node:util";
-import { ExtensionHost } from "./host.ts";
+import { ExtensionHost, sandboxProblem } from "./host.ts";
 import { enableProbeMode } from "./shim/api.ts";
 import { RpcPeer } from "./rpc.ts";
 import type { LogLevel } from "./schema.ts";
+
+// Checked before the RPC loop starts and so before any extension can load: a launcher that forgets
+// the flags must not run extensions unsandboxed.
+const sandbox = sandboxProblem((process as unknown as { permission?: { has(scope: string, reference?: string): boolean } }).permission);
+if (sandbox) {
+  process.stderr.write(`[error] refusing to start: ${sandbox}\n`);
+  process.exit(78);
+}
 
 const writeOut = process.stdout.write.bind(process.stdout);
 const writeErr = process.stderr.write.bind(process.stderr);

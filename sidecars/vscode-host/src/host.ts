@@ -40,6 +40,46 @@ function installRequireHook(): void {
   };
 }
 
+/** The part of `process.permission` the sandbox check reads. */
+export interface PermissionModel {
+  has(scope: string, reference?: string): boolean;
+}
+
+/**
+ * Grants that would make the sandbox meaningless: with any of them, an extension can run code
+ * outside the sidecar or read and write the whole disk. Without a reference, `has` reports a
+ * grant for every path.
+ */
+const WIDE_GRANTS: Record<string, string> = {
+  "fs.read": "--allow-fs-read=*",
+  "fs.write": "--allow-fs-write=*",
+  child: "--allow-child-process",
+  worker: "--allow-worker",
+  wasi: "--allow-wasi",
+  addon: "--allow-addons",
+};
+
+/**
+ * Why the sidecar must not load extensions under `permission` (`process.permission`), or
+ * undefined when it is sandboxed. Extensions are unmodified third-party code, so running them
+ * without Node's permission model is refused rather than warned about.
+ */
+export function sandboxProblem(permission: PermissionModel | undefined): string | undefined {
+  if (!permission) {
+    return "the sidecar must run under Node's permission model: start it with --permission and --allow-fs-read/--allow-fs-write for the extension, this package and the workspace";
+  }
+  const wide = Object.entries(WIDE_GRANTS).filter(([scope]) => {
+    try {
+      return permission.has(scope);
+    } catch {
+      // A scope this Node version does not know cannot have been granted.
+      return false;
+    }
+  });
+  if (wide.length > 0) return `the sidecar's sandbox is too wide: drop ${wide.map(([, flag]) => flag).join(", ")}`;
+  return undefined;
+}
+
 /**
  * Default storage root. The temp folder is shared between users on Linux and macOS, so the folder
  * name carries the uid and `ensurePrivateDir` refuses one that another user created first. On

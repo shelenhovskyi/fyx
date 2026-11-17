@@ -67,20 +67,20 @@ export class MockHost {
     this.registerHandlers();
   }
 
-  /** Sidecar in a child process, optionally under Node's permission model. */
-  /** `probe` starts the sidecar in coverage probe mode (missing APIs become inert stubs). */
-  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string>; probe?: boolean } = {}): MockHost {
+  /**
+   * Sidecar in a child process under Node's permission model, which `main.ts` requires. `probe`
+   * starts it in coverage probe mode (missing APIs become inert stubs).
+   */
+  static spawn(options: MockHostOptions & { permission: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string>; probe?: boolean }): MockHost {
     const main = join(import.meta.dirname, "main.ts");
-    const flags = options.permission
-      ? [
-          "--permission",
-          ...[import.meta.dirname, ...options.permission.read].flatMap(driveVariants).map((p) => `--allow-fs-read=${p}`),
-          ...options.permission.write.flatMap(driveVariants).map((p) => `--allow-fs-write=${p}`),
-        ]
-      : [];
+    const flags = [
+      "--permission",
+      ...[import.meta.dirname, ...options.permission.read].flatMap(driveVariants).map((p) => `--allow-fs-read=${p}`),
+      ...options.permission.write.flatMap(driveVariants).map((p) => `--allow-fs-write=${p}`),
+    ];
     // Under --permission even `existsSync("")` throws unless the cwd is readable, so default the
     // cwd to the first granted folder.
-    const cwd = options.cwd ?? options.permission?.read[0];
+    const cwd = options.cwd ?? options.permission.read[0];
     const child = spawn(process.execPath, [...flags, main, ...(options.probe ? ["--fyx-coverage-probe"] : [])], {
       stdio: ["pipe", "pipe", "pipe"],
       ...(cwd ? { cwd } : {}),

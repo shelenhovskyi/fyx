@@ -65,7 +65,11 @@ are in the generated section at the end.
 ### Sandboxing with Node's permission model
 
 Each extension runs in its own sidecar process with `--permission`, read access to the extension
-and its sandbox folder, and write access to the sandbox folder only. What that looks like in
+and its sandbox folder, and write access to the sandbox folder only. The sidecar enforces this
+itself: `main.ts` exits with code 78 when `process.permission` is missing, or when it reports a
+grant for every path (`fs.read`, `fs.write`) or for `child`, `worker`, `wasi` or `addon`, so a
+launcher that forgets the flags cannot run extensions unsandboxed. The phase-3 Rust launcher must
+pass the same path-scoped flags as `MockHost.spawn`. What that looks like in
 practice:
 
 1. **It blocks what it should.** Language-server extensions (auto-rename-tag, svg) cannot spawn
