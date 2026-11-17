@@ -41,6 +41,8 @@ strum.workspace = true
 telemetry.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
+# fyx: capability chips for UI extensions
+ui_ext_host.workspace = true
 util.workspace = true
 vim_mode_setting.workspace = true
 workspace.workspace = true

@@ -610,6 +610,7 @@ impl RenderOnce for ExtensionCard {
             source,
         } = details;
         let installed_version = source.installed_version(&version);
+        let fyx_ui_capabilities = ui_ext_host::capability_chips(&id, cx); // fyx: UI extension chips
         let download_count = source.download_count();
         let is_dev = source.is_dev();
         let is_overridden = source.is_overridden();
@@ -660,7 +661,8 @@ impl RenderOnce for ExtensionCard {
                                             .gap_1()
                                             .children(provided_features.into_iter().map(Chip::new)),
                                     )
-                                }),
+                                })
+                                .children(fyx_ui_capabilities), // fyx: UI extension chips
                         )
                         .child(
                             h_flex()
