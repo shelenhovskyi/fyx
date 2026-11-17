@@ -4,6 +4,9 @@ Status: **draft for approval**. Evidence: [research report](../../research/repor
 Owner decisions (2026-11-17): first-party extensions are postponed; authors are Rust and
 TypeScript; distribution is our own GitHub-reviewed registry; network and processes only with
 consent; old `fyx:ui` versions keep working.
+Revised for the `fyx:ui` 0.2 decisions, [decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17): editor decorations ship in 0.2 as section L, so
+notifications and progress become section M; the frozen 101-icon enum (§I) and the modal gesture
+rule (§C: a modal opens only within 5 s after a click or Enter) are settled.
 
 ## 1. Goal
 
@@ -21,11 +24,12 @@ line decorations, code lenses, read-only documents, network and processes behind
 2. Four tracks, shipped in this order; each phase is usable on its own:
    - **P1 local platform**: install folder, dev install, hot reload, `fyx-ext` CLI, Rust template,
      consent tiers T0–T1, Extension Inspector, generated reference docs.
-   - **P2 `fyx:ui@0.2.0`**: `docs/fyx/wit-0.2/design.md` sections A–K unchanged, plus section L
-     (notifications and progress, decision 22). TypeScript SDK.
+   - **P2 `fyx:ui@0.2.0`**: `docs/fyx/wit-0.2/design.md` sections A–L as [decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17)
+     (L: editor decorations, blocks above or below a line, `ui:editor-decorations`), plus
+     section M (notifications and progress, decision 22). TypeScript SDK.
    - **P3 registry**: package format, registry repo and CI, signatures, updates, block list,
      rollback.
-   - **P4 `fyx:ui@0.3.0`**: decorations, picker protocol, code lens and hover, virtual documents,
+   - **P4 `fyx:ui@0.3.0`**: decoration extras beyond 0.2 §L, picker protocol, code lens and hover, virtual documents,
      commands, network and process capabilities (tier T2).
    - **1.0 freeze** after P4 (decision 30).
 
@@ -96,7 +100,7 @@ line decorations, code lenses, read-only documents, network and processes behind
     An update that adds a T1 or T2 capability, a network domain or a process name is **held**: the
     old version keeps running and the page shows "Update needs approval". T0 additions install
     silently.
-22. Section L of 0.2, notifications and progress: `notify(level, text, actions)` and
+22. Section M of 0.2, notifications and progress: `notify(level, text, actions)` and
     `progress-start` / `progress-update` / `progress-end`; at most **5 notifications per minute**
     per extension, extra ones go to the log.
 23. `network:fetch` is a host import, not WASI sockets. The manifest lists domains
@@ -121,11 +125,13 @@ line decorations, code lenses, read-only documents, network and processes behind
 ### API functionality and stability
 
 28. `fyx:ui@0.3.0` adds, in this priority order:
-    - **Decorations**: one anchored primitive with kinds `block`, `inline-style`, `eol-text`,
-      `inline-text`, `gutter-sign`, `line-background`; every decoration belongs to an
-      extension-owned namespace; `clear-namespace`; the host asks for decorations of the visible
-      range only, debounced **50 ms**. Colours stay theme tokens, except a `color-swatch` value
-      the host renders as a small swatch.
+    - **Decoration extras** on top of 0.2 §L ([decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17)), which already ships block
+      decorations (a `fyx:ui` tree above or below a line, anchored by the host, at most 512 per
+      extension): the kinds `inline-style`, `eol-text`, `inline-text`, `gutter-sign` and
+      `line-background`; extension-owned namespaces with `clear-namespace`; the host asking for
+      decorations of the visible range only, debounced **50 ms**, instead of eager placement;
+      §L's deferred `decoration-orphaned` event and anchoring to a buffer handle. Colours stay
+      theme tokens, except a `color-swatch` value the host renders as a small swatch.
     - **Picker protocol** on the 0.2 modal: host fuzzy matching, multi-select, `row-highlighted`
       event for live preview, picker sources and actions registered by extensions.
     - **Code lens and hover** contributions, rendered by the editor's existing code lens and hover

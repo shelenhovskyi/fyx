@@ -3,7 +3,8 @@
 Implements [spec.md](spec.md) (decision numbers in brackets). Owners are the existing streams;
 "new" means a stream the coordinator starts. Every task ends with the behaviour seen in the
 running editor, not only green tests. Integrator-only files (`Cargo.toml`, `Cargo.lock`,
-`crates/ui_ext/wit/`) go through W0 as usual.
+`crates/ui_ext/wit/`) go through W0 as usual. Revised for the 0.2 decisions, [decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17):
+decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 ## Before P1: merge what already exists
 
@@ -31,11 +32,12 @@ running editor, not only green tests. Integrator-only files (`Cargo.toml`, `Carg
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 2.1 | W0 | Answer the 4 open questions in `wit-0.2/design.md`; add section L (notifications, progress) [22]; land the 0.2 WIT next to 0.1 [29] | — | both worlds in `crates/ui_ext/wit/`, 0.1 demos unchanged and working |
-| 2.2 | W2c | Host side of A–L, version dispatch | 2.1 | probe fixture covers every new import |
-| 2.3 | W3 | Renderer side of A–L: ticks, modal, dismissed, runtime surfaces, notifications and progress | 2.2 | clock status item, picker modal, progress demo in the dev build |
-| 2.4 | W4 | Rust SDK 0.2 + demos moved to 0.2 as examples | 2.2 | demos build for both 0.1 and 0.2 |
+| 2.1 | W0 | Open questions answered and §L decorations added, [decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17). Left: add section M (notifications, progress) [22]; land the 0.2 WIT next to 0.1 [29] | — | both worlds in `crates/ui_ext/wit/`, 0.1 demos unchanged and working |
+| 2.2 | W2c | Host side of A–M (including the `decorations` interface of §L), version dispatch | 2.1 | probe fixture covers every new import |
+| 2.3 | W3 | Renderer side of A–K and M: ticks, modal with keyboard selection and the click-or-Enter gesture rule, dismissed, runtime surfaces, frozen icons, notifications and progress | 2.2 | clock status item, picker modal, progress demo in the dev build |
+| 2.4 | W4 | Rust SDK 0.2 (with `place_decoration` / `remove_decoration` for §L) + demos moved to 0.2 as examples | 2.2 | demos build for both 0.1 and 0.2 |
 | 2.5 | new `ts-sdk` | `@fyx/sdk` on 0.2 with `jco componentize`, `fyx-ext new --lang ts`, SDK parity test [3] | 0.1, 2.1 | a TS counter runs in Fyx; parity test red on a missing wrapper |
+| 2.6 | W6 (restart) | Decorations §L on W6's anchor mechanism: an extension backend for `Decorations`, worktree-relative path matching, the registry effects, the 512 cap | 2.2 | a demo places blocks under TODO lines that follow edits and route clicks to `handle-event` |
 
 ## P3 registry
 
@@ -52,7 +54,7 @@ running editor, not only green tests. Integrator-only files (`Cargo.toml`, `Carg
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
 | 4.1 | W0 | 0.3 design draft for decision 28 (cloud task, like the 0.2 draft), then the WIT | P2 | design reviewed by W7 |
-| 4.2 | W6 (restart) | Decorations family on W6's anchor mechanism, namespaces, visible-range pull, `color-swatch` | 4.1 | TODO highlighter and gutter-sign demo work while editing |
+| 4.2 | W6 | Decoration extras beyond 0.2 §L (decision 28): inline kinds, gutter signs, line backgrounds, namespaces, visible-range pull, `color-swatch`, `decoration-orphaned` | 4.1, 2.6 | TODO highlighter and gutter-sign demo work while editing |
 | 4.3 | W3 | Picker protocol on the 0.2 modal | 4.1 | two extensions contribute sources to one picker |
 | 4.4 | W3 | Code lens, hover, virtual documents, commands in palette and keymap | 4.1 | each has a demo in the gallery |
 | 4.5 | W3 | T2 consent at first use, held updates for new T2 / domains / programs [21] | 1.5 | spec §4 failure 1 passes |
@@ -65,5 +67,6 @@ running editor, not only green tests. Integrator-only files (`Cargo.toml`, `Carg
 
 At most 2 compiling streams plus the gatekeeper (owner limit). Non-compiling work runs alongside:
 1.9, 2.1, 3.1, 3.2 (registry repo), 4.1 (design) and the TS SDK's JS side. Suggested pairs:
-P1 = W3 (1.1→1.3→1.5→1.7) + `platform-cli` (1.4, then 1.8 with W4); P2 = W2c + W3;
+P1 = W3 (1.1→1.3→1.5→1.7) + `platform-cli` (1.4, then 1.8 with W4); P2 = W2c + W3, then W6
+for 2.6;
 P3 = W3 alone (registry CI is non-compiling); P4 = W6 + W3, then W2c.

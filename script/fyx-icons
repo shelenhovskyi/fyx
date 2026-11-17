@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Generates every Fyx icon file from the SVG sources in assets/fyx/icon.
+
+Usage: script/fyx-icons
+Needs ImageMagick 7 (`magick`) with an SVG delegate (librsvg). The output is deterministic (no
+timestamps in the PNGs), so running it again on unchanged sources changes nothing.
+
+Writes, at the paths Zed's build and bundle scripts already use (tasks/progress/W4-icon.md):
+- crates/zed/resources/app-icon{,-preview,-nightly,-dev}.png (512) and @2x.png (1024):
+  macOS bundle (cargo-bundle builds the .icns from them), Linux hicolor icons, Flatpak, the X11
+  window icon;
+- crates/zed/resources/windows/app-icon{,-preview,-nightly,-dev}.ico (256 to 16): the exe icons
+  of zed, cli and auto_update_helper, and the installer;
+- crates/zed/resources/Document.icns: the macOS document type icon (one `ic10` entry, as Zed's);
+- docs/theme/favicon.png (64): the docs site;
+- assets/images/fyx_logo.svg: the in-app mark (welcome page, onboarding), copied from the source.
+"""
+
+import pathlib
+import shutil
+import struct
+import subprocess
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SOURCES = ROOT / "assets" / "fyx" / "icon"
+RESOURCES = ROOT / "crates" / "zed" / "resources"
+
+# The gradient stops of fyx-icon.svg (Stable). Each channel swaps them for its own hue; the white
+# mark stays, so every variant keeps the same contrast at 16 px.
+STABLE_STOPS = ("#FF8A1F", "#F0452E")
+CHANNELS = {
+    "": STABLE_STOPS,  # Stable: orange to coral
+    "-preview": ("#3D8BFF", "#2A4FE0"),  # Preview: blue
+    "-nightly": ("#8B5CF6", "#4C1D95"),  # Nightly: violet
+    "-dev": ("#9AA3AF", "#5B6472"),  # Dev: grey
+}
+# Zed ships 256, 128, 64, 32 and 16; 48 and 24 are what Explorer and the taskbar pick at 150 %.
+ICO_SIZES = "256,128,64,48,32,24,16"
+# Apple's grid: the tile is 824 px with a 100 px margin. Windows frames and the favicon use the
+# tile alone, like Zed's .ico files, so small sizes do not waste pixels on transparency.
+TILE_CROP = "824x824+100+100"
+PNG_OUTPUT = ["-strip", "-depth", "8", "-define", "png:exclude-chunks=date,time"]
+
+
+def magick(*args):
+    subprocess.run(["magick", *map(str, args)], check=True)
+
+
+def render(svg, out):
+    magick("-background", "none", "-density", 96, svg, "-resize", "1024x1024", *PNG_OUTPUT, out)
+
+
+def resize(source, size, out, crop=None):
+    crop_args = ["-crop", crop, "+repage"] if crop else []
+    magick(source, *crop_args, "-filter", "Lanczos", "-resize", f"{size}x{size}", *PNG_OUTPUT, out)
+
+
+def write_icns(png, out):
+    data = png.read_bytes()
+    entry = b"ic10" + struct.pack(">I", 8 + len(data)) + data
+    out.write_bytes(b"icns" + struct.pack(">I", 8 + len(entry)) + entry)
+
+
+def main():
+    source = (SOURCES / "fyx-icon.svg").read_text(encoding="utf-8")
+    for stop in STABLE_STOPS:
+        if source.count(stop) != 1:
+            raise SystemExit(f"fyx-icon.svg must contain the stop colour {stop} exactly once")
+
+    written = []
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch = pathlib.Path(scratch)
+        for suffix, stops in CHANNELS.items():
+            svg_text = source
+            for stable, channel in zip(STABLE_STOPS, stops):
+                svg_text = svg_text.replace(stable, channel)
+            svg = scratch / f"icon{suffix}.svg"
+            svg.write_text(svg_text, encoding="utf-8")
+            master = scratch / f"icon{suffix}.png"
+            render(svg, master)
+
+            retina = RESOURCES / f"app-icon{suffix}@2x.png"
+            magick(master, *PNG_OUTPUT, retina)
+            regular = RESOURCES / f"app-icon{suffix}.png"
+            resize(master, 512, regular)
+
+            tile = scratch / f"tile{suffix}.png"
+            magick(master, "-crop", TILE_CROP, "+repage", *PNG_OUTPUT, tile)
+            ico = RESOURCES / "windows" / f"app-icon{suffix}.ico"
+            magick(tile, "-strip", "-define", f"icon:auto-resize={ICO_SIZES}", ico)
+            written += [retina, regular, ico]
+
+            if suffix == "":
+                favicon = ROOT / "docs" / "theme" / "favicon.png"
+                resize(master, 64, favicon, crop=TILE_CROP)
+                written.append(favicon)
+
+        document = scratch / "document.png"
+        render(SOURCES / "fyx-document.svg", document)
+        icns = RESOURCES / "Document.icns"
+        write_icns(document, icns)
+        written.append(icns)
+
+    logo = ROOT / "assets" / "images" / "fyx_logo.svg"
+    shutil.copyfile(SOURCES / "fyx-logo.svg", logo)
+    written.append(logo)
+
+    for path in written:
+        print(path.relative_to(ROOT).as_posix())
+
+
+if __name__ == "__main__":
+    main()

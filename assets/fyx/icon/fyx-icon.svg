@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Fyx app icon, Stable colours. script/fyx-icons derives the channel variants from this file
+       by replacing the two gradient stops, and the .ico frames from the tile without the margin
+       (crop 824x824+100+100). The tile follows Apple's 1024 grid: 824 px, radius 184. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A1F"/>
+      <stop offset="1" stop-color="#F0452E"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#tile)"/>
+  <g fill="#FFFFFF">
+    <rect x="300" y="250" width="130" height="524" rx="36"/>
+    <rect x="300" y="250" width="290" height="130" rx="36"/>
+    <rect x="640" y="250" width="130" height="130" rx="36"/>
+    <rect x="300" y="452" width="190" height="130" rx="36"/>
+    <rect x="540" y="452" width="130" height="130" rx="36"/>
+  </g>
+</svg>
