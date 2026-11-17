@@ -22,7 +22,7 @@ use gpui::{
 use project::Project;
 use ui::{Button, ButtonStyle, Label, LabelSize, Tooltip, prelude::*};
 use workspace::{
-    Item, Workspace,
+    Item, OpenOptions, Workspace,
     item::{ItemEvent, TabContentParams},
 };
 
@@ -133,11 +133,17 @@ pub(crate) fn init(cx: &mut App) {
         let Some(review) = AgentReview::global(cx) else {
             return;
         };
-        cx.subscribe_in(&review, window, |workspace, _, event, window, cx| {
-            if let AgentReviewEvent::Opened(id) = event {
-                open_reviews(workspace, Some(*id), window, cx);
-            }
-        })
+        cx.subscribe_in(
+            &review,
+            window,
+            |workspace, _, event, window, cx| match event {
+                AgentReviewEvent::Opened(id) => open_reviews(workspace, Some(*id), window, cx),
+                AgentReviewEvent::UnreviewedChanges(turn) => {
+                    show_unreviewed_changes(workspace, *turn, window, cx)
+                }
+                _ => {}
+            },
+        )
         .detach();
     })
     .detach();
@@ -180,12 +186,43 @@ fn open_reviews(
                 pane
             }
             None => {
-                let pane = cx.new(|cx| ReviewPane::new(review.clone(), turn, project.clone(), cx));
+                let workspace_handle = cx.weak_entity();
+                let pane = cx.new(|cx| {
+                    ReviewPane::new(review.clone(), turn, project.clone(), workspace_handle, cx)
+                });
                 workspace.add_item_to_active_pane(Box::new(pane.clone()), None, true, window, cx);
                 pane
             }
         };
         pane.update(cx, |pane, cx| pane.show_next(window, cx));
+    }
+}
+
+/// Opens the turn's pane, without focusing it, when files of this workspace's project changed during
+/// the turn without review.
+fn show_unreviewed_changes(
+    workspace: &mut Workspace,
+    turn: TurnId,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let project = workspace.project().clone();
+    let in_project = review.read(cx).unreviewed_changes(turn).any(|path| {
+        project
+            .read(cx)
+            .project_path_for_absolute_path(path, cx)
+            .is_some()
+    });
+    let has_pane = workspace
+        .items_of_type::<ReviewPane>(cx)
+        .any(|pane| pane.read(cx).turn == turn);
+    if in_project && !has_pane {
+        let workspace_handle = cx.weak_entity();
+        let pane = cx.new(|cx| ReviewPane::new(review, turn, project, workspace_handle, cx));
+        workspace.add_item_to_active_pane(Box::new(pane), None, false, window, cx);
     }
 }
 
@@ -210,6 +247,7 @@ pub struct ReviewPane {
     review: Entity<AgentReview>,
     turn: TurnId,
     project: Entity<Project>,
+    workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     current: Option<CurrentReview>,
     comment_editor: Option<Entity<Editor>>,
@@ -222,12 +260,14 @@ impl ReviewPane {
         review: Entity<AgentReview>,
         turn: TurnId,
         project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             review,
             turn,
             project,
+            workspace,
             focus_handle: cx.focus_handle(),
             current: None,
             comment_editor: None,
@@ -276,7 +316,10 @@ impl ReviewPane {
                             this.show_next(window, cx);
                         }
                         AgentReviewEvent::TurnEnded(ended) if *ended == turn => {
-                            if this.current.is_none() {
+                            // A turn with unreviewed changes stays on screen so the user sees them.
+                            let unreviewed =
+                                review.read(cx).unreviewed_changes(turn).next().is_some();
+                            if this.current.is_none() && !unreviewed {
                                 cx.emit(ReviewPaneEvent::Close);
                             }
                         }
@@ -320,7 +363,6 @@ impl ReviewPane {
             None => {
                 self.current = None;
                 self.current_hunk = None;
-                window.focus(&self.focus_handle, cx);
                 cx.notify();
             }
         }
@@ -629,7 +671,12 @@ impl ReviewPane {
                         Label::new(resolution_label(entry.resolution))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
-                    ),
+                    )
+                    .children(entry.rule.as_ref().map(|rule| {
+                        Label::new(format!("by rule {}", rule.describe()))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                    })),
             );
         }
         for (id, path) in open {
@@ -648,6 +695,48 @@ impl ReviewPane {
                     ),
             );
         }
+
+        let unreviewed = review
+            .unreviewed_changes(self.turn)
+            .cloned()
+            .collect::<Vec<_>>();
+        let unreviewed_section = (!unreviewed.is_empty()).then(|| {
+            let mut section = v_flex().gap_0p5().child(
+                Label::new(format!(
+                    "{} {} changed without review",
+                    unreviewed.len(),
+                    if unreviewed.len() == 1 {
+                        "file"
+                    } else {
+                        "files"
+                    }
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Warning),
+            );
+            for (index, path) in unreviewed.into_iter().enumerate() {
+                let workspace = self.workspace.clone();
+                section = section.child(
+                    Button::new(("unreviewed-file", index), path.display().to_string())
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Subtle)
+                        .tooltip(Tooltip::text(
+                            "Open the file; its git gutter shows the change",
+                        ))
+                        .on_click(move |_, window, cx| {
+                            let path = path.clone();
+                            if let Err(error) = workspace.update(cx, |workspace, cx| {
+                                workspace
+                                    .open_abs_path(path, OpenOptions::default(), window, cx)
+                                    .detach_and_log_err(cx);
+                            }) {
+                                log::debug!("workspace closed: {error}");
+                            }
+                        }),
+                );
+            }
+            section
+        });
 
         v_flex()
             .p_2()
@@ -673,6 +762,7 @@ impl ReviewPane {
                     )),
             )
             .child(files)
+            .children(unreviewed_section)
     }
 
     fn render_file_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -695,6 +785,10 @@ impl ReviewPane {
             _ => "Move the cursor into a hunk (alt-j / alt-k)".into(),
         };
         let path = edit.map_or_else(String::new, |edit| edit.abs_path().display().to_string());
+        let rule = self.current_review_id().and_then(|id| {
+            let review = self.review.read(cx).review(id)?;
+            Some(format!("Asked by rule {}", review.rule()?.describe()))
+        });
         let can_submit = resolution.is_some_and(|resolution| !resolution.is_pending());
 
         v_flex()
@@ -706,6 +800,11 @@ impl ReviewPane {
                 h_flex()
                     .gap_2()
                     .child(Label::new(path).size(LabelSize::Small))
+                    .children(
+                        rule.map(|rule| {
+                            Label::new(rule).size(LabelSize::Small).color(Color::Accent)
+                        }),
+                    )
                     .child(div().flex_1())
                     .child(Label::new(status).size(LabelSize::Small)),
             )
