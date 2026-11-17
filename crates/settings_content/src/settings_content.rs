@@ -410,7 +410,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
         call_hierarchy, command_palette, file_finder, git_panel, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
-        agent_servers, agent_review, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
+        agent_servers, agent_review, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics, // fyx: agent_review
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,

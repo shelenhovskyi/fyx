@@ -377,6 +377,11 @@ impl AgentReview {
             }
         }
         if added {
+            log::info!(
+                "fyx: agent review: {} files changed without review in {turn:?}: {:?}",
+                unreviewed.len(),
+                unreviewed
+            );
             cx.emit(AgentReviewEvent::UnreviewedChanges(turn));
             cx.notify();
         }
@@ -406,6 +411,14 @@ impl AgentReview {
     }
 
     fn record(&mut self, turn: TurnId, edit: &ProposedEdit, rule: Option<RuleMatch>) {
+        log::info!(
+            "fyx: agent review: {} {:?} in {turn:?}{}",
+            edit.abs_path().display(),
+            edit.resolution(),
+            rule.as_ref()
+                .map(|rule| format!(" by rule {}", rule.describe()))
+                .unwrap_or_default()
+        );
         self.turn_history.entry(turn).or_default().push(TurnEntry {
             path: edit.abs_path().to_path_buf(),
             resolution: edit.resolution(),
@@ -945,7 +958,7 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
             }),
             None => true,
         };
-        let rules_path = root.join(RULES_FILE);
+        let rules_path = review_rules::rules_file_path(&root);
         let review = review.downgrade();
         let project = project.downgrade();
         let fs = fs.clone();
