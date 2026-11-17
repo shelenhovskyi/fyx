@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Builds the Fyx demo UI extensions for wasm32-wasip2 and copies each component next to its
+# extension.toml as fyx_ui.wasm, so each demo directory loads as a UI extension.
+# Usage: script/fyx-build-demos [--release] [extra cargo build args, e.g. -j 2]
+# Then point the dev build at the directories, e.g. on Windows:
+#   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+demos=(fyx_demo_counter fyx_demo_todo)
+profile=debug
+cargo_args=()
+if [[ "${1:-}" == "--release" ]]; then
+    profile=release
+    cargo_args+=(--release)
+    shift
+fi
+for demo in "${demos[@]}"; do cargo_args+=(-p "$demo"); done
+
+cargo build --target wasm32-wasip2 "${cargo_args[@]}" "$@"
+
+# Honors CARGO_TARGET_DIR and .cargo/config.toml; JSON escapes Windows backslashes, so turn
+# them into forward slashes, which Git Bash accepts.
+target_dir=$(
+    cargo metadata --format-version 1 --no-deps \
+        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' \
+        | sed 's#\\\\#/#g'
+)
+if [[ -z "$target_dir" ]]; then
+    echo "fyx-build-demos: could not read the target directory from cargo metadata" >&2
+    exit 1
+fi
+
+separator=":"
+dirs=()
+for demo in "${demos[@]}"; do
+    component="$target_dir/wasm32-wasip2/$profile/$demo.wasm"
+    cp "$component" "extensions/$demo/fyx_ui.wasm"
+    dir="$PWD/extensions/$demo"
+    if command -v cygpath >/dev/null 2>&1; then
+        dir=$(cygpath -w "$dir")
+        separator=";"
+    fi
+    dirs+=("$dir")
+    echo "fyx-build-demos: $component -> extensions/$demo/fyx_ui.wasm"
+done
+
+joined=$(IFS="$separator"; echo "${dirs[*]}")
+echo "FYX_UI_DEV_EXTENSIONS=$joined"

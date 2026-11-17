@@ -19273,6 +19273,7 @@ dependencies = [
 name = "ui_ext_sdk"
 version = "0.1.0"
 dependencies = [
+ "ui_ext",
  "wit-bindgen 0.41.0",
 ]
 
