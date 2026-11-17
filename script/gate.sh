@@ -49,7 +49,16 @@ echo "gate: ${changed_crates//$'\n'/ }"
 
 cargo check "${pkgs[@]}" 2>&1 | tail -20
 cargo clippy "${pkgs[@]}" --all-targets -- --deny warnings 2>&1 | tail -30
-cargo nextest run "${pkgs[@]}" --no-tests=pass 2>&1 | tail -30
+# Known local issue (docs/fyx/ci.md, "Known local issues"): on a machine whose DNS answers
+# example.com with a loopback address, upstream's fetch-tool redirect tests fail because they
+# resolve example.com for real. Skip exactly those, loudly, and never in CI.
+nextest_filter=()
+if [[ "${CI:-}" != "true" && " ${pkgs[*]} " == *" agent "* ]] \
+    && powershell -NoProfile -Command "exit [int](-not ((Resolve-DnsName example.com -Type A -ErrorAction SilentlyContinue).IPAddress -match '^127\.'))" 2>/dev/null; then
+    echo "gate: WARNING: example.com resolves to loopback here; skipping agent's 3 fetch-tool redirect tests (CI runs them)"
+    nextest_filter=(-E 'not (test(test_fetch_tool_follows_same_host_redirect) | test(test_fetch_tool_refuses_redirect_to_loopback) | test(test_fetch_tool_reauthorizes_redirect_to_new_host))')
+fi
+cargo nextest run "${pkgs[@]}" --no-tests=pass "${nextest_filter[@]}" 2>&1 | tail -30
 if [[ "$(git config --bool core.symlinks || echo true)" == "false" ]]; then
     script/fyx-check-licenses-index # symlinks checked out as text files (Windows without Developer Mode)
 else
