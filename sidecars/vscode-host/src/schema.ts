@@ -184,16 +184,22 @@ export function propsKind(p: Props): string {
 const U32 = 0xffffffff;
 const U16 = 0xffff;
 
+/** Host limits (`ui_ext::TreeLimits`, W2): per update and per retained tree. */
+export const MAX_PATCHES_PER_UPDATE = 2048;
+export const MAX_NODES = 16384;
+
 export function validateNodes(nodes: readonly Node[], options: { singleRoot?: boolean } = {}): string[] {
   const errors: string[] = [];
-  const seen = new Set<NodeId>();
+  const seen = new Map<NodeId, Node>();
   let roots = 0;
+  if (nodes.length > MAX_NODES) errors.push(`${nodes.length} nodes exceed the host cap of ${MAX_NODES}`);
   for (const n of nodes) {
     if (!Number.isInteger(n.id) || n.id < 0 || n.id > U32) errors.push(`node id ${n.id} is not a u32`);
     if (seen.has(n.id)) errors.push(`duplicate node id ${n.id}`);
     if (n.parent === null) roots++;
     else if (!seen.has(n.parent)) errors.push(`node ${n.id}: parent ${n.parent} does not precede it`);
-    seen.add(n.id);
+    else if (!("flex" in seen.get(n.parent)!.props)) errors.push(`node ${n.id}: parent ${n.parent} is not a flex (only flex nodes have children)`);
+    seen.set(n.id, n);
     errors.push(...validateProps(n.props).map((e) => `node ${n.id}: ${e}`));
   }
   if (options.singleRoot && roots !== 1) errors.push(`expected exactly one root, found ${roots}`);
@@ -271,6 +277,7 @@ export function validateProps(p: Props): string[] {
 export function applyUpdate(tree: readonly Node[], update: Update): Node[] {
   if (update === "unchanged") return [...tree];
   if ("replace" in update) return [...update.replace];
+  if (update.patches.length > MAX_PATCHES_PER_UPDATE) throw new Error(`${update.patches.length} patches exceed the host cap of ${MAX_PATCHES_PER_UPDATE}`);
   let nodes = [...tree];
   for (const patch of update.patches) {
     if ("set-props" in patch) {

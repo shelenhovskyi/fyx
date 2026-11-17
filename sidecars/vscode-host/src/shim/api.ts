@@ -390,9 +390,25 @@ function isPanelContainer(ctx: HostContext, container: string): boolean {
   return panel.some((c) => c.id === container);
 }
 
-function notImplementedFunction(ctx: HostContext, api: string): (...args: unknown[]) => never {
+/**
+ * Probe mode (`FYX_VSCODE_PROBE=1`, coverage runs only): a missing API is still recorded, but
+ * returns an inert stub instead of throwing, so activation continues and the report lists every
+ * API an extension needs, not just the first one. Never for real use: the extension then runs
+ * against stubs that silently do nothing.
+ */
+export const PROBE_MODE = process.env.FYX_VSCODE_PROBE === "1";
+
+/** Callable, constructible, every property is itself inert; awaiting it does not hang. */
+export const inert: any = new Proxy(function inert() {}, {
+  get: (_t, p) => (p === "then" || p === "toJSON" ? undefined : p === Symbol.toPrimitive ? () => "" : p === Symbol.iterator ? function* () {} : inert),
+  apply: () => inert,
+  construct: () => inert,
+});
+
+function notImplementedFunction(ctx: HostContext, api: string): (...args: unknown[]) => any {
   return () => {
     ctx.coverage.missing(api);
+    if (PROBE_MODE) return inert;
     throw new NotImplementedInFyx(api);
   };
 }
@@ -411,6 +427,7 @@ export function namespace<T extends object>(ctx: HostContext, name: string, impl
       if (known?.functions.includes(prop) || known?.events.includes(prop)) return notImplementedFunction(ctx, api);
       if (known?.values.includes(prop)) {
         ctx.coverage.missing(api);
+        if (PROBE_MODE) return undefined;
         throw new NotImplementedInFyx(api);
       }
       if (prop !== "then" && prop !== "toJSON") ctx.coverage.unknownName(api);
@@ -446,6 +463,7 @@ function moduleProxy(ctx: HostContext, top: Record<string, unknown>): Record<str
           // A constructor that fails on use; static members fail too.
           const fail = () => {
             ctx.coverage.missing(api);
+            if (PROBE_MODE) return inert;
             throw new NotImplementedInFyx(api);
           };
           stub = new Proxy(function NotImplemented() {}, {
@@ -475,6 +493,7 @@ export function notImplementedObject(ctx: HostContext, api: string): object {
         if (typeof prop === "symbol" || prop === "then" || prop === "toJSON") return undefined;
         const name = `${api}.${prop}`;
         ctx.coverage.missing(name);
+        if (PROBE_MODE) return inert;
         throw new NotImplementedInFyx(name);
       },
     },

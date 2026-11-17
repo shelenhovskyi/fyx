@@ -63,3 +63,18 @@ test("the permission model blocks workspace.fs outside the granted folders", asy
     rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test("probe mode records missing APIs without throwing", async () => {
+  const dir = tempDir("fyx-probe-");
+  const host = MockHost.spawn({ permission: { read: [dir, fixture], write: [dir] }, env: { FYX_VSCODE_PROBE: "1" } });
+  try {
+    await host.initialize({ extensionPath: fixture, workspaceFolders: [Uri.file(dir).toString()], storageDir: join(dir, "storage") });
+    await host.openDocument(Uri.file(join(dir, "a.txt")).toString(), "x", "plaintext");
+    await host.settle();
+    assert.equal(await host.executeCommand("sink.webview"), null, "the stub returns instead of throwing");
+    assert.equal((await host.coverage()).notImplemented["vscode.window.createWebviewPanel"], 1);
+  } finally {
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

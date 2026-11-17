@@ -25,7 +25,9 @@ for (const { id, version } of list) {
     if (!meta.license || !ALLOWED_LICENSES.has(meta.license)) throw new Error(`license ${meta.license} is not on the permissive list`);
     const download = new URL(meta.files.download);
     if (download.hostname !== "open-vsx.org") throw new Error(`refusing download from ${download.hostname}`);
-    const expected = meta.files.sha256 ? (await (await fetch(meta.files.sha256)).text()).trim().split(/\s+/)[0].toLowerCase() : undefined;
+    const shaUrl = meta.files.sha256 ? new URL(meta.files.sha256) : undefined;
+    if (shaUrl && shaUrl.hostname !== "open-vsx.org") throw new Error(`refusing checksum from ${shaUrl.hostname}`);
+    const expected = shaUrl ? (await (await fetch(shaUrl)).text()).trim().split(/\s+/)[0].toLowerCase() : undefined;
     let data: Buffer;
     if (existsSync(target)) data = readFileSync(target);
     else {

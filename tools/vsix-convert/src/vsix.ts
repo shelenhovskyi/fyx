@@ -140,6 +140,7 @@ export function convertExtension(files: ExtensionFiles, options: { platform?: Pl
     result.keymap = keymap;
     for (const w of keyWarnings) warnings.push(`keybinding ${w}`);
   }
+  result.warnings = [...new Set(warnings)];
   return result;
 }
 

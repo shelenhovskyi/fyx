@@ -41,6 +41,7 @@ interface Result {
   kind: string;
   converter?: string;
   sidecar?: Record<string, unknown>;
+  probe?: Record<string, unknown>;
 }
 
 mkdirSync(outDir, { recursive: true });
@@ -58,18 +59,37 @@ for (const ext of list) {
   result.converter = (conv.stdout || conv.stderr).trim().replace(/ → .*$/, "");
   const extRoot = unpackVsix(vsix, join(cache, "unpacked"));
   const manifest = JSON.parse(readFileSync(join(extRoot, "package.json"), "utf8"));
-  if (manifest.main) result.sidecar = await runSidecar(ext.id, extRoot, manifest);
+  if (manifest.main) {
+    result.sidecar = await runSidecar(ext.id, extRoot, manifest, false);
+    // Second pass with missing APIs stubbed, to list everything the extension would need.
+    const probe = await runSidecar(ext.id, extRoot, manifest, true);
+    result.probe = { activated: probe.activated, activationError: probe.activationError, notImplemented: probe.notImplemented };
+  }
   results.push(result);
   writeFileSync(join(outDir, `${ext.id}.json`), JSON.stringify(result, null, 2));
   const s = result.sidecar as { activated?: boolean; notImplemented?: Record<string, number> } | undefined;
   console.log(`${ext.id}: ${result.converter}${s ? ` | activated=${s.activated} notImplemented=${Object.keys(s.notImplemented ?? {}).length}` : ""}`);
 }
 writeFileSync(join(outDir, "summary.json"), JSON.stringify(results, null, 2));
-writeFileSync(join(outDir, "report.md"), renderMarkdown(results));
+const markdown = renderMarkdown(results);
+writeFileSync(join(outDir, "report.md"), markdown);
 console.log(`wrote ${join(outDir, "report.md")}`);
+// docs/vscode-coverage.md keeps its prose; only the block between the markers is regenerated.
+const docs = resolve(root, "..", "..", "docs", "vscode-coverage.md");
+if (!only.length && existsSync(docs)) {
+  const text = readFileSync(docs, "utf8");
+  const begin = "<!-- BEGIN GENERATED: npm run coverage -->";
+  const end = "<!-- END GENERATED -->";
+  const a = text.indexOf(begin);
+  const b = text.indexOf(end);
+  if (a >= 0 && b > a) {
+    writeFileSync(docs, `${text.slice(0, a + begin.length)}\n\n${markdown}\n${text.slice(b)}`);
+    console.log(`updated ${docs}`);
+  }
+}
 
-async function runSidecar(id: string, extRoot: string, manifest: Record<string, any>): Promise<Record<string, unknown>> {
-  const work = join(cache, "work", id);
+async function runSidecar(id: string, extRoot: string, manifest: Record<string, any>, probe: boolean): Promise<Record<string, any>> {
+  const work = join(cache, "work", probe ? `${id}.probe` : id);
   rmSync(work, { recursive: true, force: true });
   const ws = join(work, "workspace");
   const storage = join(work, "storage");
@@ -85,7 +105,7 @@ async function runSidecar(id: string, extRoot: string, manifest: Record<string, 
   const host = MockHost.spawn({
     permission: { read: [extRoot, work], write: [work] },
     cwd: work,
-    env: { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: join(home, ".cache"), XDG_CONFIG_HOME: join(home, ".config") },
+    env: { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: join(home, ".cache"), XDG_CONFIG_HOME: join(home, ".config"), ...(probe ? { FYX_VSCODE_PROBE: "1" } : {}) },
   });
   const started = Date.now();
   const commandResults: Record<string, string> = {};
@@ -148,7 +168,7 @@ async function runSidecar(id: string, extRoot: string, manifest: Record<string, 
         await withTimeout(host.executeCommand(command), COMMAND_TIMEOUT_MS, command);
         commandResults[command] = "ok";
       } catch (err) {
-        commandResults[command] = `error: ${(err as Error).message.split("\n")[0].slice(0, 160)}`;
+        commandResults[command] = `error: ${scrubPaths((err as Error).message.split("\n")[0]).slice(0, 160)}`;
       }
       await host.settle(10);
     }
@@ -191,7 +211,7 @@ async function runSidecar(id: string, extRoot: string, manifest: Record<string, 
     await host.settle(30);
 
     const coverage = await withTimeout(host.coverage(), 5000, "coverage");
-    host.writeTraffic(join(outDir, `${id}.traffic.jsonl`));
+    if (!probe) host.writeTraffic(join(outDir, `${id}.traffic.jsonl`));
     const edited = [...new Set(host.traffic.filter((t) => "method" in t.message && t.message.method === "vscode/applyEdit").flatMap((t) => ((t.message as { params: { edits: { uri: string }[] } }).params.edits ?? []).map((e) => opened.find((o) => o.uri === e.uri)?.languageId ?? e.uri)))];
     return {
       ...coverage,
@@ -204,7 +224,7 @@ async function runSidecar(id: string, extRoot: string, manifest: Record<string, 
         decorationTypes: host.decorationTypes.size,
         decoratedRanges: peakDecorations(host),
         providers: [...kinds],
-        messages: host.messages.map((m) => `${m.severity}: ${m.message}`.slice(0, 100)),
+        messages: host.messages.map((m) => scrubPaths(`${m.severity}: ${m.message}`).slice(0, 100)),
         editedDocuments: edited,
         hostCommands: [...new Set(host.hostCommands.map((c) => c.command))],
         contextKeys: [...host.contextKeys.keys()],
@@ -249,7 +269,7 @@ function describeTree(nodes: Node[]): string {
     .map(([k, v]) => `${v} ${k}`)
     .join(", ");
   const texts = textOf(nodes)
-    .map((t) => t.replace(/\s+/g, " ").trim())
+    .map((t) => scrubPaths(t).replace(/\s+/g, " ").trim())
     .filter(Boolean)
     .map((t) => (t.length > 60 ? `${t.slice(0, 57)}…` : t));
   return `${counts}${texts.length ? `: ${texts.slice(0, 6).join(" · ")}` : ""}`;
@@ -257,14 +277,14 @@ function describeTree(nodes: Node[]): string {
 
 function renderMarkdown(rs: Result[]): string {
   const lines: string[] = [];
-  lines.push("| Extension | Converter | Activated | APIs used | Not implemented | Commands ok/run |");
-  lines.push("|---|---|---|---|---|---|");
+  lines.push("| Extension | Converter | Activated | APIs used | Not implemented | Commands ok/run | Probe: all missing APIs |");
+  lines.push("|---|---|---|---|---|---|---|");
   for (const r of rs) {
     const s = r.sidecar as any;
     const cmds = s?.commandResults ? Object.values(s.commandResults as Record<string, string>) : [];
     const ran = cmds.filter((c) => !c.startsWith("skipped"));
     lines.push(
-      `| ${r.id}@${r.version} | ${(r.converter ?? "").replace(/^[^:]+: /, "").replace(/\|/g, "/")} | ${s ? (s.activated ? "yes" : `**no**${s.activationError ? `: ${escape(s.activationError).slice(0, 120)}` : ""}`) : "n/a (no code)"} | ${s ? Object.keys(s.used ?? {}).length : ""} | ${s ? Object.keys(s.notImplemented ?? {}).map((a) => `\`${a}\``).join(", ") || "none" : ""} | ${s ? `${ran.filter((c) => c === "ok").length}/${ran.length}` : ""} |`,
+      `| ${r.id}@${r.version} | ${(r.converter ?? "").replace(/^[^:]+: /, "").replace(/\|/g, "/")} | ${s ? (s.activated ? "yes" : `**no**${s.activationError ? `: ${escape(s.activationError).slice(0, 120)}` : ""}`) : "n/a (no code)"} | ${s ? Object.keys(s.used ?? {}).length : ""} | ${s ? Object.keys(s.notImplemented ?? {}).map((a) => `\`${a}\``).join(", ") || "none" : ""} | ${s ? `${ran.filter((c) => c === "ok").length}/${ran.length}` : ""} | ${r.probe ? Object.keys((r.probe as any).notImplemented ?? {}).map((a) => `\`${a.replace(/^vscode\./, "")}\``).join(", ") || "none" : ""} |`,
     );
   }
   for (const r of rs) {
@@ -279,9 +299,15 @@ function renderMarkdown(rs: Result[]): string {
     if (Object.keys(s.unknown ?? {}).length) lines.push(`Names VS Code lacks too (proposed/feature detection): ${Object.keys(s.unknown).map((a) => `\`${a}\``).join(", ")}`, "");
     const e = s.effects ?? {};
     lines.push(`Effects seen by the host: ${e.diagnostics ?? 0} diagnostics,${e.editorOptions && Object.keys(e.editorOptions).length ? ` editor options ${escape(JSON.stringify(Object.values(e.editorOptions)[0]))},` : ""} ${e.decorationTypes ?? 0} decoration types / ${e.decoratedRanges ?? 0} ranges, providers [${(e.providers ?? []).join(", ")}], edited [${(e.editedDocuments ?? []).join(", ")}], host commands [${(e.hostCommands ?? []).join(", ")}]${e.messages?.length ? `, messages: ${e.messages.map(escape).join(" / ")}` : ""}`, "");
-    for (const [sid, d] of Object.entries(s.surfaces ?? {})) lines.push(`- surface \`${sid.replace(`${r.id}/`, "")}\`: ${escape(String(d))}`);
-    const cmdLines = Object.entries(s.commandResults ?? {}).map(([c, v]) => `- \`${c}\`: ${escape(String(v))}`);
-    if (cmdLines.length) lines.push("", "Commands:", ...cmdLines);
+    for (const [sid, d] of Object.entries(s.surfaces ?? {})) {
+      if (/^1 flex$|No output yet\.$/.test(String(d))) continue;
+      lines.push(`- surface \`${sid.replace(`${r.id}/`, "")}\`: ${escape(String(d))}`);
+    }
+    const cmds = Object.entries((s.commandResults ?? {}) as Record<string, string>);
+    if (cmds.length) {
+      const ok = cmds.filter(([, v]) => v === "ok").length;
+      lines.push("", `Commands: ${ok} of ${cmds.length} ran without error.`, ...cmds.filter(([, v]) => v !== "ok").map(([c, v]) => `- \`${c}\`: ${escape(v)}`));
+    }
     const feat = Object.entries(s.features ?? {}).map(([c, v]) => `- ${c}: ${escape(String(v))}`);
     if (feat.length) lines.push("", "Language features:", ...feat);
     if (s.errors?.length) lines.push("", "Errors:", ...s.errors.slice(0, 6).map((x: string) => `- ${escape(x).slice(0, 220)}`));
@@ -291,6 +317,15 @@ function renderMarkdown(rs: Result[]): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** Markdown-safe, with machine-specific paths replaced by placeholders. */
 function escape(s: string): string {
-  return s.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").replace(/</g, "&lt;");
+  return scrubPaths(s).replace(/\|/g, "\\|").replace(/\r?\n/g, " ").replace(/</g, "&lt;");
+}
+
+/** Machine-specific absolute paths (and file: URIs) become `…/<last segment>`. */
+function scrubPaths(text: string): string {
+  return text.replace(/(?:file:\/{2,3})?(?:[a-zA-Z](?::|%3A)|\/(?=Users\/|home\/|projects\/))[\\/][^\s"'`|()]*/g, (m) => {
+    const parts = m.split(/[\\/]/).filter(Boolean);
+    return `…/${parts[parts.length - 1] ?? ""}`;
+  });
 }

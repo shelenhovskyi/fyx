@@ -5,7 +5,7 @@ import { applyUpdate, diff, node, props, validateNodes, type Node } from "../src
 const tree: Node[] = [
   node(1, null, props.flex({ direction: "row" })),
   node(2, 1, props.text("a")),
-  node(3, 1, props.button("b", { icon: "check" })),
+  node(3, 1, props.flex({ direction: "row", gap: 4 })),
   node(4, 3, props.icon("x")),
 ];
 
@@ -23,6 +23,7 @@ test("validateNodes enforces ids, parent order and prop types", () => {
   assert.match(validateNodes([node(1, null, { text: { content: "x", color: "red" as never, bold: false, monospace: false } })]).join(), /unknown color token/);
   assert.match(validateNodes([node(1, null, props.list(-1, 22))]).join(), /row-count/);
   assert.match(validateNodes([node(1, null, props.text("a")), node(2, null, props.text("b"))], { singleRoot: true }).join(), /exactly one root/);
+  assert.match(validateNodes([node(1, null, props.button("b")), node(2, 1, props.text("x"))]).join(), /only flex nodes have children/);
 });
 
 test("diff produces patches that applyUpdate replays", () => {
@@ -56,4 +57,5 @@ test("applyUpdate rejects invalid patches", () => {
   assert.throws(() => applyUpdate(tree, { patches: [{ insert: { node: node(2, 1, props.text("dup")), before: null } }] }), /already exists/);
   assert.throws(() => applyUpdate(tree, { patches: [{ insert: { node: node(9, 1, props.text("x")), before: 4 } }] }), /not a sibling/);
   assert.deepEqual(applyUpdate(tree, { patches: [{ remove: 3 }] }).map((n) => n.id), [1, 2], "remove takes the subtree");
+  assert.throws(() => applyUpdate(tree, { patches: Array.from({ length: 2049 }, () => ({ remove: 2 })) }), /host cap/);
 });
