@@ -186,11 +186,16 @@ async fn test_demo_counter_round_trip(cx: &mut TestAppContext) {
     // Decrement at 0 changes nothing.
     let update = click(DECREMENT).await;
     assert_eq!(update, Update::Unchanged);
-    assert!(!tree.apply_update(update).expect("valid update"));
+    assert!(tree.apply_update(update).expect("valid update").is_empty());
 
     let update = click(INCREMENT).await;
     assert_eq!(set_props_ids(&update), [LABEL, DECREMENT, RESET, LIST]);
-    assert!(tree.apply_update(update).expect("valid patches"));
+    // The list node is among the touched ids, so the renderer knows to re-request its rows.
+    assert!(
+        tree.apply_update(update)
+            .expect("valid patches")
+            .contains(&LIST)
+    );
     assert_eq!(text_of(&tree, LABEL), "Count: 1");
     assert!(!is_disabled(&tree, DECREMENT));
     assert!(!is_disabled(&tree, RESET));

@@ -2,7 +2,7 @@
 //! patches. Every update is validated and applied atomically, so a bad update from an extension
 //! leaves the previous tree intact.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::types::{InsertOp, Node, NodeId, Patch, Props, Update};
 
@@ -149,49 +149,53 @@ impl Tree {
         nodes
     }
 
-    /// Applies an update atomically. Returns whether the tree changed.
-    pub fn apply_update(&mut self, update: Update) -> Result<bool, TreeError> {
+    /// Applies an update atomically and returns the ids it touched: `set-props` targets, inserted
+    /// ids and every removed id (whole subtrees); for `replace`, the old and the new ids. Empty means
+    /// nothing changed. A touched id that is still a list node needs its rows requested again.
+    pub fn apply_update(&mut self, update: Update) -> Result<BTreeSet<NodeId>, TreeError> {
         match update {
-            Update::Unchanged => Ok(false),
-            Update::Replace(nodes) => {
-                self.replace(nodes)?;
-                Ok(true)
-            }
-            Update::Patches(patches) => {
-                let changed = !patches.is_empty();
-                self.apply_patches(patches)?;
-                Ok(changed)
-            }
+            Update::Unchanged => Ok(BTreeSet::new()),
+            Update::Replace(nodes) => self.replace(nodes),
+            Update::Patches(patches) => self.apply_patches(patches),
         }
     }
 
-    /// Replaces the whole tree atomically.
-    pub fn replace(&mut self, nodes: Vec<Node>) -> Result<(), TreeError> {
+    /// Replaces the whole tree atomically. Returns the old and the new ids.
+    pub fn replace(&mut self, nodes: Vec<Node>) -> Result<BTreeSet<NodeId>, TreeError> {
         self.check_update_size(nodes.len())?;
         let mut next = Self::new(self.limits);
         for node in nodes {
             next.insert(InsertOp { node, before: None })?;
         }
+        let touched = self
+            .nodes
+            .keys()
+            .chain(next.nodes.keys())
+            .copied()
+            .collect();
         *self = next;
-        Ok(())
+        Ok(touched)
     }
 
-    /// Applies patches in order, atomically: on error the tree is left as it was.
-    pub fn apply_patches(&mut self, patches: Vec<Patch>) -> Result<(), TreeError> {
+    /// Applies patches in order, atomically: on error the tree is left as it was. Returns the
+    /// touched ids, as [`Tree::apply_update`] does.
+    pub fn apply_patches(&mut self, patches: Vec<Patch>) -> Result<BTreeSet<NodeId>, TreeError> {
         self.check_update_size(patches.len())?;
+        let mut touched = BTreeSet::new();
         if patches.is_empty() {
-            return Ok(());
+            return Ok(touched);
         }
         // Patching a copy keeps rollback trivial; updates are per input event, not per frame.
         let mut next = self.clone();
         for (index, patch) in patches.into_iter().enumerate() {
-            next.apply_patch(patch).map_err(|error| TreeError::Patch {
-                index,
-                error: Box::new(error),
-            })?;
+            next.apply_patch(patch, &mut touched)
+                .map_err(|error| TreeError::Patch {
+                    index,
+                    error: Box::new(error),
+                })?;
         }
         *self = next;
-        Ok(())
+        Ok(touched)
     }
 
     fn check_update_size(&self, count: usize) -> Result<(), TreeError> {
@@ -204,12 +208,24 @@ impl Tree {
         Ok(())
     }
 
-    fn apply_patch(&mut self, patch: Patch) -> Result<(), TreeError> {
+    fn apply_patch(
+        &mut self,
+        patch: Patch,
+        touched: &mut BTreeSet<NodeId>,
+    ) -> Result<(), TreeError> {
         match patch {
-            Patch::SetProps(id, props) => self.set_props(id, props),
-            Patch::Insert(op) => self.insert(op),
-            Patch::Remove(id) => self.remove(id),
+            Patch::SetProps(id, props) => {
+                self.set_props(id, props)?;
+                touched.insert(id);
+            }
+            Patch::Insert(op) => {
+                let id = op.node.id;
+                self.insert(op)?;
+                touched.insert(id);
+            }
+            Patch::Remove(id) => self.remove(id, touched)?,
         }
+        Ok(())
     }
 
     fn set_props(&mut self, id: NodeId, props: Props) -> Result<(), TreeError> {
@@ -274,8 +290,9 @@ impl Tree {
         Ok(())
     }
 
-    fn remove(&mut self, id: NodeId) -> Result<(), TreeError> {
+    fn remove(&mut self, id: NodeId, removed: &mut BTreeSet<NodeId>) -> Result<(), TreeError> {
         let node = self.nodes.remove(&id).ok_or(TreeError::UnknownNode(id))?;
+        removed.insert(id);
         let siblings = match node.parent {
             Some(parent_id) => self
                 .nodes
@@ -288,8 +305,9 @@ impl Tree {
         }
         let mut pending = node.children;
         while let Some(child) = pending.pop() {
-            if let Some(child) = self.nodes.remove(&child) {
-                pending.extend(child.children);
+            if let Some(node) = self.nodes.remove(&child) {
+                removed.insert(child);
+                pending.extend(node.children);
             }
         }
         Ok(())
@@ -600,17 +618,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_update_reports_changes() {
+    fn apply_update_reports_touched_ids() {
         let mut tree = sample();
-        assert_eq!(tree.apply_update(Update::Unchanged), Ok(false));
-        assert_eq!(tree.apply_update(Update::Patches(Vec::new())), Ok(false));
+        let ids = |ids: &[NodeId]| ids.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(tree.apply_update(Update::Unchanged), Ok(ids(&[])));
+        assert_eq!(tree.apply_update(Update::Patches(Vec::new())), Ok(ids(&[])));
         assert_eq!(
-            tree.apply_update(Update::Patches(vec![Patch::Remove(2)])),
-            Ok(true)
+            tree.apply_update(Update::Patches(vec![
+                Patch::SetProps(2, text_props("changed")),
+                insert(text(5, Some(1), "new"), None),
+            ])),
+            Ok(ids(&[2, 5]))
+        );
+        // Removing 3 removes its child 4 too.
+        assert_eq!(
+            tree.apply_update(Update::Patches(vec![Patch::Remove(3)])),
+            Ok(ids(&[3, 4]))
         );
         assert_eq!(
             tree.apply_update(Update::Replace(vec![text(10, None, "new")])),
-            Ok(true)
+            Ok(ids(&[1, 2, 5, 10]))
         );
         assert_eq!(tree.roots(), &[10]);
         assert_eq!(tree.len(), 1);
