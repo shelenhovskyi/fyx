@@ -2421,6 +2421,73 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_file_changed_during_review_is_not_written(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/p"), serde_json::json!({ "a.txt": OLD }))
+            .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let path = PathBuf::from(util::path!("/p/a.txt"));
+        let accept_held = |cx: &mut TestAppContext| {
+            let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+            review.update(cx, |review, cx| {
+                review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+                review.submit(id, cx).unwrap();
+            });
+        };
+
+        // The user edits the file while the agent's write waits for review.
+        let write = thread.update(cx, |thread, cx| {
+            thread.write_text_file(path.clone(), NEW.into(), cx)
+        });
+        cx.run_until_parked();
+        let project_path = project
+            .read_with(cx, |project, cx| project.find_project_path(&path, cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await
+            .unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "// user\n")], None, cx)
+        });
+        accept_held(cx);
+        let error = write.await.expect_err("a stale write must not land");
+        assert!(format!("{error:#}").contains("changed while your edit was under review"));
+        assert_eq!(fs.load(&path).await.unwrap(), OLD, "nothing written");
+
+        // Without a concurrent change, the accepted write lands.
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0.."// user\n".len(), "")], None, cx)
+        });
+        let write = thread.update(cx, |thread, cx| {
+            thread.write_text_file(path.clone(), NEW.into(), cx)
+        });
+        cx.run_until_parked();
+        accept_held(cx);
+        write.await.unwrap();
+        assert_eq!(fs.load(&path).await.unwrap(), NEW);
+    }
+
+    #[gpui::test]
     async fn review_mode_follows_the_setting(cx: &mut TestAppContext) {
         if review_mode_override().is_some() {
             // FYX_AGENT_REVIEW in the test environment overrides the setting.

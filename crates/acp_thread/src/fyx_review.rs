@@ -58,9 +58,10 @@ pub(crate) async fn gate_agent_write(
         return Ok((new_text, None));
     };
     let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone())?;
+    let version_before = cx.update(|cx| buffer.read(cx).version());
     let write = AgentWrite {
         session_id,
-        abs_path,
+        abs_path: abs_path.clone(),
         buffer: buffer.clone(),
         old_text: snapshot.text(),
         new_text,
@@ -69,12 +70,42 @@ pub(crate) async fn gate_agent_write(
         .update(|cx| gate.review_write(write, cx))
         .await
         .map_err(|error| feedback_error(format!("{error:#}")))?;
-    match outcome.content {
-        Some(content) => Ok((content, outcome.feedback)),
-        None => Err(feedback_error(outcome.feedback.unwrap_or_else(|| {
+    let Some(content) = outcome.content else {
+        return Err(feedback_error(outcome.feedback.unwrap_or_else(|| {
             "The user rejected this edit; the file is unchanged.".into()
-        }))),
-    }
+        })));
+    };
+    // A review can take as long as the user likes. The hunks were decided against the file as it was;
+    // if it changed meanwhile (the user, another agent, a reload) or went away, writing them would
+    // land changes nobody reviewed.
+    cx.update(|cx| {
+        let buffer = buffer.read(cx);
+        let path = abs_path.display();
+        if let Some(file) = buffer.file() {
+            if file.disk_state() == language::DiskState::Deleted {
+                return Err(feedback_error(format!(
+                    "{path} was deleted while your edit was under review, so nothing was written."
+                )));
+            }
+            if let Some(current) = file.as_local().map(|file| file.abs_path(cx))
+                && current != abs_path
+            {
+                return Err(feedback_error(format!(
+                    "{path} was moved to {} while your edit was under review, so nothing was \
+                     written.",
+                    current.display()
+                )));
+            }
+        }
+        if buffer.version().changed_since(&version_before) {
+            return Err(feedback_error(format!(
+                "{path} changed while your edit was under review, so nothing was written. Read \
+                 the file again and propose the edit against its current content."
+            )));
+        }
+        Ok(())
+    })?;
+    Ok((content, outcome.feedback))
 }
 
 /// An error that reaches the agent with the review feedback as its JSON-RPC message (and, as for any
