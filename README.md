@@ -1,5 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
 # Fyx
 
 Fyx is a code editor forked from [Zed](https://github.com/zed-industries/zed). It adds two things
