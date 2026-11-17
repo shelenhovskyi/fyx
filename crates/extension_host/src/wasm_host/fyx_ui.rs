@@ -13,6 +13,7 @@
 use std::{
     future::Future,
     ops::RangeInclusive,
+    path::{Component as PathComponent, Path},
     pin::{Pin, pin},
     sync::{Arc, Mutex, OnceLock, PoisonError},
     task::{Context, Poll, Waker},
@@ -20,6 +21,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
+use fs::Fs;
 use futures::{
     FutureExt as _, StreamExt as _,
     channel::{mpsc, oneshot},
@@ -27,6 +29,7 @@ use futures::{
 };
 use gpui::{AsyncApp, Task};
 use semver::Version;
+use serde::Deserialize;
 use ui_ext::{Tree, TreeLimits};
 use wasmtime::{
     Engine, Store, UpdateDeadline,
@@ -118,6 +121,80 @@ fn api_version_from_imports(component: &Component, engine: &Engine) -> Option<Ve
                 .or_else(|| name.strip_prefix("fyx:ui/types@"))?;
             Version::parse(version).ok()
         })
+}
+
+/// Capability a manifest must declare for each panel surface.
+pub const CAPABILITY_PANEL: &str = "ui:panel";
+/// Capability a manifest must declare for each status item surface.
+pub const CAPABILITY_STATUS_BAR: &str = "ui:status-bar";
+
+/// The `[fyx_ui]` table of an extension's `extension.toml`. Upstream's `ExtensionManifest` ignores
+/// unknown tables, so the same file stays installable in Zed.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiManifest {
+    /// The `fyx:ui` version the component implements.
+    pub api_version: Version,
+    /// Path of the component inside the extension directory, separate from `extension.wasm`.
+    pub component: String,
+    /// Capabilities the surfaces need: [`CAPABILITY_PANEL`], [`CAPABILITY_STATUS_BAR`].
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionToml {
+    id: Arc<str>,
+    fyx_ui: Option<UiManifest>,
+}
+
+impl UiManifest {
+    /// Reads `extension.toml` in `extension_dir`. `None` when it has no `[fyx_ui]` table.
+    pub async fn read(fs: &dyn Fs, extension_dir: &Path) -> Result<Option<(Arc<str>, UiManifest)>> {
+        let path = extension_dir.join("extension.toml");
+        let text = fs
+            .load(&path)
+            .await
+            .with_context(|| format!("reading {path:?}"))?;
+        let toml: ExtensionToml =
+            toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
+        let Some(manifest) = toml.fyx_ui else {
+            return Ok(None);
+        };
+        let id = toml.id;
+        anyhow::ensure!(
+            is_supported_api_version(&manifest.api_version),
+            "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
+            manifest.api_version,
+        );
+        anyhow::ensure!(
+            !manifest.component.is_empty()
+                && Path::new(&manifest.component)
+                    .components()
+                    .all(|component| matches!(component, PathComponent::Normal(_))),
+            "extension {id}: [fyx_ui].component must be a relative path inside the extension, got {:?}",
+            manifest.component,
+        );
+        Ok(Some((id, manifest)))
+    }
+
+    /// Every surface needs the capability of its kind.
+    fn check_surfaces(&self, extension_id: &str, surfaces: &[ui_ext::Surface]) -> Result<()> {
+        for surface in surfaces {
+            let required = match surface.kind {
+                ui_ext::SurfaceKind::Panel(_) => CAPABILITY_PANEL,
+                ui_ext::SurfaceKind::StatusItem(_) => CAPABILITY_STATUS_BAR,
+            };
+            anyhow::ensure!(
+                self.capabilities
+                    .iter()
+                    .any(|capability| capability == required),
+                "extension {extension_id}: surface {:?} needs {required:?} in [fyx_ui].capabilities",
+                surface.id,
+            );
+        }
+        Ok(())
+    }
 }
 
 /// An update the extension sent through `host.push-update`, for any of its surfaces.
@@ -421,6 +498,35 @@ impl UiExtension {
                 pushed_rx,
             ))
         })
+    }
+
+    /// Loads the UI component of the extension in `extension_dir`, as its `extension.toml`'s
+    /// `[fyx_ui]` table describes. `None` when the extension has no such table.
+    pub async fn load_from_dir(
+        extension_dir: &Path,
+        fs: Arc<dyn Fs>,
+        cx: &AsyncApp,
+    ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        let Some((extension_id, manifest)) = UiManifest::read(fs.as_ref(), extension_dir).await?
+        else {
+            return Ok(None);
+        };
+        let component_path = extension_dir.join(&manifest.component);
+        let wasm_bytes = fs
+            .load_bytes(&component_path)
+            .await
+            .with_context(|| format!("reading {component_path:?}"))?;
+        let (extension, pushed) = Self::load(extension_id.clone(), wasm_bytes, cx)
+            .await
+            .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
+        anyhow::ensure!(
+            extension.api_version == manifest.api_version,
+            "extension {extension_id}: extension.toml says fyx:ui {}, the component targets {}",
+            manifest.api_version,
+            extension.api_version,
+        );
+        manifest.check_surfaces(&extension_id, extension.surfaces())?;
+        Ok(Some((extension, pushed)))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {

@@ -246,6 +246,78 @@ async fn test_demo_counter_round_trip(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_load_from_dir(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let fs = fs::FakeFs::new(cx.executor());
+    let manifest = |fyx_ui: &str| {
+        format!(
+            "id = \"fyx-demo-counter\"\nname = \"Counter demo\"\nversion = \"0.1.0\"\n\
+             schema_version = 1\n{fyx_ui}"
+        )
+        .into_bytes()
+    };
+    let wasm = demo_counter_wasm();
+    let write = async |dir: &str, fyx_ui: &str| {
+        fs.create_dir(Path::new(dir)).await.expect("creates dir");
+        fs.insert_file(format!("{dir}/extension.toml"), manifest(fyx_ui))
+            .await;
+        fs.insert_file(format!("{dir}/fyx_ui.wasm"), wasm.clone())
+            .await;
+        PathBuf::from(dir)
+    };
+    let table = |capabilities: &str, component: &str, api_version: &str| {
+        format!(
+            "[fyx_ui]\napi_version = \"{api_version}\"\ncomponent = \"{component}\"\n\
+             capabilities = [{capabilities}]\n"
+        )
+    };
+
+    let counter = write(
+        "/extensions/counter",
+        &table("\"ui:panel\"", "fyx_ui.wasm", "0.1.0"),
+    )
+    .await;
+    let plain = write("/extensions/plain", "").await;
+    let escaping = write(
+        "/extensions/escaping",
+        &table("\"ui:panel\"", "../counter/fyx_ui.wasm", "0.1.0"),
+    )
+    .await;
+    let future = write(
+        "/extensions/future",
+        &table("\"ui:panel\"", "fyx_ui.wasm", "0.2.0"),
+    )
+    .await;
+    let no_panel = write("/extensions/no-panel", &table("", "fyx_ui.wasm", "0.1.0")).await;
+
+    let load = |dir: PathBuf| {
+        let fs = fs.clone();
+        cx.update(|cx| {
+            let cx = cx.to_async();
+            async move { UiExtension::load_from_dir(&dir, fs, &cx).await }
+        })
+    };
+
+    let (extension, _pushed) = load(counter)
+        .await
+        .expect("loads")
+        .expect("has a [fyx_ui] table");
+    assert_eq!(extension.extension_id().as_ref(), "fyx-demo-counter");
+    assert_eq!(extension.surfaces()[0].id, counter::SURFACE);
+
+    assert!(load(plain).await.expect("reads").is_none());
+    for (dir, message) in [
+        (escaping, "must be a relative path inside the extension"),
+        (future, "targets fyx:ui 0.2.0"),
+        (no_panel, "needs \"ui:panel\""),
+    ] {
+        let error = load(dir).await.err().expect("rejected");
+        assert!(format!("{error:#}").contains(message), "{error:#}");
+    }
+}
+
+#[gpui::test]
 async fn test_pushes_come_back_with_the_reply_in_order(cx: &mut TestAppContext) {
     let (extension, mut pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
 
