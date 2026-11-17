@@ -41,6 +41,9 @@ mod bindings {
     wasmtime::component::bindgen!({
         path: "../ui_ext/wit",
         world: "ui-extension",
+        imports: {
+            default: trappable,
+        },
         exports: {
             default: async,
         },
@@ -63,6 +66,9 @@ const UI_INIT_BUDGET: Duration = Duration::from_secs(2);
 /// On top of a budget before a call is dropped outright. Long enough that a busy guest is stopped
 /// by the epoch interrupt first, which leaves a clearer error.
 const UI_DEADLINE_SLACK: Duration = Duration::from_millis(50);
+/// Pushes one call may make before it traps and the extension is disabled. Pushes are queued
+/// unvalidated until the call returns, so this bounds what a looping guest can pile up.
+pub const MAX_PUSHES_PER_CALL: usize = 64;
 
 /// The `fyx:ui` versions this host can load, on every release channel.
 ///
@@ -197,6 +203,26 @@ impl UiManifest {
     }
 }
 
+/// A call that ran to completion but whose result was rejected: the extension reported an error, or
+/// its reply failed validation. It carries the pushes the call made, in order, because the guest
+/// already counts them as applied: apply them before showing the error, so later replies still fit.
+///
+/// Reach it with `error.downcast_ref::<ReplyError>()` on the `anyhow::Error` a call returns. Errors
+/// of any other type (trap, time budget, disabled extension) carry no pushes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyError {
+    pub pushed: Vec<PushedUpdate>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ReplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReplyError {}
+
 /// An update the extension sent through `host.push-update`, for any of its surfaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushedUpdate {
@@ -249,14 +275,18 @@ impl WasiView for UiState {
 impl wit::Host for UiState {}
 
 impl wit_host::Host for UiState {
-    fn push_update(&mut self, surface_id: String, update: wit::Update) {
+    fn push_update(&mut self, surface_id: String, update: wit::Update) -> wasmtime::Result<()> {
+        if self.pushes.len() >= MAX_PUSHES_PER_CALL {
+            wasmtime::bail!("pushed more than {MAX_PUSHES_PER_CALL} updates in one call");
+        }
         self.pushes.push(PushedUpdate {
             surface_id,
             update: update.into(),
         });
+        Ok(())
     }
 
-    fn log(&mut self, level: wit_host::LogLevel, message: String) {
+    fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
         let level = match level {
             wit_host::LogLevel::Trace => log::Level::Trace,
             wit_host::LogLevel::Debug => log::Level::Debug,
@@ -265,6 +295,7 @@ impl wit_host::Host for UiState {
             wit_host::LogLevel::Error => log::Level::Error,
         };
         log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        Ok(())
     }
 }
 
@@ -370,16 +401,15 @@ pub struct UiExtension {
     surfaces: Arc<[ui_ext::Surface]>,
     limits: TreeLimits,
     tx: mpsc::UnboundedSender<UiCall>,
-    pushed_tx: mpsc::UnboundedSender<PushedUpdate>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
 }
 
 impl UiExtension {
     /// Compiles and instantiates a component and asks it for its surfaces.
     ///
-    /// Pushes made during a call come back in that call's [`Reply`]. The receiver yields only the
-    /// pushes that have no reply to go with: those made during instantiation and those of a call
-    /// that failed with an error the extension reported (the guest already counts them as sent).
+    /// Pushes made during a call come back in that call's [`Reply`], or in its [`ReplyError`]. The
+    /// receiver yields only the pushes made during instantiation and `surfaces`, which have no reply
+    /// to go with; it ends after them.
     pub fn load(
         extension_id: Arc<str>,
         wasm_bytes: Vec<u8>,
@@ -470,10 +500,10 @@ impl UiExtension {
                     for pushed in store.data_mut().pushes.drain(..) {
                         pushed_tx.unbounded_send(pushed).ok();
                     }
-                    anyhow::Ok((extension, store, surfaces, pushed_tx))
+                    anyhow::Ok((extension, store, surfaces))
                 }
             };
-            let (mut extension, mut store, surfaces, pushed_tx) =
+            let (mut extension, mut store, surfaces) =
                 gpui_tokio::Tokio::spawn(cx, instantiate).await??;
 
             let (tx, mut rx) = mpsc::unbounded::<UiCall>();
@@ -492,7 +522,6 @@ impl UiExtension {
                     surfaces,
                     limits: TreeLimits::default(),
                     tx,
-                    pushed_tx,
                     _task: Arc::new(task),
                 },
                 pushed_rx,
@@ -630,36 +659,32 @@ impl UiExtension {
         self.reply(rows, pushed)
     }
 
-    /// Turns an error the guest reported into an error, forwarding the call's pushes.
+    /// Turns an error the guest reported into a [`ReplyError`] carrying the call's pushes.
     fn guest_result<T>(
         &self,
         result: std::result::Result<T, String>,
         pushed: &[PushedUpdate],
     ) -> Result<T> {
         result.map_err(|message| {
-            self.forward_pushes(pushed.to_vec());
-            self.extension_error(message)
+            ReplyError {
+                pushed: pushed.to_vec(),
+                message: format!("from fyx:ui extension {}: {message}", self.extension_id),
+            }
+            .into()
         })
     }
 
+    /// Pairs a validated value with the call's pushes; a validation error becomes a
+    /// [`ReplyError`] carrying them.
     fn reply<T>(&self, value: Result<T>, pushed: Vec<PushedUpdate>) -> Result<Reply<T>> {
         match value {
             Ok(value) => Ok(Reply { pushed, value }),
-            Err(error) => {
-                self.forward_pushes(pushed);
-                Err(error)
+            Err(error) if error.is::<ReplyError>() => Err(error),
+            Err(error) => Err(ReplyError {
+                pushed,
+                message: format!("fyx:ui extension {}: {error:#}", self.extension_id),
             }
-        }
-    }
-
-    fn forward_pushes(&self, pushed: Vec<PushedUpdate>) {
-        for pushed in pushed {
-            if self.pushed_tx.unbounded_send(pushed).is_err() {
-                log::debug!(
-                    "fyx:ui extension {}: dropped a pushed update, nothing listens for it",
-                    self.extension_id
-                );
-            }
+            .into()),
         }
     }
 
@@ -706,10 +731,6 @@ impl UiExtension {
             .await
             .with_context(|| format!("fyx:ui extension {} dropped a call", self.extension_id))?
             .with_context(|| format!("fyx:ui extension {}", self.extension_id))
-    }
-
-    fn extension_error(&self, message: String) -> anyhow::Error {
-        anyhow!("from fyx:ui extension {}: {message}", self.extension_id)
     }
 }
 

@@ -34,6 +34,7 @@ mod probe {
     pub const SLEEP: NodeId = 3;
     pub const PUSH_THEN_PATCH: NodeId = 4;
     pub const PUSH_THEN_FAIL: NodeId = 5;
+    pub const PUSH_FLOOD: NodeId = 6;
 }
 
 fn workspace_dir() -> PathBuf {
@@ -349,7 +350,7 @@ async fn test_pushes_come_back_with_the_reply_in_order(cx: &mut TestAppContext) 
         .expect("reply applies after the push");
     assert_eq!(tree.children(Some(10)), &[11]);
 
-    // Nothing went through the channel so far; the pushes of a failed call do.
+    // A call that fails after pushing carries its pushes in the error, not in the channel.
     let error = extension
         .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_FAIL))
         .await
@@ -359,16 +360,67 @@ async fn test_pushes_come_back_with_the_reply_in_order(cx: &mut TestAppContext) 
         "{error:#}"
     );
     assert_eq!(
-        pushed.try_recv().expect("a forwarded push"),
-        PushedUpdate {
+        error
+            .downcast_ref::<ReplyError>()
+            .map(|error| &error.pushed),
+        Some(&vec![PushedUpdate {
             surface_id: probe::SURFACE.into(),
             update: Update::Patches(vec![Patch::Remove(probe::PUSH)]),
-        }
+        }])
     );
+    // The probe pushes nothing while it is instantiated, so the channel is closed and empty.
+    assert_eq!(pushed.next().await, None);
+
+    // A failed call is not fatal: the extension still answers.
+    extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("still works");
+}
+
+#[gpui::test]
+async fn test_push_flood_traps_and_disables_extension(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_FLOOD))
+        .await
+        .unwrap_err();
     assert!(
-        pushed.try_recv().is_err(),
-        "no other push reached the channel"
+        format!("{error:#}").contains(&format!("more than {MAX_PUSHES_PER_CALL} updates")),
+        "{error:#}"
     );
+    assert!(error.downcast_ref::<ReplyError>().is_none());
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("disabled"), "{error:#}");
+}
+
+#[gpui::test]
+async fn test_version_falls_back_to_imports(cx: &mut TestAppContext) {
+    // Renaming the section in place keeps every size field valid; the probe still imports
+    // fyx:ui/host@0.1.0 and fyx:ui/types@0.1.0.
+    let mut wasm = probe_wasm();
+    let name = API_VERSION_SECTION.as_bytes();
+    let mut renamed = 0;
+    let mut start = 0;
+    while let Some(offset) = wasm[start..]
+        .windows(name.len())
+        .position(|window| window == name)
+    {
+        let end = start + offset + name.len();
+        wasm[end - 1] = b'N';
+        renamed += 1;
+        start = end;
+    }
+    assert!(renamed > 0, "the probe has a version section to rename");
+    assert_eq!(parse_api_version("probe", &wasm).expect("parses"), None);
+
+    let (extension, _pushed) = load("fyx_ui_test_probe", wasm, cx).await;
+    assert_eq!(extension.api_version(), &Version::new(0, 1, 0));
 }
 
 #[gpui::test]
