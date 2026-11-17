@@ -389,6 +389,7 @@ dependencies = [
  "gpui",
  "language",
  "log",
+ "paths",
  "project",
  "serde",
  "serde_json",

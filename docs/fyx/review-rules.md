@@ -80,8 +80,12 @@ the diff.
 - A file that cannot be read or parsed (bad TOML, an unknown key, an invalid pattern) keeps the
   previous rules in force. A notification shows the error. Fyx never applies half a file and never
   drops rules silently.
-- When Fyx starts, the file as it is applies. Fyx does not remember confirmed rules across restarts.
-  An agent that removes a restriction gets it lifted only after you confirm, or after a restart.
+- Fyx remembers, per worktree, the rules you last agreed to (in `agent_review/confirmed_rules.json`
+  in its data directory). Until you agree to a change, every remembered restriction stays in force
+  together with anything stricter in the file, across restarts too: an agent that deletes a `deny`
+  and waits for the next start gets nothing.
+- The first time Fyx sees a worktree, its file applies as it is, since a project file can only add
+  restrictions.
 - Remote projects are not supported yet: the file is read through the local file system.
 
 ## Limits
