@@ -36,7 +36,7 @@ use gpui::{
     WeakEntity, Window,
 };
 use language::BufferEditSource;
-use project::{PathChange, Project, trusted_worktrees::TrustedWorktrees};
+use project::{PathChange, Project};
 use settings::{RegisterSetting, Settings, SettingsStore};
 use ui::{ContextMenu, IconPosition};
 use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
@@ -47,6 +47,7 @@ pub use review_pane::{
     RejectAllHunks, RejectHunk, RejectTurn, ReviewPane, SubmitReview, ToggleReviewMode,
     permission_card_notice,
 };
+use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
 
 /// What review mode covers, for the status bar and the docs.
@@ -69,18 +70,28 @@ const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct AgentReviewSettings {
     pub enabled: bool,
+    /// Patterns whose edits land without review (in review mode). Only user settings set them.
+    pub auto_accept: Vec<String>,
 }
 
 impl Settings for AgentReviewSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
+        let review = content.agent_review.as_ref();
         Self {
-            enabled: content
-                .agent_review
-                .as_ref()
-                .and_then(|review| review.enabled)
-                .unwrap_or(false),
+            enabled: review.and_then(|review| review.enabled).unwrap_or(false),
+            auto_accept: review
+                .and_then(|review| review.auto_accept.clone())
+                .unwrap_or_default(),
         }
     }
+}
+
+/// The user's `agent_review.auto_accept` patterns.
+fn user_auto_accept(cx: &App) -> UserAutoAccept {
+    if !cx.has_global::<SettingsStore>() {
+        return UserAutoAccept::default();
+    }
+    UserAutoAccept::new(&AgentReviewSettings::get_global(cx).auto_accept)
 }
 
 fn review_mode_override() -> Option<bool> {
@@ -123,14 +134,21 @@ pub fn init(cx: &mut App) {
         ..AgentReview::default()
     });
     cx.set_global(GlobalAgentReview(review.clone()));
+    review.update(cx, |review, cx| {
+        review.user_auto_accept = user_auto_accept(cx)
+    });
     cx.observe_global::<SettingsStore>({
         let review = review.downgrade();
         move |cx| {
             let enabled = review_mode(cx);
-            if let Some(review) = review.upgrade()
-                && review.read(cx).is_enabled() != enabled
-            {
-                review.update(cx, |review, cx| review.set_enabled(enabled, cx));
+            let auto_accept = user_auto_accept(cx);
+            if let Some(review) = review.upgrade() {
+                review.update(cx, |review, cx| {
+                    review.user_auto_accept = auto_accept;
+                    if review.is_enabled() != enabled {
+                        review.set_enabled(enabled, cx);
+                    }
+                });
             }
         }
     })
@@ -144,7 +162,7 @@ pub fn init(cx: &mut App) {
             review.update(cx, |review, _| review.thread_opened(session_id, thread_id));
         }
         let project = thread.project().clone();
-        reload_rules(&project, RulesLoad::ThreadStarted, cx);
+        reload_rules(&project, cx);
         cx.subscribe(&project, on_project_event).detach();
         let thread_id = cx.entity_id();
         cx.on_release(move |thread, cx| {
@@ -298,8 +316,10 @@ pub struct AgentReview {
     turn_unreviewed: HashMap<TurnId, BTreeSet<PathBuf>>,
     /// Ended turns whose summaries are kept for open panes, oldest first.
     ended_turns: VecDeque<TurnId>,
-    /// `.fyx/review.toml` of each worktree that has one.
+    /// `.fyx/review.toml` of each worktree (empty rules for a worktree without the file).
     rules: Vec<ReviewRules>,
+    /// The user's `agent_review.auto_accept` patterns: only user settings may loosen review.
+    user_auto_accept: UserAutoAccept,
     /// Rules files that changed while sessions ran, waiting for the user to apply them (`None`: the
     /// file was removed).
     pending_rules: HashMap<PathBuf, Option<ReviewRules>>,
@@ -538,9 +558,15 @@ impl AgentReview {
     pub fn rule_for(&self, abs_path: &Path) -> Option<RuleMatch> {
         self.rules
             .iter()
-            .filter(|rules| abs_path.starts_with(rules.root()))
+            .filter(|rules| rules.relative_path(abs_path).is_some())
             .max_by_key(|rules| rules.root().components().count())?
-            .evaluate(abs_path)
+            .evaluate(abs_path, &self.user_auto_accept)
+    }
+
+    /// Replaces the user's `auto_accept` patterns (tests; in the app they follow the settings).
+    pub fn set_user_auto_accept(&mut self, patterns: &[String], cx: &mut Context<Self>) {
+        self.user_auto_accept = UserAutoAccept::new(patterns);
+        cx.notify();
     }
 
     /// Replaces the rules of the worktree at `root` (`None`: it has no rules file).
@@ -551,32 +577,34 @@ impl AgentReview {
         cx.notify();
     }
 
-    /// Holds rules that changed during a session until the user applies them. The agent under review
-    /// may have written the file (through a reviewed write or a shell command), so a change never
-    /// applies on its own. Returns whether anything changed.
-    pub fn propose_rules(
-        &mut self,
-        root: PathBuf,
-        rules: Option<ReviewRules>,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    /// Takes the rules file as read now (a new thread starts, or the file changed). A change that only
+    /// adds restrictions applies at once. A change that removes any (a `deny` or `always_ask` pattern,
+    /// or the whole file) waits until the user applies it: the agent under review may have written the
+    /// file, through the terminal or a write the user accepted, and a new thread (a subagent the agent
+    /// opens, say) must not apply it either. Returns the restrictions waiting to be removed.
+    pub fn load_rules(&mut self, rules: ReviewRules, cx: &mut Context<Self>) -> Vec<String> {
+        let root = rules.root().to_path_buf();
         let current = self.rules.iter().find(|existing| existing.root() == root);
-        let unchanged = match (current, &rules) {
-            (None, None) => true,
-            (Some(current), Some(new)) => current.same_as(new),
-            _ => false,
-        };
-        if unchanged {
+        if current.is_some_and(|current| current.same_as(&rules)) {
             self.pending_rules.remove(&root);
-            return false;
+            return Vec::new();
+        }
+        let loosened = current
+            .map(|current| current.loosened_by(&rules))
+            .unwrap_or_default();
+        if loosened.is_empty() {
+            self.set_rules(root, Some(rules), cx);
+            return Vec::new();
         }
         log::info!(
-            "fyx: agent review: the review rules of {} changed; they apply once the user applies them",
-            root.display()
+            "fyx: agent review: the review rules of {} changed and would remove {}; they apply once \
+             the user applies them",
+            root.display(),
+            loosened.join(", ")
         );
-        self.pending_rules.insert(root, rules);
+        self.pending_rules.insert(root, Some(rules));
         cx.notify();
-        true
+        loosened
     }
 
     /// Whether a changed rules file of the worktree at `root` waits for the user.
@@ -861,7 +889,17 @@ impl AgentReview {
         write: AgentWrite,
         cx: &mut Context<Self>,
     ) -> Task<Result<AgentWriteOutcome>> {
-        let rule = self.rule_for(&write.abs_path);
+        // Rules match the file the buffer really is, not the spelling the agent sent.
+        let resolved_path = write
+            .buffer
+            .read(cx)
+            .file()
+            .and_then(|file| file.as_local())
+            .map(|file| file.abs_path(cx));
+        let rule = resolved_path
+            .as_deref()
+            .and_then(|path| self.rule_for(path))
+            .or_else(|| self.rule_for(&write.abs_path));
         let rule_kind = rule.as_ref().map(|rule| rule.kind);
         let strict_rule = matches!(rule_kind, Some(RuleKind::Deny | RuleKind::AlwaysAsk));
         if !self.enabled && !strict_rule {
@@ -1079,7 +1117,7 @@ fn on_project_event(
         .iter()
         .any(|(path, _, _)| path.as_unix_str() == RULES_FILE)
     {
-        reload_rules(&project, RulesLoad::FileChanged, cx);
+        reload_rules(&project, cx);
     }
     let Some(review) = AgentReview::global(cx) else {
         return;
@@ -1349,91 +1387,109 @@ fn report_host_write_failure(project: &Entity<Project>, message: String, cx: &mu
     notify_project::<HostWriteFailed>(project, message, cx);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RulesLoad {
-    /// A thread starts: the file as it is applies.
-    ThreadStarted,
-    /// The file changed while sessions run: the user has to apply it.
-    FileChanged,
-}
-
 struct RulesChanged;
+struct RulesIgnoredKey;
 
-/// Loads `.fyx/review.toml` of every visible worktree of `project`. A file that does not parse is
-/// reported and ignored rather than half applied.
-fn reload_rules(project: &Entity<Project>, load: RulesLoad, cx: &mut App) {
+/// Reads `.fyx/review.toml` of every visible worktree of `project` (see [`AgentReview::load_rules`]).
+/// A file that cannot be read or parsed keeps the previous rules and is reported: rules never
+/// disappear silently.
+fn reload_rules(project: &Entity<Project>, cx: &mut App) {
     let Some(review) = AgentReview::global(cx) else {
         return;
     };
     let fs = project.read(cx).fs().clone();
-    let worktree_store = project.read(cx).worktree_store();
     let worktrees = project.read(cx).visible_worktrees(cx).collect::<Vec<_>>();
     for worktree in worktrees {
-        let worktree_id = worktree.read(cx).id();
         let root = worktree.read(cx).abs_path().to_path_buf();
-        let trusted = match TrustedWorktrees::try_get_global(cx) {
-            Some(trust) => trust.update(cx, |trust, cx| {
-                trust.can_trust(&worktree_store, worktree_id, cx)
-            }),
-            None => true,
-        };
         let rules_path = review_rules::rules_file_path(&root);
         let review = review.downgrade();
         let project = project.downgrade();
         let fs = fs.clone();
         cx.spawn(async move |cx| {
-            let rules = match fs.load(&rules_path).await {
-                Ok(text) => match ReviewRules::parse(root.clone(), &text, trusted) {
-                    Ok(rules) => Some(rules),
-                    Err(error) => {
-                        let message = format!(
-                            "Agent review: {} is ignored: {error:#}",
-                            rules_path.display()
-                        );
-                        log::error!("{message}");
-                        cx.update(|cx| {
-                            if let Some(project) = project.upgrade() {
-                                notify_project::<RulesFileInvalid>(&project, message, cx);
-                            }
-                        });
-                        None
+            let notify = |kind: fn(&Entity<Project>, String, &mut App), message: String, cx: &mut AsyncApp| {
+                cx.update(|cx| {
+                    if let Some(project) = project.upgrade() {
+                        kind(&project, message, cx);
                     }
-                },
-                Err(_) => None,
+                });
             };
-            let result = review.update(cx, |review, cx| match load {
-                RulesLoad::ThreadStarted => {
-                    review.set_rules(root.clone(), rules, cx);
-                    false
+            let rules = match fs.metadata(&rules_path).await {
+                Ok(None) => ReviewRules::none(root.clone()),
+                Ok(Some(_)) => {
+                    let parsed = fs
+                        .load(&rules_path)
+                        .await
+                        .and_then(|text| ReviewRules::parse(root.clone(), &text));
+                    match parsed {
+                        Ok(rules) => rules,
+                        Err(error) => {
+                            let message = format!(
+                                "Agent review: {} could not be used ({error:#}); the previous \
+                                 review rules stay in force.",
+                                rules_path.display()
+                            );
+                            log::error!("{message}");
+                            notify(notify_project::<RulesFileInvalid>, message, cx);
+                            return;
+                        }
+                    }
                 }
-                RulesLoad::FileChanged => review.propose_rules(root.clone(), rules, cx),
-            });
-            match result {
-                Ok(true) => cx.update(|cx| {
-                    let Some(project) = project.upgrade() else {
-                        return;
-                    };
+                Err(error) => {
                     let message = format!(
-                        "Agent review: {} changed. Review rules may have been changed by an agent, \
-                         so the new rules apply only when you apply them.",
+                        "Agent review: {} could not be checked ({error:#}); the previous review \
+                         rules stay in force.",
                         rules_path.display()
                     );
-                    let review = review.clone();
-                    let apply: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
-                        if let Some(review) = review.upgrade() {
-                            review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
-                        }
-                    });
-                    notify_project_with_action::<RulesChanged>(
-                        &project,
-                        message,
-                        Some(("Apply new review rules", apply)),
-                        cx,
-                    );
-                }),
-                Ok(false) => {}
-                Err(error) => log::debug!("review closed before its rules loaded: {error}"),
+                    log::error!("{message}");
+                    notify(notify_project::<RulesFileInvalid>, message, cx);
+                    return;
+                }
+            };
+            if rules.ignored_auto_accept() {
+                notify(
+                    notify_project::<RulesIgnoredKey>,
+                    format!(
+                        "Agent review: auto_accept in {} is ignored. A project can only make review \
+                         stricter; patterns that skip review belong in your settings \
+                         (agent_review.auto_accept).",
+                        rules_path.display()
+                    ),
+                    cx,
+                );
             }
+            let loosened = match review.update(cx, |review, cx| review.load_rules(rules, cx)) {
+                Ok(loosened) => loosened,
+                Err(error) => {
+                    log::debug!("review closed before its rules loaded: {error}");
+                    return;
+                }
+            };
+            if loosened.is_empty() {
+                return;
+            }
+            cx.update(|cx| {
+                let Some(project) = project.upgrade() else {
+                    return;
+                };
+                let message = format!(
+                    "Agent review: {} changed and would remove these restrictions: {}. An agent may \
+                     have changed it, so the new rules apply only when you apply them.",
+                    rules_path.display(),
+                    loosened.join(", ")
+                );
+                let review = review.clone();
+                let apply: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                    if let Some(review) = review.upgrade() {
+                        review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
+                    }
+                });
+                notify_project_with_action::<RulesChanged>(
+                    &project,
+                    message,
+                    Some(("Apply new review rules", apply)),
+                    cx,
+                );
+            });
         })
         .detach();
     }
@@ -2013,13 +2069,8 @@ mod tests {
         drop(thread);
     }
 
-    fn set_test_rules(
-        review: &Entity<AgentReview>,
-        text: &str,
-        trusted: bool,
-        cx: &mut TestAppContext,
-    ) {
-        let rules = ReviewRules::parse(PathBuf::from("/p"), text, trusted).unwrap();
+    fn set_test_rules(review: &Entity<AgentReview>, text: &str, cx: &mut TestAppContext) {
+        let rules = ReviewRules::parse(PathBuf::from("/p"), text).unwrap();
         review.update(cx, |review, cx| {
             review.set_rules(PathBuf::from("/p"), Some(rules), cx)
         });
@@ -2040,7 +2091,7 @@ mod tests {
     #[gpui::test]
     async fn deny_rule_rejects_with_a_reason_even_with_review_off(cx: &mut TestAppContext) {
         let (review, _) = setup(cx);
-        set_test_rules(&review, r#"deny = ["*.env"]"#, false, cx);
+        set_test_rules(&review, r#"deny = ["*.env"]"#, cx);
 
         let mut write = agent_write("/p/config/.env", cx);
         write.new_text = "SECRET=1\n".into();
@@ -2070,7 +2121,7 @@ mod tests {
     #[gpui::test]
     async fn always_ask_rule_opens_a_review_regardless(cx: &mut TestAppContext) {
         let (review, _) = setup(cx);
-        set_test_rules(&review, r#"always_ask = ["Cargo.lock"]"#, false, cx);
+        set_test_rules(&review, r#"always_ask = ["Cargo.lock"]"#, cx);
 
         // Review mode is off, yet the lock file is held.
         let held = gate_write(&review, agent_write("/p/Cargo.lock", cx), cx);
@@ -2122,11 +2173,21 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn auto_accept_rule_needs_review_mode_and_trust(cx: &mut TestAppContext) {
+    async fn auto_accept_comes_from_user_settings_only(cx: &mut TestAppContext) {
         let (review, _) = setup(cx);
         review.update(cx, |review, cx| review.set_enabled(true, cx));
 
-        set_test_rules(&review, r#"auto_accept = ["docs/**"]"#, true, cx);
+        // A project file cannot wave edits through (integration-4 finding 1).
+        set_test_rules(&review, r#"auto_accept = ["**"]"#, cx);
+        let _held = gate_write(&review, agent_write("/p/docs/guide.md", cx), cx);
+        assert_eq!(review.read_with(cx, |review, _| review.reviews().len()), 1);
+        let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+        review.update(cx, |review, cx| review.close(id, cx));
+
+        // The user's settings can.
+        review.update(cx, |review, cx| {
+            review.set_user_auto_accept(&["docs/**".to_string()], cx)
+        });
         let outcome = gate_write(&review, agent_write("/p/docs/guide.md", cx), cx)
             .await
             .unwrap();
@@ -2135,16 +2196,130 @@ mod tests {
         let (respond, verdicts) = recording_responder();
         let preview = ProposedEdit::new(PathBuf::from("/p/docs/a.md"), OLD.into(), NEW.into());
         let rule = review.read_with(cx, |review, _| review.rule_for(preview.abs_path()));
+        assert!(
+            rule.unwrap()
+                .describe()
+                .contains("agent_review.auto_accept")
+        );
+        let rule = review.read_with(cx, |review, _| review.rule_for(preview.abs_path()));
         review.update(cx, |review, cx| {
             review.open_permission_preview(session(), new_request_id(), preview, respond, rule, cx)
         });
         cx.run_until_parked();
         assert_eq!(*verdicts.borrow(), [PermissionVerdict::Allow]);
+    }
 
-        // An untrusted worktree cannot wave edits through.
-        set_test_rules(&review, r#"auto_accept = ["docs/**"]"#, false, cx);
-        let _held = gate_write(&review, agent_write("/p/docs/guide.md", cx), cx);
-        assert_eq!(review.read_with(cx, |review, _| review.reviews().len()), 1);
+    /// integration-4 finding 1: in review mode, the agent writes `auto_accept = ["**"]` into
+    /// `.fyx/review.toml` from its terminal and opens a new thread (a subagent): its later edits must
+    /// still be reviewed, and the project's `deny` must stay.
+    #[gpui::test]
+    async fn an_agent_cannot_switch_review_off_through_the_rules_file(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({
+                ".fyx": { "review.toml": "deny = [\"*.env\"]\n" },
+                "src": { "main.rs": OLD },
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let new_thread = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+        };
+        let _thread = new_thread(cx).await.unwrap();
+        cx.run_until_parked();
+
+        fs.save(
+            Path::new(util::path!("/p/.fyx/review.toml")),
+            &"auto_accept = [\"**\"]\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        let _subagent = new_thread(cx).await.unwrap();
+        cx.run_until_parked();
+
+        let root = PathBuf::from(util::path!("/p"));
+        let rule = |name: &str, cx: &mut TestAppContext| {
+            let path = root.join(name);
+            review.read_with(cx, |review, _| review.rule_for(&path).map(|rule| rule.kind))
+        };
+        assert_eq!(
+            rule(".env", cx),
+            Some(RuleKind::Deny),
+            "deny stays until the user agrees"
+        );
+        assert_eq!(rule("src/main.rs", cx), None, "nothing is auto-accepted");
+        assert!(review.read_with(cx, |review, _| review.has_pending_rules(&root)));
+
+        let mut write = agent_write(util::path!("/p/src/main.rs"), cx);
+        write.abs_path = root.join("src").join("main.rs");
+        let _held = gate_write(&review, write, cx);
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1,
+            "the agent's next edit is still reviewed"
+        );
+
+        // Even confirmed, the file cannot auto-accept: it only drops the deny.
+        review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
+        assert_eq!(rule(".env", cx), None);
+        assert_eq!(rule("src/main.rs", cx), None);
+    }
+
+    #[gpui::test]
+    async fn stricter_rules_apply_at_once_and_read_errors_keep_the_rules(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let root = PathBuf::from("/p");
+        let parse = |text: &str| ReviewRules::parse(root.clone(), text).unwrap();
+        review.update(cx, |review, cx| {
+            assert!(
+                review
+                    .load_rules(parse(r#"deny = ["*.env"]"#), cx)
+                    .is_empty()
+            );
+            // Adding a restriction applies without asking.
+            assert!(
+                review
+                    .load_rules(parse(r#"deny = ["*.env", "*.pem"]"#), cx)
+                    .is_empty()
+            );
+            assert_eq!(
+                review
+                    .rule_for(Path::new("/p/key.pem"))
+                    .map(|rule| rule.kind),
+                Some(RuleKind::Deny)
+            );
+            // Removing the file removes restrictions: it waits.
+            assert!(
+                !review
+                    .load_rules(ReviewRules::none(root.clone()), cx)
+                    .is_empty()
+            );
+            assert_eq!(
+                review
+                    .rule_for(Path::new("/p/key.pem"))
+                    .map(|rule| rule.kind),
+                Some(RuleKind::Deny)
+            );
+        });
     }
 
     #[gpui::test]

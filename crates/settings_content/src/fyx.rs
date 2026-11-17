@@ -19,4 +19,11 @@ pub struct AgentReviewSettingsContent {
     ///
     /// Default: false
     pub enabled: Option<bool>,
+    /// Paths whose agent edits land without review while review mode is on, as glob patterns
+    /// relative to a worktree root (a pattern without `/` matches the file name at any depth).
+    /// Only your user settings can set them: a project's `.fyx/review.toml` can only make review
+    /// stricter, and its `deny` and `always_ask` patterns win over these.
+    ///
+    /// Default: []
+    pub auto_accept: Option<Vec<String>>,
 }
