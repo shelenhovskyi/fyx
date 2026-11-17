@@ -1,17 +1,22 @@
-# `fyx:ui@0.2.0`: design draft
+# `fyx:ui@0.2.0`: design
 
-Status: **draft for the integrator (W0)**. No code has been changed. The world is in
+Status: **decided 2026-11-17**; see [Decisions](#decisions-2026-11-17). Ready for implementation,
+not frozen: the world stays staged (Stable and Preview capped at 0.1) until the commit that
+declares it frozen. No code has been changed yet. The world is in
 [`fyx-ui-0.2.wit`](fyx-ui-0.2.wit), next to this file. It parses with
 `wasm-tools component wit` (1.263.0). A dummy component embedded from it validates with
 `wasm-tools component embed --dummy` + `component new` + `validate`. How 0.1 and 0.2 components
 coexist is in [`migration.md`](migration.md).
 
-Sources: the backlog [`tasks/wit-0.2.md`](../../../tasks/wit-0.2.md) (rows #1–#8), the judge
+Sources: the backlog [`tasks/wit-0.2.md`](../../../tasks/wit-0.2.md) (rows #1–#10), the judge
 reviews [`integration-1`](../../../tasks/reviews/integration-1.md) (findings 1–13, F1–F2),
 [`integration-2`](../../../tasks/reviews/integration-2.md) (findings 1–8, W8-1…W8-10) and
 [`w3-deep-1`](../../../tasks/reviews/w3-deep-1.md) (findings 1–8), and
 [`docs/vscode-coverage.md`](../../vscode-coverage.md) ("Schema gaps"). Line references are to
-`integration` at `2e91298`.
+`integration` at `2e91298`. Revised after the judge review
+[`wit-0.2-design`](../../../tasks/reviews/wit-0.2-design.md) (on `claude/fyx-w7-judge-cd66a5`):
+§L added (finding 1), one cap for `replace` and `mount` (finding 2), SDK world selection without
+Cargo features (finding 3, migration.md §4), and the small points of finding 5.
 
 ## Summary
 
@@ -19,27 +24,33 @@ reviews [`integration-1`](../../../tasks/reviews/integration-1.md) (findings 1�
 |---|---|---|---|
 | A | Effects of host imports are ordered, checked at the call, and applied after it | integration-1 #3, integration-2 #7 | **accepted**: the base for B–F |
 | B | `request-tick` / `cancel-tick` imports, `tick` export | backlog #2, integration-1 #9 | **accepted (priority)** |
-| C | `surface-kind::modal`, `show-surface` / `hide-surface`, list `selected` + `row-selected` | backlog #5, W8 | **accepted (priority)** |
+| C | `surface-kind::modal`, `show-surface` / `hide-surface`, list `selected` + `row-selected` | backlog #5, W8 | **accepted (priority)**, keyboard selection included; a modal opens only after a click or Enter (decided 2026-11-17) |
 | D | `ui-event::dismissed(dismiss-reason)` | backlog #7, W8 | **accepted**, for modals only |
 | E | `add-surface` / `remove-surface` | backlog #6, W8 | **accepted** |
-| F | `push-update` returns `result<_, host-error>` | W8-3 (integration-2), integration-1 #2 | **accepted** |
+| F | `push-update` returns `result<_, host-error>` | backlog #9, W8-3 (integration-2), integration-1 #2 | **accepted** |
 | G | `invalidate-rows` patch | backlog #1, integration-1 #5 | **accepted**, with an optional range |
 | H | Row-local ids documented in the WIT | backlog #3, integration-1 #4 | **accepted** (docs only) |
-| I | Frozen `icon` enum instead of upstream `IconName` strings | backlog #4, integration-1 #12 | **accepted**: 101 icons |
+| I | Frozen `icon` enum instead of upstream `IconName` strings | backlog #4, integration-1 #12 | **accepted**: 101 icons (decided 2026-11-17) |
 | J | `list-row.indent`, `button-props.tooltip` | backlog #8, W8 | **accepted**: indent on the row, not on flex |
 | K | `input-props.secret` | integration-2 W8-5 | **accepted** |
+| L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **accepted**, in 0.2 (decided 2026-11-17) |
 | — | Panel visibility events, surface rename, commands, raw colours, in-row node clicks, `ignoreFocusOut` | various | **rejected or deferred**; see [Rejected and deferred](#rejected-and-deferred) |
 
-Not changed: the flat tree, theme tokens only, the caps (2048 patches per update, 16384 nodes per
-tree, 2048 nodes per row), the `mount` / `handle-event` / `list-rows` exports, `log`.
+Not changed: the flat tree, theme tokens only, the `mount` / `handle-event` / `list-rows`
+exports, `log`, and the caps of 2048 patches per update, 16384 nodes per tree and 2048 nodes per
+row. One cap changes: a `replace` and a `mount` may carry a whole tree, 16384 nodes, where the 0.1
+host stopped at 2048 (integration-1 #11). Otherwise a push that passes the check in F could never
+be applied, and its remount would fail the same way (judge wit-0.2-design #2).
 
 ## A. Effects of host imports: checked at the call, applied after it
 
 **Motivation.** Integration-1 #3 fixed the order of pushes against the reply by returning them
 with it (`Reply<T> { pushed, value }`, `fyx_ui.rs:233-241`). Integration-2 #7 then had to carry
 pushes inside `ReplyError` too. 0.2 adds six more imports with side effects (`request-tick`,
-`cancel-tick`, `add-surface`, `remove-surface`, `show-surface`, `hide-surface`). Each needs the
-same ordering guarantee, so they share one rule instead of six.
+`cancel-tick`, `add-surface`, `remove-surface`, `show-surface`, `hide-surface`), and L adds two
+(`place-decoration`, `remove-decoration`). Each needs the same ordering guarantee, so they share
+one rule. `log` has no effect on the UI and is not part of the effect list: it is written at
+once, so a log line from a call that then traps is still kept.
 
 **Semantics** (doc comment on `interface host`):
 
@@ -186,13 +197,15 @@ pickers. The title is drawn as a header when it is not empty. The capability is 
 
 **Rules.**
 
-- **User gesture.** A modal steals focus, so `show-surface` on a modal returns `not-permitted`
-  unless the extension has a *transient activation*. That is granted while `handle-event` runs
-  for a user event (`click`, `input-submitted`, `row-click`, `row-selected`, `input-changed`; not
-  `dismissed`). It lasts until 5 s after that call returns, or until one successful
-  `show-surface` consumes it. The 5 s window covers "click → fetch → show the picker from a tick".
-  The rule follows browsers' popup blocking. Revealing a panel needs no gesture: it does not move
-  focus.
+- **User gesture** (decided 2026-11-17). A modal steals focus, so `show-surface` on a modal
+  returns `not-permitted` unless the extension has a *transient activation*. Only a click or
+  Enter grants one: `handle-event` for `click`, `row-click` (a mouse click on a row, or Enter on
+  a focused list) or `input-submitted` (Enter in an input). `input-changed` does not, so typing in
+  an extension's own input never opens a focus-stealing modal (judge wit-0.2-design #4). Neither do
+  `row-selected` (arrow keys) and `dismissed`. The activation lasts until 5 s after that call
+  returns, or until one successful `show-surface` consumes it. The 5 s window covers "click →
+  fetch → show the picker from a tick". The rule follows browsers' popup blocking. Revealing a
+  panel needs no gesture: it does not move focus.
 - **One modal per window.** Zed's `ModalLayer` holds one. Opening any modal, an extension's or
   Zed's own, closes the active one, and the closed modal gets `dismissed(replaced)`. An extension
   modal can never veto its dismissal: `on_before_dismiss` always returns `Dismiss(true)`, because
@@ -212,8 +225,8 @@ pickers. The title is drawn as a header when it is not empty. The capability is 
     modal itself, so Escape still works.
   - Tab and Shift-Tab move through inputs and enabled buttons in tree order.
   - On close, `ModalLayer` restores the previous focus (`modal_layer.rs:233`).
-- **Keyboard selection.** Without it, a picker cannot be driven by keyboard. This is the one
-  addition beyond the backlog row:
+- **Keyboard selection** (ships with 0.2, decided 2026-11-17). Without it, a picker cannot be
+  driven by keyboard. This is the one addition beyond the backlog row:
   - `list-props.selected: option<u32>` is the highlighted row. It is drawn in every surface
     kind, and scrolled into view (`UniformListScrollHandle::scroll_to_item`) when the extension
     sets it. That also gives the sidecar's `TreeView.reveal` the scroll it lacks
@@ -242,7 +255,8 @@ pickers. The title is drawn as a header when it is not empty. The capability is 
 - Host, `fyx_ui.rs`:
   - `CAPABILITY_MODAL = "ui:modal"`, added to `check_surfaces` (`fyx_ui.rs:188-203`).
   - `HostEffect::{Show, Hide}`.
-  - The transient-activation timestamp in `UiState`, set by `handle_event` for user events.
+  - The transient-activation timestamp in `UiState`, set by `handle_event` for `click`,
+    `row-click` and `input-submitted` only.
 - Renderer, new file `crates/ui_ext_host/src/modal.rs`: `ExtensionModal: ModalView` wraps a
   `SurfaceView`, handles `menu::Cancel`, the dismiss reason, focus and the selection keys. This is
   a new logical component, so a new file.
@@ -342,8 +356,9 @@ activation. The sidecar invented `fyx/surfacesChanged` (`host.ts:176`).
 **Upstream hook.** `StatusBar` can only remove by position, and `position_of_item::<T>` finds the
 first item of a type (`status_bar.rs:374-419`). Every extension status item has the same type. It
 needs `StatusBar::remove_item_by_id(EntityId)`, about 8 lines marked `fyx:`, the same pattern as
-`Dock::panel_index_for_id` (`dock.rs:550-555`). Alternative without a hook: keep a removed item
-and render nothing. That leaks one empty view per removal, so it is not recommended.
+`Dock::panel_index_for_id` (`dock.rs:550-555`). Decided 2026-11-17: the hook is accepted. The
+alternative, keeping a removed item and rendering nothing, would leak one empty view per removal.
+The hook goes into the upstream-diff table of the next integration review when it lands.
 
 **Changes.**
 
@@ -387,7 +402,8 @@ and render nothing. That leaks one empty view per removal, so it is not recommen
 - `ok` means the update passed every check the host can make **at once**:
   - the surface is live (as of this point in the call, see A);
   - a `patches` update has at most 2048 patches;
-  - a `replace` has at most 16384 nodes;
+  - a `replace` has at most 16384 nodes, the same cap as the tree and as `mount` (see Summary),
+    so "resend whole" after an `err` always fits;
   - this is at most the 64th push of the call.
 - It does **not** mean the update fits the tree. That is only known when it is applied on the main
   thread. A misfit still remounts the surface (`surface.rs:438-462`), and the remount resets the
@@ -618,11 +634,105 @@ sidecar throws `NotImplementedInFyx` (`vscode-coverage.md:173`).
 - Sidecar: `ui/quickpick.ts:355-362` maps `password` to `secret`, and the `NotImplementedInFyx` throw
   is removed.
 
+## L. Editor decorations (`fyx:ui/decorations`)
+
+**Status: accepted, in 0.2** (decided 2026-11-17; judge wit-0.2-design, decision 1). W6's dev
+data source (`FYX_UI_DEV_DECORATIONS`) stays as a host-side test aid.
+
+**Motivation.** Backlog #10, W6. Layer 4 of `ARCHITECTURE.md`: blocks above or below buffer
+lines that survive edits, such as test results, blame or diagnostics. W6 built the host side.
+`ui_ext_host::decorations::Decorations` draws a retained `fyx:ui` tree as an editor block,
+anchored by a CRDT anchor per buffer and shared by every editor on that buffer
+(`tasks/progress/W6.md`). No extension can place one yet.
+
+**Shape.** W6's two functions, adapted to A, in an interface of their own that the world imports:
+
+- `place-decoration(id, location, nodes) -> result<_, host-error>`;
+- `remove-decoration(id) -> result<_, host-error>`.
+
+An interface rather than more `host` functions, so the capability boundary shows in the WIT, and
+a 0.3 change to decorations (inlays, buffer handles) leaves `host` alone. Imports rather than a
+`surface-kind`, for W6's reason: surfaces are few and long-lived, while decorations come and go
+with analysis results.
+
+The host links `decorations` for every 0.2 component and checks the capability per call. The
+judge suggested linking it only for `ui:editor-decorations`. But then a component that imports it
+would fail to instantiate wherever the capability is not granted, with a link error instead of an
+error it can handle. Checked per call, the same component works either way.
+
+**Semantics.**
+
+- **Checks at the call** (A), in this order:
+  - the manifest has `ui:editor-decorations`, otherwise `not-permitted`;
+  - the id follows E's rule (1–64 bytes of `[a-z0-9._-]`), otherwise `invalid-argument`;
+  - the id is not a live surface id, otherwise `invalid-argument`. Ids share one namespace, so
+    `push-update`, `handle-event`, `list-rows` and `mount` need no second id parameter;
+  - the path is relative, `/`-separated, at most 1024 bytes, with no empty, `.` or `..`
+    component, otherwise `invalid-argument`;
+  - `nodes` has at most 16384 nodes, otherwise `limit-exceeded`;
+  - a new id while 512 decorations are live, otherwise `limit-exceeded`. The cap is separate
+    from E's 32 surfaces, because a linter places one decoration per finding;
+  - at most 512 decoration effects per export call, otherwise `limit-exceeded`.
+- Whether the tree fits (parents first, children only under `flex`) is checked when it is
+  applied, as for pushes (F). On a misfit the host calls `mount(id)`; when that fails too, the
+  decoration is removed with one `warn` log. It uses the same remount counter as surfaces.
+- **After the call** the registry hands the tree to `Decorations` (W6), keyed
+  `"<extension>/<id>"`, with a backend that routes the block's events to the extension as
+  `handle-event(id, …)` and its rows as `list-rows(id, …)`. Rendering is retained and uses theme
+  tokens only, so there are no WASM calls in `render()`.
+- **Location.** The path is matched against every worktree of every open workspace. Buffers
+  opened later get the anchor when they open, as in W6. A path outside every worktree never
+  matches. The host reads no file for the extension: `line` is anchored in buffers that are
+  already open or opened later, and rows past the end clamp to the last row. If the anchored
+  line is deleted, the block stays where the anchor collapses to. W6 also accepts absolute paths
+  and component suffixes; 0.2 narrows that to worktree-relative paths, so extensions cannot probe
+  for files outside the project.
+- **Placing a live id again** moves the decoration (a new anchor from `line`) and replaces its
+  tree, like a fresh mount. Events still queued for the old tree are dropped.
+- **Removal.** `remove-decoration`, or the extension being disabled or unloaded. No event is
+  sent, as for `remove-surface`.
+- **Not for decorations:** `request-tick`, `show-surface`, `hide-surface` and `remove-surface`
+  return `invalid-argument`. An extension that refreshes decorations periodically ticks one of
+  its surfaces and pushes to the decorations from there. That keeps the tick budget (B) per
+  surface and bounded.
+- **Deferred to 0.3:** a `decoration-orphaned` event, anchoring to a buffer handle (layer 3)
+  instead of a path, and inline (inlay) decorations.
+- 0.1 components have no decorations.
+
+**Changes.**
+
+- WIT (W0): `decoration-placement`, `decoration-location`, `interface decorations`,
+  `import decorations`.
+- Model, `types.rs`: `DecorationPlacement` and `DecorationLocation`.
+- Host, `fyx_ui.rs`:
+  - link `decorations` for 0.2;
+  - `UiState.live_decorations: BTreeSet<String>`, checked together with `live_surfaces`;
+  - `HostEffect::{PlaceDecoration { id, location, nodes }, RemoveDecoration(id)}`;
+  - the capability, the two caps and the path rule.
+- Renderer:
+  - `registry.rs`: `apply_effect` for both effects, a per-decoration backend for events and
+    rows, the remount counter, removal on unload;
+  - `decorations.rs`: worktree-relative path matching for extension decorations.
+- SDK:
+  - `place_decoration(id, &DecorationLocation, nodes)` and `remove_decoration(id)`, both
+    `-> Result<(), HostError>`;
+  - `SurfaceTree::place(id, location, build)`, which mounts the mirror and places it;
+  - `take_host_effects` records both.
+- Sidecar: no VS Code mapping in 0.2, since `TextEditorDecorationType` styles text rather than
+  drawing trees. `mock-host.ts` returns `not-permitted`.
+- Tests:
+  - host: `not-permitted` without the capability, a clash with a surface id, the 513th
+    decoration, a `..` path, `push-update(id)` after placing, the `mount(id)` resync on a misfit,
+    and that removal drops queued events;
+  - renderer: W6's decoration tests with a WASM backend, where a click in the block reaches
+    `handle-event(id)`;
+  - SDK: both effects in `take_host_effects`.
+
 ## Rejected and deferred
 
 | Proposal | Source | Why not in 0.2 |
 |---|---|---|
-| Raw colours or a palette index | `vscode-coverage.md:105` | "Theme tokens only" is an architecture rule; decorations (layer 4, W6) may need their own escape hatch, which belongs in that world, not `fyx:ui`. |
+| Raw colours or a palette index | `vscode-coverage.md:105` | "Theme tokens only" is an architecture rule. Decorations (L) use the same tokens. |
 | `visibility-changed` event for panels | VS Code `onDidChangeVisibility` | No consumer; the host already throttles ticks by visibility. |
 | `update-surface` (rename, move) | `TreeView.title` | Remove plus add covers it; deferred. |
 | Command contributions (palette entries that open a modal) | W8 keybindings (`fyx_vscode::RunCommand`) | A separate host feature (actions, keymap) with its own capability; 0.2 modals open from buttons, rows and status items. |
@@ -636,9 +746,9 @@ sidecar throws `NotImplementedInFyx` (`vscode-coverage.md:173`).
 
 | Component | Files | Changes |
 |---|---|---|
-| WIT (W0) | `crates/ui_ext/wit/fyx-ui.wit` → `crates/ui_ext/wit/since_v0.1.0/fyx-ui.wit` (moved, byte-identical); new `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` (this draft) | migration.md |
+| WIT (W0) | `crates/ui_ext/wit/fyx-ui.wit` → `crates/ui_ext/wit/since_v0.1.0/fyx-ui.wit` (moved, byte-identical); new `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` (this design's WIT) | migration.md |
 | Model | `crates/ui_ext/src/types.rs` | `Icon`, `IconRef`, `ModalDescriptor`, `ModalWidth`, `DismissReason`, `RowRange`; new fields `ButtonProps.tooltip`, `InputProps.secret`, `ListProps.selected`, `ListRow.indent`; `Patch::InvalidateRows`; `UiEvent::{RowSelected, Dismissed}`; `UiEvent::target() -> Option<NodeId>`; `SurfaceKind::Modal` (B, C, G, I, J, K) |
-| Model | `crates/ui_ext/src/tree.rs` | `InvalidateRows` validation, `TreeError::NotAList`, `Touched` result with row invalidations (G) |
+| Model | `crates/ui_ext/src/tree.rs` | `InvalidateRows` validation, `TreeError::NotAList`, `Touched` result with row invalidations (G); `replace` checks `max_nodes` (16384) instead of `max_nodes_per_update`, for both versions, since 0.1 only gains (Summary) |
 | Host | `crates/extension_host/src/wasm_host/fyx_ui.rs` | version dispatch, `HostEffect` list replacing `pushes`, `Reply { effects, value }`, `ReplyError { effects, .. }`, live surface set, activation timestamp, `tick()`, `ui:modal`, `MAX_VERSION = 0.2.0` (A–F) |
 | Host | new `crates/extension_host/src/wasm_host/fyx_ui/since_v0_1_0.rs`, `since_v0_2_0.rs` | one `bindgen!` and its conversions each; `fyx_ui.rs` keeps the shared runtime (migration.md) |
 | Host tests | `crates/extension_host/src/wasm_host/fyx_ui/tests.rs`, `fixtures/probe` | see migration.md, "Test plan" |
@@ -649,18 +759,24 @@ sidecar throws `NotImplementedInFyx` (`vscode-coverage.md:173`).
 | Renderer | new `crates/ui_ext_host/src/modal.rs` | `ExtensionModal: ModalView` (C, D) |
 | Renderer | `crates/ui_ext_host/src/view.rs` | icon match, spinner, blank, tooltip, indent, selected highlight and scroll, masked input, modal header (C, I, J, K) |
 | Upstream hook | `crates/workspace/src/status_bar.rs` | `remove_item_by_id`, about 8 lines, marked `fyx:` (E) |
-| SDK | `crates/ui_ext_sdk/src/ui_ext_sdk.rs`, `host_model.rs`, `Cargo.toml` | bindings per version, `Extension::tick`, host-function wrappers returning `HostError`, `SurfaceTree::push` and the unsynced flag, `invalidate_rows`, builders for the new fields, `take_host_effects` (A–K); migration.md, "SDK" |
+| SDK | `crates/ui_ext_sdk/src/ui_ext_sdk.rs`, `host_model.rs`, `Cargo.toml` | bindings for both versions in every build, the world chosen in `register_extension!`, `Extension::tick`, host-function wrappers returning `HostError`, `SurfaceTree::push` and the unsynced flag, `SurfaceTree::mount` capped at `max_nodes`, `invalidate_rows`, builders for the new fields, `place_decoration`, `take_host_effects` (A–L); migration.md, "SDK" |
 | Demos | `extensions/fyx_demo_counter`, `fyx_demo_todo`, `fyx_demo_gallery` | clock status item (ticks), a picker modal, `invalidate-rows` instead of re-keying, frozen icons |
 | Sidecar | `sidecars/vscode-host/src/schema.ts`, `host.ts`, `mock-host.ts`, `ui/surfaces.ts`, `ui/quickpick.ts`, `ui/treeview.ts`, `ui/output.ts`, `ui/statusbar.ts`, `test/*.test.ts` | the JSON mirror of every type change, version negotiation in `initialize`, `fyx/surfacesChanged` and `fyx/surfaceClosed` replaced by WIT-equivalent requests (C–K) |
 | Docs | `docs/fyx/sdk-reference.md`, `extension-authoring.md`, `limits-and-gotchas.md`, `docs/vscode-coverage.md`, `tasks/wit-0.2.md` | new APIs, the limits table from B, C and E, coverage updates, close the backlog rows |
 
-## Open questions for the integrator
+## Decisions (2026-11-17)
 
-1. **Tick floor:** 100 ms, as drafted, or 250 ms? The CPU-share throttle makes 100 ms safe;
-   250 ms would be simpler to explain.
-2. **Transient activation:** a 5 s window, as drafted, or strictly inside `handle-event`? The
-   strict rule breaks "click, then fetch, then show the picker".
-3. **Keyboard selection (C)** is the one addition beyond the backlog. Accept it with the modal, or
-   ship modals in 0.2 driven by mouse and Enter only and add selection in 0.3?
-4. **Status-bar hook (E):** accept the 8-line `fyx:` hook in `status_bar.rs`, or render removed
-   items empty?
+The owner decided the judge's three owner questions (wit-0.2-design, "Decisions for the user"),
+and the integrator took the judge's recommendations for the rest. They are applied in the sections
+above.
+
+| Question | Decision | Where |
+|---|---|---|
+| Decorations in 0.2? | **In.** `fyx:ui/decorations` as drafted. | L, WIT |
+| Frozen icon enum or strings? | **The frozen 101-icon enum.** A new icon needs a new world version. | I |
+| May a modal open after a gesture, and what is a gesture? | **Within 5 s after a click or Enter only**: `click`, `row-click`, `input-submitted`. Typing (`input-changed`) is not a gesture, nor are `row-selected` and `dismissed`. | C, WIT `show-surface` |
+| Keyboard selection in pickers? | **Ships with 0.2.** | C |
+| Tick floor | **100 ms.** | B, WIT `request-tick` |
+| `StatusBar::remove_item_by_id` hook | **Accepted**, about 8 lines marked `fyx:`. | E |
+| `replace` / `mount` cap | **16384 nodes**, the tree cap. | Summary, F, WIT |
+| Staging | **Stable and Preview capped at 0.1** until the commit that declares 0.2 frozen; Dev and Nightly accept 0.2. | migration.md §2 |
