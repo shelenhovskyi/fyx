@@ -6,20 +6,25 @@ you must *see*. Record every run in `tasks/progress/W7.md` as one line: test, co
 `FAIL` with what you saw.
 
 Conventions:
-- `$fyx` is the full path of the built binary (`target\debug\fyx.exe` once W1 renames it, otherwise
-  `target\debug\zed.exe`). Shell: `pwsh`.
+- `$fyx` is the full path of the built binary, `target\debug\fyx.exe`. Shell: `pwsh`.
 - Start from a clean profile for each test, so no state carries over from earlier runs. Delete
-  Fyx's data and config directories first (after W1: `%APPDATA%\Fyx` and `%LOCALAPPDATA%\Fyx`). Never
-  delete `...\Zed`: those belong to the installed Zed.
-- "Install the demo" means the load path from review finding 7 (`[fyx_ui]` in `extension.toml`).
-  Until that path exists, tests T1–T3 are blocked.
+  `%APPDATA%\Fyx` and `%LOCALAPPDATA%\Fyx` first. Never delete `...\Zed`: those belong to the
+  installed Zed.
+- "Install the demos" means two steps. 0.1 has no installed-extensions path yet (review
+  integration-3, finding 2).
+  1. In Git Bash, run `script/fyx-build-demos`. It builds the counter, todo and gallery demos and
+     copies each component next to its `extension.toml` as `fyx_ui.wasm`.
+  2. In `pwsh`, before starting Fyx, set the variable the script prints:
+     `$env:FYX_UI_DEV_EXTENSIONS = '<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;<repo>\extensions\fyx_demo_gallery'`
+
+  Fyx reads the variable once, at startup.
 
 ## T1 Counter panel: the click loop
 
 Covers: dock panel container, flex/text/button/list primitives, click → one `handle-event` →
 patches → repaint, theme tokens, virtualized list.
 
-1. Build `fyx_demo_counter` for `wasm32-wasip2` and install it. Start `$fyx` on an empty folder.
+1. Install the demos (see Conventions). Start `$fyx --foreground` on an empty folder.
 2. Open the right dock. A **Counter** panel with icon `#` is listed. Open it.
    - Expect: `Count: 0` in bold. Buttons **Decrement** (disabled), **Increment** (filled) and
      **Reset** (disabled). An empty list.
@@ -37,8 +42,8 @@ patches → repaint, theme tokens, virtualized list.
    - Expect: the panel's text, buttons and background follow the theme immediately. No colour stays
      from the previous theme.
 8. Close the panel and reopen it.
-   - Expect: it shows the current state with no errors. Then click **Increment** once more and check
-     that the count still updates (re-mount check from review finding 2).
+   - Expect: it shows the current state with no errors. Reopening does not mount the panel again.
+     Click **Increment** once more and check that the count still updates.
 9. Open the log (`zed: open log` or Fyx's renamed equivalent).
    - Expect: no `fyx_ui` errors and no `disabled after an earlier failure`.
 
@@ -70,17 +75,17 @@ running alongside the first.
 
 ## T3 Status item
 
-Blocked: no demo contributes a `status-item` surface yet. Proposed for W4: the counter adds a
-surface `counter-status` (status bar, right) showing `Count: N`. The panel's click handler updates
-it through `push-update`.
+Uses `fyx_demo_gallery`. It contributes the **Gallery** panel (right dock) and a status item
+("Gallery selection", right side). A row click in the panel updates the status item through
+`push-update` (test `row_click_updates_the_label_and_the_status_item`).
 
-1. Start `$fyx` with the counter installed.
-   - Expect: `Count: 0` in the status bar on the right. Its order relative to the built-in items
-     follows `priority` (higher is closer to the edge).
-2. Click **Increment** in the counter panel three times.
-   - Expect: the status item reads `Count: 3`, updated in the same frame as the panel or the next
-     one.
-3. Close the counter panel.
+1. Install the demos and start `$fyx`.
+   - Expect: the gallery's status item appears on the right of the status bar. The renderer
+     ignores `priority` in 0.1, so its order among the other items is not checked.
+2. Open the **Gallery** panel and click three different rows of its list.
+   - Expect: after each click, the status item shows the selected row, updated in the same frame
+     as the panel or the next one.
+3. Close the Gallery panel.
    - Expect: the status item stays visible and keeps its value.
 4. Switch between a light and a dark theme.
    - Expect: the item follows the status bar's colours.
@@ -90,8 +95,19 @@ it through `push-update`.
 Covers: W5 `agent_review`, an ACP `session/request_permission` routed into the host's review, and
 host-owned consent.
 
-Setup: an ACP agent (Claude Agent) configured with your own key, which the tester enters, never an
-agent. Use a scratch git repository containing `review.txt`:
+Setup:
+- Review mode must be on. Either start with `$env:FYX_AGENT_REVIEW = '1'`, or run
+  `agent_review: toggle review mode` from the command palette.
+- Agent, first without a key: the scripted stub `crates/agent_review/test-agent/review_stub_agent.js`.
+  Add it to `settings.json`:
+  `"agent_servers": { "Review Stub": { "type": "custom", "command": "node", "args": ["<repo>/crates/agent_review/test-agent/review_stub_agent.js"] } }`.
+  It proposes two hunks on `demo.txt`, asking permission first. With "direct" in the prompt, it
+  writes through `fs/write_text_file` instead. Run the test once each way.
+- Agent, then a real one: Claude Agent, with a key that the tester enters, never an agent.
+- Never set `FYX_AGENT_REVIEW_SCRIPT` for this test. It drives the review pane by itself (review
+  integration-3, finding 1).
+
+For a real agent, use a scratch git repository containing `review.txt`:
 
 ```
 alpha
