@@ -41,7 +41,7 @@ running editor, not only green tests. Integrator-only files (`Cargo.toml`, `Carg
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 3.1 | W0 | Create repo `fyx-extensions` (owner picks the GitHub org: open decision in PLAN.md); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
+| 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
 | 3.2 | W0 | Registry CI: build from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
 | 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18] | 3.2 | install from the index; tampered package refused |
 | 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19] | 3.3 | spec §4 failures 1, 2, 5 pass |

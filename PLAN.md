@@ -34,7 +34,7 @@ findings that belong to an item are noted next to it (`tasks/reviews/integration
 | 6 | W3 | Renderer fixes from the cycle-3 review: the `list-rows` loop after a resync, stale row clicks, the remount counter, Retry on a disabled instance, input lost on remount | integration-3 #8–#10 |
 | 7 | W1 | Remaining brand gaps: the CLI binary and its `Zed.exe` lookup, the clap name, the installer | integration-3 #5 |
 | 8 | W1 | Review the cloud-off defaults (`assets/settings/fyx.json`) and measure a `cloud` cargo feature that compiles out Zed's cloud crates | Move `fyx_default_settings` and `fyx_url_to_internal` out of upstream files (integration-3 #4) |
-| 9 | W2c (later) | Move `crates/extension_host/src/wasm_host/fyx_ui*` into a Fyx-owned crate, leaving one hook in `extension_host` | Also integration-1 #11 and F2 |
+| 9 | W2c (later) | Move `crates/extension_host/src/wasm_host/fyx_ui*` into a Fyx-owned crate, no hook in `extension_host` (done: `crates/ui_ext_wasm`, W3) | Also integration-1 #11 and F2 |
 | 10 | W0 | `fyx:ui` 0.2 design as one world: `request-tick` and `modal` first, then the rest of `tasks/wit-0.2.md` | Add `push-update -> result` (integration-3 #6) |
 | 11 | W0 | Own CI: `fyx_*` GitHub workflows (gate, lockfile check, licenses, demo build). All 46 upstream Zed workflows are disabled on the fork | Mark the `Cargo.toml` members (integration-1 #13) |
 | 12 | W8 | VS Code adapter, Rust side: launch the sidecar under `--permission`, bridge JSON-RPC to the `ui_ext` tree and answer `push-update` | W8-7 to W8-10, `main.ts` sandbox check (W8-9) |
@@ -85,3 +85,6 @@ running more than 2–3 compiling streams at once.
 - Trademark: several US FYX marks exist in classes 9 and 42; talk to a trademark lawyer before any
   commercialisation.
 - Whether the build may talk to Zed's extension registry at all (Zed ToS apply).
+
+**Decided:** the Fyx extension registry repo is `shelenhovskyi/fyx-extensions`, next to `fyx`
+(owner, 2026-11-17). It is created in Platform 1 task 3.1, not before.
