@@ -6,7 +6,6 @@ on:
     branches:
       - integration
       - fyx/main
-      - claude/fyx-ci-readme # TRIAL ONLY, remove before handoff
   workflow_dispatch:
 
 permissions:
@@ -52,9 +51,16 @@ jobs:
                   Format-Table Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } }, @{ n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) } } |
                   Out-String | Write-Host
           }
+          function Get-BestDrive {
+              Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free -ne $null } |
+                  Sort-Object Free -Descending | Select-Object -First 1
+          }
           Show-Drives
+          # The gate's target dir needs 25-60 GB. windows-latest has had ~147 GB free on D:, and
+          # deleting SDKs costs ~3 minutes for ~12 GB on C:, so only do it when room is short.
+          $neededGB = 100
           # SDKs this build never uses. MSVC, the Windows SDK, CMake, Git and Strawberry Perl stay.
-          $unused = @(
+          $unused = if ((Get-BestDrive).Free / 1GB -ge $neededGB) { @() } else { @(
               'C:\Android',
               'C:\ghcup',
               'C:\Miniconda',
@@ -64,10 +70,10 @@ jobs:
               'C:\hostedtoolcache\windows\PyPy',
               'C:\hostedtoolcache\windows\Ruby',
               'C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk',
-              'C:\Program Files\Microsoft SQL Server',
               'C:\Program Files\MongoDB',
               'C:\SeleniumWebDrivers'
-          )
+          ) }
+          if (-not $unused) { Write-Host "at least $neededGB GB free already: not deleting anything" }
           foreach ($dir in $unused) {
               if (Test-Path -LiteralPath $dir) {
                   $started = Get-Date
@@ -77,10 +83,9 @@ jobs:
               }
           }
           $global:LASTEXITCODE = 0
-          Show-Drives
+          if ($unused) { Show-Drives }
           # Put target/ on whichever drive now has the most room.
-          $best = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free -ne $null } |
-              Sort-Object Free -Descending | Select-Object -First 1
+          $best = Get-BestDrive
           $targetDir = "$($best.Name):\fyx-target"
           New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
           "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
