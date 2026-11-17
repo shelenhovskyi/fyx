@@ -11,7 +11,7 @@ workspace = true
 [lib]
 path = "src/fyx_demo_counter.rs"
 crate-type = ["cdylib"]
-test = false
+test = true
 doctest = false
 
 [dependencies]
