@@ -209,6 +209,19 @@ impl SurfaceState {
         }));
     }
 
+    /// Swaps in a new instance of the extension (a reinstall) and mounts the surface on it.
+    pub fn replace_backend(
+        &mut self,
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) {
+        self.backend = backend;
+        self.surface = surface;
+        self.events.clear();
+        self.retry(cx);
+    }
+
     /// Mounts again after a failure, at the user's request.
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.remounts_without_input = 0;

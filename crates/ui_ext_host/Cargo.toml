@@ -40,4 +40,5 @@ editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 gpui_tokio.workspace = true
 settings = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 theme_settings.workspace = true
