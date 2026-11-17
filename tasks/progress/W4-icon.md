@@ -1,7 +1,7 @@
 # W4: Fyx app icon and logo
 
-Steps 1–3 are done: the inventory, three concepts and a preview sheet. Step 4, the full asset set,
-waits for the user's pick. W1 does the wiring.
+All four steps are done. The user picked **concept A, "tree F"** (2026-11-17). Step 4 generated the
+full set with `script/fyx-icons`; W1 does the remaining wiring (see "For W1" below).
 
 ## 1. Icon assets Zed ships (inventory, `integration` at `1ec364bfc0`)
 
@@ -35,7 +35,7 @@ The `.ico` files are used by:
 |---|---|---|---|
 | `crates/zed/resources/Document.icns` | ICNS with one `ic10` entry: a 1024 px PNG | macOS document type icon: `script/bundle-mac:133-136`, `info/DocumentTypes.plist` (`CFBundleTypeIconFile` "Document") | one file for every channel. ImageMagick here has no ICNS coder; I read the entries with a small parser. |
 | `crates/auto_update_helper/app-icon.ico` | ICO 16, 24, 32, 48, 64, 96, 128, 256, 512 | nothing found: `auto_update_helper` gets its icon from `windows_resources` | apparently orphaned; replace it or delete it with the set |
-| `crates/explorer_command_injector/AppxManifest{,-Preview,-Nightly}.xml:24-53` | references `resources\logo_150x150.png` and `resources\logo_70x70.png` | the Windows 11 Explorer context-menu package | **the PNGs are not in the repo**, and nothing in `script/` generates them. Step 4 should add 150×150 and 70×70 tiles. |
+| `crates/explorer_command_injector/AppxManifest{,-Preview,-Nightly}.xml:24-53` | references `resources\logo_150x150.png` and `resources\logo_70x70.png` | the Windows 11 Explorer context-menu package | **the PNGs are not in the repo**, and nothing in `script/` generates them. Left for W1 (see "For W1"). |
 | Inno wizard bitmaps `inno-*.bmp`, `inno-small-*.bmp` | — | `zed.iss:20-21` | commented out, not shipped |
 | `docs/theme/favicon.png` | PNG 64×64 | the mdBook docs site | Zed mark |
 | `crates/gpui/examples/image/app-icon.png` | PNG 512 | a GPUI example | not product branding; leave it |
@@ -71,23 +71,53 @@ which is what the Windows `.ico` frames and small Linux icons should use. To reb
 My ranking for legibility and distinctness: A, then C, then B. B carries the review idea best,
 but it is the weakest at 16 px.
 
-## 4. Plan for the full set, after the pick
+## 4. The full set (done)
 
-From the chosen SVG, with ImageMagick and one script under `script/`:
+The sources are in `assets/fyx/icon/`:
+- `fyx-icon.svg`: the app icon in Stable colours;
+- `fyx-document.svg`: a page with a folded corner carrying the tile;
+- `fyx-logo.svg`: the one-colour mark.
 
-- `app-icon{suffix}.png` at 512 and `@2x` at 1024, with the macOS margin, for all four channels.
-- `windows/app-icon{suffix}.ico` with frames 256, 128, 64, 48, 32, 24 and 16, drawn from the tile
-  without the margin. Zed's files lack 48 and 24, which Explorer and the taskbar use at 150 % scale.
-- `Document.icns`: an `ic10` entry with a 1024 px PNG, written directly (the ICNS header is two
-  lengths), as a document page carrying the mark.
-- Explorer package tiles `logo_150x150.png` and `logo_70x70.png`, which are missing today.
-- `docs/theme/favicon.png` at 64 px, and a Fyx `assets/images/fyx_logo.svg` for the welcome page
-  and onboarding, if W1 wants to replace `zed_logo.svg`.
-- **Channel variants, same mark, different tile:**
-  - Stable: the chosen colours;
-  - Preview: a blue-shifted tile;
-  - Nightly: a dark tile with the mark in its accent colour;
-  - Dev: a grey tile.
+`script/fyx-icons` (Python plus ImageMagick 7 with librsvg) writes everything below. Its output is
+deterministic: a second run gives byte-identical files, checked with `sha1sum`.
 
-  Following Zed, the channel is told apart by the tile colour, not a badge, because a badge is
-  unreadable at 16 px.
+| Output | Sizes | Notes |
+|---|---|---|
+| `crates/zed/resources/app-icon{,-preview,-nightly,-dev}.png` | 512, 8-bit RGBA | Apple's grid with a 100/1024 margin, like Zed's |
+| `crates/zed/resources/app-icon{,-preview,-nightly,-dev}@2x.png` | 1024 | the same |
+| `crates/zed/resources/windows/app-icon{,-preview,-nightly,-dev}.ico` | 256, 128, 64, 48, 32, 24, 16 | the tile without the margin, as in Zed's `.ico` files; 48 and 24 are new |
+| `crates/zed/resources/Document.icns` | one `ic10` entry, a 1024 PNG | written directly by the script, since ImageMagick here has no ICNS writer |
+| `docs/theme/favicon.png` | 64 | the tile |
+| `assets/images/fyx_logo.svg` | 96×96 view box | a copy of `fyx-logo.svg`. One colour, because GPUI draws `Vector`s as a mask tinted with the element's colour (`crates/ui/src/components/image.rs:85-96`). |
+
+The channels differ by tile hue only, keeping the white mark, so each stays readable at 16 px:
+
+| Channel | Tile gradient |
+|---|---|
+| Stable | orange `#FF8A1F` to coral `#F0452E` |
+| Preview | blue `#3D8BFF` to `#2A4FE0` |
+| Nightly | violet `#8B5CF6` to `#4C1D95` |
+| Dev | grey `#9AA3AF` to `#5B6472` |
+
+A badge was rejected because it is unreadable at 16 px. The 16 and 32 px frames pulled from the
+`.ico` files still read as the "F" on light and dark backgrounds.
+
+Linux needs no separate files: `script/bundle-linux` and Flatpak copy the PNGs above.
+`crates/auto_update_helper/app-icon.ico` was deleted: nothing referenced it, since the helper's
+icon comes from `windows_resources`.
+
+## For W1 (wiring)
+
+- **In-app logo.** Add `VectorName::FyxLogo` → `images/fyx_logo.svg` in
+  `crates/ui/src/components/image.rs`. Switch the welcome page (`crates/workspace/src/welcome.rs`)
+  and onboarding (`crates/onboarding/src/onboarding.rs`) to it. Then decide whether
+  `assets/images/zed_logo.svg` stays, since the Copilot lockup still uses Zed's mark.
+- **Explorer package tiles.** `crates/explorer_command_injector/AppxManifest{,-Preview,-Nightly}.xml`
+  reference `resources\logo_150x150.png` and `resources\logo_70x70.png`, which are in neither the
+  repo nor any script. `script/fyx-icons` can produce them, by resizing the tile to 150 and 70,
+  once W1 says where the packaging step expects them.
+- **Linux icon name.** `script/bundle-linux:215-222` still installs the icon as
+  `share/icons/hicolor/*/apps/zed.png` with `APP_ICON="zed"`; that is a name, not artwork, so it
+  is W1's.
+- `docs/src/development/windows.md:201` mentions `resources/windows/app-icon.ico`. The path is
+  unchanged, so nothing to do.

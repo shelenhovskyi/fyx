@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Fyx document icon (macOS Document.icns): a page with a folded corner carrying the app tile. -->
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F1F1F3"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A1F"/>
+      <stop offset="1" stop-color="#F0452E"/>
+    </linearGradient>
+  </defs>
+  <path d="M 236 72 H 622 L 828 278 V 920 Q 828 952 796 952 H 236 Q 204 952 204 920 V 104 Q 204 72 236 72 Z"
+        fill="url(#page)" stroke="#C9C9CF" stroke-width="8"/>
+  <path d="M 622 72 V 246 Q 622 278 654 278 H 828 Z" fill="#E2E2E7" stroke="#C9C9CF" stroke-width="8"
+        stroke-linejoin="round"/>
+  <g transform="translate(316 404) scale(0.4854)">
+    <rect x="0" y="0" width="824" height="824" rx="184" fill="url(#tile)"/>
+    <g fill="#FFFFFF" transform="translate(-100 -100)">
+      <rect x="300" y="250" width="130" height="524" rx="36"/>
+      <rect x="300" y="250" width="290" height="130" rx="36"/>
+      <rect x="640" y="250" width="130" height="130" rx="36"/>
+      <rect x="300" y="452" width="190" height="130" rx="36"/>
+      <rect x="540" y="452" width="130" height="130" rx="36"/>
+    </g>
+  </g>
+</svg>
