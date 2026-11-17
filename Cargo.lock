@@ -19231,6 +19231,11 @@ dependencies = [
 [[package]]
 name = "ui_ext"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+]
 
 [[package]]
 name = "ui_ext_host"
