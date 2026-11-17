@@ -128,6 +128,15 @@ impl ProposedEdit {
         }
     }
 
+    /// Decides every hunk that is still pending, keeping decisions already made.
+    pub fn decide_pending(&mut self, decision: HunkDecision) {
+        for hunk in &mut self.hunks {
+            if hunk.decision == HunkDecision::Pending {
+                hunk.decision = decision;
+            }
+        }
+    }
+
     pub fn set_comment(&mut self, hunk_index: usize, comment: Option<String>) -> Result<()> {
         let comment = comment
             .map(|comment| comment.trim().to_string())

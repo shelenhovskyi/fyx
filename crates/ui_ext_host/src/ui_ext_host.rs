@@ -7,10 +7,13 @@
 //! - [`ExtensionPanel`] (a dock [`workspace::Panel`]) and [`ExtensionStatusItem`] (a
 //!   [`workspace::StatusItemView`]) host a view.
 //! - [`UiExtensionRegistry`] holds the loaded surfaces and adds containers to every workspace.
+//! - [`Decorations`] draws trees as editor blocks anchored to buffer lines (layer 4).
 //!
-//! For the sprint, extensions are loaded from [`DEV_EXTENSIONS_ENV`] only.
+//! For the sprint, extensions are loaded from [`DEV_EXTENSIONS_ENV`] only, and decorations from
+//! [`DEV_DECORATIONS_ENV`].
 
 mod backend;
+mod decorations;
 mod install;
 mod keyboard;
 mod panel;
@@ -18,6 +21,8 @@ mod registry;
 mod surface;
 mod view;
 
+#[cfg(test)]
+mod decoration_tests;
 #[cfg(test)]
 mod primitive_tests;
 #[cfg(test)]
@@ -30,6 +35,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 pub use backend::UiBackend;
+pub use decorations::{
+    DEV_DECORATIONS_ENV, DecorationId, DecorationPlacement, DecorationTarget, Decorations,
+    text_tree,
+};
 pub use install::{InstallDevUiExtension, describe_capabilities, install_dev_ui_extension};
 pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
 pub use panel::{
@@ -69,4 +78,5 @@ pub fn capability_chips(extension_id: &str, cx: &App) -> Option<gpui::AnyElement
 pub fn init(cx: &mut App) {
     registry::init(cx);
     keyboard::intercept_keys(cx);
+    decorations::init(cx);
 }
