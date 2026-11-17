@@ -1280,7 +1280,7 @@ fn register_actions(
                         Toast::new(
                             NotificationId::unique::<RegisterZedScheme>(),
                             format!(
-                                "zed:// links will now open in {}.",
+                                "fyx:// links will now open in {}.", // fyx: own scheme
                                 ReleaseChannel::global(cx).display_name()
                             ),
                         ),
@@ -1290,7 +1290,7 @@ fn register_actions(
                 Ok(())
             })
             .detach_and_prompt_err(
-                "Error registering zed:// scheme",
+                "Error registering fyx:// scheme", // fyx: own scheme
                 window,
                 cx,
                 |_, _, _| None,
@@ -1718,7 +1718,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About Fyx".into()), // fyx: product name
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
