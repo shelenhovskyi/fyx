@@ -105,8 +105,11 @@ These were worked around without touching the WIT; each is a candidate for the i
 | Colours are tokens only | `ThemeColor` ids map to the nearest token; raw CSS colours (indent-rainbow, todo-highlight) are dropped and reported | keep as is for `fyx:ui`; decorations (layer 4, W6) may need a palette index or a raw-colour escape hatch |
 
 The JSON mirror itself (encoding rules below) needed no change, and it matches the serde derive W2
-put on the `ui_ext` types. The mock host also enforces W2's host rules: only `flex` nodes have
-children, `before` names a sibling, at most 2,048 patches per update and 16,384 nodes per tree.
+put on the `ui_ext` types. The mock host also enforces W2's host rules (`ui_ext::Tree`) and refuses
+what the host refuses, atomically: only `flex` nodes have children, `before` names a sibling, at
+most 2,048 patches per update and 2,048 nodes per list row, and at most 16,384 nodes per tree, which
+also caps a `mount` and a `replace`. An invalid `mount` or `list-rows` reply fails the whole call,
+as it does in the host.
 
 ### API gaps, by how many extensions they block
 
