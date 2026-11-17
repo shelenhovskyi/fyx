@@ -177,3 +177,37 @@ test("unimplemented APIs fail with an explicit error naming the API", async () =
   assert.ok(cov.used["vscode.languages.createDiagnosticCollection"] >= 1);
   assert.match(cov.partial["vscode.window.createTextEditorDecorationType"], /color=#ff0000/);
 });
+
+test("edits the host refuses never reach the extension's document", async () => {
+  const uri = Uri.file(join(workspace, "refused.txt")).toString();
+  await host.openDocument(uri, "lower line\nsecond", "plaintext");
+  await host.setActiveEditor(uri);
+  const word = async (line: number, character: number) =>
+    ((await host.rpc.request("vscode/provideHover", { uri, position: { line, character } })) as { contents: string[] }).contents[0];
+
+  host.refuseEdits = true;
+  try {
+    await host.executeCommand("sink.upper");
+    await host.executeCommand("sink.upper");
+  } finally {
+    host.refuseEdits = false;
+  }
+  assert.equal(await word(0, 1), "**lower**", "the refused edits were not kept locally");
+  assert.equal(host.buffers.get(uri)!.text, "lower line\nsecond");
+
+  // A user edit at the host's next version still lands: refused edits did not move the local version.
+  host.buffers.set(uri, { text: "typed line\nsecond", version: 2 });
+  await host.rpc.request("vscode/didChangeTextDocument", { uri, version: 2, text: "typed line\nsecond" });
+  assert.equal(await word(0, 1), "**typed**");
+
+  // The host changed the buffer without syncing yet: the edit's version is stale and refused.
+  host.buffers.set(uri, { text: "other line\nsecond", version: 3 });
+  await host.executeCommand("sink.upper");
+  assert.equal(host.buffers.get(uri)!.text, "other line\nsecond");
+  assert.equal(await word(0, 1), "**typed**");
+
+  await host.rpc.request("vscode/didChangeTextDocument", { uri, version: 3, text: "other line\nsecond" });
+  await host.executeCommand("sink.upper");
+  assert.equal(host.buffers.get(uri)!.text, "OTHER LINE\nsecond");
+  assert.equal(await word(0, 1), "**OTHER**", "a confirmed edit is applied locally");
+});

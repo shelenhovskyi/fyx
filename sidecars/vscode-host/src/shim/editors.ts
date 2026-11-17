@@ -271,14 +271,17 @@ export class EditorStore {
     return editor;
   }
 
-  /** Applies edits locally and asks the host to apply them to its buffer. */
+  /**
+   * Asks the host to apply edits to its buffer, and changes the local document only once the host
+   * confirmed them: a refused edit never shows up in the extension's view of the text.
+   */
   async applyEdits(doc: TextDocument, edits: readonly TextEdit[]): Promise<boolean> {
     if (edits.length === 0) return true;
     const version = doc.version;
-    const wire = edits.map(encodeTextEdit);
-    this.ctx.documents.edit(doc, edits);
-    const ok = await this.ctx.rpc.request<boolean>("vscode/applyEdit", { edits: [{ uri: doc.uri.toString(), version, edits: wire }] });
-    return ok !== false;
+    const ok = await this.ctx.rpc.request<boolean>("vscode/applyEdit", { edits: [{ uri: doc.uri.toString(), version, edits: edits.map(encodeTextEdit) }] });
+    if (ok !== true) return false;
+    this.ctx.documents.applyConfirmed(doc, version, edits);
+    return true;
   }
 }
 

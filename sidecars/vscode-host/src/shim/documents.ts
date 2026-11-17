@@ -260,7 +260,11 @@ export class DocumentStore {
     return doc;
   }
 
-  /** Full-text sync from the host. Ignores stale versions (our own optimistic edits got there first). */
+  /**
+   * Full-text sync from the host, which owns versions and text. A version older than the local
+   * one is a message that crossed a newer sync and is dropped; the local version is only ever the
+   * host's, or one past it after an edit the host confirmed (see `applyConfirmed`).
+   */
   replace(uri: Uri, version: number, text: string): void {
     const doc = this.get(uri);
     if (!doc || version < doc.version) return;
@@ -277,11 +281,14 @@ export class DocumentStore {
     });
   }
 
-  /** Local edit by the extension. */
-  edit(doc: TextDocument, edits: readonly TextEdit[]): void {
-    if (edits.length === 0) return;
+  /**
+   * Applies edits the host has just confirmed it applied on top of `baseVersion`. If a host sync
+   * arrived first (the version moved on), that text already holds the edits.
+   */
+  applyConfirmed(doc: TextDocument, baseVersion: number, edits: readonly TextEdit[]): void {
+    if (edits.length === 0 || doc.isClosed || doc.version !== baseVersion) return;
     const changes = doc.applyEdits(edits);
-    doc.version++;
+    doc.version = baseVersion + 1;
     doc.isDirty = true;
     this.onDidChange.fire({ document: doc, contentChanges: changes, reason: undefined });
   }

@@ -129,15 +129,19 @@ export class WorkspaceApi {
 
   async applyEdit(edit: WorkspaceEdit): Promise<boolean> {
     const changes: { uri: string; version: number | null; edits: unknown[] }[] = [];
+    const local: { doc: TextDocument; version: number; edits: TextEdit[] }[] = [];
     for (const [uri, edits] of edit.entries()) {
       const doc = this.ctx.documents.get(uri) ?? (await this.openTextDocument(uri).catch(() => undefined));
       changes.push({ uri: uri.toString(), version: doc?.version ?? null, edits: edits.map(encodeTextEdit) });
-      if (doc) this.ctx.documents.edit(doc, edits as TextEdit[]);
+      if (doc) local.push({ doc, version: doc.version, edits: edits as TextEdit[] });
     }
     const fileOperations = edit.fileOperations.map((op) => ({ kind: op.kind, uri: op.uri.toString(), ...(op.newUri ? { newUri: op.newUri.toString() } : {}) }));
     if (changes.length === 0 && fileOperations.length === 0) return true;
+    // The host applies a workspace edit all or nothing; local documents change only after it did.
     const ok = await this.ctx.rpc.request<boolean>("vscode/applyEdit", { edits: changes, ...(fileOperations.length ? { fileOperations } : {}) });
-    return ok !== false;
+    if (ok !== true) return false;
+    for (const { doc, version, edits } of local) this.ctx.documents.applyConfirmed(doc, version, edits);
+    return true;
   }
 
   async findFiles(include: string | RelativePattern, exclude?: string | RelativePattern | null, maxResults?: number, token?: { isCancellationRequested: boolean }): Promise<Uri[]> {

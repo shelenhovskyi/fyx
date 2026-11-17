@@ -201,6 +201,13 @@ channel), `<id>/view/<viewId>` per contributed tree view (panel; expandable rows
 | sidecar → host | `vscode/registerCommand`, `unregisterCommand`, `registerProvider`, `unregisterProvider` | what the extension offers |
 | sidecar → host | `vscode/executeCommand` | built-in commands the sidecar does not handle |
 | sidecar → host | `vscode/applyEdit` (→ bool), `showTextDocument`, `saveTextDocument`, `saveAll`, `insertSnippet`, `setSelections`, `setEditorOptions`, `revealRange` | editor actions |
+
+`vscode/applyEdit` carries `{edits: [{uri, version, edits}], fileOperations?}`. The host applies it
+all or nothing and answers `true`, or `false` when it applied nothing, including when a `version`
+is not the buffer's current one. The sidecar changes its copy of a document only after `true`, at
+`version + 1`; if a `didChangeTextDocument` arrived before the answer, that text already holds the
+edit. Versions come from the host: a full-text sync is dropped only when its version is older than
+the sidecar's.
 | sidecar → host | `vscode/publishDiagnostics`, `createDecorationType`, `setDecorations`, `disposeDecorationType` | diagnostics, decorations (layer 4) |
 | sidecar → host | `vscode/showMessage` (→ chosen item), `progress`, `setContext`, `updateConfiguration`, `clipboard/readText`, `clipboard/writeText`, `openExternal` | window services |
 

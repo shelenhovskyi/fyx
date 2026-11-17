@@ -39,6 +39,8 @@ export class MockHost {
   readonly schemaErrors: string[] = [];
   /** Test hook: refuse the next `push-update` for this surface, as a host whose tree diverged would. */
   refuseNextPush: string | undefined;
+  /** Test hook: answer every `vscode/applyEdit` with `false`. */
+  refuseEdits = false;
   readonly logs: { level: string; message: string }[] = [];
   readonly messages: { severity: string; message: string; items: string[] }[] = [];
   readonly diagnostics = new Map<string, unknown[]>();
@@ -270,7 +272,13 @@ export class MockHost {
       const ix = this.options.messageChoice;
       return ix !== undefined && p.items[ix] !== undefined ? p.items[ix] : null;
     });
-    rpc.on("vscode/applyEdit", (p: { edits: { uri: string; edits: WireEdit[] }[] }) => {
+    // All or nothing, refused when a document's version is not the buffer's (the user typed).
+    rpc.on("vscode/applyEdit", (p: { edits: { uri: string; version: number | null; edits: WireEdit[] }[] }) => {
+      if (this.refuseEdits) return false;
+      for (const change of p.edits) {
+        const buffer = this.buffers.get(change.uri);
+        if (buffer && change.version !== null && change.version !== buffer.version) return false;
+      }
       for (const change of p.edits) {
         const buffer = this.buffers.get(change.uri);
         if (!buffer) continue;

@@ -43,9 +43,11 @@ test("TextDocument line and offset math, edits and change events", () => {
   assert.deepEqual(doc.positionAt(6).toJSON(), { line: 1, character: 1 });
   assert.equal(doc.getText(new Range(1, 0, 2, 3)), "two\nthr");
   assert.deepEqual(doc.getWordRangeAtPosition(new Position(2, 2))?.toJSON(), { start: { line: 2, character: 0 }, end: { line: 2, character: 5 } });
-  store.edit(doc, [TextEdit.insert(new Position(0, 0), ">"), TextEdit.replace(new Range(2, 0, 2, 5), "3")]);
+  store.applyConfirmed(doc, 1, [TextEdit.insert(new Position(0, 0), ">"), TextEdit.replace(new Range(2, 0, 2, 5), "3")]);
   assert.equal(doc.getText(), ">one\r\ntwo\n3");
   assert.equal(doc.version, 2);
+  store.applyConfirmed(doc, 1, [TextEdit.insert(new Position(0, 0), "again")]);
+  assert.equal(doc.getText(), ">one\r\ntwo\n3", "a host sync that arrived first already holds the confirmed edit");
   store.replace(doc.uri, 1, "stale");
   assert.equal(doc.getText(), ">one\r\ntwo\n3", "older host versions are ignored");
   store.replace(doc.uri, 5, "fresh");
