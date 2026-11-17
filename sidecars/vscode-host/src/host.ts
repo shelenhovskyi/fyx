@@ -3,7 +3,7 @@
 // JSON-RPC methods listed in docs/vscode-coverage.md ("Protocol").
 
 import Module from "node:module";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -40,22 +40,76 @@ function installRequireHook(): void {
   };
 }
 
-/** Unpacks a .vsix (`extension/` subtree) into `cacheDir`; returns the extension root. */
+/**
+ * Default storage root. The temp folder is shared between users on Linux and macOS, so the folder
+ * name carries the uid and `ensurePrivateDir` refuses one that another user created first. On
+ * Windows the temp folder is already per user.
+ */
+export function defaultStorageDir(): string {
+  const uid = process.getuid?.();
+  return join(tmpdir(), uid === undefined ? "fyx-vscode-host" : `fyx-vscode-host-${uid}`);
+}
+
+/**
+ * Creates `dir` (mode 0700) or checks an existing one: a real folder, not a symlink, owned by this
+ * user, and closed to group and others. Only POSIX modes and owners are checked.
+ */
+export function ensurePrivateDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const uid = process.getuid?.();
+  if (uid === undefined) return;
+  const stat = lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`refusing to use ${dir}: not a folder (a symlink?)`);
+  if (stat.uid !== uid) throw new Error(`refusing to use ${dir}: owned by uid ${stat.uid}, not ${uid}`);
+  if ((stat.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+}
+
+// Written last into a finished unpack. It holds the full SHA-256 of the .vsix, which the archive
+// cannot contain, so a packed file of the same name never passes for it.
+const UNPACK_MARKER = ".fyx-unpack-complete";
+
+/**
+ * Unpacks a .vsix (`extension/` subtree) into `<cacheDir>/<sha16>/` and returns that folder. The
+ * archive is unpacked into a temporary folder that is renamed into place only once complete, so a
+ * crashed or partial unpack is never reused.
+ */
 export function unpackVsix(vsixPath: string, cacheDir: string): string {
   const data = readFileSync(vsixPath);
-  const digest = createHash("sha256").update(data).digest("hex").slice(0, 16);
-  const root = join(cacheDir, digest);
-  if (existsSync(join(root, "package.json"))) return root;
-  for (const [name, entry] of readZip(data)) {
-    if (!name.startsWith("extension/")) continue;
-    const content = entry.read();
-    const target = join(root, ...name.slice("extension/".length).split("/"));
-    if (!resolve(target).startsWith(resolve(root) + sep)) throw new Error(`vsix: entry escapes the extension folder: ${name}`);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, content);
+  const digest = createHash("sha256").update(data).digest("hex");
+  ensurePrivateDir(cacheDir);
+  const root = join(cacheDir, digest.slice(0, 16));
+  if (isCompleteUnpack(root, digest)) return root;
+  const entries = readZip(data);
+  if (!entries.has("extension/package.json")) throw new Error("vsix has no extension/package.json");
+  const staging = mkdtempSync(join(cacheDir, `.staging-${digest.slice(0, 16)}-`));
+  try {
+    for (const [name, entry] of entries) {
+      if (!name.startsWith("extension/")) continue;
+      const target = join(staging, ...name.slice("extension/".length).split("/"));
+      if (!resolve(target).startsWith(resolve(staging) + sep)) throw new Error(`vsix: entry escapes the extension folder: ${name}`);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, entry.read());
+    }
+    writeFileSync(join(staging, UNPACK_MARKER), digest);
+    if (existsSync(root)) rmSync(root, { recursive: true, force: true });
+    try {
+      renameSync(staging, root);
+    } catch (err) {
+      // Another sidecar finished the same unpack first.
+      if (!isCompleteUnpack(root, digest)) throw err;
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
-  if (!existsSync(join(root, "package.json"))) throw new Error("vsix has no extension/package.json");
   return root;
+}
+
+function isCompleteUnpack(root: string, digest: string): boolean {
+  try {
+    return readFileSync(join(root, UNPACK_MARKER), "utf8") === digest && existsSync(join(root, "package.json"));
+  } catch {
+    return false;
+  }
 }
 
 export interface InitializeParams {
@@ -63,7 +117,7 @@ export interface InitializeParams {
   extensionPath: string;
   workspaceFolders?: string[];
   settings?: Record<string, unknown>;
-  /** Where unpacked .vsix files and extension storage go (default: OS temp). */
+  /** Where unpacked .vsix files and extension storage go (default: `defaultStorageDir()`). */
   storageDir?: string;
 }
 
@@ -104,7 +158,8 @@ export class ExtensionHost {
 
   async initialize(params: InitializeParams): Promise<InitializeResult> {
     if (this.ctx) throw new RpcError(ErrorCodes.InvalidRequest, "already initialized");
-    const storageDir = params.storageDir ?? join(tmpdir(), "fyx-vscode-host");
+    const storageDir = params.storageDir ?? defaultStorageDir();
+    ensurePrivateDir(storageDir);
     const root = params.extensionPath.toLowerCase().endsWith(".vsix") ? unpackVsix(params.extensionPath, join(storageDir, "unpacked")) : resolve(params.extensionPath);
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
     localizeManifest(root, manifest);

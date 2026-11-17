@@ -2,8 +2,9 @@
 // permission model, loading the fixture packed as a .vsix.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { defaultStorageDir, ensurePrivateDir, unpackVsix } from "../src/host.ts";
 import { MockHost, tempDir } from "../src/mock-host.ts";
 import { Uri } from "../src/shim/types.ts";
 import { writeZip } from "../src/zip.ts";
@@ -98,6 +99,83 @@ test("a crafted publisher or name cannot steer the storage folder", async () => 
     }
     assert.deepEqual(readdirSync(dir).filter((f) => !f.endsWith(".vsix")).sort(), ["storage"]);
     assert.deepEqual(readdirSync(join(dir, "storage")), ["unpacked"], "no storage folder was created for a crafted id");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const posix = process.platform !== "win32";
+
+test("unpacked .vsix files go to a private cache and are reused only when complete", () => {
+  const dir = tempDir("fyx-unpack-");
+  try {
+    const vsix = join(dir, "kitchen-sink.vsix");
+    packFixture(vsix);
+    const cache = join(dir, "cache");
+    const root = unpackVsix(vsix, cache);
+    if (posix) assert.equal(statSync(cache).mode & 0o777, 0o700);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).name, "kitchen-sink");
+    assert.deepEqual(readdirSync(cache), [root.slice(cache.length + 1)], "no staging folder is left behind");
+
+    writeFileSync(join(root, "reuse-probe"), "");
+    assert.equal(unpackVsix(vsix, cache), root);
+    assert.ok(existsSync(join(root, "reuse-probe")), "a complete unpack is reused");
+
+    // A crashed unpack: package.json present, marker missing. Its files must not survive.
+    rmSync(join(root, ".fyx-unpack-complete"));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "planted", main: "./evil.js" }));
+    assert.equal(unpackVsix(vsix, cache), root);
+    assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).name, "kitchen-sink");
+    assert.ok(!existsSync(join(root, "reuse-probe")), "the incomplete folder was replaced, not merged");
+
+    // A marker that does not hold this archive's digest (for example, one packed in the .vsix).
+    writeFileSync(join(root, ".fyx-unpack-complete"), "0".repeat(64));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "planted" }));
+    unpackVsix(vsix, cache);
+    assert.equal(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).name, "kitchen-sink");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed unpack leaves nothing that can be reused", () => {
+  const dir = tempDir("fyx-unpack-fail-");
+  try {
+    const vsix = join(dir, "broken.vsix");
+    const zip = writeZip({ "extension/package.json": "{}", "extension/out/a.js": "x" });
+    zip[zip.lastIndexOf("extension/out/a.js") - 46 + 16] ^= 0xff; // corrupt the second entry's CRC
+    writeFileSync(vsix, zip);
+    const cache = join(dir, "cache");
+    assert.throws(() => unpackVsix(vsix, cache), /CRC/);
+    assert.deepEqual(readdirSync(cache), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the cache folder must be private to this user", { skip: !posix }, () => {
+  const dir = tempDir("fyx-private-");
+  try {
+    assert.match(defaultStorageDir(), new RegExp(`fyx-vscode-host-${process.getuid?.()}$`));
+    const open = join(dir, "open");
+    mkdirSync(open, { mode: 0o777 });
+    chmodSync(open, 0o777);
+    ensurePrivateDir(open);
+    assert.equal(statSync(open).mode & 0o777, 0o700, "an own folder is closed to group and others");
+
+    mkdirSync(join(dir, "elsewhere"));
+    symlinkSync(join(dir, "elsewhere"), join(dir, "link"));
+    assert.throws(() => ensurePrivateDir(join(dir, "link")), /not a folder/);
+
+    if (process.getuid?.() === 0) {
+      const foreign = join(dir, "foreign");
+      mkdirSync(foreign, { mode: 0o700 });
+      chownSync(foreign, 4242, 4242);
+      assert.throws(() => ensurePrivateDir(foreign), /owned by uid 4242/);
+      const vsix = join(dir, "k.vsix");
+      packFixture(vsix);
+      assert.throws(() => unpackVsix(vsix, foreign), /owned by uid 4242/);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
