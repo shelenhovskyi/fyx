@@ -44,4 +44,12 @@
   "agent_review": {
     "enabled": false,
   },
+  // Security modes for agents (`crates/fyx_guard`, docs/fyx/security-modes.md).
+  // "off" behaves like Zed; "audit" logs what "shield" would block; "shield"
+  // keeps private files, secret environment variables and agent configs out of
+  // agents' reach. Only user settings can change it.
+  "fyx_security": {
+    "mode": "off",
+    "allow_env": [],
+  },
 }
