@@ -8,6 +8,29 @@ use serde_json::json;
 
 use crate::init_test;
 
+// fyx: Fyx makes no network request at startup; the registry is fetched on demand.
+#[gpui::test]
+async fn registry_init_makes_no_request(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let http_client = FakeHttpClient::create({
+        let requests = requests.clone();
+        move |_| {
+            requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            future::pending::<anyhow::Result<Response<AsyncBody>>>()
+        }
+    }) as Arc<dyn HttpClient>;
+
+    let registry_store =
+        cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    cx.run_until_parked();
+
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    registry_store.update(cx, |store, _| assert!(!store.is_fetching()));
+}
+
 #[gpui::test]
 async fn registry_refresh_times_out_when_fetch_never_completes(cx: &mut TestAppContext) {
     init_test(cx);
@@ -19,6 +42,7 @@ async fn registry_refresh_times_out_when_fetch_never_completes(cx: &mut TestAppC
 
     let registry_store =
         cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    registry_store.update(cx, |store, cx| store.refresh(cx)); // fyx: init_global no longer fetches
     cx.run_until_parked();
 
     cx.executor().advance_clock(Duration::from_secs(31));
@@ -99,6 +123,7 @@ async fn registry_refresh_does_not_block_sequentially_on_hung_icon_downloads(
 
     let registry_store =
         cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    registry_store.update(cx, |store, cx| store.refresh(cx)); // fyx: init_global no longer fetches
     cx.run_until_parked();
 
     cx.executor().advance_clock(Duration::from_secs(11));
@@ -150,6 +175,7 @@ async fn registry_refresh_preserves_optional_binary_checksums(cx: &mut TestAppCo
 
     let registry_store =
         cx.update(|cx| AgentRegistryStore::init_global(cx, fs.clone(), http_client));
+    registry_store.update(cx, |store, cx| store.refresh(cx)); // fyx: init_global no longer fetches
     cx.run_until_parked();
 
     registry_store.read_with(cx, |store, _| {

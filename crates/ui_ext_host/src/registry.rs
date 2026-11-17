@@ -23,7 +23,7 @@ use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
     panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo},
-    surface::{PushRouter, SurfaceState},
+    surface::{SurfaceLink, SurfaceState},
 };
 
 /// Opt-in for the sprint: a list of `fyx:ui` extensions to load at startup, separated like
@@ -82,29 +82,18 @@ impl UiExtensionRegistry {
                 continue;
             }
             self.next_activation_priority += 1;
-            let route_push = self.push_router(backend.extension_id(), cx);
-            let state = cx.new(|cx| {
-                SurfaceState::new(backend.clone(), surface.clone(), Some(route_push), cx)
+            let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
+                registry: cx.weak_entity(),
+                extension_id: backend.extension_id().into(),
             });
+            let state =
+                cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), Some(link), cx));
             self.surfaces.push(LoadedSurface {
                 info: Rc::new(info),
                 state,
             });
         }
         cx.notify();
-    }
-
-    /// Routes a push that a call on one surface made for another surface of the extension.
-    fn push_router(&self, extension_id: &str, cx: &mut Context<Self>) -> PushRouter {
-        let registry = cx.weak_entity();
-        let extension_id: Arc<str> = extension_id.into();
-        Rc::new(move |push: PushedUpdate, cx: &mut App| {
-            registry
-                .update(cx, |registry, cx| {
-                    registry.apply_pushed(&extension_id, &push.surface_id, push.update, cx)
-                })
-                .ok();
-        })
     }
 
     /// Registers a WASM extension and applies the updates it pushes outside of any call (the
@@ -138,6 +127,27 @@ impl UiExtensionRegistry {
         .detach();
     }
 
+    /// Stops every surface of an extension except `except_surface` (which stops itself).
+    fn fail_extension(
+        &mut self,
+        extension_id: &str,
+        except_surface: &str,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let prefix = format!("{extension_id}/");
+        for surface in &self.surfaces {
+            let Some(surface_id) = surface.info.key.strip_prefix(prefix.as_str()) else {
+                continue;
+            };
+            if surface_id != except_surface {
+                surface
+                    .state
+                    .update(cx, |state, cx| state.fail(message.clone(), cx));
+            }
+        }
+    }
+
     fn apply_pushed(
         &mut self,
         extension_id: &str,
@@ -154,6 +164,30 @@ impl UiExtensionRegistry {
                 "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
             ),
         }
+    }
+}
+
+/// A surface's way back to the registry, for the other surfaces of its extension.
+struct RegistryLink {
+    registry: WeakEntity<UiExtensionRegistry>,
+    extension_id: Arc<str>,
+}
+
+impl SurfaceLink for RegistryLink {
+    fn route_push(&self, push: PushedUpdate, cx: &mut App) {
+        self.registry
+            .update(cx, |registry, cx| {
+                registry.apply_pushed(&self.extension_id, &push.surface_id, push.update, cx)
+            })
+            .ok();
+    }
+
+    fn extension_failed(&self, from_surface: &str, message: SharedString, cx: &mut App) {
+        self.registry
+            .update(cx, |registry, cx| {
+                registry.fail_extension(&self.extension_id, from_surface, message, cx)
+            })
+            .ok();
     }
 }
 
@@ -295,7 +329,13 @@ fn toggle_panel_focus(
                 dock.activate_panel(index, window, cx);
                 dock.set_open(true, window, cx);
             });
-            focus_handle.focus(window, cx);
+            panel
+                .read(cx)
+                .view()
+                .read(cx)
+                .focus_handle
+                .clone()
+                .focus(window, cx);
             break;
         }
     }

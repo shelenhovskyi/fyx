@@ -146,12 +146,8 @@ impl AgentRegistryStore {
 
         let store = cx.new(|cx| Self::new(fs, http_client, cx));
         cx.set_global(GlobalAgentRegistryStore(store.clone()));
-
-        store.update(cx, |store, cx| {
-            if store.agents.is_empty() {
-                store.refresh(cx);
-            }
-        });
+        // fyx: no eager refresh, so no request at startup; the registry page and
+        // `refresh_if_stale` (configured registry agents) still fetch on demand.
 
         store
     }

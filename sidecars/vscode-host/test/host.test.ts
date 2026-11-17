@@ -78,6 +78,32 @@ test("output channel content arrives as push-update patches", async () => {
   assert.deepEqual(host.schemaErrors, []);
 });
 
+test("after the host refuses a push-update, the sidecar resends the whole tree", async () => {
+  const id = `${ID}/output`;
+  await host.mount(id);
+  const pushes = () =>
+    host.traffic
+      .map((t) => t.message as { method?: string; params?: { "surface-id": string; update: unknown } })
+      .filter((m) => m.method === "push-update" && m.params?.["surface-id"] === id)
+      .map((m) => m.params?.update);
+  const before = pushes().length;
+  host.refuseNextPush = id;
+  await host.executeCommand("sink.hello", "Refused");
+  await host.settle();
+  const sent = pushes().slice(before);
+  assert.equal(sent.length, 2, JSON.stringify(sent));
+  assert.ok(typeof sent[0] === "object" && sent[0] !== null && "patches" in sent[0], "first the diff, which the host refuses");
+  assert.ok(typeof sent[1] === "object" && sent[1] !== null && "replace" in sent[1], "then a full replace");
+  assert.ok(text(host.trees.get(id)!).some((t) => t.includes("Hey, Refused")), "the host tree caught up");
+  assert.ok(host.logs.some((l) => l.level === "warn" && l.message.includes("refused push-update")));
+
+  await host.executeCommand("sink.hello", "Again");
+  await host.settle();
+  const next = pushes().slice(before + 2);
+  assert.ok(next.length > 0 && next.every((u) => typeof u === "object" && u !== null && "patches" in u), "patches resume once the host has the tree");
+  assert.deepEqual(host.schemaErrors, []);
+});
+
 test("tree view: rows, expansion and leaf commands", async () => {
   const id = `${ID}/view/sinkTree`;
   const nodes = await host.mount(id);
@@ -150,4 +176,38 @@ test("unimplemented APIs fail with an explicit error naming the API", async () =
   assert.ok(cov.used["vscode.window.createStatusBarItem"] >= 1);
   assert.ok(cov.used["vscode.languages.createDiagnosticCollection"] >= 1);
   assert.match(cov.partial["vscode.window.createTextEditorDecorationType"], /color=#ff0000/);
+});
+
+test("edits the host refuses never reach the extension's document", async () => {
+  const uri = Uri.file(join(workspace, "refused.txt")).toString();
+  await host.openDocument(uri, "lower line\nsecond", "plaintext");
+  await host.setActiveEditor(uri);
+  const word = async (line: number, character: number) =>
+    ((await host.rpc.request("vscode/provideHover", { uri, position: { line, character } })) as { contents: string[] }).contents[0];
+
+  host.refuseEdits = true;
+  try {
+    await host.executeCommand("sink.upper");
+    await host.executeCommand("sink.upper");
+  } finally {
+    host.refuseEdits = false;
+  }
+  assert.equal(await word(0, 1), "**lower**", "the refused edits were not kept locally");
+  assert.equal(host.buffers.get(uri)!.text, "lower line\nsecond");
+
+  // A user edit at the host's next version still lands: refused edits did not move the local version.
+  host.buffers.set(uri, { text: "typed line\nsecond", version: 2 });
+  await host.rpc.request("vscode/didChangeTextDocument", { uri, version: 2, text: "typed line\nsecond" });
+  assert.equal(await word(0, 1), "**typed**");
+
+  // The host changed the buffer without syncing yet: the edit's version is stale and refused.
+  host.buffers.set(uri, { text: "other line\nsecond", version: 3 });
+  await host.executeCommand("sink.upper");
+  assert.equal(host.buffers.get(uri)!.text, "other line\nsecond");
+  assert.equal(await word(0, 1), "**typed**");
+
+  await host.rpc.request("vscode/didChangeTextDocument", { uri, version: 3, text: "other line\nsecond" });
+  await host.executeCommand("sink.upper");
+  assert.equal(host.buffers.get(uri)!.text, "OTHER LINE\nsecond");
+  assert.equal(await word(0, 1), "**OTHER**", "a confirmed edit is applied locally");
 });

@@ -8,6 +8,7 @@
 // Cancelling is `fyx/surfaceClosed`, outside the WIT world.
 
 import type { HostContext } from "../context.ts";
+import { NotImplementedInFyx, notSupported } from "../coverage.ts";
 import { node, props, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
 import { EventEmitter, QuickPickItemKind } from "../shim/types.ts";
 import { splitCodicons, type SurfaceModel } from "./surfaces.ts";
@@ -16,6 +17,9 @@ const ROOT = 1;
 const TITLE = 2;
 const INPUT = 3;
 const MESSAGE = 4;
+const BUTTONS = 5;
+const BUTTON_BASE = 100;
+const MAX_BUTTONS = 800;
 const LIST_BASE = 1000;
 const ROW_HEIGHT = 24;
 const ROW_ID_BASE = 1_000_000;
@@ -43,15 +47,16 @@ abstract class QuickInputBase implements SurfaceModel {
   readonly onDidHide = this.hideEmitter.event;
   readonly onDidAccept = this.acceptEmitter.event;
   readonly onDidChangeValue = this.valueEmitter.event;
-  readonly onDidTriggerButton = new EventEmitter<unknown>().event;
-  title: string | undefined;
-  step: number | undefined;
-  totalSteps: number | undefined;
-  enabled = true;
-  busy = false;
+  protected buttonEmitter = new EventEmitter<QuickInputButton>();
+  readonly onDidTriggerButton = this.buttonEmitter.event;
+  /** A panel does not close when it loses focus, so `ignoreFocusOut` holds whatever it is set to. */
   ignoreFocusOut = false;
-  buttons: unknown[] = [];
   protected state = { value: "", placeholder: "" };
+  private chromeState: { title?: string; step?: number; totalSteps?: number; enabled: boolean; busy: boolean; buttons: readonly QuickInputButton[] } = {
+    enabled: true,
+    busy: false,
+    buttons: [],
+  };
 
   constructor(ctx: HostContext, kind: string) {
     this.ctx = ctx;
@@ -67,6 +72,49 @@ abstract class QuickInputBase implements SurfaceModel {
   }
   set value(v: string) {
     this.state.value = v;
+    this.update();
+  }
+  get title(): string | undefined {
+    return this.chromeState.title;
+  }
+  set title(v: string | undefined) {
+    this.chromeState.title = v;
+    this.update();
+  }
+  get step(): number | undefined {
+    return this.chromeState.step;
+  }
+  set step(v: number | undefined) {
+    this.chromeState.step = v;
+    this.update();
+  }
+  get totalSteps(): number | undefined {
+    return this.chromeState.totalSteps;
+  }
+  set totalSteps(v: number | undefined) {
+    this.chromeState.totalSteps = v;
+    this.update();
+  }
+  /** While false, accepting (Enter, a row click) does nothing. */
+  get enabled(): boolean {
+    return this.chromeState.enabled;
+  }
+  set enabled(v: boolean) {
+    this.chromeState.enabled = v;
+  }
+  get busy(): boolean {
+    return this.chromeState.busy;
+  }
+  set busy(v: boolean) {
+    this.chromeState.busy = v;
+    this.update();
+  }
+  get buttons(): readonly QuickInputButton[] {
+    return this.chromeState.buttons;
+  }
+  set buttons(v: readonly QuickInputButton[]) {
+    if (v.length > MAX_BUTTONS) throw new Error(`QuickInput: at most ${MAX_BUTTONS} buttons`);
+    this.chromeState.buttons = [...v];
     this.update();
   }
   get placeholder(): string {
@@ -109,6 +157,20 @@ abstract class QuickInputBase implements SurfaceModel {
     if (title) nodes.push(node(TITLE, ROOT, props.text(title, { bold: true })));
     nodes.push(node(INPUT, ROOT, props.input(this.state.value, this.state.placeholder)));
     if (message?.text) nodes.push(node(MESSAGE, ROOT, props.text(message.text, { color: message.error ? "error" : "text-muted" })));
+    if (this.chromeState.buttons.length > 0) {
+      nodes.push(node(BUTTONS, ROOT, props.flex({ direction: "row", gap: 4 })));
+      for (const [ix, button] of this.chromeState.buttons.entries()) {
+        nodes.push(node(BUTTON_BASE + ix, BUTTONS, props.button(button.tooltip ?? "", { icon: buttonIcon(button), style: "subtle" })));
+      }
+    }
+  }
+
+  /** A click on one of `buttons`; returns whether the event was one. */
+  protected handleButtonClick(event: UiEvent): boolean {
+    if (!("click" in event)) return false;
+    const button = this.chromeState.buttons[event.click - BUTTON_BASE];
+    if (button) this.buttonEmitter.fire(button);
+    return true;
   }
 
   abstract render(): Node[];
@@ -123,12 +185,11 @@ export class QuickPickImpl<T extends QuickPickItem> extends QuickInputBase {
   private selectionEmitter = new EventEmitter<readonly T[]>();
   readonly onDidChangeActive = this.activeEmitter.event;
   readonly onDidChangeSelection = this.selectionEmitter.event;
-  readonly onDidTriggerItemButton = new EventEmitter<unknown>().event;
   canSelectMany = false;
   matchOnDescription = false;
   matchOnDetail = false;
-  keepScrollPosition = false;
-  sortByLabel = true;
+  private keepScroll = false;
+  private sortLabels = true;
   activeItems: readonly T[] = [];
   selectedItems: readonly T[] = [];
 
@@ -136,10 +197,36 @@ export class QuickPickImpl<T extends QuickPickItem> extends QuickInputBase {
     super(ctx, "quick-pick");
   }
 
+  // Item buttons would sit inside list rows, whose node ids are row-local, so a click could not
+  // name its row; they are not rendered and this event could never fire.
+  get onDidTriggerItemButton(): never {
+    this.ctx.coverage.missing("vscode.QuickPick.onDidTriggerItemButton");
+    throw new NotImplementedInFyx("vscode.QuickPick.onDidTriggerItemButton", "item buttons are not rendered");
+  }
+
+  // Presentation hints the panel cannot honour: recorded in the coverage report, not silent.
+  get keepScrollPosition(): boolean {
+    return this.keepScroll;
+  }
+  set keepScrollPosition(v: boolean) {
+    if (v) this.ctx.coverage.note("vscode.QuickPick.keepScrollPosition", "accepted, no effect: fyx:ui lists have no scroll position to keep");
+    this.keepScroll = v;
+  }
+  get sortByLabel(): boolean {
+    return this.sortLabels;
+  }
+  set sortByLabel(v: boolean) {
+    if (v !== this.sortLabels) this.ctx.coverage.note("vscode.QuickPick.sortByLabel", "accepted, no effect: filtered items always keep their order");
+    this.sortLabels = v;
+  }
+
   get items(): readonly T[] {
     return this.itemsState;
   }
   set items(items: readonly T[]) {
+    if (items.some((i) => ((i as { buttons?: unknown }).buttons as unknown[] | undefined)?.length)) {
+      this.ctx.coverage.note("vscode.QuickPickItem.buttons", "not rendered: buttons inside list rows cannot be addressed (row-local node ids)");
+    }
     this.itemsState = items;
     if (this.canSelectMany) this.selectedItems = items.filter((i) => i.picked);
     this.refilter();
@@ -199,9 +286,12 @@ export class QuickPickImpl<T extends QuickPickItem> extends QuickInputBase {
   }
 
   handleEvent(event: UiEvent): void {
+    if (this.handleButtonClick(event)) return;
     if ("input-changed" in event && event["input-changed"][0] === INPUT) {
       this.value = event["input-changed"][1];
       this.valueEmitter.fire(this.state.value);
+    } else if (!this.enabled) {
+      return;
     } else if ("input-submitted" in event && event["input-submitted"][0] === INPUT) {
       if (!this.canSelectMany) {
         this.selectedItems = this.activeItems;
@@ -227,33 +317,82 @@ export class QuickPickImpl<T extends QuickPickItem> extends QuickInputBase {
   }
 }
 
+type ValidationMessage = string | { message: string; severity: number } | undefined;
+
 export class InputBoxImpl extends QuickInputBase {
-  prompt: string | undefined;
-  password = false;
-  valueSelection: readonly [number, number] | undefined;
-  validationMessage: string | { message: string; severity: number } | undefined;
+  private selectionState: readonly [number, number] | undefined;
+  private promptState: string | undefined;
+  private validationState: ValidationMessage;
 
   constructor(ctx: HostContext) {
     super(ctx, "input-box");
   }
 
+  get valueSelection(): readonly [number, number] | undefined {
+    return this.selectionState;
+  }
+  set valueSelection(v: readonly [number, number] | undefined) {
+    if (v) this.ctx.coverage.note("vscode.InputBox.valueSelection", "accepted, no effect: fyx:ui inputs carry no selection");
+    this.selectionState = v;
+  }
+
+  get prompt(): string | undefined {
+    return this.promptState;
+  }
+  set prompt(v: string | undefined) {
+    this.promptState = v;
+    this.update();
+  }
+
+  get validationMessage(): ValidationMessage {
+    return this.validationState;
+  }
+  set validationMessage(v: ValidationMessage) {
+    this.validationState = v;
+    this.update();
+  }
+
+  get password(): boolean {
+    return false;
+  }
+  // fyx:ui 0.1 has no masked input, so a secret typed here would show in plain text. Refuse it
+  // until the `input` props gain a mask (0.2 candidate).
+  set password(v: boolean) {
+    if (!v) return;
+    this.ctx.coverage.missing("vscode.InputBox.password");
+    throw notSupported("vscode.InputBox.password", "masked input (password: true)");
+  }
+
   render(): Node[] {
     const nodes: Node[] = [];
     const validation = typeof this.validationMessage === "string" ? this.validationMessage : this.validationMessage?.message;
-    this.chrome(nodes, validation ? { text: validation, error: true } : { text: this.prompt ?? "", error: false });
+    this.chrome(nodes, validation ? { text: validation, error: true } : this.busy ? { text: "Loading…", error: false } : { text: this.prompt ?? "", error: false });
     return nodes;
   }
 
   handleEvent(event: UiEvent): void {
+    if (this.handleButtonClick(event)) return;
     if ("input-changed" in event && event["input-changed"][0] === INPUT) {
       this.state.value = event["input-changed"][1];
       this.valueEmitter.fire(this.state.value);
       this.update();
-    } else if ("input-submitted" in event && event["input-submitted"][0] === INPUT) {
+    } else if ("input-submitted" in event && event["input-submitted"][0] === INPUT && this.enabled) {
       this.state.value = event["input-submitted"][1];
       this.acceptEmitter.fire();
     }
   }
+}
+
+export interface QuickInputButton {
+  iconPath: unknown;
+  tooltip?: string;
+}
+
+function buttonIcon(button: QuickInputButton): string | null {
+  const icon = button.iconPath;
+  if (icon && typeof icon === "object" && typeof (icon as { id?: unknown }).id === "string") return (icon as { id: string }).id;
+  // Image paths and URIs cannot be shown: fyx:ui icons are names only.
+  return null;
 }
 
 function fuzzyContains(haystack: string, needle: string): boolean {
@@ -305,10 +444,10 @@ export async function showInputBox(
   token?: { onCancellationRequested(l: () => void): unknown },
 ): Promise<string | undefined> {
   const box = new InputBoxImpl(ctx);
+  box.password = options.password ?? false;
   box.title = options.title;
   box.prompt = options.prompt;
   box.placeholder = options.placeHolder;
-  box.password = options.password ?? false;
   box.value = options.value ?? "";
   box.show();
   const validate = async (value: string) => {

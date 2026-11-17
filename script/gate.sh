@@ -36,4 +36,12 @@ fi
 if [[ "${FULL:-0}" == "1" ]]; then
     cargo build -p zed 2>&1 | grep -E '^(error|warning: unused)|Finished' | tail -20
 fi
+
+# A lockfile that cargo rewrote during the run is not committed, so `--locked` builds of a fresh
+# checkout fail (judge integration-2, finding 1). Includes fixture guests' lockfiles.
+if ! git diff --quiet HEAD -- Cargo.lock '**/Cargo.lock'; then
+    echo "gate: RED: lockfiles differ from HEAD; commit them:"
+    git diff --stat HEAD -- Cargo.lock '**/Cargo.lock'
+    exit 1
+fi
 echo "gate: GREEN"

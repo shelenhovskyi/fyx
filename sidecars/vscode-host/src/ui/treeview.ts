@@ -5,6 +5,7 @@
 // cached rows. Depth is shown with flex padding because the schema has no indent prop.
 
 import type { HostContext } from "../context.ts";
+import { NotImplementedInFyx } from "../coverage.ts";
 import { node, props, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
 import { EventEmitter, ThemeIcon, TreeItemCollapsibleState, Uri, type Event } from "../shim/types.ts";
 import type { SurfaceModel } from "./surfaces.ts";
@@ -12,6 +13,10 @@ import type { SurfaceModel } from "./surfaces.ts";
 const ROOT = 1;
 const MESSAGE = 2;
 const EMPTY = 3;
+const HEADER = 4;
+const HEADER_TITLE = 5;
+const HEADER_DESCRIPTION = 6;
+const HEADER_BADGE = 7;
 const LIST_BASE = 1000;
 const ROW_HEIGHT = 22;
 const ROW_ID_BASE = 1_000_000;
@@ -58,20 +63,24 @@ export class TreeViewSurface implements SurfaceModel {
   private prepared = false;
   private refreshing?: Promise<void>;
   message?: string;
+  /** The title the surface was declared with; `fyx:ui` cannot rename a surface. */
+  readonly declaredTitle: string;
   title: string;
   description?: string;
+  badge?: { value: number; tooltip: string };
   readonly view: TreeViewApi;
 
   constructor(ctx: HostContext, viewId: string, title: string, position: "left" | "right" | "bottom") {
     this.ctx = ctx;
     this.viewId = viewId;
+    this.declaredTitle = title;
     this.title = title;
     this.surface = {
       id: `${ctx.ext.id}/view/${viewId}`,
       title,
       kind: { panel: { position, icon: "list-tree", "default-size": 280 } } as const,
     };
-    this.view = new TreeViewApi(this);
+    this.view = new TreeViewApi(this, ctx);
   }
 
   setProvider(provider: TreeDataProvider<unknown>): void {
@@ -79,6 +88,61 @@ export class TreeViewSurface implements SurfaceModel {
     this.provider = provider;
     this.providerSubscription = provider.onDidChangeTreeData?.(() => void this.refresh());
     if (this.prepared) void this.refresh();
+  }
+
+  /** Drops `provider` if it is the current one (its registration or view was disposed). */
+  clearProvider(provider: TreeDataProvider<unknown>): void {
+    if (this.provider !== provider) return;
+    this.providerSubscription?.dispose();
+    this.providerSubscription = undefined;
+    this.provider = undefined;
+    this.expanded.clear();
+    if (this.prepared) void this.refresh();
+  }
+
+  currentProvider(): TreeDataProvider<unknown> | undefined {
+    return this.provider;
+  }
+
+  /** Expands every ancestor of `element` (and `element` itself `expandLevels` deep), then refreshes. */
+  async reveal(element: unknown, expandLevels: number): Promise<void> {
+    const provider = this.provider;
+    if (!provider) throw new Error(`TreeView ${this.viewId}: reveal needs a registered TreeDataProvider`);
+    if (!provider.getParent) throw new Error(`TreeView ${this.viewId}: reveal needs the TreeDataProvider to implement getParent`);
+    const path = [element];
+    for (let parent = await provider.getParent(element); parent !== undefined && parent !== null; parent = await provider.getParent(parent)) {
+      if (path.length > 1000) throw new Error(`TreeView ${this.viewId}: getParent does not reach a root`);
+      path.unshift(parent);
+    }
+    let parentKey = "";
+    let parent: unknown = undefined;
+    const toExpand: { element: unknown; key: string }[] = [];
+    for (const [depth, current] of path.entries()) {
+      const children = (await provider.getChildren(parent)) ?? [];
+      const ix = children.indexOf(current);
+      if (ix < 0) throw new Error(`TreeView ${this.viewId}: reveal: element is not a child of its getParent result`);
+      const item = await provider.getTreeItem(current);
+      const key = item.id ?? `${parentKey}/${labelOf(item)}#${ix}`;
+      if (depth < path.length - 1) this.expanded.set(key, true);
+      else if (expandLevels > 0 && (item.collapsibleState ?? TreeItemCollapsibleState.None) !== TreeItemCollapsibleState.None) {
+        this.expanded.set(key, true);
+        toExpand.push({ element: current, key });
+      }
+      parentKey = key;
+      parent = current;
+    }
+    for (let level = 1; level < expandLevels && toExpand.length > 0; level++) {
+      for (const { element: expanding, key: expandingKey } of toExpand.splice(0)) {
+        for (const [ix, child] of ((await provider.getChildren(expanding)) ?? []).entries()) {
+          const item = await provider.getTreeItem(child);
+          if ((item.collapsibleState ?? TreeItemCollapsibleState.None) === TreeItemCollapsibleState.None) continue;
+          const key = item.id ?? `${expandingKey}/${labelOf(item)}#${ix}`;
+          this.expanded.set(key, true);
+          toExpand.push({ element: child, key });
+        }
+      }
+    }
+    await this.refresh();
   }
 
   async prepare(): Promise<void> {
@@ -126,6 +190,16 @@ export class TreeViewSurface implements SurfaceModel {
 
   render(): Node[] {
     const nodes: Node[] = [node(ROOT, null, props.flex({ direction: "column", grow: true }))];
+    const retitled = this.title !== this.declaredTitle;
+    if (retitled || this.description || this.badge) {
+      nodes.push(node(HEADER, ROOT, props.flex({ direction: "row", gap: 6, align: "center" })));
+      if (retitled) nodes.push(node(HEADER_TITLE, HEADER, props.text(this.title, { bold: true })));
+      if (this.description) nodes.push(node(HEADER_DESCRIPTION, HEADER, props.text(this.description, { color: "text-muted" })));
+      if (this.badge) {
+        const label = this.badge.tooltip ? `${this.badge.value} (${this.badge.tooltip})` : `${this.badge.value}`;
+        nodes.push(node(HEADER_BADGE, HEADER, props.text(label, { color: "text-accent", bold: true })));
+      }
+    }
     if (this.message) nodes.push(node(MESSAGE, ROOT, props.text(this.message, { color: "text-muted" })));
     if (!this.provider) {
       nodes.push(node(EMPTY, ROOT, props.text(`No data provider registered for view ${this.viewId}.`, { color: "text-muted" })));
@@ -178,6 +252,7 @@ export class TreeViewSurface implements SurfaceModel {
 /** The `TreeView<T>` object `window.createTreeView` returns. */
 export class TreeViewApi {
   private surface: TreeViewSurface;
+  private ctx: HostContext;
   private visibilityEmitter = new EventEmitter<{ visible: boolean }>();
   private selectionEmitter = new EventEmitter<{ selection: unknown[] }>();
   readonly expandEmitter = new EventEmitter<{ element: unknown }>();
@@ -186,13 +261,12 @@ export class TreeViewApi {
   readonly onDidChangeSelection = this.selectionEmitter.event;
   readonly onDidExpandElement = this.expandEmitter.event;
   readonly onDidCollapseElement = this.collapseEmitter.event;
-  readonly onDidChangeCheckboxState = new EventEmitter<unknown>().event;
   visible = false;
   selection: unknown[] = [];
-  badge: unknown;
 
-  constructor(surface: TreeViewSurface) {
+  constructor(surface: TreeViewSurface, ctx: HostContext) {
     this.surface = surface;
+    this.ctx = ctx;
   }
 
   get message(): string | undefined {
@@ -202,17 +276,31 @@ export class TreeViewApi {
     this.surface.message = v;
     this.surface.changedChrome();
   }
+  // Tree item checkboxes are not rendered, so this event could never fire.
+  get onDidChangeCheckboxState(): never {
+    this.ctx.coverage.missing("vscode.TreeView.onDidChangeCheckboxState");
+    throw new NotImplementedInFyx("vscode.TreeView.onDidChangeCheckboxState", "tree item checkboxes are not rendered");
+  }
   get title(): string {
     return this.surface.title;
   }
-  set title(v: string) {
-    this.surface.title = v;
+  set title(v: string | undefined) {
+    this.surface.title = v ?? this.surface.declaredTitle;
+    this.surface.changedChrome();
   }
   get description(): string | undefined {
     return this.surface.description;
   }
   set description(v: string | undefined) {
     this.surface.description = v;
+    this.surface.changedChrome();
+  }
+  get badge(): { value: number; tooltip: string } | undefined {
+    return this.surface.badge;
+  }
+  set badge(v: { value: number; tooltip: string } | undefined) {
+    this.surface.badge = v ? { value: v.value, tooltip: v.tooltip ?? "" } : undefined;
+    this.surface.changedChrome();
   }
 
   setVisible(visible: boolean): void {
@@ -226,11 +314,21 @@ export class TreeViewApi {
     this.selectionEmitter.fire({ selection: this.selection });
   }
 
-  async reveal(element: unknown, options?: { select?: boolean }): Promise<void> {
+  /**
+   * Expands the element's ancestors and selects it. `focus` is the host's to give, and `fyx:ui`
+   * has no scroll-to-row yet, so the row is not scrolled into view.
+   */
+  async reveal(element: unknown, options?: { select?: boolean; focus?: boolean; expand?: boolean | number }): Promise<void> {
+    if (options?.focus) this.ctx.coverage.note("vscode.TreeView.reveal", "focus is the host's to give; the row is not scrolled into view (no scroll-to-row in fyx:ui)");
+    const expand = options?.expand === true ? 1 : typeof options?.expand === "number" ? Math.min(options.expand, 3) : 0;
+    await this.surface.reveal(element, expand);
     if (options?.select !== false) this.select(element);
   }
 
+  /** As in VS Code, disposing the view also disposes its data provider registration. */
   dispose(): void {
+    const provider = this.surface.currentProvider();
+    if (provider) this.surface.clearProvider(provider);
     this.visibilityEmitter.dispose();
     this.selectionEmitter.dispose();
   }

@@ -118,6 +118,11 @@ impl Render for ExtensionPanel {
 }
 
 impl Panel for ExtensionPanel {
+    /// The surface view's own focus target, so Tab moves into the surface right away.
+    fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.read(cx).focus_handle.clone()
+    }
+
     // Every extension panel shares these, because the trait makes them static. Consequences:
     // panel sizes persist per workspace for all extension panels together, and a restored dock
     // reopens the first extension panel. A per-instance key would need a larger workspace change.

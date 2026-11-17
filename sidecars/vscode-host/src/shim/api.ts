@@ -43,6 +43,8 @@ export interface ShimState {
   output: OutputPanel;
   views: Map<string, TreeViewSurface>;
   contextKeys: Map<string, unknown>;
+  /** The host's request to cancel a `cancellable` `withProgress` task. */
+  cancelProgress(id: number): void;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -178,6 +180,7 @@ export function createVscodeApi(ctx: HostContext): ShimState {
     };
 
   let progressSerial = 0;
+  const progressSources = new Map<number, types.CancellationTokenSource>();
   const windowImpl = {
     get activeTextEditor() {
       return editors.active;
@@ -207,8 +210,9 @@ export function createVscodeApi(ctx: HostContext): ShimState {
     createOutputChannel: (name: string, opts?: string | { log: true }) => output.create(name, opts),
     createTextEditorDecorationType: (options: Record<string, unknown>) => new TextEditorDecorationType(ctx, options),
     registerTreeDataProvider: (viewId: string, provider: never) => {
-      viewFor(viewId).setProvider(provider);
-      return new types.Disposable(() => {});
+      const surface = viewFor(viewId);
+      surface.setProvider(provider);
+      return new types.Disposable(() => surface.clearProvider(provider));
     },
     createTreeView: (viewId: string, options: { treeDataProvider: never; showCollapseAll?: boolean; canSelectMany?: boolean }) => {
       const surface = viewFor(viewId);
@@ -220,10 +224,13 @@ export function createVscodeApi(ctx: HostContext): ShimState {
       const id = ++progressSerial;
       const source = new types.CancellationTokenSource();
       const location = typeof options.location === "number" ? options.location : `view:${options.location.viewId}`;
-      ctx.rpc.notify("vscode/progress", { id, phase: "start", title: options.title ?? "", location, cancellable: options.cancellable ?? false });
+      const cancellable = options.cancellable ?? false;
+      if (cancellable) progressSources.set(id, source);
+      ctx.rpc.notify("vscode/progress", { id, phase: "start", title: options.title ?? "", location, cancellable });
       try {
         return await task({ report: (v) => ctx.rpc.notify("vscode/progress", { id, phase: "report", ...v }) }, source.token);
       } finally {
+        progressSources.delete(id);
         ctx.rpc.notify("vscode/progress", { id, phase: "end" });
         source.dispose();
       }
@@ -255,7 +262,7 @@ export function createVscodeApi(ctx: HostContext): ShimState {
     applyEdit: (edit: types.WorkspaceEdit) => workspace.applyEdit(edit),
     findFiles: (include: never, exclude?: never, max?: number, token?: never) => workspace.findFiles(include, exclude, max, token),
     saveAll: (includeUntitled?: boolean) => ctx.rpc.request<boolean>("vscode/saveAll", { includeUntitled: includeUntitled ?? false }),
-    createFileSystemWatcher: (glob: unknown, a?: boolean, b?: boolean, c?: boolean) => workspace.createFileSystemWatcher(glob, a, b, c),
+    createFileSystemWatcher: (glob: string | types.RelativePattern, a?: boolean, b?: boolean, c?: boolean) => workspace.createFileSystemWatcher(glob, a, b, c),
     registerTextDocumentContentProvider: (scheme: string, provider: never) => {
       workspace.contentProviders.set(scheme, provider);
       return new types.Disposable(() => workspace.contentProviders.delete(scheme));
@@ -282,10 +289,17 @@ export function createVscodeApi(ctx: HostContext): ShimState {
     match: (selector: DocumentSelector, doc: TextDocument) => matchSelector(selector, doc),
     getLanguages: async () => [...new Set([...knownLanguageIds(), ...((ctx.ext.manifest.contributes?.languages ?? []) as { id: string }[]).map((l) => l.id)])],
     setTextDocumentLanguage: async (doc: TextDocument, languageId: string) => ctx.documents.setLanguage(doc, languageId),
-    setLanguageConfiguration: (language: string, configuration: unknown) => {
-      ctx.coverage.note("vscode.languages.setLanguageConfiguration", "stored but not applied: Zed language config comes from its own config.toml");
+    setLanguageConfiguration: (language: string, configuration: { wordPattern?: RegExp } & Record<string, unknown>) => {
       languages.languageConfigurations.set(language, configuration);
-      return new types.Disposable(() => languages.languageConfigurations.delete(language));
+      if (configuration.wordPattern instanceof RegExp) ctx.documents.wordPatterns.set(language, configuration.wordPattern);
+      else ctx.documents.wordPatterns.delete(language);
+      ctx.rpc.notify("vscode/setLanguageConfiguration", { language, configuration: encodeLanguageConfiguration(configuration) });
+      return new types.Disposable(() => {
+        if (languages.languageConfigurations.get(language) !== configuration) return;
+        languages.languageConfigurations.delete(language);
+        ctx.documents.wordPatterns.delete(language);
+        ctx.rpc.notify("vscode/setLanguageConfiguration", { language, configuration: null });
+      });
     },
   };
 
@@ -381,6 +395,7 @@ export function createVscodeApi(ctx: HostContext): ShimState {
     output,
     views,
     contextKeys: commands.contextKeys,
+    cancelProgress: (id) => progressSources.get(id)?.cancel(),
   };
 }
 
@@ -391,12 +406,30 @@ function isPanelContainer(ctx: HostContext, container: string): boolean {
 }
 
 /**
- * Probe mode (`FYX_VSCODE_PROBE=1`, coverage runs only): a missing API is still recorded, but
- * returns an inert stub instead of throwing, so activation continues and the report lists every
- * API an extension needs, not just the first one. Never for real use: the extension then runs
- * against stubs that silently do nothing.
+ * Language configuration as JSON for the host: RegExps (`wordPattern`, `indentationRules`,
+ * `onEnterRules[].beforeText`, ...) become `{"regexp": source, "flags": flags}`.
  */
-export const PROBE_MODE = process.env.FYX_VSCODE_PROBE === "1";
+export function encodeLanguageConfiguration(value: unknown): unknown {
+  if (value instanceof RegExp) return { regexp: value.source, flags: value.flags };
+  if (Array.isArray(value)) return value.map(encodeLanguageConfiguration);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v !== "function" && v !== undefined).map(([k, v]) => [k, encodeLanguageConfiguration(v)]));
+  }
+  return value;
+}
+
+/**
+ * Probe mode (coverage runs only): a missing API is still recorded, but returns an inert stub
+ * instead of throwing, so activation continues and the report lists every API an extension
+ * needs, not just the first one. Never for real use: the extension then runs against stubs that
+ * silently do nothing. Only `main.ts --fyx-coverage-probe` turns it on; an environment variable
+ * would leak from whatever launched the sidecar.
+ */
+let probeMode = false;
+
+export function enableProbeMode(): void {
+  probeMode = true;
+}
 
 /** Callable, constructible, every property is itself inert; awaiting it does not hang. */
 export const inert: any = new Proxy(function inert() {}, {
@@ -408,7 +441,7 @@ export const inert: any = new Proxy(function inert() {}, {
 function notImplementedFunction(ctx: HostContext, api: string): (...args: unknown[]) => any {
   return () => {
     ctx.coverage.missing(api);
-    if (PROBE_MODE) return inert;
+    if (probeMode) return inert;
     throw new NotImplementedInFyx(api);
   };
 }
@@ -427,7 +460,7 @@ export function namespace<T extends object>(ctx: HostContext, name: string, impl
       if (known?.functions.includes(prop) || known?.events.includes(prop)) return notImplementedFunction(ctx, api);
       if (known?.values.includes(prop)) {
         ctx.coverage.missing(api);
-        if (PROBE_MODE) return undefined;
+        if (probeMode) return undefined;
         throw new NotImplementedInFyx(api);
       }
       if (prop !== "then" && prop !== "toJSON") ctx.coverage.unknownName(api);
@@ -463,7 +496,7 @@ function moduleProxy(ctx: HostContext, top: Record<string, unknown>): Record<str
           // A constructor that fails on use; static members fail too.
           const fail = () => {
             ctx.coverage.missing(api);
-            if (PROBE_MODE) return inert;
+            if (probeMode) return inert;
             throw new NotImplementedInFyx(api);
           };
           stub = new Proxy(function NotImplemented() {}, {
@@ -493,7 +526,7 @@ export function notImplementedObject(ctx: HostContext, api: string): object {
         if (typeof prop === "symbol" || prop === "then" || prop === "toJSON") return undefined;
         const name = `${api}.${prop}`;
         ctx.coverage.missing(name);
-        if (PROBE_MODE) return inert;
+        if (probeMode) return inert;
         throw new NotImplementedInFyx(name);
       },
     },

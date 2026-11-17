@@ -15,4 +15,5 @@ test = true
 doctest = false
 
 [dependencies]
+ui_ext.workspace = true
 wit-bindgen = "0.41"

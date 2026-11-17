@@ -42,12 +42,21 @@ export class TextDocument {
   private text = "";
   private lineStarts: number[] = [0];
   private saveHook: (doc: TextDocument) => Promise<boolean>;
+  private wordPatternFor: (languageId: string) => RegExp | undefined;
 
-  constructor(uri: Uri, languageId: string, version: number, text: string, saveHook: (doc: TextDocument) => Promise<boolean>) {
+  constructor(
+    uri: Uri,
+    languageId: string,
+    version: number,
+    text: string,
+    saveHook: (doc: TextDocument) => Promise<boolean>,
+    wordPatternFor: (languageId: string) => RegExp | undefined = () => undefined,
+  ) {
     this.uri = uri;
     this.languageId = languageId;
     this.version = version;
     this.saveHook = saveHook;
+    this.wordPatternFor = wordPatternFor;
     this.setText(text);
   }
 
@@ -122,7 +131,9 @@ export class TextDocument {
 
   getWordRangeAtPosition(position: Position, regex?: RegExp): Range | undefined {
     const line = this.lineAt(this.validatePosition(position).line);
-    const re = new RegExp(regex?.source ?? /(-?\d*\.\d\w*)|([^`~!@#$%^&*()\-=+[{\]}\\|;:'",.<>/?\s]+)/.source, `${regex?.flags.replace("g", "") ?? ""}g`);
+    // As in VS Code: an explicit regex, else the language's `wordPattern`, else the default.
+    const pattern = regex ?? this.wordPatternFor(this.languageId);
+    const re = new RegExp(pattern?.source ?? /(-?\d*\.\d\w*)|([^`~!@#$%^&*()\-=+[{\]}\\|;:'",.<>/?\s]+)/.source, `${pattern?.flags.replace("g", "") ?? ""}g`);
     for (const m of line.text.matchAll(re)) {
       const start = m.index!;
       const end = start + m[0].length;
@@ -238,6 +249,8 @@ export class DocumentStore {
   readonly onDidClose = new EventEmitter<TextDocument>();
   readonly onDidChange = new EventEmitter<DocumentChangeEvent>();
   readonly onDidSave = new EventEmitter<TextDocument>();
+  /** `wordPattern` from `languages.setLanguageConfiguration`, by language id. */
+  readonly wordPatterns = new Map<string, RegExp>();
   saveHook: (doc: TextDocument) => Promise<boolean> = async () => false;
 
   get all(): TextDocument[] {
@@ -254,13 +267,17 @@ export class DocumentStore {
       if (version > existing.version || existing.getText() !== text) this.replace(uri, version, text);
       return existing;
     }
-    const doc = new TextDocument(uri, languageId, version, text, (d) => this.saveHook(d));
+    const doc = new TextDocument(uri, languageId, version, text, (d) => this.saveHook(d), (language) => this.wordPatterns.get(language));
     this.docs.set(uri.toString(), doc);
     this.onDidOpen.fire(doc);
     return doc;
   }
 
-  /** Full-text sync from the host. Ignores stale versions (our own optimistic edits got there first). */
+  /**
+   * Full-text sync from the host, which owns versions and text. A version older than the local
+   * one is a message that crossed a newer sync and is dropped; the local version is only ever the
+   * host's, or one past it after an edit the host confirmed (see `applyConfirmed`).
+   */
   replace(uri: Uri, version: number, text: string): void {
     const doc = this.get(uri);
     if (!doc || version < doc.version) return;
@@ -277,11 +294,14 @@ export class DocumentStore {
     });
   }
 
-  /** Local edit by the extension. */
-  edit(doc: TextDocument, edits: readonly TextEdit[]): void {
-    if (edits.length === 0) return;
+  /**
+   * Applies edits the host has just confirmed it applied on top of `baseVersion`. If a host sync
+   * arrived first (the version moved on), that text already holds the edits.
+   */
+  applyConfirmed(doc: TextDocument, baseVersion: number, edits: readonly TextEdit[]): void {
+    if (edits.length === 0 || doc.isClosed || doc.version !== baseVersion) return;
     const changes = doc.applyEdits(edits);
-    doc.version++;
+    doc.version = baseVersion + 1;
     doc.isDirty = true;
     this.onDidChange.fire({ document: doc, contentChanges: changes, reason: undefined });
   }

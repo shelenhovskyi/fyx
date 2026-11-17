@@ -1927,7 +1927,7 @@ impl ProtoClient for Client {
 }
 
 /// prefix for the zed:// url scheme
-pub const ZED_URL_SCHEME: &str = "zed";
+pub const ZED_URL_SCHEME: &str = "fyx"; // fyx: own URL scheme, never steal zed://
 
 /// A parsed Zed link that can be handled internally by the application.
 #[derive(Debug, Clone, PartialEq, Eq)]

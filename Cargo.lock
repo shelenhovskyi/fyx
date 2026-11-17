@@ -6845,6 +6845,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_gallery"
+version = "0.1.0"
+dependencies = [
+ "ui_ext",
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_todo"
 version = "0.1.0"
 dependencies = [
@@ -19251,6 +19259,7 @@ dependencies = [
 name = "ui_ext"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -19267,6 +19276,7 @@ dependencies = [
  "fs",
  "futures 0.3.34",
  "gpui",
+ "gpui_tokio",
  "log",
  "markdown",
  "menu",
@@ -19284,6 +19294,7 @@ dependencies = [
 name = "ui_ext_sdk"
 version = "0.1.0"
 dependencies = [
+ "ui_ext",
  "wit-bindgen 0.41.0",
 ]
 

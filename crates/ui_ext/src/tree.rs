@@ -8,8 +8,10 @@ use crate::types::{InsertOp, Node, NodeId, Patch, Props, Update};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeLimits {
-    /// Nodes in a `replace` or list row, or patches in a `patches` update.
+    /// Patches in a `patches` update, or nodes in one list row.
     pub max_nodes_per_update: usize,
+    /// Nodes in the whole tree, so also in a `mount` or `replace`: any tree that can be built up
+    /// through patches can also be mounted at once.
     pub max_nodes: usize,
 }
 
@@ -92,7 +94,9 @@ impl Tree {
 
     /// Builds the subtree of one virtualized list row; it must have exactly one root.
     pub fn from_row(nodes: Vec<Node>, limits: TreeLimits) -> Result<Self, TreeError> {
-        let tree = Self::from_nodes(nodes, limits)?;
+        let mut tree = Self::new(limits);
+        tree.check_update_size(nodes.len())?;
+        tree.replace(nodes)?;
         if tree.roots.len() != 1 {
             return Err(TreeError::RowRootCount(tree.roots.len()));
         }
@@ -162,7 +166,11 @@ impl Tree {
 
     /// Replaces the whole tree atomically. Returns the old and the new ids.
     pub fn replace(&mut self, nodes: Vec<Node>) -> Result<BTreeSet<NodeId>, TreeError> {
-        self.check_update_size(nodes.len())?;
+        if nodes.len() > self.limits.max_nodes {
+            return Err(TreeError::TreeTooLarge {
+                max: self.limits.max_nodes,
+            });
+        }
         let mut next = Self::new(self.limits);
         for node in nodes {
             next.insert(InsertOp { node, before: None })?;
@@ -439,14 +447,13 @@ mod tests {
             max_nodes_per_update: 2,
             max_nodes: 100,
         };
-        let error = Tree::from_nodes(
-            vec![flex(1, None), flex(2, Some(1)), flex(3, Some(1))],
-            limits,
-        )
-        .unwrap_err();
+        let nodes = vec![flex(1, None), flex(2, Some(1)), flex(3, Some(1))];
+        // A mount is capped by the tree size only; a row by the per-update cap.
+        let mut tree = Tree::from_nodes(nodes.clone(), limits).expect("mount over the update cap");
+        let error = Tree::from_row(nodes, limits).unwrap_err();
         assert_eq!(error, TreeError::UpdateTooLarge { count: 3, max: 2 });
 
-        let mut tree = Tree::from_nodes(vec![flex(1, None)], limits).expect("valid");
+        tree.replace(vec![flex(1, None)]).expect("valid");
         let error = tree
             .apply_patches(vec![
                 insert(text(2, Some(1), "a"), None),
@@ -473,6 +480,15 @@ mod tests {
             error,
             TreeError::Patch { index: 0, ref error } if **error == TreeError::TreeTooLarge { max: 2 }
         ));
+        assert_eq!(
+            tree.apply_update(Update::Replace(vec![
+                flex(1, None),
+                flex(2, Some(1)),
+                flex(3, Some(1)),
+            ])),
+            Err(TreeError::TreeTooLarge { max: 2 })
+        );
+        assert_eq!(tree.len(), 2);
     }
 
     #[test]

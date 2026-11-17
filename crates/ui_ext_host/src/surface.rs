@@ -9,10 +9,20 @@ use collections::HashMap;
 use gpui::{App, Context, SharedString, Task};
 use ui_ext::{NodeId, Patch, Props, Surface, Tree, UiEvent, Update};
 
-use crate::backend::{PushedUpdate, Reply, UiBackend};
+use crate::backend::{PushedUpdate, Reply, ReplyError, UiBackend};
 
-/// Delivers a push that a call on one surface made for another surface of the same extension.
-pub type PushRouter = Rc<dyn Fn(PushedUpdate, &mut App)>;
+/// How a surface reaches the other surfaces of its extension (the registry implements it).
+pub trait SurfaceLink {
+    /// Delivers a push that a call on one surface made for another surface of the extension.
+    fn route_push(&self, push: PushedUpdate, cx: &mut App);
+    /// The extension's instance is gone (trap, time budget, disabled): every other surface of
+    /// it stops too.
+    fn extension_failed(&self, from_surface: &str, message: SharedString, cx: &mut App);
+}
+
+/// Remounts in a row caused by updates that did not fit, with no user input between them, before
+/// the surface gives up (judge review w3-deep-1, finding 4).
+const MAX_REMOUNTS_WITHOUT_INPUT: u32 = 3;
 
 /// Cached rows above this count are pruned to the neighbourhood of the latest request.
 const MAX_CACHED_ROWS: usize = 1024;
@@ -38,24 +48,32 @@ struct RowCache {
     queued: Option<Range<u32>>,
     /// A fetch for this generation failed; do not retry until the list changes.
     failed_generation: Option<u64>,
-    /// The last range answered in this generation. Rows the extension left out of it are not
-    /// asked for again, so a short answer cannot cause a fetch on every frame.
-    answered: Option<(u64, Range<u32>)>,
 }
 
+/// One index of a list. Every index of an answered range gets an entry, `tree: None` for a row the
+/// extension left out, so a short answer is not asked for again in the same generation however
+/// many ranges (measuring, visible, other windows) are requested.
 struct CachedRow {
     generation: u64,
-    tree: Tree,
+    tree: Option<Tree>,
+}
+
+/// An event waiting for the extension, with what it was aimed at when the user made it.
+struct QueuedEvent {
+    event: UiEvent,
+    /// For `row-click`: the list's row generation the user saw. A reply that changes the list
+    /// before this event is sent makes the index point at another row, so the event is dropped.
+    row_generation: Option<u64>,
 }
 
 pub struct SurfaceState {
     backend: Rc<dyn UiBackend>,
     surface: Surface,
-    route_push: Option<PushRouter>,
+    link: Option<Rc<dyn SurfaceLink>>,
     phase: Phase,
     last_error: Option<SharedString>,
     lists: HashMap<NodeId, RowCache>,
-    events: VecDeque<UiEvent>,
+    events: VecDeque<QueuedEvent>,
     event_worker_running: bool,
     /// How many times the extension has set each input's `value` (`set-props`, insert, replace).
     /// A view writes the value into its editor when this moves past what it last saw; otherwise
@@ -65,6 +83,8 @@ pub struct SurfaceState {
     /// Bumped on every change to the tree, so views know when to reconcile their editors.
     revision: u64,
     resyncing: bool,
+    /// Remounts caused by bad updates since the last applied reply to user input.
+    remounts_without_input: u32,
     _mount: Option<Task<()>>,
 }
 
@@ -72,13 +92,13 @@ impl SurfaceState {
     pub fn new(
         backend: Rc<dyn UiBackend>,
         surface: Surface,
-        route_push: Option<PushRouter>,
+        link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
             backend,
             surface,
-            route_push,
+            link,
             phase: Phase::Mounting,
             last_error: None,
             lists: HashMap::default(),
@@ -87,6 +107,7 @@ impl SurfaceState {
             input_sets: HashMap::default(),
             revision: 0,
             resyncing: false,
+            remounts_without_input: 0,
             _mount: None,
         };
         this.mount(cx);
@@ -150,14 +171,55 @@ impl SurfaceState {
                             this.extension_id(),
                             this.surface.id
                         );
-                        this.phase = Phase::Failed(format!("{error:#}").into());
-                        this.revision += 1;
+                        if let Some(pushed) = reply_error_pushes(&error) {
+                            // This surface has no tree to apply its own pushes to.
+                            let others = pushed
+                                .into_iter()
+                                .filter(|push| push.surface_id != this.surface.id)
+                                .collect();
+                            this.apply_pushes(others, cx);
+                            this.fail(format!("{error:#}").into(), cx);
+                        } else {
+                            this.fail_extension(&error, cx);
+                        }
                     }
                 }
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Mounts again after a failure, at the user's request.
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
+        self.remounts_without_input = 0;
+        self.last_error = None;
+        self.phase = Phase::Mounting;
+        self.revision += 1;
+        self.mount(cx);
+        cx.notify();
+    }
+
+    /// Stops the surface: no events, no rows, the message in place of the tree. `retry` mounts
+    /// again.
+    pub fn fail(&mut self, message: SharedString, cx: &mut Context<Self>) {
+        self.phase = Phase::Failed(message);
+        self.events.clear();
+        self.lists.clear();
+        self.resyncing = false;
+        self.revision += 1;
+        cx.notify();
+    }
+
+    /// An error without a `ReplyError` means the instance is gone (trap, time budget, or disabled
+    /// by an earlier failure): this surface and every other surface of the extension stop.
+    fn fail_extension(&mut self, error: &anyhow::Error, cx: &mut Context<Self>) {
+        let message: SharedString =
+            format!("{} stopped: {error:#}", self.backend.extension_id()).into();
+        if let Some(link) = self.link.clone() {
+            link.extension_failed(&self.surface.id, message.clone(), cx);
+        }
+        self.fail(message, cx);
     }
 
     fn set_tree(&mut self, tree: Tree) {
@@ -182,18 +244,28 @@ impl SurfaceState {
             self.set_input_locally(*id, value);
         }
         if let UiEvent::InputChanged(id, _) = &event
-            && let Some(UiEvent::InputChanged(queued_id, _)) = self.events.back()
+            && let Some(QueuedEvent {
+                event: UiEvent::InputChanged(queued_id, _),
+                ..
+            }) = self.events.back()
             && queued_id == id
         {
             self.events.pop_back();
         }
-        self.events.push_back(event);
+        let row_generation = match &event {
+            UiEvent::RowClick(list, _) => Some(self.row_generation(*list)),
+            _ => None,
+        };
+        self.events.push_back(QueuedEvent {
+            event,
+            row_generation,
+        });
         if !self.event_worker_running {
             self.event_worker_running = true;
             cx.spawn(async move |this, cx| {
                 loop {
                     let next = this.update(cx, |this, _| {
-                        let event = this.events.pop_front();
+                        let event = this.next_event();
                         if event.is_none() {
                             this.event_worker_running = false;
                         }
@@ -216,6 +288,35 @@ impl SurfaceState {
             })
             .detach();
         }
+    }
+
+    /// The next queued event that still means what it meant when the user made it. Replies to
+    /// earlier events may have removed its node or changed the list under a row click.
+    fn next_event(&mut self) -> Option<UiEvent> {
+        while let Some(QueuedEvent {
+            event,
+            row_generation,
+        }) = self.events.pop_front()
+        {
+            let still_there = self
+                .tree()
+                .is_some_and(|tree| tree.contains(event.target()));
+            let same_rows = match (&event, row_generation) {
+                (UiEvent::RowClick(list, _), Some(generation)) => {
+                    self.row_generation(*list) == generation
+                }
+                _ => true,
+            };
+            if still_there && same_rows {
+                return Some(event);
+            }
+            log::debug!("fyx:ui: dropping {event:?}, an earlier reply changed its target");
+        }
+        None
+    }
+
+    fn row_generation(&self, list: NodeId) -> u64 {
+        self.lists.get(&list).map_or(0, |cache| cache.generation)
     }
 
     /// The host tree follows what the user typed (integrator decision 6), so it matches the text
@@ -246,8 +347,8 @@ impl SurfaceState {
         match result {
             // Pushes made during the call first, the reply last.
             Ok(Reply { pushed, value }) => {
-                if self.apply_pushes(pushed, cx) {
-                    self.apply_update(value, cx);
+                if self.apply_pushes(pushed, cx) && self.apply_update(value, cx) {
+                    self.remounts_without_input = 0;
                 }
             }
             Err(error) => {
@@ -256,23 +357,31 @@ impl SurfaceState {
                     self.extension_id(),
                     self.surface.id
                 );
-                self.last_error = Some(format!("{error:#}").into());
-                cx.notify();
+                match reply_error_pushes(&error) {
+                    Some(pushed) => {
+                        self.apply_pushes(pushed, cx);
+                        self.last_error = Some(format!("{error:#}").into());
+                        cx.notify();
+                    }
+                    None => self.fail_extension(&error, cx),
+                }
             }
         }
     }
 
-    /// Applies pushes in order: this surface's here, other surfaces' through the router. Returns
-    /// false once one of this surface's fails, since the surface is then being mounted again and
-    /// later updates no longer fit.
+    /// Applies pushes in order: this surface's here, other surfaces' through the link. Returns
+    /// false if one of this surface's failed: the surface is then being mounted again, so its
+    /// later pushes and the reply no longer fit and are skipped. Pushes for other surfaces are
+    /// still routed, because their mirrors in the extension already count them as applied.
     fn apply_pushes(&mut self, pushed: Vec<PushedUpdate>, cx: &mut Context<Self>) -> bool {
+        let mut own_ok = true;
         for push in pushed {
             if push.surface_id == self.surface.id {
-                if !self.apply_update(push.update, cx) {
-                    return false;
+                if own_ok && !self.apply_update(push.update, cx) {
+                    own_ok = false;
                 }
-            } else if let Some(route_push) = self.route_push.clone() {
-                route_push(push, cx);
+            } else if let Some(link) = self.link.clone() {
+                link.route_push(push, cx);
             } else {
                 log::error!(
                     "fyx:ui {}: dropping a push for surface {:?}, nothing routes it",
@@ -281,7 +390,7 @@ impl SurfaceState {
                 );
             }
         }
-        true
+        own_ok
     }
 
     /// Applies an update from an event reply or a push. An update that does not fit the retained
@@ -333,6 +442,18 @@ impl SurfaceState {
                 self.last_error =
                     Some(format!("Invalid update from the extension: {error}").into());
                 if !self.resyncing {
+                    if self.remounts_without_input >= MAX_REMOUNTS_WITHOUT_INPUT {
+                        self.fail(
+                            format!(
+                                "{} keeps sending updates that do not fit its tree: {error}",
+                                self.backend.extension_id()
+                            )
+                            .into(),
+                            cx,
+                        );
+                        return false;
+                    }
+                    self.remounts_without_input += 1;
                     self.resyncing = true;
                     self.mount(cx);
                 }
@@ -349,7 +470,7 @@ impl SurfaceState {
 
     /// A cached row, possibly from before the list last changed.
     pub fn row(&self, list: NodeId, index: u32) -> Option<&Tree> {
-        self.lists.get(&list)?.rows.get(&index).map(|row| &row.tree)
+        self.lists.get(&list)?.rows.get(&index)?.tree.as_ref()
     }
 
     /// Makes sure rows `range` of `list` are fetched, without waiting for them. Cheap when they
@@ -363,17 +484,6 @@ impl SurfaceState {
             return;
         }
         let generation = cache.generation;
-        if cache
-            .answered
-            .as_ref()
-            .is_some_and(|(answered_generation, answered)| {
-                *answered_generation == generation
-                    && answered.start <= range.start
-                    && range.end <= answered.end
-            })
-        {
-            return;
-        }
         let missing = range.clone().any(|index| {
             cache
                 .rows
@@ -409,20 +519,41 @@ impl SurfaceState {
         result: anyhow::Result<Reply<Vec<(u32, Tree)>>>,
         cx: &mut Context<Self>,
     ) {
-        let result = result.map(|Reply { pushed, value }| {
-            // A push that touches this list bumps its generation, so these rows are stored as
-            // stale and fetched again.
-            self.apply_pushes(pushed, cx);
-            value
-        });
+        let result = match result {
+            Ok(Reply { pushed, value }) => {
+                // A push that touches this list bumps its generation, so these rows are stored
+                // as stale and fetched again.
+                self.apply_pushes(pushed, cx);
+                Ok(value)
+            }
+            Err(error) => match reply_error_pushes(&error) {
+                Some(pushed) => {
+                    self.apply_pushes(pushed, cx);
+                    Err(error)
+                }
+                None => {
+                    self.fail_extension(&error, cx);
+                    return;
+                }
+            },
+        };
         let Some(cache) = self.lists.get_mut(&list) else {
             return;
         };
         cache.in_flight = None;
-        cache.answered = Some((generation, range.clone()));
         match result {
             Ok(rows) => {
-                for (index, tree) in rows {
+                let mut answered: HashMap<u32, Tree> = rows.into_iter().collect();
+                for index in range.clone() {
+                    // Never replace an entry of a newer generation with this older answer.
+                    if cache
+                        .rows
+                        .get(&index)
+                        .is_some_and(|row| row.generation > generation)
+                    {
+                        continue;
+                    }
+                    let tree = answered.remove(&index);
                     cache.rows.insert(index, CachedRow { generation, tree });
                 }
                 if cache.rows.len() > MAX_CACHED_ROWS {
@@ -457,6 +588,15 @@ impl RowCache {
         self.generation += 1;
         self.failed_generation = None;
     }
+}
+
+/// The pushes a rejected call carries, or `None` when the error is not a rejection: then the
+/// instance itself failed (trap, time budget, disabled) and carries none.
+fn reply_error_pushes(error: &anyhow::Error) -> Option<Vec<PushedUpdate>> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ReplyError>())
+        .map(|reply_error| reply_error.pushed.clone())
 }
 
 fn count_all_inputs(tree: &Tree, input_sets: &mut HashMap<NodeId, u64>) {
