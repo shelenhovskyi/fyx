@@ -1,0 +1,12 @@
+{
+  "name": "fyx-demo-counter-ts",
+  "version": "0.1.0",
+  "description": "The Fyx counter demo, in TypeScript.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/counter.ts",
+  "dependencies": {
+    "fyx-ui-sdk": "0.1.0"
+  }
+}
