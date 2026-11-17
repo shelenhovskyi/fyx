@@ -235,6 +235,20 @@ updating `FYX_UPSTREAM` and re-running the gate stays a manual integrator task.
 The schedule only fires for the copy of the workflow on the default branch (`fyx/main`), and
 manual runs also need the file to be on `fyx/main`.
 
+## Known local issues
+
+Things the gate works around on one machine only. CI never takes these paths.
+
+- **`example.com` resolves to a loopback address** (found 2026-11-18 on the Windows dev machine:
+  its DNS answers `example.com` A with `127.0.0.1`; the AAAA records are real). Upstream's
+  `agent` tests `test_fetch_tool_follows_same_host_redirect`,
+  `test_fetch_tool_refuses_redirect_to_loopback` and `test_fetch_tool_reauthorizes_redirect_to_new_host`
+  resolve `example.com` for real, so the fetch tool's loopback check refuses it and they fail.
+  They fail the same way on `integration` without any Fyx change to `crates/agent`. When `agent`
+  is in the gated set and `example.com` resolves to `127.*`, `script/gate.sh` skips exactly
+  these three with a `gate: WARNING` line. Fix on the machine (find what filters its DNS) and the
+  skip turns itself off.
+
 ## Secrets
 
 None. Both workflows use only the automatic `GITHUB_TOKEN`, with the permissions listed above. The
