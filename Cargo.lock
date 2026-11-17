@@ -6171,6 +6171,7 @@ dependencies = [
  "telemetry",
  "theme_settings",
  "ui",
+ "ui_ext_host",
  "util",
  "vim_mode_setting",
  "workspace",
@@ -19273,6 +19274,7 @@ dependencies = [
 name = "ui_ext_host"
 version = "0.1.0"
 dependencies = [
+ "acp_thread",
  "anyhow",
  "collections",
  "editor",
