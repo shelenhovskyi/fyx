@@ -4,11 +4,12 @@
 //! gets a panel (or status item) per surface, and new workspaces get them on creation. Nothing
 //! is listed statically in `crates/zed`.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 use anyhow::Context as _;
 use collections::{HashMap, HashSet};
 use extension_host::wasm_host::fyx_ui::{PushedUpdate, UiExtension};
+use fs::Fs;
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, Focusable as _, Global, SharedString,
@@ -22,12 +23,13 @@ use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
     panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo},
-    surface::SurfaceState,
+    surface::{PushRouter, SurfaceState},
 };
 
-/// Opt-in for the sprint: a list of `fyx:ui` components to load at startup, separated like
-/// `PATH` (`;` on Windows, `:` elsewhere). Each entry is a `.wasm` file, or a directory holding
-/// `fyx_ui.wasm` or `extension.wasm`. The extension id is the file (or directory) name.
+/// Opt-in for the sprint: a list of `fyx:ui` extensions to load at startup, separated like
+/// `PATH` (`;` on Windows, `:` elsewhere). Each entry is an extension directory (an
+/// `extension.toml` with a `[fyx_ui]` table plus the component it names, loaded with
+/// `UiExtension::load_from_dir`), or a bare `.wasm` component whose file name becomes its id.
 pub const DEV_EXTENSIONS_ENV: &str = "FYX_UI_DEV_EXTENSIONS";
 
 /// Extension panels sort after every built-in panel (those use 0..=7).
@@ -80,7 +82,10 @@ impl UiExtensionRegistry {
                 continue;
             }
             self.next_activation_priority += 1;
-            let state = cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), cx));
+            let route_push = self.push_router(backend.extension_id(), cx);
+            let state = cx.new(|cx| {
+                SurfaceState::new(backend.clone(), surface.clone(), Some(route_push), cx)
+            });
             self.surfaces.push(LoadedSurface {
                 info: Rc::new(info),
                 state,
@@ -89,8 +94,22 @@ impl UiExtensionRegistry {
         cx.notify();
     }
 
-    /// Registers a WASM extension and applies the updates it pushes, batched per wake-up: a
-    /// burst of pushes becomes one repaint on the next frame.
+    /// Routes a push that a call on one surface made for another surface of the extension.
+    fn push_router(&self, extension_id: &str, cx: &mut Context<Self>) -> PushRouter {
+        let registry = cx.weak_entity();
+        let extension_id: Arc<str> = extension_id.into();
+        Rc::new(move |push: PushedUpdate, cx: &mut App| {
+            registry
+                .update(cx, |registry, cx| {
+                    registry.apply_pushed(&extension_id, &push.surface_id, push.update, cx)
+                })
+                .ok();
+        })
+    }
+
+    /// Registers a WASM extension and applies the updates it pushes outside of any call (the
+    /// pushes made during a call come back with its reply), batched per wake-up: a burst of
+    /// pushes becomes one repaint on the next frame.
     pub fn register_extension(
         &mut self,
         extension: UiExtension,
@@ -308,30 +327,28 @@ fn load_dev_extensions(cx: &mut App) {
 }
 
 async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    let (extension_id, bytes) = cx
-        .background_spawn(async move {
-            let wasm_path = if path.is_dir() {
-                ["fyx_ui.wasm", "extension.wasm"]
-                    .iter()
-                    .map(|name| path.join(name))
-                    .find(|candidate| candidate.is_file())
-                    .with_context(|| {
-                        format!("{} has no fyx_ui.wasm or extension.wasm", path.display())
-                    })?
-            } else {
-                path.clone()
-            };
-            let extension_id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .context("dev extension path has no usable name")?
-                .replace('_', "-");
-            let bytes = std::fs::read(&wasm_path)
-                .with_context(|| format!("failed to read {}", wasm_path.display()))?;
-            anyhow::Ok((extension_id, bytes))
-        })
-        .await?;
-    let (extension, pushed) = UiExtension::load(extension_id.into(), bytes, cx).await?;
+    let (extension, pushed) = if path.is_dir() {
+        // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
+        let fs = cx.update(|cx| <dyn Fs>::global(cx));
+        UiExtension::load_from_dir(&path, fs, cx)
+            .await?
+            .with_context(|| format!("{}: extension.toml has no [fyx_ui] table", path.display()))?
+    } else {
+        // A bare component, for quick iteration: the id is the file name.
+        let (extension_id, bytes) = cx
+            .background_spawn(async move {
+                let extension_id = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .context("dev extension path has no usable name")?
+                    .replace('_', "-");
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                anyhow::Ok((extension_id, bytes))
+            })
+            .await?;
+        UiExtension::load(extension_id.into(), bytes, cx).await?
+    };
     log::info!(
         "fyx:ui: loaded {} with {} surface(s)",
         extension.extension_id(),

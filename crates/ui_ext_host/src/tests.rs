@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use gpui::{
-    AppContext as _, Entity, Focusable as _, KeyBinding, Modifiers, TestAppContext,
+    App, AppContext as _, Entity, Focusable as _, KeyBinding, Modifiers, TestAppContext,
     VisualTestContext,
 };
 use settings::SettingsStore;
@@ -17,7 +17,7 @@ use ui_ext::{
 
 use crate::{
     SurfaceState, SurfaceView, TYPING_DEBOUNCE,
-    backend::UiBackend,
+    backend::{PushedUpdate, Reply, UiBackend},
     surface::fetch_range,
     view::{DiffLine, diff_lines, icon_name},
 };
@@ -52,6 +52,8 @@ struct FakeBackend {
     calls: RefCell<Vec<Call>>,
     count: Cell<u32>,
     fail_rows: Cell<bool>,
+    /// Surfaces that pushes for other surfaces were routed to.
+    routed: RefCell<Vec<String>>,
     short_rows: Cell<bool>,
 }
 
@@ -116,7 +118,7 @@ impl UiBackend for FakeBackend {
         "fake"
     }
 
-    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Tree>> {
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
         self.calls.borrow_mut().push(Call::Mount);
         let count = self.count.get();
         let nodes = vec![
@@ -140,21 +142,36 @@ impl UiBackend for FakeBackend {
             node(LIST, Some(1), list(count)),
         ];
         let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
-        async move { tree }.boxed_local()
+        async move {
+            tree.map(|value| Reply {
+                pushed: Vec::new(),
+                value,
+            })
+        }
+        .boxed_local()
     }
 
     fn handle_event(
         &self,
         _: &str,
         event: UiEvent,
-    ) -> LocalBoxFuture<'static, Result<Vec<Update>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         self.calls.borrow_mut().push(Call::Event(event.clone()));
         if event == UiEvent::Click(PUSHER) {
-            let updates = vec![
-                Update::Patches(vec![Patch::SetProps(LABEL, text("pushed"))]),
-                Update::Patches(vec![Patch::SetProps(LABEL, text("replied"))]),
-            ];
-            return async move { Ok(updates) }.boxed_local();
+            let reply = Reply {
+                pushed: vec![
+                    PushedUpdate {
+                        surface_id: "counter".into(),
+                        update: Update::Patches(vec![Patch::SetProps(LABEL, text("pushed"))]),
+                    },
+                    PushedUpdate {
+                        surface_id: "other".into(),
+                        update: Update::Unchanged,
+                    },
+                ],
+                value: Update::Patches(vec![Patch::SetProps(LABEL, text("replied"))]),
+            };
+            return async move { Ok(reply) }.boxed_local();
         }
         let update = match event {
             UiEvent::Click(INCREMENT) => {
@@ -174,7 +191,13 @@ impl UiBackend for FakeBackend {
             }
             _ => Update::Unchanged,
         };
-        async move { Ok(vec![update]) }.boxed_local()
+        async move {
+            Ok(Reply {
+                pushed: Vec::new(),
+                value: update,
+            })
+        }
+        .boxed_local()
     }
 
     fn list_rows(
@@ -183,7 +206,7 @@ impl UiBackend for FakeBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Vec<(u32, Tree)>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
         self.calls
             .borrow_mut()
             .push(Call::Rows { list, start, count });
@@ -211,7 +234,13 @@ impl UiBackend for FakeBackend {
                 })
                 .collect())
         };
-        async move { result }.boxed_local()
+        async move {
+            result.map(|value| Reply {
+                pushed: Vec::new(),
+                value,
+            })
+        }
+        .boxed_local()
     }
 }
 
@@ -235,8 +264,12 @@ fn new_state(backend: &Rc<FakeBackend>, cx: &mut TestAppContext) -> Entity<Surfa
             default_size: 320,
         }),
     };
+    let routed = backend.clone();
+    let route_push: crate::surface::PushRouter = Rc::new(move |push: PushedUpdate, _: &mut App| {
+        routed.routed.borrow_mut().push(push.surface_id);
+    });
     let backend: Rc<dyn UiBackend> = backend.clone();
-    let state = cx.new(|cx| SurfaceState::new(backend, surface, cx));
+    let state = cx.new(|cx| SurfaceState::new(backend, surface, Some(route_push), cx));
     cx.run_until_parked();
     state
 }
@@ -361,6 +394,7 @@ async fn test_events_are_serialized_and_typing_is_coalesced(cx: &mut TestAppCont
     cx.run_until_parked();
     assert_eq!(backend.events(), [UiEvent::Click(PUSHER)]);
     assert_eq!(props_of(&state, LABEL, cx), text("replied"));
+    assert_eq!(backend.routed.borrow().as_slice(), ["other"]);
 }
 
 #[gpui::test]

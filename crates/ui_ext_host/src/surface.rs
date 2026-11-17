@@ -6,10 +6,13 @@
 use std::{collections::VecDeque, ops::Range, rc::Rc};
 
 use collections::HashMap;
-use gpui::{Context, SharedString, Task};
+use gpui::{App, Context, SharedString, Task};
 use ui_ext::{NodeId, Patch, Props, Surface, Tree, UiEvent, Update};
 
-use crate::backend::UiBackend;
+use crate::backend::{PushedUpdate, Reply, UiBackend};
+
+/// Delivers a push that a call on one surface made for another surface of the same extension.
+pub type PushRouter = Rc<dyn Fn(PushedUpdate, &mut App)>;
 
 /// Cached rows above this count are pruned to the neighbourhood of the latest request.
 const MAX_CACHED_ROWS: usize = 1024;
@@ -48,6 +51,7 @@ struct CachedRow {
 pub struct SurfaceState {
     backend: Rc<dyn UiBackend>,
     surface: Surface,
+    route_push: Option<PushRouter>,
     phase: Phase,
     last_error: Option<SharedString>,
     lists: HashMap<NodeId, RowCache>,
@@ -65,10 +69,16 @@ pub struct SurfaceState {
 }
 
 impl SurfaceState {
-    pub fn new(backend: Rc<dyn UiBackend>, surface: Surface, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        route_push: Option<PushRouter>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             backend,
             surface,
+            route_push,
             phase: Phase::Mounting,
             last_error: None,
             lists: HashMap::default(),
@@ -124,7 +134,16 @@ impl SurfaceState {
             this.update(cx, |this, cx| {
                 this.resyncing = false;
                 match result {
-                    Ok(tree) => this.set_tree(tree),
+                    Ok(Reply { pushed, value }) => {
+                        // Pushes for this surface made during `mount` are superseded by the tree
+                        // it returns; pushes for other surfaces still apply.
+                        let others = pushed
+                            .into_iter()
+                            .filter(|push| push.surface_id != this.surface.id)
+                            .collect();
+                        this.apply_pushes(others, cx);
+                        this.set_tree(value);
+                    }
                     Err(error) => {
                         log::error!(
                             "fyx:ui {}/{}: mount failed: {error:#}",
@@ -221,17 +240,14 @@ impl SurfaceState {
     fn apply_reply(
         &mut self,
         event: &UiEvent,
-        result: anyhow::Result<Vec<Update>>,
+        result: anyhow::Result<Reply<Update>>,
         cx: &mut Context<Self>,
     ) {
         match result {
-            Ok(updates) => {
-                // Pushes made during the call first, the reply last. After a failed one the
-                // surface is being mounted again, so the rest no longer fits.
-                for update in updates {
-                    if !self.apply_update(update, cx) {
-                        break;
-                    }
+            // Pushes made during the call first, the reply last.
+            Ok(Reply { pushed, value }) => {
+                if self.apply_pushes(pushed, cx) {
+                    self.apply_update(value, cx);
                 }
             }
             Err(error) => {
@@ -246,6 +262,28 @@ impl SurfaceState {
         }
     }
 
+    /// Applies pushes in order: this surface's here, other surfaces' through the router. Returns
+    /// false once one of this surface's fails, since the surface is then being mounted again and
+    /// later updates no longer fit.
+    fn apply_pushes(&mut self, pushed: Vec<PushedUpdate>, cx: &mut Context<Self>) -> bool {
+        for push in pushed {
+            if push.surface_id == self.surface.id {
+                if !self.apply_update(push.update, cx) {
+                    return false;
+                }
+            } else if let Some(route_push) = self.route_push.clone() {
+                route_push(push, cx);
+            } else {
+                log::error!(
+                    "fyx:ui {}: dropping a push for surface {:?}, nothing routes it",
+                    self.backend.extension_id(),
+                    push.surface_id
+                );
+            }
+        }
+        true
+    }
+
     /// Applies an update from an event reply or a push. An update that does not fit the retained
     /// tree means host and extension disagree, so it is logged and the surface is mounted again
     /// (the SDK resets its mirror on mount). Returns whether the update applied.
@@ -258,35 +296,29 @@ impl SurfaceState {
             );
             return false;
         };
-        let invalidated = invalidated_lists(&update);
-        let inputs_set = inputs_set_by(&update);
         match tree.apply_update(update) {
-            Ok(false) => true,
-            Ok(true) => {
-                match invalidated {
-                    None => self.lists.clear(),
-                    Some(ids) => {
-                        for id in ids {
+            Ok(touched) if touched.is_empty() => true,
+            Ok(touched) => {
+                let tree = &*tree;
+                for id in touched {
+                    match tree.get(id).map(|node| node.props()) {
+                        // The WIT has no "rows changed" patch: a touched list (its row count,
+                        // usually) has its rows fetched again, once, for the visible range.
+                        Some(Props::List(_) | Props::Table(_)) => {
                             if let Some(cache) = self.lists.get_mut(&id) {
                                 cache.invalidate();
                             }
                         }
+                        // Set, inserted or replaced by the extension: the views write the value.
+                        Some(Props::Input(_)) => *self.input_sets.entry(id).or_default() += 1,
+                        _ => {}
                     }
                 }
-                let tree = &*tree;
                 self.lists.retain(|id, _| {
                     tree.get(*id).is_some_and(|node| {
                         matches!(node.props(), Props::List(_) | Props::Table(_))
                     })
                 });
-                match inputs_set {
-                    None => count_all_inputs(tree, &mut self.input_sets),
-                    Some(ids) => {
-                        for id in ids {
-                            *self.input_sets.entry(id).or_default() += 1;
-                        }
-                    }
-                }
                 self.input_sets.retain(|id, _| tree.contains(*id));
                 self.revision += 1;
                 cx.notify();
@@ -374,9 +406,15 @@ impl SurfaceState {
         list: NodeId,
         generation: u64,
         range: Range<u32>,
-        result: anyhow::Result<Vec<(u32, Tree)>>,
+        result: anyhow::Result<Reply<Vec<(u32, Tree)>>>,
         cx: &mut Context<Self>,
     ) {
+        let result = result.map(|Reply { pushed, value }| {
+            // A push that touches this list bumps its generation, so these rows are stored as
+            // stale and fetched again.
+            self.apply_pushes(pushed, cx);
+            value
+        });
         let Some(cache) = self.lists.get_mut(&list) else {
             return;
         };
@@ -418,46 +456,6 @@ impl RowCache {
     fn invalidate(&mut self) {
         self.generation += 1;
         self.failed_generation = None;
-    }
-}
-
-/// The list and table nodes whose rows an update makes stale, or `None` for "all of them".
-///
-/// The WIT has no "rows changed" patch, so a change to a list's props (its row count, usually)
-/// is the signal to fetch its visible rows again.
-fn invalidated_lists(update: &Update) -> Option<Vec<NodeId>> {
-    match update {
-        Update::Unchanged => Some(Vec::new()),
-        Update::Replace(_) => None,
-        Update::Patches(patches) => Some(
-            patches
-                .iter()
-                .filter_map(|patch| match patch {
-                    Patch::SetProps(id, Props::List(_) | Props::Table(_)) => Some(*id),
-                    Patch::SetProps(..) | Patch::Insert(_) | Patch::Remove(_) => None,
-                })
-                .collect(),
-        ),
-    }
-}
-
-/// The inputs whose value an update sets, or `None` for every input (a replace).
-fn inputs_set_by(update: &Update) -> Option<Vec<NodeId>> {
-    match update {
-        Update::Unchanged => Some(Vec::new()),
-        Update::Replace(_) => None,
-        Update::Patches(patches) => Some(
-            patches
-                .iter()
-                .filter_map(|patch| match patch {
-                    Patch::SetProps(id, Props::Input(_)) => Some(*id),
-                    Patch::Insert(op) if matches!(op.node.props, Props::Input(_)) => {
-                        Some(op.node.id)
-                    }
-                    Patch::SetProps(..) | Patch::Insert(_) | Patch::Remove(_) => None,
-                })
-                .collect(),
-        ),
     }
 }
 
