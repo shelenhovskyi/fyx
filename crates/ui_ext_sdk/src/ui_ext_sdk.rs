@@ -1652,6 +1652,7 @@ mod tests {
         let limits = TreeLimits {
             max_nodes_per_update: 4,
             max_nodes: 100,
+            ..TreeLimits::default()
         };
         let (mut surface, column, text_id, row_id) = small_surface(limits);
         for index in 0..4 {
@@ -1711,6 +1712,7 @@ mod tests {
         let limits = TreeLimits {
             max_nodes_per_update: 10,
             max_nodes: 5,
+            ..TreeLimits::default()
         };
         let (mut surface, column, text_id, _) = small_surface(limits);
         surface

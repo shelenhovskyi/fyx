@@ -44,9 +44,12 @@ ignored by upstream Zed's manifest parser, so one directory can hold both kinds.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:3-9, 137-138 -->
 
-The sandbox: the component gets WASI with stderr inherited and nothing else configured. It has no
-preopened directories, no environment variables and no arguments. It cannot read the worktree or
-buffers yet. The only host functions are `push-update` and `log`.
+The sandbox: the component gets WASI p2, all of it linked (Rust's std imports parts of it), with
+stderr inherited and nothing else granted. It has no preopened directories, no environment
+variables and no arguments, and no network: TCP, UDP and name lookup are denied, so `connect`
+fails with "access denied". It cannot read the worktree or buffers yet. Its store is capped (256 MiB
+of memory; see "Limits" in `limits-and-gotchas.md`). Besides WASI, the host functions are
+`push-update` and `log`.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 
@@ -226,9 +229,20 @@ RUSTC_WRAPPER= cargo build --target wasm32-wasip2 --release
 
 ## Installing as a dev extension
 
-For the sprint, UI extensions load **only** from the environment variable
-`FYX_UI_DEV_EXTENSIONS`, which Fyx reads once at startup. Upstream's "Install Dev Extension"
-command does not load `[fyx_ui]` components, and when the variable is unset nothing loads.
+UI extensions load from the installed-extensions directory and from the environment variable
+`FYX_UI_DEV_EXTENSIONS`.
+
+- **`fyx_ui: install dev UI extension`** asks for a folder, shows the capabilities its
+  `extension.toml` asks for, and links the folder into the installed-extensions directory. Fyx
+  loads it now and on every start, and reloads it when its component is rebuilt. The folder's
+  path may not contain `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
+- **Anything else in the installed-extensions directory** (a folder copied there, or linked by
+  upstream's "Install Dev Extension") waits for consent: Fyx shows a notification with the
+  capabilities it asks for and loads it only after **Enable**. The answer is kept in
+  `<data dir>/fyx-ui-consent.json`, for those capabilities and that component (for a linked
+  folder, that folder). Asking for more capabilities, or a different component, asks again on the
+  next start.
+- **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
 
 <!-- crates/ui_ext_host/src/ui_ext_host.rs:11, crates/ui_ext_host/src/registry.rs:29-33, 172, 305-312 -->
 
@@ -328,7 +342,7 @@ work on your side.
 <!-- crates/ui_ext/wit/fyx-ui.wit:9-21; crates/ui_ext_host/src/view.rs:763-794 -->
 
 **9. Slow or crashing extensions are disabled.** Each call has a 200 ms budget (2 s for
-instantiation and `surfaces`). A call that runs past it, traps or panics disables the extension
+instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps or panics disables the extension
 until Fyx restarts. Returning `Err(String)` is different: it is shown to the user and the extension
 keeps running.
 

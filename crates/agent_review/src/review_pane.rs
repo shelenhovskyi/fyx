@@ -22,12 +22,15 @@ use gpui::{
 use project::Project;
 use ui::{Button, ButtonStyle, Label, LabelSize, Tooltip, prelude::*};
 use workspace::{
-    Item, OpenOptions, Workspace,
+    HideStatusItem, Item, ItemHandle, OpenOptions, StatusItemView, Workspace,
     item::{ItemEvent, TabContentParams},
 };
 
+use acp_thread::PermissionRequestId;
+
 use crate::{
-    AgentReview, AgentReviewEvent, HunkDecision, ProposedEdit, Resolution, ReviewId, TurnId,
+    AgentReview, AgentReviewEvent, HunkDecision, ProposedEdit, Resolution, ReviewId, ReviewSource,
+    TurnId,
 };
 
 actions!(
@@ -133,6 +136,10 @@ pub(crate) fn init(cx: &mut App) {
         let Some(review) = AgentReview::global(cx) else {
             return;
         };
+        let status = cx.new(|cx| ReviewStatus::new(review.clone(), cx));
+        workspace.status_bar().update(cx, |status_bar, cx| {
+            status_bar.add_right_item(status, window, cx)
+        });
         cx.subscribe_in(
             &review,
             window,
@@ -182,7 +189,8 @@ fn open_reviews(
             .find(|pane| pane.read(cx).turn == turn);
         let pane = match existing {
             Some(pane) => {
-                workspace.activate_item(&pane, true, true, window, cx);
+                let focus = window.is_window_active();
+                workspace.activate_item(&pane, true, focus, window, cx);
                 pane
             }
             None => {
@@ -190,7 +198,8 @@ fn open_reviews(
                 let pane = cx.new(|cx| {
                     ReviewPane::new(review.clone(), turn, project.clone(), workspace_handle, cx)
                 });
-                workspace.add_item_to_active_pane(Box::new(pane.clone()), None, true, window, cx);
+                let focus = window.is_window_active();
+                workspace.add_item_to_active_pane(Box::new(pane.clone()), None, focus, window, cx);
                 pane
             }
         };
@@ -445,7 +454,11 @@ impl ReviewPane {
         });
         self.current_hunk = None;
         let focus = editor.focus_handle(cx);
-        window.focus(&focus, cx);
+        // A review that opens in a background window must not take the keyboard from the window the
+        // user is typing in.
+        if window.is_window_active() {
+            window.focus(&focus, cx);
+        }
         focus.dispatch_action(&GoToHunk, window, cx);
         self.update_current_hunk(window, cx);
         cx.notify();
@@ -784,6 +797,11 @@ impl ReviewPane {
             )
             .child(files)
             .children(unreviewed_section)
+            .child(
+                Label::new(crate::NOT_REVIEWED)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
     }
 
     fn render_file_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -983,6 +1001,87 @@ impl Item for ReviewPane {
     }
 }
 
+/// What the agent panel shows instead of a permission request's buttons while Fyx reviews the
+/// request's edit: the decision is made in the review pane, and answering the card as well would end
+/// the review (an "always allow" there would end review for the whole tool).
+pub fn permission_card_notice(request_id: PermissionRequestId, cx: &App) -> Option<Div> {
+    let review = AgentReview::global(cx)?;
+    let preview = review.read(cx).reviews().iter().find(|review| {
+        review.source() == ReviewSource::Permission(request_id) && !review.is_submitted()
+    })?;
+    let file = file_name(preview.edit().abs_path());
+    Some(
+        h_flex()
+            .gap_2()
+            .child(
+                Label::new(format!(
+                    "Fyx is reviewing this edit to {file} hunk by hunk; decide it in the review pane."
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                Button::new(
+                    SharedString::from(format!("open-agent-review-{request_id:?}")),
+                    "Open review",
+                )
+                .label_size(LabelSize::Small)
+                .on_click(|_, window, cx| window.dispatch_action(OpenReviews.boxed_clone(), cx)),
+            ),
+    )
+}
+
+/// Review mode and waiting reviews in the status bar. Shown while review mode is on or a review
+/// waits (e.g. one asked by an `always_ask` rule); clicking it brings the waiting reviews forward.
+pub struct ReviewStatus {
+    review: Entity<AgentReview>,
+    _observe: Subscription,
+}
+
+impl ReviewStatus {
+    fn new(review: Entity<AgentReview>, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&review, |_, _, cx| cx.notify());
+        Self {
+            review,
+            _observe: observe,
+        }
+    }
+}
+
+impl Render for ReviewStatus {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let review = self.review.read(cx);
+        let waiting = review.open_review_count();
+        let label = match (review.is_enabled(), waiting) {
+            (false, 0) => return div().into_any_element(),
+            (true, 0) => "Review on".to_string(),
+            (_, 1) => "Review: 1 waiting".to_string(),
+            (_, waiting) => format!("Review: {waiting} waiting"),
+        };
+        Button::new("agent-review-status", label)
+            .label_size(LabelSize::Small)
+            .style(ButtonStyle::Subtle)
+            .tooltip(Tooltip::text(crate::COVERAGE))
+            .on_click(|_, window, cx| window.dispatch_action(OpenReviews.boxed_clone(), cx))
+            .into_any_element()
+    }
+}
+
+impl StatusItemView for ReviewStatus {
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+
+    /// Shown only while the `agent_review.enabled` setting is on or a review waits.
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        None
+    }
+}
+
 struct ReviewHunkRenderer {
     review: WeakEntity<AgentReview>,
     pane: WeakEntity<ReviewPane>,
@@ -1009,7 +1108,7 @@ impl DiffHunkRenderer for ReviewHunkRenderer {
         let pane = self.pane.clone();
         let hunk = buffer_row(&snapshot, hunk_range.start).and_then(|row| {
             let edit = review.read(cx).review(review_id)?.edit();
-            let index = edit.hunk_at_new_row(row)?;
+            let index = edit.hunk_drawn_at(row)?;
             Some((index, edit.hunks().get(index)?.decision))
         });
         let Some((index, decision)) = hunk else {

@@ -29,9 +29,12 @@ language.workspace = true
 log.workspace = true
 markdown.workspace = true
 menu.workspace = true
+paths.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
+sha2.workspace = true
 theme.workspace = true
 ui.workspace = true
 ui_ext.workspace = true
@@ -46,5 +49,6 @@ gpui_tokio.workspace = true
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+ui_ext_wasm = { workspace = true, features = ["test-support"] }
 theme_settings.workspace = true
 util.workspace = true

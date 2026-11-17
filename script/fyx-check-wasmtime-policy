@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Spec decision 27: wasmtime compiles extension code with native Cranelift only. Fails if the
+# workspace's resolved feature set (all targets, dev-dependencies included) enables Winch, Pulley
+# or the all-arch backends on wasmtime, or pulls a Winch crate into the graph. See docs/fyx/ci.md.
+# The same bans are in script/fyx-deny.toml; keep the two lists in sync.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# "crate:feature feature ..." pairs. `pulley` on wasmtime-internal-cranelift and cranelift-codegen
+# is not listed: wasmtime turns it on unconditionally whenever `cranelift` is on, and without
+# wasmtime's own `pulley` feature `Engine::new` rejects Pulley targets.
+forbidden_features=(
+    "wasmtime:winch pulley all-arch profile-pulley"
+    "wasmtime-internal-cranelift:all-arch"
+    "cranelift-codegen:all-arch"
+)
+forbidden_crates=(wasmtime-internal-winch winch-codegen)
+
+red=0
+fail() {
+    echo "wasmtime-policy: RED: $*"
+    red=1
+}
+
+# Prints the enabled features of `$1` as ",a,b,c,", or "absent" when the crate is not built.
+# Cargo.lock also holds crates that only a weak `dep?/feature` names, such as Winch under
+# wasmtime's `all-arch`; cargo tree prints "nothing to print" for those. Fails on any other
+# cargo error, which aborts the script through `set -e`.
+crate_features() {
+    local output
+    if output=$(cargo tree --locked --target all -i "$1" --depth 0 --format ',{f},' 2>&1); then
+        if grep -q 'nothing to print' <<<"$output"; then
+            echo "absent"
+        else
+            head -1 <<<"$output"
+        fi
+    elif grep -q 'did not match any packages' <<<"$output"; then
+        echo "absent"
+    else
+        echo "wasmtime-policy: cargo tree -i $1 failed:" >&2
+        echo "$output" >&2
+        return 1
+    fi
+}
+
+# What directly enables feature `$2` of crate `$1`: the children of that feature in the inverted
+# tree. cargo tree prints a node's children only at its first occurrence and marks later ones
+# with (*), so this takes the first unmarked occurrence, at whatever depth it is. awk reads all of
+# its input, because an early exit would kill cargo with SIGPIPE and fail the pipeline.
+show_enablers() {
+    cargo tree --locked --target all -e features -i "$1" --prefix depth 2>/dev/null \
+        | awk -v head="$1 feature \"$2\"" '
+            {
+                match($0, /^[0-9]+/)
+                depth = substr($0, 1, RLENGTH) + 0
+                text = substr($0, RLENGTH + 1)
+            }
+            found && depth <= found_depth { done = 1 }
+            done { next }
+            !found && text == head { found = 1; found_depth = depth }
+            found && depth == found_depth { print "    " text }
+            found && depth == found_depth + 1 { print "        " text }'
+}
+
+for entry in "${forbidden_features[@]}"; do
+    crate="${entry%%:*}"
+    features=$(crate_features "$crate")
+    if [[ "$features" == "absent" ]]; then
+        continue
+    fi
+    if [[ "$crate" == "wasmtime" && "$features" != *",cranelift,"* ]]; then
+        fail "wasmtime is built without its \"cranelift\" feature, so it has no native compiler"
+    fi
+    for feature in ${entry#*:}; do
+        if [[ "$features" == *",$feature,"* ]]; then
+            fail "$crate feature \"$feature\" is enabled; Fyx allows only native Cranelift. Enabled by:"
+            show_enablers "$crate" "$feature"
+        fi
+    done
+done
+
+for crate in "${forbidden_crates[@]}"; do
+    if [[ "$(crate_features "$crate")" != "absent" ]]; then
+        fail "$crate (the Winch compiler) is in the dependency graph. Pulled in by:"
+        cargo tree --locked --target all -i "$crate" --depth 2 2>/dev/null | awk 'NR <= 20 { print "    " $0 }'
+    fi
+done
+
+if [[ "$red" == "1" ]]; then
+    exit 1
+fi
+echo "wasmtime-policy: ok (native Cranelift only; no Winch, Pulley or all-arch)"

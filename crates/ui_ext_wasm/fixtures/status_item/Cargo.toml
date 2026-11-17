@@ -1,0 +1,17 @@
+# Guest fixture: a status-bar item, which no demo has. A member of the fixture workspace in
+# `crates/ui_ext_wasm/fixtures`; for the running editor, build it and copy the component next to
+# extension.toml as fyx_ui.wasm (see tasks/progress/W3.md).
+[package]
+name = "fyx_ui_test_status_item"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/status_item.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ui_ext_sdk = { path = "../../../ui_ext_sdk" }
+

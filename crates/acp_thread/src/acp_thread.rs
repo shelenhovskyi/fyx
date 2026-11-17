@@ -8066,7 +8066,8 @@ impl AcpThread {
                 format_on_save
             });
 
-            if format_on_save {
+            // fyx: no reformatting around hunks the review rejected.
+            if format_on_save && feedback.is_none() {
                 let format_task = project.update(cx, |project, cx| {
                     project.format(
                         HashSet::from_iter([buffer.clone()]),
