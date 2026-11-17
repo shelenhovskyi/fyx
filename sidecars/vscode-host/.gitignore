@@ -1,0 +1,5 @@
+node_modules/
+# Downloaded extensions and their unpacked copies never enter git.
+/vsix/
+/.cache/
+*.vsix

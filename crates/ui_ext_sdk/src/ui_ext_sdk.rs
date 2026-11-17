@@ -33,7 +33,7 @@
 //!                 self.greeting = Some(tree.text("Hello"));
 //!                 self.button = Some(tree.button("Wave"));
 //!             });
-//!         }))
+//!         })?)
 //!     }
 //!
 //!     fn handle_event(&mut self, _surface_id: &str, event: UiEvent) -> Result<Update, String> {
@@ -66,6 +66,25 @@ pub mod bindings {
 
 pub use bindings::fyx::ui::host::LogLevel;
 pub use bindings::fyx::ui::types::*;
+
+/// The `fyx:ui` WIT version this SDK is generated from, as (major, minor, patch).
+pub const API_VERSION: (u16, u16, u16) = (0, 1, 0);
+
+/// Name of the custom section [`register_extension!`] adds to every component, from which the host
+/// reads [`API_VERSION`] before instantiating it.
+pub const API_VERSION_SECTION: &str = "fyx:ui-api-version";
+
+/// [`API_VERSION`] as stored in the section: three big-endian `u16`s, as in Zed's
+/// `zed:api-version`.
+pub const API_VERSION_SECTION_BYTES: [u8; 6] = {
+    let (major, minor, patch) = API_VERSION;
+    let [major_high, major_low] = major.to_be_bytes();
+    let [minor_high, minor_low] = minor.to_be_bytes();
+    let [patch_high, patch_low] = patch.to_be_bytes();
+    [
+        major_high, major_low, minor_high, minor_low, patch_high, patch_low,
+    ]
+};
 
 /// First id handed out inside a [`ListRow`] subtree.
 ///
@@ -184,6 +203,13 @@ macro_rules! register_extension {
             }
         }
 
+        // In the extension's own crate rather than the SDK's rlib, so the linker cannot drop it
+        // as an unreferenced archive member.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(link_section = "fyx:ui-api-version")]
+        #[used]
+        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_SECTION_BYTES;
+
         $crate::bindings::export!(__FyxUiExtension with_types_in $crate::bindings);
     };
 }
@@ -242,7 +268,7 @@ impl Default for IdAllocator {
     }
 }
 
-/// Builds a flat node list from nested code. Containers take a closure that builds their
+/// Builds a flat node list from nested code. Flex nodes take a closure that builds their
 /// children; every node gets a fresh id and its parent's id, and parents precede children.
 pub struct TreeBuilder<'a> {
     ids: &'a mut IdAllocator,
@@ -280,12 +306,9 @@ impl<'a> TreeBuilder<'a> {
         id
     }
 
-    /// Adds a node and the children `build_children` adds, and returns the node's id.
-    pub fn container(
-        &mut self,
-        props: impl Into<Props>,
-        build_children: impl FnOnce(&mut Self),
-    ) -> NodeId {
+    /// Adds a flex node and the children `build_children` adds, and returns the node's id. Only
+    /// flex nodes have children; the host rejects children under any other kind.
+    pub fn flex(&mut self, props: FlexProps, build_children: impl FnOnce(&mut Self)) -> NodeId {
         let id = self.node(props);
         let outer_parent = self.parent.replace(id);
         build_children(self);
@@ -293,16 +316,12 @@ impl<'a> TreeBuilder<'a> {
         id
     }
 
-    pub fn flex(&mut self, props: FlexProps, build_children: impl FnOnce(&mut Self)) -> NodeId {
-        self.container(props, build_children)
-    }
-
     pub fn column(&mut self, build_children: impl FnOnce(&mut Self)) -> NodeId {
-        self.container(FlexProps::column(), build_children)
+        self.flex(FlexProps::column(), build_children)
     }
 
     pub fn row(&mut self, build_children: impl FnOnce(&mut Self)) -> NodeId {
-        self.container(FlexProps::row(), build_children)
+        self.flex(FlexProps::row(), build_children)
     }
 
     pub fn text(&mut self, props: impl Into<TextProps>) -> NodeId {
@@ -450,12 +469,46 @@ impl From<PatchSet> for Update {
     }
 }
 
+/// The host's caps on a surface, the defaults of `ui_ext::TreeLimits`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeLimits {
+    /// Nodes in a `replace` (or `mount`), or patches in one `patches` update.
+    pub max_nodes_per_update: usize,
+    pub max_nodes: usize,
+}
+
+impl Default for TreeLimits {
+    fn default() -> Self {
+        Self {
+            max_nodes_per_update: 2048,
+            max_nodes: 16384,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeError {
     NotMounted,
     UnknownNode(NodeId),
-    NotAChild { parent: NodeId, child: NodeId },
+    NotAChild {
+        parent: NodeId,
+        child: NodeId,
+    },
     IsRoot(NodeId),
+    /// Only flex nodes have children: inserting under `node`, or giving it props of `kind` while
+    /// it has children, would be rejected by the host.
+    NotAContainer {
+        node: NodeId,
+        kind: &'static str,
+    },
+    UpdateTooLarge {
+        count: usize,
+        max: usize,
+    },
+    TreeTooLarge {
+        count: usize,
+        max: usize,
+    },
 }
 
 impl fmt::Display for TreeError {
@@ -467,8 +520,37 @@ impl fmt::Display for TreeError {
                 write!(formatter, "node {child} is not a child of node {parent}")
             }
             Self::IsRoot(id) => write!(formatter, "node {id} is a root of the surface's tree"),
+            Self::NotAContainer { node, kind } => write!(
+                formatter,
+                "node {node} would be a {kind} with children; only flex nodes have children"
+            ),
+            Self::UpdateTooLarge { count, max } => write!(
+                formatter,
+                "update would carry {count} nodes or patches, the cap is {max}"
+            ),
+            Self::TreeTooLarge { count, max } => {
+                write!(formatter, "tree would have {count} nodes, the cap is {max}")
+            }
         }
     }
+}
+
+fn kind_name(props: &Props) -> &'static str {
+    match props {
+        Props::Flex(_) => "flex",
+        Props::Text(_) => "text",
+        Props::Button(_) => "button",
+        Props::Input(_) => "input",
+        Props::List(_) => "list",
+        Props::Table(_) => "table",
+        Props::Icon(_) => "icon",
+        Props::Markdown(_) => "markdown",
+        Props::DiffView(_) => "diff-view",
+    }
+}
+
+fn is_container(props: &Props) -> bool {
+    matches!(props, Props::Flex(_))
 }
 
 impl std::error::Error for TreeError {}
@@ -488,12 +570,20 @@ struct LiveNode {
 
 /// The extension-side copy of one surface's tree, mirroring what the host has applied.
 ///
-/// Edits are checked against the tree, recorded and queued as patches; [`SurfaceTree::take_update`]
-/// hands the queue to the host. A `set_props` that does not change anything is dropped, so
-/// re-setting every node after a state change sends only what actually changed.
+/// Edits are recorded and queued as patches; [`SurfaceTree::take_update`] hands the queue to the
+/// host. A `set_props` that does not change anything is dropped, so re-setting every node after a
+/// state change sends only what actually changed.
+///
+/// The host applies an update atomically, rejects the whole batch if one patch breaks its rules,
+/// and does not tell the extension. So every edit is checked against those rules first: children
+/// only under flex nodes, at most [`TreeLimits::max_nodes_per_update`] queued patches and at most
+/// [`TreeLimits::max_nodes`] nodes. An edit that breaks one returns a [`TreeError`] and leaves the
+/// mirror and the queue as they were (ids it allocated stay unused), so the queue is always a
+/// batch the host accepts.
 #[derive(Debug, Default)]
 pub struct SurfaceTree {
     ids: IdAllocator,
+    limits: TreeLimits,
     mounted: bool,
     nodes: HashMap<NodeId, LiveNode>,
     roots: Vec<NodeId>,
@@ -505,25 +595,41 @@ impl SurfaceTree {
         Self::default()
     }
 
+    /// A tree checked against `limits` instead of the host's defaults.
+    pub fn with_limits(limits: TreeLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
+    }
+
+    pub fn limits(&self) -> TreeLimits {
+        self.limits
+    }
+
     /// Builds the surface's tree from scratch and returns it for `mount`. Pending patches are
     /// dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never
-    /// names a node of the new tree.
-    pub fn mount(&mut self, build: impl FnOnce(&mut TreeBuilder)) -> Vec<Node> {
+    /// names a node of the new tree. Fails, keeping the previous tree, if the new one has more
+    /// nodes than one update may carry.
+    pub fn mount(&mut self, build: impl FnOnce(&mut TreeBuilder)) -> Result<Vec<Node>, TreeError> {
+        let mut tree = TreeBuilder::new(&mut self.ids);
+        build(&mut tree);
+        let nodes = tree.finish();
+        self.check_update_size(nodes.len())?;
+        self.check_tree_size(nodes.len())?;
+
         self.nodes.clear();
         self.roots.clear();
         self.pending = PatchSet::new();
         self.mounted = true;
-        let mut tree = TreeBuilder::new(&mut self.ids);
-        build(&mut tree);
-        let nodes = tree.finish();
         self.record(&nodes, None);
-        nodes
+        Ok(nodes)
     }
 
     /// Like [`SurfaceTree::mount`], but returns the tree as a `replace` update, for when patching
     /// would be more work than rebuilding.
-    pub fn replace(&mut self, build: impl FnOnce(&mut TreeBuilder)) -> Update {
-        Update::Replace(self.mount(build))
+    pub fn replace(&mut self, build: impl FnOnce(&mut TreeBuilder)) -> Result<Update, TreeError> {
+        Ok(Update::Replace(self.mount(build)?))
     }
 
     pub fn is_mounted(&self) -> bool {
@@ -579,12 +685,15 @@ impl SurfaceTree {
 
     /// Replaces a node's props. Returns whether they changed; unchanged props queue no patch.
     pub fn set_props(&mut self, id: NodeId, props: impl Into<Props>) -> Result<bool, TreeError> {
-        let node = self.node_mut(id)?;
         let props = props.into();
+        let node = self.node(id)?;
         if node.props == props {
             return Ok(false);
         }
-        node.props = props.clone();
+        Self::check_container(id, node, &props)?;
+        self.check_update_size(self.pending.len() + 1)?;
+
+        self.node_mut(id)?.props = props.clone();
         self.pending.set_props(id, props);
         Ok(true)
     }
@@ -596,88 +705,72 @@ impl SurfaceTree {
         id: NodeId,
         props: impl Into<Props>,
     ) -> Result<(), TreeError> {
-        self.node_mut(id)?.props = props.into();
+        let props = props.into();
+        Self::check_container(id, self.node(id)?, &props)?;
+        self.node_mut(id)?.props = props;
         Ok(())
     }
 
-    /// Builds a subtree under `parent`, before its child `before` or after its last child, and
-    /// returns the ids of the subtree's top-level nodes.
+    /// Builds a subtree under the flex node `parent`, before its child `before` or after its last
+    /// child, and returns the ids of the subtree's top-level nodes.
     pub fn insert(
         &mut self,
         parent: NodeId,
         before: Option<NodeId>,
         build: impl FnOnce(&mut TreeBuilder),
     ) -> Result<Vec<NodeId>, TreeError> {
-        let siblings = &self.node_mut(parent)?.children;
-        let position = match before {
-            Some(before) => siblings
-                .iter()
-                .position(|&sibling| sibling == before)
-                .ok_or(TreeError::NotAChild {
-                    parent,
-                    child: before,
-                })?,
-            None => siblings.len(),
-        };
-
+        let position = self.insert_position(parent, before)?;
         let mut tree = TreeBuilder::under(&mut self.ids, parent);
         build(&mut tree);
         let nodes = tree.finish();
-
-        let top_level = nodes
-            .iter()
-            .filter(|node| node.parent == Some(parent))
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
-        self.record(&nodes, Some((parent, position)));
-        self.pending.insert_subtree(nodes, before);
-        Ok(top_level)
+        self.check_update_size(self.pending.len() + nodes.len())?;
+        self.check_tree_size(self.nodes.len() + nodes.len())?;
+        Ok(self.commit_insert(parent, position, before, nodes))
     }
 
     /// Removes a node and its whole subtree.
     pub fn remove(&mut self, id: NodeId) -> Result<(), TreeError> {
-        let parent = self.node_mut(id)?.parent;
-        let siblings = match parent.and_then(|parent| self.nodes.get_mut(&parent)) {
-            Some(parent) => &mut parent.children,
-            None => &mut self.roots,
-        };
-        siblings.retain(|&sibling| sibling != id);
-
-        let mut stack = vec![id];
-        while let Some(id) = stack.pop() {
-            if let Some(node) = self.nodes.remove(&id) {
-                stack.extend(node.children);
-            }
-        }
-        self.pending.remove(id);
+        self.node(id)?;
+        self.check_update_size(self.pending.len() + 1)?;
+        self.commit_remove(id);
         Ok(())
     }
 
     /// Replaces node `id` and its subtree with the nodes `build` adds, at the same position, and
     /// returns their ids. The new nodes get new ids, so the host treats them as new: a list
     /// rebuilt this way has all of its rows requested again, which `set_props` cannot force when
-    /// the rows changed but the list's props did not.
+    /// the rows changed but the list's props did not. Checked as a whole: on error nothing is
+    /// removed.
     pub fn rebuild(
         &mut self,
         id: NodeId,
         build: impl FnOnce(&mut TreeBuilder),
     ) -> Result<Vec<NodeId>, TreeError> {
-        let parent = self.node_mut(id)?.parent.ok_or(TreeError::IsRoot(id))?;
+        let parent = self.node(id)?.parent.ok_or(TreeError::IsRoot(id))?;
         let siblings = self.children(parent);
-        let next_sibling = siblings
+        let position = siblings
             .iter()
             .position(|&sibling| sibling == id)
-            .and_then(|position| siblings.get(position + 1))
-            .copied();
-        self.remove(id)?;
-        self.insert(parent, next_sibling, build)
+            .ok_or(TreeError::NotAChild { parent, child: id })?;
+        let next_sibling = siblings.get(position + 1).copied();
+        let removed = self.subtree_len(id);
+
+        let mut tree = TreeBuilder::under(&mut self.ids, parent);
+        build(&mut tree);
+        let nodes = tree.finish();
+        self.check_update_size(self.pending.len() + 1 + nodes.len())?;
+        self.check_tree_size(self.nodes.len() - removed + nodes.len())?;
+
+        self.commit_remove(id);
+        Ok(self.commit_insert(parent, position, next_sibling, nodes))
     }
 
     /// Removes every child of `parent`.
     pub fn clear_children(&mut self, parent: NodeId) -> Result<(), TreeError> {
-        let children = self.node_mut(parent)?.children.clone();
+        let children = self.node(parent)?.children.clone();
+        self.check_update_size(self.pending.len() + children.len())?;
         for child in children {
-            self.remove(child)?;
+            self.commit_remove(child);
         }
         Ok(())
     }
@@ -691,11 +784,109 @@ impl SurfaceTree {
         &self.pending
     }
 
+    fn node(&self, id: NodeId) -> Result<&LiveNode, TreeError> {
+        if !self.mounted {
+            return Err(TreeError::NotMounted);
+        }
+        self.nodes.get(&id).ok_or(TreeError::UnknownNode(id))
+    }
+
     fn node_mut(&mut self, id: NodeId) -> Result<&mut LiveNode, TreeError> {
         if !self.mounted {
             return Err(TreeError::NotMounted);
         }
         self.nodes.get_mut(&id).ok_or(TreeError::UnknownNode(id))
+    }
+
+    fn check_container(id: NodeId, node: &LiveNode, props: &Props) -> Result<(), TreeError> {
+        if !node.children.is_empty() && !is_container(props) {
+            return Err(TreeError::NotAContainer {
+                node: id,
+                kind: kind_name(props),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_update_size(&self, count: usize) -> Result<(), TreeError> {
+        let max = self.limits.max_nodes_per_update;
+        if count > max {
+            return Err(TreeError::UpdateTooLarge { count, max });
+        }
+        Ok(())
+    }
+
+    fn check_tree_size(&self, count: usize) -> Result<(), TreeError> {
+        let max = self.limits.max_nodes;
+        if count > max {
+            return Err(TreeError::TreeTooLarge { count, max });
+        }
+        Ok(())
+    }
+
+    fn insert_position(&self, parent: NodeId, before: Option<NodeId>) -> Result<usize, TreeError> {
+        let parent_node = self.node(parent)?;
+        if !is_container(&parent_node.props) {
+            return Err(TreeError::NotAContainer {
+                node: parent,
+                kind: kind_name(&parent_node.props),
+            });
+        }
+        let siblings = &parent_node.children;
+        match before {
+            Some(before) => siblings
+                .iter()
+                .position(|&sibling| sibling == before)
+                .ok_or(TreeError::NotAChild {
+                    parent,
+                    child: before,
+                }),
+            None => Ok(siblings.len()),
+        }
+    }
+
+    fn subtree_len(&self, id: NodeId) -> usize {
+        let mut count = 0;
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            count += 1;
+            stack.extend_from_slice(self.children(id));
+        }
+        count
+    }
+
+    fn commit_insert(
+        &mut self,
+        parent: NodeId,
+        position: usize,
+        before: Option<NodeId>,
+        nodes: Vec<Node>,
+    ) -> Vec<NodeId> {
+        let top_level = nodes
+            .iter()
+            .filter(|node| node.parent == Some(parent))
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        self.record(&nodes, Some((parent, position)));
+        self.pending.insert_subtree(nodes, before);
+        top_level
+    }
+
+    fn commit_remove(&mut self, id: NodeId) {
+        let parent = self.nodes.get(&id).and_then(|node| node.parent);
+        let siblings = match parent.and_then(|parent| self.nodes.get_mut(&parent)) {
+            Some(parent) => &mut parent.children,
+            None => &mut self.roots,
+        };
+        siblings.retain(|&sibling| sibling != id);
+
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = self.nodes.remove(&id) {
+                stack.extend(node.children);
+            }
+        }
+        self.pending.remove(id);
     }
 
     /// Records parents-first `nodes`; top-level ones are placed at `position` among the
@@ -1165,11 +1356,13 @@ mod tests {
     fn surface_tree_skips_unchanged_props() {
         let mut surface = SurfaceTree::new();
         let mut label = 0;
-        surface.mount(|tree| {
-            tree.column(|tree| {
-                label = tree.text("0");
-            });
-        });
+        surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    label = tree.text("0");
+                });
+            })
+            .expect("mount");
 
         assert_eq!(surface.set_props(label, TextProps::new("0")), Ok(false));
         assert_eq!(surface.take_update(), Update::Unchanged);
@@ -1200,21 +1393,24 @@ mod tests {
 
         let mut column = 0;
         let mut first = 0;
-        surface.mount(|tree| {
-            column = tree.column(|tree| {
-                first = tree.text("a");
-            });
-        });
+        surface
+            .mount(|tree| {
+                column = tree.column(|tree| {
+                    first = tree.text("a");
+                });
+            })
+            .expect("mount");
         assert_eq!(surface.remove(99), Err(TreeError::UnknownNode(99)));
         assert_eq!(
-            surface.insert(first, Some(column), |tree| {
+            surface.insert(column, Some(column), |tree| {
                 tree.text("x");
             }),
             Err(TreeError::NotAChild {
-                parent: first,
+                parent: column,
                 child: column,
             })
         );
+        assert!(surface.contains(first));
         let message: String = TreeError::UnknownNode(99).into();
         assert_eq!(message, "node 99 is not in the surface's tree");
     }
@@ -1225,16 +1421,18 @@ mod tests {
         let mut column = 0;
         let mut first = 0;
         let mut last = 0;
-        let mut host_nodes = surface.mount(|tree| {
-            column = tree.column(|tree| {
-                first = tree.text("first");
-                tree.row(|tree| {
-                    tree.button("a");
-                    tree.button("b");
+        let mut host_nodes = surface
+            .mount(|tree| {
+                column = tree.column(|tree| {
+                    first = tree.text("first");
+                    tree.row(|tree| {
+                        tree.button("a");
+                        tree.button("b");
+                    });
+                    last = tree.text("last");
                 });
-                last = tree.text("last");
-            });
-        });
+            })
+            .expect("mount");
         assert_eq!(host_nodes, surface.to_nodes());
 
         let inserted = surface
@@ -1299,10 +1497,12 @@ mod tests {
     #[test]
     fn surface_tree_never_reuses_ids_across_mounts() {
         let mut surface = SurfaceTree::new();
-        let first = surface.mount(|tree| {
-            tree.text("a");
-        });
-        let Update::Replace(second) = surface.replace(|tree| {
+        let first = surface
+            .mount(|tree| {
+                tree.text("a");
+            })
+            .expect("mount");
+        let Ok(Update::Replace(second)) = surface.replace(|tree| {
             tree.text("b");
         }) else {
             panic!("expected a replace");
@@ -1340,6 +1540,208 @@ mod tests {
             [("echo".to_string(), Update::Unchanged)]
         );
         assert!(take_pushed_updates().is_empty());
+    }
+
+    #[test]
+    fn api_version_matches_the_wit_package() {
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
+        let wit = include_str!("../../ui_ext/wit/fyx-ui.wit");
+        let (major, minor, patch) = API_VERSION;
+        assert!(wit.contains(&format!("package fyx:ui@{major}.{minor}.{patch};")));
+    }
+
+    /// A mounted column holding a text and a row with one button; returns (column, text, row).
+    fn small_surface(limits: TreeLimits) -> (SurfaceTree, NodeId, NodeId, NodeId) {
+        let mut surface = SurfaceTree::with_limits(limits);
+        let (mut text_id, mut row_id) = (0, 0);
+        let column = surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    text_id = tree.text("label");
+                    row_id = tree.row(|tree| {
+                        tree.button("go");
+                    });
+                });
+            })
+            .expect("mount")[0]
+            .id;
+        (surface, column, text_id, row_id)
+    }
+
+    fn snapshot(surface: &SurfaceTree) -> (Vec<Node>, PatchSet) {
+        (surface.to_nodes(), surface.pending().clone())
+    }
+
+    #[test]
+    fn insert_only_under_flex() {
+        let (mut surface, column, text_id, _) = small_surface(TreeLimits::default());
+        surface
+            .set_props(text_id, TextProps::new("queued"))
+            .expect("set");
+        let before = snapshot(&surface);
+
+        let error = surface.insert(text_id, None, |tree| {
+            tree.text("child of a text");
+        });
+        assert_eq!(
+            error,
+            Err(TreeError::NotAContainer {
+                node: text_id,
+                kind: "text",
+            })
+        );
+        assert_eq!(snapshot(&surface), before);
+
+        assert_eq!(
+            surface.insert(column, Some(column), |_| {}),
+            Err(TreeError::NotAChild {
+                parent: column,
+                child: column,
+            })
+        );
+        assert_eq!(snapshot(&surface), before);
+        assert!(
+            surface
+                .insert(column, None, |tree| {
+                    tree.text("ok");
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn flex_with_children_stays_flex() {
+        let (mut surface, column, text_id, row_id) = small_surface(TreeLimits::default());
+        let before = snapshot(&surface);
+
+        assert_eq!(
+            surface.set_props(row_id, TextProps::new("leaf")),
+            Err(TreeError::NotAContainer {
+                node: row_id,
+                kind: "text",
+            })
+        );
+        assert_eq!(
+            surface.set_props_from_host(column, ButtonProps::new("leaf")),
+            Err(TreeError::NotAContainer {
+                node: column,
+                kind: "button",
+            })
+        );
+        assert_eq!(snapshot(&surface), before);
+
+        assert_eq!(
+            surface.set_props(row_id, FlexProps::column().gap(2)),
+            Ok(true)
+        );
+        assert_eq!(
+            surface.set_props(text_id, ButtonProps::new("leaf")),
+            Ok(true)
+        );
+        surface.clear_children(row_id).expect("clear");
+        assert_eq!(
+            surface.set_props(row_id, TextProps::new("now a leaf")),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn updates_stay_under_the_patch_cap() {
+        let limits = TreeLimits {
+            max_nodes_per_update: 4,
+            max_nodes: 100,
+        };
+        let (mut surface, column, text_id, row_id) = small_surface(limits);
+        for index in 0..4 {
+            surface
+                .set_props(text_id, TextProps::new(index.to_string()))
+                .expect("under the cap");
+        }
+        let before = snapshot(&surface);
+        let too_large = Err(TreeError::UpdateTooLarge { count: 5, max: 4 });
+        assert_eq!(surface.set_props(text_id, TextProps::new("5")), too_large);
+        assert_eq!(surface.remove(text_id), too_large.clone().map(|_: bool| ()));
+        assert_eq!(
+            surface
+                .insert(column, None, |tree| {
+                    tree.text("x");
+                })
+                .map(|_| ()),
+            too_large.map(|_: bool| ())
+        );
+        assert_eq!(snapshot(&surface), before);
+
+        assert!(matches!(surface.take_update(), Update::Patches(patches) if patches.len() == 4));
+        let error = surface.insert(column, None, |tree| {
+            tree.row(|tree| {
+                tree.text("a");
+                tree.text("b");
+                tree.text("c");
+                tree.text("d");
+            });
+        });
+        assert_eq!(error, Err(TreeError::UpdateTooLarge { count: 5, max: 4 }));
+        let error = surface.rebuild(row_id, |tree| {
+            tree.row(|tree| {
+                tree.text("a");
+                tree.text("b");
+                tree.text("c");
+            });
+        });
+        assert_eq!(error, Err(TreeError::UpdateTooLarge { count: 5, max: 4 }));
+        assert!(surface.contains(row_id));
+        assert_eq!(surface.take_update(), Update::Unchanged);
+
+        let error = surface.mount(|tree| {
+            tree.column(|tree| {
+                for _ in 0..4 {
+                    tree.text("x");
+                }
+            });
+        });
+        assert_eq!(error, Err(TreeError::UpdateTooLarge { count: 5, max: 4 }));
+        assert_eq!(surface.roots(), [column]);
+        assert!(surface.contains(text_id));
+    }
+
+    #[test]
+    fn tree_stays_under_the_node_cap() {
+        let limits = TreeLimits {
+            max_nodes_per_update: 10,
+            max_nodes: 5,
+        };
+        let (mut surface, column, text_id, _) = small_surface(limits);
+        surface
+            .insert(column, None, |tree| {
+                tree.text("fifth");
+            })
+            .expect("at the cap");
+        let before = snapshot(&surface);
+        assert_eq!(
+            surface
+                .insert(column, None, |tree| {
+                    tree.text("sixth");
+                })
+                .map(|_| ()),
+            Err(TreeError::TreeTooLarge { count: 6, max: 5 })
+        );
+        assert_eq!(
+            surface
+                .rebuild(text_id, |tree| {
+                    tree.text("a");
+                    tree.text("b");
+                })
+                .map(|_| ()),
+            Err(TreeError::TreeTooLarge { count: 6, max: 5 })
+        );
+        assert_eq!(snapshot(&surface), before);
+        assert!(
+            surface
+                .rebuild(text_id, |tree| {
+                    tree.text("replacement");
+                })
+                .is_ok()
+        );
     }
 
     struct Echo {

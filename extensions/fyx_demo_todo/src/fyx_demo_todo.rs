@@ -228,6 +228,12 @@ impl TodoPanel {
             })
             .map(|(index, _)| index)
             .collect();
+        if self
+            .selected
+            .is_some_and(|selected| !self.visible.contains(&selected))
+        {
+            self.selected = None;
+        }
     }
 
     fn summary(&self) -> TextProps {
@@ -301,6 +307,23 @@ impl TodoPanel {
     }
 
     /// Brings every node in line with the state; the list is rebuilt when its rows changed.
+    /// Applies `change` and syncs the tree. The list is rebuilt only when the rows it shows
+    /// changed, since a rebuild loses the scroll position.
+    fn update_rows(&mut self, change: impl FnOnce(&mut Self)) -> Result<Update, String> {
+        let rows_before = self.visible_rows();
+        change(self);
+        let rows_changed = self.visible_rows() != rows_before;
+        self.sync(rows_changed)
+    }
+
+    fn visible_rows(&self) -> Vec<TodoItem> {
+        self.visible
+            .iter()
+            .filter_map(|&index| self.items.get(index))
+            .cloned()
+            .collect()
+    }
+
     fn sync(&mut self, rows_changed: bool) -> Result<Update, String> {
         let summary = self.summary();
         let detail = self.detail();
@@ -396,6 +419,7 @@ impl Extension for TodoPanel {
         let mut nodes = None;
         let mounted = tree.mount(|tree| nodes = Some(self.build(tree)));
         self.tree = tree;
+        let mounted = mounted?;
         self.nodes = nodes;
         Ok(mounted)
     }
@@ -424,22 +448,17 @@ impl Extension for TodoPanel {
                 }
                 self.tree
                     .set_props_from_host(filter, filter_input(&value))?;
-                self.query = value;
-                self.selected = None;
-                self.refilter();
-                self.sync(true)
+                self.update_rows(|panel| {
+                    panel.query = value;
+                    panel.refilter();
+                })
             }
-            UiEvent::Click(id) if id == rescan => {
-                self.rescan();
-                self.sync(true)
-            }
+            UiEvent::Click(id) if id == rescan => self.update_rows(Self::rescan),
             UiEvent::Click(_) => match clicked_kind {
-                Some(kind) if kind != self.kind => {
-                    self.kind = kind;
-                    self.selected = None;
-                    self.refilter();
-                    self.sync(true)
-                }
+                Some(kind) if kind != self.kind => self.update_rows(|panel| {
+                    panel.kind = kind;
+                    panel.refilter();
+                }),
                 _ => Ok(Update::Unchanged),
             },
             UiEvent::RowClick((id, index)) if id == list => {
@@ -561,9 +580,20 @@ mod tests {
         let list = panel.nodes.as_ref().expect("mounted").list;
         assert_eq!(panel.list_rows("todos", list, 0, 10).len(), 2);
 
+        let update = panel
+            .handle_event("todos", UiEvent::InputChanged((filter, "mai".into())))
+            .expect("same rows");
+        assert_eq!(panel.nodes.as_ref().expect("mounted").list, list);
+        assert!(matches!(&update, Update::Unchanged), "{update:?}");
+        let update = panel
+            .handle_event("todos", UiEvent::InputChanged((filter, "main".into())))
+            .expect("same rows again");
+        assert!(matches!(&update, Update::Unchanged), "{update:?}");
+
         panel
             .handle_event("todos", UiEvent::Click(fixme_button))
             .expect("kind");
+        assert_ne!(panel.nodes.as_ref().expect("mounted").list, list);
         assert_eq!(summary(&panel), "1 of 6 items in 4 files");
         assert_eq!(
             panel
