@@ -1,6 +1,9 @@
-//! Conversions from the guest bindings to `ui_ext`'s plain model of the same WIT types, so the SDK
-//! checks trees with the host's own rules (`ui_ext::Props::is_container`, `ui_ext::Tree`) rather
-//! than a copy of them.
+//! Conversions from the guest bindings to `ui_ext`'s plain model, so the SDK checks trees with the
+//! host's own rules (`ui_ext::Props::is_container`, `ui_ext::Tree`) rather than a copy of them.
+//!
+//! The target is the 0.1 model, which `ui_ext::Tree` validates. The structure (ids, parents,
+//! kinds) carries over exactly, which is all those rules look at; 0.2-only fields are dropped,
+//! icons become upstream names, and `invalidate-rows`, which changes no node, is left out.
 
 use crate::{
     Align, ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps,
@@ -83,7 +86,7 @@ impl From<&ButtonProps> for ui_ext::ButtonProps {
     fn from(props: &ButtonProps) -> Self {
         Self {
             label: props.label.clone(),
-            icon: props.icon.clone(),
+            icon: props.icon.and_then(crate::v0_1::upstream_icon_name),
             style: props.style.into(),
             disabled: props.disabled,
         }
@@ -120,7 +123,7 @@ impl From<&TableProps> for ui_ext::TableProps {
 impl From<&IconProps> for ui_ext::IconProps {
     fn from(props: &IconProps) -> Self {
         Self {
-            name: props.name.clone(),
+            name: crate::v0_1::upstream_icon_name(props.name).unwrap_or_default(),
             color: props.color.map(Into::into),
         }
     }
@@ -162,17 +165,17 @@ impl From<&Node> for ui_ext::Node {
     }
 }
 
-impl From<&Patch> for ui_ext::Patch {
-    fn from(patch: &Patch) -> Self {
-        match patch {
-            Patch::SetProps((id, props)) => Self::SetProps(*id, props.into()),
-            Patch::Insert(InsertOp { node, before }) => Self::Insert(ui_ext::InsertOp {
-                node: node.into(),
-                before: *before,
-            }),
-            Patch::Remove(id) => Self::Remove(*id),
-        }
-    }
+/// `None` for `invalidate-rows`, which changes no node of the tree.
+fn tree_patch(patch: &Patch) -> Option<ui_ext::Patch> {
+    Some(match patch {
+        Patch::SetProps((id, props)) => ui_ext::Patch::SetProps(*id, props.into()),
+        Patch::Insert(InsertOp { node, before }) => ui_ext::Patch::Insert(ui_ext::InsertOp {
+            node: node.into(),
+            before: *before,
+        }),
+        Patch::Remove(id) => ui_ext::Patch::Remove(*id),
+        Patch::InvalidateRows(_) => return None,
+    })
 }
 
 impl From<&Update> for ui_ext::Update {
@@ -180,7 +183,9 @@ impl From<&Update> for ui_ext::Update {
         match update {
             Update::Unchanged => Self::Unchanged,
             Update::Replace(nodes) => Self::Replace(nodes.iter().map(Into::into).collect()),
-            Update::Patches(patches) => Self::Patches(patches.iter().map(Into::into).collect()),
+            Update::Patches(patches) => {
+                Self::Patches(patches.iter().filter_map(tree_patch).collect())
+            }
         }
     }
 }

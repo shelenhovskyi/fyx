@@ -103,9 +103,13 @@ fn the_rust_page_lists_sdk_items() {
         !paths.iter().any(|path| path.starts_with("__private")),
         "hidden items are left out"
     );
-    let host_only = items
-        .iter()
-        .find(|item| item.path == "take_pushed_updates")
-        .expect("item");
-    assert_eq!(host_only.note, Some("host only"));
+    let host_items =
+        rust_items(&repository_root().join("crates/ui_ext_sdk/src/host.rs")).expect("items");
+    for name in ["take_pushed_updates", "take_host_effects"] {
+        let host_only = host_items
+            .iter()
+            .find(|item| item.path == name)
+            .expect("item");
+        assert_eq!(host_only.note, Some("host only"), "{name}");
+    }
 }

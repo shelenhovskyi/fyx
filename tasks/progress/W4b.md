@@ -100,7 +100,7 @@ get by clicking that section's button right after the first mount. They all star
 | Input | heading; caption; input (value `""`, placeholder `Type and press Enter`) (72); text `Submitted: nothing yet` (muted) (73) | 69–73 |
 | List | heading `Virtualized list`; caption; text `Selected: none` (muted) (72); list (`row-count` 1000, `row-height` 24) (73) | 69–73 |
 | Table | heading; caption; table (columns `Name`, `Kind`, `Lines`; `row-count` 100) (72) | 69–72 |
-| Icons | heading; caption; 3 rows (gap 12) of 4 cells; caption; 1 row with one cell. A cell is a column (gap 2, padding 4, align center) holding an icon and a muted text with its name. Known names: `check` (`success`), `close` (`error`), `warning` (`warning`), `info` (`text-accent`), `plus`, `dash`, `folder`, `file`, `settings`, `magnifying_glass`, `trash`, `pencil` (no colour). Unknown: `fyx_no_such_icon`, which should render as the host fallback (`Blocks`). `blocks` itself is deliberately not used. | 69–115 |
+| Icons | heading; caption; 3 rows (gap 12) of 4 cells; caption; 1 row with one cell. A cell is a column (gap 2, padding 4, align center) holding an icon and a muted text with its name. Frozen 0.2 icons, labelled with their WIT names: `check` (`success`), `close` (`error`), `warning` (`warning`), `info` (`text-accent`), `plus`, `dash`, `folder`, `file`, `settings`, `search`, `trash`, `pencil` (no colour). The last cell is `spinner`, animated by a 0.2 host and drawn as `load_circle` by a 0.1 one. (Until 2026-11-18 it was an unknown 0.1 name showing the host fallback; a frozen icon cannot be unknown.) `blocks` itself is deliberately not used. | 69–115 |
 | Markdown | heading; one markdown node: H1, paragraph with bold/italic/inline code/link, bullet list, numbered list, block quote, fenced `rust` block | 69–71 |
 | Diff | heading `Diff view`; caption `Rust`; diff-view (Rust before/after, `language: "rust"`) (72); caption `Plain text, no language`; diff-view (`language: none`) (74) | 69–74 |
 
@@ -155,7 +155,7 @@ selection. `handle-event` on `gallery-status` returns `unchanged` (error before 
 - **What to look at, section by section:** Layout (gap/padding/align/grow/backgrounds), Text (7
   text colours, the 2 surface tokens as backgrounds, bold, monospace), Buttons (4 styles, disabled, start icon, icon-only
   `IconButton`), Input (submit echo, no per-keystroke echo), List (1,000 rows, scrolling, row
-  click, status item update), Table (header plus equal-width cells), Icons (12 names plus fallback),
+  click, status item update), Table (header plus equal-width cells), Icons (12 frozen icons plus the spinner),
   Markdown, Diff (the placeholder, with and without a language).
 - **Section switches remove a list or table.** That exercises "removed lists lose their cache"
   (integrator decision 5) and the `uniform_list` scroll handle of a node that goes away.
@@ -181,6 +181,6 @@ does.
 - `buttons_report_the_last_click`, `input_echoes_only_on_submit`,
   `row_click_updates_the_label_and_the_status_item`, `table_rows_fill_every_column`,
   `list_rows_only_for_the_shown_list`, `remount_keeps_the_shown_section_with_new_ids`.
-- `icons_are_zed_icon_names_except_the_unknown_one`: every icon name the gallery uses, and the
-  unknown one, is checked against the `IconName` variants in `crates/icons/src/icons.rs`. That
+- `icons_reach_a_0_1_host_as_zed_icon_names`: every icon of the Icons section, as a 0.1 host
+  receives it, is checked against the `IconName` variants in `crates/icons/src/icons.rs`. That
   file is read with `include_str!` instead of depending on the GPL crate.

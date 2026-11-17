@@ -31,6 +31,7 @@ pub const NOT_WIT_NAMES: &[&str] = &["wit-bindgen", "wasm-tools", "fyx-ext", "fy
 /// The Rust crates whose public items get a page: (crate name, root source file).
 pub const RUST_CRATES: &[(&str, &str)] = &[
     ("ui_ext_sdk", "crates/ui_ext_sdk/src/ui_ext_sdk.rs"),
+    ("ui_ext_sdk_host", "crates/ui_ext_sdk/src/host.rs"),
     (
         "fyx_ext_harness",
         "crates/fyx_ext_harness/src/fyx_ext_harness.rs",
@@ -38,7 +39,7 @@ pub const RUST_CRATES: &[(&str, &str)] = &[
 ];
 
 /// The WIT packages that get a page: the directory with the package.
-pub const WIT_DIRS: &[&str] = &["crates/ui_ext/wit"];
+pub const WIT_DIRS: &[&str] = &["crates/ui_ext/wit", "crates/ui_ext/wit/since_v0.2.0"];
 
 pub fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

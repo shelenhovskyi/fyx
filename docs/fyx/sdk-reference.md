@@ -92,6 +92,10 @@ pub trait Extension: 'static {
         -> Vec<ListRow> {
         Vec::new()
     }
+    /// fyx:ui 0.2: the tick `request_tick` asked for.
+    fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
+        Ok(Update::Unchanged)
+    }
 }
 ```
 
@@ -117,16 +121,29 @@ traps or panics disables the extension for the session.
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
 
 ```rust
-register_extension!(MyExtension);
+register_extension!(MyExtension);        // exports fyx:ui 0.2
+register_extension!(MyExtension, v0_1);  // exports fyx:ui 0.1, for hosts that only run 0.1
 ```
 
-Call the macro once, at the root of your `cdylib` crate. It:
+The SDK's types and functions are those of `fyx:ui@0.2.0` (`API_VERSION`); one extension source
+exports either world. Call the macro once, at the root of your `cdylib` crate. It:
 
-- implements the generated `bindings::Guest` trait by forwarding each export to your type;
+- implements the chosen world's `Guest` trait by forwarding each export to your type. With
+  `v0_1`, values are converted at the boundary. Icons become upstream `IconName`s, and
+  tooltips, list selection and row indents are dropped. What 0.1 cannot express is an error that
+  names 0.2: modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank`
+  icon node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
+- defines `extern "Rust"` shims through which the SDK's host functions reach that world's
+  imports, so a 0.1 component imports only `fyx:ui/*@0.1.0`. A 0.2 component always imports
+  `fyx:ui/decorations`; the host checks `ui:editor-decorations` per call, not at import.
 - on `wasm32` only, adds a `#[used]` static in the `fyx:ui-api-version` link section holding
-  `API_VERSION_SECTION_BYTES`. The static lives in your crate, so the linker cannot drop it as an
-  unused member of the SDK's rlib;
-- calls `bindings::export!` to export the world.
+  `API_VERSION_SECTION_BYTES` (0.2) or `API_VERSION_V0_1_SECTION_BYTES` (0.1). The static lives in
+  your crate, so the linker cannot drop it as an unused member of the SDK's rlib;
+- calls the export macro wit-bindgen generates for the world. The 0.1 bindings live in the crate `ui_ext_sdk_v0_1`,
+  because wit-bindgen names the export macro after the world, and both worlds are called
+  `ui-extension`.
+
+<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs (register_extension!, __fyx_host_shims!), crates/ui_ext_sdk/src/v0_1.rs, crates/ui_ext_sdk/src/host.rs -->
 
 <!-- sdk:163-219 -->
 
@@ -458,10 +475,32 @@ return `Result<_, String>`. The string is what the user sees.
 
 ```rust
 pub fn log(level: LogLevel, message: &str);
-pub fn push_update(surface_id: &str, update: &Update);
+pub fn push_update(surface_id: &str, update: &Update) -> Result<(), HostError>;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn take_pushed_updates() -> Vec<(String, Update)>;
 ```
+
+`fyx:ui` 0.2 adds these host functions; each is checked when called and its effect happens after
+the current call returns (design.md, section A):
+
+```rust
+pub fn request_tick(surface_id: &str, delay_ms: u32) -> Result<(), HostError>;
+pub fn cancel_tick(surface_id: &str);
+pub fn add_surface(surface: &Surface) -> Result<(), HostError>;
+pub fn remove_surface(surface_id: &str) -> Result<(), HostError>;
+pub fn show_surface(surface_id: &str) -> Result<(), HostError>;
+pub fn hide_surface(surface_id: &str) -> Result<(), HostError>;
+pub fn place_decoration(id: &str, location: &DecorationLocation, nodes: &[Node])
+    -> Result<(), HostError>;
+pub fn remove_decoration(id: &str) -> Result<(), HostError>;
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_host_effects() -> Vec<HostEffect>;
+```
+
+In an extension exported with `v0_1` they return `HostError` with code `unavailable`
+("needs fyx:ui 0.2"), and `cancel_tick` does nothing. `push_update` converts the update to 0.1 and
+returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
+queued update; after a refused push it sends the whole tree as a `replace` next time.
 
 <!-- sdk:100-131 -->
 
@@ -494,9 +533,10 @@ another surface of the same extension. Rules:
 
 <!-- tasks/progress/W2.md:21-32 (push ordering rule); crates/ui_ext_wasm/src/ui_ext_wasm.rs:206-241, 277-287 (cap 64), 498-502, 693-734; crates/ui_ext_host/src/surface.rs:137-145, 240-285 (apply_reply: the Err arm never downcasts ReplyError), 291-298, 404-417; crates/ui_ext_host/src/registry.rs:109-156 -->
 
-Off WASM, `push_update` records the update in a thread local, and `take_pushed_updates()`
-returns and clears what was recorded on the current thread. The SDK does this because
-`wit-bindgen`'s off-WASM import stubs abort the test process.
+Off WASM, every host function records a `HostEffect` in a thread local and succeeds.
+`take_host_effects()` returns and clears what was recorded on the current thread;
+`take_pushed_updates()` takes only the pushes. The SDK does this because `wit-bindgen`'s off-WASM
+import stubs abort the test process.
 
 <!-- tasks/progress/W4.md:124-126 -->
 

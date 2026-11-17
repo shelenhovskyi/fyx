@@ -500,7 +500,7 @@ impl Extension for Counter {
     }
 
     fn surfaces(&self) -> Vec<Surface> {
-        let panel = Surface::panel(SURFACE_ID, "My counter", DockPosition::Right, "hash", 280);
+        let panel = Surface::panel(SURFACE_ID, "My counter", DockPosition::Right, Icon::Hash, 280);
         vec![panel]
     }
 ```
@@ -527,7 +527,7 @@ a snake_case name of Zed's `IconName` (`hash` is `#`), and an unknown name shows
             tree.flex(FlexProps::column().gap(8).padding(8), |tree| {
                 ids.0 = tree.text(label);
                 tree.row(|tree| {
-                    ids.1 = tree.button(ButtonProps::new("Add").icon("plus"));
+                    ids.1 = tree.button(ButtonProps::new("Add").icon(Icon::Plus));
                     ids.2 = tree.button(reset);
                 });
             });
@@ -582,11 +582,18 @@ Reset (5).
 ### Step 6: export it
 
 ```rust
-register_extension!(Counter);
+register_extension!(Counter, v0_1);
 ```
 
 The macro implements the generated WIT exports for your type and embeds the
 `fyx:ui-api-version` section. Call it exactly once, at the crate root.
+
+The SDK's API is that of `fyx:ui@0.2.0`, and `register_extension!(Counter)` exports 0.2. Fyx runs
+0.1 today, so `v0_1` exports the same code as 0.1. Icons become upstream names, and the 0.2-only
+features fail with an error that says they need 0.2. Switch to `register_extension!(Counter)`, and
+`api_version = "0.2.0"` in `extension.toml`, once your Fyx runs 0.2. The demos build both: 0.1 by
+default, 0.2 with `--features fyx-ui-0-2`. The [SDK reference](sdk-reference.md#extension-and-register_extension)
+lists what each world allows.
 
 <!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs:163-219 -->
 

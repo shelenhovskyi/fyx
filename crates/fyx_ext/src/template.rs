@@ -294,7 +294,7 @@ impl Extension for Panel {
             SURFACE_ID,
             "__TITLE__",
             DockPosition::Right,
-            "sparkle",
+            Icon::Sparkle,
             280,
         )]
     }
@@ -307,7 +307,7 @@ impl Extension for Panel {
             tree.flex(FlexProps::column().gap(8).padding(8), |tree| {
                 tree.text(TextProps::new("__TITLE__").bold());
                 ids.0 = tree.text(label);
-                ids.1 = tree.button(ButtonProps::new("Click me").icon("plus"));
+                ids.1 = tree.button(ButtonProps::new("Click me").icon(Icon::Plus));
             });
         })?;
         // A remount builds new nodes with new ids, so they are stored on every mount.
@@ -329,7 +329,9 @@ impl Extension for Panel {
     }
 }
 
-register_extension!(Panel);
+// Exports fyx:ui 0.1, which is what Fyx runs today. Once your Fyx runs 0.2, use
+// `register_extension!(Panel)` and set `api_version = "0.2.0"` in extension.toml.
+register_extension!(Panel, v0_1);
 
 #[cfg(test)]
 mod tests {
