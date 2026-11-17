@@ -4485,6 +4485,10 @@ impl ThreadView {
         source: Option<String>,
         cx: &Context<Self>,
     ) -> AnyElement {
+        // fyx: an edit under host review is decided in the review pane, not here.
+        if let Some(notice) = agent_review::permission_card_notice(request_id, cx) {
+            return notice.into_any_element();
+        }
         let subject = match &request.subject {
             Some(acp_v2::RequestPermissionSubject::Command(command)) => Some(
                 v_flex()
@@ -10856,6 +10860,10 @@ impl ThreadView {
         else {
             return div();
         };
+        // fyx: an edit under host review is decided in the review pane, not here.
+        if let Some(notice) = agent_review::permission_card_notice(request.id, cx) {
+            return notice;
+        }
         match options {
             PermissionOptions::Flat(options) => self.render_permission_buttons_flat(
                 session_id,
