@@ -295,4 +295,33 @@ fn test_api_version_gating() {
         parse_api_version("empty", empty_core_module).expect("parses"),
         None
     );
+
+    let version = [0, 0, 0, 1, 0, 0];
+    assert_eq!(
+        parse_api_version("one", &module_with_version_section(&version)).expect("parses"),
+        Some(Version::new(0, 1, 0))
+    );
+    let error =
+        parse_api_version("two", &module_with_version_section(&version.repeat(2))).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("2 copies of the fyx:ui-api-version section"),
+        "{error:#}"
+    );
+    let error = parse_api_version("short", &module_with_version_section(&[0, 1])).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("invalid fyx:ui-api-version section"),
+        "{error:#}"
+    );
+}
+
+/// A core module whose only content is an `fyx:ui-api-version` custom section holding `data`.
+fn module_with_version_section(data: &[u8]) -> Vec<u8> {
+    let name = API_VERSION_SECTION.as_bytes();
+    let payload_len = u8::try_from(1 + name.len() + data.len()).expect("fits one LEB128 byte");
+    let name_len = u8::try_from(name.len()).expect("fits one LEB128 byte");
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    module.extend([0, payload_len, name_len]);
+    module.extend(name);
+    module.extend(data);
+    module
 }

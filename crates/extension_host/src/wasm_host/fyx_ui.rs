@@ -74,8 +74,19 @@ pub fn parse_api_version(extension_id: &str, wasm_bytes: &[u8]) -> Result<Option
             payload.context("error parsing fyx:ui extension")?
             && section.name() == API_VERSION_SECTION
         {
+            let data = section.data();
+            // The linker concatenates equally named custom sections, so a guest that emits the
+            // section next to `register_extension!` ends up with a multiple of 6 bytes.
+            if data.len() > 6 && data.len() % 6 == 0 {
+                anyhow::bail!(
+                    "extension {extension_id} has {} copies of the {API_VERSION_SECTION} section \
+                     ({} bytes); emit it only via ui_ext_sdk::register_extension!",
+                    data.len() / 6,
+                    data.len(),
+                );
+            }
             version = Some(
-                super::parse_wasm_extension_version_custom_section(section.data())
+                super::parse_wasm_extension_version_custom_section(data)
                     .with_context(|| {
                         format!(
                             "extension {extension_id} has an invalid {API_VERSION_SECTION} section: {:?}",
