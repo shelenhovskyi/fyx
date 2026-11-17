@@ -217,6 +217,8 @@ title_bar.workspace = true
 toolchain_selector.workspace = true
 tracing.workspace = true
 ui.workspace = true
+# fyx: native UI extensions (W3)
+ui_ext_host.workspace = true
 ui_prompt.workspace = true
 url.workspace = true
 urlencoding.workspace = true

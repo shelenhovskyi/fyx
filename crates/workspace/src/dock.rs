@@ -547,6 +547,13 @@ impl Dock {
             .map(|entry| &entry.panel)
     }
 
+    // fyx: lets ui_ext_host activate one of several panels of the same type (extension panels).
+    pub fn panel_index_for_id(&self, panel_id: EntityId) -> Option<usize> {
+        self.panel_entries
+            .iter()
+            .position(|entry| entry.panel.panel_id() == panel_id)
+    }
+
     pub fn first_enabled_panel_idx(&mut self, cx: &mut Context<Self>) -> anyhow::Result<usize> {
         self.panel_entries
             .iter()

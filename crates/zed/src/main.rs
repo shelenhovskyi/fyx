@@ -746,6 +746,7 @@ fn main() {
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
+        ui_ext_host::init(cx); // fyx: extension panels and status items
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
