@@ -1,0 +1,14 @@
+# W5 end-to-end check: the stub agent first asks permission to edit demo.txt, then writes demo2.txt directly.
+wait 10
+action agent::NewExternalAgentThread {"agent": "Review Stub"}
+review
+accept 1
+reject 2
+submit
+review
+accept 1
+reject 2
+comment 2 keep the fifth line lowercase
+submit
+wait 4
+quit
