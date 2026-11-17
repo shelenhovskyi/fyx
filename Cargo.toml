@@ -89,6 +89,7 @@ members = [
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
     "crates/fyx_ext", # fyx
+    "crates/fyx_guard", # fyx
     "crates/fyx_registry", # fyx
     "crates/git",
     "crates/git_hosting_providers",
@@ -376,6 +377,7 @@ file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
+fyx_guard = { path = "crates/fyx_guard" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 git = { path = "crates/git" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
