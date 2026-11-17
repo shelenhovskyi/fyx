@@ -91,6 +91,9 @@ export class CommandRegistry {
       case "vscode.open":
         return this.openHook(types.toUri(args[0]), args[1]);
     }
+    // The extension's own command that never got registered fails as it does in VS Code.
+    const contributed = ((this.ctx.ext.manifest.contributes?.commands ?? []) as { command: string }[]).some((c) => c.command === id);
+    if (contributed) throw new Error(`command '${id}' not found`);
     // Everything else is a host (built-in) command.
     return this.ctx.rpc.request("vscode/executeCommand", { command: id, args: args.map(toWire) });
   }

@@ -47,9 +47,11 @@ export class ConfigStore {
   addContributedDefaults(configuration: unknown): void {
     const blocks = Array.isArray(configuration) ? configuration : configuration ? [configuration] : [];
     for (const block of blocks) {
-      const properties = (block as { properties?: Record<string, { default?: unknown }> }).properties ?? {};
+      const properties = (block as { properties?: Record<string, { default?: unknown; type?: string | string[] }> }).properties ?? {};
       for (const [key, schema] of Object.entries(properties)) {
-        if (schema && "default" in schema) this.defaults[key] = schema.default;
+        if (!schema) continue;
+        // Like VS Code's configuration registry: a property without `default` gets its type's default.
+        this.defaults[key] = "default" in schema ? schema.default : typeDefault(schema.type);
       }
     }
   }
@@ -193,6 +195,24 @@ export function flatten(settings: Settings, prefix = "", out: Settings = {}): Se
     else out[key] = v;
   }
   return out;
+}
+
+function typeDefault(type: string | string[] | undefined): unknown {
+  switch (Array.isArray(type) ? type[0] : type) {
+    case "string":
+      return "";
+    case "boolean":
+      return false;
+    case "number":
+    case "integer":
+      return 0;
+    case "array":
+      return [];
+    case "object":
+      return {};
+    default:
+      return null;
+  }
 }
 
 function changedKeys(a: Settings, b: Settings): string[] {

@@ -46,6 +46,8 @@ export class MockHost {
   readonly providers = new Map<number, unknown>();
   readonly buffers = new Map<string, { text: string; version: number }>();
   readonly contextKeys = new Map<string, unknown>();
+  readonly editorOptions = new Map<string, unknown>();
+  readonly selections = new Map<string, unknown[]>();
   options: MockHostOptions;
   private child?: ChildProcess;
   private stderr = "";
@@ -61,12 +63,23 @@ export class MockHost {
   }
 
   /** Sidecar in a child process, optionally under Node's permission model. */
-  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] } } = {}): MockHost {
+  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string> } = {}): MockHost {
     const main = join(import.meta.dirname, "main.ts");
     const flags = options.permission
-      ? ["--permission", ...[import.meta.dirname, ...options.permission.read].map((p) => `--allow-fs-read=${p}`), ...options.permission.write.map((p) => `--allow-fs-write=${p}`)]
+      ? [
+          "--permission",
+          ...[import.meta.dirname, ...options.permission.read].flatMap(driveVariants).map((p) => `--allow-fs-read=${p}`),
+          ...options.permission.write.flatMap(driveVariants).map((p) => `--allow-fs-write=${p}`),
+        ]
       : [];
-    const child = spawn(process.execPath, [...flags, main], { stdio: ["pipe", "pipe", "pipe"] });
+    // Under --permission even `existsSync("")` throws unless the cwd is readable, so default the
+    // cwd to the first granted folder.
+    const cwd = options.cwd ?? options.permission?.read[0];
+    const child = spawn(process.execPath, [...flags, main], {
+      stdio: ["pipe", "pipe", "pipe"],
+      ...(cwd ? { cwd } : {}),
+      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
+    });
     const rpc = new RpcPeer((line) => void child.stdin.write(line));
     const host = new MockHost(rpc, options);
     host.child = child;
@@ -123,6 +136,15 @@ export class MockHost {
   async openDocument(uri: string, text: string, languageId?: string): Promise<void> {
     this.buffers.set(uri, { text, version: 1 });
     await this.rpc.request("vscode/didOpenTextDocument", { uri, text, version: 1, ...(languageId ? { languageId } : {}) });
+  }
+
+  /** Host-side edit of a buffer (full-text sync), e.g. to reset it between runs. */
+  async changeDocument(uri: string, text: string): Promise<void> {
+    const buffer = this.buffers.get(uri) ?? { text, version: 0 };
+    buffer.text = text;
+    buffer.version += 100;
+    this.buffers.set(uri, buffer);
+    await this.rpc.request("vscode/didChangeTextDocument", { uri, version: buffer.version, text });
   }
 
   async setActiveEditor(uri: string | null, selections?: unknown[]): Promise<void> {
@@ -254,6 +276,8 @@ export class MockHost {
     });
     rpc.on("vscode/registerProvider", (p: { id: number }) => void this.providers.set(p.id, p));
     rpc.on("vscode/unregisterProvider", (p: { id: number }) => void this.providers.delete(p.id));
+    rpc.on("vscode/setSelections", (p: { uri: string; selections: unknown[] }) => void this.selections.set(p.uri, p.selections));
+    rpc.on("vscode/setEditorOptions", (p: { uri: string; options: Record<string, unknown> }) => void this.editorOptions.set(p.uri, { ...((this.editorOptions.get(p.uri) as object) ?? {}), ...p.options }));
     rpc.on("vscode/setContext", (p: { key: string; value: unknown }) => void this.contextKeys.set(p.key, p.value));
     rpc.on("vscode/showTextDocument", () => true);
     rpc.on("vscode/saveTextDocument", () => true);
@@ -263,7 +287,7 @@ export class MockHost {
     rpc.on("vscode/clipboard/writeText", () => null);
     rpc.on("vscode/openExternal", () => false);
     // Notifications the mock only records (see traffic).
-    for (const m of ["vscode/registerCommand", "vscode/unregisterCommand", "vscode/updateConfiguration", "vscode/progress", "vscode/setSelections", "vscode/revealRange"]) rpc.on(m, () => null);
+    for (const m of ["vscode/registerCommand", "vscode/unregisterCommand", "vscode/updateConfiguration", "vscode/progress", "vscode/revealRange"]) rpc.on(m, () => null);
     rpc.onUnhandled((method) => {
       this.schemaErrors.push(`sidecar called unknown host method ${method}`);
       return null;
@@ -302,6 +326,16 @@ export function applyWireEdits(text: string, edits: readonly WireEdit[]): string
   const sorted = edits.map((e) => ({ start: offset(e.range.start), end: offset(e.range.end), text: e.newText })).sort((a, b) => b.start - a.start);
   for (const e of sorted) text = text.slice(0, e.start) + e.text + text.slice(e.end);
   return text;
+}
+
+/**
+ * Node's permission grants compare Windows paths case-sensitively, drive letter included, while
+ * VS Code's `Uri.fsPath` lowercases the drive (`c:\...`). Grant both spellings.
+ */
+function driveVariants(path: string): string[] {
+  const m = /^([a-zA-Z]):(.*)$/.exec(path);
+  if (!m) return [path];
+  return [...new Set([`${m[1].toUpperCase()}:${m[2]}`, `${m[1].toLowerCase()}:${m[2]}`])];
 }
 
 export function tempDir(prefix: string): string {

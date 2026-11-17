@@ -63,7 +63,8 @@ function activate(context) {
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (!editor) return;
       const ranges = diagnostics.get(editor.document.uri)?.map((d) => d.range) ?? [];
-      editor.setDecorations(decoration, ranges);
+      // Options objects with a null hoverMessage, as indent-rainbow sends them.
+      editor.setDecorations(decoration, ranges.map((range) => ({ range, hoverMessage: null })));
     }),
   );
 
@@ -88,6 +89,7 @@ function activate(context) {
     }),
     vscode.commands.registerTextEditorCommand("sink.upper", (editor, edit) => {
       edit.replace(new vscode.Range(0, 0, 0, editor.document.lineAt(0).text.length), editor.document.lineAt(0).text.toUpperCase());
+      editor.selection = new vscode.Selection(0, 0, 0, 5);
     }),
     vscode.commands.registerCommand("sink.webview", () => vscode.window.createWebviewPanel("x", "X", vscode.ViewColumn.One, {})),
     vscode.commands.registerCommand("sink.fs", async () => {

@@ -117,6 +117,7 @@ test("editor commands, formatting and hover go through the host buffer", async (
   await host.setActiveEditor(docUri);
   await host.executeCommand("sink.upper");
   assert.equal(host.buffers.get(docUri)!.text, "HELLO TODO   \nworld  ");
+  assert.deepEqual(host.selections.get(docUri), [{ anchor: { line: 0, character: 0 }, active: { line: 0, character: 5 } }], "selection assignment reaches the host");
   const edits = await host.format(docUri);
   assert.deepEqual(edits, [
     { range: { start: { line: 0, character: 10 }, end: { line: 0, character: 13 } }, newText: "" },
@@ -125,7 +126,7 @@ test("editor commands, formatting and hover go through the host buffer", async (
   const hover = await host.rpc.request("vscode/provideHover", { uri: docUri, position: { line: 1, character: 2 } });
   assert.deepEqual(hover, { contents: ["**world**"], range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } });
   const decorated = [...host.decorations.values()][0];
-  assert.ok(decorated, "active editor change applied decorations");
+  assert.deepEqual(decorated, [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 10 } } }], "null hoverMessage is dropped");
   const style = [...host.decorationTypes.values()][0] as Record<string, unknown>;
   assert.deepEqual(style, { backgroundColor: "warning" }, "ThemeColor kept as token, raw #ff0000 dropped");
 });

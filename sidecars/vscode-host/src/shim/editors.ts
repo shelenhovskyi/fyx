@@ -76,17 +76,17 @@ export class TextEditor {
   readonly document: TextDocument;
   private ctx: HostContext;
   private editors: EditorStore;
-  selections: Selection[] = [new Selection(0, 0, 0, 0)];
+  private selectionState: Selection[] = [new Selection(0, 0, 0, 0)];
   visibleRanges: Range[] = [];
   viewColumn = 1;
-  options: EditorOptions;
+  private optionsState: EditorOptions;
 
   constructor(ctx: HostContext, editors: EditorStore, document: TextDocument) {
     this.ctx = ctx;
     this.editors = editors;
     this.document = document;
     const cfg = ctx.config.get("editor");
-    this.options = {
+    this.optionsState = {
       tabSize: cfg.get<number>("tabSize", 4)!,
       insertSpaces: cfg.get<boolean>("insertSpaces", true)!,
       cursorStyle: TextEditorCursorStyle.Line,
@@ -95,12 +95,35 @@ export class TextEditor {
     this.visibleRanges = [new Range(0, 0, Math.max(0, document.lineCount - 1), 0)];
   }
 
+  get options(): EditorOptions {
+    return this.optionsState;
+  }
+  /** Assigning options (EditorConfig does) changes the host editor's indentation settings. */
+  set options(value: Partial<EditorOptions>) {
+    this.optionsState = { ...this.optionsState, ...value };
+    this.ctx.rpc.notify("vscode/setEditorOptions", { uri: this.document.uri.toString(), options: value });
+    this.editors.onDidChangeOptions.fire({ textEditor: this, options: this.optionsState });
+  }
+
+  get selections(): readonly Selection[] {
+    return this.selectionState;
+  }
+  /** Assigned by the extension: moves the host's cursors. */
+  set selections(value: readonly Selection[]) {
+    this.selectionState = value.length ? [...value] : [new Selection(0, 0, 0, 0)];
+    this.ctx.rpc.notify("vscode/setSelections", { uri: this.document.uri.toString(), selections: this.selectionState.map(encodeSelection) });
+  }
+
   get selection(): Selection {
-    return this.selections[0];
+    return this.selectionState[0];
   }
   set selection(s: Selection) {
     this.selections = [s];
-    this.ctx.rpc.notify("vscode/setSelections", { uri: this.document.uri.toString(), selections: [encodeSelection(s)] });
+  }
+
+  /** @internal Selections reported by the host (no echo back). */
+  setSelectionsFromHost(selections: readonly Selection[]): void {
+    this.selectionState = selections.length ? [...selections] : [new Selection(0, 0, 0, 0)];
   }
 
   async edit(callback: (builder: EditBuilder) => void, _options?: { undoStopBefore: boolean; undoStopAfter: boolean }): Promise<boolean> {
@@ -130,7 +153,7 @@ export class TextEditor {
           ? { range: encodeRange(r) }
           : {
               range: encodeRange(r.range),
-              ...(r.hoverMessage !== undefined ? { hoverMessage: String((r.hoverMessage as { value?: string }).value ?? r.hoverMessage) } : {}),
+              ...(hoverText(r.hoverMessage) !== undefined ? { hoverMessage: hoverText(r.hoverMessage) } : {}),
               ...(r.renderOptions ? { renderOptions: encodeDecorationOptions(this.ctx, r.renderOptions) } : {}),
             },
       ),
@@ -145,6 +168,17 @@ export class TextEditor {
     void this.editors.show(this.document);
   }
   hide(): void {}
+}
+
+/** `hoverMessage` is a string, a MarkdownString, an array of those, or null/undefined. */
+function hoverText(message: unknown): string | undefined {
+  if (message === null || message === undefined) return undefined;
+  if (Array.isArray(message)) {
+    const parts = message.map(hoverText).filter((m): m is string => m !== undefined);
+    return parts.length ? parts.join("\n\n") : undefined;
+  }
+  if (typeof message === "object" && typeof (message as { value?: unknown }).value === "string") return (message as { value: string }).value;
+  return typeof message === "string" ? message : undefined;
 }
 
 export class EditBuilder {
@@ -220,14 +254,14 @@ export class EditorStore {
   }
 
   setSelections(editor: TextEditor, selections: Selection[], kind?: number): void {
-    editor.selections = selections.length ? selections : [new Selection(0, 0, 0, 0)];
+    editor.setSelectionsFromHost(selections);
     this.onDidChangeSelection.fire({ textEditor: editor, selections: editor.selections, kind });
   }
 
   /** `window.showTextDocument`: the host opens it, the sidecar treats it as active right away. */
   async show(doc: TextDocument, options?: { selection?: Range; preserveFocus?: boolean; preview?: boolean; viewColumn?: number }): Promise<TextEditor> {
     const editor = this.editorFor(doc);
-    if (options?.selection) editor.selections = [new Selection(options.selection.start, options.selection.end)];
+    if (options?.selection) editor.setSelectionsFromHost([new Selection(options.selection.start, options.selection.end)]);
     await this.ctx.rpc.request("vscode/showTextDocument", {
       uri: doc.uri.toString(),
       ...(options?.selection ? { selection: encodeRange(options.selection) } : {}),

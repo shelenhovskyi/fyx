@@ -13,9 +13,9 @@ import { ErrorCodes, RpcError, type RpcPeer } from "./rpc.ts";
 import type { ListRow, Node, Surface, UiEvent, Update } from "./schema.ts";
 import { createExtensionContext, createVscodeApi, type ShimState } from "./shim/api.ts";
 import { ConfigStore } from "./shim/config.ts";
-import { DocumentStore, languageIdForPath } from "./shim/documents.ts";
-import { Uri, toUri } from "./shim/types.ts";
-import { decodeSelection } from "./shim/wire.ts";
+import { DocumentStore, languageIdForPath, type TextDocument } from "./shim/documents.ts";
+import { Selection, Uri, toUri } from "./shim/types.ts";
+import { decodeDiagnostic, decodeSelection } from "./shim/wire.ts";
 import { SurfaceRegistry } from "./ui/surfaces.ts";
 import { readZip } from "./zip.ts";
 
@@ -292,20 +292,26 @@ export class ExtensionHost {
       const doc = this.c.documents.get(toUri(p.uri));
       if (!doc) throw new RpcError(ErrorCodes.InvalidParams, `document not open: ${p.uri}`);
       const editor = this.s.editors.editorFor(doc);
-      if (p.selections) editor.selections = p.selections.map(decodeSelection);
+      if (p.selections) editor.setSelectionsFromHost(p.selections.map((sel) => clampSelection(doc, decodeSelection(sel))));
       this.s.editors.setActive(editor);
     }));
     rpc.on("vscode/didChangeSelection", wrap((p: { uri: string; selections: { anchor: { line: number; character: number }; active: { line: number; character: number } }[]; kind?: number }) => {
       const doc = this.c.documents.get(toUri(p.uri));
       if (!doc) return;
-      this.s.editors.setSelections(this.s.editors.editorFor(doc), p.selections.map(decodeSelection), p.kind);
+      this.s.editors.setSelections(this.s.editors.editorFor(doc), p.selections.map((sel) => clampSelection(doc, decodeSelection(sel))), p.kind);
     }));
+    rpc.on("vscode/didChangeDiagnostics", wrap((p: { uri: string; diagnostics: never[] }) => this.s.languages.setHostDiagnostics(toUri(p.uri), p.diagnostics.map(decodeDiagnostic))));
     rpc.on("vscode/didChangeConfiguration", wrap((p: { settings: Record<string, unknown> }) => this.c.config.setUserSettings(p.settings)));
     rpc.on("vscode/provideFormatting", wrap((p: any) => this.s.languages.provideFormatting(p)));
     rpc.on("vscode/provideOnTypeFormatting", wrap((p: any) => this.s.languages.provideOnTypeFormatting(p)));
     rpc.on("vscode/provideCompletion", wrap((p: any) => this.s.languages.provideCompletion(p)));
     rpc.on("vscode/provideHover", wrap((p: any) => this.s.languages.provideHover(p)));
   }
+}
+
+/** VS Code never hands an extension a selection outside its document. */
+function clampSelection(doc: TextDocument, sel: Selection): Selection {
+  return new Selection(doc.validatePosition(sel.anchor), doc.validatePosition(sel.active));
 }
 
 function toWireResult(v: unknown): unknown {

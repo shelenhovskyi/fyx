@@ -4,6 +4,8 @@
 // stdout belongs to the protocol, so console output and stray `process.stdout.write` calls from
 // extension code are redirected: console → `log` notifications (WIT `host.log`) and stderr.
 
+import fs from "node:fs";
+import { builtinModules } from "node:module";
 import { format } from "node:util";
 import { ExtensionHost } from "./host.ts";
 import { RpcPeer } from "./rpc.ts";
@@ -12,6 +14,32 @@ import type { LogLevel } from "./schema.ts";
 const writeOut = process.stdout.write.bind(process.stdout);
 const writeErr = process.stderr.write.bind(process.stderr);
 process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => (writeErr as (c: string | Uint8Array, ...r: unknown[]) => boolean)(chunk, ...rest)) as typeof process.stdout.write;
+
+// Under --permission, `process.binding` is denied. Bundled telemetry libraries (applicationinsights'
+// diagnostic-channel) call `process.binding("natives")` at load time only to list builtin
+// modules, so answer that one call from `module.builtinModules`.
+const originalBinding = (process as unknown as { binding: (name: string) => unknown }).binding;
+(process as unknown as { binding: (name: string) => unknown }).binding = (name: string) => {
+  try {
+    return originalBinding.call(process, name);
+  } catch (err) {
+    if (name === "natives") return Object.fromEntries(builtinModules.map((m) => [m, ""]));
+    throw err;
+  }
+};
+
+// `fs.existsSync` is documented never to throw, but under --permission it throws
+// ERR_ACCESS_DENIED for paths outside the grant. Extensions probe home-directory paths with it
+// (REST Client: ~/.rest-client), so restore the contract: an inaccessible path does not exist.
+// This grants nothing.
+const originalExistsSync = fs.existsSync;
+fs.existsSync = ((path: fs.PathLike) => {
+  try {
+    return originalExistsSync(path);
+  } catch {
+    return false;
+  }
+}) as typeof fs.existsSync;
 
 const rpc = new RpcPeer((line) => void writeOut(line));
 const host = new ExtensionHost(rpc);

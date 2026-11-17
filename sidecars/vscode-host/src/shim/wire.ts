@@ -34,6 +34,14 @@ export function encodeTextEdit(e: TextEdit): { range: WireRange; newText: string
 
 const SEVERITY = ["error", "warning", "information", "hint"] as const;
 
+export function decodeDiagnostic(d: { range: WireRange; message: string; severity?: string; source?: string; code?: string | number }): Diagnostic {
+  const severity = SEVERITY.indexOf((d.severity ?? "error") as (typeof SEVERITY)[number]);
+  const diag = new Diagnostic(decodeRange(d.range), d.message, severity < 0 ? DiagnosticSeverity.Error : severity);
+  if (d.source !== undefined) diag.source = d.source;
+  if (d.code !== undefined) diag.code = d.code;
+  return diag;
+}
+
 export function encodeDiagnostic(d: Diagnostic): Record<string, unknown> {
   const code = typeof d.code === "object" && d.code !== null ? { value: d.code.value, target: d.code.target.toString() } : d.code;
   return {

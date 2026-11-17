@@ -151,6 +151,8 @@ export class LanguageFeatures {
   readonly collections = new Set<DiagnosticCollectionImpl>();
   readonly diagnosticsChanged = new EventEmitter<{ uris: readonly Uri[] }>();
   readonly languageConfigurations = new Map<string, unknown>();
+  /** Diagnostics the host owns (language servers, other extensions), pushed with `vscode/didChangeDiagnostics`. */
+  private hostDiagnostics = new Map<string, { uri: Uri; diagnostics: Diagnostic[] }>();
 
   constructor(ctx: HostContext) {
     this.ctx = ctx;
@@ -162,10 +164,17 @@ export class LanguageFeatures {
     return c;
   }
 
+  setHostDiagnostics(uri: Uri, diagnostics: Diagnostic[]): void {
+    if (diagnostics.length) this.hostDiagnostics.set(uri.toString(), { uri, diagnostics });
+    else this.hostDiagnostics.delete(uri.toString());
+    this.diagnosticsChanged.fire({ uris: [uri] });
+  }
+
   getDiagnostics(uri?: Uri): unknown {
-    if (uri) return [...this.collections].flatMap((c) => [...(c.get(uri) ?? [])]);
+    if (uri) return [...(this.hostDiagnostics.get(uri.toString())?.diagnostics ?? []), ...[...this.collections].flatMap((c) => [...(c.get(uri) ?? [])])];
     const all = new Map<string, { uri: Uri; diags: Diagnostic[] }>();
-    for (const c of this.collections) {
+    const host: [Uri, readonly Diagnostic[]][] = [...this.hostDiagnostics.values()].map((e) => [e.uri, e.diagnostics]);
+    for (const c of [host, ...this.collections] as Iterable<[Uri, readonly Diagnostic[]]>[]) {
       for (const [u, diags] of c) {
         const e = all.get(u.toString()) ?? { uri: u, diags: [] };
         e.diags.push(...diags);
