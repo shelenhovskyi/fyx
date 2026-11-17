@@ -47,7 +47,7 @@ ignored by upstream Zed's manifest parser, so one directory can hold both kinds.
 The sandbox: the component gets WASI p2, all of it linked (Rust's std imports parts of it), with
 stderr inherited and nothing else granted. It has no preopened directories, no environment
 variables and no arguments, and no network: TCP, UDP and name lookup are denied, so `connect`
-fails with "access denied". It cannot read the worktree or buffers yet. Its store is capped (32 MiB
+fails with "access denied". It cannot read the worktree or buffers yet. Its store is capped (256 MiB
 of memory; see "Limits" in `limits-and-gotchas.md`). Besides WASI, the host functions are
 `push-update` and `log`.
 
@@ -276,7 +276,7 @@ work on your side.
 <!-- crates/ui_ext/wit/fyx-ui.wit:9-21; crates/ui_ext_host/src/view.rs:763-794 -->
 
 **9. Slow or crashing extensions are disabled.** Each call has a 200 ms budget (2 s for
-instantiation and `surfaces`). A call that runs past it, traps or panics disables the extension
+instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps or panics disables the extension
 until Fyx restarts. Returning `Err(String)` is different: it is shown to the user and the extension
 keeps running.
 

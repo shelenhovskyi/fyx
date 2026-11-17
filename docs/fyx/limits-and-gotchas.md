@@ -23,7 +23,8 @@ Contents:
 
 | Call | Budget |
 |---|---|
-| `mount`, `handle-event`, `list-rows` | **200 ms** each |
+| `handle-event`, `list-rows`, and `mount` after a surface's first | **200 ms** each |
+| the first `mount` of each surface | **2 s** |
 | instantiation, then `surfaces` (your `Extension::new` runs inside `surfaces`) | **2 s** each |
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:63-65, 476-495, 710-715; crates/ui_ext_sdk/src/ui_ext_sdk.rs:225-238 -->
@@ -42,7 +43,8 @@ Contents:
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:5-9, 62, 66-68, 378-389, 466-474, 693-734; tasks/progress/W2.md:47-48 -->
 
 What to do: keep every call well under 200 ms, including debug builds, which are much slower
-than release builds. Do heavy setup lazily, or in `new`/`surfaces` (2 s). Never sleep or spin
+than release builds. Do heavy setup lazily, in `new`/`surfaces` or in a surface's first `mount`
+(2 s each); a remount (after **Retry**, say) gets 200 ms. Never sleep or spin
 waiting for something: there is nothing to wait for, since no other code runs while your call
 does.
 
@@ -280,9 +282,11 @@ you that a surface was closed (0.2 items 5–7).
   arguments.
 - No network: TCP, UDP and name lookup are denied and no address passes the check, so `connect`
   fails with "access denied" inside the component.
-- Store caps: 32 MiB of linear memory, 64 Ki table elements, 32 core instances, 32 tables,
-  8 memories. Growing past one traps the call and disables the extension. The pushes of one call
-  may carry 4096 patches plus nodes together, and at most 64 pushes.
+- Store caps: 256 MiB of linear memory (room for a JS engine), 64 Ki table elements, 32 core
+  instances, 32 tables, 8 memories. Growing past one traps the call and disables the extension;
+  other extensions are not affected. The pushes of one call may carry 4096 patches plus nodes
+  together, and at most 64 pushes. The strings passed to `push-update` and `log` in one call may
+  total 16 MiB; a `log` message is cut at 16 KiB.
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
 - Fyx's own host functions: `push-update` and `log`.
