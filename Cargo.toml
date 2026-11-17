@@ -265,6 +265,9 @@ members = [
     "extensions/fyx_demo_counter", # fyx
     "extensions/fyx_demo_todo", # fyx
     "extensions/fyx_demo_gallery", # fyx
+    "extensions/fyx_demo_markdown", # fyx
+    "extensions/fyx_demo_gitstatus", # fyx
+    "extensions/fyx_demo_form", # fyx
     "extensions/glsl",
     "extensions/html",
     "extensions/proto",
