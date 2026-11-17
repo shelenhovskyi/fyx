@@ -186,7 +186,8 @@ fn open_reviews(
             .find(|pane| pane.read(cx).turn == turn);
         let pane = match existing {
             Some(pane) => {
-                workspace.activate_item(&pane, true, true, window, cx);
+                let focus = window.is_window_active();
+                workspace.activate_item(&pane, true, focus, window, cx);
                 pane
             }
             None => {
@@ -194,7 +195,8 @@ fn open_reviews(
                 let pane = cx.new(|cx| {
                     ReviewPane::new(review.clone(), turn, project.clone(), workspace_handle, cx)
                 });
-                workspace.add_item_to_active_pane(Box::new(pane.clone()), None, true, window, cx);
+                let focus = window.is_window_active();
+                workspace.add_item_to_active_pane(Box::new(pane.clone()), None, focus, window, cx);
                 pane
             }
         };
@@ -449,7 +451,11 @@ impl ReviewPane {
         });
         self.current_hunk = None;
         let focus = editor.focus_handle(cx);
-        window.focus(&focus, cx);
+        // A review that opens in a background window must not take the keyboard from the window the
+        // user is typing in.
+        if window.is_window_active() {
+            window.focus(&focus, cx);
+        }
         focus.dispatch_action(&GoToHunk, window, cx);
         self.update_current_hunk(window, cx);
         cx.notify();
@@ -1069,7 +1075,7 @@ impl DiffHunkRenderer for ReviewHunkRenderer {
         let pane = self.pane.clone();
         let hunk = buffer_row(&snapshot, hunk_range.start).and_then(|row| {
             let edit = review.read(cx).review(review_id)?.edit();
-            let index = edit.hunk_at_new_row(row)?;
+            let index = edit.hunk_drawn_at(row)?;
             Some((index, edit.hunks().get(index)?.decision))
         });
         let Some((index, decision)) = hunk else {

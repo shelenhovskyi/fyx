@@ -23,20 +23,6 @@ pub struct Hunk {
 }
 
 impl Hunk {
-    /// Fragments sent with a permission request often omit the final newline that the same lines have
-    /// in the file, so decisions are matched on text with that difference ignored.
-    fn same_change(&self, other: &Hunk) -> bool {
-        fn with_newline(text: &str) -> std::borrow::Cow<'_, str> {
-            if text.is_empty() || text.ends_with('\n') {
-                text.into()
-            } else {
-                format!("{text}\n").into()
-            }
-        }
-        with_newline(&self.old_text) == with_newline(&other.old_text)
-            && with_newline(&self.new_text) == with_newline(&other.new_text)
-    }
-
     fn label(&self) -> String {
         if self.old_rows.is_empty() {
             format!("insertion after line {}", self.old_rows.start)
@@ -79,7 +65,11 @@ pub struct ProposedEdit {
 }
 
 impl ProposedEdit {
+    /// Line endings are normalised to `\n`, as buffers (and so the pane's diff) do: a CRLF-only
+    /// difference is no change, and CRLF text never falls back to a whole-file hunk.
     pub fn new(abs_path: PathBuf, old_text: String, new_text: String) -> Self {
+        let old_text = normalize_line_endings(old_text);
+        let new_text = normalize_line_endings(new_text);
         let hunks = compute_hunks(&old_text, &new_text);
         Self {
             abs_path,
@@ -105,16 +95,35 @@ impl ProposedEdit {
         &self.hunks
     }
 
-    /// The hunk shown at `row` of the new text. A pure deletion is shown at the row that follows it.
+    /// The hunk at `row` of the new text, for the cursor. A pure deletion is at the row that follows
+    /// it.
     pub fn hunk_at_new_row(&self, row: u32) -> Option<usize> {
+        self.hunks.iter().position(|hunk| {
+            hunk.new_rows.contains(&row) || (hunk.new_rows.is_empty() && hunk.new_rows.start == row)
+        })
+    }
+
+    /// The hunk a diff hunk drawn at `row` stands for. The pane draws hunks with Zed's `BufferDiff`,
+    /// which may slide a hunk of repeated lines (a `}`, a blank line) by one row against this model's
+    /// line diff, so a hunk one row away still matches.
+    pub fn hunk_drawn_at(&self, row: u32) -> Option<usize> {
+        let distance = |hunk: &Hunk| {
+            let rows = &hunk.new_rows;
+            if rows.contains(&row) || (rows.is_empty() && rows.start == row) {
+                0
+            } else if row < rows.start {
+                rows.start - row
+            } else {
+                row - rows.end.max(rows.start + 1) + 1
+            }
+        };
         self.hunks
             .iter()
-            .position(|hunk| hunk.new_rows.contains(&row))
-            .or_else(|| {
-                self.hunks
-                    .iter()
-                    .position(|hunk| hunk.new_rows.is_empty() && hunk.new_rows.start == row)
-            })
+            .enumerate()
+            .map(|(index, hunk)| (distance(hunk), index))
+            .filter(|(distance, _)| *distance <= 1)
+            .min()
+            .map(|(_, index)| index)
     }
 
     pub fn set_decision(&mut self, hunk_index: usize, decision: HunkDecision) -> Result<()> {
@@ -189,24 +198,51 @@ impl ProposedEdit {
 
     /// Copies decisions and comments from an earlier review of the same change, such as the preview
     /// shown with a permission request. Returns how many hunks were decided this way.
+    ///
+    /// The preview's old text is a fragment of the file. It must occur exactly once in this edit's old
+    /// text; the preview's hunks are then placed at that position, and a decision carries over only to
+    /// the hunk at the same rows with the same change. A decision on a harmless-looking fragment never
+    /// covers the same line change elsewhere in the file, and fragments that start or end mid-line
+    /// map like whole lines.
     pub fn adopt_decisions(&mut self, earlier: &ProposedEdit) -> usize {
-        let mut used = vec![false; earlier.hunks.len()];
+        let fragment = earlier.old_text.as_str();
+        let expected_new_text = if fragment.is_empty() {
+            // A new file: the preview is the whole file.
+            if !self.old_text.is_empty() {
+                return 0;
+            }
+            earlier.new_text.clone()
+        } else {
+            let mut occurrences = self.old_text.match_indices(fragment);
+            let Some((start, _)) = occurrences.next() else {
+                return 0;
+            };
+            if occurrences.next().is_some() {
+                return 0;
+            }
+            format!(
+                "{}{}{}",
+                &self.old_text[..start],
+                earlier.new_text,
+                &self.old_text[start + fragment.len()..]
+            )
+        };
+        let placed = compute_hunks(&self.old_text, &expected_new_text);
+        if placed.len() != earlier.hunks.len() {
+            return 0;
+        }
         let mut adopted = 0;
-        for hunk in &mut self.hunks {
-            if hunk.decision != HunkDecision::Pending {
+        for (placed, earlier_hunk) in placed.iter().zip(&earlier.hunks) {
+            if earlier_hunk.decision == HunkDecision::Pending {
                 continue;
             }
-            let matching = earlier
-                .hunks
-                .iter()
-                .enumerate()
-                .find(|(index, earlier_hunk)| {
-                    !used[*index]
-                        && earlier_hunk.decision != HunkDecision::Pending
-                        && earlier_hunk.same_change(hunk)
-                });
-            if let Some((index, earlier_hunk)) = matching {
-                used[index] = true;
+            let matching = self.hunks.iter_mut().find(|hunk| {
+                hunk.decision == HunkDecision::Pending
+                    && hunk.old_rows == placed.old_rows
+                    && hunk.old_text == placed.old_text
+                    && hunk.new_text == placed.new_text
+            });
+            if let Some(hunk) = matching {
                 hunk.decision = earlier_hunk.decision;
                 hunk.comment = earlier_hunk.comment.clone();
                 adopted += 1;
@@ -257,6 +293,14 @@ impl ProposedEdit {
             }
         }
         Some(feedback)
+    }
+}
+
+fn normalize_line_endings(text: String) -> String {
+    if text.contains('\r') {
+        text.replace("\r\n", "\n")
+    } else {
+        text
     }
 }
 
@@ -429,14 +473,64 @@ c
         created.decide_all(HunkDecision::Accepted);
         assert_eq!(created.apply_accepted().unwrap(), "hello\nworld\n");
 
-        for (old, new) in [("a\nb", "a\nb\n"), ("a\nb\n", "a\r\nb\r\n")] {
-            let mut edit = edit(old, new);
-            assert!(!edit.hunks().is_empty(), "{old:?} -> {new:?}");
-            edit.decide_all(HunkDecision::Accepted);
-            assert_eq!(edit.apply_accepted().unwrap(), new);
-            edit.decide_all(HunkDecision::Rejected);
-            assert_eq!(edit.apply_accepted().unwrap(), old);
-        }
+        assert_eq!(
+            edit("a\nb\n", "a\r\nb\r\n").resolution(),
+            Resolution::Unchanged
+        );
+        let crlf = edit(OLD, &NEW.replace('\n', "\r\n"));
+        assert_eq!(
+            crlf.hunks().len(),
+            2,
+            "CRLF does not collapse into one hunk"
+        );
+
+        let (old, new) = ("a\nb", "a\nb\n");
+        let mut newline_only = edit(old, new);
+        assert!(!newline_only.hunks().is_empty());
+        newline_only.decide_all(HunkDecision::Accepted);
+        assert_eq!(newline_only.apply_accepted().unwrap(), new);
+        newline_only.decide_all(HunkDecision::Rejected);
+        assert_eq!(newline_only.apply_accepted().unwrap(), old);
+    }
+
+    #[test]
+    fn hunks_one_row_away_still_match() {
+        // A deletion of a repeated line: BufferDiff may draw it a row off.
+        let edit = edit("a\n}\n}\nb\n", "a\n}\nb\n");
+        let deletion = edit.hunks()[0].new_rows.start;
+        assert_eq!(edit.hunk_drawn_at(deletion), Some(0));
+        assert_eq!(edit.hunk_drawn_at(deletion.saturating_sub(1)), Some(0));
+        assert_eq!(edit.hunk_drawn_at(deletion + 1), Some(0));
+        assert_eq!(edit.hunk_drawn_at(deletion + 3), None);
+        // The cursor only selects what it is on.
+        assert_eq!(edit.hunk_at_new_row(deletion + 1), None);
+    }
+
+    #[test]
+    fn decisions_carry_over_only_at_the_fragment() {
+        let old = "let debug = false;\nfn a() {}\nlet debug = false;\n";
+        // The fragment occurs twice: nothing is adopted.
+        let mut preview = edit("let debug = false;", "let debug = true;");
+        preview.decide_all(HunkDecision::Accepted);
+        let mut write = edit(old, &old.replace("false", "true"));
+        assert_eq!(write.adopt_decisions(&preview), 0);
+
+        // A unique fragment around the first line covers that line only, even though the second
+        // line has the same change.
+        let mut preview = edit("let debug = false;\nfn a()", "let debug = true;\nfn a()");
+        preview.decide_all(HunkDecision::Accepted);
+        let mut write = edit(old, &old.replace("false", "true"));
+        assert_eq!(write.hunks().len(), 2);
+        assert_eq!(write.adopt_decisions(&preview), 1);
+        assert_eq!(write.hunks()[0].decision, HunkDecision::Accepted);
+        assert_eq!(write.hunks()[1].decision, HunkDecision::Pending);
+
+        // A fragment that starts mid-line maps like the whole line.
+        let mut preview = edit("debug = false;\nfn a", "debug = true;\nfn a");
+        preview.decide_all(HunkDecision::Rejected);
+        let mut write = edit(old, &old.replacen("false", "true", 1));
+        assert_eq!(write.adopt_decisions(&preview), 1);
+        assert_eq!(write.resolution(), Resolution::RejectedAll);
     }
 
     #[test]

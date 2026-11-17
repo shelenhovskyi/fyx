@@ -32,7 +32,8 @@ use fs::Fs;
 use futures::channel::oneshot;
 use gpui::Action as _;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity, Window,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Task,
+    WeakEntity, Window,
 };
 use language::BufferEditSource;
 use project::{PathChange, Project, trusted_worktrees::TrustedWorktrees};
@@ -135,13 +136,25 @@ pub fn init(cx: &mut App) {
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
     cx.observe_new(|thread: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
+        if let Some(review) = AgentReview::global(cx) {
+            let session_id = thread.session_id().clone();
+            let thread_id = cx.entity_id();
+            review.update(cx, |review, _| review.thread_opened(session_id, thread_id));
+        }
         let project = thread.project().clone();
         reload_rules(&project, RulesLoad::ThreadStarted, cx);
         cx.subscribe(&project, on_project_event).detach();
-        cx.on_release(|thread, cx| {
+        let thread_id = cx.entity_id();
+        cx.on_release(move |thread, cx| {
             if let Some(review) = AgentReview::global(cx) {
                 let session_id = thread.session_id().clone();
-                review.update(cx, |review, cx| review.close_session(&session_id, cx));
+                review.update(cx, |review, cx| {
+                    // A reload opens a new thread for the session before the old one goes; the
+                    // session's reviews belong to the new one then.
+                    if review.thread_released(&session_id, thread_id) {
+                        review.close_session(&session_id, cx);
+                    }
+                });
             }
         })
         .detach();
@@ -290,6 +303,8 @@ pub struct AgentReview {
     pending_rules: HashMap<PathBuf, Option<ReviewRules>>,
     /// Open review panes per turn, across workspaces.
     panes: HashMap<TurnId, usize>,
+    /// Live threads per session.
+    session_threads: HashMap<acp_v2::SessionId, HashSet<EntityId>>,
 }
 
 /// How many ended turns keep their summary (decided files, unreviewed changes).
@@ -419,6 +434,27 @@ impl AgentReview {
             );
             cx.emit(AgentReviewEvent::UnreviewedChanges(turn));
             cx.notify();
+        }
+    }
+
+    fn thread_opened(&mut self, session_id: acp_v2::SessionId, thread_id: EntityId) {
+        self.session_threads
+            .entry(session_id)
+            .or_default()
+            .insert(thread_id);
+    }
+
+    /// Returns whether it was the session's last thread.
+    fn thread_released(&mut self, session_id: &acp_v2::SessionId, thread_id: EntityId) -> bool {
+        let Some(threads) = self.session_threads.get_mut(session_id) else {
+            return true;
+        };
+        threads.remove(&thread_id);
+        if threads.is_empty() {
+            self.session_threads.remove(session_id);
+            true
+        } else {
+            false
         }
     }
 
@@ -936,6 +972,17 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
     match event {
         AcpThreadEvent::ToolAuthorizationRequested(request_id) => {
             let session_id = thread.session_id().clone();
+            let diffs = legacy_diff_count(thread, *request_id);
+            if diffs > 1 {
+                if review.read(cx).is_enabled() {
+                    report_unreviewable_edit(
+                        thread.project(),
+                        &format!("one tool call edits {diffs} files"),
+                        cx,
+                    );
+                }
+                return;
+            }
             if let Some((edit, respond)) = permission_preview(thread, *request_id, cx) {
                 review.update(cx, |review, cx| {
                     let rule = review.rule_for(edit.abs_path());
@@ -1229,6 +1276,21 @@ fn report_unreviewable_edit(project: &Entity<Project>, reason: &str, cx: &mut Ap
         ),
         cx,
     );
+}
+
+/// How many v1 diffs the tool call of a pending permission request carries.
+fn legacy_diff_count(thread: &AcpThread, request_id: PermissionRequestId) -> usize {
+    thread
+        .permission_request(request_id)
+        .and_then(|request| request.legacy_tool_call_id())
+        .and_then(|tool_call_id| thread.tool_call(tool_call_id))
+        .map_or(0, |(_, tool_call)| {
+            tool_call
+                .content()
+                .iter()
+                .filter(|content| matches!(content, ToolCallContent::LegacyDiff { .. }))
+                .count()
+        })
 }
 
 /// The diff of a pending v1 edit permission and the host's way to answer it. v1 diffs carry whole old
@@ -2485,6 +2547,33 @@ mod tests {
         accept_held(cx);
         write.await.unwrap();
         assert_eq!(fs.load(&path).await.unwrap(), NEW);
+    }
+
+    #[gpui::test]
+    async fn a_reloaded_session_keeps_its_reviews(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let old_thread = EntityId::from(1u64);
+        let new_thread = EntityId::from(2u64);
+        review.update(cx, |review, _| {
+            review.thread_opened(session(), old_thread);
+            review.thread_opened(session(), new_thread);
+        });
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let closed = review.update(cx, |review, _| {
+            review.thread_released(&session(), old_thread)
+        });
+        assert!(!closed, "the new thread still holds the session");
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1
+        );
+        let closed = review.update(cx, |review, _| {
+            review.thread_released(&session(), new_thread)
+        });
+        assert!(closed);
+        review.update(cx, |review, cx| review.close_session(&session(), cx));
+        assert!(held.await.is_err());
     }
 
     #[gpui::test]
