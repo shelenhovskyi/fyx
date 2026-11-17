@@ -12,6 +12,10 @@
 //! is loaded and its surfaces move to the new instance; a removed one stops its surfaces.
 //! `FYX_UI_DEV_EXTENSIONS` adds paths outside that directory.
 //!
+//! An installed extension loads only with the user's consent to its current form (see
+//! `consent`): one that has none waits in `pending_consent`, and every workspace offers an
+//! "Enable" notification for it.
+//!
 //! Dev extensions (installed as links, or from `FYX_UI_DEV_EXTENSIONS`) reload by themselves:
 //! their component file is watched, and a change, once writes have paused for
 //! `HOT_RELOAD_DEBOUNCE`, loads it again and remounts its surfaces.
@@ -35,11 +39,15 @@ use gpui::{
 use settings::Settings as _;
 use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
 use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, PushedUpdate, UiExtension, UiManifest};
-use workspace::{Workspace, WorkspaceSettings};
+use workspace::{
+    Workspace, WorkspaceSettings,
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
+};
 
 use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
+    consent::{self, ConsentRecord, ConsentStore},
     panel::{
         AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
         add_extension_panel,
@@ -91,6 +99,24 @@ pub struct UiExtensionRegistry {
     watches: HashMap<Arc<str>, Task<()>>,
     /// The source each loaded extension id belongs to.
     sources: HashMap<Arc<str>, ExtensionSource>,
+    consent: ConsentStore,
+    /// Installed extensions not loaded because the user has not enabled them as they are now.
+    pending_consent: Vec<PendingConsent>,
+    /// Tests only: load installed extensions without consent.
+    trust_installed: bool,
+}
+
+/// An installed extension waiting for the user's "Enable".
+#[derive(Clone, Debug)]
+pub struct PendingConsent {
+    pub extension_id: Arc<str>,
+    /// The folder in the installed-extensions directory.
+    pub dir: PathBuf,
+    pub installed_dir: PathBuf,
+    /// As `extension.toml` declares them.
+    pub capabilities: Vec<String>,
+    pub is_dev: bool,
+    record: ConsentRecord,
 }
 
 /// How a watched dev extension is loaded again.
@@ -117,6 +143,7 @@ struct Found {
     component: PathBuf,
     /// A link (Zed's dev install): its component is watched for changes.
     is_dev: bool,
+    capabilities: Vec<String>,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -124,6 +151,60 @@ struct GlobalRegistry(Entity<UiExtensionRegistry>);
 impl Global for GlobalRegistry {}
 
 impl UiExtensionRegistry {
+    /// Consent is kept in `consent_path`.
+    pub fn new(consent_path: PathBuf) -> Self {
+        Self {
+            consent: ConsentStore::at(consent_path),
+            ..Self::default()
+        }
+    }
+
+    /// Loads installed extensions without asking: for tests that are not about consent.
+    #[cfg(test)]
+    pub(crate) fn trusting() -> Self {
+        Self {
+            trust_installed: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn pending_consent(&self) -> &[PendingConsent] {
+        &self.pending_consent
+    }
+
+    /// Records the user's consent to an extension as it is now and loads it.
+    pub fn enable(&mut self, extension_id: &str, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .pending_consent
+            .iter()
+            .position(|pending| pending.extension_id.as_ref() == extension_id)
+        else {
+            return;
+        };
+        let pending = self.pending_consent.remove(index);
+        log::info!(
+            "fyx:ui: {extension_id} enabled with {:?}",
+            pending.capabilities
+        );
+        self.grant_consent(extension_id, pending.record, fs.clone(), cx);
+        self.scan_installed(pending.installed_dir, fs, cx);
+        cx.notify();
+    }
+
+    /// Records consent the user gave elsewhere (the install confirmation).
+    pub fn grant_consent(
+        &mut self,
+        extension_id: &str,
+        record: ConsentRecord,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((path, text)) = self.consent.grant(extension_id, record) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+    }
+
     pub fn global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalRegistry>()
             .map(|global| global.0.clone())
@@ -299,10 +380,45 @@ impl UiExtensionRegistry {
         cx.spawn(async move |this, cx| {
             loop {
                 let found = find_ui_extensions(&dir, fs.as_ref()).await;
-                let Ok(to_load) = this.update(cx, |this, cx| this.plan_scan(found, cx)) else {
+                let Ok((to_load, consent_file)) = this.update(cx, |this, cx| {
+                    (this.plan_scan(found, cx), this.consent.path_to_load())
+                }) else {
                     return;
                 };
+                if let Some(path) = consent_file {
+                    let records = consent::read_records(&path, fs.as_ref()).await;
+                    this.update(cx, |this, _| this.consent.set_loaded(records))
+                        .ok();
+                }
                 for found in to_load {
+                    let trusted = this
+                        .update(cx, |this, _| this.trust_installed)
+                        .unwrap_or(false);
+                    if !trusted {
+                        let record = match ConsentRecord::current(
+                            &found.dir,
+                            &found.capabilities,
+                            &found.component,
+                            found.is_dev,
+                            fs.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(record) => record,
+                            Err(error) => {
+                                log::error!(
+                                    "fyx:ui: not loading {}: {error:#}",
+                                    found.dir.display()
+                                );
+                                continue;
+                            }
+                        };
+                        let allowed = this
+                            .update(cx, |this, cx| this.check_consent(&found, &dir, record, cx));
+                        if !matches!(allowed, Ok(true)) {
+                            continue;
+                        }
+                    }
                     let loaded = UiExtension::load_from_dir(&found.dir, fs.clone(), cx).await;
                     match loaded {
                         Ok(Some((extension, pushed))) => {
@@ -423,8 +539,44 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// Whether the user consented to `found` as it is now; if not, it waits in
+    /// `pending_consent` for an "Enable".
+    fn check_consent(
+        &mut self,
+        found: &Found,
+        installed_dir: &Path,
+        record: ConsentRecord,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.pending_consent
+            .retain(|pending| pending.extension_id != found.extension_id);
+        if self.consent.allows(&found.extension_id, &record) {
+            cx.notify();
+            return true;
+        }
+        log::info!(
+            "fyx:ui: {} is installed but not enabled (as it is now); waiting for the user",
+            found.extension_id
+        );
+        self.pending_consent.push(PendingConsent {
+            extension_id: found.extension_id.clone(),
+            dir: found.dir.clone(),
+            installed_dir: installed_dir.to_path_buf(),
+            capabilities: found.capabilities.clone(),
+            is_dev: found.is_dev,
+            record,
+        });
+        cx.notify();
+        false
+    }
+
     /// Which found extensions need loading; stops the surfaces of uninstalled ones.
     fn plan_scan(&mut self, found: Vec<Found>, cx: &mut Context<Self>) -> Vec<Found> {
+        self.pending_consent.retain(|pending| {
+            found
+                .iter()
+                .any(|found| found.extension_id == pending.extension_id)
+        });
         let gone: Vec<Arc<str>> = self
             .installed
             .keys()
@@ -528,6 +680,7 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
                 },
                 component,
                 is_dev,
+                capabilities: manifest.capabilities.clone(),
             }),
             Ok(None) | Err(_) => log::error!(
                 "fyx:ui: {extension_id}: component {} is missing (build it first)",
@@ -563,7 +716,7 @@ impl SurfaceLink for RegistryLink {
 }
 
 pub fn init(cx: &mut App) {
-    let registry = cx.new(|_| UiExtensionRegistry::default());
+    let registry = cx.new(|_| UiExtensionRegistry::new(ConsentStore::default_path()));
     cx.set_global(GlobalRegistry(registry));
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
@@ -611,6 +764,8 @@ struct WorkspaceSurfaces {
     /// One status bar entry per side, holding that side's extension status items.
     status_groups: HashMap<bool, Entity<ExtensionStatusGroup>>,
     status_items: HashSet<SharedString>,
+    /// Extensions this workspace has offered "Enable" for.
+    consent_prompts: HashSet<Arc<str>>,
 }
 
 fn attach_to_workspace(
@@ -657,15 +812,71 @@ fn attach_to_workspace(
     cx.observe_in(&registry, window, {
         let surfaces = surfaces.clone();
         move |workspace, registry, window, cx| {
-            add_missing_surfaces(workspace, &registry, &surfaces, window, cx)
+            add_missing_surfaces(workspace, &registry, &surfaces, window, cx);
+            offer_consent(workspace, &registry, &surfaces, cx);
         }
     })
     .detach();
 
     // Not from inside `observe_new`: the workspace is still being set up there.
     cx.defer_in(window, move |workspace, window, cx| {
-        add_missing_surfaces(workspace, &registry, &surfaces, window, cx)
+        add_missing_surfaces(workspace, &registry, &surfaces, window, cx);
+        offer_consent(workspace, &registry, &surfaces, cx);
     });
+}
+
+/// One notification per installed extension waiting for consent, once per workspace: what it
+/// asks for, with "Enable" and "Not now". "Not now" leaves it unloaded until the next start.
+fn offer_consent(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    surfaces: &RefCell<WorkspaceSurfaces>,
+    cx: &mut Context<Workspace>,
+) {
+    let pending: Vec<PendingConsent> = registry.read(cx).pending_consent().to_vec();
+    let mut surfaces = surfaces.borrow_mut();
+    surfaces
+        .consent_prompts
+        .retain(|id| pending.iter().any(|pending| &pending.extension_id == id));
+    for pending in pending {
+        if !surfaces
+            .consent_prompts
+            .insert(pending.extension_id.clone())
+        {
+            continue;
+        }
+        let folder = if pending.is_dev {
+            format!(" Folder: {}", pending.dir.display())
+        } else {
+            String::new()
+        };
+        let message = format!(
+            "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
+            pending.extension_id,
+            crate::install::describe_capability_ids(&pending.capabilities).join("; "),
+        );
+        let extension_id = pending.extension_id.clone();
+        let registry = registry.downgrade();
+        let fs = workspace.app_state().fs.clone();
+        workspace.show_notification(
+            NotificationId::named(format!("fyx-ui-consent-{extension_id}").into()),
+            cx,
+            move |cx| {
+                cx.new(|cx| {
+                    MessageNotification::new(message, cx)
+                        .primary_message("Enable")
+                        .primary_on_click(move |_, cx| {
+                            registry
+                                .update(cx, |registry, cx| {
+                                    registry.enable(&extension_id, fs.clone(), cx)
+                                })
+                                .ok();
+                        })
+                        .secondary_message("Not now")
+                })
+            },
+        );
+    }
 }
 
 fn add_missing_surfaces(
