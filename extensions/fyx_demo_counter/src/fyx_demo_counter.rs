@@ -4,7 +4,7 @@
 //!
 //! - One surface, id `"counter"`: a right dock panel titled "Counter", icon `hash`, default size
 //!   320.
-//! - `mount("counter")` returns 7 nodes, parents first, with fixed ids:
+//! - The first `mount("counter")` returns 7 nodes, parents first, with these ids:
 //!
 //!   | id | parent | props |
 //!   |---|---|---|
@@ -16,6 +16,11 @@
 //!   | 6 | 3 | button `Reset`, subtle, disabled while the count is 0 |
 //!   | 7 | 1 | list, `row-count` = count, `row-height` 24 |
 //!
+//! - Ids are fixed for the first mount only. The `SurfaceTree` id allocator survives remounts (a
+//!   panel reopen, or the host remounting after it rejected an update), so the second mount
+//!   returns the same tree with ids 8 to 14, the third 15 to 21, and so on; events and
+//!   `list-rows` then use those ids. The count survives a remount. Ids below are the first
+//!   mount's.
 //! - `handle-event` answers `click(4|5|6)` with `patches` containing only `set-props` for nodes
 //!   whose props changed, never `replace`. The first increment from 0 sets props on 2, 4, 6 and 7;
 //!   the second only on 2 and 7. A click that changes nothing (decrement at 0) returns
@@ -129,6 +134,7 @@ impl Extension for Counter {
             });
         });
         self.tree = tree;
+        let mounted = mounted?;
         self.nodes = Some(nodes);
         Ok(mounted)
     }
@@ -243,5 +249,15 @@ mod tests {
         assert_eq!(click(&mut counter, 6), Update::Unchanged);
         assert!(counter.list_rows("counter", 7, 0, 10).is_empty());
         assert!(counter.handle_event("other", UiEvent::Click(5)).is_err());
+
+        click(&mut counter, 5);
+        let remounted = counter.mount("counter").expect("second mount");
+        let ids = remounted.iter().map(|node| node.id).collect::<Vec<_>>();
+        assert_eq!(ids, [8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(remounted[1].props, TextProps::new("Count: 1").bold().into());
+        assert_eq!(click(&mut counter, 5), Update::Unchanged);
+        assert_eq!(set_props_ids(click(&mut counter, 12)), [9, 14]);
+        assert_eq!(counter.list_rows("counter", 14, 0, 10).len(), 2);
+        assert!(counter.list_rows("counter", 7, 0, 10).is_empty());
     }
 }
