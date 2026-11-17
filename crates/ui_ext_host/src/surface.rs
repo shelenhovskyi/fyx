@@ -5,7 +5,7 @@
 
 use std::{collections::VecDeque, ops::Range, rc::Rc};
 
-use collections::{HashMap, HashSet};
+use collections::HashMap;
 use gpui::{Context, SharedString, Task};
 use ui_ext::{NodeId, Patch, Props, Surface, Tree, UiEvent, Update};
 
@@ -53,9 +53,11 @@ pub struct SurfaceState {
     lists: HashMap<NodeId, RowCache>,
     events: VecDeque<UiEvent>,
     event_worker_running: bool,
-    /// Inputs whose next `value` from the extension wins over the user's text even while
-    /// focused, because it answers the user's own submit (for example, clearing the field).
-    input_overrides: HashSet<NodeId>,
+    /// How many times the extension has set each input's `value` (`set-props`, insert, replace).
+    /// A view writes the value into its editor when this moves past what it last saw; otherwise
+    /// the user's text stands (integrator decision 6). A counter, not a flag, so every window's
+    /// view sees each set.
+    input_sets: HashMap<NodeId, u64>,
     /// Bumped on every change to the tree, so views know when to reconcile their editors.
     revision: u64,
     resyncing: bool,
@@ -72,7 +74,7 @@ impl SurfaceState {
             lists: HashMap::default(),
             events: VecDeque::new(),
             event_worker_running: false,
-            input_overrides: HashSet::default(),
+            input_sets: HashMap::default(),
             revision: 0,
             resyncing: false,
             _mount: None,
@@ -140,6 +142,7 @@ impl SurfaceState {
     }
 
     fn set_tree(&mut self, tree: Tree) {
+        count_all_inputs(&tree, &mut self.input_sets);
         self.phase = Phase::Ready(tree);
         self.lists.clear();
         self.revision += 1;
@@ -155,6 +158,9 @@ impl SurfaceState {
         if !tree.contains(event.target()) {
             log::debug!("fyx:ui: dropping {event:?}, its node is gone");
             return;
+        }
+        if let UiEvent::InputChanged(id, value) | UiEvent::InputSubmitted(id, value) = &event {
+            self.set_input_locally(*id, value);
         }
         if let UiEvent::InputChanged(id, _) = &event
             && let Some(UiEvent::InputChanged(queued_id, _)) = self.events.back()
@@ -193,20 +199,40 @@ impl SurfaceState {
         }
     }
 
+    /// The host tree follows what the user typed (integrator decision 6), so it matches the text
+    /// on screen. Not counted as a set by the extension: the editor already shows it.
+    fn set_input_locally(&mut self, id: NodeId, value: &str) {
+        let Phase::Ready(tree) = &mut self.phase else {
+            return;
+        };
+        let Some(Props::Input(props)) = tree.get(id).map(|node| node.props()) else {
+            return;
+        };
+        if props.value == value {
+            return;
+        }
+        let mut props = props.clone();
+        props.value = value.to_string();
+        if let Err(error) = tree.apply_patches(vec![Patch::SetProps(id, Props::Input(props))]) {
+            log::error!("fyx:ui: failed to record the text of input {id}: {error}");
+        }
+    }
+
     fn apply_reply(
         &mut self,
         event: &UiEvent,
-        result: anyhow::Result<Update>,
+        result: anyhow::Result<Vec<Update>>,
         cx: &mut Context<Self>,
     ) {
         match result {
-            Ok(update) => {
-                if let UiEvent::InputSubmitted(id, _) = event
-                    && sets_input(&update, *id)
-                {
-                    self.input_overrides.insert(*id);
+            Ok(updates) => {
+                // Pushes made during the call first, the reply last. After a failed one the
+                // surface is being mounted again, so the rest no longer fits.
+                for update in updates {
+                    if !self.apply_update(update, cx) {
+                        break;
+                    }
                 }
-                self.apply_update(update, cx);
             }
             Err(error) => {
                 log::error!(
@@ -221,19 +247,21 @@ impl SurfaceState {
     }
 
     /// Applies an update from an event reply or a push. An update that does not fit the retained
-    /// tree means host and extension disagree, so the surface is mounted again.
-    pub fn apply_update(&mut self, update: Update, cx: &mut Context<Self>) {
+    /// tree means host and extension disagree, so it is logged and the surface is mounted again
+    /// (the SDK resets its mirror on mount). Returns whether the update applied.
+    pub fn apply_update(&mut self, update: Update, cx: &mut Context<Self>) -> bool {
         let Phase::Ready(tree) = &mut self.phase else {
             log::debug!(
                 "fyx:ui {}/{}: dropping an update that arrived before mount finished",
                 self.backend.extension_id(),
                 self.surface.id
             );
-            return;
+            return false;
         };
         let invalidated = invalidated_lists(&update);
+        let inputs_set = inputs_set_by(&update);
         match tree.apply_update(update) {
-            Ok(false) => {}
+            Ok(false) => true,
             Ok(true) => {
                 match invalidated {
                     None => self.lists.clear(),
@@ -251,9 +279,18 @@ impl SurfaceState {
                         matches!(node.props(), Props::List(_) | Props::Table(_))
                     })
                 });
-                self.input_overrides.retain(|id| tree.contains(*id));
+                match inputs_set {
+                    None => count_all_inputs(tree, &mut self.input_sets),
+                    Some(ids) => {
+                        for id in ids {
+                            *self.input_sets.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+                self.input_sets.retain(|id, _| tree.contains(*id));
                 self.revision += 1;
                 cx.notify();
+                true
             }
             Err(error) => {
                 log::error!(
@@ -268,12 +305,14 @@ impl SurfaceState {
                     self.mount(cx);
                 }
                 cx.notify();
+                false
             }
         }
     }
 
-    pub fn take_input_override(&mut self, id: NodeId) -> bool {
-        self.input_overrides.remove(&id)
+    /// How many times the extension has set this input's value; see `input_sets`.
+    pub fn input_set_count(&self, id: NodeId) -> u64 {
+        self.input_sets.get(&id).copied().unwrap_or_default()
     }
 
     /// A cached row, possibly from before the list last changed.
@@ -402,13 +441,31 @@ fn invalidated_lists(update: &Update) -> Option<Vec<NodeId>> {
     }
 }
 
-fn sets_input(update: &Update, input: NodeId) -> bool {
+/// The inputs whose value an update sets, or `None` for every input (a replace).
+fn inputs_set_by(update: &Update) -> Option<Vec<NodeId>> {
     match update {
-        Update::Unchanged => false,
-        Update::Replace(_) => true,
-        Update::Patches(patches) => patches
-            .iter()
-            .any(|patch| matches!(patch, Patch::SetProps(id, Props::Input(_)) if *id == input)),
+        Update::Unchanged => Some(Vec::new()),
+        Update::Replace(_) => None,
+        Update::Patches(patches) => Some(
+            patches
+                .iter()
+                .filter_map(|patch| match patch {
+                    Patch::SetProps(id, Props::Input(_)) => Some(*id),
+                    Patch::Insert(op) if matches!(op.node.props, Props::Input(_)) => {
+                        Some(op.node.id)
+                    }
+                    Patch::SetProps(..) | Patch::Insert(_) | Patch::Remove(_) => None,
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn count_all_inputs(tree: &Tree, input_sets: &mut HashMap<NodeId, u64>) {
+    for node in tree.to_nodes() {
+        if let Props::Input(_) = node.props {
+            *input_sets.entry(node.id).or_default() += 1;
+        }
     }
 }
 

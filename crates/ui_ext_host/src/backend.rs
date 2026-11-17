@@ -11,11 +11,13 @@ use ui_ext::{NodeId, Tree, UiEvent, Update};
 pub trait UiBackend: 'static {
     fn extension_id(&self) -> &str;
     fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Tree>>;
+    /// The updates to apply for one event, in order: anything the extension pushed while handling
+    /// it, then the reply itself, last.
     fn handle_event(
         &self,
         surface_id: &str,
         event: UiEvent,
-    ) -> LocalBoxFuture<'static, Result<Update>>;
+    ) -> LocalBoxFuture<'static, Result<Vec<Update>>>;
     fn list_rows(
         &self,
         surface_id: &str,
@@ -36,14 +38,21 @@ impl UiBackend for UiExtension {
         async move { UiExtension::mount(&this, &surface_id).await }.boxed_local()
     }
 
+    // The one place to adapt when W2's `handle_event` starts returning the pushes made during the
+    // call together with the reply (integrator decision 3). Until then pushes arrive on the
+    // separate channel and the reply is the only update here.
     fn handle_event(
         &self,
         surface_id: &str,
         event: UiEvent,
-    ) -> LocalBoxFuture<'static, Result<Update>> {
+    ) -> LocalBoxFuture<'static, Result<Vec<Update>>> {
         let this = self.clone();
         let surface_id = surface_id.to_string();
-        async move { UiExtension::handle_event(&this, &surface_id, event).await }.boxed_local()
+        async move {
+            let reply = UiExtension::handle_event(&this, &surface_id, event).await?;
+            Ok(vec![reply])
+        }
+        .boxed_local()
     }
 
     fn list_rows(

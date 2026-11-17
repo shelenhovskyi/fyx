@@ -27,6 +27,10 @@ const INCREMENT: NodeId = 5;
 const LIST: NodeId = 7;
 const INPUT: NodeId = 9;
 const BROKEN: NodeId = 11;
+/// Answers with a push made during the call, then the reply.
+const PUSHER: NodeId = 13;
+/// Sets the input's value without a submit.
+const SET_INPUT: NodeId = 15;
 const ROW_ROOT: NodeId = 0x8000_0000;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -130,6 +134,8 @@ impl UiBackend for FakeBackend {
             node(LABEL, Some(1), text(format!("Count: {count}"))),
             node(INCREMENT, Some(1), button("Increment")),
             node(BROKEN, Some(1), button("Broken")),
+            node(PUSHER, Some(1), button("Push")),
+            node(SET_INPUT, Some(1), button("Set input")),
             node(INPUT, Some(1), input("")),
             node(LIST, Some(1), list(count)),
         ];
@@ -137,8 +143,19 @@ impl UiBackend for FakeBackend {
         async move { tree }.boxed_local()
     }
 
-    fn handle_event(&self, _: &str, event: UiEvent) -> LocalBoxFuture<'static, Result<Update>> {
+    fn handle_event(
+        &self,
+        _: &str,
+        event: UiEvent,
+    ) -> LocalBoxFuture<'static, Result<Vec<Update>>> {
         self.calls.borrow_mut().push(Call::Event(event.clone()));
+        if event == UiEvent::Click(PUSHER) {
+            let updates = vec![
+                Update::Patches(vec![Patch::SetProps(LABEL, text("pushed"))]),
+                Update::Patches(vec![Patch::SetProps(LABEL, text("replied"))]),
+            ];
+            return async move { Ok(updates) }.boxed_local();
+        }
         let update = match event {
             UiEvent::Click(INCREMENT) => {
                 let count = self.count.get() + 1;
@@ -149,12 +166,15 @@ impl UiBackend for FakeBackend {
                 ])
             }
             UiEvent::Click(BROKEN) => Update::Patches(vec![Patch::SetProps(99, text("nope"))]),
+            UiEvent::Click(SET_INPUT) => {
+                Update::Patches(vec![Patch::SetProps(INPUT, input("from extension"))])
+            }
             UiEvent::InputSubmitted(INPUT, _) => {
                 Update::Patches(vec![Patch::SetProps(INPUT, input(""))])
             }
             _ => Update::Unchanged,
         };
-        async move { Ok(update) }.boxed_local()
+        async move { Ok(vec![update]) }.boxed_local()
     }
 
     fn list_rows(
@@ -332,6 +352,15 @@ async fn test_events_are_serialized_and_typing_is_coalesced(cx: &mut TestAppCont
         ]
     );
     assert_eq!(props_of(&state, LABEL, cx), text("Count: 3"));
+    // The host tree follows the typed text (integrator decision 6).
+    assert_eq!(props_of(&state, INPUT, cx), input("ab"));
+
+    // Pushes made during a call are applied before the reply.
+    backend.take_calls();
+    state.update(cx, |state, cx| state.dispatch(UiEvent::Click(PUSHER), cx));
+    cx.run_until_parked();
+    assert_eq!(backend.events(), [UiEvent::Click(PUSHER)]);
+    assert_eq!(props_of(&state, LABEL, cx), text("replied"));
 }
 
 #[gpui::test]
@@ -462,6 +491,67 @@ async fn test_typing_is_debounced_and_submit_clears(cx: &mut TestAppContext) {
     vcx.executor().advance_clock(TYPING_DEBOUNCE);
     vcx.run_until_parked();
     assert_eq!(backend.calls(), [], "clearing is not echoed back");
+
+    // While focused, the user's text stands until the extension sets a value...
+    vcx.simulate_input("mine");
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert_eq!(editor.read_with(vcx, |editor, cx| editor.text(cx)), "mine");
+    backend.take_calls();
+    // ...and a set-props is written even though the field is focused.
+    state.update(vcx, |state, cx| {
+        state.dispatch(UiEvent::Click(SET_INPUT), cx)
+    });
+    vcx.run_until_parked();
+    assert!(vcx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+    assert_eq!(
+        editor.read_with(vcx, |editor, cx| editor.text(cx)),
+        "from extension"
+    );
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [UiEvent::Click(SET_INPUT)],
+        "the written value is not echoed back"
+    );
+}
+
+#[gpui::test]
+async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let info = Rc::new(crate::SurfaceInfo::new(
+        "fake",
+        &state.read_with(cx, |state, _| state.surface().clone()),
+        100,
+    ));
+    let (panel, vcx) = cx.add_window_view(|window, cx| {
+        crate::ExtensionPanel::new(info.clone(), state.clone(), window, cx)
+    });
+    vcx.run_until_parked();
+
+    vcx.update(|window, cx| {
+        use workspace::Panel as _;
+        let panel = panel.read(cx);
+        assert_eq!(panel.key().as_ref(), "fake/counter");
+        assert_eq!(panel.icon(window, cx), Some(ui::IconName::Hash));
+        assert_eq!(panel.icon_tooltip(window, cx), Some("Counter"));
+        assert_eq!(
+            panel.position(window, cx),
+            workspace::dock::DockPosition::Right
+        );
+        assert_eq!(panel.default_size(window, cx), gpui::px(320.));
+        assert_eq!(panel.activation_priority(), 100);
+    });
+
+    let bounds = vcx
+        .debug_bounds("fyx-node-5")
+        .expect("the surface is drawn inside the panel");
+    vcx.simulate_click(bounds.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(props_of(&state, LABEL, vcx), text("Count: 1"));
 }
 
 #[test]

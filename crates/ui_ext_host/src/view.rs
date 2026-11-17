@@ -8,9 +8,9 @@ use std::{ops::Range, time::Duration};
 use collections::HashMap;
 use editor::{Editor, EditorEvent};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, Focusable as _, FontWeight, Hsla,
-    IntoElement, ListSizingBehavior, ParentElement, Render, SharedString, Styled, Subscription,
-    Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, ElementId, Entity, FontWeight, Hsla, IntoElement,
+    ListSizingBehavior, ParentElement, Render, SharedString, Styled, Subscription, Task,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
@@ -37,8 +37,8 @@ pub(crate) struct InputEditor {
     /// The text both sides last agreed on: what the extension last set, or what was last sent.
     /// Edits that leave the text equal to it (including our own `set_text`) are not sent.
     last_known: String,
-    /// The `value` prop as last seen, to tell an extension-driven change from a stale value.
-    props_value: String,
+    /// `SurfaceState::input_set_count` as of the last value written into the editor.
+    sets_seen: u64,
     placeholder: String,
     debounce: Option<Task<()>>,
     _subscription: Subscription,
@@ -164,6 +164,7 @@ impl SurfaceView {
                 editor.set_text(props.value.as_str(), window, cx);
                 editor
             });
+            let sets_seen = self.state.read(cx).input_set_count(id);
             let subscription = cx.subscribe_in(
                 &editor,
                 window,
@@ -177,8 +178,8 @@ impl SurfaceView {
                 id,
                 InputEditor {
                     editor,
-                    last_known: props.value.clone(),
-                    props_value: props.value,
+                    last_known: props.value,
+                    sets_seen,
                     placeholder: props.placeholder,
                     debounce: None,
                     _subscription: subscription,
@@ -194,17 +195,16 @@ impl SurfaceView {
             input.placeholder = props.placeholder;
         }
 
-        // The text belongs to the user while the field is focused (W4's contract). The extension's
-        // value still wins when it changed and the field is not focused, or when it answers the
-        // user's own submit (clearing the field, say).
-        let overridden = self
-            .state
-            .update(cx, |state, _| state.take_input_override(id));
-        let changed_by_extension = input.props_value != props.value;
-        input.props_value = props.value.clone();
-        let focused = input.editor.focus_handle(cx).is_focused(window);
+        // Integrator decision 6: a value the extension sets is written into the editor whenever it
+        // differs from the editor's text, focused or not. Without a new set the user's text stands
+        // (the host tree already follows it, see `SurfaceState::set_input_locally`).
+        let sets = self.state.read(cx).input_set_count(id);
+        if sets == input.sets_seen {
+            return;
+        }
+        input.sets_seen = sets;
         let text = input.editor.read(cx).text(cx);
-        if text != props.value && (overridden || (changed_by_extension && !focused)) {
+        if text != props.value {
             input.debounce = None;
             input.last_known = props.value.clone();
             input

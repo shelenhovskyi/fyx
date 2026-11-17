@@ -128,9 +128,9 @@ impl UiExtensionRegistry {
     ) {
         let key = format!("{extension_id}/{surface_id}");
         match self.surface(&key) {
-            Some(surface) => surface
-                .state
-                .update(cx, |state, cx| state.apply_update(update, cx)),
+            Some(surface) => surface.state.update(cx, |state, cx| {
+                state.apply_update(update, cx);
+            }),
             None => log::error!(
                 "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
             ),
