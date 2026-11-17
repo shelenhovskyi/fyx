@@ -2,8 +2,11 @@
 
 Status: **decided 2026-11-17**; see [Decisions](#decisions-2026-11-17). Ready for implementation,
 not frozen: the world stays staged (Stable and Preview capped at 0.1) until the commit that
-declares it frozen. No code has been changed yet. The world is in
-[`fyx-ui-0.2.wit`](fyx-ui-0.2.wit), next to this file. It parses with
+declares it frozen. The world is in
+[`crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit`](../../../crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit),
+next to the frozen 0.1 world, and its data model is in `ui_ext::v0_2` (platform plan 2.1; what
+landed is in [`migration.md`](migration.md), "Status"). The host and the renderer are not changed
+yet (plan 2.2, 2.3). The WIT parses with
 `wasm-tools component wit` (1.263.0). A dummy component embedded from it validates with
 `wasm-tools component embed --dummy` + `component new` + `validate`. How 0.1 and 0.2 components
 coexist is in [`migration.md`](migration.md).
@@ -34,7 +37,7 @@ Cargo features (finding 3, migration.md §4), and the small points of finding 5.
 | J | `list-row.indent`, `button-props.tooltip` | backlog #8, W8 | **accepted**: indent on the row, not on flex |
 | K | `input-props.secret` | integration-2 W8-5 | **accepted** |
 | L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **accepted**, in 0.2 (decided 2026-11-17) |
-| M | Notifications and progress: `notify`, `progress-start` / `-update` / `-end` | [platform spec](../platform/spec.md) decision 22 | **planned**, to be drafted (platform plan 2.1); not in this WIT yet |
+| M | Notifications and progress: `notify`, `progress-start` / `-update` / `-end` | [platform spec](../platform/spec.md) decision 22 | **planned**, to be drafted; not in the WIT yet, which has a `TODO` where it goes |
 | — | Panel visibility events, surface rename, commands, raw colours, in-row node clicks, `ignoreFocusOut` | various | **rejected or deferred**; see [Rejected and deferred](#rejected-and-deferred) |
 
 Not changed: the flat tree, theme tokens only, the `mount` / `handle-event` / `list-rows`
@@ -747,7 +750,7 @@ error it can handle. Checked per call, the same component works either way.
 
 | Component | Files | Changes |
 |---|---|---|
-| WIT (W0) | `crates/ui_ext/wit/fyx-ui.wit` → `crates/ui_ext/wit/since_v0.1.0/fyx-ui.wit` (moved, byte-identical); new `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` (this design's WIT) | migration.md |
+| WIT (W0) | `crates/ui_ext/wit/fyx-ui.wit` stays where it is (0.1, unchanged); new `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` (this design's WIT). **Landed** (plan 2.1) | migration.md §1 |
 | Model | `crates/ui_ext/src/types.rs` | `Icon`, `IconRef`, `ModalDescriptor`, `ModalWidth`, `DismissReason`, `RowRange`; new fields `ButtonProps.tooltip`, `InputProps.secret`, `ListProps.selected`, `ListRow.indent`; `Patch::InvalidateRows`; `UiEvent::{RowSelected, Dismissed}`; `UiEvent::target() -> Option<NodeId>`; `SurfaceKind::Modal` (B, C, G, I, J, K) |
 | Model | `crates/ui_ext/src/tree.rs` | `InvalidateRows` validation, `TreeError::NotAList`, `Touched` result with row invalidations (G); `replace` checks `max_nodes` (16384) instead of `max_nodes_per_update`, for both versions, since 0.1 only gains (Summary) |
 | Host | `crates/extension_host/src/wasm_host/fyx_ui.rs` | version dispatch, `HostEffect` list replacing `pushes`, `Reply { effects, value }`, `ReplyError { effects, .. }`, live surface set, activation timestamp, `tick()`, `ui:modal`, `MAX_VERSION = 0.2.0` (A–F) |

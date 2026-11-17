@@ -25,9 +25,13 @@ their count; click it to bring the waiting reviews forward.
 | Writes through Fyx (`fs/write_text_file`) | Yes: the write waits until you submit, and only accepted hunks land. |
 | ACP v2 edits Fyx cannot show as a diff: several files in one request, no patch text, or a patch that does not apply | No. A notification says so; decide in the agent panel. |
 | Shell and terminal commands (`sed -i`, `cat >`, scripts) | No. Files that change on disk during the agent's turn without going through review are listed in the turn's review pane as "changed without review". Nothing is blocked. |
-| Zed's built-in agent | No. Its edits land as in Zed. |
+| Zed's built-in agent: edit and write tools | Yes: what the agent streamed into the file is held before it is saved; only accepted hunks are kept, and the agent is told about the rest. |
+| Zed's built-in agent: delete, move and copy tools | No. They ask permission as in Zed. |
 
 The same summary is in the setting's description and under every review pane.
+
+A write that the security guard (`crates/fyx_guard`, docs/fyx/security-modes.md) refuses is
+refused before review, so it never opens a review pane.
 
 ## Reviewing
 
@@ -49,6 +53,8 @@ The same summary is in the setting's description and under every review pane.
 - If Fyx cannot write the hunks you accepted (for example, the text moved in the meantime), the
   review stays open with the reason. Submit again, or reject the file.
 - If the file has unsaved edits of yours, Fyx applies the accepted hunks but does not save the file.
+- While Fyx reviews an edit that came with a permission request, the request's card in the agent
+  panel says so and offers **Open review** instead of Allow and Reject: the review decides it.
 - When the agent's turn stops, or its connection drops, its waiting edits are cancelled: the agent
   is told the file is unchanged. The same happens when you close the last pane of a turn.
 

@@ -13,6 +13,9 @@ pub struct TreeLimits {
     /// Nodes in the whole tree, so also in a `mount` or `replace`: any tree that can be built up
     /// through patches can also be mounted at once.
     pub max_nodes: usize,
+    /// Levels from a root to its deepest node (a root alone is depth 1). Renderers recurse per
+    /// level, so an unbounded depth could exhaust their stack.
+    pub max_depth: usize,
 }
 
 impl Default for TreeLimits {
@@ -20,6 +23,7 @@ impl Default for TreeLimits {
         Self {
             max_nodes_per_update: 2048,
             max_nodes: 16384,
+            max_depth: 64,
         }
     }
 }
@@ -42,6 +46,8 @@ pub enum TreeError {
         "node {node} cannot be inserted before {before}, which is not a sibling under the same parent"
     )]
     UnknownSibling { node: NodeId, before: NodeId },
+    #[error("node {node} would be nested deeper than {max} levels")]
+    TooDeep { node: NodeId, max: usize },
     #[error("a list row must have exactly one root node, found {0}")]
     RowRootCount(usize),
     #[error("patch {index}: {error}")]
@@ -248,6 +254,24 @@ impl Tree {
         Ok(())
     }
 
+    /// Levels from `id` up to its root, inclusive (a root is 1). Unknown ids count as 0. The walk
+    /// stops at `max_depth + 1`, so it is cheap however the tree was built.
+    fn depth_of(&self, id: NodeId) -> usize {
+        let mut depth = 0;
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let Some(node) = self.nodes.get(&id) else {
+                break;
+            };
+            depth += 1;
+            if depth > self.limits.max_depth {
+                break;
+            }
+            current = node.parent;
+        }
+        depth
+    }
+
     fn insert(&mut self, InsertOp { node, before }: InsertOp) -> Result<(), TreeError> {
         if self.nodes.contains_key(&node.id) {
             return Err(TreeError::DuplicateId(node.id));
@@ -255,6 +279,14 @@ impl Tree {
         if self.nodes.len() >= self.limits.max_nodes {
             return Err(TreeError::TreeTooLarge {
                 max: self.limits.max_nodes,
+            });
+        }
+        if let Some(parent_id) = node.parent
+            && self.depth_of(parent_id) >= self.limits.max_depth
+        {
+            return Err(TreeError::TooDeep {
+                node: node.id,
+                max: self.limits.max_depth,
             });
         }
         let siblings = match node.parent {
@@ -446,6 +478,7 @@ mod tests {
         let limits = TreeLimits {
             max_nodes_per_update: 2,
             max_nodes: 100,
+            ..TreeLimits::default()
         };
         let nodes = vec![flex(1, None), flex(2, Some(1)), flex(3, Some(1))];
         // A mount is capped by the tree size only; a row by the per-update cap.
@@ -470,6 +503,7 @@ mod tests {
         let limits = TreeLimits {
             max_nodes_per_update: 10,
             max_nodes: 2,
+            ..TreeLimits::default()
         };
         let mut tree =
             Tree::from_nodes(vec![flex(1, None), flex(2, Some(1))], limits).expect("valid");
@@ -715,5 +749,60 @@ mod tests {
         );
         let back: Update = serde_json::from_value(json).expect("deserializes");
         assert_eq!(back, update);
+    }
+
+    /// Nesting is capped by `max_depth`, through `replace` and through patches alike, and a
+    /// failing patch leaves the tree as it was.
+    #[test]
+    fn rejects_nesting_past_max_depth() {
+        let limits = TreeLimits {
+            max_depth: 4,
+            ..TreeLimits::default()
+        };
+        let chain = |depth: u32| -> Vec<Node> {
+            (1..=depth)
+                .map(|id| flex(id, (id > 1).then(|| id - 1)))
+                .collect()
+        };
+        let mut tree = Tree::from_nodes(chain(4), limits).expect("4 levels fit");
+        assert_eq!(
+            Tree::from_nodes(chain(5), limits).unwrap_err(),
+            TreeError::TooDeep { node: 5, max: 4 }
+        );
+        let error = tree
+            .apply_patches(vec![insert(text(5, Some(4), "too deep"), None)])
+            .unwrap_err();
+        assert_eq!(
+            error,
+            TreeError::Patch {
+                index: 0,
+                error: Box::new(TreeError::TooDeep { node: 5, max: 4 })
+            }
+        );
+        assert_eq!(tree.len(), 4, "the failed patch changed nothing");
+        // A sibling at a shallower level still fits.
+        tree.apply_patches(vec![insert(text(6, Some(3), "fine"), None)])
+            .expect("depth 4");
+        assert_eq!(TreeLimits::default().max_depth, 64);
+    }
+
+    /// The 0.2 design keeps this for both worlds: `push-update` accepts a `replace` of a whole
+    /// tree, so applying it must not fail on size alone (judge wit-0.2-design #2).
+    #[test]
+    fn default_limits_take_a_whole_tree_in_a_mount_and_a_replace() {
+        let roots = |count: u32| (0..count).map(|id| text(id, None, "")).collect::<Vec<_>>();
+        let mut tree =
+            Tree::from_nodes(roots(16384), TreeLimits::default()).expect("16384 nodes mount");
+        assert_eq!(
+            Tree::from_nodes(roots(16385), TreeLimits::default()),
+            Err(TreeError::TreeTooLarge { max: 16384 })
+        );
+        tree.apply_update(Update::Replace(roots(16384)))
+            .expect("16384 nodes replace");
+        assert_eq!(
+            tree.apply_update(Update::Replace(roots(16385))),
+            Err(TreeError::TreeTooLarge { max: 16384 })
+        );
+        assert_eq!(tree.len(), 16384);
     }
 }

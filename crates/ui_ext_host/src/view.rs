@@ -71,6 +71,8 @@ pub struct SurfaceView {
     /// The panel body scrolls when the tree is taller than the panel.
     pub(crate) body_scroll: ScrollHandle,
     synced_revision: Option<u64>,
+    /// The state's `mount_count` at the last sync.
+    synced_mount: u64,
     _observe_state: Subscription,
 }
 
@@ -106,6 +108,7 @@ impl SurfaceView {
             focus_order: Vec::new(),
             body_scroll: ScrollHandle::new(),
             synced_revision: None,
+            synced_mount: 0,
             _observe_state: observe_state,
         };
         this.sync(window, cx);
@@ -166,6 +169,8 @@ impl SurfaceView {
         let old_order = std::mem::take(&mut self.focus_order);
         let state = self.state.read(cx);
         self.synced_revision = Some(state.revision());
+        let remounted = self.synced_mount != state.mount_count();
+        self.synced_mount = state.mount_count();
 
         let mut inputs = Vec::new();
         let mut markdown = Vec::new();
@@ -227,7 +232,9 @@ impl SurfaceView {
 
         // An SDK remount gives every node a new id, so an input with typing the extension has not
         // seen (or with focus) would lose it with its old editor. Carry it to the input at the
-        // same position among the surface's inputs (integration-3 finding 10).
+        // same position among the surface's inputs (integration-3 finding 10). Only after a mount
+        // the host started: when the extension replaces or rebuilds its own tree, a new empty
+        // input is what it means, such as a form cleared after a submit (integration-4 finding 8).
         let old_inputs: Vec<NodeId> = old_order
             .iter()
             .filter(|id| self.inputs.contains_key(id))
@@ -237,6 +244,7 @@ impl SurfaceView {
         let carried: Vec<(usize, String, bool)> = old_inputs
             .iter()
             .enumerate()
+            .filter(|_| remounted)
             .filter(|(_, id)| !new_inputs.contains(id))
             .filter_map(|(position, id)| {
                 let input = self.inputs.get(id)?;
@@ -941,10 +949,13 @@ impl Renderer<'_, '_> {
             Some(entity) => div()
                 .w_full()
                 .min_w_0()
-                .child(MarkdownElement::new(
-                    entity,
-                    MarkdownStyle::themed(MarkdownFont::Agent, self.window, self.cx),
-                ))
+                .child(
+                    MarkdownElement::new(
+                        entity,
+                        MarkdownStyle::themed(MarkdownFont::Agent, self.window, self.cx),
+                    )
+                    .on_url_click(open_extension_link),
+                )
                 .into_any_element(),
             None => Label::new(source.to_string()).into_any_element(),
         }
@@ -1153,6 +1164,40 @@ fn focus_ring(focused: bool, cx: &App) -> Hsla {
     } else {
         colors.border_transparent
     }
+}
+
+/// Only web links leave an extension's markdown: `http` and `https`. Anything else (`file:`,
+/// `javascript:`, `zed:`, custom schemes, relative paths) would hand the OS URL handler a target
+/// the extension chose.
+pub(crate) fn link_is_allowed(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && rest.starts_with("//")
+        && rest.len() > 2
+}
+
+/// A click on a link in an extension's markdown: refused unless it is a web link, and even then
+/// opened only after the user confirms the address.
+fn open_extension_link(url: SharedString, window: &mut Window, cx: &mut App) {
+    if !link_is_allowed(&url) {
+        log::warn!("fyx:ui: not opening {url:?} from an extension: only http(s) links open");
+        return;
+    }
+    let answer = window.prompt(
+        gpui::PromptLevel::Info,
+        "Open this link from an extension?",
+        Some(url.as_ref()),
+        &["Open", "Cancel"],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        if answer.await == Ok(0) {
+            cx.update(|cx| cx.open_url(&url));
+        }
+    })
+    .detach();
 }
 
 /// Icon names are snake_case `IconName`s (`plus`, `list_todo`); unknown names get a neutral icon.

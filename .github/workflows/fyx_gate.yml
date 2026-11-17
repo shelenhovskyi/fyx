@@ -139,10 +139,12 @@ jobs:
           rustup show active-toolchain
           cargo --version
 
-      - name: Install cargo-nextest
+      # Prebuilt binaries, so no compile and nothing to cache. gate.sh fails in CI without
+      # cargo-deny, while a local run without it only warns.
+      - name: Install cargo-nextest and cargo-deny
         uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest,cargo-deny
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
