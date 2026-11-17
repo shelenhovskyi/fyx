@@ -9,8 +9,8 @@ use collections::HashMap;
 use editor::{Editor, EditorEvent};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, FontWeight, Hsla, IntoElement,
-    ListSizingBehavior, ParentElement, Render, SharedString, Styled, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    ListSizingBehavior, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription,
+    Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
@@ -52,6 +52,8 @@ pub struct SurfaceView {
     pub(crate) inputs: HashMap<NodeId, InputEditor>,
     markdown: HashMap<NodeId, Entity<Markdown>>,
     scroll_handles: HashMap<NodeId, UniformListScrollHandle>,
+    /// The panel body scrolls when the tree is taller than the panel.
+    pub(crate) body_scroll: ScrollHandle,
     synced_revision: Option<u64>,
     _observe_state: Subscription,
 }
@@ -74,6 +76,7 @@ impl SurfaceView {
             inputs: HashMap::default(),
             markdown: HashMap::default(),
             scroll_handles: HashMap::default(),
+            body_scroll: ScrollHandle::new(),
             synced_revision: None,
             _observe_state: observe_state,
         };
@@ -309,10 +312,16 @@ impl Render for SurfaceView {
                 if compact {
                     h_flex().gap_1().children(children).into_any_element()
                 } else {
-                    v_flex()
+                    // The content is at least as tall as the panel (so `grow` nodes and lists fill
+                    // it) and scrolls when it is taller.
+                    div()
+                        .id("fyx-ui-body")
                         .flex_1()
                         .min_h_0()
-                        .children(children)
+                        .w_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.body_scroll)
+                        .child(v_flex().w_full().min_h_full().children(children))
                         .into_any_element()
                 }
             }
@@ -419,7 +428,7 @@ impl Renderer<'_, '_> {
             .gap(px(props.gap.into()))
             .p(px(props.padding.into()))
             .min_w_0()
-            .when(props.grow, |this| this.flex_1().min_h_0())
+            .when(props.grow, |this| this.flex_grow_1())
             .when_some(props.background, |this, token| {
                 this.bg(token_hsla(token, self.cx))
             })
@@ -524,8 +533,7 @@ impl Renderer<'_, '_> {
             }));
         v_flex()
             .w_full()
-            .flex_1()
-            .min_h_0()
+            .flex_grow_1()
             .child(header)
             .child(self.virtualized(
                 id,
@@ -572,7 +580,7 @@ impl Renderer<'_, '_> {
                 )
             }),
         )
-        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .with_sizing_behavior(ListSizingBehavior::Auto)
         .flex_1()
         .min_h(px(min_height as f32))
         .w_full();
@@ -592,6 +600,8 @@ impl Renderer<'_, '_> {
         let scope = Scope::Row { list, index };
         let row = div()
             .id(ElementId::NamedInteger("fyx-row".into(), index as u64))
+            // Tests find rows by `fyx-row-<list>-<index>`; a no-op outside test builds.
+            .debug_selector(|| format!("fyx-row-{list}-{index}"))
             .h(px(row_height.into()))
             .w_full()
             .px_1()
