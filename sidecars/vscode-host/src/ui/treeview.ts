@@ -6,7 +6,7 @@
 
 import type { HostContext } from "../context.ts";
 import { NotImplementedInFyx } from "../coverage.ts";
-import { node, props, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
+import { node, props, U16, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
 import { EventEmitter, ThemeIcon, TreeItemCollapsibleState, Uri, type Event } from "../shim/types.ts";
 import type { SurfaceModel } from "./surfaces.ts";
 
@@ -17,11 +17,14 @@ const HEADER = 4;
 const HEADER_TITLE = 5;
 const HEADER_DESCRIPTION = 6;
 const HEADER_BADGE = 7;
+const TRUNCATED = 8;
 const LIST_BASE = 1000;
 const ROW_HEIGHT = 22;
 const ROW_ID_BASE = 1_000_000;
 const ROW_ID_STRIDE = 8;
 const INDENT = 12;
+/** Visible rows across all levels; the rest of an expanded tree is cut off, with a message. */
+const MAX_ROWS = 10_000;
 
 interface TreeDataProvider<T> {
   getChildren(element?: T): T[] | undefined | null | PromiseLike<T[] | undefined | null>;
@@ -58,6 +61,7 @@ export class TreeViewSurface implements SurfaceModel {
   private provider?: TreeDataProvider<unknown>;
   private providerSubscription?: { dispose(): unknown };
   private rows: Row[] = [];
+  private truncated = false;
   private expanded = new Map<string, boolean>();
   private listGeneration = 0;
   private prepared = false;
@@ -156,8 +160,10 @@ export class TreeViewSurface implements SurfaceModel {
   refresh(): Promise<void> {
     const run = async () => {
       const rows: Row[] = [];
-      if (this.provider) await this.collect(undefined, 0, "", rows);
+      const complete = this.provider ? await this.collect(undefined, 0, "", rows) : true;
       this.rows = rows;
+      this.truncated = !complete;
+      if (!complete) this.ctx.coverage.note("vscode.TreeView", `only the first ${MAX_ROWS} visible rows are shown (view ${this.viewId})`);
       this.listGeneration++;
       this.ctx.surfaces.invalidate(this.surface.id);
     };
@@ -169,9 +175,11 @@ export class TreeViewSurface implements SurfaceModel {
     return next.catch((err) => this.ctx.coverage.error(`tree view ${this.viewId}: ${(err as Error).message}`));
   }
 
-  private async collect(parent: unknown, depth: number, parentKey: string, out: Row[]): Promise<void> {
+  /** Appends the visible rows under `parent`; false once `out` is full, which stops every level. */
+  private async collect(parent: unknown, depth: number, parentKey: string, out: Row[]): Promise<boolean> {
     const children = (await this.provider!.getChildren(parent)) ?? [];
     for (const [ix, element] of children.entries()) {
+      if (out.length >= MAX_ROWS) return false;
       const item = await this.provider!.getTreeItem(element);
       const label = labelOf(item);
       const key = item.id ?? `${parentKey}/${label}#${ix}`;
@@ -179,9 +187,9 @@ export class TreeViewSurface implements SurfaceModel {
       const expandable = state !== TreeItemCollapsibleState.None;
       const expanded = expandable && (this.expanded.get(key) ?? state === TreeItemCollapsibleState.Expanded);
       out.push({ element, item, depth, key, expandable, expanded });
-      if (expanded) await this.collect(element, depth + 1, key, out);
-      if (out.length > 10_000) return;
+      if (expanded && !(await this.collect(element, depth + 1, key, out))) return false;
     }
+    return true;
   }
 
   private get listId(): NodeId {
@@ -206,6 +214,7 @@ export class TreeViewSurface implements SurfaceModel {
       return nodes;
     }
     nodes.push(node(this.listId, ROOT, props.list(this.rows.length, ROW_HEIGHT)));
+    if (this.truncated) nodes.push(node(TRUNCATED, ROOT, props.text(`Showing the first ${MAX_ROWS} rows of this view.`, { color: "text-muted" })));
     return nodes;
   }
 
@@ -214,7 +223,7 @@ export class TreeViewSurface implements SurfaceModel {
     return this.rows.slice(start, start + count).map((row, k) => {
       const index = start + k;
       const base = ROW_ID_BASE + index * ROW_ID_STRIDE;
-      const nodes: Node[] = [node(base, null, props.flex({ direction: "row", gap: 4, padding: row.depth * INDENT, align: "center" }))];
+      const nodes: Node[] = [node(base, null, props.flex({ direction: "row", gap: 4, padding: indent(row.depth), align: "center" }))];
       nodes.push(node(base + 1, base, props.icon(row.expandable ? (row.expanded ? "chevron-down" : "chevron-right") : "blank")));
       const icon = iconName(row.item.iconPath);
       if (icon) nodes.push(node(base + 2, base, props.icon(icon)));
@@ -332,6 +341,11 @@ export class TreeViewApi {
     this.visibilityEmitter.dispose();
     this.selectionEmitter.dispose();
   }
+}
+
+/** `padding` is a u16; a deeper row than fits keeps the deepest indent rather than failing the reply. */
+function indent(depth: number): number {
+  return Math.min(depth * INDENT, U16);
 }
 
 function labelOf(item: TreeItemLike): string {

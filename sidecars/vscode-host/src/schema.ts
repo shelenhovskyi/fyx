@@ -182,7 +182,7 @@ export function propsKind(p: Props): string {
 // Validation: the invariants the WIT comments state. Used by tests and by the mock host.
 
 const U32 = 0xffffffff;
-const U16 = 0xffff;
+export const U16 = 0xffff;
 
 /**
  * Host limits (`ui_ext::TreeLimits`, W2). `max_nodes_per_update` caps the patches in one update and

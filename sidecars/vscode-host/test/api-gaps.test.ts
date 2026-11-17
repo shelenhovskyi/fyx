@@ -19,8 +19,20 @@ const provider = {
   getTreeItem: (e) => (typeof e === "object" ? { label: e.name, collapsibleState: 1 } : { label: e }),
   getParent: (e) => (typeof e === "object" ? undefined : leaves.get(e)),
 };
+// A chain 6000 levels deep (its indent no longer fits a u16), then a wide node: 12002 rows in all.
+const CHAIN = 6000;
+const chainDepth = (e) => (e.startsWith("chain:") ? Number(e.slice(6)) : -1);
+const deepProvider = {
+  getChildren: (e) =>
+    e === undefined ? ["chain:0", "wide"]
+    : e === "wide" ? Array.from({ length: 5000 }, (_, k) => "leaf:" + k)
+    : chainDepth(e) >= 0 && chainDepth(e) < CHAIN ? ["chain:" + (chainDepth(e) + 1)]
+    : [],
+  getTreeItem: (e) => ({ id: e, label: e, collapsibleState: e === "wide" || (chainDepth(e) >= 0 && chainDepth(e) < CHAIN) ? 2 : 0 }),
+};
 function activate(context) {
   const view = vscode.window.createTreeView("gapsTree", { treeDataProvider: provider });
+  context.subscriptions.push(vscode.window.registerTreeDataProvider("deepTree", deepProvider));
   context.subscriptions.push(
     vscode.languages.registerHoverProvider("plaintext", {
       provideHover(doc, pos) {
@@ -100,7 +112,7 @@ before(async () => {
       version: "1.0.0",
       main: "./extension.js",
       activationEvents: ["*"],
-      contributes: { views: { explorer: [{ id: "gapsTree", name: "Gaps" }] } },
+      contributes: { views: { explorer: [{ id: "gapsTree", name: "Gaps" }, { id: "deepTree", name: "Deep" }] } },
     }),
   );
   writeFileSync(join(ext, "extension.js"), EXTENSION);
@@ -181,6 +193,27 @@ test("tree view: title, description and badge render; reveal expands; dispose cl
   await host.executeCommand("gaps.disposeTree");
   await host.settle();
   assert.ok(texts(host.trees.get(id)!).some((t) => t.startsWith("No data provider registered")));
+  assert.deepEqual(host.schemaErrors, []);
+});
+
+test("tree view: rows stop at 10 000 across all levels, deep rows keep a valid indent", async () => {
+  const id = "fyx-test.gaps/view/deepTree";
+  await host.mount(id);
+  await host.settle();
+  const tree = host.trees.get(id)!;
+  const list = tree.find((n) => "list" in n.props)!;
+  assert.ok("list" in list.props);
+  assert.equal(list.props.list["row-count"], 10_000, "the cap counts rows of every level, exactly");
+  assert.ok(texts(tree).includes("Showing the first 10000 rows of this view."), "the cut is visible");
+  assert.match((await host.coverage()).partial["vscode.TreeView"], /first 10000 visible rows.*deepTree/);
+
+  const rows = await host.listRows(id, list.id, 5998, 6);
+  assert.deepEqual(rows.map((r) => texts(r.nodes)[0]), ["chain:5998", "chain:5999", "chain:6000", "wide", "leaf:0", "leaf:1"]);
+  const padding = (row: { nodes: Node[] }) => ("flex" in row.nodes[0].props ? row.nodes[0].props.flex.padding : -1);
+  assert.equal(padding(rows[0]), 0xffff, "depth 5998 × 12 px is clamped to the u16 maximum");
+  assert.equal(padding(rows[3]), 0, "a root row is not indented");
+  const last = await host.listRows(id, list.id, 9_998, 10);
+  assert.deepEqual(last.map((r) => texts(r.nodes)[0]), ["leaf:3996", "leaf:3997"]);
   assert.deepEqual(host.schemaErrors, []);
 });
 

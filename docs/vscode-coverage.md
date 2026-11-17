@@ -162,6 +162,7 @@ accepted and recorded in the coverage report's `partial` notes.
 | `languages.setLanguageConfiguration` | `wordPattern` drives `TextDocument.getWordRangeAtPosition`; the whole configuration goes to the host as `vscode/setLanguageConfiguration` (`null` on dispose) |
 | `window.registerTreeDataProvider().dispose()`, `TreeView.dispose()` | removes the provider; the view shows "No data provider" |
 | `TreeView.title`, `description`, `badge` | re-render as a header row (`fyx:ui` cannot rename a surface, so a changed title is a bold header, not the panel title) |
+| TreeView rows | at most 10,000 visible rows, counted across all levels; past that a muted line says the view is cut off, and the coverage report notes it. Rows deeper than 5,461 levels keep the deepest indent, because flex `padding` is a `u16` and one out-of-range row would fail the host's whole `list-rows` reply |
 | `TreeView.reveal` | expands the element's ancestors (needs `getParent`, as in VS Code) and `expand` levels up to 3, then selects it. It cannot scroll the row into view or take focus: `fyx:ui` has no scroll-to-row |
 | `QuickPick`/`InputBox` `buttons` | rendered as buttons; a click fires `onDidTriggerButton` |
 | `QuickPick`/`InputBox` `title`, `step`, `totalSteps`, `busy` after `show()` | re-render |
