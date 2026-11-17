@@ -16,19 +16,25 @@ and 15 GB of memory, and other builds were running on it, so treat the numbers a
 | Bench | Build | What it runs |
 |---|---|---|
 | `ui_ext` tree | `release` | `Tree::from_nodes`, `apply_patches`, `replace` and clone on 16384-node trees |
-| `ui_ext_wasm` | `test` (dev), but `wasmtime` and `cranelift-*` build at opt-level 3 in dev (`Cargo.toml` `[profile.dev.package]`) | a throwaway guest (`ui_ext_sdk`, 80 KB) that mounts 16384 nodes and answers events with 0, 1, 2048 or 16384-node updates; the debug `fyx_demo_counter` and `fyx_demo_gallery` |
-| `ui_ext_host` renderer | dev **and** `release-fast` (no debug info) | `SurfaceView` in a test window over a fake backend: 1024, 4096 and 16384 texts or buttons, and a 1M-row list. A frame is `window.draw()`. |
+| `ui_ext_wasm` | `release-fast` (no debug info); dev numbers were 2-3× slower | a throwaway guest (`ui_ext_sdk`, 80 KB) that mounts 16384 nodes and answers events with 0, 1, 2048 or 16384-node updates; the debug `fyx_demo_counter` and `fyx_demo_gallery` |
+| `ui_ext_host` renderer | `release-fast` (no debug info), dev for comparison | `SurfaceView` in a test window over a fake backend: 1024, 4096 and 16384 texts or buttons, and a 1M-row list. A frame is `window.draw()`. |
 | `agent_review` diff | `release`, standalone | a copy of `proposed_edit::{compute_hunks, line_hunks, apply_hunks}` over `imara-diff 0.2.0` Histogram, which is what `language::line_diff` runs, on a 50k-line (2.8 MB) file |
 | review log | `release`, standalone | the `log::info!` in `AgentReview::note_changed_paths` |
 
-Renderer numbers (`ui_ext_host`, dev build, so gpui/ui/taffy-free code is unoptimized; a release
-run is pending and will replace these):
+Renderer numbers (`ui_ext_host`, `release-fast` without debug info; a frame is `window.draw()` of a
+window whose root is the `SurfaceView`, so the whole surface renders and lays out):
 
 | Tree | open view (sync + first frame) | one frame, nothing changed | click → 1 `set-props` → sync + frame |
 |---|---|---|---|
-| 16384 texts (127 flex groups) | 1.83 s | 1.28 s | 1.28 s |
-| 16384 buttons | 5.89 s | 5.62 s | 6.58 s |
-| list node with 1M rows | 31 ms | 1.9 ms | 6 µs (no visible change) |
+| 1024 texts | 29 ms | 14.5 ms | 11.4 ms |
+| 4096 texts | 81 ms | 50 ms | 48 ms |
+| 16384 texts (127 flex groups) | 422 ms | 271 ms | 281 ms |
+| 1024 buttons | 60 ms | 54 ms | 54 ms |
+| 4096 buttons | 257 ms | 260 ms | 280 ms |
+| 16384 buttons | 1.20 s | 1.12 s | 1.15 s |
+| list node with 1M rows | 28 ms | 0.12 ms | <1 µs (no visible change) |
+
+The dev build is 4-5× slower again (16384 texts: 1.28 s per frame; 16384 buttons: 5.6 s).
 
 ## Findings, by impact
 
@@ -48,12 +54,12 @@ tree: every flex, label and button element, plus a Taffy layout of all of them.
 - every keystroke in a surface input.
 - every reply that changes one node (`surface.rs:497` `cx.notify()`).
 
-**Evidence.** Dev build: one full frame of a 16384-text surface takes 1.28 s, of a 16384-button surface 5.6 s (table above); a 1M-row `list` takes 1.9 ms, so the cost is the non-virtualized tree. The cost grows linearly with the node count, and a button costs about
+**Evidence** (release, table above). One full frame takes 14.5 ms for 1024 texts, 50 ms for 4096 and 271 ms for 16384. Buttons cost about 4× more: 54 ms for 1024, 260 ms for 4096 and 1.12 s for 16384. A 1M-row `list` takes 0.12 ms, so the cost is the non-virtualized tree, not the renderer as such. A 120 Hz frame budget (8 ms) is already exceeded at about 600 texts or 150 buttons. The cost grows linearly with the node count, and a button costs about
 four times as much as a text (a `Button` plus its focus ring `div` plus a listener).
 
 **User-visible effect.** A panel built with plain children instead of a `list` drops frames while
-the user types into its filter box. At a few thousand nodes it stutters, and near the 16384 cap it
-freezes. Nothing warns the extension author: `TreeLimits` allows it.
+the user types into its filter box. With a few hundred buttons it already drops frames; at a few thousand nodes every keystroke
+and caret blink costs 50-260 ms, and near the 16384 cap each one freezes the window for 0.3-1.1 s. Nothing warns the extension author: `TreeLimits` allows it.
 
 **Fix sketch.** Render big subtrees as their own cached views. Split the surface into
 `Entity<SubtreeView>`s, one per root child and one per flex node with more than about 256
@@ -139,7 +145,7 @@ grows by hundreds of MB. It also builds a `HashSet<PathBuf>` of every reviewed p
 **Fix sketch.** Log only the count and the paths that are new in this event, at `debug`. Keep the
 reviewed-path set incrementally per turn instead of rebuilding it.
 
-### 5. Medium: `SurfaceView::sync` is quadratic in buttons, lists, inputs and markdown nodes
+### 5. Medium-Low: `SurfaceView::sync` is quadratic in buttons, lists, inputs and markdown nodes
 
 `view.rs:208` (`button_focus.retain(|id, _| buttons.contains(id))`), `:214-220`, `:221-225`,
 `:231-240`, `:249-250`, `:286-287`, `:302`, and `keyboard.rs:328` (`restore_focus`:
@@ -148,10 +154,10 @@ reviewed-path set incrementally per turn instead of rebuilding it.
 Every revision, which means every event reply that changes something, runs `Vec::contains` or
 `iter().any` inside a `retain` over a map of the same size.
 
-**Evidence.** Dev build, 16384 buttons: a click costs 6.58 s against 5.62 s for a frame alone, so sync adds about 1 s, most of it the `buttons.contains` retain (16384 × ~8192 comparisons). Opening the view (one sync) adds about 0.3 s over a frame.
+**Evidence.** Release, 16384 buttons: a click costs 1.15 s against 1.12 s for a frame alone, and opening the view costs 1.20 s, so one sync adds about 30-90 ms, most of it the `buttons.contains` retain (16384 × ~8192 comparisons). In the dev build the same sync adds about 1 s. At 1024 buttons it is negligible; it grows with the square of the count.
 
-**User-visible effect.** Each click on a panel with thousands of buttons adds a visible delay on top
-of finding 1.
+**User-visible effect.** Each update of a panel with many thousands of buttons adds tens of ms on top
+of finding 1, which dominates.
 
 **Fix sketch.** Collect `buttons`, `lists`, `inputs` and `markdown` into `HashSet`s or `HashMap`s
 (`collections::HashSet`), and look up `focus_order` in a set in `restore_focus`. The change is
@@ -205,14 +211,14 @@ budget semantics stay the same, because epochs only matter while guest code runs
 (`Component::from_binary`), `registry.rs:305-306` (`scan_installed` awaits each
 `load_from_dir` in turn).
 
-**Evidence** (dev test binary, but cranelift and wasmtime at opt-level 3):
+**Evidence** (`release-fast`):
 
 | Component | Load (compile + instantiate + `surfaces`) |
 |---|---|
-| release guest, 80 KB | 114 ms |
-| the same guest again in the same process (incremental cache) | 71 ms |
-| debug `fyx_demo_counter`, 4.2 MB (as `script/fyx-build-demos` builds it) | 349 ms, 213 ms again |
-| debug `fyx_demo_gallery`, 4.4 MB | 380 ms |
+| release guest, 80 KB | 43 ms |
+| the same guest again in the same process (incremental cache) | 29 ms |
+| debug `fyx_demo_counter`, 4.2 MB (as `script/fyx-build-demos` builds it) | 109 ms, 69 ms again |
+| debug `fyx_demo_gallery`, 4.4 MB | 122 ms |
 
 The compilation runs on the background executor, so the main thread is not blocked. But each panel
 shows "Loading…" until its extension's turn comes. With N extensions the last one waits for the sum
@@ -340,19 +346,19 @@ only to find the input ids.
 - **List virtualization works.** `render_rows` asks only for the visible range plus 8 rows of
   overscan (`surface.rs:723-729`). One layout's requests merge into one `list-rows` call
   (`RowCache::wanted`). A requested range is capped at 256 rows and the cache is pruned past 1024.
-  The width measurement uses the top visible row (`view.rs:856-862`). Measured: a 1M-row list renders in 1.9 ms per frame (dev build).
+  The width measurement uses the top visible row (`view.rs:856-862`). Measured: a 1M-row list renders in 0.12 ms per frame (release).
 - **Host↔WASM call overhead is low.**
 
   | Call | Time |
   |---|---|
-  | `handle-event` round trip, foreground → tokio → guest → back (unchanged reply) | 57 µs |
-  | 1 `set-props` | 70 µs |
-  | 2048 `set-props` | 1.7 ms |
-  | `replace` of 16384 nodes | 12 ms |
-  | `mount` of 16384 nodes | 37 ms (first call) |
-  | `list-rows` of 40 rows × 3 nodes | 0.34 ms |
+  | `handle-event` round trip, foreground → tokio → guest → back (unchanged reply) | 32 µs |
+  | 1 `set-props` | 34 µs |
+  | 2048 `set-props` | 0.58 ms |
+  | `replace` of 16384 nodes | 4.8 ms |
+  | `mount` of 16384 nodes | 11 ms (first call) |
+  | `list-rows` of 40 rows × 3 nodes | 0.11 ms |
 
-  The host side of these numbers is a dev build, so release is lower. Each call allocates a few
+  (`release-fast`.) Each call allocates a few
   small things (a surface-id `String`, a boxed closure, a oneshot); that is noise next to the tokio
   hop. The `From<wit::*>` conversions move strings rather than copy them, so a lifted update is
   copied once, by wasmtime. Push accounting is O(1) per push.
