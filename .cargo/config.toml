@@ -22,3 +22,11 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "12.0"
+
+# fyx: build cache and lighter debug info. Debug info dominates target/ size, and every worktree
+# carries its own target/, so this is what keeps 6-8 parallel builds on one disk.
+[build]
+rustc-wrapper = "sccache"
+
+[profile.dev]
+debug = "line-tables-only"

@@ -372,6 +372,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_review"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
 name = "agent_servers"
 version = "0.1.0"
 dependencies = [
@@ -19204,6 +19211,25 @@ dependencies = [
  "theme_settings",
  "ui_macros",
  "web-time",
+]
+
+[[package]]
+name = "ui_ext"
+version = "0.1.0"
+
+[[package]]
+name = "ui_ext_host"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "ui_ext",
+]
+
+[[package]]
+name = "ui_ext_sdk"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.41.0",
 ]
 
 [[package]]

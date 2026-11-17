@@ -1,0 +1,190 @@
+// FROZEN for the sprint. Only the integrator (W0) edits this file; see ARCHITECTURE.md.
+package fyx:ui@0.1.0;
+
+interface types {
+    /// Chosen by the extension, unique within one surface. The host keys event routing and
+    /// patches on it, so an id must not be reused for a different node while the surface lives.
+    type node-id = u32;
+
+    /// Colours are semantic theme slots, never raw values, so every extension follows the
+    /// active theme (the Zellij approach).
+    enum color-token {
+        text,
+        text-muted,
+        text-accent,
+        error,
+        warning,
+        success,
+        border,
+        surface,
+        elevated-surface,
+    }
+
+    enum flex-direction { row, column }
+
+    enum align { start, center, end, stretch }
+
+    record flex-props {
+        direction: flex-direction,
+        gap: u16,
+        padding: u16,
+        grow: bool,
+        align: align,
+        background: option<color-token>,
+    }
+
+    record text-props {
+        content: string,
+        color: option<color-token>,
+        bold: bool,
+        monospace: bool,
+    }
+
+    enum button-style { default, filled, subtle, danger }
+
+    record button-props {
+        label: string,
+        icon: option<string>,
+        style: button-style,
+        disabled: bool,
+    }
+
+    record input-props {
+        value: string,
+        placeholder: string,
+    }
+
+    /// Virtualized: the host asks for rows with `list-rows` as they scroll into view,
+    /// mirroring GPUI's `uniform_list`. `row-height` is in pixels and fixed for every row.
+    record list-props {
+        row-count: u32,
+        row-height: u16,
+    }
+
+    record table-props {
+        columns: list<string>,
+        row-count: u32,
+    }
+
+    record icon-props {
+        name: string,
+        color: option<color-token>,
+    }
+
+    /// Host component: rendered by Zed's own diff/editor machinery, the extension only supplies text.
+    record diff-view-props {
+        old-text: string,
+        new-text: string,
+        language: option<string>,
+    }
+
+    variant props {
+        flex(flex-props),
+        text(text-props),
+        button(button-props),
+        input(input-props),
+        %list(list-props),
+        table(table-props),
+        icon(icon-props),
+        markdown(string),
+        diff-view(diff-view-props),
+    }
+
+    /// WIT types cannot be recursive, so a tree travels as a flat `list<node>` in which every
+    /// node names its parent. Parents precede children; siblings keep list order.
+    record node {
+        id: node-id,
+        parent: option<node-id>,
+        props: props,
+    }
+
+    record insert-op {
+        node: node,
+        /// Insert before this sibling; `none` appends.
+        before: option<node-id>,
+    }
+
+    variant patch {
+        set-props(tuple<node-id, props>),
+        insert(insert-op),
+        /// Removes the node and its whole subtree.
+        remove(node-id),
+    }
+
+    variant update {
+        unchanged,
+        replace(list<node>),
+        patches(list<patch>),
+    }
+
+    record list-row {
+        index: u32,
+        /// A subtree whose single root has `parent: none`.
+        nodes: list<node>,
+    }
+
+    variant ui-event {
+        click(node-id),
+        input-changed(tuple<node-id, string>),
+        input-submitted(tuple<node-id, string>),
+        /// The list node and the row index within it.
+        row-click(tuple<node-id, u32>),
+    }
+
+    enum dock-position { left, right, bottom }
+
+    record panel-descriptor {
+        position: dock-position,
+        icon: string,
+        default-size: u32,
+    }
+
+    enum status-bar-side { left, right }
+
+    record status-item-descriptor {
+        side: status-bar-side,
+        /// Higher sorts closer to the edge.
+        priority: s32,
+    }
+
+    variant surface-kind {
+        panel(panel-descriptor),
+        status-item(status-item-descriptor),
+    }
+
+    record surface {
+        id: string,
+        title: string,
+        kind: surface-kind,
+    }
+}
+
+/// Functions the extension may call on the host.
+interface host {
+    use types.{update};
+
+    /// Extension-initiated update (timers, background work). The host coalesces pushes and
+    /// applies them on the next frame; it never calls back into the extension while rendering.
+    push-update: func(surface-id: string, update: update);
+
+    enum log-level { trace, debug, info, warn, error }
+
+    log: func(level: log-level, message: string);
+}
+
+world ui-extension {
+    use types.{surface, node, node-id, ui-event, update, list-row};
+
+    import host;
+
+    /// Called once after instantiation; declares every surface the extension contributes.
+    export surfaces: func() -> list<surface>;
+
+    /// Initial tree when the surface is first shown. Not called per frame: the host retains the tree.
+    export mount: func(surface-id: string) -> result<list<node>, string>;
+
+    /// At most one call per input event; the host debounces scroll, hover and typing.
+    export handle-event: func(surface-id: string, event: ui-event) -> result<update, string>;
+
+    export list-rows: func(surface-id: string, list-node: node-id, start: u32, count: u32) -> list<list-row>;
+}

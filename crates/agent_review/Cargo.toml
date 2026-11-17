@@ -1,0 +1,17 @@
+[package]
+name = "agent_review"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Host-owned model of agent-proposed edits with hunk-by-hunk accept and reject"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/agent_review.rs"
+doctest = false
+
+[dependencies]
+gpui.workspace = true

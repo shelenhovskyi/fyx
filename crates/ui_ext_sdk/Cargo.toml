@@ -1,0 +1,18 @@
+[package]
+name = "ui_ext_sdk"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+description = "Guest SDK for writing Fyx UI extensions in Rust"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/ui_ext_sdk.rs"
+test = false
+doctest = false
+
+[dependencies]
+wit-bindgen = "0.41"
