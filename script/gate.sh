@@ -29,6 +29,12 @@ else
     echo "gate: WARNING: cargo-deny is not installed, so the advisory check is SKIPPED here (CI runs it)."
     echo "gate: WARNING: install it with: cargo install cargo-deny --locked"
 fi
+# The generated extension API reference (docs/fyx/api) must match the WIT and the SDK, whatever
+# crates changed: a WIT or SDK rename must not slip through a gate that skips ui_ext_sdk.
+if ! script/fyx-api-docs --check; then
+    echo "gate: RED: docs/fyx/api is out of date; run script/fyx-api-docs and commit the pages"
+    exit 1
+fi
 
 changed_crates=$(
     git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \
