@@ -15,11 +15,22 @@ on top of the upstream editor:
 How it fits together: [ARCHITECTURE.md](ARCHITECTURE.md). The sprint plan and its progress:
 [PLAN.md](PLAN.md).
 
+## Documentation
+
+- [User guide](docs/fyx/user-guide.md): privacy defaults, agent change review, UI extensions,
+  security modes, where Fyx keeps its files, troubleshooting.
+- [Writing a UI extension](docs/fyx/extension-authoring.md), with the
+  [SDK reference](docs/fyx/sdk-reference.md) and [limits and gotchas](docs/fyx/limits-and-gotchas.md).
+- [Platform plan](docs/fyx/platform/plan.md): the road to third-party UI extensions, after the
+  [platform spec](docs/fyx/platform/spec.md).
+- [All Fyx docs and reviews](docs/fyx/README.md).
+
 ## Status
 
 Fyx is a **sprint prototype**. It is built and tested as a **Windows dev build** only. There are no
 releases, installers or signed binaries, and nothing here is a stable API: `fyx:ui@0.1.0` will
-break in 0.2. UI extensions load only from an environment variable at startup.
+break in 0.2. UI extensions are installed from a folder or loaded from an environment variable;
+there is no extension registry yet.
 
 Fyx follows a pinned upstream stable tag (see [`FYX_UPSTREAM`](FYX_UPSTREAM)) and is rebased onto
 newer tags. Fyx's CI is described in [docs/fyx/ci.md](docs/fyx/ci.md).
