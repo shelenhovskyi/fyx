@@ -31,7 +31,10 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
+// fyx: accept fyx:// links.
+const URL_PREFIX: [&'static str; 6] = [
+    "fyx://", "zed://", "http://", "https://", "file://", "ssh://",
+];
 
 struct Detect;
 
