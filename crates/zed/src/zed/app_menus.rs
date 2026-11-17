@@ -71,7 +71,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Fyx".into(), // fyx: product name in this menu
             disabled: false,
             items: vec![
-                MenuItem::action("About Fyx", zed_actions::About),
+                MenuItem::action("About Fyx", zed_actions::About), // fyx: product name
                 MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
@@ -103,13 +103,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Fyx", super::Hide),
+                MenuItem::action("Hide Fyx", super::Hide), // fyx: product name
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Hide Others", super::HideOthers),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Show All", super::ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit Fyx", Quit),
+                MenuItem::action("Quit Fyx", Quit), // fyx: product name
             ],
         },
         Menu {

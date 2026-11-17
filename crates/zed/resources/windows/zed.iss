@@ -2,8 +2,10 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVerName={#AppDisplayName}
-; fyx: publisher
+; fyx: publisher, copyright holder, non-affiliation notice
 AppPublisher=Fyx contributors
+AppCopyright=Copyright 2026 Hennadii Shelenhovskyi. Based on Zed, copyright 2022-2025 Zed Industries, Inc.
+AppComments=Fyx is an independent fork of Zed and is not affiliated with or endorsed by Zed Industries.
 AppPublisherURL=https://www.zed.dev/
 AppSupportURL=https://www.zed.dev/
 AppUpdatesURL=https://www.zed.dev/
@@ -43,8 +45,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
-Name: "english"; MessagesFile: "compiler:Default.isl,{#ResourcesDir}\messages\en.isl"; LicenseFile: "script\terms\terms.rtf"
-Name: "simplifiedChinese"; MessagesFile: "{#ResourcesDir}\messages\Default.zh-cn.isl,{#ResourcesDir}\messages\zh-cn.isl"; LicenseFile: "script\terms\terms.rtf"
+; fyx: the licence page shows the GPL, not Zed Industries' Terms of Service
+Name: "english"; MessagesFile: "compiler:Default.isl,{#ResourcesDir}\messages\en.isl"; LicenseFile: "LICENSE-GPL"
+Name: "simplifiedChinese"; MessagesFile: "{#ResourcesDir}\messages\Default.zh-cn.isl,{#ResourcesDir}\messages\zh-cn.isl"; LicenseFile: "LICENSE-GPL"
 
 [UninstallDelete]
 ; Delete logs
