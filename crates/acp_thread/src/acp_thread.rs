@@ -8087,7 +8087,7 @@ impl AcpThread {
                 .update(cx, |project, cx| project.save_buffer(buffer, cx))
                 .await?;
             // fyx: report hunks the host review rejected.
-            feedback.map_or(Ok(()), |feedback| Err(anyhow::anyhow!(feedback)))
+            feedback.map_or(Ok(()), |feedback| Err(fyx_review::feedback_error(feedback)))
         })
     }
 

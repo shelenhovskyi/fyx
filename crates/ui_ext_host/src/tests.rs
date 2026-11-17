@@ -67,6 +67,8 @@ struct FakeBackend {
     bad_rows_push: Cell<bool>,
     /// Surfaces that reported the whole extension as failed.
     failed_from: RefCell<Vec<String>>,
+    /// The input's id in the next mount, as an SDK remount hands out new ids.
+    renumbered_input: Cell<Option<NodeId>>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -176,7 +178,11 @@ impl UiBackend for FakeBackend {
             node(BAD_OWN_THEN_OTHER, Some(1), button("Bad push")),
             node(FATAL, Some(1), button("Trap")),
             node(REMOVER, Some(1), button("Remove me")),
-            node(INPUT, Some(1), input("")),
+            node(
+                self.renumbered_input.get().unwrap_or(INPUT),
+                Some(1),
+                input(""),
+            ),
             node(LIST, Some(1), list(count)),
         ];
         let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
@@ -328,7 +334,21 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
-        cx.bind_keys([KeyBinding::new("enter", menu::Confirm, None)]);
+        // The context-free part of the default keymap that surfaces rely on: Tab and Down both
+        // map to `menu::SelectNext` there, which is why the keyboard module intercepts Tab.
+        cx.bind_keys([
+            KeyBinding::new("enter", menu::Confirm, None),
+            KeyBinding::new("escape", menu::Cancel, None),
+            KeyBinding::new("tab", menu::SelectNext, None),
+            KeyBinding::new("shift-tab", menu::SelectPrevious, None),
+            KeyBinding::new("down", menu::SelectNext, None),
+            KeyBinding::new("up", menu::SelectPrevious, None),
+            KeyBinding::new("home", menu::SelectFirst, None),
+            KeyBinding::new("pageup", menu::SelectFirst, None),
+            KeyBinding::new("end", menu::SelectLast, None),
+            KeyBinding::new("pagedown", menu::SelectLast, None),
+        ]);
+        crate::keyboard::intercept_keys(cx);
     });
 }
 
@@ -662,7 +682,7 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
         100,
     ));
     let (panel, vcx) = cx.add_window_view(|window, cx| {
-        crate::ExtensionPanel::new(info.clone(), state.clone(), window, cx)
+        crate::ExtensionPanel::<0>::new(info.clone(), state.clone(), window, cx)
     });
     vcx.run_until_parked();
 
@@ -678,6 +698,12 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
         );
         assert_eq!(panel.default_size(window, cx), gpui::px(320.));
         assert_eq!(panel.activation_priority(), 100);
+        let slot = info.slot.expect("a panel slot");
+        assert_eq!(slot, 0, "the first panel surface of the process");
+        assert_eq!(
+            <crate::ExtensionPanel<0> as workspace::Panel>::persistent_name(),
+            "fyx-ui:fake/counter"
+        );
     });
 
     let bounds = vcx
@@ -732,9 +758,21 @@ fn mounts(backend: &FakeBackend) -> usize {
         .count()
 }
 
+fn retryable(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> bool {
+    state.read_with(cx, |state, _| {
+        matches!(
+            state.phase(),
+            crate::Phase::Failed {
+                retryable: true,
+                ..
+            }
+        )
+    })
+}
+
 fn failure(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> Option<String> {
     state.read_with(cx, |state, _| match state.phase() {
-        crate::Phase::Failed(message) => Some(message.to_string()),
+        crate::Phase::Failed { message, .. } => Some(message.to_string()),
         crate::Phase::Mounting | crate::Phase::Ready(_) => None,
     })
 }
@@ -808,6 +846,10 @@ async fn test_remounts_without_input_are_bounded(cx: &mut TestAppContext) {
     assert_eq!(mounts(&backend), 3);
     let message = failure(&state, cx).expect("the surface gave up");
     assert!(message.contains("keeps sending updates"), "{message}");
+    assert!(
+        retryable(&state, cx),
+        "the instance lives, so Retry is offered"
+    );
 
     // A retry by the user starts over.
     backend.bad_rows_push.set(false);
@@ -834,6 +876,10 @@ async fn test_a_dead_instance_stops_the_extension(cx: &mut TestAppContext) {
         "{message}"
     );
     assert_eq!(backend.failed_from.borrow().as_slice(), ["counter"]);
+    assert!(
+        !retryable(&state, cx),
+        "a dead instance refuses every call, so no Retry (integration-3 finding 9)"
+    );
 
     backend.take_calls();
     state.update(cx, |state, cx| {
@@ -914,7 +960,17 @@ async fn test_queued_events_are_checked_before_sending(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert_eq!(backend.events(), [UiEvent::Click(REMOVER)]);
 
-    // A row click with the list unchanged still goes through.
+    // The increment changed the list and nothing has fetched its rows again, so row 1 on screen
+    // is stale: a click on it is not sent (integration-3 finding 9)...
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::RowClick(LIST, 1), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(backend.events(), []);
+    // ...while a click on a fresh row goes through.
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..6, cx));
+    cx.run_until_parked();
     backend.take_calls();
     state.update(cx, |state, cx| {
         state.dispatch(UiEvent::RowClick(LIST, 1), cx)
@@ -951,4 +1007,474 @@ async fn test_a_remount_keeps_unsent_typing(cx: &mut TestAppContext) {
     vcx.executor().advance_clock(TYPING_DEBOUNCE);
     vcx.run_until_parked();
     assert_eq!(backend.calls(), [], "nothing is sent twice");
+}
+
+// Keyboard support: every key path makes exactly the extension calls a mouse would.
+
+fn focused(view: &Entity<SurfaceView>, cx: &mut VisualTestContext) -> Option<NodeId> {
+    cx.update(|window, cx| view.read(cx).focused_node(window, cx))
+}
+
+fn focus_surface(view: &Entity<SurfaceView>, cx: &mut VisualTestContext) {
+    let handle = view.read_with(cx, |view, _| view.focus_handle.clone());
+    cx.update(|window, cx| handle.focus(window, cx));
+    cx.run_until_parked();
+}
+
+fn key(keys: &str, cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes(keys);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn test_tab_moves_focus_in_tree_order(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+    focus_surface(&view, vcx);
+
+    // Buttons, then the input, then the list, as the tree lists them.
+    let order = [
+        INCREMENT,
+        BROKEN,
+        PUSHER,
+        SET_INPUT,
+        PUSH_THEN_FAIL,
+        BAD_OWN_THEN_OTHER,
+        FATAL,
+        REMOVER,
+        INPUT,
+        LIST,
+    ];
+    for expected in order {
+        key("tab", vcx);
+        assert_eq!(focused(&view, vcx), Some(expected));
+    }
+    // Around the end, and back.
+    key("tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(INCREMENT));
+    key("shift-tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST));
+    key("shift-tab", vcx);
+    assert_eq!(
+        focused(&view, vcx),
+        Some(INPUT),
+        "Shift-Tab leaves the list"
+    );
+    key("shift-tab", vcx);
+    assert_eq!(
+        focused(&view, vcx),
+        Some(REMOVER),
+        "Tab keys leave an input too"
+    );
+    assert_eq!(backend.calls(), [], "moving focus calls nothing");
+}
+
+#[gpui::test]
+async fn test_enter_and_space_click_the_focused_button(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+    focus_surface(&view, vcx);
+    key("tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(INCREMENT));
+
+    key("enter", vcx);
+    assert_eq!(backend.events(), [UiEvent::Click(INCREMENT)]);
+    backend.take_calls();
+    key("space", vcx);
+    assert_eq!(backend.events(), [UiEvent::Click(INCREMENT)]);
+    assert_eq!(props_of(&state, LABEL, vcx), text("Count: 2"));
+    // The patches did not remove the button, so it keeps focus.
+    assert_eq!(focused(&view, vcx), Some(INCREMENT));
+}
+
+#[gpui::test]
+async fn test_list_selection_keys_and_enter(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(300);
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let list_focus = view.read_with(vcx, |view, _| view.list_focus[&LIST].clone());
+    vcx.update(|window, cx| list_focus.focus(window, cx));
+    vcx.run_until_parked();
+    assert_eq!(focused(&view, vcx), Some(LIST));
+    backend.take_calls();
+
+    let selected = |vcx: &mut VisualTestContext| {
+        view.read_with(vcx, |view, _| view.selection.get(&LIST).copied())
+    };
+    key("down", vcx);
+    assert_eq!(selected(vcx), Some(0));
+    key("down", vcx);
+    assert_eq!(selected(vcx), Some(1));
+    key("up", vcx);
+    key("up", vcx);
+    assert_eq!(selected(vcx), Some(0), "Up stops at the first row");
+    key("end", vcx);
+    assert_eq!(selected(vcx), Some(299));
+    key("home", vcx);
+    assert_eq!(selected(vcx), Some(0));
+    // Page keys move by a page, not to the ends (upstream maps them to SelectFirst/Last).
+    key("pagedown", vcx);
+    let page = selected(vcx).expect("selected");
+    assert!(page > 1 && page < 299, "a page is {page} rows");
+    key("pageup", vcx);
+    assert_eq!(selected(vcx), Some(0));
+    key("down", vcx);
+    key("down", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST), "Down stays in the list");
+    assert!(
+        !backend
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Event(_))),
+        "moving the selection sends no event"
+    );
+
+    key("enter", vcx);
+    assert_eq!(backend.events(), [UiEvent::RowClick(LIST, 2)]);
+}
+
+#[gpui::test]
+async fn test_focus_moves_on_when_its_node_is_removed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let remover = view.read_with(vcx, |view, _| view.button_focus[&REMOVER].clone());
+    vcx.update(|window, cx| remover.focus(window, cx));
+    vcx.run_until_parked();
+    backend.take_calls();
+
+    key("enter", vcx);
+    assert_eq!(backend.events(), [UiEvent::Click(REMOVER)]);
+    // The reply removed the button; the next node in the Tab order takes focus.
+    assert_eq!(focused(&view, vcx), Some(INPUT));
+}
+
+#[gpui::test]
+async fn test_escape_returns_to_the_editor(cx: &mut TestAppContext) {
+    init_test(cx);
+    let returned = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let returned = returned.clone();
+        cx.on_action(move |_: &workspace::FocusCenterPane, _| returned.set(returned.get() + 1));
+    });
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    focus_surface(&view, vcx);
+    key("tab", vcx);
+    backend.take_calls();
+
+    key("escape", vcx);
+    assert_eq!(returned.get(), 1);
+    assert_eq!(backend.calls(), [], "Escape calls nothing");
+}
+
+// Judge review integration-3 (tasks/reviews/integration-3.md), W3 findings 8, 9 and 10.
+
+/// Finding 8: an answer to a fetch made before a remount cannot pose as the new list's rows.
+#[gpui::test]
+async fn test_a_stale_row_answer_after_a_remount_is_dropped(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(5);
+    let state = new_state(&backend, cx);
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+    cx.run_until_parked();
+    let old_generation = state.read_with(cx, |state, _| state.current_row_generation(LIST));
+
+    // A remount (the list keeps its fixed id), then the new list asks for rows...
+    state.update(cx, |state, cx| state.mount(cx));
+    cx.run_until_parked();
+    backend.take_calls();
+    state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+    // ...and the answer to the fetch from before the remount arrives first.
+    state.update(cx, |state, cx| {
+        let rows = (0..5)
+            .map(|index| {
+                let row = vec![node(ROW_ROOT, None, text("stale"))];
+                (
+                    index,
+                    Tree::from_row(row, TreeLimits::default()).expect("valid row"),
+                )
+            })
+            .collect();
+        let reply = Reply {
+            pushed: Vec::new(),
+            value: rows,
+        };
+        state.receive_rows(LIST, old_generation, 0..5, Ok(reply), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(row_text(&state, LIST, 0, cx), Some(text("Row 1 of 5")));
+
+    // Layout keeps asking; nothing is missing, so nothing is fetched again.
+    for _ in 0..5 {
+        state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        backend.take_calls(),
+        [Call::Rows {
+            list: LIST,
+            start: 0,
+            count: 5
+        }]
+    );
+}
+
+/// w3-deep-1 finding 6, the rest of it: the measuring request and the visible range of one
+/// layout make one `list-rows` call.
+#[gpui::test]
+async fn test_one_layout_makes_one_row_call(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(100);
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    state.update(cx, |state, cx| {
+        state.request_rows(LIST, 40..49, cx);
+        state.request_rows(LIST, 32..60, cx);
+        state.request_rows(LIST, 40..49, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        backend.take_calls(),
+        [Call::Rows {
+            list: LIST,
+            start: 32,
+            count: 28
+        }]
+    );
+}
+
+/// Finding 9: an update pushed from elsewhere that applies is progress, like an event reply, so a
+/// surface fed only by pushes does not fail after a few recovered desyncs over a session.
+#[gpui::test]
+async fn test_applied_pushes_reset_the_remount_bound(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+
+    for round in 0..6 {
+        state.update(cx, |state, cx| {
+            state.apply_pushed_update(unfit_push().update, cx)
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            state.apply_pushed_update(
+                Update::Patches(vec![Patch::SetProps(LABEL, text(format!("round {round}")))]),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+    }
+    assert_eq!(failure(&state, cx), None);
+    assert_eq!(mounts(&backend), 6, "every desync remounted and recovered");
+}
+
+/// Finding 9: typing pending in one view of an extension is sent before a click in another
+/// view of the same extension (another surface, another window).
+#[gpui::test]
+async fn test_typing_in_one_view_precedes_a_click_in_another(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let typing_state = new_state(&backend, cx);
+    let clicking_state = new_state(&backend, cx);
+    let (typing_view, typing_cx) = open_view(&typing_state, cx);
+    let editor = typing_view.read_with(typing_cx, |view, _| view.inputs[&INPUT].editor.clone());
+    typing_cx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    typing_cx.run_until_parked();
+    typing_cx.simulate_input("abc");
+    let (clicking_view, clicking_cx) = open_view(&clicking_state, cx);
+    backend.take_calls();
+
+    clicking_view.update(clicking_cx, |view, cx| {
+        view.dispatch(UiEvent::Click(INCREMENT), cx)
+    });
+    // Before either queue runs, the typing is already queued: it goes out first.
+    assert_eq!(
+        typing_state.read_with(clicking_cx, |state, _| state.queued_events()),
+        [UiEvent::InputChanged(INPUT, "abc".into())]
+    );
+    clicking_cx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [
+            UiEvent::InputChanged(INPUT, "abc".into()),
+            UiEvent::Click(INCREMENT)
+        ]
+    );
+}
+
+/// Finding 10: a remount that gives the input a new id keeps the user's unsent typing and
+/// focus, and sends the typing under the new id.
+#[gpui::test]
+async fn test_typing_survives_a_remount_that_renumbers_the_input(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let editor = view.read_with(vcx, |view, _| view.inputs[&INPUT].editor.clone());
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("abc");
+    backend.take_calls();
+
+    const RENUMBERED: NodeId = 31;
+    backend.renumbered_input.set(Some(RENUMBERED));
+    state.update(vcx, |state, cx| state.mount(cx));
+    vcx.run_until_parked();
+
+    let editor = view.read_with(vcx, |view, _| view.inputs[&RENUMBERED].editor.clone());
+    assert_eq!(editor.read_with(vcx, |editor, cx| editor.text(cx)), "abc");
+    assert_eq!(focused(&view, vcx), Some(RENUMBERED));
+    assert_eq!(
+        backend.take_calls(),
+        [
+            Call::Mount,
+            Call::Event(UiEvent::InputChanged(RENUMBERED, "abc".into()))
+        ]
+    );
+    vcx.executor().advance_clock(TYPING_DEBOUNCE);
+    vcx.run_until_parked();
+    assert_eq!(backend.calls(), [], "nothing is sent twice");
+}
+
+// (c) Names, titles and status item order.
+
+fn panel_surface(id: &str, title: &str) -> ui_ext::Surface {
+    ui_ext::Surface {
+        id: id.into(),
+        title: title.into(),
+        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
+            position: ui_ext::DockPosition::Left,
+            icon: "hash".into(),
+            default_size: 300,
+        }),
+    }
+}
+
+/// Every panel surface gets a type slot of its own, so its `persistent_name` and `panel_key`
+/// (sizes, the restored open panel) are its own: `fyx-ui:<extension>/<surface>`. The same surface
+/// keeps its slot for the process (a reload does not take another), and titles are interned
+/// rather than leaked per load.
+#[test]
+fn test_panels_get_names_of_their_own() {
+    use workspace::Panel as _;
+    let first = crate::SurfaceInfo::new("names-test", &panel_surface("a", "Alpha"), 100);
+    let second = crate::SurfaceInfo::new("names-test", &panel_surface("b", "Beta"), 101);
+    let status = crate::SurfaceInfo::new(
+        "names-test",
+        &ui_ext::Surface {
+            id: "s".into(),
+            title: "Status".into(),
+            kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+                side: ui_ext::StatusBarSide::Right,
+                priority: 0,
+            }),
+        },
+        102,
+    );
+    let (first_slot, second_slot) = (first.slot.expect("a slot"), second.slot.expect("a slot"));
+    assert_ne!(first_slot, second_slot);
+    assert_eq!(status.slot, None, "status items are not dock panels");
+    assert_eq!(
+        crate::panel::slot_name(first_slot),
+        Some("fyx-ui:names-test/a")
+    );
+    assert_eq!(
+        crate::panel::slot_name(second_slot),
+        Some("fyx-ui:names-test/b")
+    );
+    assert_eq!(
+        <crate::ExtensionPanel<{ crate::SHARED_SLOT }>>::persistent_name(),
+        "Extension Panel",
+        "panels past the slots share one name"
+    );
+
+    let reloaded = crate::SurfaceInfo::new("names-test", &panel_surface("a", "Alpha"), 103);
+    assert_eq!(reloaded.slot, Some(first_slot));
+    assert!(
+        std::ptr::eq(reloaded.title, first.title),
+        "the title is interned"
+    );
+}
+
+#[gpui::test]
+async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (_, vcx) = open_view(&state, cx);
+    for (side, expected) in [
+        (ui_ext::StatusBarSide::Left, [10, 5, 5, 1]),
+        (ui_ext::StatusBarSide::Right, [1, 5, 5, 10]),
+    ] {
+        let group = vcx.update(|_, cx| cx.new(|_| crate::ExtensionStatusGroup::new(side)));
+        for priority in [5, 10, 1, 5] {
+            let item = vcx.update(|window, cx| {
+                cx.new(|cx| crate::ExtensionStatusItem::new(state.clone(), window, cx))
+            });
+            group.update(vcx, |group, cx| group.add(priority, item, cx));
+        }
+        assert_eq!(
+            group.read_with(vcx, |group, _| group.priorities()),
+            expected,
+            "higher priority sits closer to the {side:?} edge"
+        );
+    }
+}
+
+/// The extensions page shows a loaded UI extension's capabilities, from the surfaces it declared.
+#[gpui::test]
+async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+    let panel = panel_surface("main", "Main");
+    let status = ui_ext::Surface {
+        id: "status".into(),
+        title: "Status".into(),
+        kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
+            side: ui_ext::StatusBarSide::Right,
+            priority: 0,
+        }),
+    };
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), std::slice::from_ref(&status), cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(
+            registry.read(cx).capabilities("fake", cx),
+            ["ui:status-bar"]
+        );
+    });
+    // A reload that adds a panel shows both.
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel, status], cx)
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let registry = registry.read(cx);
+        assert_eq!(
+            registry.capabilities("fake", cx),
+            ["ui:panel", "ui:status-bar"]
+        );
+        assert!(
+            registry.capabilities("not-a-ui-extension", cx).is_empty(),
+            "a regular Zed extension gets no chips"
+        );
+    });
 }

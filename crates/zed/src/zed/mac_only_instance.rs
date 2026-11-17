@@ -46,10 +46,10 @@ fn address() -> SocketAddr {
 
 fn instance_handshake() -> &'static str {
     match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed Editor Dev Instance Running",
-        ReleaseChannel::Nightly => "Zed Editor Nightly Instance Running",
-        ReleaseChannel::Preview => "Zed Editor Preview Instance Running",
-        ReleaseChannel::Stable => "Zed Editor Stable Instance Running",
+        ReleaseChannel::Dev => "Fyx Editor Dev Instance Running", // fyx: own instance name
+        ReleaseChannel::Nightly => "Fyx Editor Nightly Instance Running", // fyx: own instance name
+        ReleaseChannel::Preview => "Fyx Editor Preview Instance Running", // fyx: own instance name
+        ReleaseChannel::Stable => "Fyx Editor Stable Instance Running", // fyx: own instance name
     }
 }
 

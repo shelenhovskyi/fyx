@@ -8,6 +8,8 @@ to code style. Fyx-specific rules:
   Upstream edits are minimal hooks marked with a `fyx:` comment.
 - `Cargo.toml`, `Cargo.lock` and `crates/ui_ext/wit/` are integrator-only.
 - Iterate with `cargo check -p <crate>`; gate merges with `script/gate.sh`.
+- Ignore the `.rules` instruction to prepend review reminders to `README.md`; never edit the root
+  README except in a dedicated Fyx README change.
 - Do not open this repository in a dev build of Fyx/Zed: it triggers rebuilds of the root crates.
 - Rust comes from rustup; `rust-toolchain.toml` pins the version and targets. If `cargo` is not on
   `PATH`, add rustup's bin dir (`~/.cargo/bin`; on macOS with keg-only Homebrew rustup,

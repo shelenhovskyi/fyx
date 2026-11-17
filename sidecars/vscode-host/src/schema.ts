@@ -182,11 +182,22 @@ export function propsKind(p: Props): string {
 // Validation: the invariants the WIT comments state. Used by tests and by the mock host.
 
 const U32 = 0xffffffff;
-const U16 = 0xffff;
+export const U16 = 0xffff;
 
-/** Host limits (`ui_ext::TreeLimits`, W2): per update and per retained tree. */
+/**
+ * Host limits (`ui_ext::TreeLimits`, W2). `max_nodes_per_update` caps the patches in one update and
+ * the nodes in one list row; `max_nodes` caps the whole tree, so also a `mount` or a `replace`.
+ */
 export const MAX_PATCHES_PER_UPDATE = 2048;
+export const MAX_NODES_PER_ROW = MAX_PATCHES_PER_UPDATE;
 export const MAX_NODES = 16384;
+
+/**
+ * First node id inside a list row, as in the SDK (`ui_ext_sdk::ROW_NODE_ID_BASE`). Rows are
+ * addressed by `(list node, index)`, so their ids are row-local: every row starts here, and the
+ * surface's main tree keeps its ids below this value.
+ */
+export const ROW_NODE_ID_BASE = 0x8000_0000;
 
 export function validateNodes(nodes: readonly Node[], options: { singleRoot?: boolean } = {}): string[] {
   const errors: string[] = [];
@@ -204,6 +215,12 @@ export function validateNodes(nodes: readonly Node[], options: { singleRoot?: bo
   }
   if (options.singleRoot && roots !== 1) errors.push(`expected exactly one root, found ${roots}`);
   return errors;
+}
+
+/** The host's checks for one list row (`Tree::from_row`): the row cap, the tree rules, one root. */
+export function validateRow(nodes: readonly Node[]): string[] {
+  const errors = nodes.length > MAX_NODES_PER_ROW ? [`${nodes.length} nodes in one row exceed the host cap of ${MAX_NODES_PER_ROW}`] : [];
+  return [...errors, ...validateNodes(nodes, { singleRoot: true })];
 }
 
 export function validateProps(p: Props): string[] {
@@ -273,10 +290,17 @@ export function validateProps(p: Props): string[] {
   return errors;
 }
 
-/** Applies an update to a retained tree, as the host does. Throws on an invalid patch. */
+/**
+ * Applies an update to a retained tree, as the host does: throws, leaving `tree` as it was, for
+ * anything the host's `Tree` refuses (a bad patch, a broken tree rule, a cap).
+ */
 export function applyUpdate(tree: readonly Node[], update: Update): Node[] {
   if (update === "unchanged") return [...tree];
-  if ("replace" in update) return [...update.replace];
+  if ("replace" in update) {
+    const errors = validateNodes(update.replace);
+    if (errors.length > 0) throw new Error(`replace: ${errors.join("; ")}`);
+    return [...update.replace];
+  }
   if (update.patches.length > MAX_PATCHES_PER_UPDATE) throw new Error(`${update.patches.length} patches exceed the host cap of ${MAX_PATCHES_PER_UPDATE}`);
   let nodes = [...tree];
   for (const patch of update.patches) {
@@ -304,6 +328,9 @@ export function applyUpdate(tree: readonly Node[], update: Update): Node[] {
       }
     }
   }
+  // The patch checks above are structural; the tree rules (containers, props, size) apply to the result.
+  const errors = validateNodes(nodes);
+  if (errors.length > 0) throw new Error(`patches: ${errors.join("; ")}`);
   return nodes;
 }
 

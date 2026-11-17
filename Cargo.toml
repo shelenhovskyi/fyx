@@ -6,7 +6,7 @@ members = [
     "crates/action_log",
     "crates/activity_indicator",
     "crates/agent",
-    "crates/agent_review",
+    "crates/agent_review", # fyx
     "crates/agent_servers",
     "crates/agent_settings",
     "crates/agent_skills",
@@ -228,9 +228,9 @@ members = [
     "crates/title_bar",
     "crates/toolchain_selector",
     "crates/ui",
-    "crates/ui_ext",
-    "crates/ui_ext_host",
-    "crates/ui_ext_sdk",
+    "crates/ui_ext", # fyx
+    "crates/ui_ext_host", # fyx
+    "crates/ui_ext_sdk", # fyx
     "crates/ui_input",
     "crates/ui_macros",
     "crates/ui_prompt",
@@ -296,7 +296,7 @@ acp_tools = { path = "crates/acp_tools" }
 action_log = { path = "crates/action_log" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent = { path = "crates/agent" }
-agent_review = { path = "crates/agent_review" }
+agent_review = { path = "crates/agent_review" } # fyx
 agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
 agent_skills = { path = "crates/agent_skills" }
@@ -508,9 +508,9 @@ time_format = { path = "crates/time_format" }
 title_bar = { path = "crates/title_bar" }
 toolchain_selector = { path = "crates/toolchain_selector" }
 ui = { path = "crates/ui" }
-ui_ext = { path = "crates/ui_ext" }
-ui_ext_host = { path = "crates/ui_ext_host" }
-ui_ext_sdk = { path = "crates/ui_ext_sdk" }
+ui_ext = { path = "crates/ui_ext" } # fyx
+ui_ext_host = { path = "crates/ui_ext_host" } # fyx
+ui_ext_sdk = { path = "crates/ui_ext_sdk" } # fyx
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }

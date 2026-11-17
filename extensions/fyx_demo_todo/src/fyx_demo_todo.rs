@@ -426,6 +426,7 @@ impl Extension for TodoPanel {
 
     fn handle_event(&mut self, surface_id: &str, event: UiEvent) -> Result<Update, String> {
         check_surface(surface_id)?;
+        self.tree.apply_event(&event);
         let Some(nodes) = &self.nodes else {
             return Err(TreeError::NotMounted.into());
         };
@@ -446,8 +447,6 @@ impl Extension for TodoPanel {
                 if value == self.query {
                     return Ok(Update::Unchanged);
                 }
-                self.tree
-                    .set_props_from_host(filter, filter_input(&value))?;
                 self.update_rows(|panel| {
                     panel.query = value;
                     panel.refilter();

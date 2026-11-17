@@ -163,7 +163,8 @@ interface types {
 interface host {
     use types.{update};
 
-    /// Extension-initiated update (timers, background work). The host coalesces pushes and
+    /// Extension-initiated update, during a host call only (for example to update another surface);
+    /// timers need 0.2 `request-tick`, see tasks/wit-0.2.md item 2. The host coalesces pushes and
     /// applies them on the next frame; it never calls back into the extension while rendering.
     push-update: func(surface-id: string, update: update);
 

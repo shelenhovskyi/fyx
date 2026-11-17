@@ -9,7 +9,7 @@
 
 import type { HostContext } from "../context.ts";
 import { NotImplementedInFyx, notSupported } from "../coverage.ts";
-import { node, props, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
+import { node, props, ROW_NODE_ID_BASE, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
 import { EventEmitter, QuickPickItemKind } from "../shim/types.ts";
 import { splitCodicons, type SurfaceModel } from "./surfaces.ts";
 
@@ -22,8 +22,6 @@ const BUTTON_BASE = 100;
 const MAX_BUTTONS = 800;
 const LIST_BASE = 1000;
 const ROW_HEIGHT = 24;
-const ROW_ID_BASE = 1_000_000;
-const ROW_ID_STRIDE = 8;
 
 let serial = 0;
 
@@ -269,7 +267,7 @@ export class QuickPickImpl<T extends QuickPickItem> extends QuickInputBase {
     if (listNode !== this.listId) return [];
     return this.filtered.slice(start, start + count).map((item, k) => {
       const index = start + k;
-      const base = ROW_ID_BASE + index * ROW_ID_STRIDE;
+      const base = ROW_NODE_ID_BASE;
       const nodes: Node[] = [node(base, null, props.flex({ direction: "row", gap: 6, align: "center" }))];
       if (item.kind === QuickPickItemKind.Separator) {
         nodes.push(node(base + 1, base, props.text(item.label, { color: "text-muted", bold: true })));

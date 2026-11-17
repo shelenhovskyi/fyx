@@ -95,7 +95,7 @@ get by clicking that section's button right after the first mount. They all star
 | Section | Contents (in order) | Nodes, from a fresh mount |
 |---|---|---|
 | Layout | heading `Flex layouts`; row (gap 4, padding 4, bg `surface`) of 3 swatches `A` `B` `C`; column (gap 8, padding 8, bg `elevated-surface`) with `First`, `Second`; 4 columns (padding 4, bg `surface`) with align `start`/`center`/`end`/`stretch`, each holding a swatch `align <name>`; row (gap 4) `fixed` swatch + grow row (padding 4, bg `border`) `grow` + `fixed` swatch; one row (padding 4) per colour token as background, holding the token name. A swatch is a row flex (padding 4, bg `elevated-surface`) with one text. | 15–68 (first mount) |
-| Text | heading `Text`; caption; `no colour (the default)`; one text per token, coloured with it and naming it (all 9: `text`, `text-muted`, `text-accent`, `error`, `warning`, `success`, `border`, `surface`, `elevated-surface`); caption; `bold`; `monospace`; `bold monospace` | 69–85 |
+| Text | heading `Text`; caption; `no colour (the default)`; one text per text token, coloured with it and naming it (`text`, `text-muted`, `text-accent`, `error`, `warning`, `success`, `border`); then `surface` and `elevated-surface`, which are invisible as text colour by design, each as a row (padding 4, bg the token) holding a default-colour text `<token> (background)`; caption; `bold`; `monospace`; `bold monospace` | 69–87 |
 | Buttons | heading; three groups, each a caption plus a row (gap 4, align center) of 4 buttons: **Styles** `Default`/`Filled`/`Subtle`/`Danger` (73–76); **Disabled**, the same four disabled (79–82); **With icon** `Add` (`plus`, filled), `Search` (`magnifying_glass`, default), `Delete` (`trash`, danger), icon-only (empty label, `settings`, subtle) (85–88); then text `Last clicked: none` (muted) (89) | 69–89 |
 | Input | heading; caption; input (value `""`, placeholder `Type and press Enter`) (72); text `Submitted: nothing yet` (muted) (73) | 69–73 |
 | List | heading `Virtualized list`; caption; text `Selected: none` (muted) (72); list (`row-count` 1000, `row-height` 24) (73) | 69–73 |
@@ -112,7 +112,7 @@ switching (above). There is never a `replace`.
 | Event | Result |
 |---|---|
 | `click(<Buttons section button>)` | `set-props` on `Last clicked` (89): `Last clicked: <name>`. Names are the labels; the icon-only one is `Icon only (settings)`. A click on a **disabled** button reads `Last clicked: <name> (disabled: the host should not have sent this)`, so a host bug shows on screen. Repeating the same click returns `unchanged`. |
-| `input-changed(<input>, v)` | `unchanged`. The value is recorded with `set_props_from_host` (no echo), so it survives leaving and re-showing the section. |
+| `input-changed(<input>, v)` | `unchanged`. The value is recorded with `SurfaceTree::apply_event`, as the host records it (no echo), so it survives leaving and re-showing the section. |
 | `input-submitted(<input>, v)` | one `set-props` on `Submitted` (73): `Submitted: v`, or `Submitted: (empty)` for `""`. The input itself is **not** patched: its text stays the user's. |
 | `row-click(<list>, i)`, `i < 1000` | one `set-props` on `Selected` (72): `Selected: Row {i + 1}`, plus a **push** to `gallery-status` (below). The same row again returns `unchanged` and pushes nothing. |
 | `row-click(<list>, i ≥ 1000)` | `unchanged` |
@@ -152,8 +152,8 @@ selection. `handle-event` on `gallery-status` returns `unchanged` (error before 
 
 ## Notes for W3
 
-- **What to look at, section by section:** Layout (gap/padding/align/grow/backgrounds), Text (9
-  token colours, bold, monospace), Buttons (4 styles, disabled, start icon, icon-only
+- **What to look at, section by section:** Layout (gap/padding/align/grow/backgrounds), Text (7
+  text colours, the 2 surface tokens as backgrounds, bold, monospace), Buttons (4 styles, disabled, start icon, icon-only
   `IconButton`), Input (submit echo, no per-keystroke echo), List (1,000 rows, scrolling, row
   click, status item update), Table (header plus equal-width cells), Icons (12 names plus fallback),
   Markdown, Diff (the placeholder, with and without a language).
@@ -175,8 +175,9 @@ does.
   switch patch sequence (69–73), rows 998–999, row click, unknown surface.
 - `every_section_shows_and_patches_cleanly`: all 72 ordered section pairs. Checks the patch
   prefix and that one section stays under 14. Over all sections, all nine primitive kinds appear.
-- `sections_cover_their_primitives`: the kinds per section; all 9 tokens as text colour and as
-  background.
+- `sections_cover_their_primitives`: the kinds per section; the 7 text tokens as text colour and
+  `surface`/`elevated-surface` as backgrounds with default-colour labels in Text; all 9 tokens as
+  background in Layout.
 - `buttons_report_the_last_click`, `input_echoes_only_on_submit`,
   `row_click_updates_the_label_and_the_status_item`, `table_rows_fill_every_column`,
   `list_rows_only_for_the_shown_list`, `remount_keeps_the_shown_section_with_new_ids`.

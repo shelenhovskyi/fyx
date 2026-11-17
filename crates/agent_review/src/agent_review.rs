@@ -7,44 +7,126 @@
 
 mod proposed_edit;
 mod review_pane;
+mod review_rules;
+// dev-only: never compiled into release builds unless the `review-script` feature asks for it, because a
+// script can approve agent edits the user never saw.
+#[cfg(any(debug_assertions, feature = "review-script"))]
 mod script_driver;
 
-use std::{ops::Range, rc::Rc};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    ops::Range,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use acp_thread::{
-    AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ToolCallContent,
+    AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ThreadStatus,
+    ToolCallContent,
     fyx_review::{AgentWrite, AgentWriteGate, AgentWriteOutcome, set_agent_write_gate},
 };
 use action_log::ActionLog;
 use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::{Context as _, Result, anyhow};
+use fs::Fs;
 use futures::channel::oneshot;
+use gpui::Action as _;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity,
 };
 use language::BufferEditSource;
-use project::Project;
+use project::{PathChange, Project, trusted_worktrees::TrustedWorktrees};
+use settings::{RegisterSetting, Settings, SettingsStore};
+use ui::{ContextMenu, IconPosition};
+use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
-    AcceptAllHunks, AcceptHunk, CommentHunk, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks,
-    RejectHunk, ReviewPane, SubmitReview, ToggleReviewMode,
+    AcceptAllHunks, AcceptHunk, AcceptTurn, CommentHunk, NextHunk, OpenReviews, PreviousHunk,
+    RejectAllHunks, RejectHunk, RejectTurn, ReviewPane, SubmitReview, ToggleReviewMode,
 };
+pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
 
-/// Review mode starts on when this variable is set to anything but `0`; `agent_review: toggle review
-/// mode` switches it at runtime.
+/// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
 const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
 
-pub fn init(cx: &mut App) {
-    let enabled = std::env::var_os(REVIEW_MODE_VAR).is_some_and(|value| value != "0");
-    let review = cx.new(|_| AgentReview {
+/// `agent_review` in settings (schema in `settings_content::AgentReviewSettingsContent`, default in
+/// `assets/settings/fyx.json`).
+#[derive(Clone, Debug, RegisterSetting)]
+pub struct AgentReviewSettings {
+    pub enabled: bool,
+}
+
+impl Settings for AgentReviewSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            enabled: content
+                .agent_review
+                .as_ref()
+                .and_then(|review| review.enabled)
+                .unwrap_or(false),
+        }
+    }
+}
+
+fn review_mode_override() -> Option<bool> {
+    std::env::var_os(REVIEW_MODE_VAR).map(|value| value != "0")
+}
+
+/// Whether agent edits are reviewed: the environment override, else the setting.
+pub fn review_mode(cx: &App) -> bool {
+    review_mode_override().unwrap_or_else(|| {
+        cx.has_global::<SettingsStore>() && AgentReviewSettings::get_global(cx).enabled
+    })
+}
+
+/// Writes `agent_review.enabled` to the user's settings; review mode follows the settings change.
+pub fn set_review_mode_setting(enabled: bool, cx: &App) {
+    if review_mode_override().is_some() {
+        log::warn!("fyx: {REVIEW_MODE_VAR} is set and overrides the agent_review.enabled setting");
+    }
+    settings::update_settings_file(<dyn Fs>::global(cx), cx, move |settings, _| {
+        settings.agent_review.get_or_insert_default().enabled = Some(enabled);
+    });
+}
+
+/// The agent panel's options-menu toggle for review mode.
+pub fn review_mode_menu_entry(menu: ContextMenu, cx: &App) -> ContextMenu {
+    let enabled = review_mode(cx);
+    menu.toggleable_entry_disabled_when(
+        "Review Agent Edits",
         enabled,
+        review_mode_override().is_some(),
+        IconPosition::Start,
+        Some(ToggleReviewMode.boxed_clone()),
+        move |_, cx| set_review_mode_setting(!enabled, cx),
+    )
+}
+
+pub fn init(cx: &mut App) {
+    let review = cx.new(|cx| AgentReview {
+        enabled: review_mode(cx),
         ..AgentReview::default()
     });
     cx.set_global(GlobalAgentReview(review.clone()));
+    cx.observe_global::<SettingsStore>({
+        let review = review.downgrade();
+        move |cx| {
+            let enabled = review_mode(cx);
+            if let Some(review) = review.upgrade()
+                && review.read(cx).is_enabled() != enabled
+            {
+                review.update(cx, |review, cx| review.set_enabled(enabled, cx));
+            }
+        }
+    })
+    .detach();
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
-    cx.observe_new(|_: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
+    cx.observe_new(|thread: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
+        let project = thread.project().clone();
+        reload_rules(&project, cx);
+        cx.subscribe(&project, on_project_event).detach();
         cx.on_release(|thread, cx| {
             if let Some(review) = AgentReview::global(cx) {
                 let session_id = thread.session_id().clone();
@@ -55,8 +137,12 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     review_pane::init(cx);
+    #[cfg(any(debug_assertions, feature = "review-script"))]
     script_driver::init(cx); // dev-only, off unless FYX_AGENT_REVIEW_SCRIPT is set
 }
+
+/// Whether this build contains the dev-only review script driver.
+pub const SCRIPT_DRIVER_COMPILED: bool = cfg!(any(debug_assertions, feature = "review-script"));
 
 struct GlobalAgentReview(Entity<AgentReview>);
 
@@ -64,6 +150,19 @@ impl Global for GlobalAgentReview {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReviewId(u64);
+
+/// One agent turn of one session: every edit the agent proposes until its turn stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TurnId(u64);
+
+/// A file already decided in a turn, for the turn's summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnEntry {
+    pub path: PathBuf,
+    pub resolution: Resolution,
+    /// The project rule that decided the file, if one did.
+    pub rule: Option<RuleMatch>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewSource {
@@ -88,6 +187,11 @@ pub enum AgentReviewEvent {
     Updated(ReviewId),
     Resolved(ReviewId),
     Closed(ReviewId),
+    /// The agent's turn stopped; no more edits will join it.
+    TurnEnded(TurnId),
+    /// Files changed on disk during the turn without going through review (see
+    /// [`AgentReview::unreviewed_changes`]).
+    UnreviewedChanges(TurnId),
 }
 
 type PermissionResponder = Box<dyn FnOnce(PermissionVerdict, ProposedEdit, &mut App)>;
@@ -99,6 +203,8 @@ enum Responder {
 
 pub struct Review {
     id: ReviewId,
+    turn: TurnId,
+    rule: Option<RuleMatch>,
     session_id: acp_v2::SessionId,
     source: ReviewSource,
     edit: ProposedEdit,
@@ -112,6 +218,15 @@ impl Review {
 
     pub fn session_id(&self) -> &acp_v2::SessionId {
         &self.session_id
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// The project rule that applies to the file (`always_ask` is the only kind that opens a review).
+    pub fn rule(&self) -> Option<&RuleMatch> {
+        self.rule.as_ref()
     }
 
     pub fn source(&self) -> ReviewSource {
@@ -134,7 +249,21 @@ pub struct AgentReview {
     enabled: bool,
     reviews: Vec<Review>,
     next_id: u64,
+    turns: HashMap<acp_v2::SessionId, TurnId>,
+    next_turn: u64,
+    /// "Accept all in turn" / "reject all in turn": also decides edits that arrive later in the turn.
+    turn_decisions: HashMap<TurnId, HunkDecision>,
+    turn_history: HashMap<TurnId, Vec<TurnEntry>>,
+    /// Files that changed on disk during a turn but never went through its review.
+    turn_unreviewed: HashMap<TurnId, BTreeSet<PathBuf>>,
+    /// Ended turns whose summaries are kept for open panes, oldest first.
+    ended_turns: VecDeque<TurnId>,
+    /// `.fyx/review.toml` of each worktree that has one.
+    rules: Vec<ReviewRules>,
 }
+
+/// How many ended turns keep their summary (decided files, unreviewed changes).
+const ENDED_TURNS_KEPT: usize = 16;
 
 impl EventEmitter<AgentReviewEvent> for AgentReview {}
 
@@ -161,6 +290,143 @@ impl AgentReview {
 
     pub fn review(&self, id: ReviewId) -> Option<&Review> {
         self.reviews.iter().find(|review| review.id == id)
+    }
+
+    /// Reviews of `turn` still waiting for a decision, oldest first.
+    pub fn open_reviews_in_turn(&self, turn: TurnId) -> impl Iterator<Item = &Review> {
+        self.reviews
+            .iter()
+            .filter(move |review| review.turn == turn && !review.is_submitted())
+    }
+
+    pub fn turn_history(&self, turn: TurnId) -> &[TurnEntry] {
+        self.turn_history.get(&turn).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn turn_decision(&self, turn: TurnId) -> Option<HunkDecision> {
+        self.turn_decisions.get(&turn).copied()
+    }
+
+    /// The session's current turn, started by its first reviewed edit.
+    fn turn_for(&mut self, session_id: &acp_v2::SessionId) -> TurnId {
+        let next_turn = &mut self.next_turn;
+        *self.turns.entry(session_id.clone()).or_insert_with(|| {
+            let turn = TurnId(*next_turn);
+            *next_turn += 1;
+            turn
+        })
+    }
+
+    /// Starts the session's turn if none is running (the agent began generating).
+    pub fn begin_turn(&mut self, session_id: &acp_v2::SessionId) -> TurnId {
+        self.turn_for(session_id)
+    }
+
+    /// Ends the session's turn: later edits start a new one. The turn's summary stays for its pane.
+    pub fn end_turn(&mut self, session_id: &acp_v2::SessionId, cx: &mut Context<Self>) {
+        if let Some(turn) = self.turns.remove(session_id) {
+            self.turn_decisions.remove(&turn);
+            self.ended_turns.push_back(turn);
+            while self.ended_turns.len() > ENDED_TURNS_KEPT {
+                if let Some(old) = self.ended_turns.pop_front() {
+                    self.turn_history.remove(&old);
+                    self.turn_unreviewed.remove(&old);
+                }
+            }
+            cx.emit(AgentReviewEvent::TurnEnded(turn));
+            cx.notify();
+        }
+    }
+
+    /// Files that changed on disk during `turn` without going through its review: the agent wrote
+    /// them another way (a shell command, its own file tools). Observed only; nothing is blocked.
+    pub fn unreviewed_changes(&self, turn: TurnId) -> impl Iterator<Item = &PathBuf> {
+        self.turn_unreviewed.get(&turn).into_iter().flatten()
+    }
+
+    /// Records files that changed on disk while the session's turn runs. Files the turn reviewed are
+    /// skipped: their writes are the reviewed ones.
+    pub fn note_changed_paths(
+        &mut self,
+        session_id: &acp_v2::SessionId,
+        paths: impl IntoIterator<Item = PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(turn) = self.turns.get(session_id).copied() else {
+            return;
+        };
+        let reviewed = self
+            .turn_history(turn)
+            .iter()
+            .map(|entry| entry.path.clone())
+            .chain(
+                self.reviews
+                    .iter()
+                    .filter(|review| review.turn == turn)
+                    .map(|review| review.edit.abs_path().to_path_buf()),
+            )
+            .collect::<HashSet<_>>();
+        let unreviewed = self.turn_unreviewed.entry(turn).or_default();
+        let mut added = false;
+        for path in paths {
+            if !reviewed.contains(&path) {
+                added |= unreviewed.insert(path);
+            }
+        }
+        if added {
+            cx.emit(AgentReviewEvent::UnreviewedChanges(turn));
+            cx.notify();
+        }
+    }
+
+    /// Accepts or rejects every open review of `turn`, and every edit that joins the turn later.
+    pub fn decide_turn(
+        &mut self,
+        turn: TurnId,
+        decision: HunkDecision,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            decision != HunkDecision::Pending,
+            "a turn is accepted or rejected, not reset"
+        );
+        self.turn_decisions.insert(turn, decision);
+        let ids = self
+            .open_reviews_in_turn(turn)
+            .map(|review| review.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.open_review_mut(id)?.edit.decide_pending(decision);
+            self.submit(id, cx)?;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, turn: TurnId, edit: &ProposedEdit, rule: Option<RuleMatch>) {
+        self.turn_history.entry(turn).or_default().push(TurnEntry {
+            path: edit.abs_path().to_path_buf(),
+            resolution: edit.resolution(),
+            rule,
+        });
+    }
+
+    /// The project rule for `abs_path`, from the innermost worktree with rules.
+    pub fn rule_for(&self, abs_path: &Path) -> Option<RuleMatch> {
+        self.rules
+            .iter()
+            .filter(|rules| abs_path.starts_with(rules.root()))
+            .max_by_key(|rules| rules.root().components().count())?
+            .evaluate(abs_path)
+    }
+
+    /// Replaces the rules of the worktree at `root` (`None`: it has no rules file).
+    pub fn set_rules(&mut self, root: PathBuf, rules: Option<ReviewRules>, cx: &mut Context<Self>) {
+        self.rules.retain(|existing| existing.root() != root);
+        self.rules.extend(rules);
+        cx.notify();
     }
 
     pub fn set_decision(
@@ -215,9 +481,13 @@ impl AgentReview {
             .responder
             .take()
             .context("review was already submitted")?;
+        let turn = review.turn;
+        let edit = review.edit.clone();
+        let rule = review.rule.clone();
+        self.record(turn, &edit, rule);
         match responder {
             Responder::Write(sender) => {
-                let outcome = write_outcome(&review.edit)?;
+                let outcome = write_outcome(&edit)?;
                 if sender.send(outcome).is_err() {
                     log::debug!("agent write finished before its review was submitted");
                 }
@@ -226,8 +496,7 @@ impl AgentReview {
                 cx.emit(AgentReviewEvent::Closed(id));
             }
             Responder::Permission(respond) => {
-                let verdict = permission_verdict(review.edit.resolution());
-                let edit = review.edit.clone();
+                let verdict = permission_verdict(edit.resolution());
                 // Answering the permission makes the thread emit an event this entity handles, so it
                 // must not run while this entity is being updated.
                 cx.defer(move |cx| respond(verdict, edit, cx));
@@ -255,6 +524,7 @@ impl AgentReview {
         for id in ids {
             self.close(id, cx);
         }
+        self.end_turn(session_id, cx);
     }
 
     /// Closes a review without a decision. A held write then fails without touching the file.
@@ -286,12 +556,16 @@ impl AgentReview {
         source: ReviewSource,
         edit: ProposedEdit,
         responder: Responder,
+        rule: Option<RuleMatch>,
         cx: &mut Context<Self>,
     ) -> ReviewId {
         let id = ReviewId(self.next_id);
         self.next_id += 1;
+        let turn = self.turn_for(&session_id);
         self.reviews.push(Review {
             id,
+            turn,
+            rule,
             session_id,
             source,
             edit,
@@ -308,9 +582,13 @@ impl AgentReview {
         request_id: PermissionRequestId,
         edit: ProposedEdit,
         respond: PermissionResponder,
+        rule: Option<RuleMatch>,
         cx: &mut Context<Self>,
     ) -> Option<ReviewId> {
-        if !self.enabled || edit.hunks().is_empty() {
+        let rule_kind = rule.as_ref().map(|rule| rule.kind);
+        // `deny` and `always_ask` only make review stricter, so they apply in review mode or not.
+        let strict_rule = matches!(rule_kind, Some(RuleKind::Deny | RuleKind::AlwaysAsk));
+        if (!self.enabled && !strict_rule) || edit.hunks().is_empty() {
             return None;
         }
         // A newer preview of the same file supersedes allowed ones whose write never came.
@@ -328,11 +606,28 @@ impl AgentReview {
         for id in superseded {
             self.close(id, cx);
         }
+        let turn = self.turn_for(&session_id);
+        let decision = match rule_kind {
+            Some(RuleKind::Deny) => Some(HunkDecision::Rejected),
+            Some(RuleKind::AutoAccept) => Some(HunkDecision::Accepted),
+            Some(RuleKind::AlwaysAsk) => None,
+            None => self.turn_decision(turn),
+        };
+        if let Some(decision) = decision {
+            let mut edit = edit;
+            edit.decide_pending(decision);
+            self.record(turn, &edit, rule);
+            let verdict = permission_verdict(edit.resolution());
+            cx.defer(move |cx| respond(verdict, edit, cx));
+            cx.notify();
+            return None;
+        }
         Some(self.insert(
             session_id,
             ReviewSource::Permission(request_id),
             edit,
             Responder::Permission(respond),
+            rule,
             cx,
         ))
     }
@@ -357,13 +652,32 @@ impl AgentReview {
         write: AgentWrite,
         cx: &mut Context<Self>,
     ) -> Task<Result<AgentWriteOutcome>> {
-        if !self.enabled {
+        let rule = self.rule_for(&write.abs_path);
+        let rule_kind = rule.as_ref().map(|rule| rule.kind);
+        let strict_rule = matches!(rule_kind, Some(RuleKind::Deny | RuleKind::AlwaysAsk));
+        if !self.enabled && !strict_rule {
             return Task::ready(Ok(AgentWriteOutcome {
                 content: Some(write.new_text),
                 feedback: None,
             }));
         }
         let mut edit = ProposedEdit::new(write.abs_path, write.old_text, write.new_text);
+        if let Some(rule) = rule.clone().filter(|rule| rule.kind == RuleKind::Deny) {
+            edit.decide_all(HunkDecision::Rejected);
+            let turn = self.turn_for(&write.session_id);
+            let feedback = format!(
+                "The project's review rules deny agent edits to {} ({}). The file is unchanged; do \
+                 not retry this edit, ask the user instead.",
+                edit.abs_path().display(),
+                rule.describe()
+            );
+            self.record(turn, &edit, Some(rule));
+            cx.notify();
+            return Task::ready(Ok(AgentWriteOutcome {
+                content: None,
+                feedback: Some(feedback),
+            }));
+        }
         let previews = self
             .reviews
             .iter()
@@ -382,7 +696,19 @@ impl AgentReview {
             self.close(*id, cx);
         }
 
+        let turn = self.turn_for(&write.session_id);
+        let decision = match rule_kind {
+            Some(RuleKind::AutoAccept) => Some(HunkDecision::Accepted),
+            // `always_ask` overrides "accept all in turn".
+            Some(RuleKind::AlwaysAsk) => None,
+            _ => self.turn_decision(turn),
+        };
+        if let Some(decision) = decision {
+            edit.decide_pending(decision);
+        }
         if !edit.resolution().is_pending() {
+            self.record(turn, &edit, rule);
+            cx.notify();
             return Task::ready(write_outcome(&edit));
         }
         let (sender, receiver) = oneshot::channel();
@@ -391,6 +717,7 @@ impl AgentReview {
             ReviewSource::Write,
             edit,
             Responder::Write(sender),
+            rule,
             cx,
         );
         cx.spawn(async move |_, _| {
@@ -441,22 +768,86 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
     };
     match event {
         AcpThreadEvent::ToolAuthorizationRequested(request_id) => {
-            if !review.read(cx).is_enabled() {
-                return;
-            }
             let Some((edit, respond)) = permission_preview(thread, *request_id, cx) else {
                 return;
             };
             let session_id = thread.session_id().clone();
             review.update(cx, |review, cx| {
-                review.open_permission_preview(session_id, *request_id, edit, respond, cx);
+                let rule = review.rule_for(edit.abs_path());
+                review.open_permission_preview(session_id, *request_id, edit, respond, rule, cx);
             });
         }
         AcpThreadEvent::ToolAuthorizationReceived(request_id) => {
             review.update(cx, |review, cx| review.permission_answered(*request_id, cx));
         }
+        AcpThreadEvent::StatusChanged if thread.status() == ThreadStatus::Generating => {
+            if review.read(cx).is_enabled() {
+                let session_id = thread.session_id().clone();
+                review.update(cx, |review, _| {
+                    review.begin_turn(&session_id);
+                });
+            }
+        }
+        AcpThreadEvent::Stopped { .. } | AcpThreadEvent::Error => {
+            let session_id = thread.session_id().clone();
+            review.update(cx, |review, cx| review.end_turn(&session_id, cx));
+        }
         _ => {}
     }
+}
+
+/// Files that changed on disk in the thread's project, for the turn's unreviewed changes.
+fn on_project_event(
+    thread: &mut AcpThread,
+    project: Entity<Project>,
+    event: &project::Event,
+    cx: &mut Context<AcpThread>,
+) {
+    let project::Event::WorktreeUpdatedEntries(worktree_id, changes) = event else {
+        return;
+    };
+    if changes
+        .iter()
+        .any(|(path, _, _)| path.as_unix_str() == RULES_FILE)
+    {
+        reload_rules(&project, cx);
+    }
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    if !review.read(cx).is_enabled() {
+        return;
+    }
+    let Some(worktree) = project.read(cx).worktree_for_id(*worktree_id, cx) else {
+        return;
+    };
+    let worktree = worktree.read(cx);
+    let paths = changes
+        .iter()
+        .filter(|(_, _, change)| {
+            matches!(
+                change,
+                PathChange::Added
+                    | PathChange::Updated
+                    | PathChange::AddedOrUpdated
+                    | PathChange::Removed
+            )
+        })
+        .filter(|(_, entry_id, _)| {
+            !worktree
+                .entry_for_id(*entry_id)
+                .is_some_and(|entry| entry.is_dir())
+        })
+        .filter(|(path, _, _)| !path.components().any(|component| component == ".git"))
+        .map(|(path, _, _)| worktree.absolutize(path))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return;
+    }
+    let session_id = thread.session_id().clone();
+    review.update(cx, |review, cx| {
+        review.note_changed_paths(&session_id, paths, cx)
+    });
 }
 
 /// The diff of a pending edit permission and the host's way to answer it. Only legacy (v1) diffs carry
@@ -501,12 +892,14 @@ fn permission_preview(
                 match thread_parts {
                     Ok((project, action_log)) => {
                         if let Err(error) =
-                            write_accepted_hunks(project, action_log, &edit, cx).await
+                            write_accepted_hunks(project.clone(), action_log, &edit, cx).await
                         {
-                            log::error!(
-                                "could not write the accepted hunks of {}: {error:#}",
+                            let message = format!(
+                                "Agent review: the accepted hunks of {} could not be written:                                  {error:#}. The agent's edit was rejected.",
                                 edit.abs_path().display()
                             );
+                            log::error!("{message}");
+                            cx.update(|cx| report_host_write_failure(&project, message, cx));
                         }
                     }
                     Err(error) => {
@@ -523,6 +916,87 @@ fn permission_preview(
         .detach();
     });
     Some((edit, respond))
+}
+
+struct HostWriteFailed;
+struct RulesFileInvalid;
+
+/// Shows a failed host write in the workspaces of `project`. ACP has no way to attach a message to a
+/// permission answer, so the user is the one who has to learn that approved hunks did not land.
+fn report_host_write_failure(project: &Entity<Project>, message: String, cx: &mut App) {
+    notify_project::<HostWriteFailed>(project, message, cx);
+}
+
+/// Loads `.fyx/review.toml` of every visible worktree of `project`. A file that does not parse is
+/// reported and ignored rather than half applied.
+fn reload_rules(project: &Entity<Project>, cx: &mut App) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let fs = project.read(cx).fs().clone();
+    let worktree_store = project.read(cx).worktree_store();
+    let worktrees = project.read(cx).visible_worktrees(cx).collect::<Vec<_>>();
+    for worktree in worktrees {
+        let worktree_id = worktree.read(cx).id();
+        let root = worktree.read(cx).abs_path().to_path_buf();
+        let trusted = match TrustedWorktrees::try_get_global(cx) {
+            Some(trust) => trust.update(cx, |trust, cx| {
+                trust.can_trust(&worktree_store, worktree_id, cx)
+            }),
+            None => true,
+        };
+        let rules_path = root.join(RULES_FILE);
+        let review = review.downgrade();
+        let project = project.downgrade();
+        let fs = fs.clone();
+        cx.spawn(async move |cx| {
+            let rules = match fs.load(&rules_path).await {
+                Ok(text) => match ReviewRules::parse(root.clone(), &text, trusted) {
+                    Ok(rules) => Some(rules),
+                    Err(error) => {
+                        let message = format!(
+                            "Agent review: {} is ignored: {error:#}",
+                            rules_path.display()
+                        );
+                        log::error!("{message}");
+                        cx.update(|cx| {
+                            if let Some(project) = project.upgrade() {
+                                notify_project::<RulesFileInvalid>(&project, message, cx);
+                            }
+                        });
+                        None
+                    }
+                },
+                Err(_) => None,
+            };
+            if let Err(error) = review.update(cx, |review, cx| review.set_rules(root, rules, cx)) {
+                log::debug!("review closed before its rules loaded: {error}");
+            }
+        })
+        .detach();
+    }
+}
+
+fn notify_project<T: 'static>(project: &Entity<Project>, message: String, cx: &mut App) {
+    for window in cx.windows() {
+        let Some(multi_workspace) = window.downcast::<MultiWorkspace>() else {
+            continue;
+        };
+        let result = multi_workspace.update(cx, |multi_workspace, _, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            if workspace.read(cx).project() == project {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        Toast::new(NotificationId::unique::<T>(), message.clone()),
+                        cx,
+                    )
+                });
+            }
+        });
+        if let Err(error) = result {
+            log::debug!("could not show the review failure: {error}");
+        }
+    }
 }
 
 /// Writes a preview's accepted hunks into the file, through the action log like an agent write, so
@@ -584,8 +1058,8 @@ mod tests {
 
     use super::*;
     use gpui::TestAppContext;
+    use gpui::UpdateGlobal as _;
     use language::Buffer;
-    use project::Fs as _;
 
     const OLD: &str = "one\ntwo\nthree\nfour\nfive\n";
     const NEW: &str = "ONE\ntwo\nthree\nfour\nFIVE\n";
@@ -750,7 +1224,7 @@ mod tests {
         let request_id = new_request_id();
         let id = review
             .update(cx, |review, cx| {
-                review.open_permission_preview(session(), request_id, preview, respond, cx)
+                review.open_permission_preview(session(), request_id, preview, respond, None, cx)
             })
             .unwrap();
         review.update(cx, |review, cx| {
@@ -792,7 +1266,14 @@ mod tests {
         let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
         let id = review
             .update(cx, |review, cx| {
-                review.open_permission_preview(session(), new_request_id(), preview, respond, cx)
+                review.open_permission_preview(
+                    session(),
+                    new_request_id(),
+                    preview,
+                    respond,
+                    None,
+                    cx,
+                )
             })
             .unwrap();
         review.update(cx, |review, cx| {
@@ -829,6 +1310,7 @@ mod tests {
                 request_id,
                 preview,
                 Box::new(|_, _, _| {}),
+                None,
                 cx,
             );
             review.permission_answered(request_id, cx);
@@ -858,6 +1340,447 @@ mod tests {
         assert!(locate_fragment("a\nb\nb\n", "b\n").is_err());
         assert!(locate_fragment("a\n", "z").is_err());
         assert!(locate_fragment("a\n", "").is_err());
+    }
+
+    #[gpui::test]
+    async fn turn_decision_covers_open_and_later_edits(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let first = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let second = gate_write(&review, agent_write("/p/b.txt", cx), cx);
+        let turn = review.read_with(cx, |review, _| {
+            let turns = review
+                .reviews()
+                .iter()
+                .map(|review| review.turn())
+                .collect::<Vec<_>>();
+            assert_eq!(turns.len(), 2);
+            assert_eq!(turns[0], turns[1], "edits of one turn share it");
+            turns[0]
+        });
+
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap();
+            assert_eq!(review.open_reviews_in_turn(turn).count(), 0);
+            assert_eq!(review.turn_history(turn).len(), 2);
+        });
+        assert_eq!(first.await.unwrap().content.as_deref(), Some(NEW));
+        assert_eq!(second.await.unwrap().content.as_deref(), Some(NEW));
+
+        // A later edit of the same turn is accepted without a review.
+        let opened_before = events.borrow().len();
+        let later = gate_write(&review, agent_write("/p/c.txt", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(later.content.as_deref(), Some(NEW));
+        assert!(
+            !events.borrow()[opened_before..]
+                .iter()
+                .any(|event| matches!(event, AgentReviewEvent::Opened(_)))
+        );
+        assert_eq!(
+            review.read_with(cx, |review, _| review.turn_history(turn).len()),
+            3
+        );
+
+        // The next turn asks again.
+        review.update(cx, |review, cx| review.end_turn(&session(), cx));
+        assert!(events.borrow().contains(&AgentReviewEvent::TurnEnded(turn)));
+        let next = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let next_turn = review.read_with(cx, |review, _| {
+            assert_eq!(review.reviews().len(), 1, "held for review again");
+            review.reviews()[0].turn()
+        });
+        assert_ne!(next_turn, turn);
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(next_turn, HunkDecision::Rejected, cx)
+                .unwrap()
+        });
+        assert_eq!(next.await.unwrap().content, None);
+    }
+
+    #[gpui::test]
+    async fn unreviewed_changes_are_recorded_per_turn(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        let path = |name: &str| PathBuf::from(format!("/p/{name}"));
+        review.update(cx, |review, cx| {
+            review.note_changed_paths(&session(), [path("x.txt")], cx);
+            assert!(review.turns.is_empty(), "review mode off: nothing tracked");
+            review.set_enabled(true, cx);
+            review.note_changed_paths(&session(), [path("x.txt")], cx);
+            assert!(review.turns.is_empty(), "no running turn: nothing tracked");
+        });
+
+        // a.txt goes through review, x.txt changes on disk directly.
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let turn = review.read_with(cx, |review, _| review.reviews()[0].turn());
+        review.update(cx, |review, cx| {
+            review.note_changed_paths(&session(), [path("a.txt"), path("x.txt")], cx);
+            review.note_changed_paths(&session(), [path("x.txt")], cx);
+        });
+        review.read_with(cx, |review, _| {
+            assert_eq!(
+                review.unreviewed_changes(turn).collect::<Vec<_>>(),
+                [&path("x.txt")]
+            );
+        });
+        let unreviewed_events = events
+            .borrow()
+            .iter()
+            .filter(|event| **event == AgentReviewEvent::UnreviewedChanges(turn))
+            .count();
+        assert_eq!(unreviewed_events, 1, "one event per new file");
+
+        // The summary outlives the turn for its pane.
+        let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            review.submit(id, cx).unwrap();
+            review.end_turn(&session(), cx);
+            assert_eq!(review.unreviewed_changes(turn).count(), 1);
+            assert_eq!(review.turn_history(turn).len(), 1);
+        });
+        held.await.unwrap();
+    }
+
+    #[gpui::test]
+    async fn files_written_around_review_are_noticed(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": "a\n", "sub": { "b.txt": "b\n" } }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        cx.run_until_parked();
+
+        // Nothing is tracked outside a turn.
+        fs.save(
+            Path::new(util::path!("/p/a.txt")),
+            &"changed before the turn\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        let turn = review.update(cx, |review, _| review.begin_turn(&session_id));
+        assert_eq!(
+            review.read_with(cx, |review, _| review.unreviewed_changes(turn).count()),
+            0
+        );
+
+        // The agent's shell rewrites a file during its turn.
+        fs.save(
+            Path::new(util::path!("/p/sub/b.txt")),
+            &"rewritten by sed\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        review.read_with(cx, |review, _| {
+            assert_eq!(
+                review.unreviewed_changes(turn).cloned().collect::<Vec<_>>(),
+                [PathBuf::from(util::path!("/p/sub/b.txt"))]
+            );
+        });
+        let pane_turns = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<ReviewPane>(cx)
+                .map(|pane| pane.read(cx).turn())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            pane_turns,
+            [turn],
+            "the turn's pane opens to show the change"
+        );
+        drop(thread);
+    }
+
+    fn set_test_rules(
+        review: &Entity<AgentReview>,
+        text: &str,
+        trusted: bool,
+        cx: &mut TestAppContext,
+    ) {
+        let rules = ReviewRules::parse(PathBuf::from("/p"), text, trusted).unwrap();
+        review.update(cx, |review, cx| {
+            review.set_rules(PathBuf::from("/p"), Some(rules), cx)
+        });
+    }
+
+    fn recording_responder() -> (PermissionResponder, Rc<RefCell<Vec<PermissionVerdict>>>) {
+        let verdicts = Rc::new(RefCell::new(Vec::new()));
+        let respond: PermissionResponder = Box::new({
+            let verdicts = verdicts.clone();
+            move |verdict, _, _| verdicts.borrow_mut().push(verdict)
+        });
+        (respond, verdicts)
+    }
+
+    #[gpui::test]
+    async fn deny_rule_rejects_with_a_reason_even_with_review_off(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        set_test_rules(&review, r#"deny = ["*.env"]"#, false, cx);
+
+        let mut write = agent_write("/p/config/.env", cx);
+        write.new_text = "SECRET=1\n".into();
+        let outcome = gate_write(&review, write, cx).await.unwrap();
+        assert_eq!(outcome.content, None);
+        let feedback = outcome.feedback.unwrap();
+        assert!(feedback.contains("deny = \"*.env\""), "{feedback}");
+        assert!(feedback.contains("do not retry"), "{feedback}");
+
+        let (respond, verdicts) = recording_responder();
+        let preview = ProposedEdit::new(PathBuf::from("/p/.env"), "A=1\n".into(), "A=2\n".into());
+        let rule = review.read_with(cx, |review, _| review.rule_for(preview.abs_path()));
+        let opened = review.update(cx, |review, cx| {
+            review.open_permission_preview(session(), new_request_id(), preview, respond, rule, cx)
+        });
+        assert_eq!(opened, None, "no review opens for a denied file");
+        cx.run_until_parked();
+        assert_eq!(*verdicts.borrow(), [PermissionVerdict::Deny]);
+
+        // Other files are untouched by the rule; with review off they pass through.
+        let outcome = gate_write(&review, agent_write("/p/src/main.rs", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.content.as_deref(), Some(NEW));
+    }
+
+    #[gpui::test]
+    async fn always_ask_rule_opens_a_review_regardless(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        set_test_rules(&review, r#"always_ask = ["Cargo.lock"]"#, false, cx);
+
+        // Review mode is off, yet the lock file is held.
+        let held = gate_write(&review, agent_write("/p/Cargo.lock", cx), cx);
+        let (id, turn) = review.read_with(cx, |review, _| {
+            let held = &review.reviews()[0];
+            assert_eq!(held.rule().map(|rule| rule.kind), Some(RuleKind::AlwaysAsk));
+            (held.id(), held.turn())
+        });
+
+        // "Accept all in turn" does not cover it either.
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            review.submit(id, cx).unwrap();
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap();
+        });
+        held.await.unwrap();
+        let again = gate_write(&review, agent_write("/p/Cargo.lock", cx), cx);
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_reviews_in_turn(turn).count()),
+            1,
+            "held despite the turn decision"
+        );
+        let other = gate_write(&review, agent_write("/p/src/lib.rs", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(
+            other.content.as_deref(),
+            Some(NEW),
+            "other files follow the turn"
+        );
+        let id = review.read_with(cx, |review, _| {
+            review.open_reviews_in_turn(turn).next().unwrap().id()
+        });
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        assert_eq!(again.await.unwrap().content, None);
+        let history = review.read_with(cx, |review, _| review.turn_history(turn).to_vec());
+        assert!(history.iter().any(|entry| {
+            entry
+                .rule
+                .as_ref()
+                .is_some_and(|rule| rule.kind == RuleKind::AlwaysAsk)
+        }));
+    }
+
+    #[gpui::test]
+    async fn auto_accept_rule_needs_review_mode_and_trust(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+
+        set_test_rules(&review, r#"auto_accept = ["docs/**"]"#, true, cx);
+        let outcome = gate_write(&review, agent_write("/p/docs/guide.md", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.content.as_deref(), Some(NEW));
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+        let (respond, verdicts) = recording_responder();
+        let preview = ProposedEdit::new(PathBuf::from("/p/docs/a.md"), OLD.into(), NEW.into());
+        let rule = review.read_with(cx, |review, _| review.rule_for(preview.abs_path()));
+        review.update(cx, |review, cx| {
+            review.open_permission_preview(session(), new_request_id(), preview, respond, rule, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(*verdicts.borrow(), [PermissionVerdict::Allow]);
+
+        // An untrusted worktree cannot wave edits through.
+        set_test_rules(&review, r#"auto_accept = ["docs/**"]"#, false, cx);
+        let _held = gate_write(&review, agent_write("/p/docs/guide.md", cx), cx);
+        assert_eq!(review.read_with(cx, |review, _| review.reviews().len()), 1);
+    }
+
+    #[gpui::test]
+    async fn rules_file_is_loaded_and_reloaded(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({
+                ".fyx": { "review.toml": "deny = [\"*.env\"]\n" },
+                "a.txt": "a\n",
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let _thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let kind = |name: &str, cx: &mut TestAppContext| {
+            let path = PathBuf::from(util::path!("/p")).join(name);
+            review.read_with(cx, |review, _| review.rule_for(&path).map(|rule| rule.kind))
+        };
+        assert_eq!(kind(".env", cx), Some(RuleKind::Deny));
+        assert_eq!(kind("Cargo.lock", cx), None);
+
+        fs.save(
+            Path::new(util::path!("/p/.fyx/review.toml")),
+            &"always_ask = [\"Cargo.lock\"]\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(kind(".env", cx), None);
+        assert_eq!(kind("Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
+    }
+
+    #[gpui::test]
+    async fn review_mode_follows_the_setting(cx: &mut TestAppContext) {
+        if review_mode_override().is_some() {
+            // FYX_AGENT_REVIEW in the test environment overrides the setting.
+            return;
+        }
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        assert!(
+            !review.read_with(cx, |review, _| review.is_enabled()),
+            "off by default"
+        );
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.agent_review.get_or_insert_default().enabled = Some(true);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(review.read_with(cx, |review, _| review.is_enabled()));
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.agent_review.get_or_insert_default().enabled = Some(false);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(!review.read_with(cx, |review, _| review.is_enabled()));
+    }
+
+    #[test]
+    fn script_driver_is_only_in_dev_builds() {
+        // Release builds compile the driver only when the `review-script` feature asks for it.
+        assert_eq!(
+            SCRIPT_DRIVER_COMPILED,
+            cfg!(debug_assertions) || cfg!(feature = "review-script")
+        );
+        #[cfg(not(any(debug_assertions, feature = "review-script")))]
+        assert!(!SCRIPT_DRIVER_COMPILED);
+    }
+
+    #[gpui::test]
+    async fn failed_host_write_is_shown_in_the_workspace(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": "x
+" }),
+        )
+        .await;
+        let project = Project::test(fs, [util::path!("/p").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+
+        // Outside any window update, as the permission responder runs.
+        cx.cx
+            .update(|cx| report_host_write_failure(&project, "could not be written".into(), cx));
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace.has_notification(&NotificationId::unique::<HostWriteFailed>())
+        }));
     }
 
     #[gpui::test]

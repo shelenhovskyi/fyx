@@ -54,8 +54,8 @@ pub(crate) fn init(cx: &mut App) {
             return;
         }
     };
-    log::info!(
-        "fyx: review script: {} steps from {}",
+    log::warn!(
+        "fyx: review script driver active ({SCRIPT_VAR}): {} steps from {} will decide agent reviews",
         steps.len(),
         path.display()
     );
@@ -207,7 +207,7 @@ fn next_pane(
         .items_of_type::<ReviewPane>(cx)
         .collect::<Vec<_>>();
     panes.into_iter().find_map(|pane| {
-        let id = pane.read(cx).review_id();
+        let id = pane.read(cx).current_review_id()?;
         let open = review
             .read(cx)
             .review(id)

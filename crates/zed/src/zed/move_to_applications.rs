@@ -73,9 +73,9 @@ impl MoveToApplicationsRequest {
         let response = cx
             .prompt(
                 PromptLevel::Info,
-                "Move Zed to Applications?",
+                "Move Fyx to Applications?", // fyx: product name
                 Some(
-                    "Zed is running from a temporary location. Move it to Applications to finish installing it.",
+                    "Fyx is running from a temporary location. Move it to Applications to finish installing it.", // fyx: product name
                 ),
                 &[
                     PromptButton::ok("Yes"),
@@ -103,7 +103,7 @@ impl MoveToApplicationsRequest {
                         .ok();
                     cx.prompt(
                         PromptLevel::Critical,
-                        "Failed to move Zed to Applications",
+                        "Failed to move Fyx to Applications", // fyx: product name
                         Some(&error.to_string()),
                         &["OK"],
                     )
@@ -178,7 +178,7 @@ impl Render for InstallingZedModal {
                     .py_3()
                     .border_b_1()
                     .border_color(theme.colors().border_variant)
-                    .child(Label::new("Installing Zed…")),
+                    .child(Label::new("Installing Fyx…")), // fyx: product name
             )
             .child(
                 h_flex()
@@ -196,9 +196,9 @@ impl Render for InstallingZedModal {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(Label::new("Moving Zed to Applications"))
+                            .child(Label::new("Moving Fyx to Applications")) // fyx: product name
                             .child(
-                                Label::new("Zed will reopen when installation is complete.")
+                                Label::new("Fyx will reopen when installation is complete.") // fyx: product name
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                             ),

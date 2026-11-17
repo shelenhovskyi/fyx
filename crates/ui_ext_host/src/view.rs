@@ -3,15 +3,20 @@
 //! `render()` only reads `SurfaceState`; it never calls the extension. Clicks and edits are routed
 //! by node id to `SurfaceState::dispatch`, which makes the call on a task.
 
-use std::{ops::Range, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use collections::HashMap;
-use editor::{Editor, EditorEvent};
-use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, FontWeight, Hsla, IntoElement,
-    ListSizingBehavior, ParentElement, Pixels, Render, RenderOnce, ScrollHandle, SharedString,
-    Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+use editor::{
+    Editor, EditorEvent, EditorMode, HiddenUnstagedDiffHunkRenderer, MinimapVisibility,
+    SizingBehavior,
 };
+use gpui::{
+    AnyElement, App, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    FontWeight, Global, Hsla, IntoElement, ListSizingBehavior, ParentElement, Pixels, Render,
+    RenderOnce, ScrollHandle, SharedString, Styled, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::*, px, uniform_list,
+};
+use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
 use ui::{
@@ -30,7 +35,7 @@ use crate::surface::{Phase, SurfaceState, fetch_range};
 pub const TYPING_DEBOUNCE: Duration = Duration::from_millis(150);
 /// A list or table shows at least this many rows when its parent does not give it a height.
 const MIN_VISIBLE_ROWS: u32 = 3;
-const DEFAULT_ROW_HEIGHT: u16 = 24;
+pub(crate) const DEFAULT_ROW_HEIGHT: u16 = 24;
 
 pub(crate) struct InputEditor {
     pub(crate) editor: Entity<Editor>,
@@ -51,7 +56,18 @@ pub struct SurfaceView {
     compact: bool,
     pub(crate) inputs: HashMap<NodeId, InputEditor>,
     markdown: HashMap<NodeId, Entity<Markdown>>,
-    scroll_handles: HashMap<NodeId, UniformListScrollHandle>,
+    pub(crate) scroll_handles: HashMap<NodeId, UniformListScrollHandle>,
+    /// A read-only diff editor per `diff-view` node.
+    pub(crate) diffs: HashMap<NodeId, DiffEditor>,
+    /// The view's own focus target: the panel focuses it on activation and Tab starts from it.
+    pub(crate) focus_handle: FocusHandle,
+    /// Every button of the surface (a disabled one keeps focus it already has).
+    pub(crate) button_focus: HashMap<NodeId, FocusHandle>,
+    pub(crate) list_focus: HashMap<NodeId, FocusHandle>,
+    /// The keyboard selection of each list or table, per window.
+    pub(crate) selection: HashMap<NodeId, u32>,
+    /// Enabled buttons, inputs, lists and tables in tree order: the Tab order.
+    pub(crate) focus_order: Vec<NodeId>,
     /// The panel body scrolls when the tree is taller than the panel.
     pub(crate) body_scroll: ScrollHandle,
     synced_revision: Option<u64>,
@@ -70,12 +86,24 @@ impl SurfaceView {
             this.sync(window, cx);
             cx.notify();
         });
+        let extension_id = state.read(cx).extension_id().to_string();
+        let me = cx.entity().downgrade();
+        let views = cx.default_global::<ExtensionViews>();
+        let siblings = views.0.entry(extension_id).or_default();
+        siblings.retain(|view| view.upgrade().is_some());
+        siblings.push(me);
         let mut this = Self {
             state,
             compact,
             inputs: HashMap::default(),
             markdown: HashMap::default(),
             scroll_handles: HashMap::default(),
+            diffs: HashMap::default(),
+            focus_handle: cx.focus_handle(),
+            button_focus: HashMap::default(),
+            list_focus: HashMap::default(),
+            selection: HashMap::default(),
+            focus_order: Vec::new(),
             body_scroll: ScrollHandle::new(),
             synced_revision: None,
             _observe_state: observe_state,
@@ -88,13 +116,32 @@ impl SurfaceView {
         &self.state
     }
 
-    fn dispatch(&mut self, event: UiEvent, cx: &mut Context<Self>) {
+    pub(crate) fn dispatch(&mut self, event: UiEvent, cx: &mut Context<Self>) {
         // Events reach the extension in the order the user made them: typing still waiting for
         // its pause goes first (judge review w3-deep-1, finding 2).
         if !matches!(event, UiEvent::InputChanged(..)) {
             self.flush_pending_inputs(cx);
+            self.flush_sibling_views(cx);
         }
         self.state.update(cx, |state, cx| state.dispatch(event, cx));
+    }
+
+    /// The same for the extension's other views (its other surfaces, other windows): one
+    /// extension, one order of events (integration-3 finding 9).
+    fn flush_sibling_views(&mut self, cx: &mut Context<Self>) {
+        let extension_id = self.state.read(cx).extension_id().to_string();
+        let me = cx.entity_id();
+        let siblings: Vec<Entity<SurfaceView>> = cx
+            .try_global::<ExtensionViews>()
+            .and_then(|views| views.0.get(&extension_id))
+            .into_iter()
+            .flatten()
+            .filter_map(|view| view.upgrade())
+            .filter(|view| view.entity_id() != me)
+            .collect();
+        for view in siblings {
+            view.update(cx, |view, cx| view.flush_pending_inputs(cx));
+        }
     }
 
     fn flush_pending_inputs(&mut self, cx: &mut Context<Self>) {
@@ -112,40 +159,128 @@ impl SurfaceView {
     /// Brings the per-window objects (editors, markdown models, scroll handles) in line with the
     /// tree. Runs when the state changes, not per frame.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let revision = state.revision();
-        if self.synced_revision == Some(revision) {
+        if self.synced_revision == Some(self.state.read(cx).revision()) {
             return;
         }
-        self.synced_revision = Some(revision);
+        let focused_before = self.focused_node(window, cx);
+        let old_order = std::mem::take(&mut self.focus_order);
+        let state = self.state.read(cx);
+        self.synced_revision = Some(state.revision());
 
         let mut inputs = Vec::new();
         let mut markdown = Vec::new();
+        let mut diffs = Vec::new();
         let mut lists = Vec::new();
+        let mut buttons = Vec::new();
+        let mut focus_order = Vec::new();
         if let Some(tree) = state.tree() {
-            let mut stack: Vec<NodeId> = tree.roots().to_vec();
+            // Pre-order, children in order: the Tab order is the reading order.
+            let mut stack: Vec<NodeId> = tree.roots().iter().rev().copied().collect();
             while let Some(id) = stack.pop() {
                 let Some(node) = tree.get(id) else {
                     continue;
                 };
                 match node.props() {
-                    Props::Input(props) => inputs.push((id, props.clone())),
+                    Props::Input(props) => {
+                        inputs.push((id, props.clone()));
+                        focus_order.push(id);
+                    }
                     Props::Markdown(source) => markdown.push((id, source.clone())),
-                    Props::List(_) | Props::Table(_) => lists.push(id),
-                    Props::Flex(_)
-                    | Props::Text(_)
-                    | Props::Button(_)
-                    | Props::Icon(_)
-                    | Props::DiffView(_) => {}
+                    Props::List(ListProps { row_count, .. })
+                    | Props::Table(TableProps { row_count, .. }) => {
+                        lists.push((id, *row_count));
+                        focus_order.push(id);
+                    }
+                    Props::Button(props) => {
+                        buttons.push(id);
+                        if !props.disabled {
+                            focus_order.push(id);
+                        }
+                    }
+                    Props::DiffView(props) => diffs.push((id, props.clone())),
+                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) => {}
                 }
-                stack.extend_from_slice(node.children());
+                stack.extend(node.children().iter().rev());
             }
         }
+        self.focus_order = focus_order;
+
+        self.button_focus.retain(|id, _| buttons.contains(id));
+        for id in buttons {
+            self.button_focus
+                .entry(id)
+                .or_insert_with(|| cx.focus_handle());
+        }
+        self.list_focus
+            .retain(|id, _| lists.iter().any(|(list, _)| list == id));
+        self.selection.retain(|id, selected| {
+            lists
+                .iter()
+                .any(|(list, row_count)| list == id && *selected < *row_count)
+        });
+        for (id, _) in &lists {
+            self.list_focus
+                .entry(*id)
+                .or_insert_with(|| cx.focus_handle());
+        }
+        let lists: Vec<NodeId> = lists.into_iter().map(|(id, _)| id).collect();
+
+        // An SDK remount gives every node a new id, so an input with typing the extension has not
+        // seen (or with focus) would lose it with its old editor. Carry it to the input at the
+        // same position among the surface's inputs (integration-3 finding 10).
+        let old_inputs: Vec<NodeId> = old_order
+            .iter()
+            .filter(|id| self.inputs.contains_key(id))
+            .copied()
+            .collect();
+        let new_inputs: Vec<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let carried: Vec<(usize, String, bool)> = old_inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| !new_inputs.contains(id))
+            .filter_map(|(position, id)| {
+                let input = self.inputs.get(id)?;
+                let focused = focused_before == Some(*id);
+                (input.debounce.is_some() || focused)
+                    .then(|| (position, input.editor.read(cx).text(cx), focused))
+            })
+            .collect();
 
         self.inputs
             .retain(|id, _| inputs.iter().any(|(input, _)| input == id));
         for (id, props) in inputs {
             self.sync_input(id, props, window, cx);
+        }
+        for (position, text, focused) in carried {
+            let Some(&id) = new_inputs.get(position) else {
+                continue;
+            };
+            if old_inputs.contains(&id) {
+                continue;
+            }
+            let Some(input) = self.inputs.get_mut(&id) else {
+                continue;
+            };
+            let editor = input.editor.clone();
+            if editor.read(cx).text(cx) != text {
+                input.last_known = text.clone();
+                editor.update(cx, |editor, cx| editor.set_text(text.as_str(), window, cx));
+                self.dispatch(UiEvent::InputChanged(id, text), cx);
+            }
+            if focused {
+                editor.focus_handle(cx).focus(window, cx);
+            }
+        }
+
+        self.diffs.retain(|id, diff| {
+            diffs
+                .iter()
+                .any(|(node, props)| node == id && *props == diff.props)
+        });
+        for (id, props) in diffs {
+            if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(id) {
+                entry.insert(DiffEditor::new(props, window, cx));
+            }
         }
 
         self.markdown
@@ -168,6 +303,7 @@ impl SurfaceView {
         for id in lists {
             self.scroll_handles.entry(id).or_default();
         }
+        self.restore_focus(focused_before, &old_order, window, cx);
     }
 
     fn sync_input(
@@ -318,21 +454,24 @@ impl Render for SurfaceView {
                 .color(Color::Muted)
                 .size(LabelSize::Small)
                 .into_any_element(),
-            Phase::Failed(error) => h_flex()
+            Phase::Failed { message, retryable } => h_flex()
                 .gap_1()
                 .when(!compact, |this| this.p_2().flex_wrap())
                 .child(
-                    Label::new(error.clone())
+                    Label::new(message.clone())
                         .color(Color::Error)
                         .size(LabelSize::Small),
                 )
-                .child(
-                    Button::new("fyx-ui-retry", "Retry")
-                        .style(UiButtonStyle::Subtle)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.state.update(cx, |state, cx| state.retry(cx))
-                        })),
-                )
+                // A dead instance refuses every call, so a retry could only fail again.
+                .when(*retryable, |this| {
+                    this.child(
+                        Button::new("fyx-ui-retry", "Retry")
+                            .style(UiButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.state.update(cx, |state, cx| state.retry(cx))
+                            })),
+                    )
+                })
                 .into_any_element(),
             Phase::Ready(tree) => {
                 let renderer = Renderer {
@@ -354,6 +493,7 @@ impl Render for SurfaceView {
                         id: "fyx-ui-body".into(),
                         handle: ScrollbarHandle::Body(self.body_scroll.clone()),
                         min_height: None,
+                        focus: None,
                         content: div()
                             .id("fyx-ui-body-content")
                             .flex_1()
@@ -393,6 +533,20 @@ impl Render for SurfaceView {
                 }))
         });
         container
+            .key_context(crate::keyboard::SURFACE_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::focus_next))
+            .on_action(cx.listener(Self::focus_previous))
+            .on_action(cx.listener(Self::activate))
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_last))
+            .on_action(cx.listener(Self::select_page_up))
+            .on_action(cx.listener(Self::select_page_down))
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::cancel_input))
             .child(body)
             .when(!compact, |this| this.children(error))
     }
@@ -413,6 +567,8 @@ struct WithVerticalScrollbar {
     /// `Some` for a list: it fills the space its parent gives (`flex_1`), at least this tall. The
     /// panel body fills the panel.
     min_height: Option<Pixels>,
+    /// A list's focus target: keyboard selection, and a focus ring while focused.
+    focus: Option<FocusHandle>,
     content: AnyElement,
 }
 
@@ -425,6 +581,14 @@ impl RenderOnce for WithVerticalScrollbar {
             .flex_1()
             .w_full()
             .min_h(self.min_height.unwrap_or(Pixels::ZERO))
+            .when_some(self.focus, |this, focus| {
+                let ring = focus_ring(focus.is_focused(window), cx);
+                this.key_context(crate::keyboard::LIST_CONTEXT)
+                    .track_focus(&focus)
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(ring)
+            })
             .child(self.content);
         match &self.handle {
             ScrollbarHandle::List(handle) => container.vertical_scrollbar_for(handle, window, cx),
@@ -474,7 +638,7 @@ impl Renderer<'_, '_> {
             Props::Table(props) => self.table(id, props, scope),
             Props::Icon(props) => self.icon(props),
             Props::Markdown(source) => self.markdown(id, source, scope),
-            Props::DiffView(props) => self.diff_view(props),
+            Props::DiffView(props) => self.diff_view(id, props, scope),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -535,23 +699,40 @@ impl Renderer<'_, '_> {
             })),
             Scope::Row { .. } => None,
         };
-        if props.label.is_empty()
+        let focus = match scope {
+            Scope::Surface => self.view.button_focus.get(&id),
+            Scope::Row { .. } => None,
+        };
+        let button = if props.label.is_empty()
             && let Some(icon) = icon
         {
-            return IconButton::new(element_id, icon)
+            IconButton::new(element_id, icon)
                 .icon_size(IconSize::Small)
                 .style(style)
                 .disabled(props.disabled)
+                .when_some(focus, |this, focus| this.track_focus(focus))
                 .when_some(on_click, |this, on_click| this.on_click(on_click))
-                .into_any_element();
-        }
-        Button::new(element_id, props.label.clone())
-            .style(style)
-            .disabled(props.disabled)
-            .when_some(icon, |this, icon| {
-                this.start_icon(Icon::new(icon).size(IconSize::Small))
-            })
-            .when_some(on_click, |this, on_click| this.on_click(on_click))
+                .into_any_element()
+        } else {
+            Button::new(element_id, props.label.clone())
+                .style(style)
+                .disabled(props.disabled)
+                .when_some(icon, |this, icon| {
+                    this.start_icon(Icon::new(icon).size(IconSize::Small))
+                })
+                .when_some(focus, |this, focus| this.track_focus(focus))
+                .when_some(on_click, |this, on_click| this.on_click(on_click))
+                .into_any_element()
+        };
+        let Some(focus) = focus else {
+            return button;
+        };
+        div()
+            .key_context(crate::keyboard::BUTTON_CONTEXT)
+            .rounded_sm()
+            .border_1()
+            .border_color(focus_ring(focus.is_focused(self.window), self.cx))
+            .child(button)
             .into_any_element()
     }
 
@@ -578,7 +759,16 @@ impl Renderer<'_, '_> {
             .py_1()
             .rounded_sm()
             .border_1()
-            .border_color(colors.border)
+            .border_color(
+                if editor
+                    .focus_handle(self.cx)
+                    .contains_focused(self.window, self.cx)
+                {
+                    colors.border_focused
+                } else {
+                    colors.border
+                },
+            )
             .bg(colors.editor_background)
             .on_action(
                 self.cx
@@ -674,6 +864,7 @@ impl Renderer<'_, '_> {
             id: ElementId::NamedInteger("fyx-list-scroll".into(), id as u64),
             handle: ScrollbarHandle::List(handle.clone()),
             min_height: Some(px(min_height as f32)),
+            focus: self.view.list_focus.get(&id).cloned(),
             content: list.into_any_element(),
         }
         .into_any_element()
@@ -699,7 +890,14 @@ impl Renderer<'_, '_> {
             .overflow_hidden()
             .cursor_pointer()
             .hover(|style| style.bg(self.cx.theme().colors().ghost_element_hover))
-            .on_click(self.cx.listener(move |this, _: &ClickEvent, _, cx| {
+            .when(self.view.selection.get(&list) == Some(&index), |this| {
+                this.bg(self.cx.theme().colors().element_selected)
+            })
+            .on_click(self.cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.selection.insert(list, index);
+                if let Some(focus) = this.list_focus.get(&list) {
+                    focus.focus(window, cx);
+                }
                 this.dispatch(UiEvent::RowClick(list, index), cx)
             }));
         let Some(tree) = self.state.row(list, index) else {
@@ -754,7 +952,28 @@ impl Renderer<'_, '_> {
 
     /// Placeholder until the host diff component lands: unchanged leading and trailing lines as
     /// context, the middle as removed and added lines.
-    fn diff_view(&self, props: &DiffViewProps) -> AnyElement {
+    /// Zed's diff editor, read-only, every hunk expanded; inside list rows (read-only snapshots)
+    /// a light line diff instead.
+    fn diff_view(&self, id: NodeId, props: &DiffViewProps, scope: Scope) -> AnyElement {
+        if let Scope::Surface = scope
+            && let Some(diff) = self.view.diffs.get(&id)
+        {
+            let colors = self.cx.theme().colors();
+            return div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.editor_background)
+                .child(diff.editor.clone())
+                .into_any_element();
+        }
+        self.line_diff(props)
+    }
+
+    fn line_diff(&self, props: &DiffViewProps) -> AnyElement {
         let status = self.cx.theme().status();
         let lines = diff_lines(&props.old_text, &props.new_text);
         v_flex()
@@ -843,6 +1062,97 @@ pub(crate) fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(DiffLine, &'a s
             .map(|line| (DiffLine::Context, *line)),
     );
     lines
+}
+
+/// The host component behind `diff-view`: `acp_thread::Diff` (the agent panel's and W5's review
+/// pane's diff) in a read-only editor sized by its content, every hunk expanded.
+pub(crate) struct DiffEditor {
+    props: DiffViewProps,
+    pub(crate) editor: Entity<Editor>,
+    _diff: Entity<acp_thread::Diff>,
+}
+
+impl DiffEditor {
+    fn new(props: DiffViewProps, window: &mut Window, cx: &mut Context<SurfaceView>) -> Self {
+        let languages = workspace::AppState::try_global(cx)
+            .map(|app_state| app_state.languages.clone())
+            .unwrap_or_else(|| {
+                Arc::new(language::LanguageRegistry::new(
+                    cx.background_executor().clone(),
+                ))
+            });
+        let path = diff_path(props.language.as_deref(), &languages);
+        let diff = cx.new(|_| {
+            acp_thread::Diff::finalized(
+                path,
+                Some(props.old_text.clone()),
+                props.new_text.clone(),
+                languages,
+            )
+        });
+        let multibuffer = diff.update(cx, |diff, cx| diff.multibuffer(cx));
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(
+                EditorMode::Full {
+                    scale_ui_elements_with_buffer_font_size: false,
+                    show_active_line_background: false,
+                    sizing_behavior: SizingBehavior::SizeByContent,
+                },
+                multibuffer,
+                None,
+                window,
+                cx,
+            );
+            editor.set_read_only(true);
+            editor.disable_diagnostics(cx);
+            editor.set_show_gutter(false, cx);
+            editor.disable_expand_excerpt_buttons(cx);
+            editor.set_show_vertical_scrollbar(false, cx);
+            editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
+            editor.set_soft_wrap_mode(SoftWrap::None, cx);
+            editor.set_forbid_vertical_scroll(true);
+            editor.set_show_indent_guides(false, cx);
+            editor.set_show_code_actions(false, cx);
+            editor.set_show_git_diff_gutter(false, cx);
+            editor.set_expand_all_diff_hunks(cx);
+            editor.set_diff_hunk_renderer(Some(Arc::new(HiddenUnstagedDiffHunkRenderer)), cx);
+            editor
+        });
+        Self {
+            props,
+            editor,
+            _diff: diff,
+        }
+    }
+}
+
+/// `acp_thread::Diff` picks the language from a file path; `diff-view` names a language, so the
+/// path gets that language's first file suffix (`rust` → `diff.rs`).
+pub(crate) fn diff_path(
+    language: Option<&str>,
+    languages: &Arc<language::LanguageRegistry>,
+) -> String {
+    language
+        .and_then(|name| languages.available_language_for_modeline_name(name))
+        .and_then(|language| language.matcher().path_suffixes.first().cloned())
+        .map_or_else(|| "diff.txt".to_string(), |suffix| format!("diff.{suffix}"))
+}
+
+/// Every view of each extension, by extension id, so a view can flush the typing of the others.
+#[derive(Default)]
+struct ExtensionViews(HashMap<String, Vec<WeakEntity<SurfaceView>>>);
+
+impl Global for ExtensionViews {}
+
+/// The focus ring: the theme's focused border, or a transparent one of the same width so focusing
+/// does not move anything.
+fn focus_ring(focused: bool, cx: &App) -> Hsla {
+    let colors = cx.theme().colors();
+    if focused {
+        colors.border_focused
+    } else {
+        colors.border_transparent
+    }
 }
 
 /// Icon names are snake_case `IconName`s (`plus`, `list_todo`); unknown names get a neutral icon.

@@ -541,7 +541,7 @@ impl LanguageModelProvider for OpenCodeLanguageModelProvider {
                     .into()
             })
             .description(InlineDescription::Text(
-                "To use OpenCode models in Zed, you need an API key.".into(),
+                "To use OpenCode models in Fyx, you need an API key.".into(), // fyx: product name
             )),
         ))
     }
@@ -884,10 +884,11 @@ impl Render for ConfigurationView {
                 .into_any_element()
         };
 
+        // fyx: product name in the two labels below.
         let api_key_section = v_flex()
             .on_action(cx.listener(Self::save_api_key))
             .child(Label::new(
-                "To use OpenCode models in Zed, you need an API key:",
+                "To use OpenCode models in Fyx, you need an API key:",
             ).color(Color::Muted))
             .child(
                 List::new()
@@ -908,7 +909,7 @@ impl Render for ConfigurationView {
             .child(api_key_control)
             .child(
                 Label::new(format!(
-                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
+                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Fyx."
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted).mt_1p5(),

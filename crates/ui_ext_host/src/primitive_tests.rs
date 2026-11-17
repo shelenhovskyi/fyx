@@ -403,3 +403,46 @@ async fn test_input_shows_its_value_and_user_text_stands(cx: &mut TestAppContext
         [UiEvent::InputChanged(INPUT, "drafted".into())]
     );
 }
+
+/// `diff-view` is Zed's diff editor (the agent panel's `acp_thread::Diff`): read-only, showing the
+/// new text with the changed hunk expanded.
+#[gpui::test]
+async fn test_diff_view_is_a_read_only_diff_editor(cx: &mut TestAppContext) {
+    let (_backend, _state, view, vcx) = open(cx);
+    let editor = view.read_with(vcx, |view, _| view.diffs[&DIFF].editor.clone());
+    vcx.run_until_parked();
+    editor.read_with(vcx, |editor, cx| {
+        assert!(editor.read_only(cx));
+        // The expanded hunk shows the removed line above its replacement.
+        assert_eq!(
+            editor.text(cx),
+            "fn a() {}\nfn b() {}\nfn b2() {}\nfn c() {}\n"
+        );
+        let hunks = editor.buffer().read(cx).snapshot(cx).diff_hunks().count();
+        assert_eq!(hunks, 1, "one changed line, one hunk");
+    });
+}
+
+/// The language name picks the file suffix the diff's syntax highlighting comes from.
+#[gpui::test]
+async fn test_diff_view_language_from_name(cx: &mut TestAppContext) {
+    let languages = std::sync::Arc::new(language::LanguageRegistry::test(cx.executor()));
+    languages.add(std::sync::Arc::new(language::Language::new(
+        language::LanguageConfig {
+            name: "Rust".into(),
+            matcher: std::sync::Arc::new(language::LanguageMatcher {
+                path_suffixes: vec!["rs".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        None,
+    )));
+    assert_eq!(crate::view::diff_path(Some("rust"), &languages), "diff.rs");
+    assert_eq!(crate::view::diff_path(Some("Rust"), &languages), "diff.rs");
+    assert_eq!(
+        crate::view::diff_path(Some("klingon"), &languages),
+        "diff.txt"
+    );
+    assert_eq!(crate::view::diff_path(None, &languages), "diff.txt");
+}
