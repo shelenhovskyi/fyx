@@ -6906,6 +6906,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "proptest",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.17",
+ "zeroize",
+]
+
+[[package]]
 name = "gaoya"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19328,10 +19347,13 @@ dependencies = [
  "log",
  "markdown",
  "menu",
+ "paths",
  "project",
  "schemars 1.0.4",
  "serde",
+ "serde_json",
  "settings",
+ "sha2",
  "tempfile",
  "theme",
  "theme_settings",

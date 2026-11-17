@@ -308,7 +308,7 @@ mod server {
                         200,
                         oauth_callback_page(
                             "Authorization Successful",
-                            "You can close this tab and return to Fyx.", // fyx: product name
+                            "You can close this tab and return to Zed.",
                             false,
                         ),
                     ),
@@ -318,7 +318,7 @@ mod server {
                             400,
                             oauth_callback_page(
                                 "Authorization Failed",
-                                "Something went wrong. Please try again from Fyx.", // fyx: product name
+                                "Something went wrong. Please try again from Zed.",
                                 true,
                             ),
                         )

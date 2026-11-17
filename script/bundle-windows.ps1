@@ -120,6 +120,7 @@ function BuildZedAndItsFriends {
     Copy-Item -Path ".\$CargoOutDir\fyx.exe" -Destination "$innoDir\Fyx.exe" -Force # fyx: binary renamed
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto-update-helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    return # fyx: no Explorer injector, it is Zed's signed package (Zed's identity, CLSID and Zed.exe)
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
@@ -158,10 +159,10 @@ function BuildRemoteServer {
 
 function ZipZedAndItsFriendsDebug {
     $items = @(
-        ".\$CargoOutDir\zed.pdb",
+        ".\$CargoOutDir\fyx.pdb", # fyx: binary renamed
         ".\$CargoOutDir\cli.pdb",
         ".\$CargoOutDir\auto_update_helper.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
+        # fyx: no Explorer injector, it is Zed's signed package (Zed's identity, CLSID and Zed.exe)
         ".\$CargoOutDir\remote_server.pdb"
     )
 
@@ -209,12 +210,6 @@ function MakeAppx {
         }
     }
     Copy-Item -Path "$manifestFile" -Destination "$innoDir\make_appx\AppxManifest.xml"
-    # fyx: the manifest's tiles (resources\logo_150x150.png, resources\logo_70x70.png) were never packed;
-    # script/fyx-icons writes them to crates\zed\resources\windows.
-    New-Item -Path "$innoDir\make_appx\resources" -ItemType Directory -Force | Out-Null
-    foreach ($tile in "logo_150x150.png", "logo_70x70.png") {
-        Copy-Item -Path "$env:ZED_WORKSPACE\crates\zed\resources\windows\$tile" -Destination "$innoDir\make_appx\resources\$tile" -Force
-    }
     # Add makeAppx.exe to Path
     $sdk = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
     $env:Path += ';' + $sdk
@@ -226,8 +221,8 @@ function SignZedAndItsFriends {
         return
     }
 
-    # fyx: Fyx.exe
-    $files = "$innoDir\Fyx.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    # fyx: Fyx.exe; no Explorer injector DLL or appx
+    $files = "$innoDir\Fyx.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe"
     & "$innoDir\sign.ps1" $files
 }
 
@@ -250,8 +245,7 @@ function DownloadConpty {
 }
 
 function CollectFiles {
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
+    # fyx: no Explorer injector, it is Zed's signed package (Zed's identity, CLSID and Zed.exe)
     Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\fyx.exe" -Force # fyx: CLI is `fyx`
     Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
@@ -396,7 +390,7 @@ PrepareForBundle
 GenerateLicenses
 BuildZedAndItsFriends
 BuildRemoteServer
-MakeAppx
+# MakeAppx # fyx: no Explorer injector, it is Zed's signed package (Zed's identity, CLSID and Zed.exe)
 SignZedAndItsFriends
 ZipZedAndItsFriendsDebug
 DownloadAMDGpuServices
