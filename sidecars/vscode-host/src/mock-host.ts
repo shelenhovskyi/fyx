@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExtensionHost, type InitializeParams, type InitializeResult } from "./host.ts";
-import { RpcPeer, pairedPeers, type RpcMessage } from "./rpc.ts";
+import { ErrorCodes, RpcError, RpcPeer, pairedPeers, type RpcMessage } from "./rpc.ts";
 import { applyUpdate, validateNodes, validateProps, type ListRow, type Node, type Surface, type UiEvent, type Update } from "./schema.ts";
 
 export interface TrafficEntry {
@@ -37,6 +37,8 @@ export class MockHost {
   readonly trees = new Map<string, Node[]>();
   readonly surfaces = new Map<string, Surface>();
   readonly schemaErrors: string[] = [];
+  /** Test hook: refuse the next `push-update` for this surface, as a host whose tree diverged would. */
+  refuseNextPush: string | undefined;
   readonly logs: { level: string; message: string }[] = [];
   readonly messages: { severity: string; message: string; items: string[] }[] = [];
   readonly diagnostics = new Map<string, unknown[]>();
@@ -216,7 +218,8 @@ export class MockHost {
     for (const e of errors) this.schemaErrors.push(`${where}: ${e}`);
   }
 
-  private apply(surfaceId: string, update: Update, where: string): void {
+  /** Applies `update` as the Fyx host would; returns why it was refused, if it was. */
+  private apply(surfaceId: string, update: Update, where: string): string | undefined {
     if (update !== "unchanged" && "patches" in update) {
       for (const p of update.patches) {
         if ("set-props" in p) this.check(where, validateProps(p["set-props"][1]));
@@ -226,20 +229,30 @@ export class MockHost {
     const tree = this.trees.get(surfaceId);
     if (!tree) {
       if (update !== "unchanged" && !this.closedSurfaces.has(surfaceId)) this.schemaErrors.push(`${where}: update for unmounted surface ${surfaceId}`);
-      return;
+      return undefined;
+    }
+    if (this.refuseNextPush === surfaceId && where === "push-update") {
+      this.refuseNextPush = undefined;
+      return "refused by the test";
     }
     try {
       const next = applyUpdate(tree, update);
       this.check(`${where} ${surfaceId}`, validateNodes(next));
       this.trees.set(surfaceId, next);
+      return undefined;
     } catch (err) {
       this.schemaErrors.push(`${where} ${surfaceId}: ${(err as Error).message}`);
+      return (err as Error).message;
     }
   }
 
   private registerHandlers(): void {
     const rpc = this.rpc;
-    rpc.on("push-update", (p: { "surface-id": string; update: Update }) => this.apply(p["surface-id"], p.update, "push-update"));
+    rpc.on("push-update", (p: { "surface-id": string; update: Update }) => {
+      const refused = this.apply(p["surface-id"], p.update, "push-update");
+      if (refused) throw new RpcError(ErrorCodes.InvalidParams, `push-update refused: ${refused}`);
+      return null;
+    });
     rpc.on("log", (p: { level: string; message: string }) => void this.logs.push(p));
     rpc.on("fyx/surfacesChanged", (p: { added: Surface[]; removed: string[] }) => {
       for (const s of p.added) {

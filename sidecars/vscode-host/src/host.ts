@@ -168,7 +168,11 @@ export class ExtensionHost {
 
     const rpc = this.rpc;
     const surfaces = new SurfaceRegistry({
-      pushUpdate: (surfaceId, update) => rpc.notify("push-update", { "surface-id": surfaceId, update }),
+      pushUpdate: (surfaceId, update) =>
+        rpc.request("push-update", { "surface-id": surfaceId, update }).catch((err: unknown) => {
+          rpc.notify("log", { level: "warn", message: `host refused push-update for ${surfaceId}, resending the whole tree: ${(err as Error).message}` });
+          throw err;
+        }),
       surfacesChanged: (added, removed) => rpc.notify("fyx/surfacesChanged", { added, removed }),
     });
     const documents = new DocumentStore();

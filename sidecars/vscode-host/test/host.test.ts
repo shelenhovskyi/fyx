@@ -78,6 +78,32 @@ test("output channel content arrives as push-update patches", async () => {
   assert.deepEqual(host.schemaErrors, []);
 });
 
+test("after the host refuses a push-update, the sidecar resends the whole tree", async () => {
+  const id = `${ID}/output`;
+  await host.mount(id);
+  const pushes = () =>
+    host.traffic
+      .map((t) => t.message as { method?: string; params?: { "surface-id": string; update: unknown } })
+      .filter((m) => m.method === "push-update" && m.params?.["surface-id"] === id)
+      .map((m) => m.params?.update);
+  const before = pushes().length;
+  host.refuseNextPush = id;
+  await host.executeCommand("sink.hello", "Refused");
+  await host.settle();
+  const sent = pushes().slice(before);
+  assert.equal(sent.length, 2, JSON.stringify(sent));
+  assert.ok(typeof sent[0] === "object" && sent[0] !== null && "patches" in sent[0], "first the diff, which the host refuses");
+  assert.ok(typeof sent[1] === "object" && sent[1] !== null && "replace" in sent[1], "then a full replace");
+  assert.ok(text(host.trees.get(id)!).some((t) => t.includes("Hey, Refused")), "the host tree caught up");
+  assert.ok(host.logs.some((l) => l.level === "warn" && l.message.includes("refused push-update")));
+
+  await host.executeCommand("sink.hello", "Again");
+  await host.settle();
+  const next = pushes().slice(before + 2);
+  assert.ok(next.length > 0 && next.every((u) => typeof u === "object" && u !== null && "patches" in u), "patches resume once the host has the tree");
+  assert.deepEqual(host.schemaErrors, []);
+});
+
 test("tree view: rows, expansion and leaf commands", async () => {
   const id = `${ID}/view/sinkTree`;
   const nodes = await host.mount(id);
