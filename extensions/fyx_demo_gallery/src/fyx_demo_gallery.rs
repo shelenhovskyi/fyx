@@ -463,11 +463,24 @@ fn build_layout(tree: &mut TreeBuilder) {
     }
 }
 
+/// `surface` and `elevated-surface` are background colours: as text colour they are invisible on
+/// the panel by design, so the Text section shows them as a background behind a default-colour
+/// label instead.
+fn is_background_token(token: ColorToken) -> bool {
+    matches!(token, ColorToken::Surface | ColorToken::ElevatedSurface)
+}
+
 fn build_text(tree: &mut TreeBuilder) {
     caption(tree, "Colour tokens");
     tree.text("no colour (the default)");
     for token in ALL_TOKENS {
-        tree.text(TextProps::new(token_name(token)).color(token));
+        if is_background_token(token) {
+            tree.flex(FlexProps::row().padding(4).background(token), |tree| {
+                tree.text(format!("{} (background)", token_name(token)));
+            });
+        } else {
+            tree.text(TextProps::new(token_name(token)).color(token));
+        }
     }
     caption(tree, "Weight and font");
     tree.text(TextProps::new("bold").bold());
@@ -1255,16 +1268,45 @@ mod tests {
         }
 
         harness.show(Section::Text);
-        let colors = harness
-            .host
-            .to_nodes()
-            .into_iter()
-            .filter_map(|node| match node.props {
+        let nodes = harness.host.to_nodes();
+        let text_colors = nodes
+            .iter()
+            .filter_map(|node| match &node.props {
                 ui_ext::Props::Text(text) => text.color.map(|color| format!("{color:?}")),
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        assert_eq!(colors.len(), ALL_TOKENS.len(), "every colour token as text");
+        let foreground_tokens = ALL_TOKENS
+            .into_iter()
+            .filter(|&token| !is_background_token(token))
+            .map(|token| format!("{:?}", ui_ext::ColorToken::from(token)))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            text_colors, foreground_tokens,
+            "every text token as text colour"
+        );
+        let text_backgrounds = nodes
+            .iter()
+            .filter_map(|node| match &node.props {
+                ui_ext::Props::Flex(flex) => flex.background.map(|color| format!("{color:?}")),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            text_backgrounds,
+            BTreeSet::from(["ElevatedSurface".to_string(), "Surface".to_string()]),
+            "surface tokens as backgrounds"
+        );
+        for label in ["surface (background)", "elevated-surface (background)"] {
+            assert!(
+                nodes.iter().any(|node| node.props
+                    == ui_ext::Props::Text(ui_ext::TextProps {
+                        content: label.into(),
+                        ..Default::default()
+                    })),
+                "{label} in the default colour"
+            );
+        }
 
         harness.show(Section::Layout);
         let backgrounds = harness
