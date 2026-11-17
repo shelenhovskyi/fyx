@@ -5,6 +5,7 @@
 //! pushes without end, past the host's per-call cap;
 //! `click(7)` allocates 64 MiB, past the host's memory cap; `click(8)` pushes 40 updates of 200
 //! patches each, past the host's cap on one call's pushed patches;
+//! `click(9)` tries to open a TCP connection and fails with the error it got;
 //! `click(2)` spins forever and `click(3)` sleeps for a second (blocked in `wasi:io/poll`), both to
 //! hit the host's time budget. The `fyx:ui-api-version` section comes
 //! from `register_extension!`; emitting it here too would concatenate two copies into 12 bytes.
@@ -20,6 +21,7 @@ const PUSH_THEN_FAIL: NodeId = 5;
 const PUSH_FLOOD: NodeId = 6;
 const ALLOCATE: NodeId = 7;
 const PUSH_BULK: NodeId = 8;
+const CONNECT: NodeId = 9;
 
 struct Probe;
 
@@ -90,6 +92,10 @@ impl Extension for Probe {
                 }
                 Ok(Update::Unchanged)
             }
+            UiEvent::Click(CONNECT) => match std::net::TcpStream::connect("127.0.0.1:9") {
+                Ok(_) => Err("connected: the sandbox let a socket through".into()),
+                Err(error) => Err(format!("connect failed: {error}")),
+            },
             UiEvent::Click(SLEEP) => {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 Ok(Update::Unchanged)

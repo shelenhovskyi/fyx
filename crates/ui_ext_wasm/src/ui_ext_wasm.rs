@@ -382,6 +382,17 @@ fn ui_runtime() -> Result<&'static UiRuntime> {
         .map_err(|error| anyhow!("failed to set up the fyx:ui wasm runtime: {error}"))
 }
 
+/// All of WASI p2 is linked (Rust's std imports parts of it, and a component that imports an
+/// interface the linker lacks would not instantiate), but no network use is allowed: no TCP or
+/// UDP socket, no name lookup, and no address passes the check. A guest's `connect` fails with
+/// "access denied" instead of reaching the network.
+fn deny_network(wasi: &mut WasiCtxBuilder) {
+    wasi.allow_tcp(false)
+        .allow_udp(false)
+        .allow_ip_name_lookup(false)
+        .socket_addr_check(|_, _| Box::pin(async { false }));
+}
+
 /// Resource caps of every UI component's store. Growing past one traps (rather than failing the
 /// guest's allocation quietly), which disables the extension with an explicit error.
 fn ui_store_limits() -> wasmtime::StoreLimits {
@@ -534,6 +545,7 @@ impl UiExtension {
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
                     wasi.inherit_stderr();
+                    deny_network(&mut wasi);
                     let mut store = Store::new(
                         &runtime.engine,
                         UiState {

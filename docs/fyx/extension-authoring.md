@@ -44,9 +44,12 @@ ignored by upstream Zed's manifest parser, so one directory can hold both kinds.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:3-9, 137-138 -->
 
-The sandbox: the component gets WASI with stderr inherited and nothing else configured. It has no
-preopened directories, no environment variables and no arguments. It cannot read the worktree or
-buffers yet. The only host functions are `push-update` and `log`.
+The sandbox: the component gets WASI p2, all of it linked (Rust's std imports parts of it), with
+stderr inherited and nothing else granted. It has no preopened directories, no environment
+variables and no arguments, and no network: TCP, UDP and name lookup are denied, so `connect`
+fails with "access denied". It cannot read the worktree or buffers yet. Its store is capped (32 MiB
+of memory; see "Limits" in `limits-and-gotchas.md`). Besides WASI, the host functions are
+`push-update` and `log`.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 

@@ -34,6 +34,7 @@ mod probe {
     pub const PUSH_FLOOD: NodeId = 6;
     pub const ALLOCATE: NodeId = 7;
     pub const PUSH_BULK: NodeId = 8;
+    pub const CONNECT: NodeId = 9;
 }
 
 fn demo_counter_wasm() -> Vec<u8> {
@@ -384,6 +385,35 @@ async fn test_pushed_items_past_the_cap_trap(cx: &mut TestAppContext) {
         "{error:#}"
     );
     assert!(error.downcast_ref::<ReplyError>().is_none());
+}
+
+/// Sandbox: WASI sockets are linked but every network use is denied, so a guest's
+/// `TcpStream::connect` fails inside the guest. The extension reports the error and stays usable.
+#[gpui::test]
+async fn test_guest_cannot_open_a_socket(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::CONNECT))
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("connect failed"), "{message}");
+    // Denied by the sandbox, not refused by a closed port.
+    let lower = message.to_lowercase();
+    assert!(
+        lower.contains("denied") || lower.contains("not permitted"),
+        "{message}"
+    );
+    assert!(
+        error.downcast_ref::<ReplyError>().is_some(),
+        "the guest's own error, not a trap: {message}"
+    );
+    // Not disabled: the next call works.
+    extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("the extension is still usable");
 }
 
 #[gpui::test]
