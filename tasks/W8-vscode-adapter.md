@@ -1,6 +1,6 @@
 # W8 VS Code adapter (parallel, non-blocking)
 
-**Owns:** `tools/vsix-convert/`, `sidecars/vscode-host/` (Node/TypeScript).
+**Owns:** `tools/vsix-convert/`, `sidecars/vscode-host/` (Node/TypeScript), `docs/vscode-coverage.md`.
 
 **Deliverable**
 - Converter for VS Code themes, snippets and keybindings into Fyx formats (Zed already has a theme importer).
