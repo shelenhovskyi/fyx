@@ -201,15 +201,17 @@ impl ProposedEdit {
         let path = self.abs_path.display();
         let mut feedback = match resolution {
             Resolution::Unchanged | Resolution::AcceptedAll if !has_comments => return None,
-            Resolution::Unchanged | Resolution::AcceptedAll => {
-                format!("The user applied your edit to {path} and left comments.")
-            }
+            Resolution::Unchanged | Resolution::AcceptedAll => format!(
+                "Your edit to {path} was applied in full; do not write it again. The user left \
+                 comments on it:"
+            ),
             Resolution::RejectedAll => {
                 format!("The user rejected your edit to {path}; the file is unchanged.")
             }
             Resolution::Partial { accepted, .. } => format!(
                 "The user applied {accepted} of {} hunks of your edit to {path}; the rejected hunks \
-                 were not written. Re-read the file before editing it again.",
+                 were not written and must not be written again. Re-read the file before editing \
+                 it.",
                 self.hunks.len()
             ),
             Resolution::Pending { undecided } => {

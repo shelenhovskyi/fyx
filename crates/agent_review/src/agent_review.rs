@@ -7,16 +7,21 @@
 
 mod proposed_edit;
 
-use std::rc::Rc;
+use std::{ops::Range, rc::Rc};
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ToolCallContent,
     fyx_review::{AgentWrite, AgentWriteGate, AgentWriteOutcome, set_agent_write_gate},
 };
+use action_log::ActionLog;
 use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot;
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task, WeakEntity};
+use gpui::{
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity,
+};
+use language::BufferEditSource;
+use project::Project;
 
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 
@@ -26,6 +31,13 @@ pub fn init(cx: &mut App) {
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
     cx.observe_new(|_: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
+        cx.on_release(|thread, cx| {
+            if let Some(review) = AgentReview::global(cx) {
+                let session_id = thread.session_id().clone();
+                review.update(cx, |review, cx| review.close_session(&session_id, cx));
+            }
+        })
+        .detach();
     })
     .detach();
 }
@@ -49,6 +61,9 @@ pub enum ReviewSource {
 pub enum PermissionVerdict {
     Allow,
     Deny,
+    /// Some hunks were rejected. The host writes the accepted hunks itself and denies the tool call,
+    /// so an agent that writes to disk on its own cannot land a hunk the user rejected.
+    ApplyAcceptedAndDeny,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +74,7 @@ pub enum AgentReviewEvent {
     Closed(ReviewId),
 }
 
-type PermissionResponder = Box<dyn FnOnce(PermissionVerdict, &mut App)>;
+type PermissionResponder = Box<dyn FnOnce(PermissionVerdict, ProposedEdit, &mut App)>;
 
 enum Responder {
     Permission(PermissionResponder),
@@ -196,13 +211,14 @@ impl AgentReview {
             }
             Responder::Permission(respond) => {
                 let verdict = permission_verdict(review.edit.resolution());
+                let edit = review.edit.clone();
                 // Answering the permission makes the thread emit an event this entity handles, so it
                 // must not run while this entity is being updated.
-                cx.defer(move |cx| respond(verdict, cx));
+                cx.defer(move |cx| respond(verdict, edit, cx));
                 cx.emit(AgentReviewEvent::Resolved(id));
                 // An allowed preview stays until the agent's write adopts its decisions; after a
                 // denial no write follows.
-                if verdict == PermissionVerdict::Deny {
+                if verdict != PermissionVerdict::Allow {
                     self.reviews.retain(|review| review.id != id);
                     cx.emit(AgentReviewEvent::Closed(id));
                 }
@@ -210,6 +226,19 @@ impl AgentReview {
         }
         cx.notify();
         Ok(())
+    }
+
+    /// Closes every review of a session, e.g. when its thread is released. Held writes fail.
+    pub fn close_session(&mut self, session_id: &acp_v2::SessionId, cx: &mut Context<Self>) {
+        let ids = self
+            .reviews
+            .iter()
+            .filter(|review| &review.session_id == session_id)
+            .map(|review| review.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.close(id, cx);
+        }
     }
 
     /// Closes a review without a decision. A held write then fails without touching the file.
@@ -358,8 +387,11 @@ impl AgentReview {
 
 fn permission_verdict(resolution: Resolution) -> PermissionVerdict {
     match resolution {
+        Resolution::Unchanged | Resolution::AcceptedAll => PermissionVerdict::Allow,
         Resolution::RejectedAll => PermissionVerdict::Deny,
-        _ => PermissionVerdict::Allow,
+        Resolution::Partial { .. } | Resolution::Pending { .. } => {
+            PermissionVerdict::ApplyAcceptedAndDeny
+        }
     }
 }
 
@@ -436,19 +468,98 @@ fn permission_preview(
         diff.new_text.clone(),
     );
     let thread = cx.weak_entity();
-    let respond: PermissionResponder = Box::new(move |verdict, cx| {
+    let respond: PermissionResponder = Box::new(move |verdict, edit, cx| {
         let (option_id, option_kind) = match verdict {
             PermissionVerdict::Allow => (allow_option, acp_v2::PermissionOptionKind::AllowOnce),
-            PermissionVerdict::Deny => (deny_option, acp_v2::PermissionOptionKind::RejectOnce),
+            PermissionVerdict::Deny | PermissionVerdict::ApplyAcceptedAndDeny => {
+                (deny_option, acp_v2::PermissionOptionKind::RejectOnce)
+            }
         };
         let outcome = SelectedPermissionOutcome::new(option_id, option_kind);
-        if let Err(error) = thread.update(cx, |thread, cx| {
-            thread.authorize_permission_request(request_id, outcome, cx)
-        }) {
-            log::debug!("thread closed before its edit review was submitted: {error}");
-        }
+        cx.spawn(async move |cx| {
+            // The accepted hunks land before the agent hears the denial and reads the file again.
+            if verdict == PermissionVerdict::ApplyAcceptedAndDeny {
+                let thread_parts = thread.read_with(cx, |thread, _| {
+                    (thread.project().clone(), thread.action_log().clone())
+                });
+                match thread_parts {
+                    Ok((project, action_log)) => {
+                        if let Err(error) =
+                            write_accepted_hunks(project, action_log, &edit, cx).await
+                        {
+                            log::error!(
+                                "could not write the accepted hunks of {}: {error:#}",
+                                edit.abs_path().display()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::debug!("thread closed before its review was applied: {error}")
+                    }
+                }
+            }
+            if let Err(error) = thread.update(cx, |thread, cx| {
+                thread.authorize_permission_request(request_id, outcome, cx)
+            }) {
+                log::debug!("thread closed before its edit review was submitted: {error}");
+            }
+        })
+        .detach();
     });
     Some((edit, respond))
+}
+
+/// Writes a preview's accepted hunks into the file, through the action log like an agent write, so
+/// they show up in the agent diff. The preview's old text is a fragment that must occur exactly once.
+async fn write_accepted_hunks(
+    project: Entity<Project>,
+    action_log: Entity<ActionLog>,
+    edit: &ProposedEdit,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let replacement = edit.apply_accepted()?.replace("\r\n", "\n");
+    let fragment = edit.old_text().replace("\r\n", "\n");
+    let open = project.update(cx, |project, cx| {
+        let path = project
+            .project_path_for_absolute_path(edit.abs_path(), cx)
+            .context("the file is outside the project")?;
+        anyhow::Ok(project.open_buffer(path, cx))
+    })?;
+    let buffer = open.await?;
+    cx.update(|cx| {
+        let range = locate_fragment(&buffer.read(cx).text(), &fragment)?;
+        action_log.update(cx, |action_log, cx| {
+            action_log.buffer_read(buffer.clone(), cx)
+        });
+        buffer.update(cx, |buffer, cx| {
+            buffer.start_transaction();
+            buffer.edit([(range, replacement)], None, cx);
+            buffer.end_transaction_with_source(BufferEditSource::Agent, cx);
+        });
+        action_log.update(cx, |action_log, cx| {
+            action_log.buffer_edited(buffer.clone(), cx)
+        });
+        anyhow::Ok(())
+    })?;
+    project
+        .update(cx, |project, cx| project.save_buffer(buffer, cx))
+        .await
+}
+
+fn locate_fragment(text: &str, fragment: &str) -> Result<Range<usize>> {
+    anyhow::ensure!(
+        !fragment.is_empty(),
+        "the proposed edit has no old text to replace"
+    );
+    let mut matches = text.match_indices(fragment).map(|(start, _)| start);
+    let start = matches
+        .next()
+        .context("the file no longer contains the text the agent proposed to change")?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "the text the agent proposed to change occurs more than once"
+    );
+    Ok(start..start + fragment.len())
 }
 
 #[cfg(test)]
@@ -458,6 +569,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use language::Buffer;
+    use project::Fs as _;
 
     const OLD: &str = "one\ntwo\nthree\nfour\nfive\n";
     const NEW: &str = "ONE\ntwo\nthree\nfour\nFIVE\n";
@@ -611,7 +723,7 @@ mod tests {
         let verdicts = Rc::new(RefCell::new(Vec::new()));
         let respond: PermissionResponder = Box::new({
             let verdicts = verdicts.clone();
-            move |verdict, _| verdicts.borrow_mut().push(verdict)
+            move |verdict, _, _| verdicts.borrow_mut().push(verdict)
         });
         // The agent proposes a fragment of the file, as Claude's Edit tool does.
         let preview = ProposedEdit::new(
@@ -653,19 +765,18 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn fully_decided_preview_resolves_the_write_without_a_review(cx: &mut TestAppContext) {
+    async fn partly_accepted_preview_is_denied_and_applied_by_the_host(cx: &mut TestAppContext) {
         let (review, _) = setup(cx);
         review.update(cx, |review, cx| review.set_enabled(true, cx));
-        let verdicts = Rc::new(RefCell::new(Vec::new()));
+        let answers = Rc::new(RefCell::new(Vec::new()));
         let respond: PermissionResponder = Box::new({
-            let verdicts = verdicts.clone();
-            move |verdict, _| verdicts.borrow_mut().push(verdict)
+            let answers = answers.clone();
+            move |verdict, edit, _| answers.borrow_mut().push((verdict, edit))
         });
         let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
-        let request_id = new_request_id();
         let id = review
             .update(cx, |review, cx| {
-                review.open_permission_preview(session(), request_id, preview, respond, cx)
+                review.open_permission_preview(session(), new_request_id(), preview, respond, cx)
             })
             .unwrap();
         review.update(cx, |review, cx| {
@@ -676,26 +787,96 @@ mod tests {
                 .set_decision(id, 1, HunkDecision::Accepted, cx)
                 .unwrap();
             review.submit(id, cx).unwrap();
+            assert!(review.reviews().is_empty(), "no write follows a denial");
         });
         cx.run_until_parked();
-        assert_eq!(*verdicts.borrow(), [PermissionVerdict::Allow]);
-
-        let write = agent_write("/p/a.txt", cx);
-        let outcome = gate_write(&review, write, cx).await.unwrap();
+        let answers = answers.borrow();
+        let [(verdict, edit)] = answers.as_slice() else {
+            panic!("expected one answer, got {}", answers.len());
+        };
+        assert_eq!(*verdict, PermissionVerdict::ApplyAcceptedAndDeny);
         assert_eq!(
-            outcome.content.as_deref(),
-            Some("one\ntwo\nthree\nfour\nFIVE\n")
+            edit.apply_accepted().unwrap(),
+            "one\ntwo\nthree\nfour\nFIVE\n"
         );
-        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+    }
 
-        // An undecided preview disappears once the permission is answered in the thread view.
-        let respond: PermissionResponder = Box::new(|_, _| {});
+    #[gpui::test]
+    async fn previews_close_when_answered_elsewhere_and_sessions_close(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
         let preview = ProposedEdit::new(PathBuf::from("/p/b.txt"), OLD.into(), NEW.into());
         let request_id = new_request_id();
         review.update(cx, |review, cx| {
-            review.open_permission_preview(session(), request_id, preview, respond, cx);
+            review.open_permission_preview(
+                session(),
+                request_id,
+                preview,
+                Box::new(|_, _, _| {}),
+                cx,
+            );
             review.permission_answered(request_id, cx);
             assert!(review.reviews().is_empty());
         });
+
+        let write = agent_write("/p/a.txt", cx);
+        let held = gate_write(&review, write, cx);
+        let mut other = agent_write("/p/a.txt", cx);
+        other.session_id = acp_v2::SessionId::new("other");
+        let other_held = gate_write(&review, other, cx);
+        review.update(cx, |review, cx| {
+            review.close_session(&session(), cx);
+            assert_eq!(review.reviews().len(), 1);
+            assert_eq!(
+                review.reviews()[0].session_id(),
+                &acp_v2::SessionId::new("other")
+            );
+        });
+        assert!(held.await.is_err());
+        drop(other_held);
+    }
+
+    #[test]
+    fn locates_a_fragment_only_when_it_is_unique() {
+        assert_eq!(locate_fragment("a\nb\nc\n", "b\n").unwrap(), 2..4);
+        assert!(locate_fragment("a\nb\nb\n", "b\n").is_err());
+        assert!(locate_fragment("a\n", "z").is_err());
+        assert!(locate_fragment("a\n", "").is_err());
+    }
+
+    #[gpui::test]
+    async fn host_writes_accepted_hunks_of_a_fragment(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": "header\none\ntwo\nthree\nfooter\n" }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let mut edit = ProposedEdit::new(
+            PathBuf::from(util::path!("/p/a.txt")),
+            "one\ntwo\nthree".into(),
+            "ONE\ntwo\nTHREE".into(),
+        );
+        assert_eq!(edit.hunks().len(), 2);
+        edit.set_decision(0, HunkDecision::Accepted).unwrap();
+        edit.set_decision(1, HunkDecision::Rejected).unwrap();
+        let mut async_cx = cx.to_async();
+        write_accepted_hunks(project.clone(), action_log.clone(), &edit, &mut async_cx)
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let saved = fs.load(Path::new(util::path!("/p/a.txt"))).await.unwrap();
+        assert_eq!(saved, "header\nONE\ntwo\nthree\nfooter\n");
+        assert_eq!(
+            action_log.read_with(cx, |action_log, cx| action_log.changed_buffers(cx).count()),
+            1,
+            "the host's write shows up in the agent diff"
+        );
     }
 }

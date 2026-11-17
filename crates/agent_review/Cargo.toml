@@ -15,6 +15,8 @@ doctest = false
 
 [dependencies]
 acp_thread.workspace = true
+action_log.workspace = true
+project.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 futures.workspace = true
@@ -25,5 +27,8 @@ log.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+util = { workspace = true, features = ["test-support"] }
 uuid.workspace = true
