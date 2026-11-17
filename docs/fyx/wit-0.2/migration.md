@@ -26,8 +26,8 @@ Every reference to the old path moves in the same commit:
 | Reference | Change |
 |---|---|
 | `crates/extension_host/src/wasm_host/fyx_ui.rs:42` (`bindgen!` path) | moves into `fyx_ui/since_v0_1_0.rs` with `path: "../ui_ext/wit/since_v0.1.0"` |
-| `crates/ui_ext_sdk/src/ui_ext_sdk.rs:61` (`generate!` path) | per SDK feature (section 4) |
-| `crates/ui_ext_sdk/src/ui_ext_sdk.rs:1521-1523` (`api_version_matches_the_wit_package`, `include_str!`) | reads the directory of the selected version |
+| `crates/ui_ext_sdk/src/ui_ext_sdk.rs:61` (`generate!` path) | one `generate!` per version, both in every build (section 4) |
+| `crates/ui_ext_sdk/src/ui_ext_sdk.rs:1521-1523` (`api_version_matches_the_wit_package`, `include_str!`) | one check per version directory |
 | `crates/ui_ext/src/ui_ext.rs:11` (`WIT_DIR`) | `WIT_DIR_V0_1_0`, `WIT_DIR_V0_2_0` |
 | comments: `crates/ui_ext/src/types.rs:1`, `fyx_ui.rs:1`, `ARCHITECTURE.md:23`, `sidecars/vscode-host/README.md:6`, `docs/fyx/sdk-reference.md`, `docs/fyx/limits-and-gotchas.md` (`<!-- … -->` source anchors) | new path; anchors to line numbers in the 0.1 file stay valid, because the file is moved unchanged |
 
@@ -155,69 +155,76 @@ extension changes behaviour by being loaded in a 0.2 host.
 
 ## 4. SDK (W4)
 
-`ui_ext_sdk` targets exactly one world per build, chosen with a Cargo feature:
-
-```toml
-[features]
-default = ["fyx-ui-0-2"]
-fyx-ui-0-2 = []
-# For extensions that must also load on Fyx builds that only know 0.1.
-fyx-ui-0-1 = []
-```
+`ui_ext_sdk` generates the bindings of **both** worlds in every build, and an extension picks its
+world where it registers:
 
 ```rust
-#[cfg(all(feature = "fyx-ui-0-1", feature = "fyx-ui-0-2"))]
-compile_error!("enable exactly one of ui_ext_sdk's `fyx-ui-0-1` and `fyx-ui-0-2` features");
-#[cfg(not(any(feature = "fyx-ui-0-1", feature = "fyx-ui-0-2")))]
-compile_error!("enable one of ui_ext_sdk's `fyx-ui-0-1` or `fyx-ui-0-2` features");
-
 pub mod bindings {
-    #[cfg(feature = "fyx-ui-0-2")]
-    wit_bindgen::generate!({ path: "../ui_ext/wit/since_v0.2.0", world: "ui-extension", /* as today */ });
-    #[cfg(feature = "fyx-ui-0-1")]
-    wit_bindgen::generate!({ path: "../ui_ext/wit/since_v0.1.0", world: "ui-extension", /* as today */ });
+    pub mod v0_2 {
+        wit_bindgen::generate!({ path: "../ui_ext/wit/since_v0.2.0", world: "ui-extension", /* as today */ });
+    }
+    pub mod v0_1 {
+        wit_bindgen::generate!({ path: "../ui_ext/wit/since_v0.1.0", world: "ui-extension", /* as today */ });
+    }
 }
 ```
 
-**What changes for authors.**
+```rust
+register_extension!(MyExtension);        // fyx:ui 0.2, the default
+register_extension!(MyExtension, v0_1);  // for Fyx builds that only know 0.1
+```
 
-- `API_VERSION` and `API_VERSION_SECTION_BYTES` follow the feature, so `register_extension!`
-  always writes the matching version section (`ui_ext_sdk.rs:211-214`).
-- 0.2-only APIs are behind `#[cfg(feature = "fyx-ui-0-2")]`:
+**Why not Cargo features** (an earlier draft had exclusive `fyx-ui-0-1` / `fyx-ui-0-2` features
+with a `compile_error!`). Cargo unifies features. An extension that selects 0.1 and depends on a
+helper crate built on the SDK's default would get both features and fail to compile, with no way
+out for the author (judge wit-0.2-design #3). With both modules always present, the SDK has no
+features to unify. The probe fixture picks its world with a feature of its own (`probe-0-1`
+switches its `register_extension!` arm), and a leaf crate's feature unifies with nothing.
+`gate.sh` needs no feature check.
+
+**Why it does not leak 0.2 into a 0.1 component.** The SDK uses `pub_export_macro: true`. With
+it, wit-bindgen 0.41 emits two `component-type` sections. The `generate!` itself emits one with
+the world's imports only. The `export!` macro, invoked by `register_extension!` in the
+extension's own crate, emits one with the exports and the imports
+(`wit-bindgen-rust` 0.41, `lib.rs` around line 1322). `wit-component` drops imports that the core
+module never calls. So a 0.1 extension carries the 0.1 exports, plus only the imports it actually
+calls. **This has to be verified before the SDK adopts it.** Build one demo with
+`register_extension!(T, v0_1)` and check that `wasm-tools component wit` shows only `@0.1.0`
+`fyx:ui` interfaces and no `tick` export. If a 0.2 import appears, the fallback is the feature
+design above, with the unification trap documented in `docs/fyx/sdk-reference.md`.
+
+**How the API splits.**
+
+- The crate root re-exports the 0.2 types and API, as today. `ui_ext_sdk::v0_1` has the 0.1 API
+  for 0.1 guests.
+- The version-independent code (`TreeBuilder`, `IdAllocator`, `SurfaceTree`, `PatchSet`, the
+  row helpers) is written once. It is instantiated per version by an internal macro over that
+  version's bindings types, so it is neither copied by hand nor made generic in the public API.
+- Each version module brings its own `Extension` trait (0.2 adds `tick`), host-function wrappers,
+  props builders and `host_model.rs` conversions into the shared `ui_ext` model. `ui_ext::TreeLimits`
+  stays shared, which keeps integration-2 #8 fixed.
+- `register_extension!(T, v0_1)` writes the `0.1.0` version section and exports the 0.1 world.
+  The default arm writes `0.2.0` and also exports `tick` (`ui_ext_sdk.rs:211-214`).
+- 0.2-only APIs exist only in the 0.2 module, so using them in a 0.1 guest fails to compile
+  rather than silently doing nothing:
   - `Extension::tick`;
   - `request_tick`, `cancel_tick`, `add_surface`, `remove_surface`, `show_surface` and
     `hide_surface`;
-  - `SurfaceTree::invalidate_rows` and `SurfaceTree::push`;
+  - `place_decoration` and `remove_decoration`, if L ships;
+  - `SurfaceTree::invalidate_rows`, `SurfaceTree::push` and `SurfaceTree::place`;
   - `Surface::modal`;
   - the builders for `tooltip`, `secret`, `selected` and `indent`.
+- `push_update` returns `Result<(), HostError>` in 0.2 and `()` in 0.1.
+- `list_row` takes an `indent` argument only in 0.2.
+- Icons: 0.2 builders take the generated `Icon`; 0.1 builders keep `&str`.
+- `SurfaceTree::mount` checks `max_nodes` (16384) in both versions, since the host accepts that
+  for `mount` and `replace` (design.md, Summary).
+- Crate version `0.1.0` → `0.2.0`.
 
-  An extension that uses them under `fyx-ui-0-1` fails to compile, rather than silently doing
-  nothing at runtime. `register_extension!` exports `tick` only under 0.2.
-- `push_update` returns `Result<(), HostError>` under 0.2 and `()` under 0.1.
-- `list_row` takes an `indent` argument only under 0.2.
-- Icons: under 0.2, builders take the generated `Icon`. Under 0.1 they keep `&str`.
-- `host_model.rs`, the conversions from the guest bindings to `ui_ext`, gets one block per
-  feature. `ui_ext::TreeLimits` stays shared, which removes the duplicate caps (integration-2
-  #8).
-- Crate version `0.1.0` → `0.2.0`. A 0.2 SDK can still build 0.1 extensions, through the
-  feature.
-
-**Why features rather than two crates.** Shared code (`TreeBuilder`, `IdAllocator`,
-`SurfaceTree`, `PatchSet`) is most of the SDK and is version-independent. Two crates would mean
-copying it, or a third crate.
-
-**Feature unification trap.** Cargo unifies features across a workspace build. If any workspace
-member enabled `fyx-ui-0-1`, every member that also has the default would fail with the
-`compile_error!` above. Rules:
-
-- Every workspace member uses the default, 0.2. That covers `extensions/fyx_demo_*` and
-  `ui_ext_sdk`'s own tests.
-- 0.1 guests are built only outside the workspace. The probe fixture already has its own
-  `[workspace]` and lockfile (`fixtures/probe/Cargo.toml`). It forwards features
-  `probe-0-1 = ["ui_ext_sdk/fyx-ui-0-1"]` and `probe-0-2 = ["ui_ext_sdk/fyx-ui-0-2"]`, with
-  `default-features = false` on the SDK dependency. The host tests build it twice, into two
-  target directories.
-- `script/gate.sh` gets a check that no workspace `Cargo.toml` names `fyx-ui-0-1`.
+**Porting a 0.1 extension to 0.2 can require new surface ids.** 0.2 rejects static surfaces whose
+ids break `[a-z0-9._-]{1,64}` (design.md, E). Surface ids are part of panel keys and persisted
+dock state, so a renamed id loses the saved size and position. Every Fyx demo already complies
+(`counter`, `todos`, `gallery`, `gallery-status`).
 
 ## 5. VS Code sidecar (W8)
 
@@ -356,9 +363,13 @@ Every new rule gets a test at the lowest layer that owns it. GPUI tests use exec
 - `SurfaceTree::push`: on `err`, the next `take_update` is a `Replace` of the full mirror, and it
   applies cleanly to `ui_ext::Tree` (the dev-dependency test from integration-1, "Duplication").
 - `take_host_effects` records ticks and surface changes in order.
-- `api_version_matches_the_wit_package` for the selected feature.
-- `cargo check -p ui_ext_sdk --target wasm32-wasip2` with default features. The probe builds
-  cover `fyx-ui-0-1`.
+- `api_version_matches_the_wit_package` for each version: the version section bytes of
+  `register_extension!(T)` and `register_extension!(T, v0_1)` match the `package` line of their
+  WIT directory.
+- A 0.1 build of a demo (`register_extension!(T, v0_1)`): `wasm-tools component wit` shows only
+  `@0.1.0` `fyx:ui` interfaces and no `tick` export (the check from section 4).
+- `cargo check -p ui_ext_sdk --target wasm32-wasip2`. The probe builds for both versions inside
+  the workspace.
 
 **Sidecar (`sidecars/vscode-host/test`)**
 - Version negotiation: `initialize` without `0.2.0` fails.
@@ -400,7 +411,7 @@ Every new rule gets a test at the lowest layer that owns it. GPUI tests use exec
 | 1. Move 0.1 WIT to `since_v0.1.0`, update paths | W0 | — | `script/gate.sh` green, no behaviour change |
 | 2. Add `since_v0.2.0`; `ui_ext` types and `Touched` | W0, then W2 | 1 | `cargo test -p ui_ext` |
 | 3. Host bindings split, dispatch, effects, 0.2 imports, staging by channel | W2 | 2 | host tests on both probe builds |
-| 4. SDK features, 0.2 APIs | W4 | 2 | SDK tests; demos still build on 0.2 |
+| 4. SDK version modules, 0.2 APIs | W4 | 2 | SDK tests; the 0.1 build check from section 4; demos still build on 0.2 |
 | 5. Renderer: ticks, modals, runtime surfaces, rows, icons, fields; status-bar hook | W3 (hook reviewed by W0) | 3 | renderer tests, manual 1–7 |
 | 6. Demos: clock, picker, `invalidate-rows` | W4 | 4, 5 | manual 1–2 |
 | 7. Sidecar | W8 | 2 (schema), 5 (to run for real) | `npm test` with the mock host |
