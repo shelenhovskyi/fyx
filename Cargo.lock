@@ -6119,7 +6119,6 @@ dependencies = [
  "theme_settings",
  "toml 0.9.8",
  "tracing",
- "ui_ext",
  "url",
  "util",
  "wasmparser 0.254.2",
@@ -19320,6 +19319,7 @@ dependencies = [
  "theme_settings",
  "ui",
  "ui_ext",
+ "ui_ext_wasm",
  "util",
  "workspace",
 ]
@@ -19330,6 +19330,26 @@ version = "0.1.0"
 dependencies = [
  "ui_ext",
  "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "ui_ext_wasm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs",
+ "futures 0.3.34",
+ "gpui",
+ "gpui_tokio",
+ "log",
+ "moka",
+ "semver",
+ "serde",
+ "toml 0.9.8",
+ "ui_ext",
+ "wasmparser 0.254.2",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
