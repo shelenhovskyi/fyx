@@ -1,0 +1,531 @@
+{
+ "source": "@types/vscode@1.146.0",
+ "classes": [
+  "BranchCoverage",
+  "Breakpoint",
+  "CallHierarchyIncomingCall",
+  "CallHierarchyItem",
+  "CallHierarchyOutgoingCall",
+  "CancellationError",
+  "CancellationTokenSource",
+  "ChatRequestTurn",
+  "ChatResponseAnchorPart",
+  "ChatResponseCommandButtonPart",
+  "ChatResponseFileTreePart",
+  "ChatResponseMarkdownPart",
+  "ChatResponseProgressPart",
+  "ChatResponseReferencePart",
+  "ChatResponseTurn",
+  "CodeAction",
+  "CodeActionKind",
+  "CodeLens",
+  "Color",
+  "ColorInformation",
+  "ColorPresentation",
+  "CompletionItem",
+  "CompletionList",
+  "CustomExecution",
+  "DataTransfer",
+  "DataTransferItem",
+  "DebugAdapterExecutable",
+  "DebugAdapterInlineImplementation",
+  "DebugAdapterNamedPipeServer",
+  "DebugAdapterServer",
+  "DebugStackFrame",
+  "DebugThread",
+  "DeclarationCoverage",
+  "Diagnostic",
+  "DiagnosticRelatedInformation",
+  "Disposable",
+  "DocumentDropEdit",
+  "DocumentDropOrPasteEditKind",
+  "DocumentHighlight",
+  "DocumentLink",
+  "DocumentPasteEdit",
+  "DocumentSymbol",
+  "EvaluatableExpression",
+  "EventEmitter",
+  "FileCoverage",
+  "FileDecoration",
+  "FileSystemError",
+  "FoldingRange",
+  "FunctionBreakpoint",
+  "Hover",
+  "InlayHint",
+  "InlayHintLabelPart",
+  "InlineCompletionItem",
+  "InlineCompletionList",
+  "InlineValueEvaluatableExpression",
+  "InlineValueText",
+  "InlineValueVariableLookup",
+  "LanguageModelChatMessage",
+  "LanguageModelDataPart",
+  "LanguageModelError",
+  "LanguageModelPromptTsxPart",
+  "LanguageModelTextPart",
+  "LanguageModelToolCallPart",
+  "LanguageModelToolResult",
+  "LanguageModelToolResultPart",
+  "LinkedEditingRanges",
+  "Location",
+  "MarkdownString",
+  "McpHttpServerDefinition",
+  "McpStdioServerDefinition",
+  "NotebookCellData",
+  "NotebookCellOutput",
+  "NotebookCellOutputItem",
+  "NotebookCellStatusBarItem",
+  "NotebookData",
+  "NotebookEdit",
+  "NotebookRange",
+  "ParameterInformation",
+  "Position",
+  "ProcessExecution",
+  "QuickInputButtons",
+  "Range",
+  "RelativePattern",
+  "Selection",
+  "SelectionRange",
+  "SemanticTokens",
+  "SemanticTokensBuilder",
+  "SemanticTokensEdit",
+  "SemanticTokensEdits",
+  "SemanticTokensLegend",
+  "ShellExecution",
+  "SignatureHelp",
+  "SignatureInformation",
+  "SnippetString",
+  "SnippetTextEdit",
+  "SourceBreakpoint",
+  "StatementCoverage",
+  "SymbolInformation",
+  "TabInputCustom",
+  "TabInputNotebook",
+  "TabInputNotebookDiff",
+  "TabInputTerminal",
+  "TabInputText",
+  "TabInputTextDiff",
+  "TabInputWebview",
+  "Task",
+  "TaskGroup",
+  "TelemetryTrustedValue",
+  "TerminalLink",
+  "TerminalProfile",
+  "TestCoverageCount",
+  "TestMessage",
+  "TestMessageStackFrame",
+  "TestRunRequest",
+  "TestTag",
+  "TextEdit",
+  "ThemeColor",
+  "ThemeIcon",
+  "TimelineItem",
+  "TreeItem",
+  "TypeHierarchyItem",
+  "Uri",
+  "WorkspaceEdit"
+ ],
+ "enums": [
+  "ChatResultFeedbackKind",
+  "CodeActionTriggerKind",
+  "ColorThemeKind",
+  "CommentMode",
+  "CommentThreadCollapsibleState",
+  "CommentThreadState",
+  "CompletionItemKind",
+  "CompletionItemTag",
+  "CompletionTriggerKind",
+  "ConfigurationTarget",
+  "DebugConfigurationProviderTriggerKind",
+  "DebugConsoleMode",
+  "DecorationRangeBehavior",
+  "DiagnosticSeverity",
+  "DiagnosticTag",
+  "DocumentHighlightKind",
+  "DocumentPasteTriggerKind",
+  "EndOfLine",
+  "EnvironmentVariableMutatorType",
+  "ExtensionKind",
+  "ExtensionMode",
+  "FileChangeType",
+  "FilePermission",
+  "FileType",
+  "FoldingRangeKind",
+  "IndentAction",
+  "InlayHintKind",
+  "InlineCompletionTriggerKind",
+  "InputBoxValidationSeverity",
+  "LanguageModelChatMessageRole",
+  "LanguageModelChatToolMode",
+  "LanguageStatusSeverity",
+  "LogLevel",
+  "NotebookCellKind",
+  "NotebookCellStatusBarAlignment",
+  "NotebookControllerAffinity",
+  "NotebookEditorRevealType",
+  "OverviewRulerLane",
+  "ProgressLocation",
+  "QuickInputButtonLocation",
+  "QuickPickItemKind",
+  "ShellQuoting",
+  "SignatureHelpTriggerKind",
+  "StatusBarAlignment",
+  "SymbolKind",
+  "SymbolTag",
+  "SyntaxTokenType",
+  "TaskPanelKind",
+  "TaskRevealKind",
+  "TaskScope",
+  "TerminalExitReason",
+  "TerminalLocation",
+  "TerminalShellExecutionCommandLineConfidence",
+  "TestRunProfileKind",
+  "TextDocumentChangeReason",
+  "TextDocumentSaveReason",
+  "TextEditorCursorStyle",
+  "TextEditorLineNumbersStyle",
+  "TextEditorRevealType",
+  "TextEditorSelectionChangeKind",
+  "TimelineTriggerKind",
+  "TreeItemCheckboxState",
+  "TreeItemCollapsibleState",
+  "UIKind",
+  "ViewColumn"
+ ],
+ "namespaces": {
+  "authentication": {
+   "functions": [
+    "getAccounts",
+    "getSession",
+    "registerAuthenticationProvider"
+   ],
+   "values": [],
+   "events": [
+    "onDidChangeSessions"
+   ]
+  },
+  "chat": {
+   "functions": [
+    "createChatParticipant"
+   ],
+   "values": [],
+   "events": []
+  },
+  "commands": {
+   "functions": [
+    "executeCommand",
+    "getCommands",
+    "registerCommand",
+    "registerTextEditorCommand"
+   ],
+   "values": [],
+   "events": []
+  },
+  "comments": {
+   "functions": [
+    "createCommentController"
+   ],
+   "values": [],
+   "events": []
+  },
+  "debug": {
+   "functions": [
+    "addBreakpoints",
+    "asDebugSourceUri",
+    "registerDebugAdapterDescriptorFactory",
+    "registerDebugAdapterTrackerFactory",
+    "registerDebugConfigurationProvider",
+    "removeBreakpoints",
+    "startDebugging",
+    "stopDebugging"
+   ],
+   "values": [
+    "activeDebugConsole",
+    "activeDebugSession",
+    "activeStackItem",
+    "breakpoints"
+   ],
+   "events": [
+    "onDidChangeActiveDebugSession",
+    "onDidChangeActiveStackItem",
+    "onDidChangeBreakpoints",
+    "onDidReceiveDebugSessionCustomEvent",
+    "onDidStartDebugSession",
+    "onDidTerminateDebugSession"
+   ]
+  },
+  "env": {
+   "functions": [
+    "asExternalUri",
+    "createTelemetryLogger",
+    "openExternal"
+   ],
+   "values": [
+    "appHost",
+    "appName",
+    "appRoot",
+    "clipboard",
+    "isAppPortable",
+    "isNewAppInstall",
+    "isTelemetryEnabled",
+    "language",
+    "logLevel",
+    "machineId",
+    "remoteName",
+    "sessionId",
+    "shell",
+    "uiKind",
+    "uriScheme"
+   ],
+   "events": [
+    "onDidChangeLogLevel",
+    "onDidChangeShell",
+    "onDidChangeTelemetryEnabled"
+   ]
+  },
+  "extensions": {
+   "functions": [
+    "getExtension"
+   ],
+   "values": [
+    "all"
+   ],
+   "events": [
+    "onDidChange"
+   ]
+  },
+  "l10n": {
+   "functions": [
+    "t"
+   ],
+   "values": [
+    "bundle",
+    "uri"
+   ],
+   "events": []
+  },
+  "languages": {
+   "functions": [
+    "createDiagnosticCollection",
+    "createLanguageStatusItem",
+    "getDiagnostics",
+    "getLanguages",
+    "match",
+    "registerCallHierarchyProvider",
+    "registerCodeActionsProvider",
+    "registerCodeLensProvider",
+    "registerColorProvider",
+    "registerCompletionItemProvider",
+    "registerDeclarationProvider",
+    "registerDefinitionProvider",
+    "registerDocumentDropEditProvider",
+    "registerDocumentFormattingEditProvider",
+    "registerDocumentHighlightProvider",
+    "registerDocumentLinkProvider",
+    "registerDocumentPasteEditProvider",
+    "registerDocumentRangeFormattingEditProvider",
+    "registerDocumentRangeSemanticTokensProvider",
+    "registerDocumentSemanticTokensProvider",
+    "registerDocumentSymbolProvider",
+    "registerEvaluatableExpressionProvider",
+    "registerFoldingRangeProvider",
+    "registerHoverProvider",
+    "registerImplementationProvider",
+    "registerInlayHintsProvider",
+    "registerInlineCompletionItemProvider",
+    "registerInlineValuesProvider",
+    "registerLinkedEditingRangeProvider",
+    "registerOnTypeFormattingEditProvider",
+    "registerReferenceProvider",
+    "registerRenameProvider",
+    "registerSelectionRangeProvider",
+    "registerSignatureHelpProvider",
+    "registerTypeDefinitionProvider",
+    "registerTypeHierarchyProvider",
+    "registerWorkspaceSymbolProvider",
+    "setLanguageConfiguration",
+    "setTextDocumentLanguage"
+   ],
+   "values": [],
+   "events": [
+    "onDidChangeDiagnostics"
+   ]
+  },
+  "lm": {
+   "functions": [
+    "invokeTool",
+    "registerLanguageModelChatProvider",
+    "registerMcpServerDefinitionProvider",
+    "registerTool",
+    "selectChatModels"
+   ],
+   "values": [
+    "tools"
+   ],
+   "events": [
+    "onDidChangeChatModels"
+   ]
+  },
+  "notebooks": {
+   "functions": [
+    "createNotebookController",
+    "createRendererMessaging",
+    "registerNotebookCellStatusBarItemProvider"
+   ],
+   "values": [],
+   "events": []
+  },
+  "scm": {
+   "functions": [
+    "createSourceControl"
+   ],
+   "values": [
+    "inputBox"
+   ],
+   "events": []
+  },
+  "tasks": {
+   "functions": [
+    "executeTask",
+    "fetchTasks",
+    "registerTaskProvider"
+   ],
+   "values": [
+    "taskExecutions"
+   ],
+   "events": [
+    "onDidEndTask",
+    "onDidEndTaskProcess",
+    "onDidStartTask",
+    "onDidStartTaskProcess"
+   ]
+  },
+  "tests": {
+   "functions": [
+    "createTestController"
+   ],
+   "values": [],
+   "events": []
+  },
+  "window": {
+   "functions": [
+    "createInputBox",
+    "createOutputChannel",
+    "createQuickPick",
+    "createStatusBarItem",
+    "createTerminal",
+    "createTextEditorDecorationType",
+    "createTreeView",
+    "createWebviewPanel",
+    "registerCustomEditorProvider",
+    "registerFileDecorationProvider",
+    "registerTerminalLinkProvider",
+    "registerTerminalProfileProvider",
+    "registerTreeDataProvider",
+    "registerUriHandler",
+    "registerWebviewPanelSerializer",
+    "registerWebviewViewProvider",
+    "setStatusBarMessage",
+    "showErrorMessage",
+    "showInformationMessage",
+    "showInputBox",
+    "showNotebookDocument",
+    "showOpenDialog",
+    "showQuickPick",
+    "showSaveDialog",
+    "showTextDocument",
+    "showWarningMessage",
+    "showWorkspaceFolderPick",
+    "withProgress",
+    "withScmProgress"
+   ],
+   "values": [
+    "activeColorTheme",
+    "activeNotebookEditor",
+    "activeTerminal",
+    "activeTextEditor",
+    "state",
+    "tabGroups",
+    "terminals",
+    "visibleNotebookEditors",
+    "visibleTextEditors"
+   ],
+   "events": [
+    "onDidChangeActiveColorTheme",
+    "onDidChangeActiveNotebookEditor",
+    "onDidChangeActiveTerminal",
+    "onDidChangeActiveTextEditor",
+    "onDidChangeNotebookEditorSelection",
+    "onDidChangeNotebookEditorVisibleRanges",
+    "onDidChangeTerminalShellIntegration",
+    "onDidChangeTerminalState",
+    "onDidChangeTextEditorOptions",
+    "onDidChangeTextEditorSelection",
+    "onDidChangeTextEditorViewColumn",
+    "onDidChangeTextEditorVisibleRanges",
+    "onDidChangeVisibleNotebookEditors",
+    "onDidChangeVisibleTextEditors",
+    "onDidChangeWindowState",
+    "onDidCloseTerminal",
+    "onDidEndTerminalShellExecution",
+    "onDidOpenTerminal",
+    "onDidStartTerminalShellExecution"
+   ]
+  },
+  "workspace": {
+   "functions": [
+    "applyEdit",
+    "asRelativePath",
+    "createFileSystemWatcher",
+    "decode",
+    "encode",
+    "findFiles",
+    "getConfiguration",
+    "getWorkspaceFolder",
+    "openNotebookDocument",
+    "openTextDocument",
+    "registerFileSystemProvider",
+    "registerNotebookSerializer",
+    "registerTaskProvider",
+    "registerTextDocumentContentProvider",
+    "registerTimelineProvider",
+    "registerWorkspaceTimelineProvider",
+    "save",
+    "saveAll",
+    "saveAs",
+    "updateWorkspaceFolders"
+   ],
+   "values": [
+    "fs",
+    "isTrusted",
+    "name",
+    "notebookDocuments",
+    "rootPath",
+    "textDocuments",
+    "workspaceFile",
+    "workspaceFolders"
+   ],
+   "events": [
+    "onDidChangeConfiguration",
+    "onDidChangeNotebookDocument",
+    "onDidChangeTextDocument",
+    "onDidChangeWorkspaceFolders",
+    "onDidCloseNotebookDocument",
+    "onDidCloseTextDocument",
+    "onDidCreateFiles",
+    "onDidDeleteFiles",
+    "onDidGrantWorkspaceTrust",
+    "onDidOpenNotebookDocument",
+    "onDidOpenTextDocument",
+    "onDidRenameFiles",
+    "onDidSaveNotebookDocument",
+    "onDidSaveTextDocument",
+    "onWillCreateFiles",
+    "onWillDeleteFiles",
+    "onWillRenameFiles",
+    "onWillSaveNotebookDocument",
+    "onWillSaveTextDocument"
+   ]
+  }
+ }
+}
