@@ -15,6 +15,7 @@
 mod backend;
 mod consent;
 mod decorations;
+mod inspector;
 mod install;
 pub mod install_store;
 mod keyboard;
@@ -42,6 +43,7 @@ pub use decorations::{
     DEV_DECORATIONS_ENV, DecorationId, DecorationPlacement, DecorationTarget, Decorations,
     text_tree,
 };
+pub use inspector::{ExtensionInspector, InspectorSnapshot, ToggleExtensionInspector};
 pub use install::{
     FyxExtensionsSettings, InstallDevUiExtension, RemoveDevUiExtension, check_dev_folder,
     describe_capabilities,

@@ -36,6 +36,7 @@ actions!(
 #[derive(Clone, Debug, Default, RegisterSetting)]
 pub struct FyxExtensionsSettings {
     pub dev_paths: Vec<PathBuf>,
+    pub developer_mode: bool,
 }
 
 impl Settings for FyxExtensionsSettings {
@@ -48,6 +49,12 @@ impl Settings for FyxExtensionsSettings {
                 .and_then(|extensions| extensions.dev_paths.as_ref())
                 .map(|paths| paths.iter().map(PathBuf::from).collect())
                 .unwrap_or_default(),
+            developer_mode: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.developer_mode)
+                .unwrap_or(false),
         }
     }
 }
@@ -59,6 +66,12 @@ pub fn dev_paths_setting(cx: &App) -> Vec<PathBuf> {
     } else {
         Vec::new()
     }
+}
+
+/// `fyx.extensions.developer_mode`, or false before settings are set up.
+pub fn developer_mode_setting(cx: &App) -> bool {
+    cx.has_global::<settings::SettingsStore>()
+        && FyxExtensionsSettings::get_global(cx).developer_mode
 }
 
 /// What each capability lets the extension do, for the install confirmation.

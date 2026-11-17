@@ -110,7 +110,52 @@ pub struct SurfaceState {
     remounts_without_input: u32,
     /// The source of row generations; see `RowCache::generation`.
     next_row_generation: u64,
+    /// Recent events and updates, for the Extension Inspector.
+    history: VecDeque<HistoryEntry>,
     _mount: Option<Task<()>>,
+}
+
+/// Entries of a surface's history the Extension Inspector keeps.
+pub const HISTORY_CAPACITY: usize = 200;
+
+/// One event sent to the extension, or one tree change, for the Extension Inspector.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HistoryEntry {
+    Event {
+        at: std::time::SystemTime,
+        event: UiEvent,
+    },
+    /// A mounted tree, or an update (a reply, a push) and whether it applied.
+    Update {
+        at: std::time::SystemTime,
+        summary: String,
+        applied: bool,
+    },
+}
+
+/// `replace 12 nodes`, `patches: set-props 3, insert 10, remove 4`, `unchanged`.
+pub fn summarize_update(update: &Update) -> String {
+    match update {
+        Update::Unchanged => "unchanged".into(),
+        Update::Replace(nodes) => format!("replace {} nodes", nodes.len()),
+        Update::Patches(patches) => {
+            let parts: Vec<String> = patches
+                .iter()
+                .map(|patch| match patch {
+                    ui_ext::Patch::SetProps(id, props) => {
+                        format!("set-props {id} ({})", props.kind_name())
+                    }
+                    ui_ext::Patch::Insert(insert) => format!(
+                        "insert {} ({})",
+                        insert.node.id,
+                        insert.node.props.kind_name()
+                    ),
+                    ui_ext::Patch::Remove(id) => format!("remove {id}"),
+                })
+                .collect();
+            format!("patches: {}", parts.join(", "))
+        }
+    }
 }
 
 impl SurfaceState {
@@ -136,6 +181,7 @@ impl SurfaceState {
             resyncing: false,
             remounts_without_input: 0,
             next_row_generation: 0,
+            history: VecDeque::new(),
             _mount: None,
         };
         this.mount(cx);
@@ -292,7 +338,29 @@ impl SurfaceState {
 
     /// Applies the tree a `mount` returned: every mount is one the host started (the first one, a
     /// resync, Retry, a reload), never the extension's own rebuild.
+    fn record(&mut self, entry: HistoryEntry) {
+        if self.history.len() == HISTORY_CAPACITY {
+            self.history.pop_front();
+        }
+        self.history.push_back(entry);
+    }
+
+    /// Recent events and updates, oldest first.
+    pub fn history(&self) -> &VecDeque<HistoryEntry> {
+        &self.history
+    }
+
+    /// The instance's recent calls, `log` output and capability checks, if the backend keeps them.
+    pub fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        self.backend.diagnostics()
+    }
+
     fn set_tree(&mut self, tree: Tree) {
+        self.record(HistoryEntry::Update {
+            at: std::time::SystemTime::now(),
+            summary: format!("mount: {} nodes", tree.len()),
+            applied: true,
+        });
         count_all_inputs(&tree, &mut self.input_sets);
         self.phase = Phase::Ready(tree);
         self.lists.clear();
@@ -318,6 +386,10 @@ impl SurfaceState {
             log::debug!("fyx:ui: dropping {event:?}, its node is gone");
             return;
         }
+        self.record(HistoryEntry::Event {
+            at: std::time::SystemTime::now(),
+            event: event.clone(),
+        });
         if let UiEvent::InputChanged(id, value) | UiEvent::InputSubmitted(id, value) = &event {
             self.set_input_locally(*id, value);
         }
@@ -506,6 +578,19 @@ impl SurfaceState {
     /// tree means host and extension disagree, so it is logged and the surface is mounted again
     /// (the SDK resets its mirror on mount). Returns whether the update applied.
     pub fn apply_update(&mut self, update: Update, cx: &mut Context<Self>) -> bool {
+        let summary = summarize_update(&update);
+        let applied = self.apply_update_inner(update, cx);
+        if summary != "unchanged" || !applied {
+            self.record(HistoryEntry::Update {
+                at: std::time::SystemTime::now(),
+                summary,
+                applied,
+            });
+        }
+        applied
+    }
+
+    fn apply_update_inner(&mut self, update: Update, cx: &mut Context<Self>) -> bool {
         let Phase::Ready(tree) = &mut self.phase else {
             log::debug!(
                 "fyx:ui {}/{}: dropping an update that arrived before mount finished",

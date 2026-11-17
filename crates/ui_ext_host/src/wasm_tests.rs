@@ -674,6 +674,85 @@ async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
     });
 }
 
+/// Plan 1.7: the Extension Inspector shows, for the counter demo, its tree, the events and
+/// patches, and every call with its duration against the budget (2 s for the first mount, 200 ms
+/// for an event).
+#[gpui::test]
+async fn test_inspector_shows_the_counter_demo(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let extension = load("fyx_demo_counter", counter_wasm(), cx).await;
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let (_, pushed) = futures::channel::mpsc::unbounded();
+    registry.update(cx, |registry, cx| {
+        registry.register_extension(extension, pushed, cx)
+    });
+    const LABEL: NodeId = 2;
+    const INCREMENT: NodeId = 5;
+    let state = registry.read_with(cx, |registry, _| {
+        registry
+            .surface("fyx_demo_counter/counter")
+            .unwrap()
+            .state
+            .clone()
+    });
+    run_until(cx, "the mount", |cx| text_of(&state, LABEL, cx).is_some());
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(INCREMENT), cx)
+    });
+    run_until(cx, "the increment", |cx| {
+        text_of(&state, LABEL, cx).as_deref() == Some("Count: 1")
+    });
+
+    let snapshot = cx.update(|cx| crate::inspector::snapshot(registry.read(cx), None, cx));
+    assert_eq!(snapshot.surfaces, ["fyx_demo_counter/counter"]);
+    assert_eq!(
+        snapshot.selected.as_deref(),
+        Some("fyx_demo_counter/counter")
+    );
+    assert!(snapshot.phase.starts_with("ready"), "{}", snapshot.phase);
+    assert!(
+        snapshot.tree[0].starts_with("#1 flex"),
+        "{:?}",
+        snapshot.tree
+    );
+    assert!(
+        snapshot
+            .tree
+            .contains(&r#"  #2 text "Count: 1""#.to_string()),
+        "{:?}",
+        snapshot.tree
+    );
+    let has = |lines: &[String], needle: &str| lines.iter().any(|line| line.contains(needle));
+    assert!(
+        has(&snapshot.history, "event Click(5)"),
+        "{:?}",
+        snapshot.history
+    );
+    assert!(
+        has(&snapshot.history, "patches: set-props 2 (text)"),
+        "{:?}",
+        snapshot.history
+    );
+    assert!(has(&snapshot.history, "mount:"), "{:?}", snapshot.history);
+    assert!(
+        has(&snapshot.calls, "mount counter:") && has(&snapshot.calls, "ms of 2000 ms"),
+        "{:?}",
+        snapshot.calls
+    );
+    assert!(
+        has(&snapshot.calls, "handle-event counter:") && has(&snapshot.calls, "ms of 200 ms"),
+        "{:?}",
+        snapshot.calls
+    );
+
+    // The panel renders it.
+    let (inspector, vcx) =
+        cx.add_window_view(|_, cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
+    vcx.run_until_parked();
+    let rendered = vcx.update(|_, cx| inspector.read(cx).snapshot(cx));
+    assert_eq!(rendered, snapshot);
+}
+
 /// Plan 1.5: a manifest with an unknown capability, or a T2 one (not available yet), is refused
 /// before anything loads, with the capability named.
 #[gpui::test]

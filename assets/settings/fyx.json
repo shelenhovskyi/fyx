@@ -49,6 +49,8 @@
       // Folders of UI extensions in development, loaded on every start and reloaded when
       // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".
       "dev_paths": [],
+      // Show the Extension Inspector panel in release builds too (dev builds always have it).
+      "developer_mode": false,
     },
   },
 }
