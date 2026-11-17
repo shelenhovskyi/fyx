@@ -54,7 +54,7 @@ async fn read(
             thread.read_text_file(path.into(), None, None, false, cx)
         })
         .await
-        .map_err(|error| error.message.to_string())
+        .map_err(|error| error.message)
 }
 
 async fn write(
