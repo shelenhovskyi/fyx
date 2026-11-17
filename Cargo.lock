@@ -6845,6 +6845,7 @@ dependencies = [
 name = "fyx_demo_counter"
 version = "0.1.0"
 dependencies = [
+ "fyx_ext_harness",
  "ui_ext_sdk",
 ]
 
@@ -6895,14 +6896,28 @@ dependencies = [
  "async_zip",
  "clap",
  "futures 0.3.34",
+ "fyx_ext_harness",
  "semver",
  "serde",
  "serde_json",
  "smol",
  "tempfile",
  "toml 0.9.8",
+ "ui_ext",
  "walkdir",
  "wasmparser 0.254.2",
+]
+
+[[package]]
+name = "fyx_ext_harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "semver",
+ "ui_ext",
+ "wasmparser 0.254.2",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -19357,6 +19372,7 @@ dependencies = [
  "anyhow",
  "fs",
  "futures 0.3.34",
+ "fyx_ext_harness",
  "gpui",
  "gpui_tokio",
  "log",

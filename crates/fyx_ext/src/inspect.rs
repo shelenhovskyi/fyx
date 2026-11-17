@@ -202,11 +202,12 @@ pub fn check_capabilities(declared: &[String], imports: &[String], report: &mut 
         }
     }
     for capability in declared {
+        // Used by `surfaces()`, not by an import: checked by loading the component
+        // (`CheckDepth::Load`).
         if SURFACE_CAPABILITIES.contains(&capability.as_str()) {
-            report.note(format!(
-                "{capability:?} is needed by the surfaces the extension declares; the host checks it when it loads the extension"
-            ));
-        } else if !used.contains(&capability.as_str())
+            continue;
+        }
+        if !used.contains(&capability.as_str())
             && crate::manifest::KNOWN_CAPABILITIES
                 .iter()
                 .any(|(name, _)| name == capability)
@@ -291,10 +292,9 @@ pub mod tests {
             report.errors.is_empty() && report.warnings.is_empty(),
             "{report:?}"
         );
-        assert_eq!(
-            report.notes.len(),
-            1,
-            "ui:panel is checked at load: {report:?}"
+        assert!(
+            report.is_empty(),
+            "ui:panel is checked by loading the component: {report:?}"
         );
     }
 
