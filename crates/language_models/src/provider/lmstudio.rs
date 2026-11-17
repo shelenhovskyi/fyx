@@ -186,8 +186,7 @@ impl LmStudioLanguageModelProvider {
         credentials_provider: Arc<dyn CredentialsProvider>,
         cx: &mut App,
     ) -> Self {
-        // fyx: no probe at startup; `authenticate` fetches models on first use.
-        Self {
+        let this = Self {
             http_client: http_client.clone(),
             state: cx.new(|cx| {
                 let subscription = cx.observe_global::<SettingsStore>({
@@ -225,7 +224,13 @@ impl LmStudioLanguageModelProvider {
                 }
             }),
             request_limiters: ModelRateLimiters::default(),
+        };
+        if !cx.has_global::<crate::DeferStartupProbes>() {
+            // fyx: Fyx sets the marker; then `authenticate` fetches on first use.
+            this.state
+                .update(cx, |state, cx| state.restart_fetch_models_task(cx));
         }
+        this
     }
 
     fn api_url(cx: &App) -> String {

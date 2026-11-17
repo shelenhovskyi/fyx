@@ -143,7 +143,7 @@ if ! "$skip_sentry"; then
     for attempt in 1 2 3; do
         echo "Attempting sentry upload (attempt $attempt/3)..."
         if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
-            "${target_dir}/${target_triple}"/release/zed \
+            "${target_dir}/${target_triple}"/release/fyx \
             "${target_dir}/${remote_server_triple}"/release/remote-server; then
             echo "Sentry upload successful on attempt $attempt"
             break
@@ -162,7 +162,7 @@ fi
 # is skipped.
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
-llvm-objcopy --only-keep-debug "${target_dir}/${target_triple}/release/zed" "${target_dir}/${target_triple}/release/zed.dbg"
+llvm-objcopy --only-keep-debug "${target_dir}/${target_triple}/release/fyx" "${target_dir}/${target_triple}/release/zed.dbg"
 llvm-objcopy --only-keep-debug "${target_dir}/${remote_server_triple}/release/remote-server" "${target_dir}/${remote_server_triple}/release/remote-server.dbg"
 
 # Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
@@ -187,9 +187,10 @@ zed_dir="${temp_dir}/zed$suffix.app"
 
 # Cargo may reuse its outputs on the next invocation. Strip packaging copies
 # so reruns still upload full ELFs and extract complete debug companions.
+# fyx: the app binary is `fyx`; the CLI is installed as `bin/fyx` (libexec/zed-editor is what the CLI looks for)
 mkdir -p "${zed_dir}/bin" "${zed_dir}/libexec"
-llvm-objcopy --strip-unneeded "${target_dir}/${target_triple}/release/zed" "${zed_dir}/libexec/zed-editor"
-llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zed"
+llvm-objcopy --strip-unneeded "${target_dir}/${target_triple}/release/fyx" "${zed_dir}/libexec/zed-editor"
+llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/fyx"
 llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote-server" "${temp_dir}/remote_server"
 
 # Libs
@@ -200,7 +201,7 @@ llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/
 # get dlopen'd are built against the system GLib, and resolving them against an
 # older bundled copy fails with missing symbols.
 find_libs() {
-    ldd ${target_dir}/${target_triple}/release/zed |\
+    ldd ${target_dir}/${target_triple}/release/fyx |\
         cut -d' ' -f3 |\
         grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' |\
         grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)'
@@ -210,29 +211,29 @@ mkdir -p "${zed_dir}/lib"
 rm -rf "${zed_dir}/lib/*"
 cp $(find_libs) "${zed_dir}/lib"
 
-# Icons
+# Icons (fyx: installed as `fyx`)
 mkdir -p "${zed_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/zed.png"
+cp "crates/zed/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/fyx.png"
 mkdir -p "${zed_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/zed.png"
+cp "crates/zed/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/fyx.png"
 
-# .desktop
+# .desktop (fyx: names and app IDs match release_channel)
 export DO_STARTUP_NOTIFY="true"
-export APP_CLI="zed"
-export APP_ICON="zed"
+export APP_CLI="fyx"
+export APP_ICON="fyx"
 export APP_ARGS="%U"
 if [[ "$channel" == "preview" ]]; then
-  export APP_NAME="Zed Preview"
-  APP_ID="dev.zed.Zed-Preview"
+  export APP_NAME="Fyx Preview"
+  APP_ID="dev.fyx.Fyx-Preview"
 elif [[ "$channel" == "nightly" ]]; then
-  export APP_NAME="Zed Nightly"
-  APP_ID="dev.zed.Zed-Nightly"
+  export APP_NAME="Fyx Nightly"
+  APP_ID="dev.fyx.Fyx-Nightly"
 elif [[ "$channel" == "dev" ]]; then
-  export APP_NAME="Zed Devel"
-  APP_ID="dev.zed.Zed-Dev"
+  export APP_NAME="Fyx Dev"
+  APP_ID="dev.fyx.Fyx-Dev"
 else
-  export APP_NAME="Zed"
-  APP_ID="dev.zed.Zed"
+  export APP_NAME="Fyx"
+  APP_ID="dev.fyx.Fyx"
 fi
 
 mkdir -p "${zed_dir}/share/applications"

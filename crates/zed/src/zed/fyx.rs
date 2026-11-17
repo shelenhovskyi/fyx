@@ -50,6 +50,8 @@ pub fn init(cx: &mut App) {
     cx.set_app_identity(channel.app_id(), channel.display_name());
     layer_default_settings(cx);
     skip_zed_onboarding(cx);
+    // LM Studio and llama.cpp load their models on first use, like every other provider.
+    cx.set_global(language_models::DeferStartupProbes);
 }
 
 /// `fyx://` is the public URL scheme; `zed://` stays the internal link namespace (mentions, schemas,
@@ -112,7 +114,8 @@ mod tests {
 
     #[gpui::test]
     fn fyx_defaults_apply(cx: &mut App) {
-        cx.set_global(SettingsStore::test(cx));
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
         let defaults = super::merged_default_settings().unwrap();
         SettingsStore::update_global(cx, |store, cx| store.set_default_settings(&defaults, cx))
             .unwrap();

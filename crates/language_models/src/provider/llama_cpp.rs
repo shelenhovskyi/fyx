@@ -468,8 +468,7 @@ impl LlamaCppLanguageModelProvider {
     ) -> Self {
         let capability_cells: CapabilityCells = Arc::new(RwLock::new(HashMap::default()));
         let loading_progress: LoadingProgress = Arc::new(RwLock::new(HashMap::default()));
-        // fyx: no probe at startup; `authenticate` fetches models on first use.
-        Self {
+        let this = Self {
             http_client: http_client.clone(),
             capability_cells: capability_cells.clone(),
             loading_progress: loading_progress.clone(),
@@ -517,7 +516,14 @@ impl LlamaCppLanguageModelProvider {
                     credentials_provider,
                 }
             }),
+        };
+        // Discover eagerly so a running server is picked up without opening settings.
+        if !cx.has_global::<crate::DeferStartupProbes>() {
+            // fyx: Fyx sets the marker; then `authenticate` fetches on first use.
+            this.state
+                .update(cx, |state, cx| state.restart_fetch_models_task(cx));
         }
+        this
     }
 
     fn settings(cx: &App) -> &LlamaCppSettings {
