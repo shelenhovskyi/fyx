@@ -329,7 +329,13 @@ fn toggle_panel_focus(
                 dock.activate_panel(index, window, cx);
                 dock.set_open(true, window, cx);
             });
-            focus_handle.focus(window, cx);
+            panel
+                .read(cx)
+                .view()
+                .read(cx)
+                .focus_handle
+                .clone()
+                .focus(window, cx);
             break;
         }
     }

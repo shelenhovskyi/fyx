@@ -11,6 +11,7 @@
 //! For the sprint, extensions are loaded from [`DEV_EXTENSIONS_ENV`] only.
 
 mod backend;
+mod keyboard;
 mod panel;
 mod registry;
 mod surface;
@@ -28,6 +29,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 pub use backend::UiBackend;
+pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
 pub use panel::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo};
 pub use registry::{DEV_EXTENSIONS_ENV, LoadedSurface, UiExtensionRegistry};
 pub use surface::{Phase, SurfaceState};
@@ -43,4 +45,5 @@ pub struct ToggleExtensionPanel {
 
 pub fn init(cx: &mut App) {
     registry::init(cx);
+    keyboard::intercept_keys(cx);
 }

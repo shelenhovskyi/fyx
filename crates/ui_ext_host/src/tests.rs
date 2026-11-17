@@ -328,7 +328,21 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
-        cx.bind_keys([KeyBinding::new("enter", menu::Confirm, None)]);
+        // The context-free part of the default keymap that surfaces rely on: Tab and Down both
+        // map to `menu::SelectNext` there, which is why the keyboard module intercepts Tab.
+        cx.bind_keys([
+            KeyBinding::new("enter", menu::Confirm, None),
+            KeyBinding::new("escape", menu::Cancel, None),
+            KeyBinding::new("tab", menu::SelectNext, None),
+            KeyBinding::new("shift-tab", menu::SelectPrevious, None),
+            KeyBinding::new("down", menu::SelectNext, None),
+            KeyBinding::new("up", menu::SelectPrevious, None),
+            KeyBinding::new("home", menu::SelectFirst, None),
+            KeyBinding::new("pageup", menu::SelectFirst, None),
+            KeyBinding::new("end", menu::SelectLast, None),
+            KeyBinding::new("pagedown", menu::SelectLast, None),
+        ]);
+        crate::keyboard::intercept_keys(cx);
     });
 }
 
@@ -951,4 +965,173 @@ async fn test_a_remount_keeps_unsent_typing(cx: &mut TestAppContext) {
     vcx.executor().advance_clock(TYPING_DEBOUNCE);
     vcx.run_until_parked();
     assert_eq!(backend.calls(), [], "nothing is sent twice");
+}
+
+// Keyboard support: every key path makes exactly the extension calls a mouse would.
+
+fn focused(view: &Entity<SurfaceView>, cx: &mut VisualTestContext) -> Option<NodeId> {
+    cx.update(|window, cx| view.read(cx).focused_node(window, cx))
+}
+
+fn focus_surface(view: &Entity<SurfaceView>, cx: &mut VisualTestContext) {
+    let handle = view.read_with(cx, |view, _| view.focus_handle.clone());
+    cx.update(|window, cx| handle.focus(window, cx));
+    cx.run_until_parked();
+}
+
+fn key(keys: &str, cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes(keys);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn test_tab_moves_focus_in_tree_order(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+    focus_surface(&view, vcx);
+
+    // Buttons, then the input, then the list, as the tree lists them.
+    let order = [
+        INCREMENT,
+        BROKEN,
+        PUSHER,
+        SET_INPUT,
+        PUSH_THEN_FAIL,
+        BAD_OWN_THEN_OTHER,
+        FATAL,
+        REMOVER,
+        INPUT,
+        LIST,
+    ];
+    for expected in order {
+        key("tab", vcx);
+        assert_eq!(focused(&view, vcx), Some(expected));
+    }
+    // Around the end, and back.
+    key("tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(INCREMENT));
+    key("shift-tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST));
+    key("shift-tab", vcx);
+    assert_eq!(
+        focused(&view, vcx),
+        Some(INPUT),
+        "Shift-Tab leaves the list"
+    );
+    key("shift-tab", vcx);
+    assert_eq!(
+        focused(&view, vcx),
+        Some(REMOVER),
+        "Tab keys leave an input too"
+    );
+    assert_eq!(backend.calls(), [], "moving focus calls nothing");
+}
+
+#[gpui::test]
+async fn test_enter_and_space_click_the_focused_button(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+    focus_surface(&view, vcx);
+    key("tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(INCREMENT));
+
+    key("enter", vcx);
+    assert_eq!(backend.events(), [UiEvent::Click(INCREMENT)]);
+    backend.take_calls();
+    key("space", vcx);
+    assert_eq!(backend.events(), [UiEvent::Click(INCREMENT)]);
+    assert_eq!(props_of(&state, LABEL, vcx), text("Count: 2"));
+    // The patches did not remove the button, so it keeps focus.
+    assert_eq!(focused(&view, vcx), Some(INCREMENT));
+}
+
+#[gpui::test]
+async fn test_list_selection_keys_and_enter(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(300);
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let list_focus = view.read_with(vcx, |view, _| view.list_focus[&LIST].clone());
+    vcx.update(|window, cx| list_focus.focus(window, cx));
+    vcx.run_until_parked();
+    assert_eq!(focused(&view, vcx), Some(LIST));
+    backend.take_calls();
+
+    let selected = |vcx: &mut VisualTestContext| {
+        view.read_with(vcx, |view, _| view.selection.get(&LIST).copied())
+    };
+    key("down", vcx);
+    assert_eq!(selected(vcx), Some(0));
+    key("down", vcx);
+    assert_eq!(selected(vcx), Some(1));
+    key("up", vcx);
+    key("up", vcx);
+    assert_eq!(selected(vcx), Some(0), "Up stops at the first row");
+    key("end", vcx);
+    assert_eq!(selected(vcx), Some(299));
+    key("home", vcx);
+    assert_eq!(selected(vcx), Some(0));
+    // Page keys move by a page, not to the ends (upstream maps them to SelectFirst/Last).
+    key("pagedown", vcx);
+    let page = selected(vcx).expect("selected");
+    assert!(page > 1 && page < 299, "a page is {page} rows");
+    key("pageup", vcx);
+    assert_eq!(selected(vcx), Some(0));
+    key("down", vcx);
+    key("down", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST), "Down stays in the list");
+    assert!(
+        !backend
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Event(_))),
+        "moving the selection sends no event"
+    );
+
+    key("enter", vcx);
+    assert_eq!(backend.events(), [UiEvent::RowClick(LIST, 2)]);
+}
+
+#[gpui::test]
+async fn test_focus_moves_on_when_its_node_is_removed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let remover = view.read_with(vcx, |view, _| view.button_focus[&REMOVER].clone());
+    vcx.update(|window, cx| remover.focus(window, cx));
+    vcx.run_until_parked();
+    backend.take_calls();
+
+    key("enter", vcx);
+    assert_eq!(backend.events(), [UiEvent::Click(REMOVER)]);
+    // The reply removed the button; the next node in the Tab order takes focus.
+    assert_eq!(focused(&view, vcx), Some(INPUT));
+}
+
+#[gpui::test]
+async fn test_escape_returns_to_the_editor(cx: &mut TestAppContext) {
+    init_test(cx);
+    let returned = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let returned = returned.clone();
+        cx.on_action(move |_: &workspace::FocusCenterPane, _| returned.set(returned.get() + 1));
+    });
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    focus_surface(&view, vcx);
+    key("tab", vcx);
+    backend.take_calls();
+
+    key("escape", vcx);
+    assert_eq!(returned.get(), 1);
+    assert_eq!(backend.calls(), [], "Escape calls nothing");
 }
