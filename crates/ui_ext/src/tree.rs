@@ -784,6 +784,7 @@ mod tests {
         tree.apply_patches(vec![insert(text(6, Some(3), "fine"), None)])
             .expect("depth 4");
         assert_eq!(TreeLimits::default().max_depth, 64);
+    }
 
     /// The 0.2 design keeps this for both worlds: `push-update` accepts a `replace` of a whole
     /// tree, so applying it must not fail on size alone (judge wit-0.2-design #2).
