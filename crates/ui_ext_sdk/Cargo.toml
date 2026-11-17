@@ -11,7 +11,7 @@ workspace = true
 
 [lib]
 path = "src/ui_ext_sdk.rs"
-test = false
+test = true
 doctest = false
 
 [dependencies]
