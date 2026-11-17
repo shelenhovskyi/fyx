@@ -9,15 +9,15 @@ use collections::HashMap;
 use editor::{Editor, EditorEvent};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, FontWeight, Hsla, IntoElement,
-    ListSizingBehavior, ParentElement, Render, ScrollHandle, SharedString, Styled, Subscription,
-    Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    ListSizingBehavior, ParentElement, Pixels, Render, RenderOnce, ScrollHandle, SharedString,
+    Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle as UiButtonStyle, Clickable as _, Color,
     Disableable as _, Icon, IconButton, IconName, IconSize, Label, LabelCommon as _, LabelSize,
-    TintColor, h_flex, v_flex,
+    TintColor, WithScrollbar as _, h_flex, v_flex,
 };
 use ui_ext::{
     Align, ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps,
@@ -350,15 +350,21 @@ impl Render for SurfaceView {
                 } else {
                     // The content is at least as tall as the panel (so `grow` nodes and lists fill
                     // it) and scrolls when it is taller.
-                    div()
-                        .id("fyx-ui-body")
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.body_scroll)
-                        .child(v_flex().w_full().min_h_full().children(children))
-                        .into_any_element()
+                    WithVerticalScrollbar {
+                        id: "fyx-ui-body".into(),
+                        handle: ScrollbarHandle::Body(self.body_scroll.clone()),
+                        min_height: None,
+                        content: div()
+                            .id("fyx-ui-body-content")
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.body_scroll)
+                            .child(v_flex().w_full().min_h_full().children(children))
+                            .into_any_element(),
+                    }
+                    .into_any_element()
                 }
             }
         };
@@ -389,6 +395,41 @@ impl Render for SurfaceView {
         container
             .child(body)
             .when(!compact, |this| this.children(error))
+    }
+}
+
+enum ScrollbarHandle {
+    List(UniformListScrollHandle),
+    Body(ScrollHandle),
+}
+
+/// A scrolling element with the `ui` crate's vertical scrollbar, as Zed's panels have. A
+/// component, because the scrollbar needs `&mut Window` and `&mut App` while the tree renderer
+/// only borrows them.
+#[derive(IntoElement)]
+struct WithVerticalScrollbar {
+    id: ElementId,
+    handle: ScrollbarHandle,
+    /// `Some` for a list: it fills the space its parent gives (`flex_1`), at least this tall. The
+    /// panel body fills the panel.
+    min_height: Option<Pixels>,
+    content: AnyElement,
+}
+
+impl RenderOnce for WithVerticalScrollbar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // A flex column, so the content's `flex_1` gets a definite height (a percentage height
+        // would resolve to nothing inside a flexed block).
+        let container = v_flex()
+            .id(self.id)
+            .flex_1()
+            .w_full()
+            .min_h(self.min_height.unwrap_or(Pixels::ZERO))
+            .child(self.content);
+        match &self.handle {
+            ScrollbarHandle::List(handle) => container.vertical_scrollbar_for(handle, window, cx),
+            ScrollbarHandle::Body(handle) => container.vertical_scrollbar_for(handle, window, cx),
+        }
     }
 }
 
@@ -618,20 +659,24 @@ impl Renderer<'_, '_> {
         )
         .with_sizing_behavior(ListSizingBehavior::Auto)
         .flex_1()
-        .min_h(px(min_height as f32))
         .w_full();
-        match self.view.scroll_handles.get(&id) {
-            // `uniform_list` measures one item each layout; measuring the top visible one keeps
-            // that request inside the visible range (judge review w3-deep-1, finding 6).
-            Some(handle) => {
-                let scrolled = -handle.0.borrow().base_handle.offset().y;
-                let top = (scrolled / px(row_height.into())).max(0.) as u32;
-                list.with_width_from_item(Some(top.min(row_count.saturating_sub(1)) as usize))
-                    .track_scroll(handle)
-                    .into_any_element()
-            }
-            None => list.into_any_element(),
+        let Some(handle) = self.view.scroll_handles.get(&id) else {
+            return list.min_h(px(min_height as f32)).into_any_element();
+        };
+        // `uniform_list` measures one item each layout; measuring the top visible one keeps that
+        // request inside the visible range (judge review w3-deep-1, finding 6).
+        let scrolled = -handle.0.borrow().base_handle.offset().y;
+        let top = (scrolled / px(row_height.into())).max(0.) as u32;
+        let list = list
+            .with_width_from_item(Some(top.min(row_count.saturating_sub(1)) as usize))
+            .track_scroll(handle);
+        WithVerticalScrollbar {
+            id: ElementId::NamedInteger("fyx-list-scroll".into(), id as u64),
+            handle: ScrollbarHandle::List(handle.clone()),
+            min_height: Some(px(min_height as f32)),
+            content: list.into_any_element(),
         }
+        .into_any_element()
     }
 
     fn row(
