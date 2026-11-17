@@ -54,6 +54,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
+mod host_model;
+
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../ui_ext/wit",
@@ -66,6 +68,8 @@ pub mod bindings {
 
 pub use bindings::fyx::ui::host::LogLevel;
 pub use bindings::fyx::ui::types::*;
+/// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
+pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version this SDK is generated from, as (major, minor, patch).
 pub const API_VERSION: (u16, u16, u16) = (0, 1, 0);
@@ -366,16 +370,23 @@ impl<'a> TreeBuilder<'a> {
     }
 }
 
-/// Builds one row of a virtualized list. `build` must add exactly one top-level node, the row's
-/// root; its ids start at [`ROW_NODE_ID_BASE`].
-pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> ListRow {
+/// Builds one row of a virtualized list; its ids start at [`ROW_NODE_ID_BASE`]. `build` must add
+/// exactly one top-level node, the row's root, and the row must pass the host's own checks
+/// (`ui_ext::Tree::from_row`), or the host would reject the whole `list-rows` answer.
+pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<ListRow, TreeError> {
     let mut ids = IdAllocator::starting_at(ROW_NODE_ID_BASE);
     let mut tree = TreeBuilder::new(&mut ids);
     build(&mut tree);
-    ListRow {
+    let row = ListRow {
         index,
         nodes: tree.finish(),
-    }
+    };
+    ui_ext::Tree::from_row(
+        row.nodes.iter().map(Into::into).collect(),
+        TreeLimits::default(),
+    )
+    .map_err(TreeError::InvalidRow)?;
+    Ok(row)
 }
 
 /// The row indices of a `list-rows(start, count)` request that exist in a list of `row_count`
@@ -386,7 +397,8 @@ pub fn row_range(start: u32, count: u32, row_count: u32) -> Range<u32> {
 }
 
 /// Answers a `list-rows(start, count)` request for a list of `row_count` rows by calling
-/// `build_row` for each row that exists. See [`list_row`].
+/// `build_row` for each row that exists. See [`list_row`]; a row the host would reject is logged
+/// and left out, so the other rows still show.
 pub fn list_rows(
     start: u32,
     count: u32,
@@ -394,7 +406,18 @@ pub fn list_rows(
     mut build_row: impl FnMut(u32, &mut TreeBuilder),
 ) -> Vec<ListRow> {
     row_range(start, count, row_count)
-        .map(|index| list_row(index, |tree| build_row(index, tree)))
+        .filter_map(
+            |index| match list_row(index, |tree| build_row(index, tree)) {
+                Ok(row) => Some(row),
+                Err(error) => {
+                    log(
+                        LogLevel::Error,
+                        &format!("list row {index} left out: {error}"),
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }
 
@@ -469,23 +492,6 @@ impl From<PatchSet> for Update {
     }
 }
 
-/// The host's caps on a surface, the defaults of `ui_ext::TreeLimits`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TreeLimits {
-    /// Nodes in a `replace` (or `mount`), or patches in one `patches` update.
-    pub max_nodes_per_update: usize,
-    pub max_nodes: usize,
-}
-
-impl Default for TreeLimits {
-    fn default() -> Self {
-        Self {
-            max_nodes_per_update: 2048,
-            max_nodes: 16384,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeError {
     NotMounted,
@@ -509,6 +515,8 @@ pub enum TreeError {
         count: usize,
         max: usize,
     },
+    /// A list row the host would reject, reported by `ui_ext::Tree::from_row`.
+    InvalidRow(ui_ext::TreeError),
 }
 
 impl fmt::Display for TreeError {
@@ -531,26 +539,9 @@ impl fmt::Display for TreeError {
             Self::TreeTooLarge { count, max } => {
                 write!(formatter, "tree would have {count} nodes, the cap is {max}")
             }
+            Self::InvalidRow(error) => write!(formatter, "invalid list row: {error}"),
         }
     }
-}
-
-fn kind_name(props: &Props) -> &'static str {
-    match props {
-        Props::Flex(_) => "flex",
-        Props::Text(_) => "text",
-        Props::Button(_) => "button",
-        Props::Input(_) => "input",
-        Props::List(_) => "list",
-        Props::Table(_) => "table",
-        Props::Icon(_) => "icon",
-        Props::Markdown(_) => "markdown",
-        Props::DiffView(_) => "diff-view",
-    }
-}
-
-fn is_container(props: &Props) -> bool {
-    matches!(props, Props::Flex(_))
 }
 
 impl std::error::Error for TreeError {}
@@ -799,13 +790,18 @@ impl SurfaceTree {
     }
 
     fn check_container(id: NodeId, node: &LiveNode, props: &Props) -> Result<(), TreeError> {
-        if !node.children.is_empty() && !is_container(props) {
-            return Err(TreeError::NotAContainer {
-                node: id,
-                kind: kind_name(props),
-            });
+        if node.children.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let host_props = ui_ext::Props::from(props);
+        if host_props.is_container() {
+            Ok(())
+        } else {
+            Err(TreeError::NotAContainer {
+                node: id,
+                kind: host_props.kind_name(),
+            })
+        }
     }
 
     fn check_update_size(&self, count: usize) -> Result<(), TreeError> {
@@ -826,10 +822,11 @@ impl SurfaceTree {
 
     fn insert_position(&self, parent: NodeId, before: Option<NodeId>) -> Result<usize, TreeError> {
         let parent_node = self.node(parent)?;
-        if !is_container(&parent_node.props) {
+        let host_props = ui_ext::Props::from(&parent_node.props);
+        if !host_props.is_container() {
             return Err(TreeError::NotAContainer {
                 node: parent,
-                kind: kind_name(&parent_node.props),
+                kind: host_props.kind_name(),
             });
         }
         let siblings = &parent_node.children;
@@ -1173,67 +1170,21 @@ mod tests {
         TextProps::new(content).into()
     }
 
-    /// Applies patches the way the `fyx:ui` contract describes, independently of [`SurfaceTree`],
-    /// to check that the patches it emits reproduce its own view of the tree.
-    fn apply(nodes: &mut Vec<Node>, update: Update) {
-        let patches = match update {
-            Update::Unchanged => return,
-            Update::Replace(new_nodes) => {
-                *nodes = new_nodes;
-                return;
-            }
-            Update::Patches(patches) => patches,
-        };
-        for patch in patches {
-            match patch {
-                Patch::SetProps((id, props)) => {
-                    let node = nodes.iter_mut().find(|node| node.id == id);
-                    node.expect("set-props on an unknown node").props = props;
-                }
-                Patch::Remove(id) => {
-                    let mut removed = HashSet::from([id]);
-                    for node in nodes.iter() {
-                        if node.parent.is_some_and(|parent| removed.contains(&parent)) {
-                            removed.insert(node.id);
-                        }
-                    }
-                    nodes.retain(|node| !removed.contains(&node.id));
-                }
-                Patch::Insert(InsertOp { node, before }) => {
-                    let index = match before {
-                        Some(before) => nodes
-                            .iter()
-                            .position(|sibling| sibling.id == before)
-                            .expect("insert before an unknown node"),
-                        None => subtree_end(nodes, node.parent),
-                    };
-                    nodes.insert(index, node);
-                }
-            }
-        }
+    fn to_host(nodes: &[Node]) -> Vec<ui_ext::Node> {
+        nodes.iter().map(Into::into).collect()
     }
 
-    /// The index just past the last descendant of `parent` (or the end for roots).
-    fn subtree_end(nodes: &[Node], parent: Option<NodeId>) -> usize {
-        let Some(parent) = parent else {
-            return nodes.len();
-        };
-        let start = nodes
-            .iter()
-            .position(|node| node.id == parent)
-            .expect("insert under an unknown node");
-        let mut inside = HashSet::from([parent]);
-        let mut end = start + 1;
-        while let Some(node) = nodes.get(end) {
-            match node.parent {
-                Some(node_parent) if inside.contains(&node_parent) => {
-                    inside.insert(node.id);
-                    end += 1;
-                }
-                _ => break,
-            }
-        }
-        end
+    /// The host's tree after `mount`, built by `ui_ext` itself.
+    fn host_tree(nodes: &[Node]) -> ui_ext::Tree {
+        ui_ext::Tree::from_nodes(to_host(nodes), TreeLimits::default())
+            .expect("the host accepts the mount")
+    }
+
+    /// Applies an update with the host's own rules and checks the host now holds the SDK's view.
+    fn apply(host: &mut ui_ext::Tree, surface: &mut SurfaceTree) {
+        host.apply_update((&surface.take_update()).into())
+            .expect("the host accepts the update");
+        assert_eq!(host.to_nodes(), to_host(&surface.to_nodes()));
     }
 
     #[test]
@@ -1421,7 +1372,7 @@ mod tests {
         let mut column = 0;
         let mut first = 0;
         let mut last = 0;
-        let mut host_nodes = surface
+        let mounted = surface
             .mount(|tree| {
                 column = tree.column(|tree| {
                     first = tree.text("first");
@@ -1433,7 +1384,8 @@ mod tests {
                 });
             })
             .expect("mount");
-        assert_eq!(host_nodes, surface.to_nodes());
+        assert_eq!(mounted, surface.to_nodes());
+        let mut host = host_tree(&mounted);
 
         let inserted = surface
             .insert(column, Some(last), |tree| {
@@ -1455,8 +1407,7 @@ mod tests {
         surface.remove(inserted[0]).expect("remove");
         assert!(!surface.contains(inserted[0] + 1));
 
-        apply(&mut host_nodes, surface.take_update());
-        assert_eq!(host_nodes, surface.to_nodes());
+        apply(&mut host, &mut surface);
 
         let order = surface
             .children(column)
@@ -1484,12 +1435,10 @@ mod tests {
             surface.rebuild(column, |_| {}),
             Err(TreeError::IsRoot(column))
         );
-        apply(&mut host_nodes, surface.take_update());
-        assert_eq!(host_nodes, surface.to_nodes());
+        apply(&mut host, &mut surface);
 
         surface.clear_children(column).expect("clear");
-        apply(&mut host_nodes, surface.take_update());
-        assert_eq!(host_nodes, surface.to_nodes());
+        apply(&mut host, &mut surface);
         assert_eq!(surface.len(), 1);
         assert_eq!(surface.roots(), [column]);
     }
@@ -1529,6 +1478,32 @@ mod tests {
         assert_eq!(row.nodes[0].parent, None);
         assert_eq!(row.nodes[1].parent, Some(ROW_NODE_ID_BASE));
         assert_eq!(row.nodes[1].props, text("row 2"));
+    }
+
+    #[test]
+    fn rows_the_host_would_reject_are_left_out() {
+        assert_eq!(
+            list_row(0, |_| {}),
+            Err(TreeError::InvalidRow(ui_ext::TreeError::RowRootCount(0)))
+        );
+        assert_eq!(
+            list_row(0, |tree| {
+                tree.text("a");
+                tree.text("b");
+            }),
+            Err(TreeError::InvalidRow(ui_ext::TreeError::RowRootCount(2)))
+        );
+
+        let rows = list_rows(0, 3, 3, |index, tree| {
+            if index != 1 {
+                tree.text(format!("row {index}"));
+            }
+        });
+        assert_eq!(rows.iter().map(|row| row.index).collect::<Vec<_>>(), [0, 2]);
+        for row in &rows {
+            ui_ext::Tree::from_row(to_host(&row.nodes), TreeLimits::default())
+                .expect("the host accepts the row");
+        }
     }
 
     #[test]
