@@ -45,19 +45,21 @@ pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
     AcceptAllHunks, AcceptHunk, AcceptTurn, CommentHunk, NextHunk, OpenReviews, PreviousHunk,
     RejectAllHunks, RejectHunk, RejectTurn, ReviewPane, SubmitReview, ToggleReviewMode,
+    permission_card_notice,
 };
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
 
 /// What review mode covers, for the status bar and the docs.
 pub const COVERAGE: &str = "Agent review covers edits that ACP agents propose with a diff (v1 \
-    permission requests and single-file v2 patches) and writes through Fyx (fs/write_text_file). \
-    Not reviewed: shell and terminal commands (files they change during a turn are listed as changed \
-    without review), Zed's built-in agent, and edits whose diff Fyx cannot read (a notification \
-    says so).";
+    permission requests and single-file v2 patches), writes through Fyx (fs/write_text_file), and the \
+    edit and write tools of Zed's built-in agent. Not reviewed: shell and terminal commands (files \
+    they change during a turn are listed as changed without review), the built-in agent's delete, \
+    move and copy tools (they ask permission as in Zed), and edits whose diff Fyx cannot read (a \
+    notification says so).";
 
 /// The short form, under every review pane.
 pub const NOT_REVIEWED: &str = "Not reviewed: terminal commands (files they change are listed above), \
-    Zed's built-in agent, edits Fyx cannot show as a diff.";
+    the built-in agent's delete, move and copy tools, edits Fyx cannot show as a diff.";
 
 /// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
 const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
@@ -2574,6 +2576,33 @@ mod tests {
         assert!(closed);
         review.update(cx, |review, cx| review.close_session(&session(), cx));
         assert!(held.await.is_err());
+    }
+
+    #[gpui::test]
+    async fn the_permission_card_defers_to_an_open_preview(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let (respond, _) = recording_responder();
+        let request_id = new_request_id();
+        let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+        let id = review
+            .update(cx, |review, cx| {
+                review.open_permission_preview(session(), request_id, preview, respond, None, cx)
+            })
+            .unwrap();
+        assert!(cx.update(|cx| permission_card_notice(request_id, cx).is_some()));
+        assert!(cx.update(|cx| permission_card_notice(new_request_id(), cx).is_none()));
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|cx| permission_card_notice(request_id, cx).is_none()));
     }
 
     #[gpui::test]

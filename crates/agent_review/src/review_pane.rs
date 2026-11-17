@@ -26,8 +26,11 @@ use workspace::{
     item::{ItemEvent, TabContentParams},
 };
 
+use acp_thread::PermissionRequestId;
+
 use crate::{
-    AgentReview, AgentReviewEvent, HunkDecision, ProposedEdit, Resolution, ReviewId, TurnId,
+    AgentReview, AgentReviewEvent, HunkDecision, ProposedEdit, Resolution, ReviewId, ReviewSource,
+    TurnId,
 };
 
 actions!(
@@ -996,6 +999,36 @@ impl Item for ReviewPane {
             ReviewPaneEvent::Close => f(ItemEvent::CloseItem),
         }
     }
+}
+
+/// What the agent panel shows instead of a permission request's buttons while Fyx reviews the
+/// request's edit: the decision is made in the review pane, and answering the card as well would end
+/// the review (an "always allow" there would end review for the whole tool).
+pub fn permission_card_notice(request_id: PermissionRequestId, cx: &App) -> Option<Div> {
+    let review = AgentReview::global(cx)?;
+    let preview = review.read(cx).reviews().iter().find(|review| {
+        review.source() == ReviewSource::Permission(request_id) && !review.is_submitted()
+    })?;
+    let file = file_name(preview.edit().abs_path());
+    Some(
+        h_flex()
+            .gap_2()
+            .child(
+                Label::new(format!(
+                    "Fyx is reviewing this edit to {file} hunk by hunk; decide it in the review pane."
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                Button::new(
+                    SharedString::from(format!("open-agent-review-{request_id:?}")),
+                    "Open review",
+                )
+                .label_size(LabelSize::Small)
+                .on_click(|_, window, cx| window.dispatch_action(OpenReviews.boxed_clone(), cx)),
+            ),
+    )
 }
 
 /// Review mode and waiting reviews in the status bar. Shown while review mode is on or a review
