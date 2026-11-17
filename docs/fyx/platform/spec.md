@@ -1,9 +1,10 @@
 # Platform 1: a home for third-party UI extensions
 
 Status: **draft for approval**. Evidence: [research report](../../research/reports/Мастхев%20розширення%20та%20функції%20Fyx.md).
-Owner decisions (2026-11-17): first-party extensions are postponed; authors are Rust and
-TypeScript; distribution is our own GitHub-reviewed registry; network and processes only with
-consent; old `fyx:ui` versions keep working.
+Owner decisions (2026-11-17): first-party extensions are postponed; authors write Rust
+(TypeScript deferred until after 1.0, decided 2026-11-18, decision 3); distribution is our own
+GitHub-reviewed registry; network and processes only with consent; old `fyx:ui` versions keep
+working.
 Revised for the `fyx:ui` 0.2 decisions, [decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17): editor decorations ship in 0.2 as section L, so
 notifications and progress become section M; the frozen 101-icon enum (§I) and the modal gesture
 rule (§C: a modal opens only within 5 s after a click or Enter) are settled.
@@ -11,7 +12,7 @@ rule (§C: a modal opens only within 5 s after a click or Enter) are settled.
 ## 1. Goal
 
 A third-party author can go from `fyx-ext new` to an extension that users find, install, update
-and trust, in one evening, in Rust or TypeScript. A user can install it without reading a
+and trust, in one evening, in Rust. A user can install it without reading a
 permission essay, and a bad update can be pulled off every machine within hours. The API covers
 what the most-loved extensions in other editors are made of: panels, pickers, notifications,
 line decorations, code lenses, read-only documents, network and processes behind consent.
@@ -26,7 +27,7 @@ line decorations, code lenses, read-only documents, network and processes behind
      consent tiers T0–T1, Extension Inspector, generated reference docs.
    - **P2 `fyx:ui@0.2.0`**: `docs/fyx/wit-0.2/design.md` sections A–L as [decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17)
      (L: editor decorations, blocks above or below a line, `ui:editor-decorations`), plus
-     section M (notifications and progress, decision 22). TypeScript SDK.
+     section M (notifications and progress, decision 22).
    - **P3 registry**: package format, registry repo and CI, signatures, updates, block list,
      rollback.
    - **P4 `fyx:ui@0.3.0`**: decoration extras beyond 0.2 §L, picker protocol, code lens and hover, virtual documents,
@@ -35,11 +36,14 @@ line decorations, code lenses, read-only documents, network and processes behind
 
 ### Authoring (convenience)
 
-3. Two SDKs from one WIT: Rust `fyx-sdk` (today's `ui_ext_sdk`) and TypeScript `@fyx/sdk`
-   (built with `jco componentize`). A CI parity test fails if a WIT import or export lacks a
-   wrapper in either SDK.
+3. **Rust only until 1.0** (owner, 2026-11-18): one SDK, Rust `fyx-sdk` (today's
+   `ui_ext_sdk`). A TypeScript SDK (`@fyx/sdk` with `jco componentize`, prototyped in `sdks/ts`)
+   is deferred until after 1.0, and whether to do it at all is re-evaluated then. Why: two SDKs
+   double the cost of every API version (each world change needs both and a parity test), and
+   AI-assisted Rust lowers the barrier TypeScript was meant to remove. The WIT stays
+   language-neutral, so another guest language later needs no host change.
 4. One CLI, `fyx-ext`, a separate binary in a Fyx crate (no upstream `cli` edit):
-   `new <name> --lang rust|ts`, `build`, `dev`, `check`, `test`, `package`.
+   `new <name>`, `build`, `dev`, `check`, `test`, `package`.
 5. `fyx-ext check` validates the manifest, and compares capabilities **declared** in
    `extension.toml` with host imports the component **actually uses**: an undeclared import is an
    error, an unused declared capability is a warning.
@@ -54,8 +58,8 @@ line decorations, code lenses, read-only documents, network and processes behind
 9. Extension Inspector, a host panel shown in dev builds or with
    `fyx.extensions.developer_mode = true`: live tree, patch log, event log, per-call duration
    against the budget, push count, capability calls and denials, the extension's `log` output.
-10. `fyx_sdk::testing` (Rust) and `@fyx/sdk/testing` (TS): run the component in wasmtime without
-    GPUI, mount surfaces, send events, assert the tree. `fyx-ext test` runs them.
+10. `fyx_sdk::testing`: run the component in wasmtime without GPUI, mount surfaces, send
+    events, assert the tree. `fyx-ext test` runs them.
 11. The API reference is generated from WIT doc comments on every merge; a doc test fails when
     `docs/fyx/sdk-reference.md` names an item that the WIT does not have.
 
@@ -114,7 +118,7 @@ line decorations, code lenses, read-only documents, network and processes behind
     and the whole tree is killed when the extension is disabled, reloaded or uninstalled.
 25. Per-instance limits: own wasmtime `Store`, no WASI preopens and no inherited environment,
     linear memory cap **256 MiB**, existing time budgets (200 ms per call, 10 ms epoch). The first
-    `mount` after instantiation gets **2 s**, so large TypeScript components can start.
+    `mount` after instantiation gets **2 s**, so large components can start.
 26. In an untrusted worktree, `process:spawn` and `workspace:edit` are denied without a prompt.
     Revoking a capability takes effect at once: in-flight requests are cancelled and later calls
     return `denied`.
@@ -157,12 +161,13 @@ line decorations, code lenses, read-only documents, network and processes behind
 | Host imports | `extension_host::wasm_host::fyx_ui` (moves to a Fyx crate with Phase 5 #9) | `fetch`, `spawn`, notifications, decorations, picker, commands | permission broker |
 | Hot reload | `ui_ext_host::registry` | watch, debounce, re-mount in place | install store |
 | Extension Inspector | `ui_ext_host::inspector` | dev panel (decision 9) | host call log |
-| SDKs | `crates/ui_ext_sdk`, `sdks/ts` | bindings, builders, testing harness | WIT |
+| SDK | `crates/ui_ext_sdk` | bindings, builders, testing harness | WIT |
 | Registry | repo `fyx-extensions` + its CI | build from source, review rules, signing, block list | `fyx-ext` |
 | Extensions page tab | `ui_ext_host` + one `fyx:` hook in `extensions_ui` | search, install, pin, rollback, capabilities | registry client |
 
 Existing work reused: `script/fyx-new-extension` (branch `claude/fyx-ext-template`) becomes
-`fyx-ext new`; the TS prototype (branch `claude/fyx-ts-sdk`) becomes `sdks/ts`; capability chips
+`fyx-ext new`; the TS prototype (branch `claude/fyx-ts-sdk`) stays in `sdks/ts` as an
+unsupported experiment (decision 3); capability chips
 (`60507a5016`) become the tier display.
 
 ## 4. Failure modes
@@ -181,7 +186,7 @@ Existing work reused: `script/fyx-new-extension` (branch `claude/fyx-ext-templat
 5. **Registry and block list unreachable for a week** (offline laptop). Installed extensions keep
    running with the cached block list; after **7 days** the extensions page shows "Block list is
    7 days old"; nothing is disabled for being offline.
-6. **A TypeScript component of 20 MiB starts slowly.** Instantiation runs off the main thread, the
+6. **A component of 20 MiB starts slowly.** Instantiation runs off the main thread, the
    panel shows a loading state, and the first `mount` has the 2 s budget, not 200 ms.
 
 ## 5. Out of scope
@@ -190,4 +195,5 @@ Existing work reused: `script/fyx-new-extension` (branch `claude/fyx-ext-templat
   this milestone); webviews (`ui:web`); key capture and overlay labels; inlay hints; graph
   columns; ratings, reviews and download counts in the registry; paid extensions; settings sync of
   extensions; a registry for Zed-format extensions (languages, themes); agent review policy
-  (W5's Phase 5 #1 stays separate; this milestone only adds `agent:observe` for extensions).
+  (W5's Phase 5 #1 stays separate; this milestone only adds `agent:observe` for extensions);
+  TypeScript and other guest languages (decision 3: deferred until after 1.0, then re-evaluated).

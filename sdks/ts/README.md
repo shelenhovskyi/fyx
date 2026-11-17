@@ -1,5 +1,10 @@
 # Fyx UI extensions in TypeScript (prototype)
 
+> [!WARNING]
+> **Experimental prototype, not supported.** No parity with `fyx:ui` 0.2 or later. TypeScript
+> extensions are deferred until after Fyx 1.0; see
+> [the platform spec, decision 3](../../docs/fyx/platform/spec.md).
+
 This prototype tests whether Fyx UI extensions can be written in TypeScript and compiled with
 [`jco componentize`](https://github.com/bytecodealliance/jco) against the `fyx:ui@0.1.0` world
 (`crates/ui_ext/wit/fyx-ui.wit`), and whether the resulting components meet the host's contract.
