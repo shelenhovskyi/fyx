@@ -1,0 +1,30 @@
+{
+  "name": "kitchen-sink",
+  "publisher": "fyx-test",
+  "displayName": "%displayName%",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./out/extension",
+  "activationEvents": ["onLanguage:plaintext"],
+  "contributes": {
+    "commands": [
+      { "command": "sink.hello", "title": "Hello" },
+      { "command": "sink.pick", "title": "Pick" },
+      { "command": "sink.ask", "title": "Ask" },
+      { "command": "sink.upper", "title": "Uppercase" },
+      { "command": "sink.webview", "title": "Webview" },
+      { "command": "sink.fs", "title": "File system" }
+    ],
+    "configuration": {
+      "title": "Sink",
+      "properties": {
+        "sink.greeting": { "type": "string", "default": "Hello" },
+        "sink.limits.max": { "type": "number", "default": 3 }
+      }
+    },
+    "views": {
+      "explorer": [{ "id": "sinkTree", "name": "Sink Tree" }]
+    }
+  }
+}

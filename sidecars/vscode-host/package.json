@@ -1,0 +1,24 @@
+{
+  "name": "@fyx/vscode-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fyx sidecar that runs unmodified VS Code extensions (.vsix) against a partial vscode.* shim and speaks the fyx:ui tree schema over JSON-RPC.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "start": "node src/main.ts",
+    "gen-catalog": "node scripts/gen-api-catalog.ts",
+    "fetch": "node scripts/fetch-vsix.ts",
+    "coverage": "node scripts/run-coverage.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.9.0"
+  }
+}

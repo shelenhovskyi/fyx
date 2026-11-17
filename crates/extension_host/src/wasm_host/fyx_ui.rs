@@ -5,24 +5,31 @@
 //! sits in front of click handling. UI components run on a separate [`Engine`] whose epoch ticks
 //! every [`UI_EPOCH_INTERVAL`] instead of Zed's 100 ms, so a UI call yields to the executor that
 //! often, and a call that runs past [`UI_CALL_BUDGET`] is interrupted; the trapped instance is
-//! then disabled.
+//! then disabled. Epoch callbacks only run while guest code executes, so every call is also raced
+//! against a wall-clock deadline that catches a guest blocked in a WASI host call.
 //!
 //! The renderer never sees wasmtime types: everything crosses as `ui_ext` types.
 
 use std::{
+    future::Future,
     ops::RangeInclusive,
-    sync::{Arc, OnceLock},
+    path::{Component as PathComponent, Path},
+    pin::{Pin, pin},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
+    task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, anyhow};
+use fs::Fs;
 use futures::{
     FutureExt as _, StreamExt as _,
     channel::{mpsc, oneshot},
-    future::BoxFuture,
+    future::{BoxFuture, Either},
 };
 use gpui::{AsyncApp, Task};
 use semver::Version;
+use serde::Deserialize;
 use ui_ext::{Tree, TreeLimits};
 use wasmtime::{
     Engine, Store, UpdateDeadline,
@@ -53,6 +60,9 @@ pub const UI_EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 pub const UI_CALL_BUDGET: Duration = Duration::from_millis(200);
 /// Instantiation and `surfaces` run once per load and may set up state, so they get more time.
 const UI_INIT_BUDGET: Duration = Duration::from_secs(2);
+/// On top of a budget before a call is dropped outright. Long enough that a busy guest is stopped
+/// by the epoch interrupt first, which leaves a clearer error.
+const UI_DEADLINE_SLACK: Duration = Duration::from_millis(50);
 
 /// The `fyx:ui` versions this host can load, on every release channel.
 ///
@@ -74,8 +84,19 @@ pub fn parse_api_version(extension_id: &str, wasm_bytes: &[u8]) -> Result<Option
             payload.context("error parsing fyx:ui extension")?
             && section.name() == API_VERSION_SECTION
         {
+            let data = section.data();
+            // The linker concatenates equally named custom sections, so a guest that emits the
+            // section next to `register_extension!` ends up with a multiple of 6 bytes.
+            if data.len() > 6 && data.len() % 6 == 0 {
+                anyhow::bail!(
+                    "extension {extension_id} has {} copies of the {API_VERSION_SECTION} section \
+                     ({} bytes); emit it only via ui_ext_sdk::register_extension!",
+                    data.len() / 6,
+                    data.len(),
+                );
+            }
             version = Some(
-                super::parse_wasm_extension_version_custom_section(section.data())
+                super::parse_wasm_extension_version_custom_section(data)
                     .with_context(|| {
                         format!(
                             "extension {extension_id} has an invalid {API_VERSION_SECTION} section: {:?}",
@@ -102,19 +123,103 @@ fn api_version_from_imports(component: &Component, engine: &Engine) -> Option<Ve
         })
 }
 
-/// An update the extension pushed on its own (timers, background work), not as the reply to an
-/// event. The renderer coalesces these and applies them on its next frame.
+/// Capability a manifest must declare for each panel surface.
+pub const CAPABILITY_PANEL: &str = "ui:panel";
+/// Capability a manifest must declare for each status item surface.
+pub const CAPABILITY_STATUS_BAR: &str = "ui:status-bar";
+
+/// The `[fyx_ui]` table of an extension's `extension.toml`. Upstream's `ExtensionManifest` ignores
+/// unknown tables, so the same file stays installable in Zed.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiManifest {
+    /// The `fyx:ui` version the component implements.
+    pub api_version: Version,
+    /// Path of the component inside the extension directory, separate from `extension.wasm`.
+    pub component: String,
+    /// Capabilities the surfaces need: [`CAPABILITY_PANEL`], [`CAPABILITY_STATUS_BAR`].
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionToml {
+    id: Arc<str>,
+    fyx_ui: Option<UiManifest>,
+}
+
+impl UiManifest {
+    /// Reads `extension.toml` in `extension_dir`. `None` when it has no `[fyx_ui]` table.
+    pub async fn read(fs: &dyn Fs, extension_dir: &Path) -> Result<Option<(Arc<str>, UiManifest)>> {
+        let path = extension_dir.join("extension.toml");
+        let text = fs
+            .load(&path)
+            .await
+            .with_context(|| format!("reading {path:?}"))?;
+        let toml: ExtensionToml =
+            toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
+        let Some(manifest) = toml.fyx_ui else {
+            return Ok(None);
+        };
+        let id = toml.id;
+        anyhow::ensure!(
+            is_supported_api_version(&manifest.api_version),
+            "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
+            manifest.api_version,
+        );
+        anyhow::ensure!(
+            !manifest.component.is_empty()
+                && Path::new(&manifest.component)
+                    .components()
+                    .all(|component| matches!(component, PathComponent::Normal(_))),
+            "extension {id}: [fyx_ui].component must be a relative path inside the extension, got {:?}",
+            manifest.component,
+        );
+        Ok(Some((id, manifest)))
+    }
+
+    /// Every surface needs the capability of its kind.
+    fn check_surfaces(&self, extension_id: &str, surfaces: &[ui_ext::Surface]) -> Result<()> {
+        for surface in surfaces {
+            let required = match surface.kind {
+                ui_ext::SurfaceKind::Panel(_) => CAPABILITY_PANEL,
+                ui_ext::SurfaceKind::StatusItem(_) => CAPABILITY_STATUS_BAR,
+            };
+            anyhow::ensure!(
+                self.capabilities
+                    .iter()
+                    .any(|capability| capability == required),
+                "extension {extension_id}: surface {:?} needs {required:?} in [fyx_ui].capabilities",
+                surface.id,
+            );
+        }
+        Ok(())
+    }
+}
+
+/// An update the extension sent through `host.push-update`, for any of its surfaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushedUpdate {
     pub surface_id: String,
     pub update: ui_ext::Update,
 }
 
+/// The result of a call together with the updates the guest pushed while it ran.
+///
+/// Apply `pushed` in order, then `value`: the guest emitted them in that order, and a reply may
+/// depend on nodes a push inserted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reply<T> {
+    pub pushed: Vec<PushedUpdate>,
+    pub value: T,
+}
+
 pub struct UiState {
     extension_id: Arc<str>,
     table: ResourceTable,
     ctx: WasiCtx,
-    pushed_updates: mpsc::UnboundedSender<PushedUpdate>,
+    /// Pushes of the running call, returned with its reply.
+    pushes: Vec<PushedUpdate>,
     call_started: Instant,
     call_budget: Duration,
     disabled: Option<String>,
@@ -124,6 +229,7 @@ impl UiState {
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
+        self.pushes.clear();
     }
 }
 
@@ -144,16 +250,10 @@ impl wit::Host for UiState {}
 
 impl wit_host::Host for UiState {
     fn push_update(&mut self, surface_id: String, update: wit::Update) {
-        let pushed = PushedUpdate {
+        self.pushes.push(PushedUpdate {
             surface_id,
             update: update.into(),
-        };
-        if self.pushed_updates.unbounded_send(pushed).is_err() {
-            log::debug!(
-                "fyx:ui extension {}: dropped a pushed update, nothing listens for it",
-                self.extension_id
-            );
-        }
+        });
     }
 
     fn log(&mut self, level: wit_host::LogLevel, message: String) {
@@ -200,6 +300,7 @@ fn build_ui_runtime() -> Result<UiRuntime> {
                     break;
                 };
                 engine.increment_epoch();
+                wake_deadlines();
             }
         })
         .context("failed to spawn the fyx:ui epoch thread")?;
@@ -208,6 +309,52 @@ fn build_ui_runtime() -> Result<UiRuntime> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     bindings::UiExtension::add_to_linker::<_, UiState>(&mut linker, |state| state)?;
     Ok(UiRuntime { engine, linker })
+}
+
+/// Wakers of pending [`Deadline`]s, woken on every epoch tick.
+static DEADLINE_WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
+
+fn wake_deadlines() {
+    let wakers = std::mem::take(
+        &mut *DEADLINE_WAKERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    );
+    for waker in wakers {
+        waker.wake();
+    }
+}
+
+/// Completes once `Instant::now()` passes the deadline, at the resolution of the epoch thread.
+/// It needs no executor timer, so it works on tokio and in GPUI tests alike.
+struct Deadline(Instant);
+
+impl Future for Deadline {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if Instant::now() >= self.0 {
+            return Poll::Ready(());
+        }
+        DEADLINE_WAKERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// Runs a guest call with `budget`. The epoch callback interrupts a guest that keeps executing;
+/// this drops the call when the guest is blocked in a host call instead (`wasi:io/poll` behind
+/// `thread::sleep`, for example), where no epoch callback runs.
+async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
+    let deadline = Deadline(Instant::now() + budget + UI_DEADLINE_SLACK);
+    match futures::future::select(pin!(call), deadline).await {
+        Either::Left((result, _)) => result,
+        Either::Right(((), _)) => Err(anyhow!(
+            "exceeded its time budget of {budget:?} while blocked in a host call"
+        )),
+    }
 }
 
 type UiCall = Box<
@@ -223,12 +370,16 @@ pub struct UiExtension {
     surfaces: Arc<[ui_ext::Surface]>,
     limits: TreeLimits,
     tx: mpsc::UnboundedSender<UiCall>,
+    pushed_tx: mpsc::UnboundedSender<PushedUpdate>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
 }
 
 impl UiExtension {
-    /// Compiles and instantiates a component and asks it for its surfaces. The receiver yields the
-    /// updates the extension pushes through `host.push-update`.
+    /// Compiles and instantiates a component and asks it for its surfaces.
+    ///
+    /// Pushes made during a call come back in that call's [`Reply`]. The receiver yields only the
+    /// pushes that have no reply to go with: those made during instantiation and those of a call
+    /// that failed with an error the extension reported (the guest already counts them as sent).
     pub fn load(
         extension_id: Arc<str>,
         wasm_bytes: Vec<u8>,
@@ -276,7 +427,7 @@ impl UiExtension {
                             extension_id,
                             table: ResourceTable::new(),
                             ctx: wasi.build(),
-                            pushed_updates: pushed_tx,
+                            pushes: Vec::new(),
                             call_started: Instant::now(),
                             call_budget: UI_INIT_BUDGET,
                             disabled: None,
@@ -292,26 +443,37 @@ impl UiExtension {
                     });
                     store.set_epoch_deadline(1);
 
-                    let extension = bindings::UiExtension::instantiate_async(
-                        &mut store,
-                        &component,
-                        &runtime.linker,
-                    )
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .context("failed to instantiate fyx:ui component")?;
-                    store.data_mut().begin_call(UI_INIT_BUDGET);
-                    let surfaces = extension
-                        .call_surfaces(&mut store)
+                    let extension = with_budget(UI_INIT_BUDGET, async {
+                        bindings::UiExtension::instantiate_async(
+                            &mut store,
+                            &component,
+                            &runtime.linker,
+                        )
                         .await
                         .map_err(anyhow::Error::from)
-                        .context("fyx:ui surfaces() failed")?;
+                    })
+                    .await
+                    .context("failed to instantiate fyx:ui component")?;
+                    store.data_mut().begin_call(UI_INIT_BUDGET);
+                    let surfaces = with_budget(UI_INIT_BUDGET, async {
+                        extension
+                            .call_surfaces(&mut store)
+                            .await
+                            .map_err(anyhow::Error::from)
+                    })
+                    .await
+                    .context("fyx:ui surfaces() failed")?;
                     let surfaces: Arc<[ui_ext::Surface]> =
                         surfaces.into_iter().map(Into::into).collect();
-                    anyhow::Ok((extension, store, surfaces))
+                    // Nothing replies to instantiation, so its pushes go to the channel; the
+                    // receiver is still in hand here, so sending cannot fail.
+                    for pushed in store.data_mut().pushes.drain(..) {
+                        pushed_tx.unbounded_send(pushed).ok();
+                    }
+                    anyhow::Ok((extension, store, surfaces, pushed_tx))
                 }
             };
-            let (mut extension, mut store, surfaces) =
+            let (mut extension, mut store, surfaces, pushed_tx) =
                 gpui_tokio::Tokio::spawn(cx, instantiate).await??;
 
             let (tx, mut rx) = mpsc::unbounded::<UiCall>();
@@ -330,11 +492,41 @@ impl UiExtension {
                     surfaces,
                     limits: TreeLimits::default(),
                     tx,
+                    pushed_tx,
                     _task: Arc::new(task),
                 },
                 pushed_rx,
             ))
         })
+    }
+
+    /// Loads the UI component of the extension in `extension_dir`, as its `extension.toml`'s
+    /// `[fyx_ui]` table describes. `None` when the extension has no such table.
+    pub async fn load_from_dir(
+        extension_dir: &Path,
+        fs: Arc<dyn Fs>,
+        cx: &AsyncApp,
+    ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        let Some((extension_id, manifest)) = UiManifest::read(fs.as_ref(), extension_dir).await?
+        else {
+            return Ok(None);
+        };
+        let component_path = extension_dir.join(&manifest.component);
+        let wasm_bytes = fs
+            .load_bytes(&component_path)
+            .await
+            .with_context(|| format!("reading {component_path:?}"))?;
+        let (extension, pushed) = Self::load(extension_id.clone(), wasm_bytes, cx)
+            .await
+            .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
+        anyhow::ensure!(
+            extension.api_version == manifest.api_version,
+            "extension {extension_id}: extension.toml says fyx:ui {}, the component targets {}",
+            manifest.api_version,
+            extension.api_version,
+        );
+        manifest.check_surfaces(&extension_id, extension.surfaces())?;
+        Ok(Some((extension, pushed)))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {
@@ -355,18 +547,19 @@ impl UiExtension {
     }
 
     /// The initial tree of a surface, validated.
-    pub async fn mount(&self, surface_id: &str) -> Result<Tree> {
-        let nodes = self
+    pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
+        let (result, pushed) = self
             .call({
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move { extension.call_mount(store, &surface_id).await }.boxed()
                 }
             })
-            .await?
-            .map_err(|message| self.extension_error(message))?;
-        Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
-            .with_context(|| format!("invalid tree from mount({surface_id:?})"))
+            .await?;
+        let nodes = self.guest_result(result, &pushed)?;
+        let tree = Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
+            .with_context(|| format!("invalid tree from mount({surface_id:?})"));
+        self.reply(tree, pushed)
     }
 
     /// The extension's reply to one input event. The caller applies it to its tree, which
@@ -375,8 +568,8 @@ impl UiExtension {
         &self,
         surface_id: &str,
         event: ui_ext::UiEvent,
-    ) -> Result<ui_ext::Update> {
-        let update = self
+    ) -> Result<Reply<ui_ext::Update>> {
+        let (result, pushed) = self
             .call({
                 let surface_id = surface_id.to_string();
                 let event = wit::UiEvent::from(event);
@@ -389,9 +582,9 @@ impl UiExtension {
                     .boxed()
                 }
             })
-            .await?
-            .map_err(|message| self.extension_error(message))?;
-        Ok(update.into())
+            .await?;
+        let update = self.guest_result(result, &pushed)?;
+        self.reply(Ok(update.into()), pushed)
     }
 
     /// Rows `start..start + count` of a virtualized list, each validated as a single-root tree.
@@ -401,8 +594,8 @@ impl UiExtension {
         list_node: ui_ext::NodeId,
         start: u32,
         count: u32,
-    ) -> Result<Vec<(u32, Tree)>> {
-        let rows = self
+    ) -> Result<Reply<Vec<(u32, Tree)>>> {
+        let (rows, pushed) = self
             .call({
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
@@ -416,7 +609,8 @@ impl UiExtension {
             })
             .await?;
         let requested = start..start.saturating_add(count);
-        rows.into_iter()
+        let rows = rows
+            .into_iter()
             .map(|row| {
                 anyhow::ensure!(
                     requested.contains(&row.index),
@@ -432,10 +626,46 @@ impl UiExtension {
                 })?;
                 Ok((row.index, tree))
             })
-            .collect()
+            .collect();
+        self.reply(rows, pushed)
     }
 
-    async fn call<T, F>(&self, f: F) -> Result<T>
+    /// Turns an error the guest reported into an error, forwarding the call's pushes.
+    fn guest_result<T>(
+        &self,
+        result: std::result::Result<T, String>,
+        pushed: &[PushedUpdate],
+    ) -> Result<T> {
+        result.map_err(|message| {
+            self.forward_pushes(pushed.to_vec());
+            self.extension_error(message)
+        })
+    }
+
+    fn reply<T>(&self, value: Result<T>, pushed: Vec<PushedUpdate>) -> Result<Reply<T>> {
+        match value {
+            Ok(value) => Ok(Reply { pushed, value }),
+            Err(error) => {
+                self.forward_pushes(pushed);
+                Err(error)
+            }
+        }
+    }
+
+    fn forward_pushes(&self, pushed: Vec<PushedUpdate>) {
+        for pushed in pushed {
+            if self.pushed_tx.unbounded_send(pushed).is_err() {
+                log::debug!(
+                    "fyx:ui extension {}: dropped a pushed update, nothing listens for it",
+                    self.extension_id
+                );
+            }
+        }
+    }
+
+    /// Runs one guest call on the extension's queue and returns its result with the updates the
+    /// guest pushed during it. A failed call (trap, budget) disables the extension and drops them.
+    async fn call<T, F>(&self, f: F) -> Result<(T, Vec<PushedUpdate>)>
     where
         T: 'static + Send,
         F: 'static
@@ -454,12 +684,17 @@ impl UiExtension {
                     } else {
                         store.data_mut().begin_call(UI_CALL_BUDGET);
                         store.set_epoch_deadline(1);
-                        let result = f(extension, store).await.map_err(anyhow::Error::from);
-                        // A trap, the time budget included, leaves the instance unusable.
+                        let result = with_budget(UI_CALL_BUDGET, async {
+                            f(extension, store).await.map_err(anyhow::Error::from)
+                        })
+                        .await;
+                        let pushes = std::mem::take(&mut store.data_mut().pushes);
+                        // A trap or a dropped call, the time budget included, leaves the instance
+                        // unusable.
                         if let Err(error) = &result {
                             store.data_mut().disabled = Some(format!("{error:#}"));
                         }
-                        result
+                        result.map(|value| (value, pushes))
                     };
                     // The caller may have stopped waiting; then nobody needs the result.
                     return_tx.send(result).ok();

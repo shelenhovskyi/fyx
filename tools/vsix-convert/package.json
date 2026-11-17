@@ -1,0 +1,23 @@
+{
+  "name": "@fyx/vsix-convert",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Convert VS Code color themes, snippets and keybindings (.vsix or folder) into Zed/Fyx formats.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "vsix-convert": "./src/cli.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "convert": "node src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
