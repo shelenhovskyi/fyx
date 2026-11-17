@@ -117,7 +117,7 @@ function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe, cli.exe and auto-update-helper.exe
     cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
-    Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\fyx.exe" -Destination "$innoDir\Fyx.exe" -Force # fyx: binary renamed
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto-update-helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
     # Build explorer_command_injector.dll
@@ -220,7 +220,8 @@ function SignZedAndItsFriends {
         return
     }
 
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    # fyx: Fyx.exe
+    $files = "$innoDir\Fyx.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
     & "$innoDir\sign.ps1" $files
 }
 
@@ -245,7 +246,7 @@ function DownloadConpty {
 function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\fyx.exe" -Force # fyx: CLI is `fyx`
     Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
@@ -267,59 +268,59 @@ function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
     switch ($channel) {
         "stable" {
-            $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
+            $appId = "{{DACDC4B9-FA02-49E0-BE99-FB0180068A85}" # fyx: own installer identity, never upgrades Zed
             $appIconName = "app-icon"
-            $appName = "Zed"
-            $appDisplayName = "Zed"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Fyx"
+            $appDisplayName = "Fyx"
+            $appSetupName = "Fyx-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Stable-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "Zed"
-            $appUserId = "ZedIndustries.Zed"
-            $appShellNameShort = "Z&ed"
+            $appMutex = "Fyx-Editor-Stable-Instance-Mutex"
+            $appExeName = "Fyx"
+            $regValueName = "Fyx"
+            $appUserId = "dev.fyx.Fyx" # fyx: the AppUserModelID Fyx sets (release_channel app_id)
+            $appShellNameShort = "F&yx"
             $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "preview" {
-            $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
+            $appId = "{{D9FD9B6E-CAB0-4B4F-B62C-59E390670A1F}" # fyx: own installer identity, never upgrades Zed
             $appIconName = "app-icon-preview"
-            $appName = "Zed Preview"
-            $appDisplayName = "Zed Preview"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Fyx Preview"
+            $appDisplayName = "Fyx Preview"
+            $appSetupName = "Fyx-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Preview-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedPreview"
-            $appUserId = "ZedIndustries.Zed.Preview"
-            $appShellNameShort = "Z&ed Preview"
+            $appMutex = "Fyx-Editor-Preview-Instance-Mutex"
+            $appExeName = "Fyx"
+            $regValueName = "FyxPreview"
+            $appUserId = "dev.fyx.Fyx-Preview" # fyx: the AppUserModelID Fyx sets (release_channel app_id)
+            $appShellNameShort = "F&yx Preview"
             $appAppxFullName = "ZedIndustries.Zed.Preview_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "nightly" {
-            $appId = "{{1BDB21D3-14E7-433C-843C-9C97382B2FE0}"
+            $appId = "{{E9860848-77E4-4E6C-88B5-12F71EFA81FF}" # fyx: own installer identity, never upgrades Zed
             $appIconName = "app-icon-nightly"
-            $appName = "Zed Nightly"
-            $appDisplayName = "Zed Nightly"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Fyx Nightly"
+            $appDisplayName = "Fyx Nightly"
+            $appSetupName = "Fyx-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Nightly-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedNightly"
-            $appUserId = "ZedIndustries.Zed.Nightly"
-            $appShellNameShort = "Z&ed Editor Nightly"
+            $appMutex = "Fyx-Editor-Nightly-Instance-Mutex"
+            $appExeName = "Fyx"
+            $regValueName = "FyxNightly"
+            $appUserId = "dev.fyx.Fyx-Nightly" # fyx: the AppUserModelID Fyx sets (release_channel app_id)
+            $appShellNameShort = "F&yx Nightly"
             $appAppxFullName = "ZedIndustries.Zed.Nightly_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "dev" {
-            $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
+            $appId = "{{B27908EA-0846-4DCD-B831-5613711E774A}" # fyx: own installer identity, never upgrades Zed
             $appIconName = "app-icon-dev"
-            $appName = "Zed Dev"
-            $appDisplayName = "Zed Dev"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Fyx Dev"
+            $appDisplayName = "Fyx Dev"
+            $appSetupName = "Fyx-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Dev-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedDev"
-            $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ed Dev"
+            $appMutex = "Fyx-Editor-Dev-Instance-Mutex"
+            $appExeName = "Fyx"
+            $regValueName = "FyxDev"
+            $appUserId = "dev.fyx.Fyx-Dev" # fyx: the AppUserModelID Fyx sets (release_channel app_id)
+            $appShellNameShort = "F&yx Dev"
             $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
         }
         default {
