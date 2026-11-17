@@ -32,6 +32,8 @@ mod probe {
     pub const PUSH_THEN_PATCH: NodeId = 4;
     pub const PUSH_THEN_FAIL: NodeId = 5;
     pub const PUSH_FLOOD: NodeId = 6;
+    pub const ALLOCATE: NodeId = 7;
+    pub const PUSH_BULK: NodeId = 8;
 }
 
 fn demo_counter_wasm() -> Vec<u8> {
@@ -339,6 +341,49 @@ async fn test_push_flood_traps_and_disables_extension(cx: &mut TestAppContext) {
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
+}
+
+/// Sandbox: a component cannot grow its memory past `UI_MEMORY_LIMIT`; trying traps the call
+/// with an explicit error and disables the extension.
+#[gpui::test]
+async fn test_memory_past_the_limit_traps_and_disables_extension(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("memory"), "{message}");
+    assert!(
+        error.downcast_ref::<ReplyError>().is_none(),
+        "a trap, not a rejection"
+    );
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("disabled"), "{error:#}");
+}
+
+/// Sandbox: the pushes of one call may carry at most `MAX_PUSHED_ITEMS_PER_CALL` patches and
+/// nodes together, even when each push is small and there are fewer than `MAX_PUSHES_PER_CALL`.
+#[gpui::test]
+async fn test_pushed_items_past_the_cap_trap(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_BULK))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "more than {MAX_PUSHED_ITEMS_PER_CALL} patches and nodes"
+        )),
+        "{error:#}"
+    );
+    assert!(error.downcast_ref::<ReplyError>().is_none());
 }
 
 #[gpui::test]

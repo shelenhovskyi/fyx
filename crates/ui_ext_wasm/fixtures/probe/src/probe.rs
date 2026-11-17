@@ -3,6 +3,8 @@
 //! `click(4)` pushes an insert of flex node 10 and answers with an insert of text node 11 under it,
 //! so the reply depends on the push; `click(5)` pushes `remove(1)` and then fails; `click(6)`
 //! pushes without end, past the host's per-call cap;
+//! `click(7)` allocates 64 MiB, past the host's memory cap; `click(8)` pushes 40 updates of 200
+//! patches each, past the host's cap on one call's pushed patches;
 //! `click(2)` spins forever and `click(3)` sleeps for a second (blocked in `wasi:io/poll`), both to
 //! hit the host's time budget. The `fyx:ui-api-version` section comes
 //! from `register_extension!`; emitting it here too would concatenate two copies into 12 bytes.
@@ -16,6 +18,8 @@ const SLEEP: NodeId = 3;
 const PUSH_THEN_PATCH: NodeId = 4;
 const PUSH_THEN_FAIL: NodeId = 5;
 const PUSH_FLOOD: NodeId = 6;
+const ALLOCATE: NodeId = 7;
+const PUSH_BULK: NodeId = 8;
 
 struct Probe;
 
@@ -74,6 +78,18 @@ impl Extension for Probe {
             UiEvent::Click(PUSH_FLOOD) => loop {
                 push_update(SURFACE_ID, &Update::Unchanged);
             },
+            UiEvent::Click(ALLOCATE) => {
+                let big = vec![1u8; 64 << 20];
+                std::hint::black_box(&big);
+                Ok(Update::Unchanged)
+            }
+            UiEvent::Click(PUSH_BULK) => {
+                for _ in 0..40 {
+                    let patches = (0..200).map(Patch::Remove).collect();
+                    push_update(SURFACE_ID, &Update::Patches(patches));
+                }
+                Ok(Update::Unchanged)
+            }
             UiEvent::Click(SLEEP) => {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 Ok(Update::Unchanged)

@@ -116,6 +116,20 @@ const UI_DEADLINE_SLACK: Duration = Duration::from_millis(50);
 /// Pushes one call may make before it traps and the extension is disabled. Pushes are queued
 /// unvalidated until the call returns, so this bounds what a looping guest can pile up.
 pub const MAX_PUSHES_PER_CALL: usize = 64;
+/// Patches plus nodes all of one call's pushes may carry together. Each push is also capped by
+/// `TreeLimits` when it is applied, but pushes queue unapplied until the call returns, so their
+/// total is capped here: past it the call traps and the extension is disabled.
+pub const MAX_PUSHED_ITEMS_PER_CALL: usize = 4096;
+/// Linear memory one UI component may grow to. A UI component holds a tree mirror and some state,
+/// not data sets. This also bounds every string and list a call can make the host copy out of the
+/// guest (arguments of `push-update` and `log`, replies), since they come from that memory.
+pub const UI_MEMORY_LIMIT: usize = 32 << 20;
+/// Table elements per table (function references; a Rust component uses a few thousand).
+pub const UI_TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
+/// Core instances, tables and memories per component (a component and its adapters use a handful).
+pub const UI_INSTANCES_LIMIT: usize = 32;
+pub const UI_TABLES_LIMIT: usize = 32;
+pub const UI_MEMORIES_LIMIT: usize = 8;
 
 /// The `fyx:ui` versions this host can load, on every release channel.
 ///
@@ -290,6 +304,9 @@ pub struct UiState {
     ctx: WasiCtx,
     /// Pushes of the running call, returned with its reply.
     pushes: Vec<PushedUpdate>,
+    /// Patches plus nodes in `pushes`.
+    pushed_items: usize,
+    limits: wasmtime::StoreLimits,
     call_started: Instant,
     call_budget: Duration,
     disabled: Option<String>,
@@ -300,6 +317,7 @@ impl UiState {
         self.call_started = Instant::now();
         self.call_budget = budget;
         self.pushes.clear();
+        self.pushed_items = 0;
     }
 }
 
@@ -323,10 +341,18 @@ impl wit_host::Host for UiState {
         if self.pushes.len() >= MAX_PUSHES_PER_CALL {
             wasmtime::bail!("pushed more than {MAX_PUSHES_PER_CALL} updates in one call");
         }
-        self.pushes.push(PushedUpdate {
-            surface_id,
-            update: update.into(),
-        });
+        let update: ui_ext::Update = update.into();
+        self.pushed_items += match &update {
+            ui_ext::Update::Unchanged => 0,
+            ui_ext::Update::Replace(nodes) => nodes.len(),
+            ui_ext::Update::Patches(patches) => patches.len(),
+        };
+        if self.pushed_items > MAX_PUSHED_ITEMS_PER_CALL {
+            wasmtime::bail!(
+                "pushed more than {MAX_PUSHED_ITEMS_PER_CALL} patches and nodes in one call"
+            );
+        }
+        self.pushes.push(PushedUpdate { surface_id, update });
         Ok(())
     }
 
@@ -354,6 +380,19 @@ fn ui_runtime() -> Result<&'static UiRuntime> {
         .get_or_init(|| build_ui_runtime().map_err(|error| format!("{error:#}")))
         .as_ref()
         .map_err(|error| anyhow!("failed to set up the fyx:ui wasm runtime: {error}"))
+}
+
+/// Resource caps of every UI component's store. Growing past one traps (rather than failing the
+/// guest's allocation quietly), which disables the extension with an explicit error.
+fn ui_store_limits() -> wasmtime::StoreLimits {
+    wasmtime::StoreLimitsBuilder::new()
+        .memory_size(UI_MEMORY_LIMIT)
+        .table_elements(UI_TABLE_ELEMENTS_LIMIT)
+        .instances(UI_INSTANCES_LIMIT)
+        .tables(UI_TABLES_LIMIT)
+        .memories(UI_MEMORIES_LIMIT)
+        .trap_on_grow_failure(true)
+        .build()
 }
 
 fn build_ui_runtime() -> Result<UiRuntime> {
@@ -502,11 +541,14 @@ impl UiExtension {
                             table: ResourceTable::new(),
                             ctx: wasi.build(),
                             pushes: Vec::new(),
+                            pushed_items: 0,
+                            limits: ui_store_limits(),
                             call_started: Instant::now(),
                             call_budget: UI_INIT_BUDGET,
                             disabled: None,
                         },
                     );
+                    store.limiter(|state| &mut state.limits);
                     store.epoch_deadline_callback(|context| {
                         let state = context.data();
                         if state.call_started.elapsed() > state.call_budget {
