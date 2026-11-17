@@ -194,7 +194,11 @@ pub enum AgentReviewEvent {
     UnreviewedChanges(TurnId),
 }
 
-type PermissionResponder = Box<dyn FnOnce(PermissionVerdict, ProposedEdit, &mut App)>;
+/// Answers a permission request. For [`PermissionVerdict::ApplyAcceptedAndDeny`] it first writes the
+/// accepted hunks; if that fails it answers nothing and returns the error, so the review can stay open
+/// and be submitted again.
+type PermissionResponder =
+    Rc<dyn Fn(PermissionVerdict, ProposedEdit, &mut App) -> Task<Result<()>>>;
 
 enum Responder {
     Permission(PermissionResponder),
@@ -209,6 +213,10 @@ pub struct Review {
     source: ReviewSource,
     edit: ProposedEdit,
     responder: Option<Responder>,
+    /// A submitted preview whose host write is in flight.
+    applying: bool,
+    /// Why the last submit could not be carried out; the review stays open.
+    error: Option<String>,
 }
 
 impl Review {
@@ -240,6 +248,12 @@ impl Review {
     pub fn is_submitted(&self) -> bool {
         self.responder.is_none()
     }
+
+    /// Why the last submit failed (the review is still open), e.g. the host could not write the
+    /// accepted hunks.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
 }
 
 /// Open reviews of agent edits. Review mode is off by default: while it is off, agent writes and
@@ -260,6 +274,8 @@ pub struct AgentReview {
     ended_turns: VecDeque<TurnId>,
     /// `.fyx/review.toml` of each worktree that has one.
     rules: Vec<ReviewRules>,
+    /// Open review panes per turn, across workspaces.
+    panes: HashMap<TurnId, usize>,
 }
 
 /// How many ended turns keep their summary (decided files, unreviewed changes).
@@ -392,6 +408,41 @@ impl AgentReview {
         }
     }
 
+    pub(crate) fn pane_opened(&mut self, turn: TurnId) {
+        *self.panes.entry(turn).or_default() += 1;
+    }
+
+    /// When the last pane of a turn closes, its open reviews close too: a held write fails ("the
+    /// file is unchanged") instead of waiting for a pane nobody can see.
+    pub(crate) fn pane_closed(&mut self, turn: TurnId, cx: &mut Context<Self>) {
+        let remaining = self
+            .panes
+            .get(&turn)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        if remaining > 0 {
+            self.panes.insert(turn, remaining);
+            return;
+        }
+        self.panes.remove(&turn);
+        let ids = self
+            .open_reviews_in_turn(turn)
+            .map(|review| review.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.close(id, cx);
+        }
+    }
+
+    /// Reviews waiting for a decision, across all turns.
+    pub fn open_review_count(&self) -> usize {
+        self.reviews
+            .iter()
+            .filter(|review| !review.is_submitted())
+            .count()
+    }
+
     /// Accepts or rejects every open review of `turn`, and every edit that joins the turn later.
     pub fn decide_turn(
         &mut self,
@@ -495,40 +546,75 @@ impl AgentReview {
         if let Resolution::Pending { undecided } = review.edit.resolution() {
             return Err(anyhow!("{undecided} hunks are still undecided"));
         }
-        let responder = review
-            .responder
-            .take()
-            .context("review was already submitted")?;
-        let turn = review.turn;
+        anyhow::ensure!(!review.applying, "the review is being applied");
         let edit = review.edit.clone();
-        let rule = review.rule.clone();
-        self.record(turn, &edit, rule);
-        match responder {
-            Responder::Write(sender) => {
+        match review.responder.as_ref() {
+            Some(Responder::Write(_)) => {
                 let outcome = write_outcome(&edit)?;
+                let Some(Responder::Write(sender)) = review.responder.take() else {
+                    return Err(anyhow!("review was already submitted"));
+                };
+                let (turn, rule) = (review.turn, review.rule.clone());
                 if sender.send(outcome).is_err() {
                     log::debug!("agent write finished before its review was submitted");
                 }
+                self.record(turn, &edit, rule);
                 self.reviews.retain(|review| review.id != id);
                 cx.emit(AgentReviewEvent::Resolved(id));
                 cx.emit(AgentReviewEvent::Closed(id));
             }
-            Responder::Permission(respond) => {
+            Some(Responder::Permission(respond)) => {
+                let respond = respond.clone();
                 let verdict = permission_verdict(edit.resolution());
+                review.applying = true;
+                review.error = None;
+                cx.emit(AgentReviewEvent::Updated(id));
                 // Answering the permission makes the thread emit an event this entity handles, so it
-                // must not run while this entity is being updated.
-                cx.defer(move |cx| respond(verdict, edit, cx));
-                cx.emit(AgentReviewEvent::Resolved(id));
-                // An allowed preview stays until the agent's write adopts its decisions; after a
-                // denial no write follows.
-                if verdict != PermissionVerdict::Allow {
-                    self.reviews.retain(|review| review.id != id);
-                    cx.emit(AgentReviewEvent::Closed(id));
-                }
+                // runs outside this update.
+                cx.spawn(async move |this, cx| {
+                    let answered = cx.update(|cx| respond(verdict, edit, cx));
+                    let result = answered.await;
+                    this.update(cx, |this, cx| {
+                        this.finish_permission(id, verdict, result, cx)
+                    })
+                    .ok();
+                })
+                .detach();
             }
+            None => return Err(anyhow!("review was already submitted")),
         }
         cx.notify();
         Ok(())
+    }
+
+    fn finish_permission(
+        &mut self,
+        id: ReviewId,
+        verdict: PermissionVerdict,
+        result: Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(review) = self.reviews.iter_mut().find(|review| review.id == id) else {
+            return;
+        };
+        review.applying = false;
+        if let Err(error) = result {
+            review.error = Some(format!("{error:#}"));
+            cx.emit(AgentReviewEvent::Updated(id));
+            cx.notify();
+            return;
+        }
+        review.responder = None;
+        let (turn, edit, rule) = (review.turn, review.edit.clone(), review.rule.clone());
+        self.record(turn, &edit, rule);
+        cx.emit(AgentReviewEvent::Resolved(id));
+        // An allowed preview stays until the agent's write adopts its decisions; after a denial no
+        // write follows.
+        if verdict != PermissionVerdict::Allow {
+            self.reviews.retain(|review| review.id != id);
+            cx.emit(AgentReviewEvent::Closed(id));
+        }
+        cx.notify();
     }
 
     /// Closes every review of a session, e.g. when its thread is released. Held writes fail.
@@ -565,6 +651,7 @@ impl AgentReview {
             review.responder.is_some(),
             "review {id:?} was already submitted"
         );
+        anyhow::ensure!(!review.applying, "review {id:?} is being applied");
         Ok(review)
     }
 
@@ -588,6 +675,8 @@ impl AgentReview {
             source,
             edit,
             responder: Some(responder),
+            applying: false,
+            error: None,
         });
         cx.emit(AgentReviewEvent::Opened(id));
         cx.notify();
@@ -636,7 +725,12 @@ impl AgentReview {
             edit.decide_pending(decision);
             self.record(turn, &edit, rule);
             let verdict = permission_verdict(edit.resolution());
-            cx.defer(move |cx| respond(verdict, edit, cx));
+            cx.spawn(async move |_, cx| {
+                if let Err(error) = cx.update(|cx| respond(verdict, edit, cx)).await {
+                    log::error!("fyx: agent review: {error:#}");
+                }
+            })
+            .detach();
             cx.notify();
             return None;
         }
@@ -806,9 +900,11 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
                 });
             }
         }
-        AcpThreadEvent::Stopped { .. } | AcpThreadEvent::Error => {
+        AcpThreadEvent::Stopped { .. } | AcpThreadEvent::Error | AcpThreadEvent::ConnectionLost => {
+            // Held writes fail ("the file is unchanged") and allowed previews expire: the agent
+            // stopped waiting for them.
             let session_id = thread.session_id().clone();
-            review.update(cx, |review, cx| review.end_turn(&session_id, cx));
+            review.update(cx, |review, cx| review.close_session(&session_id, cx));
         }
         _ => {}
     }
@@ -893,45 +989,42 @@ fn permission_preview(
         diff.new_text.clone(),
     );
     let thread = cx.weak_entity();
-    let respond: PermissionResponder = Box::new(move |verdict, edit, cx| {
+    let respond: PermissionResponder = Rc::new(move |verdict, edit, cx| {
         let (option_id, option_kind) = match verdict {
-            PermissionVerdict::Allow => (allow_option, acp_v2::PermissionOptionKind::AllowOnce),
-            PermissionVerdict::Deny | PermissionVerdict::ApplyAcceptedAndDeny => {
-                (deny_option, acp_v2::PermissionOptionKind::RejectOnce)
-            }
+            PermissionVerdict::Allow => (
+                allow_option.clone(),
+                acp_v2::PermissionOptionKind::AllowOnce,
+            ),
+            PermissionVerdict::Deny | PermissionVerdict::ApplyAcceptedAndDeny => (
+                deny_option.clone(),
+                acp_v2::PermissionOptionKind::RejectOnce,
+            ),
         };
         let outcome = SelectedPermissionOutcome::new(option_id, option_kind);
+        let thread = thread.clone();
         cx.spawn(async move |cx| {
-            // The accepted hunks land before the agent hears the denial and reads the file again.
+            // The accepted hunks land before the agent hears the denial and reads the file again. If
+            // they cannot be written, nothing is answered: the review stays open.
             if verdict == PermissionVerdict::ApplyAcceptedAndDeny {
-                let thread_parts = thread.read_with(cx, |thread, _| {
+                let (project, action_log) = thread.read_with(cx, |thread, _| {
                     (thread.project().clone(), thread.action_log().clone())
-                });
-                match thread_parts {
-                    Ok((project, action_log)) => {
-                        if let Err(error) =
-                            write_accepted_hunks(project.clone(), action_log, &edit, cx).await
-                        {
-                            let message = format!(
-                                "Agent review: the accepted hunks of {} could not be written:                                  {error:#}. The agent's edit was rejected.",
-                                edit.abs_path().display()
-                            );
-                            log::error!("{message}");
-                            cx.update(|cx| report_host_write_failure(&project, message, cx));
-                        }
-                    }
-                    Err(error) => {
-                        log::debug!("thread closed before its review was applied: {error}")
-                    }
+                })?;
+                if let Err(error) =
+                    write_accepted_hunks(project.clone(), action_log, &edit, cx).await
+                {
+                    let message = format!(
+                        "Agent review: the accepted hunks of {} could not be written: {error:#}",
+                        edit.abs_path().display()
+                    );
+                    log::error!("{message}");
+                    cx.update(|cx| report_host_write_failure(&project, message, cx));
+                    return Err(error);
                 }
             }
-            if let Err(error) = thread.update(cx, |thread, cx| {
+            thread.update(cx, |thread, cx| {
                 thread.authorize_permission_request(request_id, outcome, cx)
-            }) {
-                log::debug!("thread closed before its edit review was submitted: {error}");
-            }
+            })
         })
-        .detach();
     });
     Some((edit, respond))
 }
@@ -1034,6 +1127,8 @@ async fn write_accepted_hunks(
         anyhow::Ok(project.open_buffer(path, cx))
     })?;
     let buffer = open.await?;
+    // Saving would also write the user's unsaved edits elsewhere in the file.
+    let was_dirty = cx.update(|cx| buffer.read(cx).is_dirty());
     cx.update(|cx| {
         let range = locate_fragment(&buffer.read(cx).text(), &fragment)?;
         action_log.update(cx, |action_log, cx| {
@@ -1049,6 +1144,13 @@ async fn write_accepted_hunks(
         });
         anyhow::Ok(())
     })?;
+    if was_dirty {
+        log::info!(
+            "fyx: agent review: {} has unsaved edits; the accepted hunks are applied but not saved",
+            edit.abs_path().display()
+        );
+        return Ok(());
+    }
     project
         .update(cx, |project, cx| project.save_buffer(buffer, cx))
         .await
@@ -1229,9 +1331,12 @@ mod tests {
         let (review, _) = setup(cx);
         review.update(cx, |review, cx| review.set_enabled(true, cx));
         let verdicts = Rc::new(RefCell::new(Vec::new()));
-        let respond: PermissionResponder = Box::new({
+        let respond: PermissionResponder = Rc::new({
             let verdicts = verdicts.clone();
-            move |verdict, _, _| verdicts.borrow_mut().push(verdict)
+            move |verdict, _, _| {
+                verdicts.borrow_mut().push(verdict);
+                Task::ready(Ok(()))
+            }
         });
         // The agent proposes a fragment of the file, as Claude's Edit tool does.
         let preview = ProposedEdit::new(
@@ -1277,9 +1382,12 @@ mod tests {
         let (review, _) = setup(cx);
         review.update(cx, |review, cx| review.set_enabled(true, cx));
         let answers = Rc::new(RefCell::new(Vec::new()));
-        let respond: PermissionResponder = Box::new({
+        let respond: PermissionResponder = Rc::new({
             let answers = answers.clone();
-            move |verdict, edit, _| answers.borrow_mut().push((verdict, edit))
+            move |verdict, edit, _| {
+                answers.borrow_mut().push((verdict, edit));
+                Task::ready(Ok(()))
+            }
         });
         let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
         let id = review
@@ -1302,9 +1410,12 @@ mod tests {
                 .set_decision(id, 1, HunkDecision::Accepted, cx)
                 .unwrap();
             review.submit(id, cx).unwrap();
-            assert!(review.reviews().is_empty(), "no write follows a denial");
         });
         cx.run_until_parked();
+        assert!(
+            review.read_with(cx, |review, _| review.reviews().is_empty()),
+            "no write follows a denial"
+        );
         let answers = answers.borrow();
         let [(verdict, edit)] = answers.as_slice() else {
             panic!("expected one answer, got {}", answers.len());
@@ -1327,7 +1438,7 @@ mod tests {
                 session(),
                 request_id,
                 preview,
-                Box::new(|_, _, _| {}),
+                Rc::new(|_, _, _| Task::ready(Ok(()))),
                 None,
                 cx,
             );
@@ -1557,9 +1668,12 @@ mod tests {
 
     fn recording_responder() -> (PermissionResponder, Rc<RefCell<Vec<PermissionVerdict>>>) {
         let verdicts = Rc::new(RefCell::new(Vec::new()));
-        let respond: PermissionResponder = Box::new({
+        let respond: PermissionResponder = Rc::new({
             let verdicts = verdicts.clone();
-            move |verdict, _, _| verdicts.borrow_mut().push(verdict)
+            move |verdict, _, _| {
+                verdicts.borrow_mut().push(verdict);
+                Task::ready(Ok(()))
+            }
         });
         (respond, verdicts)
     }
@@ -1722,6 +1836,176 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(kind(".env", cx), None);
         assert_eq!(kind("Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
+    }
+
+    #[gpui::test]
+    async fn failed_host_write_keeps_the_review_open(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let answered = Rc::new(RefCell::new(Vec::new()));
+        let respond: PermissionResponder = Rc::new({
+            let answered = answered.clone();
+            move |verdict, _, _| {
+                if verdict == PermissionVerdict::ApplyAcceptedAndDeny {
+                    // As when the fragment no longer occurs exactly once.
+                    return Task::ready(Err(anyhow!("the text occurs more than once")));
+                }
+                answered.borrow_mut().push(verdict);
+                Task::ready(Ok(()))
+            }
+        });
+        let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+        let id = review
+            .update(cx, |review, cx| {
+                review.open_permission_preview(
+                    session(),
+                    new_request_id(),
+                    preview,
+                    respond,
+                    None,
+                    cx,
+                )
+            })
+            .unwrap();
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 0, HunkDecision::Accepted, cx)
+                .unwrap();
+            review
+                .set_decision(id, 1, HunkDecision::Rejected, cx)
+                .unwrap();
+            review.submit(id, cx).unwrap();
+            assert!(
+                review.submit(id, cx).is_err(),
+                "no second submit while applying"
+            );
+        });
+        cx.run_until_parked();
+        review.read_with(cx, |review, _| {
+            let open = review.review(id).expect("the review stays open");
+            assert!(!open.is_submitted());
+            assert!(open.error().unwrap().contains("more than once"));
+        });
+        assert!(answered.borrow().is_empty(), "nothing was answered");
+
+        // The user gives up on the partial write: rejecting everything answers Deny.
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(*answered.borrow(), [PermissionVerdict::Deny]);
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+    }
+
+    #[gpui::test]
+    async fn host_write_leaves_a_dirty_buffer_unsaved(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": "one\ntwo\nthree\n" }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(util::path!("/p/a.txt"), cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path, cx))
+            .await
+            .unwrap();
+        // An unsaved edit of the user's, away from the agent's change.
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "// mine\n")], None, cx)
+        });
+        let mut edit = ProposedEdit::new(
+            PathBuf::from(util::path!("/p/a.txt")),
+            "two\n".into(),
+            "TWO\n".into(),
+        );
+        edit.decide_all(HunkDecision::Accepted);
+        let mut async_cx = cx.to_async();
+        write_accepted_hunks(project, action_log, &edit, &mut async_cx)
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "// mine\none\nTWO\nthree\n"
+        );
+        assert!(buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+        let on_disk = fs.load(Path::new(util::path!("/p/a.txt"))).await.unwrap();
+        assert_eq!(
+            on_disk, "one\ntwo\nthree\n",
+            "nothing saved behind the user's back"
+        );
+    }
+
+    #[gpui::test]
+    async fn held_writes_end_with_the_turn_or_the_last_pane(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/p"), serde_json::json!({ "a.txt": "a\n" }))
+            .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let mut write = agent_write("/p/a.txt", cx);
+        write.session_id = session_id;
+        let held = gate_write(&review, write, cx);
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1
+        );
+
+        // The connection drops: the agent stopped waiting, so the write fails unchanged.
+        thread.update(cx, |_, cx| cx.emit(AcpThreadEvent::ConnectionLost));
+        cx.run_until_parked();
+        let Err(error) = held.await else {
+            panic!("the held write should fail");
+        };
+        assert!(format!("{error:#}").contains("unchanged"), "{error:#}");
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            0
+        );
+
+        // Closing the last pane of a turn closes its open reviews; another pane keeps them.
+        let held = gate_write(&review, agent_write("/p/b.txt", cx), cx);
+        let turn = review.read_with(cx, |review, _| review.reviews()[0].turn());
+        review.update(cx, |review, cx| {
+            review.pane_opened(turn);
+            review.pane_opened(turn);
+            review.pane_closed(turn, cx);
+            assert_eq!(review.open_review_count(), 1);
+            review.pane_closed(turn, cx);
+            assert_eq!(review.open_review_count(), 0);
+        });
+        assert!(held.await.is_err());
     }
 
     #[gpui::test]

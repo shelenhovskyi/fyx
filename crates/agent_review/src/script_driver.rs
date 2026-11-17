@@ -30,6 +30,9 @@ use crate::{
 const SCRIPT_VAR: &str = "FYX_AGENT_REVIEW_SCRIPT";
 const POLL: Duration = Duration::from_millis(250);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(60);
+/// The actions a script may dispatch: starting an agent thread and opening things. Everything else,
+/// settings included, stays out of reach.
+const ALLOWED_ACTIONS: &[&str] = &["agent::NewExternalAgentThread", "workspace::Open"];
 
 #[derive(Debug, PartialEq)]
 enum Step {
@@ -130,6 +133,10 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
         log::info!("fyx: review script: {step:?}");
         match step {
             Step::Action(name, data) => {
+                anyhow::ensure!(
+                    action_allowed(&name),
+                    "action {name} is not allowed in a review script"
+                );
                 let action = cx.update(|cx| cx.build_action(&name, data))?;
                 dispatch(window, action, cx)?;
             }
@@ -191,6 +198,10 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
         cx.background_executor().timer(POLL).await;
     }
     Ok(())
+}
+
+fn action_allowed(name: &str) -> bool {
+    ALLOWED_ACTIONS.contains(&name)
 }
 
 async fn wait_for<T>(
@@ -285,6 +296,9 @@ mod tests {
             ]
         );
         assert!(parse("accept 0").is_err());
+        assert!(action_allowed("agent::NewExternalAgentThread"));
+        assert!(!action_allowed("agent_review::ToggleReviewMode"));
+        assert!(!action_allowed("zed::OpenSettings"));
         assert!(parse("dance").is_err());
     }
 }
