@@ -722,6 +722,7 @@ impl EditSession {
             update.locations(vec![acp::ToolCallLocation::new(abs_path.clone())])
         });
 
+        fyx_guard::check_agent_edit(&context.project, &abs_path, cx)?; // fyx: read-only agent configs
         cx.update(|cx| context.authorize(tool_name, &path, event_stream, cx))
             .await
             .map_err(|e| e.to_string())?;
