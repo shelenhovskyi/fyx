@@ -33,10 +33,34 @@ done
 [[ -n "$target" && -d "$target" ]] || { echo "usage: $0 [--dry-run] [--keep N] [--alias PATH]... TARGET_DIR" >&2; exit 2; }
 
 win() { cygpath -w "$1"; }
+# The real directory behind a path: every component is resolved, not just the last one, because
+# the junction is often an ancestor (D:\fyx-targets -> E:\fyx-targets with D:\fyx-targets\w3 a
+# plain directory under it). Only reparse points are read; no directory is listed or recursed.
+real_path() {
+    local p
+    p="$(powershell -NoProfile -Command "
+\$full = [System.IO.Path]::GetFullPath('$(win "$1")').TrimEnd('\\')
+\$parts = \$full.Split('\\')
+\$cur = \$parts[0] + '\\'
+for (\$i = 1; \$i -lt \$parts.Length; \$i++) {
+    \$cur = Join-Path \$cur \$parts[\$i]
+    for (\$hops = 0; \$hops -lt 32; \$hops++) {
+        \$item = Get-Item -LiteralPath \$cur -Force -ErrorAction Stop
+        if (-not \$item.LinkType) { break }
+        \$next = [string](\$item.Target | Select-Object -First 1)
+        if (-not [System.IO.Path]::IsPathRooted(\$next)) { \$next = Join-Path (Split-Path \$cur) \$next }
+        \$cur = [System.IO.Path]::GetFullPath(\$next).TrimEnd('\\')
+    }
+}
+\$cur")"
+    echo "${p%$'\r'}"
+}
 target_win="$(win "$target")"
-# Resolve junctions/symlinks to the real directory.
-real_win="$(powershell -NoProfile -Command "\$p = Get-Item -LiteralPath '$target_win'; while (\$p.LinkType) { \$p = Get-Item -LiteralPath (\$p.Target | Select-Object -First 1) }; \$p.FullName")"
-real_win="${real_win%$'\r'}"
+real_win="$(real_path "$target")"
+[[ -n "$real_win" ]] || { echo "could not resolve $target_win" >&2; exit 2; }
+# Everything below (listing, sizes, free space) works on the real directory, so no path goes
+# through a junction.
+real="$(cygpath -u "$real_win")"
 
 patterns=("$target_win" "$real_win")
 for a in "${aliases[@]}"; do patterns+=("$(win "$a")"); done
@@ -44,8 +68,8 @@ for a in "${aliases[@]}"; do patterns+=("$(win "$a")"); done
 repo_target="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)/target" || true
 if [[ -d "$repo_target" ]]; then
     rt_win="$(win "$repo_target")"
-    rt_real="$(powershell -NoProfile -Command "\$p = Get-Item -LiteralPath '$rt_win'; while (\$p.LinkType) { \$p = Get-Item -LiteralPath (\$p.Target | Select-Object -First 1) }; \$p.FullName")"
-    [[ "${rt_real%$'\r'}" == "$real_win" ]] && patterns+=("$rt_win")
+    rt_real="$(real_path "$repo_target")"
+    [[ "$rt_real" == "$real_win" ]] && patterns+=("$rt_win")
 fi
 # Loose match on the last two path components (catches junction spellings like D:\fyx-targets\w3).
 patterns+=("\\$(basename "$(dirname "$real_win")")\\$(basename "$real_win")\\")
@@ -75,8 +99,8 @@ drive="${real_win:0:1}"
 free_gb() { powershell -NoProfile -Command "[math]::Round((Get-Volume $drive).SizeRemaining/1GB,1)" | tr -d '\r'; }
 before="$(free_gb)"
 
-dirs=("$target/debug/deps")
-for d in "$target"/wasm32-wasip2/*/deps; do [[ -d "$d" ]] && dirs+=("$d"); done
+dirs=("$real/debug/deps")
+for d in "$real"/wasm32-wasip2/*/deps; do [[ -d "$d" ]] && dirs+=("$d"); done
 
 total=0
 count=0
@@ -107,6 +131,7 @@ for dir in "${dirs[@]}"; do
 done
 
 after="$(free_gb)"
+echo "target $target_win is $real_win"
 printf '%s %d files, %.1f GB logical; %s: free %s GB -> %s GB\n' \
     "$([[ $dry_run -eq 1 ]] && echo 'would delete' || echo 'deleted')" \
     "$count" "$(awk -v t="$total" 'BEGIN{print t/1073741824}')" "$drive" "$before" "$after"
