@@ -3,16 +3,20 @@
 //! `render()` only reads `SurfaceState`; it never calls the extension. Clicks and edits are routed
 //! by node id to `SurfaceState::dispatch`, which makes the call on a task.
 
-use std::{ops::Range, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use collections::HashMap;
-use editor::{Editor, EditorEvent};
+use editor::{
+    Editor, EditorEvent, EditorMode, HiddenUnstagedDiffHunkRenderer, MinimapVisibility,
+    SizingBehavior,
+};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable as _,
     FontWeight, Global, Hsla, IntoElement, ListSizingBehavior, ParentElement, Pixels, Render,
     RenderOnce, ScrollHandle, SharedString, Styled, Subscription, Task, UniformListScrollHandle,
     WeakEntity, Window, div, prelude::*, px, uniform_list,
 };
+use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
 use ui::{
@@ -53,6 +57,8 @@ pub struct SurfaceView {
     pub(crate) inputs: HashMap<NodeId, InputEditor>,
     markdown: HashMap<NodeId, Entity<Markdown>>,
     pub(crate) scroll_handles: HashMap<NodeId, UniformListScrollHandle>,
+    /// A read-only diff editor per `diff-view` node.
+    pub(crate) diffs: HashMap<NodeId, DiffEditor>,
     /// The view's own focus target: the panel focuses it on activation and Tab starts from it.
     pub(crate) focus_handle: FocusHandle,
     /// Every button of the surface (a disabled one keeps focus it already has).
@@ -92,6 +98,7 @@ impl SurfaceView {
             inputs: HashMap::default(),
             markdown: HashMap::default(),
             scroll_handles: HashMap::default(),
+            diffs: HashMap::default(),
             focus_handle: cx.focus_handle(),
             button_focus: HashMap::default(),
             list_focus: HashMap::default(),
@@ -162,6 +169,7 @@ impl SurfaceView {
 
         let mut inputs = Vec::new();
         let mut markdown = Vec::new();
+        let mut diffs = Vec::new();
         let mut lists = Vec::new();
         let mut buttons = Vec::new();
         let mut focus_order = Vec::new();
@@ -189,7 +197,8 @@ impl SurfaceView {
                             focus_order.push(id);
                         }
                     }
-                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) | Props::DiffView(_) => {}
+                    Props::DiffView(props) => diffs.push((id, props.clone())),
+                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
             }
@@ -260,6 +269,17 @@ impl SurfaceView {
             }
             if focused {
                 editor.focus_handle(cx).focus(window, cx);
+            }
+        }
+
+        self.diffs.retain(|id, diff| {
+            diffs
+                .iter()
+                .any(|(node, props)| node == id && *props == diff.props)
+        });
+        for (id, props) in diffs {
+            if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(id) {
+                entry.insert(DiffEditor::new(props, window, cx));
             }
         }
 
@@ -618,7 +638,7 @@ impl Renderer<'_, '_> {
             Props::Table(props) => self.table(id, props, scope),
             Props::Icon(props) => self.icon(props),
             Props::Markdown(source) => self.markdown(id, source, scope),
-            Props::DiffView(props) => self.diff_view(props),
+            Props::DiffView(props) => self.diff_view(id, props, scope),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -932,7 +952,28 @@ impl Renderer<'_, '_> {
 
     /// Placeholder until the host diff component lands: unchanged leading and trailing lines as
     /// context, the middle as removed and added lines.
-    fn diff_view(&self, props: &DiffViewProps) -> AnyElement {
+    /// Zed's diff editor, read-only, every hunk expanded; inside list rows (read-only snapshots)
+    /// a light line diff instead.
+    fn diff_view(&self, id: NodeId, props: &DiffViewProps, scope: Scope) -> AnyElement {
+        if let Scope::Surface = scope
+            && let Some(diff) = self.view.diffs.get(&id)
+        {
+            let colors = self.cx.theme().colors();
+            return div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.editor_background)
+                .child(diff.editor.clone())
+                .into_any_element();
+        }
+        self.line_diff(props)
+    }
+
+    fn line_diff(&self, props: &DiffViewProps) -> AnyElement {
         let status = self.cx.theme().status();
         let lines = diff_lines(&props.old_text, &props.new_text);
         v_flex()
@@ -1021,6 +1062,80 @@ pub(crate) fn diff_lines<'a>(old: &'a str, new: &'a str) -> Vec<(DiffLine, &'a s
             .map(|line| (DiffLine::Context, *line)),
     );
     lines
+}
+
+/// The host component behind `diff-view`: `acp_thread::Diff` (the agent panel's and W5's review
+/// pane's diff) in a read-only editor sized by its content, every hunk expanded.
+pub(crate) struct DiffEditor {
+    props: DiffViewProps,
+    pub(crate) editor: Entity<Editor>,
+    _diff: Entity<acp_thread::Diff>,
+}
+
+impl DiffEditor {
+    fn new(props: DiffViewProps, window: &mut Window, cx: &mut Context<SurfaceView>) -> Self {
+        let languages = workspace::AppState::try_global(cx)
+            .map(|app_state| app_state.languages.clone())
+            .unwrap_or_else(|| {
+                Arc::new(language::LanguageRegistry::new(
+                    cx.background_executor().clone(),
+                ))
+            });
+        let path = diff_path(props.language.as_deref(), &languages);
+        let diff = cx.new(|_| {
+            acp_thread::Diff::finalized(
+                path,
+                Some(props.old_text.clone()),
+                props.new_text.clone(),
+                languages,
+            )
+        });
+        let multibuffer = diff.update(cx, |diff, cx| diff.multibuffer(cx));
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(
+                EditorMode::Full {
+                    scale_ui_elements_with_buffer_font_size: false,
+                    show_active_line_background: false,
+                    sizing_behavior: SizingBehavior::SizeByContent,
+                },
+                multibuffer,
+                None,
+                window,
+                cx,
+            );
+            editor.set_read_only(true);
+            editor.disable_diagnostics(cx);
+            editor.set_show_gutter(false, cx);
+            editor.disable_expand_excerpt_buttons(cx);
+            editor.set_show_vertical_scrollbar(false, cx);
+            editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
+            editor.set_soft_wrap_mode(SoftWrap::None, cx);
+            editor.set_forbid_vertical_scroll(true);
+            editor.set_show_indent_guides(false, cx);
+            editor.set_show_code_actions(false, cx);
+            editor.set_show_git_diff_gutter(false, cx);
+            editor.set_expand_all_diff_hunks(cx);
+            editor.set_diff_hunk_renderer(Some(Arc::new(HiddenUnstagedDiffHunkRenderer)), cx);
+            editor
+        });
+        Self {
+            props,
+            editor,
+            _diff: diff,
+        }
+    }
+}
+
+/// `acp_thread::Diff` picks the language from a file path; `diff-view` names a language, so the
+/// path gets that language's first file suffix (`rust` → `diff.rs`).
+pub(crate) fn diff_path(
+    language: Option<&str>,
+    languages: &Arc<language::LanguageRegistry>,
+) -> String {
+    language
+        .and_then(|name| languages.available_language_for_modeline_name(name))
+        .and_then(|language| language.matcher().path_suffixes.first().cloned())
+        .map_or_else(|| "diff.txt".to_string(), |suffix| format!("diff.{suffix}"))
 }
 
 /// Every view of each extension, by extension id, so a view can flush the typing of the others.
