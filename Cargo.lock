@@ -19249,8 +19249,24 @@ dependencies = [
 name = "ui_ext_host"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "extension_host",
+ "fs",
+ "futures 0.3.34",
  "gpui",
+ "log",
+ "markdown",
+ "menu",
+ "schemars 1.0.4",
+ "serde",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
  "ui_ext",
+ "workspace",
 ]
 
 [[package]]
@@ -22611,6 +22627,7 @@ dependencies = [
  "toolchain_selector",
  "tracing",
  "ui",
+ "ui_ext_host",
  "ui_prompt",
  "url",
  "urlencoding",

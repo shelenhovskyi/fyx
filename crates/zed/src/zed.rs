@@ -6234,6 +6234,7 @@ mod tests {
                 "encoding_selector",
                 "feedback",
                 "file_finder",
+                "fyx_ui", // fyx: ui_ext_host actions
                 "git",
                 "git_graph",
                 "git_onboarding",
