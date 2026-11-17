@@ -22,6 +22,11 @@ Run the sidecar by hand (it waits for `initialize` on stdin):
 node --permission --allow-fs-read=<ext dir> --allow-fs-read=<this dir> --allow-fs-read=<workspace> --allow-fs-write=<workspace> src/main.ts
 ```
 
+`main.ts` refuses to start (exit code 78, reason on stderr) without `--permission`, or with a grant
+that voids the sandbox: `--allow-fs-read=*`, `--allow-fs-write=*`, `--allow-child-process`,
+`--allow-worker`, `--allow-wasi` or `--allow-addons`. Whoever launches it, the Rust host included,
+must pass path-scoped grants.
+
 ## Layout
 
 | Path | Role |

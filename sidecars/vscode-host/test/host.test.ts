@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { MockHost, tempDir } from "../src/mock-host.ts";
 import { ErrorCodes, RpcError } from "../src/rpc.ts";
 import { Uri } from "../src/shim/types.ts";
-import type { Node } from "../src/schema.ts";
+import { ROW_NODE_ID_BASE, type Node } from "../src/schema.ts";
 
 const fixture = join(import.meta.dirname, "fixtures", "kitchen-sink");
 const ID = "fyx-test.kitchen-sink";
@@ -112,6 +112,8 @@ test("tree view: rows, expansion and leaf commands", async () => {
   let rows = await host.listRows(id, list.id, 0, 10);
   assert.deepEqual(rows.map((r) => text(r.nodes)), [["fruits"], ["veg"], ["nuts", "leaf"]]);
   assert.deepEqual(rows[0].nodes[1].props, { icon: { name: "chevron-right", color: null } });
+  assert.deepEqual(rows.map((r) => r.nodes[0].id), [ROW_NODE_ID_BASE, ROW_NODE_ID_BASE, ROW_NODE_ID_BASE], "row ids are row-local and start at the SDK's base");
+  assert.ok(nodes.every((n) => n.id < ROW_NODE_ID_BASE), "the main tree stays below the row id base");
 
   await host.event(id, { "row-click": [list.id, 0] });
   const relisted = host.trees.get(id)!.find((n) => "list" in n.props)!;
