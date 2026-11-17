@@ -110,6 +110,7 @@ impl Pattern {
 /// The rules of one worktree.
 pub struct ReviewRules {
     root: PathBuf,
+    source: String,
     trusted: bool,
     auto_accept: Vec<Pattern>,
     always_ask: Vec<Pattern>,
@@ -130,8 +131,14 @@ impl ReviewRules {
             always_ask: compile(&file.always_ask)?,
             deny: compile(&file.deny)?,
             root,
+            source: text.to_string(),
             trusted,
         })
+    }
+
+    /// Whether `other` would decide every file the same way (same text, same trust).
+    pub fn same_as(&self, other: &ReviewRules) -> bool {
+        self.root == other.root && self.source == other.source && self.trusted == other.trusted
     }
 
     pub fn root(&self) -> &Path {

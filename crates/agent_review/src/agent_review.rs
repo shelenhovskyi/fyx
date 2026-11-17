@@ -32,7 +32,8 @@ use fs::Fs;
 use futures::channel::oneshot;
 use gpui::Action as _;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Task,
+    WeakEntity, Window,
 };
 use language::BufferEditSource;
 use project::{PathChange, Project, trusted_worktrees::TrustedWorktrees};
@@ -46,6 +47,17 @@ pub use review_pane::{
     RejectAllHunks, RejectHunk, RejectTurn, ReviewPane, SubmitReview, ToggleReviewMode,
 };
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
+
+/// What review mode covers, for the status bar and the docs.
+pub const COVERAGE: &str = "Agent review covers edits that ACP agents propose with a diff (v1 \
+    permission requests and single-file v2 patches) and writes through Fyx (fs/write_text_file). \
+    Not reviewed: shell and terminal commands (files they change during a turn are listed as changed \
+    without review), Zed's built-in agent, and edits whose diff Fyx cannot read (a notification \
+    says so).";
+
+/// The short form, under every review pane.
+pub const NOT_REVIEWED: &str = "Not reviewed: terminal commands (files they change are listed above), \
+    Zed's built-in agent, edits Fyx cannot show as a diff.";
 
 /// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
 const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
@@ -124,13 +136,25 @@ pub fn init(cx: &mut App) {
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
     cx.observe_new(|thread: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
+        if let Some(review) = AgentReview::global(cx) {
+            let session_id = thread.session_id().clone();
+            let thread_id = cx.entity_id();
+            review.update(cx, |review, _| review.thread_opened(session_id, thread_id));
+        }
         let project = thread.project().clone();
-        reload_rules(&project, cx);
+        reload_rules(&project, RulesLoad::ThreadStarted, cx);
         cx.subscribe(&project, on_project_event).detach();
-        cx.on_release(|thread, cx| {
+        let thread_id = cx.entity_id();
+        cx.on_release(move |thread, cx| {
             if let Some(review) = AgentReview::global(cx) {
                 let session_id = thread.session_id().clone();
-                review.update(cx, |review, cx| review.close_session(&session_id, cx));
+                review.update(cx, |review, cx| {
+                    // A reload opens a new thread for the session before the old one goes; the
+                    // session's reviews belong to the new one then.
+                    if review.thread_released(&session_id, thread_id) {
+                        review.close_session(&session_id, cx);
+                    }
+                });
             }
         })
         .detach();
@@ -274,8 +298,13 @@ pub struct AgentReview {
     ended_turns: VecDeque<TurnId>,
     /// `.fyx/review.toml` of each worktree that has one.
     rules: Vec<ReviewRules>,
+    /// Rules files that changed while sessions ran, waiting for the user to apply them (`None`: the
+    /// file was removed).
+    pending_rules: HashMap<PathBuf, Option<ReviewRules>>,
     /// Open review panes per turn, across workspaces.
     panes: HashMap<TurnId, usize>,
+    /// Live threads per session.
+    session_threads: HashMap<acp_v2::SessionId, HashSet<EntityId>>,
 }
 
 /// How many ended turns keep their summary (decided files, unreviewed changes).
@@ -408,6 +437,27 @@ impl AgentReview {
         }
     }
 
+    fn thread_opened(&mut self, session_id: acp_v2::SessionId, thread_id: EntityId) {
+        self.session_threads
+            .entry(session_id)
+            .or_default()
+            .insert(thread_id);
+    }
+
+    /// Returns whether it was the session's last thread.
+    fn thread_released(&mut self, session_id: &acp_v2::SessionId, thread_id: EntityId) -> bool {
+        let Some(threads) = self.session_threads.get_mut(session_id) else {
+            return true;
+        };
+        threads.remove(&thread_id);
+        if threads.is_empty() {
+            self.session_threads.remove(session_id);
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn pane_opened(&mut self, turn: TurnId) {
         *self.panes.entry(turn).or_default() += 1;
     }
@@ -493,9 +543,50 @@ impl AgentReview {
 
     /// Replaces the rules of the worktree at `root` (`None`: it has no rules file).
     pub fn set_rules(&mut self, root: PathBuf, rules: Option<ReviewRules>, cx: &mut Context<Self>) {
+        self.pending_rules.remove(&root);
         self.rules.retain(|existing| existing.root() != root);
         self.rules.extend(rules);
         cx.notify();
+    }
+
+    /// Holds rules that changed during a session until the user applies them. The agent under review
+    /// may have written the file (through a reviewed write or a shell command), so a change never
+    /// applies on its own. Returns whether anything changed.
+    pub fn propose_rules(
+        &mut self,
+        root: PathBuf,
+        rules: Option<ReviewRules>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let current = self.rules.iter().find(|existing| existing.root() == root);
+        let unchanged = match (current, &rules) {
+            (None, None) => true,
+            (Some(current), Some(new)) => current.same_as(new),
+            _ => false,
+        };
+        if unchanged {
+            self.pending_rules.remove(&root);
+            return false;
+        }
+        self.pending_rules.insert(root, rules);
+        cx.notify();
+        true
+    }
+
+    /// Whether a changed rules file of the worktree at `root` waits for the user.
+    pub fn has_pending_rules(&self, root: &Path) -> bool {
+        self.pending_rules.contains_key(root)
+    }
+
+    /// Applies the changed rules file of the worktree at `root`; the user confirmed it.
+    pub fn apply_pending_rules(&mut self, root: &Path, cx: &mut Context<Self>) {
+        if let Some(rules) = self.pending_rules.remove(root) {
+            log::info!(
+                "fyx: agent review: applying the changed rules of {}",
+                root.display()
+            );
+            self.set_rules(root.to_path_buf(), rules, cx);
+        }
     }
 
     pub fn set_decision(
@@ -880,14 +971,72 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
     };
     match event {
         AcpThreadEvent::ToolAuthorizationRequested(request_id) => {
-            let Some((edit, respond)) = permission_preview(thread, *request_id, cx) else {
-                return;
-            };
             let session_id = thread.session_id().clone();
-            review.update(cx, |review, cx| {
-                let rule = review.rule_for(edit.abs_path());
-                review.open_permission_preview(session_id, *request_id, edit, respond, rule, cx);
-            });
+            let diffs = legacy_diff_count(thread, *request_id);
+            if diffs > 1 {
+                if review.read(cx).is_enabled() {
+                    report_unreviewable_edit(
+                        thread.project(),
+                        &format!("one tool call edits {diffs} files"),
+                        cx,
+                    );
+                }
+                return;
+            }
+            if let Some((edit, respond)) = permission_preview(thread, *request_id, cx) {
+                review.update(cx, |review, cx| {
+                    let rule = review.rule_for(edit.abs_path());
+                    review.open_permission_preview(
+                        session_id,
+                        *request_id,
+                        edit,
+                        respond,
+                        rule,
+                        cx,
+                    );
+                });
+                return;
+            }
+            match v2_edit_request(thread, *request_id, cx) {
+                V2EditRequest::NotAnEdit => {}
+                V2EditRequest::Unreviewable(reason) => {
+                    if review.read(cx).is_enabled() {
+                        report_unreviewable_edit(thread.project(), &reason, cx);
+                    }
+                }
+                V2EditRequest::Patch {
+                    path,
+                    patch,
+                    created,
+                    respond,
+                } => {
+                    let project = thread.project().clone();
+                    let request_id = *request_id;
+                    cx.spawn(async move |thread, cx| {
+                        let preview = v2_patch_preview(&project, path, &patch, created, cx).await;
+                        let still_pending = thread
+                            .read_with(cx, |thread, _| {
+                                thread.permission_request(request_id).is_some()
+                            })
+                            .unwrap_or(false);
+                        match preview {
+                            _ if !still_pending => {}
+                            Ok(edit) => review.update(cx, |review, cx| {
+                                let rule = review.rule_for(edit.abs_path());
+                                review.open_permission_preview(
+                                    session_id, request_id, edit, respond, rule, cx,
+                                );
+                            }),
+                            Err(error) => cx.update(|cx| {
+                                if review.read(cx).is_enabled() {
+                                    report_unreviewable_edit(&project, &format!("{error:#}"), cx);
+                                }
+                            }),
+                        }
+                    })
+                    .detach();
+                }
+            }
         }
         AcpThreadEvent::ToolAuthorizationReceived(request_id) => {
             review.update(cx, |review, cx| review.permission_answered(*request_id, cx));
@@ -924,7 +1073,7 @@ fn on_project_event(
         .iter()
         .any(|(path, _, _)| path.as_unix_str() == RULES_FILE)
     {
-        reload_rules(&project, cx);
+        reload_rules(&project, RulesLoad::FileChanged, cx);
     }
     let Some(review) = AgentReview::global(cx) else {
         return;
@@ -964,8 +1113,188 @@ fn on_project_event(
     });
 }
 
-/// The diff of a pending edit permission and the host's way to answer it. Only legacy (v1) diffs carry
-/// whole old and new texts; v2 patch diffs are reviewed when the agent writes.
+/// Answers a permission request through `answer`. For [`PermissionVerdict::ApplyAcceptedAndDeny`]
+/// the accepted hunks are written first; if they cannot be, nothing is answered and the error goes back
+/// to the review, which stays open.
+fn make_responder(
+    thread: WeakEntity<AcpThread>,
+    answer: impl Fn(&mut AcpThread, PermissionVerdict, &mut Context<AcpThread>) + 'static,
+) -> PermissionResponder {
+    let answer = Rc::new(answer);
+    Rc::new(move |verdict, edit, cx| {
+        let thread = thread.clone();
+        let answer = answer.clone();
+        cx.spawn(async move |cx| {
+            // The accepted hunks land before the agent hears the denial and reads the file again.
+            if verdict == PermissionVerdict::ApplyAcceptedAndDeny {
+                let (project, action_log) = thread.read_with(cx, |thread, _| {
+                    (thread.project().clone(), thread.action_log().clone())
+                })?;
+                if let Err(error) =
+                    write_accepted_hunks(project.clone(), action_log, &edit, cx).await
+                {
+                    let message = format!(
+                        "Agent review: the accepted hunks of {} could not be written: {error:#}",
+                        edit.abs_path().display()
+                    );
+                    log::error!("{message}");
+                    cx.update(|cx| report_host_write_failure(&project, message, cx));
+                    return Err(error);
+                }
+            }
+            thread.update(cx, |thread, cx| answer(thread, verdict, cx))
+        })
+    })
+}
+
+/// How an ACP v2 permission request relates to review.
+enum V2EditRequest {
+    /// Not a file edit Fyx can see (no diff in the tool call).
+    NotAnEdit,
+    /// A file edit that cannot be shown hunk by hunk; the reason is told to the user.
+    Unreviewable(String),
+    /// A single-file patch, previewed once the current file text is loaded.
+    Patch {
+        path: PathBuf,
+        patch: String,
+        created: bool,
+        respond: PermissionResponder,
+    },
+}
+
+/// ACP v2 edits arrive as a permission request whose tool call carries a patch diff. v2 has no
+/// `fs/write_text_file`, so the agent writes the file itself once allowed: the preview is the only
+/// place to review it.
+fn v2_edit_request(
+    thread: &AcpThread,
+    request_id: PermissionRequestId,
+    cx: &Context<AcpThread>,
+) -> V2EditRequest {
+    let Some(request) = thread
+        .permission_request(request_id)
+        .and_then(|request| request.generic_request())
+    else {
+        return V2EditRequest::NotAnEdit;
+    };
+    let Some(acp_v2::RequestPermissionSubject::ToolCall(subject)) = &request.subject else {
+        return V2EditRequest::NotAnEdit;
+    };
+    let Some((_, tool_call)) = thread.tool_call(&subject.tool_call.tool_call_id) else {
+        return V2EditRequest::NotAnEdit;
+    };
+    let Some(diff) = tool_call
+        .content()
+        .iter()
+        .find_map(|content| match content {
+            ToolCallContent::DiffPatch { source, .. } => Some(source),
+            _ => None,
+        })
+    else {
+        return V2EditRequest::NotAnEdit;
+    };
+    let [change] = diff.changes.as_slice() else {
+        return V2EditRequest::Unreviewable(format!(
+            "the edit changes {} files",
+            diff.changes.len()
+        ));
+    };
+    let (path, created) = match &change.operation {
+        acp_v2::DiffChangeOperation::Modify(change) => (change.path.0.clone(), false),
+        acp_v2::DiffChangeOperation::Add(change) => (change.path.0.clone(), true),
+        _ => {
+            return V2EditRequest::Unreviewable(acp_thread::diff_change_label(change));
+        }
+    };
+    let Some(patch) = diff.patch.as_ref().map(|patch| patch.text.clone()) else {
+        return V2EditRequest::Unreviewable("the agent sent no patch text".into());
+    };
+    let option = |kind: acp_v2::PermissionOptionKind| {
+        request
+            .options
+            .iter()
+            .find(|option| option.kind == kind)
+            .map(|option| option.option_id.clone())
+    };
+    let (Some(allow_option), Some(deny_option)) = (
+        option(acp_v2::PermissionOptionKind::AllowOnce),
+        option(acp_v2::PermissionOptionKind::RejectOnce),
+    ) else {
+        return V2EditRequest::Unreviewable(
+            "the request offers no allow-once and reject-once".into(),
+        );
+    };
+    let respond = make_responder(cx.weak_entity(), move |thread, verdict, cx| {
+        let option_id = match verdict {
+            PermissionVerdict::Allow => allow_option.clone(),
+            PermissionVerdict::Deny | PermissionVerdict::ApplyAcceptedAndDeny => {
+                deny_option.clone()
+            }
+        };
+        thread.select_permission_option(request_id, option_id, cx);
+    });
+    V2EditRequest::Patch {
+        path,
+        patch,
+        created,
+        respond,
+    }
+}
+
+/// The proposed edit of a v2 patch, against the file as it is now (not the agent's copy of it).
+async fn v2_patch_preview(
+    project: &Entity<Project>,
+    path: PathBuf,
+    patch: &str,
+    created: bool,
+    cx: &mut AsyncApp,
+) -> Result<ProposedEdit> {
+    let old_text = if created {
+        String::new()
+    } else {
+        let open = project.update(cx, |project, cx| {
+            let project_path = project
+                .project_path_for_absolute_path(&path, cx)
+                .context("the file is outside the project")?;
+            anyhow::Ok(project.open_buffer(project_path, cx))
+        })?;
+        let buffer = open.await?;
+        cx.update(|cx| buffer.read(cx).text())
+    };
+    let new_text = language::apply_diff_patch(&old_text, patch)
+        .context("the patch does not apply to the file as it is now")?;
+    Ok(ProposedEdit::new(path, old_text, new_text))
+}
+
+struct UnreviewableEdit;
+
+fn report_unreviewable_edit(project: &Entity<Project>, reason: &str, cx: &mut App) {
+    notify_project::<UnreviewableEdit>(
+        project,
+        format!(
+            "Agent review: Fyx cannot review this edit hunk by hunk ({reason}). Decide it in the \
+             agent panel; it is not reviewed."
+        ),
+        cx,
+    );
+}
+
+/// How many v1 diffs the tool call of a pending permission request carries.
+fn legacy_diff_count(thread: &AcpThread, request_id: PermissionRequestId) -> usize {
+    thread
+        .permission_request(request_id)
+        .and_then(|request| request.legacy_tool_call_id())
+        .and_then(|tool_call_id| thread.tool_call(tool_call_id))
+        .map_or(0, |(_, tool_call)| {
+            tool_call
+                .content()
+                .iter()
+                .filter(|content| matches!(content, ToolCallContent::LegacyDiff { .. }))
+                .count()
+        })
+}
+
+/// The diff of a pending v1 edit permission and the host's way to answer it. v1 diffs carry whole old
+/// and new texts (or fragments of them).
 fn permission_preview(
     thread: &AcpThread,
     request_id: PermissionRequestId,
@@ -988,8 +1317,7 @@ fn permission_preview(
         diff.old_text.clone().unwrap_or_default(),
         diff.new_text.clone(),
     );
-    let thread = cx.weak_entity();
-    let respond: PermissionResponder = Rc::new(move |verdict, edit, cx| {
+    let respond = make_responder(cx.weak_entity(), move |thread, verdict, cx| {
         let (option_id, option_kind) = match verdict {
             PermissionVerdict::Allow => (
                 allow_option.clone(),
@@ -1001,30 +1329,7 @@ fn permission_preview(
             ),
         };
         let outcome = SelectedPermissionOutcome::new(option_id, option_kind);
-        let thread = thread.clone();
-        cx.spawn(async move |cx| {
-            // The accepted hunks land before the agent hears the denial and reads the file again. If
-            // they cannot be written, nothing is answered: the review stays open.
-            if verdict == PermissionVerdict::ApplyAcceptedAndDeny {
-                let (project, action_log) = thread.read_with(cx, |thread, _| {
-                    (thread.project().clone(), thread.action_log().clone())
-                })?;
-                if let Err(error) =
-                    write_accepted_hunks(project.clone(), action_log, &edit, cx).await
-                {
-                    let message = format!(
-                        "Agent review: the accepted hunks of {} could not be written: {error:#}",
-                        edit.abs_path().display()
-                    );
-                    log::error!("{message}");
-                    cx.update(|cx| report_host_write_failure(&project, message, cx));
-                    return Err(error);
-                }
-            }
-            thread.update(cx, |thread, cx| {
-                thread.authorize_permission_request(request_id, outcome, cx)
-            })
-        })
+        thread.authorize_permission_request(request_id, outcome, cx);
     });
     Some((edit, respond))
 }
@@ -1038,9 +1343,19 @@ fn report_host_write_failure(project: &Entity<Project>, message: String, cx: &mu
     notify_project::<HostWriteFailed>(project, message, cx);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RulesLoad {
+    /// A thread starts: the file as it is applies.
+    ThreadStarted,
+    /// The file changed while sessions run: the user has to apply it.
+    FileChanged,
+}
+
+struct RulesChanged;
+
 /// Loads `.fyx/review.toml` of every visible worktree of `project`. A file that does not parse is
 /// reported and ignored rather than half applied.
-fn reload_rules(project: &Entity<Project>, cx: &mut App) {
+fn reload_rules(project: &Entity<Project>, load: RulesLoad, cx: &mut App) {
     let Some(review) = AgentReview::global(cx) else {
         return;
     };
@@ -1080,8 +1395,38 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
                 },
                 Err(_) => None,
             };
-            if let Err(error) = review.update(cx, |review, cx| review.set_rules(root, rules, cx)) {
-                log::debug!("review closed before its rules loaded: {error}");
+            let result = review.update(cx, |review, cx| match load {
+                RulesLoad::ThreadStarted => {
+                    review.set_rules(root.clone(), rules, cx);
+                    false
+                }
+                RulesLoad::FileChanged => review.propose_rules(root.clone(), rules, cx),
+            });
+            match result {
+                Ok(true) => cx.update(|cx| {
+                    let Some(project) = project.upgrade() else {
+                        return;
+                    };
+                    let message = format!(
+                        "Agent review: {} changed. Review rules may have been changed by an agent, \
+                         so the new rules apply only when you apply them.",
+                        rules_path.display()
+                    );
+                    let review = review.clone();
+                    let apply: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+                        if let Some(review) = review.upgrade() {
+                            review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
+                        }
+                    });
+                    notify_project_with_action::<RulesChanged>(
+                        &project,
+                        message,
+                        Some(("Apply new review rules", apply)),
+                        cx,
+                    );
+                }),
+                Ok(false) => {}
+                Err(error) => log::debug!("review closed before its rules loaded: {error}"),
             }
         })
         .detach();
@@ -1089,6 +1434,15 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
 }
 
 fn notify_project<T: 'static>(project: &Entity<Project>, message: String, cx: &mut App) {
+    notify_project_with_action::<T>(project, message, None, cx);
+}
+
+fn notify_project_with_action<T: 'static>(
+    project: &Entity<Project>,
+    message: String,
+    action: Option<(&'static str, Rc<dyn Fn(&mut Window, &mut App)>)>,
+    cx: &mut App,
+) {
     for window in cx.windows() {
         let Some(multi_workspace) = window.downcast::<MultiWorkspace>() else {
             continue;
@@ -1096,12 +1450,11 @@ fn notify_project<T: 'static>(project: &Entity<Project>, message: String, cx: &m
         let result = multi_workspace.update(cx, |multi_workspace, _, cx| {
             let workspace = multi_workspace.workspace().clone();
             if workspace.read(cx).project() == project {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.show_toast(
-                        Toast::new(NotificationId::unique::<T>(), message.clone()),
-                        cx,
-                    )
-                });
+                let mut toast = Toast::new(NotificationId::unique::<T>(), message.clone());
+                if let Some((label, action)) = action.clone() {
+                    toast = toast.on_click(label, move |window, cx| action(window, cx));
+                }
+                workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
             }
         });
         if let Err(error) = result {
@@ -1834,6 +2187,14 @@ mod tests {
         .await
         .unwrap();
         cx.run_until_parked();
+        // Changed during a session: nothing applies until the user confirms.
+        assert_eq!(kind(".env", cx), Some(RuleKind::Deny));
+        assert_eq!(kind("Cargo.lock", cx), None);
+        let root = PathBuf::from(util::path!("/p"));
+        review.update(cx, |review, cx| {
+            assert!(review.has_pending_rules(&root));
+            review.apply_pending_rules(&root, cx);
+        });
         assert_eq!(kind(".env", cx), None);
         assert_eq!(kind("Cargo.lock", cx), Some(RuleKind::AlwaysAsk));
     }
@@ -2008,6 +2369,213 @@ mod tests {
         assert!(held.await.is_err());
     }
 
+    fn v2_edit_permission(
+        session_id: &acp_v2::SessionId,
+        changes: serde_json::Value,
+        patch: &str,
+    ) -> acp_v2::RequestPermissionRequest {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": session_id,
+            "title": "Edit a.txt",
+            "options": [
+                {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+            ],
+            "subject": {
+                "type": "tool_call",
+                "toolCall": {
+                    "toolCallId": "edit-1",
+                    "title": "Edit a.txt",
+                    "kind": "edit",
+                    "content": [{
+                        "type": "diff",
+                        "changes": changes,
+                        "patch": {"format": "git_patch", "text": patch}
+                    }]
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[gpui::test]
+    async fn v2_patch_edits_are_previewed(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/p"), serde_json::json!({ "a.txt": OLD }))
+            .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,5 +1,5 @@\n-one\n+ONE\n two\n three\n four\n-five\n+FIVE\n";
+        let request = v2_edit_permission(
+            &session_id,
+            serde_json::json!([{"operation": "modify", "path": util::path!("/p/a.txt")}]),
+            patch,
+        );
+        let (_, answer) = thread
+            .update(cx, |thread, cx| thread.request_permission(request, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        let id = review.read_with(cx, |review, _| {
+            let preview = review.reviews().first().expect("a preview of the v2 patch");
+            assert_eq!(preview.edit().hunks().len(), 2);
+            assert_eq!(preview.edit().old_text(), OLD, "against the file as it is");
+            preview.id()
+        });
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 0, HunkDecision::Accepted, cx)
+                .unwrap();
+            review
+                .set_decision(id, 1, HunkDecision::Rejected, cx)
+                .unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+        let on_disk = fs.load(Path::new(util::path!("/p/a.txt"))).await.unwrap();
+        assert_eq!(
+            on_disk, "ONE\ntwo\nthree\nfour\nfive\n",
+            "the host wrote hunk 1 only"
+        );
+        match answer.await {
+            acp_v2::RequestPermissionOutcome::Selected(selected) => {
+                assert_eq!(
+                    selected.option_id,
+                    acp_v2::PermissionOptionId::new("reject")
+                )
+            }
+            other => panic!("expected the reject option, got {other:?}"),
+        }
+
+        // A multi-file edit is not previewed; the user is told instead.
+        let request = v2_edit_permission(
+            &session_id,
+            serde_json::json!([
+                {"operation": "modify", "path": util::path!("/p/a.txt")},
+                {"operation": "modify", "path": util::path!("/p/b.txt")}
+            ]),
+            patch,
+        );
+        let (_, _unanswered) = thread
+            .update(cx, |thread, cx| thread.request_permission(request, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+    }
+
+    #[gpui::test]
+    async fn a_file_changed_during_review_is_not_written(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/p"), serde_json::json!({ "a.txt": OLD }))
+            .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let path = PathBuf::from(util::path!("/p/a.txt"));
+        let accept_held = |cx: &mut TestAppContext| {
+            let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+            review.update(cx, |review, cx| {
+                review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+                review.submit(id, cx).unwrap();
+            });
+        };
+
+        // The user edits the file while the agent's write waits for review.
+        let write = thread.update(cx, |thread, cx| {
+            thread.write_text_file(path.clone(), NEW.into(), cx)
+        });
+        cx.run_until_parked();
+        let project_path = project
+            .read_with(cx, |project, cx| project.find_project_path(&path, cx))
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await
+            .unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "// user\n")], None, cx)
+        });
+        accept_held(cx);
+        let error = write.await.expect_err("a stale write must not land");
+        assert!(format!("{error:#}").contains("changed while your edit was under review"));
+        assert_eq!(fs.load(&path).await.unwrap(), OLD, "nothing written");
+
+        // Without a concurrent change, the accepted write lands.
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0.."// user\n".len(), "")], None, cx)
+        });
+        let write = thread.update(cx, |thread, cx| {
+            thread.write_text_file(path.clone(), NEW.into(), cx)
+        });
+        cx.run_until_parked();
+        accept_held(cx);
+        write.await.unwrap();
+        assert_eq!(fs.load(&path).await.unwrap(), NEW);
+    }
+
+    #[gpui::test]
+    async fn a_reloaded_session_keeps_its_reviews(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let old_thread = EntityId::from(1u64);
+        let new_thread = EntityId::from(2u64);
+        review.update(cx, |review, _| {
+            review.thread_opened(session(), old_thread);
+            review.thread_opened(session(), new_thread);
+        });
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let closed = review.update(cx, |review, _| {
+            review.thread_released(&session(), old_thread)
+        });
+        assert!(!closed, "the new thread still holds the session");
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1
+        );
+        let closed = review.update(cx, |review, _| {
+            review.thread_released(&session(), new_thread)
+        });
+        assert!(closed);
+        review.update(cx, |review, cx| review.close_session(&session(), cx));
+        assert!(held.await.is_err());
+    }
+
     #[gpui::test]
     async fn review_mode_follows_the_setting(cx: &mut TestAppContext) {
         if review_mode_override().is_some() {
@@ -2044,6 +2612,95 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(!review.read_with(cx, |review, _| review.is_enabled()));
+    }
+
+    #[gpui::test]
+    async fn only_user_settings_turn_review_off(cx: &mut TestAppContext) {
+        if review_mode_override().is_some() {
+            return;
+        }
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.agent_review.get_or_insert_default().enabled = Some(true);
+                });
+                // A project's `.zed/settings.json` tries to turn review off.
+                store
+                    .set_local_settings(
+                        settings::WorktreeId::from_usize(1),
+                        settings::LocalSettingsPath::InWorktree(
+                            util::rel_path::rel_path("").into(),
+                        ),
+                        settings::LocalSettingsKind::Settings,
+                        Some(r#"{ "agent_review": { "enabled": false } }"#),
+                        cx,
+                    )
+                    .unwrap();
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(|cx| review_mode(cx)),
+            "a project cannot turn review off"
+        );
+    }
+
+    #[gpui::test]
+    async fn changing_the_setting_keeps_held_writes(cx: &mut TestAppContext) {
+        if review_mode_override().is_some() {
+            return;
+        }
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let set_enabled = |enabled: bool, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.agent_review.get_or_insert_default().enabled = Some(enabled);
+                    });
+                });
+            });
+            cx.run_until_parked();
+        };
+        set_enabled(true, cx);
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        set_enabled(false, cx);
+        assert!(!review.read_with(cx, |review, _| review.is_enabled()));
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1,
+            "turning review off does not release a held write"
+        );
+        let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        assert_eq!(held.await.unwrap().content, None);
+    }
+
+    #[test]
+    fn vscode_import_never_sets_agent_review() {
+        let vscode = settings::VsCodeSettings::from_str(
+            r#"{
+                "chat.editing.autoAcceptDelay": 1,
+                "chat.tools.autoApprove": true,
+                "github.copilot.chat.agent.autoFix": true,
+                "files.autoSave": "afterDelay"
+            }"#,
+            settings::VsCodeSettingsSource::VsCode,
+        )
+        .unwrap();
+        assert_eq!(vscode.settings_content().agent_review, None);
     }
 
     #[test]
