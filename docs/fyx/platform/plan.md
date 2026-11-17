@@ -1,0 +1,69 @@
+# Platform 1: work plan
+
+Implements [spec.md](spec.md) (decision numbers in brackets). Owners are the existing streams;
+"new" means a stream the coordinator starts. Every task ends with the behaviour seen in the
+running editor, not only green tests. Integrator-only files (`Cargo.toml`, `Cargo.lock`,
+`crates/ui_ext/wit/`) go through W0 as usual.
+
+## Before P1: merge what already exists
+
+| # | Owner | Task | Done when |
+|---|---|---|---|
+| 0.1 | W0 | Merge `claude/fyx-ext-template` (`559014f693`) and `claude/fyx-ts-sdk` (`af96c0f873`) after review; they seed `fyx-ext new` and `sdks/ts` | both on `integration`, gate green |
+| 0.2 | W0 | Merge the pending audit and review branches (`fyx-audit-network`, `-diff`, `-licenses`, `fyx-review-w5`, `fyx-rebase-report`) and route their findings; network-audit findings feed P1.6 and P4.6 | findings listed in `tasks/reviews/` with owners |
+
+## P1 local platform
+
+| # | Owner | Task | Depends on | Done when |
+|---|---|---|---|---|
+| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13] | — | install, update, roll back a local `.fyxext` in the dev build |
+| 1.2 | W3 | "Install Dev Extension" + `fyx.extensions.dev_paths`; env var stays as override [6] | 1.1 | dev extension survives restart without the env var |
+| 1.3 | W3 | Hot reload in place + "Restart extension" after a failure [7, 8] | 1.2 | edit → rebuild → panel updates within 1 s; failure 3 of spec §4 passes |
+| 1.4 | new `platform-cli` | `fyx-ext` crate and binary: `new` (from the template), `build`, `dev`, `check` with declared-vs-used capabilities, `package` [4, 5, 12] | 0.1 | `fyx-ext new demo && fyx-ext dev` opens the panel in Fyx |
+| 1.5 | W3 | Permission broker, tiers T0–T1, install dialog, revocation, capability list on the page (reuse capability chips) [21, 26] | 1.1 | T1 extension asks once; revoke stops reads at once |
+| 1.6 | W3 | Instance limits: no preopens, no env, 256 MiB memory, 2 s first mount [25] | — | a guest that allocates 300 MiB traps without hurting others |
+| 1.7 | W3 | Extension Inspector panel [9] | 1.3 | tree, patches, events, timings visible for the counter demo |
+| 1.8 | W4 | `fyx_sdk::testing` harness + `fyx-ext test` [10] | 1.4 | demo tests run headless in CI |
+| 1.9 | W7 | Generated API reference + doc drift test [11]; rewrite `extension-authoring.md` around `fyx-ext` | 1.4 | reference regenerates on merge; drift test catches a renamed item |
+| 1.10 | W0 | wasmtime policy: Cranelift only, `cargo deny advisories` in `script/gate.sh` [27] | — | gate fails on a seeded advisory |
+
+## P2 `fyx:ui@0.2.0`
+
+| # | Owner | Task | Depends on | Done when |
+|---|---|---|---|---|
+| 2.1 | W0 | Answer the 4 open questions in `wit-0.2/design.md`; add section L (notifications, progress) [22]; land the 0.2 WIT next to 0.1 [29] | — | both worlds in `crates/ui_ext/wit/`, 0.1 demos unchanged and working |
+| 2.2 | W2c | Host side of A–L, version dispatch | 2.1 | probe fixture covers every new import |
+| 2.3 | W3 | Renderer side of A–L: ticks, modal, dismissed, runtime surfaces, notifications and progress | 2.2 | clock status item, picker modal, progress demo in the dev build |
+| 2.4 | W4 | Rust SDK 0.2 + demos moved to 0.2 as examples | 2.2 | demos build for both 0.1 and 0.2 |
+| 2.5 | new `ts-sdk` | `@fyx/sdk` on 0.2 with `jco componentize`, `fyx-ext new --lang ts`, SDK parity test [3] | 0.1, 2.1 | a TS counter runs in Fyx; parity test red on a missing wrapper |
+
+## P3 registry
+
+| # | Owner | Task | Depends on | Done when |
+|---|---|---|---|---|
+| 3.1 | W0 | Create repo `fyx-extensions` (owner picks the GitHub org: open decision in PLAN.md); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
+| 3.2 | W0 | Registry CI: build from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
+| 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18] | 3.2 | install from the index; tampered package refused |
+| 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19] | 3.3 | spec §4 failures 1, 2, 5 pass |
+| 3.5 | W3 + one `fyx:` hook | Extensions page Fyx tab: search, install, update, pin, roll back, held updates [17, 21] | 3.3, 1.5 | user flow done end to end in the dev build |
+
+## P4 `fyx:ui@0.3.0` and T2
+
+| # | Owner | Task | Depends on | Done when |
+|---|---|---|---|---|
+| 4.1 | W0 | 0.3 design draft for decision 28 (cloud task, like the 0.2 draft), then the WIT | P2 | design reviewed by W7 |
+| 4.2 | W6 (restart) | Decorations family on W6's anchor mechanism, namespaces, visible-range pull, `color-swatch` | 4.1 | TODO highlighter and gutter-sign demo work while editing |
+| 4.3 | W3 | Picker protocol on the 0.2 modal | 4.1 | two extensions contribute sources to one picker |
+| 4.4 | W3 | Code lens, hover, virtual documents, commands in palette and keymap | 4.1 | each has a demo in the gallery |
+| 4.5 | W3 | T2 consent at first use, held updates for new T2 / domains / programs [21] | 1.5 | spec §4 failure 1 passes |
+| 4.6 | W2c | `network:fetch` host import with domain list and caps [23] | 4.5 | undeclared domain → `denied`; 17 MiB response cut |
+| 4.7 | W2c | `process:spawn`: PATH outside worktree, filtered env, job objects [24] | 4.5 | spec §4 failure 4 passes; reload kills the process tree |
+| 4.8 | W2c | `workspace:edit` (undoable transactions), `agent:observe` read-only sessions | 4.5 | an edit undoes with one ctrl-z; observe cannot accept or reject |
+| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8 | review file in `tasks/reviews/` |
+
+## Parallelism
+
+At most 2 compiling streams plus the gatekeeper (owner limit). Non-compiling work runs alongside:
+1.9, 2.1, 3.1, 3.2 (registry repo), 4.1 (design) and the TS SDK's JS side. Suggested pairs:
+P1 = W3 (1.1→1.3→1.5→1.7) + `platform-cli` (1.4, then 1.8 with W4); P2 = W2c + W3;
+P3 = W3 alone (registry CI is non-compiling); P4 = W6 + W3, then W2c.
