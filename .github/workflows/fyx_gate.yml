@@ -1,0 +1,158 @@
+# fyx: Fyx's own merge gate on a GitHub-hosted Windows runner. See docs/fyx/ci.md.
+name: Fyx gate
+
+on:
+  push:
+    branches:
+      - integration
+      - fyx/main
+      - claude/fyx-ci-readme # TRIAL ONLY, remove before handoff
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fyx-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  # Lets cargo's git dependencies use git's core.longpaths (see docs/src/development/windows.md).
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # .cargo/config.toml sets rustc-wrapper = "sccache"; this points it at the Actions cache.
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Enable long paths for git
+        run: git config --system core.longpaths true
+
+      # gate.sh diffs against the tag in FYX_UPSTREAM, so it needs history and tags; blobless
+      # keeps the clone small because it only compares trees.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          function Show-Drives {
+              Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -ne $null } |
+                  Format-Table Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } }, @{ n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) } } |
+                  Out-String | Write-Host
+          }
+          Show-Drives
+          # SDKs this build never uses. MSVC, the Windows SDK, CMake, Git and Strawberry Perl stay.
+          $unused = @(
+              'C:\Android',
+              'C:\ghcup',
+              'C:\Miniconda',
+              'C:\Julia',
+              'C:\hostedtoolcache\windows\CodeQL',
+              'C:\hostedtoolcache\windows\go',
+              'C:\hostedtoolcache\windows\PyPy',
+              'C:\hostedtoolcache\windows\Ruby',
+              'C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk',
+              'C:\Program Files\Microsoft SQL Server',
+              'C:\Program Files\MongoDB',
+              'C:\SeleniumWebDrivers'
+          )
+          foreach ($dir in $unused) {
+              if (Test-Path -LiteralPath $dir) {
+                  $started = Get-Date
+                  cmd /c rmdir /s /q "$dir"
+                  if ($LASTEXITCODE -ne 0) { Write-Host "::warning::could not fully remove $dir" }
+                  Write-Host ("removed {0} in {1:n0}s" -f $dir, ((Get-Date) - $started).TotalSeconds)
+              }
+          }
+          $global:LASTEXITCODE = 0
+          Show-Drives
+          # Put target/ on whichever drive now has the most room.
+          $best = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free -ne $null } |
+              Sort-Object Free -Descending | Select-Object -First 1
+          $targetDir = "$($best.Name):\fyx-target"
+          New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+          "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host ("CARGO_TARGET_DIR={0} ({1:n1} GB free)" -f $targetDir, ($best.Free / 1GB))
+
+      # The msvc_spectre_libs build script fails without them; the default MSVC version must have
+      # lib\spectre\x64 because that is the one cc's find_tool picks.
+      - name: Install MSVC Spectre-mitigated libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'no Visual Studio installation with the MSVC x64 tools' }
+          function Get-SpectreDir {
+              $version = (Get-Content "$vsPath\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt").Trim()
+              "$vsPath\VC\Tools\MSVC\$version\lib\spectre\x64"
+          }
+          if (Test-Path (Get-SpectreDir)) {
+              Write-Host "Spectre libs present: $(Get-SpectreDir)"
+              exit 0
+          }
+          Write-Host "Adding Spectre-mitigated libs to $vsPath"
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $process = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
+              'modify', '--installPath', "`"$vsPath`"",
+              '--add', 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre',
+              '--quiet', '--norestart', '--nocache'
+          )
+          if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+              throw "vs_installer exited with $($process.ExitCode)"
+          }
+          if (-not (Test-Path (Get-SpectreDir))) { throw "still missing: $(Get-SpectreDir)" }
+          Write-Host "Spectre libs installed: $(Get-SpectreDir)"
+
+      - name: Ensure CMake
+        shell: pwsh
+        run: |
+          $cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
+          if (-not $cmake) {
+              choco install cmake -y --no-progress
+              if ($LASTEXITCODE -ne 0) { throw "choco install cmake exited with $LASTEXITCODE" }
+              "$env:ProgramFiles\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              $cmake = "$env:ProgramFiles\CMake\bin\cmake.exe"
+          }
+          & $cmake --version
+
+      # With no arguments, rustup installs the channel, components and targets in rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-nextest
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Run script/gate.sh
+        run: bash script/gate.sh
+
+      - name: Show disk and sccache usage
+        if: always()
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -ne $null } |
+              Format-Table Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } }, @{ n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) } }
+          if ($env:CARGO_TARGET_DIR -and (Test-Path $env:CARGO_TARGET_DIR)) {
+              $bytes = (Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+              Write-Host ("target dir: {0:n1} GB" -f ($bytes / 1GB))
+          }
+          if (Get-Command sccache -ErrorAction SilentlyContinue) { sccache --show-stats }
