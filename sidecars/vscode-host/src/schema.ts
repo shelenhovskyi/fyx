@@ -192,6 +192,13 @@ export const MAX_PATCHES_PER_UPDATE = 2048;
 export const MAX_NODES_PER_ROW = MAX_PATCHES_PER_UPDATE;
 export const MAX_NODES = 16384;
 
+/**
+ * First node id inside a list row, as in the SDK (`ui_ext_sdk::ROW_NODE_ID_BASE`). Rows are
+ * addressed by `(list node, index)`, so their ids are row-local: every row starts here, and the
+ * surface's main tree keeps its ids below this value.
+ */
+export const ROW_NODE_ID_BASE = 0x8000_0000;
+
 export function validateNodes(nodes: readonly Node[], options: { singleRoot?: boolean } = {}): string[] {
   const errors: string[] = [];
   const seen = new Map<NodeId, Node>();

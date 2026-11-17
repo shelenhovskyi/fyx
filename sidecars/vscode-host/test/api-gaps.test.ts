@@ -6,7 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MockHost, tempDir } from "../src/mock-host.ts";
 import { Uri } from "../src/shim/types.ts";
-import type { Node } from "../src/schema.ts";
+import { ROW_NODE_ID_BASE, type Node } from "../src/schema.ts";
 
 const EXTENSION = String.raw`
 const vscode = require("vscode");
@@ -223,6 +223,10 @@ test("QuickPick: buttons fire, title and busy re-render after show, enabled gate
   const id = [...host.surfaces.keys()].find((k) => k.includes("quick-pick"))!;
   await host.mount(id);
   assert.deepEqual(texts(host.trees.get(id)!), ["Pick", "Loading…", "Refresh"]);
+  const pickList = host.trees.get(id)!.find((n) => "list" in n.props)!;
+  const pickRows = await host.listRows(id, pickList.id, 0, 10);
+  assert.deepEqual(pickRows.map((r) => r.nodes.map((n) => n.id)), [[ROW_NODE_ID_BASE, ROW_NODE_ID_BASE + 3], [ROW_NODE_ID_BASE, ROW_NODE_ID_BASE + 3]], "QuickPick rows use the same row-local ids");
+  assert.ok(host.trees.get(id)!.every((n) => n.id < ROW_NODE_ID_BASE));
   await host.executeCommand("gaps.pickDone");
   await host.settle();
   assert.deepEqual(texts(host.trees.get(id)!), ["Pick", "Refresh"]);

@@ -224,7 +224,7 @@ JSON-RPC 2.0, one JSON message per line on stdin/stdout. Requests can go both wa
 | host → sidecar | `surfaces` | → `surface[]` (WIT `surfaces`) |
 | host → sidecar | `mount` | `{"surface-id"}` → `node[]` (WIT `mount`) |
 | host → sidecar | `handle-event` | `{"surface-id", event: ui-event}` → `update` (WIT `handle-event`) |
-| host → sidecar | `list-rows` | `{"surface-id", "list-node", start, count}` → `list-row[]` |
+| host → sidecar | `list-rows` | `{"surface-id", "list-node", start, count}` → `list-row[]`. Row node ids are row-local and start at `0x8000_0000` in every row, as in the SDK (`ROW_NODE_ID_BASE`); main-tree ids stay below that value |
 | sidecar → host | `push-update` | `{"surface-id", update}` → `null`, or an error when the host refuses the update (WIT `host.push-update`, coalesced per tick). A request, not a notification: at most one per surface is in flight, and after a refusal the sidecar's next update for that surface is a full `replace`. Diffs above the 2048-patch cap are sent as `replace` too. |
 | sidecar → host | `log` | `{level, message}` (WIT `host.log`; extension `console.*` goes here) |
 | sidecar → host | `fyx/surfacesChanged` | `{added: surface[], removed: string[]}` (not in the WIT, see gaps) |

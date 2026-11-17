@@ -6,7 +6,7 @@
 
 import type { HostContext } from "../context.ts";
 import { NotImplementedInFyx } from "../coverage.ts";
-import { node, props, U16, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
+import { node, props, ROW_NODE_ID_BASE, U16, type ListRow, type Node, type NodeId, type UiEvent } from "../schema.ts";
 import { EventEmitter, ThemeIcon, TreeItemCollapsibleState, Uri, type Event } from "../shim/types.ts";
 import type { SurfaceModel } from "./surfaces.ts";
 
@@ -20,8 +20,6 @@ const HEADER_BADGE = 7;
 const TRUNCATED = 8;
 const LIST_BASE = 1000;
 const ROW_HEIGHT = 22;
-const ROW_ID_BASE = 1_000_000;
-const ROW_ID_STRIDE = 8;
 const INDENT = 12;
 /** Visible rows across all levels; the rest of an expanded tree is cut off, with a message. */
 const MAX_ROWS = 10_000;
@@ -222,7 +220,7 @@ export class TreeViewSurface implements SurfaceModel {
     if (listNode !== this.listId) return [];
     return this.rows.slice(start, start + count).map((row, k) => {
       const index = start + k;
-      const base = ROW_ID_BASE + index * ROW_ID_STRIDE;
+      const base = ROW_NODE_ID_BASE;
       const nodes: Node[] = [node(base, null, props.flex({ direction: "row", gap: 4, padding: indent(row.depth), align: "center" }))];
       nodes.push(node(base + 1, base, props.icon(row.expandable ? (row.expanded ? "chevron-down" : "chevron-right") : "blank")));
       const icon = iconName(row.item.iconPath);
