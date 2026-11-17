@@ -36,7 +36,9 @@ pub enum TreeError {
     NotAContainer { parent: NodeId, kind: &'static str },
     #[error("unknown node id {0}")]
     UnknownNode(NodeId),
-    #[error("node {node} cannot be inserted before {before}, which is not a sibling under the same parent")]
+    #[error(
+        "node {node} cannot be inserted before {before}, which is not a sibling under the same parent"
+    )]
     UnknownSibling { node: NodeId, before: NodeId },
     #[error("a list row must have exactly one root node, found {0}")]
     RowRootCount(usize),
@@ -348,7 +350,10 @@ mod tests {
         assert_eq!(tree.children(Some(1)), &[2, 3]);
         assert_eq!(tree.children(Some(3)), &[4]);
         assert_eq!(tree.get(4).map(TreeNode::parent), Some(Some(3)));
-        assert_eq!(tree.to_nodes().iter().map(|n| n.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(
+            tree.to_nodes().iter().map(|n| n.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -441,8 +446,8 @@ mod tests {
             max_nodes_per_update: 10,
             max_nodes: 2,
         };
-        let mut tree = Tree::from_nodes(vec![flex(1, None), flex(2, Some(1))], limits)
-            .expect("valid");
+        let mut tree =
+            Tree::from_nodes(vec![flex(1, None), flex(2, Some(1))], limits).expect("valid");
         let error = tree
             .apply_patches(vec![insert(text(3, Some(1), "a"), None)])
             .unwrap_err();
@@ -457,7 +462,10 @@ mod tests {
         let mut tree = sample();
         tree.apply_patches(vec![Patch::SetProps(2, text_props("changed"))])
             .expect("valid");
-        assert_eq!(tree.get(2).map(TreeNode::props), Some(&text_props("changed")));
+        assert_eq!(
+            tree.get(2).map(TreeNode::props),
+            Some(&text_props("changed"))
+        );
     }
 
     #[test]
@@ -565,7 +573,9 @@ mod tests {
     #[test]
     fn remove_unknown_node_fails() {
         let mut tree = sample();
-        let error = tree.apply_patches(vec![Patch::Remove(4), Patch::Remove(4)]).unwrap_err();
+        let error = tree
+            .apply_patches(vec![Patch::Remove(4), Patch::Remove(4)])
+            .unwrap_err();
         assert_eq!(
             error,
             TreeError::Patch {
@@ -625,8 +635,11 @@ mod tests {
         };
         Tree::from_row(vec![flex(1, None), button], TreeLimits::default()).expect("valid row");
         assert_eq!(
-            Tree::from_row(vec![text(1, None, "a"), text(2, None, "b")], TreeLimits::default())
-                .unwrap_err(),
+            Tree::from_row(
+                vec![text(1, None, "a"), text(2, None, "b")],
+                TreeLimits::default()
+            )
+            .unwrap_err(),
             TreeError::RowRootCount(2)
         );
         assert_eq!(

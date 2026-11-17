@@ -1,3 +1,4 @@
+pub mod fyx_ui; // fyx: host bindings for the fyx:ui world (W2)
 pub mod wit;
 
 use crate::capability_granter::CapabilityGranter;

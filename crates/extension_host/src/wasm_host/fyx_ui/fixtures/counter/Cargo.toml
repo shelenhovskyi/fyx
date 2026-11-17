@@ -1,0 +1,22 @@
+# Guest fixture for the fyx:ui host tests, built for wasm32-wasip2 by the tests themselves.
+# Not a workspace member: it has its own `[workspace]` and lockfile.
+[package]
+name = "fyx_ui_test_counter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/counter.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ui_ext_sdk = { path = "../../../../../../ui_ext_sdk" }
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+debug = false
+strip = true
