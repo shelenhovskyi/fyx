@@ -17,9 +17,11 @@ Related pages:
   and what is planned for 0.2.
 
 > **Status: prototype.** `fyx:ui@0.1.0` is frozen, but it is not a stable API, and 0.2 is
-> being implemented. Extensions are written in Rust; TypeScript is deferred until after 1.0. There
-> is no public registry yet. The SDK and `fyx-ext` are not published to crates.io, so they come
-> from a Fyx checkout, and `diff-view` is a placeholder. These docs describe what the code on the
+> being implemented. Extensions are written in Rust; TypeScript is deferred until after 1.0. UI
+> extensions load from dev folders, `.fyxext` packages installed from disk and an environment
+> variable (see "Installing as a dev extension"); there is no public registry yet. The SDK and
+> `fyx-ext` are not published to crates.io, so they come from a Fyx checkout, and `diff-view` is
+> a placeholder. These docs describe what the code on the
 > `integration` branch does, limits included.
 
 Rule sources are cited in HTML comments as `file:line`, so you can check every claim against the
@@ -318,20 +320,60 @@ RUSTC_WRAPPER= fyx-ext build --release
 `FYX_UI_DEV_EXTENSIONS` and rebuilds it as you edit. The rest of this section is what happens
 underneath, and the other ways to load an extension.
 
-UI extensions load from the installed-extensions directory and from the environment variable
+UI extensions load from `fyx.extensions.dev_paths`, from the install store (see "Installing a
+package"), from Zed's installed-extensions directory, and from the environment variable
 `FYX_UI_DEV_EXTENSIONS`.
 
 - **`fyx_ui: install dev UI extension`** asks for a folder, shows the capabilities its
-  `extension.toml` asks for, and links the folder into the installed-extensions directory. Fyx
-  loads it now and on every start, and reloads it when its component is rebuilt. The folder's
-  path may not contain `&`, `|`, `^`, `<`, `>`, `%`, `!` or `"`.
-- **Anything else in the installed-extensions directory** (a folder copied there, or linked by
-  upstream's "Install Dev Extension") waits for consent: Fyx shows a notification with the
+  `extension.toml` asks for, and adds the folder to `fyx.extensions.dev_paths` in your user
+  settings. Fyx loads it now and on every start, and reloads it when its component is rebuilt;
+  the folder stays where it is. **`fyx_ui: remove dev UI extension`** takes it off the list (or
+  edit the setting).
+
+  ```json
+  { "fyx": { "extensions": { "dev_paths": ["C:/src/my_counter"] } } }
+  ```
+- **A folder added to `dev_paths` by hand, or anything else in the installed-extensions
+  directory** (a folder copied there, or linked by upstream's "Install Dev Extension") waits for
+  consent: Fyx shows a notification with the
   capabilities it asks for and loads it only after **Enable**. The answer is kept in
   `<data dir>/fyx-ui-consent.json`, for those capabilities and that component (for a linked
   folder, that folder). Asking for more capabilities, or a different component, asks again on the
   next start.
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
+
+### Capabilities and permissions
+
+Every capability in `[fyx_ui].capabilities` has a tier:
+
+| Tier | Capabilities | Granted |
+|---|---|---|
+| T0 | `ui:panel`, `ui:status-bar` (and the 0.2+ UI ones: `ui:modal`, `ui:notifications`, …) | no prompt; listed in the install dialog and on the extension's chips |
+| T1 | `workspace:read-buffers`, `workspace:read-files`, `workspace:diagnostics` | once, in the install dialog; `fyx_ui: revoke UI extension permission` takes it back |
+| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | not available yet: a manifest that asks for one is refused |
+
+An unknown capability is refused at load, with its name in the error. An update that adds only
+T0 capabilities (or only changes the component) loads silently; one that adds a T1 capability is
+held: the old version keeps running and Fyx asks you to **Approve** it. A revoked T1 capability is
+denied from the extension's next call and asked for again on its next load. `fyx:ui@0.1.0` has no
+T1 host imports yet, so today T1 only matters for what the dialogs show and hold.
+
+### Installing a package
+
+A `.fyxext` package is a zip of `extension.toml` (with `id`, a semver `version` and the
+`[fyx_ui]` table), the component it names, and optional `assets/` and `signature.json`.
+**`fyx_ui: install UI extension from file`** shows its id, version and capabilities, marks it
+"Unsigned, not from the registry", and installs it into `<data dir>/extensions/fyx/<id>/<version>/`.
+Installing another version of the same id is an update: the replaced version is kept for
+**`fyx_ui: roll back UI extension`**, and older ones are deleted. **`fyx_ui: toggle pin UI
+extension`** keeps an id on its version (an install of another version is refused until it is
+unpinned); **`fyx_ui: uninstall UI extension`** removes every version.
+
+A package is refused when it is over 50 MiB, its component is over 32 MiB, it unpacks to more
+than 128 MiB or 1024 entries, or an entry name is not a plain relative path (no `..`, drive,
+root, backslash or `:`). On first load Fyx precompiles the component next to the version folder
+(`<id>/<version>-<key>.cwasm`), so later starts skip compiling; the file is Fyx's own, and one
+inside a package is never loaded.
 
 <!-- crates/ui_ext_host/src/ui_ext_host.rs:11, crates/ui_ext_host/src/registry.rs:29-33, 172, 305-312 -->
 
@@ -361,7 +403,12 @@ extension id.
 
 <!-- crates/ui_ext_host/src/registry.rs:316-325, 352-356; crates/ui_ext_wasm/src/ui_ext_wasm.rs:297 -->
 
-To pick up a new build, restart Fyx. Nothing reloads a running extension.
+A dev extension (from `fyx.extensions.dev_paths`, `FYX_UI_DEV_EXTENSIONS` or a link in the
+installed directory) reloads by itself when its component changes: once writes pause for 300 ms,
+the new build loads and every surface remounts in place (panels stay docked and open). If the new
+build does not load, the old instance keeps running and the surface's footer shows
+`Reload failed: …` with **Retry**. `fyx_ui: restart UI extension` loads any extension again on a
+fresh instance.
 
 Each panel gets a button in its dock. The action `fyx_ui::ToggleExtensionPanel { key }` focuses or
 unfocuses a panel by its key `"<extension id>/<surface id>"`, so you can bind it to a key. If two
@@ -430,10 +477,11 @@ work on your side.
 
 <!-- crates/ui_ext/wit/fyx-ui.wit:9-21; crates/ui_ext_host/src/view.rs:763-794 -->
 
-**9. Slow or crashing extensions are disabled.** Each call has a 200 ms budget (2 s for
-instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps or panics disables the extension
-until Fyx restarts. Returning `Err(String)` is different: it is shown to the user and the extension
-keeps running.
+**9. Slow or crashing extensions are stopped.** Each call has a 200 ms budget (2 s for
+instantiation, `surfaces` and the first `mount` of each surface). A call that runs past it, traps
+or panics stops the extension: its surfaces show the reason and **Restart extension**, which loads
+it again on a fresh instance, and a dev extension restarts by itself on its next build. Returning
+`Err(String)` is different: it is shown to the user and the extension keeps running.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 693-734, 663-675 -->
 

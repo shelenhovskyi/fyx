@@ -18,6 +18,9 @@ pub trait SurfaceLink {
     /// The extension's instance is gone (trap, time budget, disabled): every other surface of
     /// it stops too.
     fn extension_failed(&self, from_surface: &str, message: SharedString, cx: &mut App);
+    /// Loads the extension again from where it came from, on a fresh instance; its surfaces
+    /// remount on it (plan 1.3, spec decision 8).
+    fn restart_extension(&self, cx: &mut App);
 }
 
 /// Remounts in a row caused by updates that did not fit, with no user input between them, before
@@ -87,6 +90,8 @@ pub struct SurfaceState {
     link: Option<Rc<dyn SurfaceLink>>,
     phase: Phase,
     last_error: Option<SharedString>,
+    /// `last_error` is a failed reload: the old instance still runs, and the footer offers Retry.
+    reload_failed: bool,
     lists: HashMap<NodeId, RowCache>,
     events: VecDeque<QueuedEvent>,
     event_worker_running: bool,
@@ -121,6 +126,7 @@ impl SurfaceState {
             link,
             phase: Phase::Mounting,
             last_error: None,
+            reload_failed: false,
             lists: HashMap::default(),
             events: VecDeque::new(),
             event_worker_running: false,
@@ -160,8 +166,34 @@ impl SurfaceState {
     }
 
     pub fn dismiss_error(&mut self, cx: &mut Context<Self>) {
+        self.reload_failed = false;
         if self.last_error.take().is_some() {
             cx.notify();
+        }
+    }
+
+    /// A reload of the extension failed: the surface keeps its instance and shows the error in
+    /// its footer with Retry (spec decision 7).
+    pub fn show_reload_error(&mut self, message: SharedString, cx: &mut Context<Self>) {
+        self.last_error = Some(message);
+        self.reload_failed = true;
+        cx.notify();
+    }
+
+    pub fn reload_failed(&self) -> bool {
+        self.reload_failed
+    }
+
+    /// Whether `restart_extension` can do anything: the surface belongs to a registry.
+    pub fn can_restart(&self) -> bool {
+        self.link.is_some()
+    }
+
+    /// Loads the extension again on a fresh instance (Restart extension, and Retry after a
+    /// failed reload). Deferred: the registry updates this surface while it restarts.
+    pub fn restart_extension(&mut self, cx: &mut Context<Self>) {
+        if let Some(link) = self.link.clone() {
+            cx.defer(move |cx| link.restart_extension(cx));
         }
     }
 
@@ -229,6 +261,7 @@ impl SurfaceState {
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.remounts_without_input = 0;
         self.last_error = None;
+        self.reload_failed = false;
         self.phase = Phase::Mounting;
         self.revision += 1;
         self.mount(cx);

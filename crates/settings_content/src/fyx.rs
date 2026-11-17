@@ -61,3 +61,24 @@ pub enum FyxSecurityMode {
     #[schemars(skip)]
     Unrecognized,
 }
+
+/// Fyx's own settings (`fyx` in settings).
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxSettingsContent {
+    /// UI extensions (`crates/ui_ext_host`).
+    pub extensions: Option<FyxExtensionsSettingsContent>,
+}
+
+/// `fyx.extensions`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxExtensionsSettingsContent {
+    /// Folders of UI extensions in development, loaded on every start and reloaded when their
+    /// component is rebuilt. "fyx_ui: install dev UI extension" adds to this list. Only your user
+    /// settings count, and each folder still needs one "Enable" before it loads. The
+    /// `FYX_UI_DEV_EXTENSIONS` environment variable adds more, without asking.
+    ///
+    /// Default: []
+    pub dev_paths: Option<Vec<String>>,
+}
