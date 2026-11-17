@@ -387,4 +387,452 @@ cargo test -p ui_ext_host --test async_lifecycle
 cargo test -p agent_review --lib async_review_tests
 ```
 
-Results: pending (build in progress); this section is updated in the next commit.
+Results (Linux, rustc 1.98.1). Each test asserts the faulty behaviour, so a pass confirms the finding:
+
+```
+test test_a_stale_reply_patches_the_reloaded_tree ... ok                      # U2, finding 2
+test test_a_stale_failure_stops_the_reloaded_extension ... ok                 # U1, finding 2
+test async_review_tests::test_a_cancelled_write_keeps_its_review_and_is_recorded_as_landed ... ok          # A1, finding 6
+test async_review_tests::test_answering_elsewhere_while_applying_drops_the_review_but_not_the_write ... ok  # A2, finding 3
+test async_review_tests::test_a_new_thread_applies_a_pending_rules_change_without_confirmation ... ok       # A3, finding 1
+```
+
+Once a finding is fixed, invert its test's final assertions and keep it as a regression test.
+
+### U1, U2: `crates/ui_ext_host/tests/async_lifecycle.rs` (an integration test; only public API)
+
+```rust
+//! Scratch tests for review async-1 (not product code): calls in flight on a replaced instance.
+
+use std::{cell::RefCell, rc::Rc};
+
+use anyhow::{Result, anyhow};
+use futures::{FutureExt as _, channel::oneshot, future::LocalBoxFuture};
+use gpui::{AppContext as _, Entity, TestAppContext};
+use ui_ext::{
+    ButtonProps, FlexProps, Node, NodeId, Patch, Props, TextProps, Tree, TreeLimits, UiEvent,
+    Update,
+};
+use ui_ext_host::{Phase, SurfaceState, UiBackend, UiExtensionRegistry};
+use ui_ext_wasm::Reply;
+
+const ROOT: NodeId = 1;
+const LABEL: NodeId = 2;
+const BUTTON: NodeId = 3;
+
+/// A backend whose `handle-event` calls stay in flight until the test answers them, the way a
+/// call on a busy wasm instance does.
+struct GatedBackend {
+    label: &'static str,
+    pending: RefCell<Vec<oneshot::Sender<Result<Reply<Update>>>>>,
+    mounts: RefCell<usize>,
+}
+
+impl GatedBackend {
+    fn new(label: &'static str) -> Rc<Self> {
+        Rc::new(Self {
+            label,
+            pending: RefCell::default(),
+            mounts: RefCell::new(0),
+        })
+    }
+
+    fn answer(&self, result: Result<Reply<Update>>) {
+        let sender = self.pending.borrow_mut().remove(0);
+        sender.send(result).ok();
+    }
+}
+
+fn nodes(label: &str) -> Vec<Node> {
+    vec![
+        Node {
+            id: ROOT,
+            parent: None,
+            props: Props::Flex(FlexProps::default()),
+        },
+        Node {
+            id: LABEL,
+            parent: Some(ROOT),
+            props: Props::Text(TextProps {
+                content: label.into(),
+                ..TextProps::default()
+            }),
+        },
+        Node {
+            id: BUTTON,
+            parent: Some(ROOT),
+            props: Props::Button(ButtonProps {
+                label: "Go".into(),
+                ..ButtonProps::default()
+            }),
+        },
+    ]
+}
+
+impl UiBackend for GatedBackend {
+    fn extension_id(&self) -> &str {
+        "demo"
+    }
+
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        *self.mounts.borrow_mut() += 1;
+        let tree = Tree::from_nodes(nodes(self.label), TreeLimits::default());
+        async move {
+            Ok(Reply {
+                pushed: Vec::new(),
+                value: tree?,
+            })
+        }
+        .boxed_local()
+    }
+
+    fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        let (sender, receiver) = oneshot::channel();
+        self.pending.borrow_mut().push(sender);
+        async move { receiver.await.map_err(|_| anyhow!("dropped a call"))? }.boxed_local()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+        async move {
+            Ok(Reply {
+                pushed: Vec::new(),
+                value: Vec::new(),
+            })
+        }
+        .boxed_local()
+    }
+}
+
+fn surface(id: &str) -> ui_ext::Surface {
+    ui_ext::Surface {
+        id: id.into(),
+        title: id.into(),
+        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
+            position: ui_ext::DockPosition::Right,
+            icon: "hash".into(),
+            default_size: 320,
+        }),
+    }
+}
+
+fn label(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> Option<String> {
+    state.read_with(cx, |state, _| match state.tree()?.get(LABEL)?.props() {
+        Props::Text(text) => Some(text.content.clone()),
+        _ => None,
+    })
+}
+
+fn stopped_for_good(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> bool {
+    state.read_with(cx, |state, _| {
+        matches!(
+            state.phase(),
+            Phase::Failed {
+                retryable: false,
+                ..
+            }
+        )
+    })
+}
+
+/// Hot reload while a click is in flight on the old instance: the old instance then hits its time
+/// budget. Its error carries no `ReplyError`, so it is taken for a failure of the *current*
+/// instance, and every surface of the freshly reloaded extension stops for good.
+#[gpui::test]
+async fn test_a_stale_failure_stops_the_reloaded_extension(cx: &mut TestAppContext) {
+    let registry = cx.new(|_| UiExtensionRegistry::default());
+    let old = GatedBackend::new("old");
+    let old_backend: Rc<dyn UiBackend> = old.clone();
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(old_backend, &[surface("main"), surface("side")], cx)
+    });
+    cx.run_until_parked();
+    let main = registry.read_with(cx, |registry, _| {
+        registry.surface_of("demo", "main").unwrap().state.clone()
+    });
+    let side = registry.read_with(cx, |registry, _| {
+        registry.surface_of("demo", "side").unwrap().state.clone()
+    });
+    assert_eq!(label(&main, cx).as_deref(), Some("old"));
+
+    main.update(cx, |state, cx| state.dispatch(UiEvent::Click(BUTTON), cx));
+    cx.run_until_parked();
+    assert_eq!(old.pending.borrow().len(), 1, "the click is in flight");
+
+    // The developer rebuilds the extension: hot reload registers a new instance.
+    let new = GatedBackend::new("new");
+    let new_backend: Rc<dyn UiBackend> = new.clone();
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(new_backend, &[surface("main"), surface("side")], cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(label(&main, cx).as_deref(), Some("new"));
+    assert_eq!(label(&side, cx).as_deref(), Some("new"));
+
+    // A click after the reload is not sent to the new instance while the old call is in flight.
+    main.update(cx, |state, cx| state.dispatch(UiEvent::Click(BUTTON), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        new.pending.borrow().len(),
+        0,
+        "head-of-line: the new click waits for the old instance"
+    );
+
+    // The old instance's call runs out of time (no ReplyError: "the instance is gone").
+    old.answer(Err(anyhow!(
+        "exceeded its time budget of 200ms while blocked in a host call"
+    )));
+    cx.run_until_parked();
+    assert!(stopped_for_good(&main, cx), "the reloaded surface stopped");
+    assert!(stopped_for_good(&side, cx), "so did its sibling");
+    assert_eq!(*new.mounts.borrow(), 2, "the new instance itself never failed");
+}
+
+/// Hot reload while a click is in flight: the old instance's reply, computed against the old
+/// instance's mirror, is applied to the tree the new instance mounted.
+#[gpui::test]
+async fn test_a_stale_reply_patches_the_reloaded_tree(cx: &mut TestAppContext) {
+    let old = GatedBackend::new("old");
+    let old_backend: Rc<dyn UiBackend> = old.clone();
+    let state = cx.new(|cx| SurfaceState::new(old_backend, surface("main"), None, cx));
+    cx.run_until_parked();
+    state.update(cx, |state, cx| state.dispatch(UiEvent::Click(BUTTON), cx));
+    cx.run_until_parked();
+
+    let new = GatedBackend::new("new");
+    let new_backend: Rc<dyn UiBackend> = new.clone();
+    state.update(cx, |state, cx| {
+        state.replace_backend(new_backend, surface("main"), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(label(&state, cx).as_deref(), Some("new"));
+
+    old.answer(Ok(Reply {
+        pushed: Vec::new(),
+        value: Update::Patches(vec![Patch::SetProps(
+            LABEL,
+            Props::Text(TextProps {
+                content: "written by the old instance".into(),
+                ..TextProps::default()
+            }),
+        )]),
+    }));
+    cx.run_until_parked();
+    assert_eq!(
+        label(&state, cx).as_deref(),
+        Some("written by the old instance"),
+        "the new instance's tree now disagrees with the new instance's mirror"
+    );
+}
+```
+
+### A1, A2, A3: `crates/agent_review/src/async_review_tests.rs`
+
+Needs `#[cfg(test)] mod async_review_tests;` in `agent_review.rs`; it uses private items through `super::*`.
+
+```rust
+//! Scratch tests for review async-1 (not product code).
+
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
+
+use futures::channel::oneshot;
+use gpui::TestAppContext;
+use language::Buffer;
+
+use super::*;
+
+const OLD: &str = "one\ntwo\nthree\nfour\nfive\n";
+const NEW: &str = "ONE\ntwo\nthree\nfour\nFIVE\n";
+
+fn session() -> acp_v2::SessionId {
+    acp_v2::SessionId::new("session")
+}
+
+fn request_id() -> PermissionRequestId {
+    serde_json::from_value(serde_json::Value::String(uuid::Uuid::new_v4().to_string())).unwrap()
+}
+
+/// The agent cancels its `fs/write_text_file` (or the handler future is dropped for any other
+/// reason than the events `close_session` listens to). The review stays open and keeps asking the
+/// user; submitting it then records the file as accepted in the turn summary although nothing was
+/// written.
+#[gpui::test]
+async fn test_a_cancelled_write_keeps_its_review_and_is_recorded_as_landed(
+    cx: &mut TestAppContext,
+) {
+    let review = cx.new(|_| AgentReview::default());
+    review.update(cx, |review, cx| review.set_enabled(true, cx));
+    let write = AgentWrite {
+        session_id: session(),
+        abs_path: PathBuf::from("/p/a.txt"),
+        buffer: cx.new(|cx| Buffer::local(OLD, cx)),
+        old_text: OLD.into(),
+        new_text: NEW.into(),
+    };
+    let gate = WriteGate(review.downgrade());
+    let task = cx.update(|cx| gate.review_write(write, cx));
+    let (id, turn) = review.read_with(cx, |review, _| {
+        (review.reviews()[0].id(), review.reviews()[0].turn())
+    });
+
+    drop(task);
+    cx.run_until_parked();
+    assert_eq!(
+        review.read_with(cx, |review, _| review.open_review_count()),
+        1,
+        "nobody waits for this review any more, but it is still open"
+    );
+
+    review.update(cx, |review, cx| {
+        review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+        review.submit(id, cx).unwrap();
+    });
+    let history = review.read_with(cx, |review, _| review.turn_history(turn).to_vec());
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].resolution,
+        Resolution::AcceptedAll,
+        "the turn summary says the edit landed; the agent never wrote it"
+    );
+}
+
+/// The user submits a partly accepted preview; while the host writes the accepted hunks, the same
+/// permission request is answered in the agent panel. `permission_answered` closes the review
+/// although its host write is in flight, the write then lands and answers the request a second
+/// time, and the turn summary never records it.
+#[gpui::test]
+async fn test_answering_elsewhere_while_applying_drops_the_review_but_not_the_write(
+    cx: &mut TestAppContext,
+) {
+    let review = cx.new(|_| AgentReview::default());
+    review.update(cx, |review, cx| review.set_enabled(true, cx));
+    let gate: Rc<RefCell<Option<oneshot::Sender<()>>>> = Rc::default();
+    let host_writes = Rc::new(RefCell::new(0));
+    let respond: PermissionResponder = Rc::new({
+        let gate = gate.clone();
+        let host_writes = host_writes.clone();
+        move |verdict, _, cx| {
+            assert_eq!(verdict, PermissionVerdict::ApplyAcceptedAndDeny);
+            let (sender, receiver) = oneshot::channel();
+            *gate.borrow_mut() = Some(sender);
+            let host_writes = host_writes.clone();
+            cx.spawn(async move |_| {
+                receiver.await.ok();
+                *host_writes.borrow_mut() += 1;
+                anyhow::Ok(())
+            })
+        }
+    });
+    let request = request_id();
+    let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+    let id = review
+        .update(cx, |review, cx| {
+            review.open_permission_preview(session(), request, preview, respond, None, cx)
+        })
+        .unwrap();
+    let turn = review.read_with(cx, |review, _| review.review(id).unwrap().turn());
+    review.update(cx, |review, cx| {
+        review
+            .set_decision(id, 0, HunkDecision::Accepted, cx)
+            .unwrap();
+        review
+            .set_decision(id, 1, HunkDecision::Rejected, cx)
+            .unwrap();
+        review.submit(id, cx).unwrap();
+    });
+    cx.run_until_parked();
+    assert!(gate.borrow().is_some(), "the host write is in flight");
+
+    // `AcpThreadEvent::ToolAuthorizationReceived`: the user clicked Allow in the agent panel.
+    review.update(cx, |review, cx| review.permission_answered(request, cx));
+    assert!(
+        review.read_with(cx, |review, _| review.review(id).is_none()),
+        "the review under submission was closed"
+    );
+
+    gate.borrow_mut().take().unwrap().send(()).ok();
+    cx.run_until_parked();
+    assert_eq!(*host_writes.borrow(), 1, "the accepted hunks were still written");
+    assert!(
+        review.read_with(cx, |review, _| review.turn_history(turn).is_empty()),
+        "and the turn summary does not mention the file"
+    );
+}
+
+/// A rules file changed during a session waits for the user. Any new thread on the project (a
+/// second session, a reload, or a subagent the agent announces with `subagent_update`, which
+/// `agent_servers` turns into a new `AcpThread`) loads the file with `RulesLoad::ThreadStarted`,
+/// which applies it and drops the pending confirmation.
+#[gpui::test]
+async fn test_a_new_thread_applies_a_pending_rules_change_without_confirmation(
+    cx: &mut TestAppContext,
+) {
+    use std::path::Path;
+    cx.update(|cx| {
+        let settings_store = settings::SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        crate::init(cx);
+    });
+    let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+    let fs = project::FakeFs::new(cx.executor());
+    fs.insert_tree(
+        util::path!("/p"),
+        serde_json::json!({
+            ".fyx": { "review.toml": "always_ask = [\"src/**\"]\n" },
+            "src": { "main.rs": "" },
+        }),
+    )
+    .await;
+    let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+    let connection = Rc::new(acp_thread::StubAgentConnection::new());
+    let new_thread = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            acp_thread::AgentConnection::new_session(
+                connection.clone(),
+                project.clone(),
+                workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                cx,
+            )
+        })
+    };
+    let _first = new_thread(cx).await.unwrap();
+    cx.run_until_parked();
+    let main_rs = PathBuf::from(util::path!("/p/src/main.rs"));
+    let kind = |cx: &mut TestAppContext| {
+        review.read_with(cx, |review, _| review.rule_for(&main_rs).map(|rule| rule.kind))
+    };
+    assert_eq!(kind(cx), Some(RuleKind::AlwaysAsk));
+
+    // The agent rewrites the rules with a shell command (not reviewed).
+    fs.save(
+        Path::new(util::path!("/p/.fyx/review.toml")),
+        &"auto_accept = [\"**\"]\n".into(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    cx.run_until_parked();
+    let root = PathBuf::from(util::path!("/p"));
+    assert!(review.read_with(cx, |review, _| review.has_pending_rules(&root)));
+    assert_eq!(kind(cx), Some(RuleKind::AlwaysAsk), "waits for the user");
+
+    // Another thread starts on the project before the user answers the toast.
+    let _second = new_thread(cx).await.unwrap();
+    cx.run_until_parked();
+    assert!(
+        !review.read_with(cx, |review, _| review.has_pending_rules(&root)),
+        "the confirmation is gone"
+    );
+    assert_eq!(
+        kind(cx),
+        Some(RuleKind::AutoAccept),
+        "and the agent-written rules apply"
+    );
+}
+```
+
