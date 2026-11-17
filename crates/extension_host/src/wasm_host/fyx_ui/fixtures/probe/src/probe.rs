@@ -1,13 +1,9 @@
 //! `fyx:ui` guest for the host behaviour the demos do not exercise. On surface `probe`:
 //! `click(1)` logs, pushes `patches [remove(1)]` through the host import and answers `unchanged`;
-//! `click(2)` spins forever, to hit the host's time budget. It also carries the
-//! `fyx:ui-api-version` section explicitly.
+//! `click(2)` spins forever, to hit the host's time budget. The `fyx:ui-api-version` section comes
+//! from `register_extension!`; emitting it here too would concatenate two copies into 12 bytes.
 
 use ui_ext_sdk::*;
-
-#[used]
-#[unsafe(link_section = "fyx:ui-api-version")]
-pub static FYX_UI_API_VERSION: [u8; 6] = [0, 0, 0, 1, 0, 0];
 
 const SURFACE_ID: &str = "probe";
 const PUSH: NodeId = 1;
