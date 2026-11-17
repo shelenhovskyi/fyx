@@ -1,50 +1,100 @@
 > [!IMPORTANT]
 > Remove this line to confirm you've reviewed this PR before submitting.
-# Zed
+# Fyx
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+Fyx is a code editor forked from [Zed](https://github.com/zed-industries/zed). It adds two things
+on top of the upstream editor:
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+- **A native UI API for WASM extensions.** Extensions written for `wasm32-wasip2` add dock panels
+  and status bar items through the `fyx:ui` WIT world. They never draw: they describe a retained
+  tree of nodes (flex, text, buttons, inputs, virtualized lists and tables, icons, markdown), and
+  Fyx renders it with its own components, coloured by the active theme. Each extension runs
+  sandboxed in its own wasmtime store, with no preopened directories, environment variables or
+  arguments.
+- **Hunk-level review of agent changes.** Edits proposed by an ACP agent become a host-side review
+  model, where each hunk is accepted or rejected on its own before it lands.
 
----
+How it fits together: [ARCHITECTURE.md](ARCHITECTURE.md). The sprint plan and its progress:
+[PLAN.md](PLAN.md).
 
-### Installation
+## Status
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+Fyx is a **sprint prototype**. It is built and tested as a **Windows dev build** only. There are no
+releases, installers or signed binaries, and nothing here is a stable API: `fyx:ui@0.1.0` will
+break in 0.2. UI extensions load only from an environment variable at startup.
 
-Other platforms are not yet available:
+Fyx follows a pinned upstream stable tag (see [`FYX_UPSTREAM`](FYX_UPSTREAM)) and is rebased onto
+newer tags. Fyx's CI is described in [docs/fyx/ci.md](docs/fyx/ci.md).
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+## Building on Windows
 
-### Developing Zed
+You need:
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+- [rustup](https://www.rust-lang.org/tools/install). The toolchain version, components and targets
+  are pinned in [`rust-toolchain.toml`](rust-toolchain.toml); run `rustup toolchain install` in
+  the repository root to install them.
+- Visual Studio 2022 or newer, or the Build Tools, with the MSVC x64/x86 build tools, a Windows 10
+  or 11 SDK, and the **MSVC Spectre-mitigated libraries** for x64/x86. The build fails without the
+  Spectre libraries. The full component list is in
+  [docs/src/development/windows.md](docs/src/development/windows.md).
+- [CMake](https://cmake.org/download) on `PATH` (a wasmtime dependency needs it).
+- [sccache](https://github.com/mozilla/sccache) on `PATH`. `.cargo/config.toml` sets it as the
+  `rustc` wrapper, so the build fails if it is missing.
+- Git Bash, to run the scripts in `script/`.
+- Long paths enabled for Git (`git config --system core.longpaths true`) and Windows.
 
-### Contributing
+Then, from the repository root:
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+```bash
+export CARGO_INCREMENTAL=0
+cargo build -p zed
+```
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+The binary is `target\debug\fyx.exe`. Run it with `cargo run -p zed`.
 
-### Licensing
+`CARGO_INCREMENTAL=0` matters: sccache cannot cache incremental builds, and incremental artifacts
+grow the target directory by gigabytes. Expect the target directory to take 25–60 GB.
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+Before proposing a change, run the merge gate (check, clippy, tests and license check on every
+crate changed since the upstream tag):
 
-License information for third party dependencies must be correctly provided for CI to pass.
+```bash
+bash script/gate.sh
+```
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+## Trying the demo extensions
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+Build the three demo extensions (counter, todo list, component gallery) for `wasm32-wasip2`:
 
-## Sponsorship
+```bash
+bash script/fyx-build-demos
+```
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+The script copies each component next to its `extension.toml` and prints a
+`FYX_UI_DEV_EXTENSIONS=...` line. Set that variable and start Fyx; each demo adds a panel with a
+button in its dock:
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+```bat
+set FYX_UI_DEV_EXTENSIONS=C:\src\fyx\extensions\fyx_demo_counter;C:\src\fyx\extensions\fyx_demo_todo;C:\src\fyx\extensions\fyx_demo_gallery
+target\debug\fyx.exe --foreground
+```
+
+To write your own UI extension, start with
+[docs/fyx/extension-authoring.md](docs/fyx/extension-authoring.md), then the
+[SDK reference](docs/fyx/sdk-reference.md) and [limits and gotchas](docs/fyx/limits-and-gotchas.md).
+
+## Licenses
+
+- The Fyx application is licensed under the **GPL-3.0-or-later** ([LICENSE-GPL](LICENSE-GPL)),
+  like the upstream code it is built from. This includes `ui_ext_host` and `agent_review`.
+- The extension API crates `ui_ext` (the WIT world and tree model) and `ui_ext_sdk` (the guest
+  SDK), and the demo extensions, are licensed under the **Apache-2.0**
+  ([LICENSE-APACHE](LICENSE-APACHE)), so extensions can use them under any license.
+- Each crate states its license in its `Cargo.toml`. Third-party notices are generated with
+  `script/generate-licenses`.
+
+## Not affiliated with Zed Industries
+
+Fyx is an independent fork. It is not affiliated with, endorsed by, or supported by Zed Industries,
+Inc. "Zed" is used here only to name the upstream project Fyx is forked from. Please report Fyx
+problems to this repository, not to the Zed project.
