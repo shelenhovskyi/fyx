@@ -183,8 +183,7 @@ fn arb_limits() -> impl Strategy<Value = TreeLimits> {
         2 => Just(TreeLimits::default()),
         1 => (0usize..=12, 1usize..=48).prop_map(|(max_nodes_per_update, max_nodes)| TreeLimits {
             max_nodes_per_update,
-            max_nodes,
-        }),
+            max_nodes, ..TreeLimits::default() }),
     ]
 }
 
@@ -1074,7 +1073,7 @@ proptest! {
         extra in 1usize..4,
         targets in prop::collection::vec(any::<NodeId>(), 12),
     ) {
-        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes: 64 };
+        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes: 64, ..TreeLimits::default() };
         let mut tree = Tree::from_nodes(nodes, limits)?;
         let before = tree.clone();
 
@@ -1105,7 +1104,7 @@ proptest! {
             1..30,
         ),
     ) {
-        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes };
+        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes, ..TreeLimits::default() };
         let mut tree = Tree::new(limits);
         let mut next_id: NodeId = 0;
         for (remove_first, remove_pick, parent_picks) in batches {
@@ -1162,7 +1161,7 @@ proptest! {
         max_nodes in 1usize..48,
         existing in arb_nodes(8),
     ) {
-        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes };
+        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes, ..TreeLimits::default() };
         let fits = nodes.len() <= max_nodes;
 
         let mounted = Tree::from_nodes(nodes.clone(), limits);

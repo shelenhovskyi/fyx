@@ -97,6 +97,8 @@ pub struct SurfaceState {
     input_sets: HashMap<NodeId, u64>,
     /// Bumped on every change to the tree, so views know when to reconcile their editors.
     revision: u64,
+    /// Bumped when a mounted tree is applied; see `mount_count`.
+    mounts: u64,
     resyncing: bool,
     /// Remounts caused by bad updates since the last update that applied (a reply, a push, a row
     /// answer).
@@ -124,6 +126,7 @@ impl SurfaceState {
             event_worker_running: false,
             input_sets: HashMap::default(),
             revision: 0,
+            mounts: 0,
             resyncing: false,
             remounts_without_input: 0,
             next_row_generation: 0,
@@ -254,11 +257,21 @@ impl SurfaceState {
         self.fail(message, false, cx);
     }
 
+    /// Applies the tree a `mount` returned: every mount is one the host started (the first one, a
+    /// resync, Retry, a reload), never the extension's own rebuild.
     fn set_tree(&mut self, tree: Tree) {
         count_all_inputs(&tree, &mut self.input_sets);
         self.phase = Phase::Ready(tree);
         self.lists.clear();
+        self.mounts += 1;
         self.revision += 1;
+    }
+
+    /// How many mounted trees have been applied. A view carries unsent typing to renumbered inputs
+    /// only when this moved, so the extension's own `replace` or rebuild clears a form as it means
+    /// to (integration-4 finding 8).
+    pub fn mount_count(&self) -> u64 {
+        self.mounts
     }
 
     /// Queues one input event. Events reach the extension one at a time, in order, and each makes

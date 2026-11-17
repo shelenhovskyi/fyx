@@ -9,6 +9,27 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"
 
+# Workspace-wide checks (spec decision 27). They do not depend on which crates changed, so they
+# run first and on every gate, even one with no crate changes. See docs/fyx/ci.md.
+if ! script/fyx-check-wasmtime-policy; then
+    echo "gate: RED: a non-Cranelift wasmtime backend is enabled (see the lines above)"
+    exit 1
+fi
+if command -v cargo-deny >/dev/null 2>&1; then
+    if ! cargo deny --locked --config script/fyx-deny.toml check --hide-inclusion-graph advisories bans 2>&1; then
+        echo "gate: RED: cargo deny found an open advisory or a banned wasmtime backend. Update the"
+        echo "gate: crate, or triage an upstream-only advisory in script/fyx-deny.toml (docs/fyx/ci.md)."
+        echo "gate: Rerun without --hide-inclusion-graph to see which crates pull it in."
+        exit 1
+    fi
+elif [[ "${CI:-}" == "true" ]]; then
+    echo "gate: RED: cargo-deny is not installed; CI must run the advisory check"
+    exit 1
+else
+    echo "gate: WARNING: cargo-deny is not installed, so the advisory check is SKIPPED here (CI runs it)."
+    echo "gate: WARNING: install it with: cargo install cargo-deny --locked"
+fi
+
 changed_crates=$(
     git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \
         | awk -F/ '{print $1"/"$2"/Cargo.toml"}' | sort -u \

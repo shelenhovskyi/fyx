@@ -110,6 +110,9 @@ pub const UI_EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 pub const UI_CALL_BUDGET: Duration = Duration::from_millis(200);
 /// Instantiation and `surfaces` run once per load and may set up state, so they get more time.
 const UI_INIT_BUDGET: Duration = Duration::from_secs(2);
+/// The first `mount` of each surface builds its whole tree (and, in a JS guest, warms the engine
+/// up), so it gets this instead of [`UI_CALL_BUDGET`]. Later mounts of the surface do not.
+pub const UI_FIRST_MOUNT_BUDGET: Duration = Duration::from_secs(2);
 /// On top of a budget before a call is dropped outright. Long enough that a busy guest is stopped
 /// by the epoch interrupt first, which leaves a clearer error.
 const UI_DEADLINE_SLACK: Duration = Duration::from_millis(50);
@@ -120,10 +123,22 @@ pub const MAX_PUSHES_PER_CALL: usize = 64;
 /// `TreeLimits` when it is applied, but pushes queue unapplied until the call returns, so their
 /// total is capped here: past it the call traps and the extension is disabled.
 pub const MAX_PUSHED_ITEMS_PER_CALL: usize = 4096;
-/// Linear memory one UI component may grow to. A UI component holds a tree mirror and some state,
-/// not data sets. This also bounds every string and list a call can make the host copy out of the
-/// guest (arguments of `push-update` and `log`, replies), since they come from that memory.
-pub const UI_MEMORY_LIMIT: usize = 32 << 20;
+/// String bytes all of one call's `push-update` and `log` arguments may carry together; past it
+/// the call traps and the extension is disabled.
+///
+/// Guest memory bounds what one host call lifts (wasmtime checks every string and list against
+/// it before copying, and neither `Config::max_wasm_stack`, which bounds the guest's stack, nor
+/// the resource limiter, which sees only guest memory and tables, bounds the host's copies). It
+/// does not bound a call's total: a guest can push the same 200 MiB string 64 times, and pushes
+/// are kept until the call returns. So their text is counted here.
+pub const MAX_LIFTED_TEXT_PER_CALL: usize = 16 << 20;
+/// Longest `log` message written out; the rest is cut off (it still counts toward
+/// [`MAX_LIFTED_TEXT_PER_CALL`]).
+pub const MAX_LOG_MESSAGE_LEN: usize = 16 << 10;
+/// Linear memory one UI component may grow to: room for a JS engine (a componentize-js guest
+/// embeds one) as well as a tree mirror and state. It also bounds each string and list one host
+/// call copies out of the guest; [`MAX_LIFTED_TEXT_PER_CALL`] bounds their sum per call.
+pub const UI_MEMORY_LIMIT: usize = 256 << 20;
 /// Table elements per table (function references; a Rust component uses a few thousand).
 pub const UI_TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
 /// Core instances, tables and memories per component (a component and its adapters use a handful).
@@ -307,18 +322,104 @@ pub struct UiState {
     pushes: Vec<PushedUpdate>,
     /// Patches plus nodes in `pushes`.
     pushed_items: usize,
+    /// String bytes of the running call's `push-update` and `log` arguments.
+    lifted_text: usize,
     limits: wasmtime::StoreLimits,
     call_started: Instant,
     call_budget: Duration,
+    /// Surfaces `mount` has been called for, so only the first mount gets
+    /// [`UI_FIRST_MOUNT_BUDGET`].
+    mounted: std::collections::HashSet<String>,
     disabled: Option<String>,
 }
 
 impl UiState {
+    fn new(extension_id: Arc<str>, ctx: WasiCtx) -> Self {
+        Self {
+            extension_id,
+            table: ResourceTable::new(),
+            ctx,
+            pushes: Vec::new(),
+            pushed_items: 0,
+            lifted_text: 0,
+            limits: ui_store_limits(),
+            call_started: Instant::now(),
+            call_budget: UI_INIT_BUDGET,
+            mounted: Default::default(),
+            disabled: None,
+        }
+    }
+
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
         self.pushes.clear();
         self.pushed_items = 0;
+        self.lifted_text = 0;
+    }
+
+    fn count_lifted_text(&mut self, bytes: usize) -> wasmtime::Result<()> {
+        self.lifted_text = self.lifted_text.saturating_add(bytes);
+        if self.lifted_text > MAX_LIFTED_TEXT_PER_CALL {
+            wasmtime::bail!(
+                "passed more than {MAX_LIFTED_TEXT_PER_CALL} bytes of text to push-update and log \
+                 in one call"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Which time budget a call gets.
+enum CallBudget {
+    Regular,
+    /// A `mount` of this surface: [`UI_FIRST_MOUNT_BUDGET`] the first time.
+    Mount(String),
+}
+
+impl CallBudget {
+    fn resolve(self, state: &mut UiState) -> Duration {
+        match self {
+            CallBudget::Mount(surface_id) if state.mounted.insert(surface_id.clone()) => {
+                UI_FIRST_MOUNT_BUDGET
+            }
+            CallBudget::Mount(_) | CallBudget::Regular => UI_CALL_BUDGET,
+        }
+    }
+}
+
+fn props_text_len(props: &ui_ext::Props) -> usize {
+    use ui_ext::Props;
+    let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+    match props {
+        Props::Flex(_) | Props::List(_) => 0,
+        Props::Text(props) => props.content.len(),
+        Props::Button(props) => props.label.len() + option_len(&props.icon),
+        Props::Input(props) => props.value.len() + props.placeholder.len(),
+        Props::Table(props) => props.columns.iter().map(String::len).sum(),
+        Props::Icon(props) => props.name.len(),
+        Props::Markdown(text) => text.len(),
+        Props::DiffView(props) => {
+            props.old_text.len() + props.new_text.len() + option_len(&props.language)
+        }
+    }
+}
+
+/// String bytes an update carries.
+fn update_text_len(update: &ui_ext::Update) -> usize {
+    match update {
+        ui_ext::Update::Unchanged => 0,
+        ui_ext::Update::Replace(nodes) => {
+            nodes.iter().map(|node| props_text_len(&node.props)).sum()
+        }
+        ui_ext::Update::Patches(patches) => patches
+            .iter()
+            .map(|patch| match patch {
+                ui_ext::Patch::SetProps(_, props) => props_text_len(props),
+                ui_ext::Patch::Insert(insert) => props_text_len(&insert.node.props),
+                ui_ext::Patch::Remove(_) => 0,
+            })
+            .sum(),
     }
 }
 
@@ -343,6 +444,7 @@ impl wit_host::Host for UiState {
             wasmtime::bail!("pushed more than {MAX_PUSHES_PER_CALL} updates in one call");
         }
         let update: ui_ext::Update = update.into();
+        self.count_lifted_text(surface_id.len() + update_text_len(&update))?;
         self.pushed_items += match &update {
             ui_ext::Update::Unchanged => 0,
             ui_ext::Update::Replace(nodes) => nodes.len(),
@@ -357,7 +459,17 @@ impl wit_host::Host for UiState {
         Ok(())
     }
 
-    fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
+    fn log(&mut self, level: wit_host::LogLevel, mut message: String) -> wasmtime::Result<()> {
+        self.count_lifted_text(message.len())?;
+        if message.len() > MAX_LOG_MESSAGE_LEN {
+            let mut end = MAX_LOG_MESSAGE_LEN;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            let total = message.len();
+            message.truncate(end);
+            message.push_str(&format!("… ({total} bytes, cut)"));
+        }
         let level = match level {
             wit_host::LogLevel::Trace => log::Level::Trace,
             wit_host::LogLevel::Debug => log::Level::Debug,
@@ -583,20 +695,10 @@ impl UiExtension {
                     let mut wasi = WasiCtxBuilder::new();
                     wasi.inherit_stderr();
                     deny_network(&mut wasi);
-                    let mut store = Store::new(
-                        &runtime.engine,
-                        UiState {
-                            extension_id,
-                            table: ResourceTable::new(),
-                            ctx: wasi.build(),
-                            pushes: Vec::new(),
-                            pushed_items: 0,
-                            limits: ui_store_limits(),
-                            call_started: Instant::now(),
-                            call_budget: UI_INIT_BUDGET,
-                            disabled: None,
-                        },
-                    );
+                    // No preopened directories, no environment variables, no arguments: the
+                    // builder starts empty and only stderr is inherited.
+                    let mut store =
+                        Store::new(&runtime.engine, UiState::new(extension_id, wasi.build()));
                     store.limiter(|state| &mut state.limits);
                     store.epoch_deadline_callback(|context| {
                         let state = context.data();
@@ -714,7 +816,7 @@ impl UiExtension {
     /// The initial tree of a surface, validated.
     pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
         let (result, pushed) = self
-            .call({
+            .call(CallBudget::Mount(surface_id.to_string()), {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move { extension.call_mount(store, &surface_id).await }.boxed()
@@ -735,7 +837,7 @@ impl UiExtension {
         event: ui_ext::UiEvent,
     ) -> Result<Reply<ui_ext::Update>> {
         let (result, pushed) = self
-            .call({
+            .call(CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 let event = wit::UiEvent::from(event);
                 move |extension, store| {
@@ -761,7 +863,7 @@ impl UiExtension {
         count: u32,
     ) -> Result<Reply<Vec<(u32, Tree)>>> {
         let (rows, pushed) = self
-            .call({
+            .call(CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move {
@@ -826,7 +928,7 @@ impl UiExtension {
 
     /// Runs one guest call on the extension's queue and returns its result with the updates the
     /// guest pushed during it. A failed call (trap, budget) disables the extension and drops them.
-    async fn call<T, F>(&self, f: F) -> Result<(T, Vec<PushedUpdate>)>
+    async fn call<T, F>(&self, budget: CallBudget, f: F) -> Result<(T, Vec<PushedUpdate>)>
     where
         T: 'static + Send,
         F: 'static
@@ -843,9 +945,10 @@ impl UiExtension {
                     let result = if let Some(reason) = &store.data().disabled {
                         Err(anyhow!("disabled after an earlier failure: {reason}"))
                     } else {
-                        store.data_mut().begin_call(UI_CALL_BUDGET);
+                        let budget = budget.resolve(store.data_mut());
+                        store.data_mut().begin_call(budget);
                         store.set_epoch_deadline(1);
-                        let result = with_budget(UI_CALL_BUDGET, async {
+                        let result = with_budget(budget, async {
                             f(extension, store).await.map_err(anyhow::Error::from)
                         })
                         .await;

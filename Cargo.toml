@@ -89,6 +89,7 @@ members = [
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
     "crates/fyx_ext", # fyx
+    "crates/fyx_registry", # fyx
     "crates/git",
     "crates/git_hosting_providers",
     "crates/git_ui",
@@ -375,6 +376,7 @@ file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
+fyx_registry = { path = "crates/fyx_registry" } # fyx
 git = { path = "crates/git" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }
@@ -896,6 +898,7 @@ resvg = { version = "0.46.0", default-features = false, features = [
     "memmap-fonts",
     "raster-images",
 ] }
+ring = "0.17.14" # fyx
 rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit"] }
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
