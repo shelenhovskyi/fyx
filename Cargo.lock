@@ -375,7 +375,15 @@ dependencies = [
 name = "agent_review"
 version = "0.1.0"
 dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "anyhow",
+ "futures 0.3.34",
  "gpui",
+ "language",
+ "log",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
