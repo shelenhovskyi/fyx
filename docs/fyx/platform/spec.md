@@ -108,6 +108,15 @@ line decorations, code lenses, read-only documents, network and processes behind
     An update that adds a T1 or T2 capability, a network domain or a process name is **held**: the
     old version keeps running and the page shows "Update needs approval". T0 additions install
     silently.
+
+    How this meets the interim consent guard of integration-4 #3 (agreed with W3 for plan 1.5):
+    - **T0-only extensions load without a prompt** when a Fyx install dialog showed their
+      capabilities: install from file, or install dev UI extension.
+    - **A folder that appears without a Fyx install action keeps the one-time Enable.** That
+      covers a folder copied into the installed directory, one linked by upstream's Install Dev
+      Extension, and one added to `dev_paths` by hand.
+    - **After that, only T1 matters.** An update that adds T0 or changes the component loads
+      silently. One that adds T1 is held until **Approve**.
 22. Section M of 0.2, notifications and progress: `notify(level, text, actions)` and
     `progress-start` / `progress-update` / `progress-end`; at most **5 notifications per minute**
     per extension, extra ones go to the log.

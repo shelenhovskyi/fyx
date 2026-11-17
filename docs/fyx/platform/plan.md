@@ -44,9 +44,9 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
 | 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
-| 3.2 | W0 | Registry CI: build from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
-| 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18] | 3.2 | install from the index; tampered package refused |
-| 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19] | 3.3 | spec §4 failures 1, 2, 5 pass |
+| 3.2 | W0 | Registry CI: build Rust extensions from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
+| 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18]. The client compiles in both keysets (release keys and block-list keys) and verifies releases and the index only against the release keyset | 3.2 | install from the index; tampered package refused; a release signed with a block-list key refused |
+| 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19]. Fetched and cached lists are verified only against the block-list keyset | 3.3 | spec §4 failures 1, 2, 5 pass; a block list signed with a release key refused |
 | 3.5 | W3 + one `fyx:` hook | Extensions page Fyx tab: search, install, update, pin, roll back, held updates [17, 21] | 3.3, 1.5 | user flow done end to end in the dev build |
 
 ## P4 `fyx:ui@0.3.0` and T2
