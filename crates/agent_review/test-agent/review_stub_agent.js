@@ -129,6 +129,30 @@ async function runEdit(sessionId, file, direct) {
   return { stopReason: "end_turn" };
 }
 
+async function writeWhole(sessionId, file, content) {
+  try {
+    await request("fs/write_text_file", { sessionId, path: file, content });
+    log(`write of ${path.basename(file)} succeeded`);
+  } catch (error) {
+    log(`write of ${path.basename(file)} failed: ${error.message}`);
+  }
+}
+
+// `REVIEW_STUB_SCENARIO=turn-rules-bypass`, one turn:
+// 1. writes covered by `.fyx/review.toml` (`deny` Cargo.lock, `auto_accept` docs/**);
+// 2. two edits proposed at once (demo.txt, demo2.txt), held together in the turn's review;
+// 3. a file written straight to disk, as a shell command would, bypassing review.
+async function scenarioTurnRulesBypass(sessionId, cwd) {
+  await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten by the agent\n");
+  await writeWhole(sessionId, path.resolve(cwd, "docs", "guide.md"), "# Guide, edited by the agent\n");
+  await Promise.all([
+    runEdit(sessionId, path.resolve(cwd, "demo.txt"), true),
+    runEdit(sessionId, path.resolve(cwd, "demo2.txt"), true),
+  ]);
+  require("fs").writeFileSync(path.resolve(cwd, "outside.txt"), "written by a shell command\n");
+  log("wrote outside.txt directly on disk");
+}
+
 async function handle(message) {
   switch (message.method) {
     case "initialize":
@@ -141,7 +165,13 @@ async function handle(message) {
       const sessionId = `stub-${Date.now()}-${nextId++}`;
       const cwd = message.params.cwd;
       sessions.set(sessionId, cwd);
-      if (process.env.REVIEW_STUB_AUTOSTART === "1") {
+      if (process.env.REVIEW_STUB_SCENARIO === "turn-rules-bypass") {
+        setTimeout(() => {
+          scenarioTurnRulesBypass(sessionId, cwd).catch((error) =>
+            log(`scenario failed: ${error.message}`),
+          );
+        }, 2000);
+      } else if (process.env.REVIEW_STUB_AUTOSTART === "1") {
         setTimeout(async () => {
           try {
             await runEdit(sessionId, path.resolve(cwd, "demo.txt"), false);
