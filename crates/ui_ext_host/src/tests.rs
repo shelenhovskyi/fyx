@@ -1513,3 +1513,30 @@ async fn test_extension_ids_belong_to_their_source(cx: &mut TestAppContext) {
         assert_eq!(registry.surfaces_of("fake").count(), 1);
     });
 }
+
+/// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
+#[test]
+fn test_markdown_links_are_filtered() {
+    use crate::view::link_is_allowed;
+    for allowed in [
+        "https://zed.dev",
+        "http://example.com/a?b=c",
+        "HTTPS://EXAMPLE.COM",
+    ] {
+        assert!(link_is_allowed(allowed), "{allowed}");
+    }
+    for refused in [
+        "file:///C:/Windows/System32/calc.exe",
+        "javascript:alert(1)",
+        "zed://settings",
+        "fyx://extension/install",
+        "mailto:someone@example.com",
+        "ftp://example.com",
+        "relative/path.md",
+        "https:",
+        "https:/one-slash",
+        "",
+    ] {
+        assert!(!link_is_allowed(refused), "{refused}");
+    }
+}

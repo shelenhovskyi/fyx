@@ -941,10 +941,13 @@ impl Renderer<'_, '_> {
             Some(entity) => div()
                 .w_full()
                 .min_w_0()
-                .child(MarkdownElement::new(
-                    entity,
-                    MarkdownStyle::themed(MarkdownFont::Agent, self.window, self.cx),
-                ))
+                .child(
+                    MarkdownElement::new(
+                        entity,
+                        MarkdownStyle::themed(MarkdownFont::Agent, self.window, self.cx),
+                    )
+                    .on_url_click(open_extension_link),
+                )
                 .into_any_element(),
             None => Label::new(source.to_string()).into_any_element(),
         }
@@ -1153,6 +1156,40 @@ fn focus_ring(focused: bool, cx: &App) -> Hsla {
     } else {
         colors.border_transparent
     }
+}
+
+/// Only web links leave an extension's markdown: `http` and `https`. Anything else (`file:`,
+/// `javascript:`, `zed:`, custom schemes, relative paths) would hand the OS URL handler a target
+/// the extension chose.
+pub(crate) fn link_is_allowed(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        && rest.starts_with("//")
+        && rest.len() > 2
+}
+
+/// A click on a link in an extension's markdown: refused unless it is a web link, and even then
+/// opened only after the user confirms the address.
+fn open_extension_link(url: SharedString, window: &mut Window, cx: &mut App) {
+    if !link_is_allowed(&url) {
+        log::warn!("fyx:ui: not opening {url:?} from an extension: only http(s) links open");
+        return;
+    }
+    let answer = window.prompt(
+        gpui::PromptLevel::Info,
+        "Open this link from an extension?",
+        Some(url.as_ref()),
+        &["Open", "Cancel"],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        if answer.await == Ok(0) {
+            cx.update(|cx| cx.open_url(&url));
+        }
+    })
+    .detach();
 }
 
 /// Icon names are snake_case `IconName`s (`plus`, `list_todo`); unknown names get a neutral icon.

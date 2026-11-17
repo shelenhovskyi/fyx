@@ -54,6 +54,7 @@ does.
 |---|---|---|---|
 | `max_nodes_per_update` | **2048** | patches in one `patches` update; nodes in one list row | queued patches (an inserted subtree counts one per node), **and** the nodes of a `mount`/`replace` |
 | `max_nodes` | **16384** | nodes in the whole tree, so also in a `mount` or `replace` | the mirror after any edit |
+| `max_depth` | **64** | levels from a root to its deepest node (a root is level 1), in the tree and in each list row; a deeper insert fails as `TooDeep` and the whole update is rejected | the same, on the mirror |
 
 <!-- crates/ui_ext/src/tree.rs:9-25, 96-104, 168-173, 190-191, 255-258; crates/ui_ext_sdk/src/ui_ext_sdk.rs:605-618, 685, 717-718, 752-753 -->
 
@@ -285,6 +286,9 @@ you that a surface was closed (0.2 items 5–7).
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
 - Fyx's own host functions: `push-update` and `log`.
+- Links in `markdown` nodes open only if they are `http` or `https`, and only after the user
+  confirms the address; other schemes (`file:`, `javascript:`, custom ones, relative paths) do
+  nothing.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453; extensions/fyx_demo_todo/src/fyx_demo_todo.rs:3-4; crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 
