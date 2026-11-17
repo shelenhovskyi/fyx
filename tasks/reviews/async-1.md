@@ -9,8 +9,8 @@ Method: read every `spawn`, `detach`, `subscribe`/`observe`, `on_release`, `Task
 `WeakEntity` in the Fyx crates, and followed each through Zed's rules (`crates/gpui`: a dropped
 `Task` is cancelled; `observe`/`subscribe` callbacks are removed lazily, the next time they fire
 after the observer is gone, `invoke_observer_in` in `gpui/src/app/context.rs:893`; `on_release`
-runs at effect flush, never inside another entity's update). Five findings are confirmed with GPUI
-tests (`TestAppContext`, `run_until_parked`) on a local scratch branch; the tests are pasted in the
+runs at effect flush, never inside another entity's update). Four findings (1, 2, 3 and 6) are confirmed by
+five GPUI tests (`TestAppContext`, `run_until_parked`) on a local scratch branch; the tests are pasted in the
 appendix. The rest are by inspection, and are marked so.
 
 Other reviewers cover performance, logic, security, tests and UX. Where a finding crosses into one
