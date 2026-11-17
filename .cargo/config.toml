@@ -25,8 +25,11 @@ MACOSX_DEPLOYMENT_TARGET = "12.0"
 
 # fyx: build cache and lighter debug info. Debug info dominates target/ size, and every worktree
 # carries its own target/, so this is what keeps 6-8 parallel builds on one disk.
+# No incremental compilation: each target's debug/incremental regrows by GBs on the shared Dev
+# Drive, and sccache cannot cache incremental crates, so without it workspace crates hit sccache.
 [build]
 rustc-wrapper = "sccache"
 
 [profile.dev]
 debug = "line-tables-only"
+incremental = false
