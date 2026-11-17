@@ -116,16 +116,7 @@ pub(crate) fn init(cx: &mut App) {
             open_reviews(workspace, None, window, cx);
         });
         workspace.register_action(|_, _: &ToggleReviewMode, _, cx| {
-            if let Some(review) = AgentReview::global(cx) {
-                review.update(cx, |review, cx| {
-                    let enabled = !review.is_enabled();
-                    review.set_enabled(enabled, cx);
-                    log::info!(
-                        "fyx: agent review mode {}",
-                        if enabled { "on" } else { "off" }
-                    );
-                });
-            }
+            crate::set_review_mode_setting(!crate::review_mode(cx), cx);
         });
         let Some(review) = AgentReview::global(cx) else {
             return;
@@ -311,11 +302,7 @@ impl ReviewPane {
     }
 
     /// Makes `hunk` the target of the hunk actions, as moving the cursor into it would.
-    pub fn select_hunk(
-        &mut self,
-        hunk: usize,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<()> {
+    pub fn select_hunk(&mut self, hunk: usize, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let hunk_count = self.edit(cx).map_or(0, |edit| edit.hunks().len());
         anyhow::ensure!(hunk < hunk_count, "hunk {} of {hunk_count}", hunk + 1);
         self.current_hunk = Some(hunk);

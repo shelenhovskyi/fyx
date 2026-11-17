@@ -5770,6 +5770,7 @@ impl AgentPanel {
                                 .separator()
                                 .header("Context")
                                 .action("Skills", Box::new(ManageSkills));
+                            menu = agent_review::review_mode_menu_entry(menu, cx); // fyx: review toggle
 
                             if project_agents_md_path.is_some() || global_agents_md_loaded {
                                 if global_agents_md_loaded {

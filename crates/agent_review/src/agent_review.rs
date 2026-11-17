@@ -21,12 +21,16 @@ use acp_thread::{
 use action_log::ActionLog;
 use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::{Context as _, Result, anyhow};
+use fs::Fs;
 use futures::channel::oneshot;
+use gpui::Action as _;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, Task, WeakEntity,
 };
 use language::BufferEditSource;
 use project::Project;
+use settings::{RegisterSetting, Settings, SettingsStore};
+use ui::{ContextMenu, IconPosition};
 use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
@@ -35,17 +39,80 @@ pub use review_pane::{
     RejectHunk, ReviewPane, SubmitReview, ToggleReviewMode,
 };
 
-/// Review mode starts on when this variable is set to anything but `0`; `agent_review: toggle review
-/// mode` switches it at runtime.
+/// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
 const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
 
-pub fn init(cx: &mut App) {
-    let enabled = std::env::var_os(REVIEW_MODE_VAR).is_some_and(|value| value != "0");
-    let review = cx.new(|_| AgentReview {
+/// `agent_review` in settings (schema in `settings_content::AgentReviewSettingsContent`, default in
+/// `assets/settings/fyx.json`).
+#[derive(Clone, Debug, RegisterSetting)]
+pub struct AgentReviewSettings {
+    pub enabled: bool,
+}
+
+impl Settings for AgentReviewSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            enabled: content
+                .agent_review
+                .as_ref()
+                .and_then(|review| review.enabled)
+                .unwrap_or(false),
+        }
+    }
+}
+
+fn review_mode_override() -> Option<bool> {
+    std::env::var_os(REVIEW_MODE_VAR).map(|value| value != "0")
+}
+
+/// Whether agent edits are reviewed: the environment override, else the setting.
+pub fn review_mode(cx: &App) -> bool {
+    review_mode_override().unwrap_or_else(|| {
+        cx.has_global::<SettingsStore>() && AgentReviewSettings::get_global(cx).enabled
+    })
+}
+
+/// Writes `agent_review.enabled` to the user's settings; review mode follows the settings change.
+pub fn set_review_mode_setting(enabled: bool, cx: &App) {
+    if review_mode_override().is_some() {
+        log::warn!("fyx: {REVIEW_MODE_VAR} is set and overrides the agent_review.enabled setting");
+    }
+    settings::update_settings_file(<dyn Fs>::global(cx), cx, move |settings, _| {
+        settings.agent_review.get_or_insert_default().enabled = Some(enabled);
+    });
+}
+
+/// The agent panel's options-menu toggle for review mode.
+pub fn review_mode_menu_entry(menu: ContextMenu, cx: &App) -> ContextMenu {
+    let enabled = review_mode(cx);
+    menu.toggleable_entry_disabled_when(
+        "Review Agent Edits",
         enabled,
+        review_mode_override().is_some(),
+        IconPosition::Start,
+        Some(ToggleReviewMode.boxed_clone()),
+        move |_, cx| set_review_mode_setting(!enabled, cx),
+    )
+}
+
+pub fn init(cx: &mut App) {
+    let review = cx.new(|cx| AgentReview {
+        enabled: review_mode(cx),
         ..AgentReview::default()
     });
     cx.set_global(GlobalAgentReview(review.clone()));
+    cx.observe_global::<SettingsStore>({
+        let review = review.downgrade();
+        move |cx| {
+            let enabled = review_mode(cx);
+            if let Some(review) = review.upgrade()
+                && review.read(cx).is_enabled() != enabled
+            {
+                review.update(cx, |review, cx| review.set_enabled(enabled, cx));
+            }
+        }
+    })
+    .detach();
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
     cx.observe_new(|_: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
@@ -621,7 +688,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use language::Buffer;
-    use project::Fs as _;
+    use gpui::UpdateGlobal as _;
 
     const OLD: &str = "one\ntwo\nthree\nfour\nfive\n";
     const NEW: &str = "ONE\ntwo\nthree\nfour\nFIVE\n";
@@ -894,6 +961,44 @@ mod tests {
         assert!(locate_fragment("a\nb\nb\n", "b\n").is_err());
         assert!(locate_fragment("a\n", "z").is_err());
         assert!(locate_fragment("a\n", "").is_err());
+    }
+
+    #[gpui::test]
+    async fn review_mode_follows_the_setting(cx: &mut TestAppContext) {
+        if review_mode_override().is_some() {
+            // FYX_AGENT_REVIEW in the test environment overrides the setting.
+            return;
+        }
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        assert!(
+            !review.read_with(cx, |review, _| review.is_enabled()),
+            "off by default"
+        );
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.agent_review.get_or_insert_default().enabled = Some(true);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(review.read_with(cx, |review, _| review.is_enabled()));
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.agent_review.get_or_insert_default().enabled = Some(false);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(!review.read_with(cx, |review, _| review.is_enabled()));
     }
 
     #[test]

@@ -381,6 +381,7 @@ dependencies = [
  "anyhow",
  "buffer_diff",
  "editor",
+ "fs",
  "futures 0.3.34",
  "gpui",
  "language",
