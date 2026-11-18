@@ -21,7 +21,7 @@ use gpui::{
     SharedString, Subscription, WeakEntity, Window, actions, prelude::*,
 };
 use project::Project;
-use ui::{Button, ButtonStyle, Label, LabelSize, Tooltip, prelude::*};
+use ui::{Button, ButtonStyle, ContextMenu, Label, LabelSize, PopoverMenu, Tooltip, prelude::*};
 use workspace::{
     HideStatusItem, Item, ItemHandle, OpenOptions, StatusItemView, Toast, Workspace,
     item::{ItemEvent, TabContentParams},
@@ -58,6 +58,10 @@ actions!(
         NextHunk,
         /// Moves to the previous hunk.
         PreviousHunk,
+        /// Shows the turn's next waiting file.
+        NextFile,
+        /// Shows the turn's previous waiting file.
+        PreviousFile,
         /// Focuses the comment field of the hunk at the cursor.
         CommentHunk,
         /// Returns from the comment field to the diff.
@@ -105,7 +109,8 @@ pub(crate) fn init(cx: &mut App) {
         let Some(review) = AgentReview::global(cx) else {
             return;
         };
-        let status = cx.new(|cx| ReviewStatus::new(review.clone(), cx));
+        let project = workspace.project().clone();
+        let status = cx.new(|cx| ReviewStatus::new(review.clone(), project, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_right_item(status, window, cx)
         });
@@ -462,6 +467,8 @@ pub struct ReviewPane {
     current: Option<CurrentReview>,
     comment_editor: Option<Entity<Editor>>,
     current_hunk: Option<usize>,
+    /// Why the last action did nothing, shown in the file header until the next action.
+    notice: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -487,6 +494,7 @@ impl ReviewPane {
             current: None,
             comment_editor: None,
             current_hunk: None,
+            notice: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -767,15 +775,61 @@ impl ReviewPane {
             &mut Context<AgentReview>,
         ) -> anyhow::Result<()>,
     ) {
-        let (Some(id), Some(hunk)) = (self.current_review_id(), self.current_hunk) else {
-            return;
+        let Some(id) = self.current_review_id() else {
+            return self.report(Err(anyhow::anyhow!("No file is waiting for review")), cx);
         };
-        if let Err(error) = self
+        let Some(hunk) = self.current_hunk else {
+            return self.report(
+                Err(anyhow::anyhow!(
+                    "Move the cursor into a hunk first (Next Hunk, Previous Hunk)"
+                )),
+                cx,
+            );
+        };
+        let result = self
             .review
-            .update(cx, |review, cx| update(review, id, hunk, cx))
-        {
-            log::debug!("review update failed: {error:#}");
+            .update(cx, |review, cx| update(review, id, hunk, cx));
+        self.report(result, cx);
+    }
+
+    /// Shows why an action did nothing (or clears the last reason).
+    fn report(&mut self, result: anyhow::Result<()>, cx: &mut Context<Self>) {
+        let notice = result.err().map(|error| {
+            log::debug!("fyx: review action not done: {error:#}");
+            SharedString::from(format!("{error:#}"))
+        });
+        if notice != self.notice {
+            self.notice = notice;
+            cx.notify();
         }
+    }
+
+    fn show_file(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = self
+            .review
+            .read(cx)
+            .open_reviews_in_turn(self.turn)
+            .map(|review| review.id())
+            .collect::<Vec<_>>();
+        if waiting.len() < 2 {
+            return self.report(Err(anyhow::anyhow!("No other file waits in this turn")), cx);
+        }
+        let current = self
+            .current_review_id()
+            .and_then(|id| waiting.iter().position(|waiting| *waiting == id))
+            .unwrap_or(0);
+        let next = (current as isize + step).rem_euclid(waiting.len() as isize) as usize;
+        self.notice = None;
+        self.show_review(waiting[next], window, cx);
+        window.focus(&self.diff_focus_handle(cx), cx);
+    }
+
+    fn next_file(&mut self, _: &NextFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_file(1, window, cx);
+    }
+
+    fn previous_file(&mut self, _: &PreviousFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_file(-1, window, cx);
     }
 
     fn decide_current(
@@ -806,14 +860,12 @@ impl ReviewPane {
 
     fn decide_all(&mut self, decision: HunkDecision, cx: &mut Context<Self>) {
         let Some(id) = self.current_review_id() else {
-            return;
+            return self.report(Err(anyhow::anyhow!("No file is waiting for review")), cx);
         };
-        if let Err(error) = self
+        let result = self
             .review
-            .update(cx, |review, cx| review.decide_all(id, decision, cx))
-        {
-            log::debug!("review update failed: {error:#}");
-        }
+            .update(cx, |review, cx| review.decide_all(id, decision, cx));
+        self.report(result, cx);
     }
 
     fn accept_all(&mut self, _: &AcceptAllHunks, _: &mut Window, cx: &mut Context<Self>) {
@@ -826,12 +878,10 @@ impl ReviewPane {
 
     fn decide_turn(&mut self, decision: HunkDecision, cx: &mut Context<Self>) {
         let turn = self.turn;
-        if let Err(error) = self
+        let result = self
             .review
-            .update(cx, |review, cx| review.decide_turn(turn, decision, cx))
-        {
-            log::info!("fyx: turn not decided: {error:#}");
-        }
+            .update(cx, |review, cx| review.decide_turn(turn, decision, cx));
+        self.report(result, cx);
     }
 
     /// Decides the turn, after asking when more than one file waits: one stray key must not decide
@@ -932,11 +982,13 @@ impl ReviewPane {
 
     fn submit(&mut self, _: &SubmitReview, _: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.current_review_id() else {
-            return;
+            return self.report(Err(anyhow::anyhow!("No file is waiting for review")), cx);
         };
-        if let Err(error) = self.review.update(cx, |review, cx| review.submit(id, cx)) {
-            log::info!("fyx: review not submitted: {error:#}");
-        }
+        let result = self
+            .review
+            .update(cx, |review, cx| review.submit(id, cx))
+            .map_err(|error| anyhow::anyhow!("Not submitted: {error:#}"));
+        self.report(result, cx);
     }
 
     fn render_turn(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -964,7 +1016,10 @@ impl ReviewPane {
             files = files.child(
                 h_flex()
                     .gap_2()
-                    .child(Label::new(file_name(&entry.path)).size(LabelSize::Small))
+                    .child(
+                        Label::new(display_path(&self.project, &entry.path, cx))
+                            .size(LabelSize::Small),
+                    )
                     .child(
                         Label::new(resolution_label(entry.resolution))
                             .size(LabelSize::Small)
@@ -980,17 +1035,18 @@ impl ReviewPane {
         for (id, path) in open {
             let is_current = Some(id) == current;
             files = files.child(
-                Button::new(("review-file", id.0), file_name(&path))
-                    .label_size(LabelSize::Small)
-                    .toggle_state(is_current)
-                    .style(if is_current {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.show_review(id, window, cx)),
-                    ),
+                Button::new(
+                    ("review-file", id.0),
+                    display_path(&self.project, &path, cx),
+                )
+                .label_size(LabelSize::Small)
+                .toggle_state(is_current)
+                .style(if is_current {
+                    ButtonStyle::Filled
+                } else {
+                    ButtonStyle::Subtle
+                })
+                .on_click(cx.listener(move |this, _, window, cx| this.show_review(id, window, cx))),
             );
         }
 
@@ -1015,22 +1071,25 @@ impl ReviewPane {
             for (index, path) in unreviewed.into_iter().enumerate() {
                 let workspace = self.workspace.clone();
                 section = section.child(
-                    Button::new(("unreviewed-file", index), path.display().to_string())
-                        .label_size(LabelSize::Small)
-                        .style(ButtonStyle::Subtle)
-                        .tooltip(Tooltip::text(
-                            "Open the file; its git gutter shows the change",
-                        ))
-                        .on_click(move |_, window, cx| {
-                            let path = path.clone();
-                            if let Err(error) = workspace.update(cx, |workspace, cx| {
-                                workspace
-                                    .open_abs_path(path, OpenOptions::default(), window, cx)
-                                    .detach_and_log_err(cx);
-                            }) {
-                                log::debug!("workspace closed: {error}");
-                            }
-                        }),
+                    Button::new(
+                        ("unreviewed-file", index),
+                        display_path(&self.project, &path, cx),
+                    )
+                    .label_size(LabelSize::Small)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text(
+                        "Open the file; its git gutter shows the change",
+                    ))
+                    .on_click(move |_, window, cx| {
+                        let path = path.clone();
+                        if let Err(error) = workspace.update(cx, |workspace, cx| {
+                            workspace
+                                .open_abs_path(path, OpenOptions::default(), window, cx)
+                                .detach_and_log_err(cx);
+                        }) {
+                            log::debug!("workspace closed: {error}");
+                        }
+                    }),
                 );
             }
             section
@@ -1095,7 +1154,9 @@ impl ReviewPane {
             }
             _ => "Move the cursor into a hunk (Next Hunk, Previous Hunk)".into(),
         };
-        let path = edit.map_or_else(String::new, |edit| edit.abs_path().display().to_string());
+        let path = edit.map_or_else(String::new, |edit| {
+            display_path(&self.project, edit.abs_path(), cx)
+        });
         let rule = self.current_review_id().and_then(|id| {
             let review = self.review.read(cx).review(id)?;
             Some(format!("Asked by rule {}", review.rule()?.describe()))
@@ -1156,6 +1217,11 @@ impl ReviewPane {
             .children(
                 error.map(|error| Label::new(error).size(LabelSize::Small).color(Color::Error)),
             )
+            .children(self.notice.clone().map(|notice| {
+                Label::new(notice)
+                    .size(LabelSize::Small)
+                    .color(Color::Warning)
+            }))
             .children(self.comment_editor.clone().map(|comment_editor| {
                 h_flex()
                     .gap_2()
@@ -1201,11 +1267,13 @@ fn resolution_label(resolution: Resolution) -> &'static str {
     }
 }
 
+/// The file name, escaped like [`display_path`].
 fn file_name(path: &Path) -> SharedString {
-    path.file_name()
+    let name = path
+        .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-        .into()
+        .unwrap_or_else(|| path.display().to_string());
+    escape_for_display(&name).into()
 }
 
 /// The row in the proposed (new) text at a position of the diff multibuffer.
@@ -1252,6 +1320,8 @@ impl Render for ReviewPane {
             .on_action(cx.listener(Self::reject_and_close))
             .on_action(cx.listener(Self::next_hunk))
             .on_action(cx.listener(Self::previous_hunk))
+            .on_action(cx.listener(Self::next_file))
+            .on_action(cx.listener(Self::previous_file))
             .on_action(cx.listener(Self::comment_hunk))
             .on_action(cx.listener(Self::focus_diff))
             .on_action(cx.listener(Self::submit))
@@ -1350,38 +1420,85 @@ pub fn permission_card_notice(request_id: PermissionRequestId, cx: &App) -> Opti
     )
 }
 
-/// Review mode and waiting reviews in the status bar. Shown while review mode is on or a review
-/// waits (e.g. one asked by an `always_ask` rule); clicking it brings the waiting reviews forward.
+/// Review mode and this project's waiting reviews in the status bar. Shown while review mode is on,
+/// a review waits (e.g. one asked by an `always_ask` rule), or `FYX_AGENT_REVIEW` overrides the
+/// setting (dev builds; the item says so). With reviews waiting it brings them forward; otherwise
+/// it opens a menu.
 pub struct ReviewStatus {
     review: Entity<AgentReview>,
+    project: Entity<Project>,
     _observe: Subscription,
 }
 
 impl ReviewStatus {
-    fn new(review: Entity<AgentReview>, cx: &mut Context<Self>) -> Self {
+    fn new(review: Entity<AgentReview>, project: Entity<Project>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&review, |_, _, cx| cx.notify());
         Self {
             review,
+            project,
             _observe: observe,
         }
+    }
+
+    /// Waiting reviews of this workspace's project only.
+    fn waiting(&self, cx: &App) -> usize {
+        self.review
+            .read(cx)
+            .reviews()
+            .iter()
+            .filter(|review| !review.is_submitted())
+            .filter(|review| in_project(&self.project, review.edit().abs_path(), cx))
+            .count()
     }
 }
 
 impl Render for ReviewStatus {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let review = self.review.read(cx);
-        let waiting = review.open_review_count();
-        let label = match (review.is_enabled(), waiting) {
-            (false, 0) => return div().into_any_element(),
+        let enabled = self.review.read(cx).is_enabled();
+        let waiting = self.waiting(cx);
+        let overridden = crate::review_mode_override(cx).is_some();
+        let mut label = match (enabled, waiting) {
+            (false, 0) if !overridden => return div().into_any_element(),
+            (false, 0) => "Review off".to_string(),
             (true, 0) => "Review on".to_string(),
             (_, 1) => "Review: 1 waiting".to_string(),
             (_, waiting) => format!("Review: {waiting} waiting"),
         };
-        Button::new("agent-review-status", label)
+        let mut tooltip = crate::COVERAGE.to_string();
+        if overridden {
+            label.push_str(&format!(" ({})", crate::REVIEW_MODE_VAR));
+            tooltip = format!(
+                "{} is set (dev build): it overrides the agent_review.enabled setting. {tooltip}",
+                crate::REVIEW_MODE_VAR
+            );
+        }
+        let button = Button::new("agent-review-status", label)
             .label_size(LabelSize::Small)
             .style(ButtonStyle::Subtle)
-            .tooltip(Tooltip::text(crate::COVERAGE))
-            .on_click(|_, window, cx| window.dispatch_action(OpenReviews.boxed_clone(), cx))
+            .when(overridden, |button| button.color(Color::Warning))
+            .tooltip(Tooltip::text(tooltip));
+        if waiting > 0 {
+            return button
+                .on_click(|_, window, cx| window.dispatch_action(OpenReviews.boxed_clone(), cx))
+                .into_any_element();
+        }
+        PopoverMenu::new("agent-review-status-menu")
+            .menu(move |window, cx| {
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.header("No agent edits wait for review")
+                        .action("Show Review Rules", ShowReviewRules.boxed_clone())
+                        .action(
+                            if enabled {
+                                "Turn Off Review"
+                            } else {
+                                "Turn On Review"
+                            },
+                            ToggleReviewMode.boxed_clone(),
+                        )
+                }))
+            })
+            .anchor(gpui::Anchor::BottomRight)
+            .trigger(button)
             .into_any_element()
     }
 }
@@ -1526,6 +1643,15 @@ mod tests {
     }
 
     #[test]
+    fn names_cannot_pose_as_other_files() {
+        let shown = escape_for_display("invoice\u{202E}fdp.exe");
+        assert!(!shown.contains('\u{202E}'), "{shown}");
+        assert!(shown.contains("\\u{202e}"), "{shown}");
+        assert_eq!(escape_for_display("src/main.rs"), "src/main.rs");
+        assert_eq!(escape_for_display("a\nb"), "a\\u{a}b");
+    }
+
+    #[test]
     fn turn_keys_collide_with_nothing_on_any_os() {
         for (keymap, modifier) in [
             (
@@ -1542,7 +1668,7 @@ mod tests {
             ),
         ] {
             settings::KeymapFile::parse(keymap).expect("every default keymap parses");
-            for key in ["k y", "k shift-y", "k shift-n", "k shift-x"] {
+            for key in ["k y", "k shift-y", "k shift-n", "k shift-x", "k j", "k k"] {
                 let binding = format!("\"{modifier}-{key}\"");
                 // Once in `Workspace` (`k y`) or twice (the pane and its editors), nothing else.
                 let expected = if key == "k y" { 1 } else { 2 };
@@ -1608,6 +1734,20 @@ mod tests {
         let (first, second) = review.read_with(cx, |review, _| {
             (review.reviews()[0].id(), review.reviews()[1].id())
         });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.current_review_id()),
+            Some(first)
+        );
+
+        // Next / previous file.
+        cx.simulate_keystrokes(&format!("{MOD}-k j"));
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.current_review_id()),
+            Some(second)
+        );
+        cx.simulate_keystrokes(&format!("{MOD}-k k"));
+        cx.run_until_parked();
         assert_eq!(
             pane.read_with(cx, |pane, _| pane.current_review_id()),
             Some(first)
@@ -1687,6 +1827,17 @@ mod tests {
         pane.update_in(cx, |pane, window, cx| pane.show_next(window, cx));
         cx.run_until_parked();
         assert_eq!(pane.read_with(cx, |pane, _| pane.current_hunk), Some(0));
+
+        // An action that cannot be done says why.
+        cx.simulate_keystrokes(&format!("{MOD}-enter"));
+        cx.run_until_parked();
+        let notice = pane.read_with(cx, |pane, _| pane.notice.clone());
+        assert!(
+            notice
+                .as_ref()
+                .is_some_and(|notice| notice.contains("undecided")),
+            "{notice:?}"
+        );
 
         // Keymap bindings in the `AgentReview` context, over the editor's own.
         cx.simulate_keystrokes("alt-y");

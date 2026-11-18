@@ -392,6 +392,7 @@ dependencies = [
  "log",
  "paths",
  "project",
+ "release_channel",
  "serde",
  "serde_json",
  "settings",
