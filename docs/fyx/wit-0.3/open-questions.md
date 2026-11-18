@@ -34,8 +34,14 @@ no breaking change, then `fyx:ui@1.0.0`) cannot start while Q1–Q12 are open. I
 - **Q9: no support for pre-1.0 versions.** The frozen 0.3 becomes `fyx:ui@1.0.0`. Loading 0.1 and
   0.2 components is removed at the 1.0 cut (`MIN_VERSION` becomes 1.0.0 then). This replaces spec
   decision 29's two-version rule for the 0.x worlds.
-- **Q1 → (1):** the registry refuses packages with an `extension.wasm`, and a local or unsigned
-  install that has one warns in its install dialog.
+- **Q1: accept, warn, always T2** (changed by the owner on 2026-11-19, replacing "(1) refuse").
+  - **Accept:** the registry accepts packages that contain an `extension.wasm`.
+  - **Always T2:** such a release is always tier T2, whatever its capabilities. The owner
+    approves every version, and it never auto-merges.
+  - **Warn:** registry CI says plainly that it "runs an unrestricted Zed extension" whose network
+    and process access bypasses Fyx's permission checks. The same goes for the install dialog of
+    a local or unsigned package that has one.
+  - **Where:** `fyx-extensions` branch `p3.2-ci`, f080b29.
 - **Q2 → (3):** interpreters and shells are allowed, with `args` patterns and a host list of
   "runs any code" programs.
 - **Q5 → (2):** `workspace:edit` needs no gesture, and the edits are visible: undo per buffer, a
@@ -106,7 +112,7 @@ The recommended answers and reasons are those of (a) unless the row says otherwi
 
 | Q | Under (b) | Recommended | Kind |
 |---|---|---|---|
-| Q1 | Stays: the T2 imports ship. | (1), as in (a) | Product |
+| Q1 | Stays: the T2 imports ship. | **Decided:** accept, warn, always T2 (not (1)) | Product |
 | Q2 | Stays: `process:spawn` ships. | (3), as in (a) | Product |
 | Q3 | **Vanishes.** Document context goes to 0.4 with the providers, its only users. In 0.4 it is added with them, so no request record needs duplicating. | — | — |
 | Q4 | Stays: `network:fetch` ships. | (2), as in (a) | Technical |

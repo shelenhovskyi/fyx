@@ -78,7 +78,8 @@ public at 1.0. **3.1 is done:** its `main` holds one initial commit, `551cdc8`, 
   to 0.4, and the staged 0.3 WIT drops their interfaces.
 - **No pre-1.0 support.** The frozen 0.3 becomes `fyx:ui@1.0.0`, and loading 0.1 and 0.2 is
   removed at the 1.0 cut.
-- **Q1, Q2, Q5, Q8 and Q10 are answered** as recommended
+- **Q2, Q5, Q8 and Q10 are answered** as recommended. **Q1 differs:** a package with an
+  `extension.wasm` is accepted, always as tier T2, with an explicit warning
   ([0.3 open questions](../wit-0.3/open-questions.md)).
 
 **Priority within P4 (owner's rule, 2026-11-18):** P4 is the first candidate to cut. Tasks 4.10–4.15
