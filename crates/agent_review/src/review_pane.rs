@@ -445,6 +445,17 @@ pub(crate) fn escape_for_display(text: &str) -> String {
     escaped
 }
 
+/// Marks the editors of a review pane (the diff and the comment field), so code that decorates or
+/// annotates editors (extensions' buffer decorations, hovers) can leave them alone:
+/// `editor.addon::<AgentReviewEditor>().is_some()`.
+pub struct AgentReviewEditor;
+
+impl editor::Addon for AgentReviewEditor {
+    fn to_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 pub enum ReviewPaneEvent {
     Close,
 }
@@ -510,6 +521,7 @@ impl ReviewPane {
         let turn = self.turn;
         let comment_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
+            editor.register_addon(AgentReviewEditor);
             editor.set_placeholder_text("Comment for the agent on this hunk", window, cx);
             editor
         });
@@ -648,6 +660,7 @@ impl ReviewPane {
                 cx,
             );
             editor.set_read_only(true);
+            editor.register_addon(AgentReviewEditor);
             editor.disable_diagnostics(cx);
             editor.set_expand_all_diff_hunks(cx);
             editor.set_diff_hunk_renderer(Some(renderer), cx);
@@ -1838,6 +1851,14 @@ mod tests {
         pane.update_in(cx, |pane, window, cx| pane.show_next(window, cx));
         cx.run_until_parked();
         assert_eq!(pane.read_with(cx, |pane, _| pane.current_hunk), Some(0));
+
+        // Editors that decorate or annotate other editors can tell the review's apart.
+        pane.read_with(cx, |pane, cx| {
+            let current = pane.current.as_ref().unwrap();
+            assert!(current.editor.read(cx).addon::<AgentReviewEditor>().is_some());
+            let comment = pane.comment_editor.as_ref().unwrap();
+            assert!(comment.read(cx).addon::<AgentReviewEditor>().is_some());
+        });
 
         // `tab` leaves the diff for the pane's buttons; `escape` comes back.
         let diff_focused = |cx: &mut gpui::VisualTestContext| {
