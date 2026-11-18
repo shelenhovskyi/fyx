@@ -217,8 +217,26 @@ On top of these:
   that is missing, outside the package, over 2 MiB or not a valid PNG or SVG, a freed generated
   image, and `tint` on a PNG. Each is also a `warn` log line, and `fyx-ext test` reports them as
   warnings. Assets are only checked in a harness made by `load_package` (or `fyx-ext test`).
-- In 0.3, `canvas` nodes and picker surfaces are refused as not supported yet, and the 0.3
-  interfaces the host does not implement yet (`decorations` included) trap when called.
+- Canvases (0.3) are checked as the host checks them:
+  - the caps, finite coordinates, and panels only;
+  - none in list rows;
+  - at most 16 per surface.
+
+  `canvas(surface, id)` returns a canvas's draw list. `canvas_click(surface, id, x, y)` clicks
+  it as the renderer would. It fails without a call on a canvas that is not clickable, or at a
+  point outside the box.
+- `network:fetch` (0.3) runs the host's import checks: the capability, the domain list
+  (`[fyx_ui.network]`, or `with_network_domains`), `check_request`, and the in-flight and
+  per-minute caps.
+  - With no broker, `fetch` is `denied`, as in a host where the user has not allowed it.
+  - `set_broker(TestBroker::granted(respond))` lets requests reach a closure that answers them.
+    `TestBroker::asking(answer, respond)` prompts on the first delivery, and
+    `TestBroker::denied()` refuses at the import.
+  - Accepted requests wait in `pending_fetches()` until `deliver_io()` delivers each outcome
+    through `handle-io`. A cancelled request ends `cancelled`, and a call that traps drops its
+    requests.
+- In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
+  not implement yet (`decorations` included) trap when called.
 
 The host's 0.2 rules apply: each import is checked when it is called, and its effect applies after
 the call. Showing a modal needs a click or Enter, a modal mounts when it is shown, and three failed
@@ -880,6 +898,7 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
 | `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
+| `extensions/fyx_demo_charts` | canvases (0.3): a clickable bar chart with click-to-select through `CanvasHits`, and a tick-driven sparkline with Pause and Resume |
 | `extensions/fyx_demo_images` | images (0.3): SVG and PNG assets, `tint`, `contain` and `cover`, a chart made at run time with `add_image` and swapped on Shuffle, a missing asset's alt text, thumbnails in list rows |
 
 `script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a

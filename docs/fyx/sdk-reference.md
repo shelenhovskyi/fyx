@@ -605,6 +605,50 @@ pub fn cancel_fetch(request: u64);
 - **Off WASM:** `fetch` hands out ids and records `HostEffect::Fetch { id, request }`;
   `cancel_fetch` records `HostEffect::CancelFetch`.
 
+## Canvases (`fyx-ui-0-3`)
+
+A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
+generated records: `Point`, `Rect`, `Paint`, `Stroke`, `DrawOp` and the rest. The SDK adds
+builders on top:
+
+```rust
+let mut draw = DrawList::new();
+for (day, value) in values.iter().enumerate() {
+    draw.rect(bar(day, *value), Some(Paint::data(DataColor::cycle(day))), None);
+}
+draw.path(Path::polyline(points).stroke(Stroke::new(Paint::token(ColorToken::TextAccent), 1.5)));
+draw.text_with(pt(140.0, 132.0), "Week", Paint::token(ColorToken::TextMuted),
+    TextStyle::default().anchor(TextAnchor::Middle));
+let canvas = CanvasProps::new(280, 140, "Commits per day").draw(draw).clickable()
+    .fit(CanvasFit::ScaleDown);
+tree.canvas(canvas);
+```
+
+- **Values:**
+  - `pt(x, y)`, `Rect::new(x, y, w, h)` and `rect.contains(x, y)`;
+  - `Paint::token(ColorToken)` and `Paint::data(DataColor)`, opaque, with `.opacity(percent)`;
+  - `Stroke::new(paint, width)`;
+  - `DataColor::cycle(index)`, the eight series colours repeating.
+- **`DrawList`:** a `&mut` builder with `line`, `rect`, `rounded_rect`, `circle`, `path`,
+  `text` and `text_with(…, TextStyle)`. `len()`, `segments()` and `text_bytes()` show how close
+  it is to the caps. Extensions cannot measure text: place labels with `TextAnchor`.
+- **`Path`:** `move_to`, `line_to`, `quad_to`, `cubic_to`, `close`, then `fill` and/or `stroke`.
+  `Path::polyline(points)` is a polyline.
+- **`CanvasProps::new(width, height, description)`:** not clickable, `CanvasFit::Clip`. Setters:
+  `.draw(list)`, `.clickable()` and `.fit(..)`. Also `TreeBuilder::canvas` and
+  `From<CanvasProps> for Props`.
+- **`CanvasHits<V>`:**
+  - `add(rect, value)` records a region next to the draw list;
+  - `at(x, y)` returns the topmost region's value for a `UiEvent::CanvasClick`, since
+    hit-testing is the extension's job;
+  - a click is a gesture, like a button click.
+- **Checks before the host:** `SurfaceTree` and `list_row` run the host's rules
+  (`ui_ext::canvas`). These are `TreeError::InvalidCanvas` (caps, finite coordinates within
+  ±32768, strokes 0.5 to 16, description 1 to 1024 bytes), `TooManyCanvases` (16 per surface)
+  and `CanvasInRow`. The host also allows canvases in panels only.
+- **The whole draw list is sent in every `set-props`.** A tick-driven chart re-sends it at most
+  every 100 ms.
+
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,

@@ -142,6 +142,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TextProps::new` | method |  |
 | `TreeBuilder` | struct | Builds a flat node list from nested code. Flex nodes take a closure that builds their children; every node gets a fresh id and its parent's id, and parents precede children. |
 | `TreeBuilder::button` | method |  |
+| `TreeBuilder::canvas` | method | `fyx:ui` 0.3: a canvas node (see `CanvasProps` and `DrawList`). Panels only, not in list rows; at most 16 per surface. |
 | `TreeBuilder::column` | method |  |
 | `TreeBuilder::diff_view` | method |  |
 | `TreeBuilder::finish` | method |  |
@@ -159,12 +160,15 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeBuilder::text` | method |  |
 | `TreeBuilder::under` | method | A builder whose top-level nodes are children of `parent`, for inserting into a live tree. |
 | `TreeError` | enum |  |
+| `TreeError::CanvasInRow` | variant | `fyx:ui` 0.3: canvases are not allowed in list rows. |
+| `TreeError::InvalidCanvas` | variant | `fyx:ui` 0.3: a canvas the host would reject (`ui_ext::canvas::check_canvas_props`). |
 | `TreeError::InvalidRow` | variant | A list row the host would reject, reported by `ui_ext::Tree::from_row`. |
 | `TreeError::IsRoot` | variant |  |
 | `TreeError::NotAChild` | variant |  |
 | `TreeError::NotAContainer` | variant | Only flex nodes have children: inserting under `node`, or giving it props of `kind` while it has children, would be rejected by the host. |
 | `TreeError::NotAList` | variant | `invalidate-rows` names a node that is not a list or a table. |
 | `TreeError::NotMounted` | variant |  |
+| `TreeError::TooManyCanvases` | variant | `fyx:ui` 0.3: more canvases on one surface than the host allows. |
 | `TreeError::TreeTooLarge` | variant |  |
 | `TreeError::UnknownNode` | variant |  |
 | `TreeError::UpdateTooLarge` | variant |  |
@@ -172,6 +176,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `bindings` | module |  |
 | `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |
+| `canvas::*` | re-export | `canvas::*` |
 | `host::*` | re-export | `host::*` |
 | `list_row` | fn | Builds one row of a virtualized list; its ids start at `ROW_NODE_ID_BASE`. `build` must add exactly one top-level node, the row's root, and the row must pass the host's own checks (`ui_ext::Tree::from_row`), or the host would reject the whole `list-rows` answer. |
 | `list_rows` | fn | Answers a `list-rows(start, count)` request for a list of `row_count` rows by calling `build_row` for each row that exists. See `list_row`; a row the host would reject is logged and left out, so the other rows still show. |

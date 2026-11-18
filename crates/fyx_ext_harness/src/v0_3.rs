@@ -22,7 +22,8 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    host as wit_host, images as wit_images, notifications as wit_notifications, types as wit,
+    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
+    notifications as wit_notifications, types as wit,
 };
 
 /// What the host says for a value its model cannot hold yet.
@@ -54,11 +55,85 @@ pub(crate) fn add_to_linker(
     wit_host::add_to_linker::<_, State>(linker, |state| state)?;
     wit_images::add_to_linker::<_, State>(linker, |state| state)?;
     wit_notifications::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_network::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
+impl wit_network::Host for State {
+    fn fetch(
+        &mut self,
+        request: wit_network::HttpRequest,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        use ui_ext::network as net;
+        self.count_lifted_text(
+            request.url.len()
+                + request
+                    .headers
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum::<usize>(),
+        )?;
+        let request = net::FetchRequest {
+            method: match request.method {
+                wit_network::HttpMethod::Get => net::Method::Get,
+                wit_network::HttpMethod::Head => net::Method::Head,
+                wit_network::HttpMethod::Post => net::Method::Post,
+                wit_network::HttpMethod::Put => net::Method::Put,
+                wit_network::HttpMethod::Patch => net::Method::Patch,
+                wit_network::HttpMethod::Delete => net::Method::Delete,
+                wit_network::HttpMethod::Options => net::Method::Options,
+            },
+            url: request.url,
+            headers: request.headers,
+            body: request.body,
+            timeout_ms: request.timeout_ms,
+        };
+        Ok(self.api.fetch(request).map_err(Into::into))
+    }
+
+    fn cancel_fetch(&mut self, request: u64) -> wasmtime::Result<()> {
+        self.api.cancel_fetch(request);
+        Ok(())
+    }
+}
+
+/// An outcome for the `handle-io` export.
+pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEvent> {
+    use ui_ext::network as net;
+    match event {
+        net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
+            id,
+            result
+                .map(|response| wit_network::HttpResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                    url: response.url,
+                })
+                .map_err(|error| match error {
+                    net::FetchError::Denied => wit_network::FetchError::Denied,
+                    net::FetchError::HostNotAllowed(host) => {
+                        wit_network::FetchError::HostNotAllowed(host)
+                    }
+                    net::FetchError::RedirectNotAllowed(host) => {
+                        wit_network::FetchError::RedirectNotAllowed(host)
+                    }
+                    net::FetchError::Dns(error) => wit_network::FetchError::Dns(error),
+                    net::FetchError::Connect(error) => wit_network::FetchError::Connect(error),
+                    net::FetchError::Tls(error) => wit_network::FetchError::Tls(error),
+                    net::FetchError::Timeout => wit_network::FetchError::Timeout,
+                    net::FetchError::TooLarge => wit_network::FetchError::TooLarge,
+                    net::FetchError::Cancelled => wit_network::FetchError::Cancelled,
+                    net::FetchError::Other(error) => wit_network::FetchError::Other(error),
+                }),
+        ))),
+        // The harness changes no permission on its own.
+        net::IoEvent::PermissionChanged(..) => None,
+    }
+}
+
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 4] = ["types", "host", "images", "notifications"];
+const LINKED_INTERFACES: [&str; 5] = ["types", "host", "images", "notifications", "network"];
 
 /// The resource type of a stubbed interface; no value of it is ever made.
 struct Unlinked;
@@ -351,8 +426,125 @@ impl TryFrom<wit::Props> for model::Props {
                 },
                 tint: image.tint.map(Into::into),
             }),
-            wit::Props::Canvas(_) => return Err(unsupported("a canvas node")),
+            wit::Props::Canvas(canvas) => Self::Canvas(canvas_props(canvas)),
         })
+    }
+}
+
+/// A 0.3 canvas in the model (`ui_ext::canvas`), unchecked: the checks run where the host runs
+/// them, when the update or reply is applied.
+fn canvas_props(canvas: wit::CanvasProps) -> ui_ext::canvas::CanvasProps {
+    use ui_ext::canvas as model_canvas;
+    let point = |point: wit::Point| model_canvas::Point {
+        x: point.x.into(),
+        y: point.y.into(),
+    };
+    let paint = |paint: wit::Paint| model_canvas::Paint {
+        color: match paint.color {
+            wit::CanvasColor::Token(token) => model_canvas::CanvasColor::Token(token.into()),
+            wit::CanvasColor::Data(data) => model_canvas::CanvasColor::Data(match data {
+                wit::DataColor::Series1 => model_canvas::DataColor::Series1,
+                wit::DataColor::Series2 => model_canvas::DataColor::Series2,
+                wit::DataColor::Series3 => model_canvas::DataColor::Series3,
+                wit::DataColor::Series4 => model_canvas::DataColor::Series4,
+                wit::DataColor::Series5 => model_canvas::DataColor::Series5,
+                wit::DataColor::Series6 => model_canvas::DataColor::Series6,
+                wit::DataColor::Series7 => model_canvas::DataColor::Series7,
+                wit::DataColor::Series8 => model_canvas::DataColor::Series8,
+            }),
+        },
+        opacity: paint.opacity,
+    };
+    let stroke = |stroke: wit::Stroke| model_canvas::Stroke {
+        paint: paint(stroke.paint),
+        width: stroke.width.into(),
+    };
+    let rect = |rect: wit::Rect| model_canvas::Rect {
+        x: rect.x.into(),
+        y: rect.y.into(),
+        width: rect.width.into(),
+        height: rect.height.into(),
+    };
+    model_canvas::CanvasProps {
+        width: canvas.width,
+        height: canvas.height,
+        description: canvas.description,
+        ops: canvas
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                wit::DrawOp::Line(op) => model_canvas::DrawOp::Line {
+                    from: point(op.from),
+                    to: point(op.to),
+                    stroke: stroke(op.stroke),
+                },
+                wit::DrawOp::Rect(op) => model_canvas::DrawOp::Rect {
+                    bounds: rect(op.bounds),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::RoundedRect(op) => model_canvas::DrawOp::RoundedRect {
+                    bounds: rect(op.bounds),
+                    radius: op.radius.into(),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::Circle(op) => model_canvas::DrawOp::Circle {
+                    center: point(op.center),
+                    radius: op.radius.into(),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::Path(op) => model_canvas::DrawOp::Path {
+                    segments: op
+                        .segments
+                        .into_iter()
+                        .map(|segment| match segment {
+                            wit::PathSegment::MoveTo(to) => {
+                                model_canvas::PathSegment::MoveTo(point(to))
+                            }
+                            wit::PathSegment::LineTo(to) => {
+                                model_canvas::PathSegment::LineTo(point(to))
+                            }
+                            wit::PathSegment::QuadTo((control, to)) => {
+                                model_canvas::PathSegment::QuadTo(point(control), point(to))
+                            }
+                            wit::PathSegment::CubicTo((first, second, to)) => {
+                                model_canvas::PathSegment::CubicTo(
+                                    point(first),
+                                    point(second),
+                                    point(to),
+                                )
+                            }
+                            wit::PathSegment::Close => model_canvas::PathSegment::Close,
+                        })
+                        .collect(),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::Text(op) => model_canvas::DrawOp::Text {
+                    at: point(op.at),
+                    text: op.text,
+                    paint: paint(op.paint),
+                    size: match op.size {
+                        wit::CanvasTextSize::Small => model_canvas::CanvasTextSize::Small,
+                        wit::CanvasTextSize::Medium => model_canvas::CanvasTextSize::Medium,
+                        wit::CanvasTextSize::Large => model_canvas::CanvasTextSize::Large,
+                    },
+                    anchor: match op.anchor {
+                        wit::TextAnchor::Start => model_canvas::TextAnchor::Start,
+                        wit::TextAnchor::Middle => model_canvas::TextAnchor::Middle,
+                        wit::TextAnchor::End => model_canvas::TextAnchor::End,
+                    },
+                    monospace: op.monospace,
+                },
+            })
+            .collect(),
+        clickable: canvas.clickable,
+        fit: match canvas.fit {
+            wit::CanvasFit::Clip => model_canvas::CanvasFit::Clip,
+            wit::CanvasFit::ScaleDown => model_canvas::CanvasFit::ScaleDown,
+        },
     }
 }
 

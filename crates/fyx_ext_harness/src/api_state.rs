@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use ui_ext::image::{self, ImageFormat};
 
+use ui_ext::network::{self as net, DomainList, FetchCounters, FetchRequest, PermissionState};
 use ui_ext::v0_2 as model;
 use ui_ext::v0_2::notifications::{self as notify, Notification, ProgressOptions, ProgressValue};
 use ui_ext::{ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement};
@@ -132,6 +133,20 @@ pub(crate) struct ApiState {
     /// `notify` effects and `progress-update` calls of the running call.
     notification_effects: usize,
     progress_updates: usize,
+    /// `network:fetch` (0.3): the manifest's domains, the host's counters, accepted requests not
+    /// delivered yet, the ones the running call made, and the broker's state at the import.
+    network_domains: DomainList,
+    fetch_counters: FetchCounters,
+    fetches: BTreeMap<u64, QueuedFetch>,
+    call_fetches: Vec<u64>,
+    network_permission: PermissionState,
+}
+
+/// A request `fetch` accepted, waiting for `Harness::deliver_io`.
+#[derive(Clone, Debug)]
+pub(crate) struct QueuedFetch {
+    pub(crate) request: FetchRequest,
+    pub(crate) cancelled: bool,
 }
 
 impl ApiState {
@@ -158,6 +173,12 @@ impl ApiState {
             progress_start_times: VecDeque::new(),
             notification_effects: 0,
             progress_updates: 0,
+            network_domains: DomainList::default(),
+            fetch_counters: FetchCounters::default(),
+            fetches: BTreeMap::new(),
+            call_fetches: Vec::new(),
+            // As the host without a broker: no T2 capability is granted.
+            network_permission: PermissionState::Unavailable,
         }
     }
 
@@ -190,6 +211,7 @@ impl ApiState {
         self.decoration_effects = 0;
         self.notification_effects = 0;
         self.progress_updates = 0;
+        self.call_fetches.clear();
         if let Activation::Until(until) = self.activation
             && Instant::now() >= until
         {
@@ -512,6 +534,14 @@ impl ApiState {
         props: impl IntoIterator<Item = &'a model::Props>,
     ) -> Result<(), model::HostError> {
         for props in props {
+            if let model::Props::Canvas(canvas) = props {
+                ui_ext::canvas::check_canvas_props(canvas)
+                    .and_then(|()| {
+                        ui_ext::canvas::check_canvas_placement(self.live.surface_kind(surface_id))
+                    })
+                    .map_err(|error| host_error(error.code(), error.to_string()))?;
+                continue;
+            }
             let model::Props::Image(props) = props else {
                 continue;
             };
@@ -733,6 +763,89 @@ impl ApiState {
         if self.running_progresses.remove(&id).is_some() {
             self.effects.push(HostEffect::ProgressEnd { id });
         }
+    }
+}
+
+/// `network:fetch` (design.md §8), as the host's import checks it: the capability, the broker's
+/// state, the domain list, `ui_ext::network::check_request`, then the shared counters.
+impl ApiState {
+    pub(crate) fn set_network_domains(&mut self, domains: DomainList) {
+        self.network_domains = domains;
+    }
+
+    pub(crate) fn set_network_permission(&mut self, state: PermissionState) {
+        self.network_permission = state;
+    }
+
+    pub(crate) fn fetch(&mut self, request: FetchRequest) -> Result<u64, model::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == net::CAPABILITY_NETWORK)
+        {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{:?} is not in the manifest", net::CAPABILITY_NETWORK),
+            ));
+        }
+        // `ask` is accepted: the prompt comes when the request is applied.
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => {}
+            state @ (PermissionState::Denied | PermissionState::Unavailable) => {
+                return Err(host_error(
+                    model::HostErrorCode::Denied,
+                    format!("{} is {state:?}", net::CAPABILITY_NETWORK),
+                ));
+            }
+        }
+        if self.network_domains.is_empty() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "fetch needs {:?} and [fyx_ui.network] domains in the manifest",
+                    net::CAPABILITY_NETWORK
+                ),
+            ));
+        }
+        net::check_request(&request, &self.network_domains)?;
+        let id = self.fetch_counters.start(Instant::now())?;
+        self.fetches.insert(
+            id,
+            QueuedFetch {
+                request,
+                cancelled: false,
+            },
+        );
+        self.call_fetches.push(id);
+        Ok(id)
+    }
+
+    /// `cancel-fetch`: unknown or delivered ids are ignored; a waiting one ends `cancelled`.
+    pub(crate) fn cancel_fetch(&mut self, id: u64) {
+        if let Some(fetch) = self.fetches.get_mut(&id) {
+            fetch.cancelled = true;
+        }
+    }
+
+    /// A call that trapped or ran over: its requests are dropped without an outcome, and they
+    /// do not count, as in the host.
+    pub(crate) fn abort_call(&mut self) {
+        for id in std::mem::take(&mut self.call_fetches) {
+            self.fetches.remove(&id);
+            self.fetch_counters.finished(id);
+        }
+    }
+
+    pub(crate) fn queued_fetches(&self) -> impl Iterator<Item = (u64, &QueuedFetch)> {
+        self.fetches.iter().map(|(id, fetch)| (*id, fetch))
+    }
+
+    /// The oldest accepted request, for delivery; it stops counting as in flight, as the host
+    /// does before `handle-io`.
+    pub(crate) fn take_fetch(&mut self) -> Option<(u64, QueuedFetch)> {
+        let (id, fetch) = self.fetches.pop_first()?;
+        self.fetch_counters.finished(id);
+        Some((id, fetch))
     }
 }
 

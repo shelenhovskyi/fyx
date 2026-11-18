@@ -51,7 +51,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
         NETWORK_FETCH,
         CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
-    ("ui:canvas", CapabilityStatus::Planned(NOT_BUILT)),
+    ("ui:canvas", CapabilityStatus::Since(Version::new(0, 3, 0))),
     ("ui:picker", CapabilityStatus::Planned(NOT_BUILT)),
     ("ui:code-lens", CapabilityStatus::Planned(NOT_BUILT)),
     ("ui:hover", CapabilityStatus::Planned(NOT_BUILT)),
