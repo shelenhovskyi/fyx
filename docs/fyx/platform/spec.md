@@ -185,7 +185,10 @@ line decorations, code lenses, read-only documents, network and processes behind
 
 ### API functionality and stability
 
-28. `fyx:ui@0.3.0` adds, in this priority order:
+28. **Scope decided 2026-11-19 (owner): the smaller 0.3.** 0.3 ships images, canvas, the T2 imports
+    and notifications. The decoration extras, the picker protocol, code lens and hover, virtual
+    documents and commands below move to 0.4 ([0.3 open questions](../wit-0.3/open-questions.md)).
+    As first drafted, `fyx:ui@0.3.0` added, in this priority order:
     - **Decoration extras** on top of 0.2 §L ([decided 2026-11-17](../wit-0.2/design.md#decisions-2026-11-17)), which already ships block
       decorations (a `fyx:ui` tree above or below a line, anchored by the host, at most 512 per
       extension): the kinds `inline-style`, `eol-text`, `inline-text`, `gutter-sign` and
@@ -223,10 +226,9 @@ line decorations, code lenses, read-only documents, network and processes behind
     rest of P4. If P4 slips, images stay in 0.3 and the canvas moves to 0.4.
 29. Version support: every world version keeps working until **two** later minor versions have
     shipped (0.1 until 0.3 inclusive, removed in 0.4). The host runs each component against the
-    world it declares. **Open:** if 1.0 follows 0.3, 0.4 never ships, so this rule
-    needs restating. Integration-5 (decision 4) recommends keeping 0.1 and 0.2 through all of 1.x,
-    which conflicts with the rule. The owner decides
-    ([0.3 open questions, Q9](../wit-0.3/open-questions.md#q9-version-lifetime-open-the-owners-decision)).
+    world it declares. **Decided 2026-11-19 (owner):** no support for pre-1.0
+    versions. The frozen 0.3 becomes `fyx:ui@1.0.0`, and loading 0.1 and 0.2 is removed at the
+    1.0 cut. The two-version rule applies from 1.0 on.
 30. `fyx:ui@1.0.0` = 0.3 once it has run **4 weeks** with no breaking change. After 1.0 only
     additive changes until 2.0, and 1.x stays supported for **12 months** after 2.0 ships.
 

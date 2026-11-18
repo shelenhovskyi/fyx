@@ -1,6 +1,7 @@
 # `fyx:ui` 0.3: open questions for the owner
 
-Status: **for the owner's answer**, 2026-11-18. Each question here is one of the "Open questions
+Status: **answered** (owner, 2026-11-19), apart from the technical Q4, Q7 and Q14. Drafted
+2026-11-18. Each question here is one of the "Open questions
 for the owner" in [design.md](design.md#open-questions-for-the-owner) (Q1–Q14).
 
 **Why now.** The judge review integration-5 (`tasks/reviews/integration-5.md`, branch
@@ -24,13 +25,37 @@ no breaking change, then `fyx:ui@1.0.0`) cannot start while Q1–Q12 are open. I
 - **Technical:** the coordinator may decide it for the owner under the decision mandate, and only
   the recommendation needs a nod.
 
-## Already decided
+**Decided by the owner, 2026-11-19:**
+
+- **Scope: the smaller 0.3, version (b).** 0.3 is images, canvas, the T2 imports and
+  notifications. The picker, code lens, hover, virtual documents, commands and the decoration
+  extras (design §1–§5) go to 0.4, and document context (§6) with them. Q3, Q6, Q11 and Q12 go to
+  0.4 with their features.
+- **Q9: no support for pre-1.0 versions.** The frozen 0.3 becomes `fyx:ui@1.0.0`. Loading 0.1 and
+  0.2 components is removed at the 1.0 cut (`MIN_VERSION` becomes 1.0.0 then). This replaces spec
+  decision 29's two-version rule for the 0.x worlds.
+- **Q1 → (1):** the registry refuses packages with an `extension.wasm`, and a local or unsigned
+  install that has one warns in its install dialog.
+- **Q2 → (3):** interpreters and shells are allowed, with `args` patterns and a host list of
+  "runs any code" programs.
+- **Q5 → (2):** `workspace:edit` needs no gesture, and the edits are visible: undo per buffer, a
+  notification for multi-file or unopened files, the host never saves, fixed protected paths.
+- **Q8 → (1):** `agent:observe` sees full hunk text and comments for files inside the worktrees.
+- **Q10 → (1):** the T2 consent prompt is non-modal, with a 1 s guard and no keyboard answer.
+
+Still open, all technical (the coordinator decides): Q4, Q7 and Q14.
+
+## Already decided (before 2026-11-19)
 
 | Q | Decision | Source |
 |---|---|---|
 | Q13 | **Image budget and error semantics.** 64 MiB of decoded pixels per extension, 32 live generated images, 2 concurrent decodes per extension and 4 in total. The error rules are as in design §12, "Errors". | design.md Q13 (decided 2026-11-18) |
 
 ## Q9: version lifetime (open, the owner's decision)
+
+**Decided 2026-11-19:** none of the options below. There is no support for pre-1.0 versions: the
+frozen 0.3 becomes `fyx:ui@1.0.0`, and loading 0.1 and 0.2 is removed at the 1.0 cut. The options
+are kept for the record.
 
 **The conflict.**
 - **The owner's rule** (spec decision 29): each `fyx:ui` version stays supported until two later

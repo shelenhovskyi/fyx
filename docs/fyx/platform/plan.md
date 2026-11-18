@@ -40,6 +40,12 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 ## P3 registry
 
+**Status 2026-11-19.** The user created `shelenhovskyi/fyx-extensions`. It is **private**, and goes
+public at 1.0. Its seed is prepared as one initial commit of `tools/fyx-extensions-template/` from
+`fyx/main` `062d6c99cd`; it is done for 3.1 once that commit is pushed to the new repository's
+`main`. The user does the rest later: branch rules, Environments, keys, and the GitHub App behind
+`AUTO_MERGE_TOKEN` ([registry-repo.md](registry-repo.md#bootstrap-task-31-then-32)).
+
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
 | 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16]. Moderation (owner, 2026-11-18): agents plus CI review every entry; T0–T1 entries auto-merge on green CI, T2 needs the owner's approval. The `policy` decision and the `needs-owner` label run in the trusted `review.yml`, started by `workflow_run` of `pr.yml` and of `review-trigger.yml` (a review on a fork PR has a read-only token) ([registry-repo.md](registry-repo.md#reviewyml-the-agent-review-and-the-policy-decision)). Reserved ids only for entries owned by the registry owner alone, with the owner's approval; the owner's own PR counts as the owner's approval. Template: `tools/fyx-extensions-template/` (W2c) | 1.4 | a PR adding a T2 capability cannot merge without a maintainer; a PR with `needs-owner` cannot auto-merge |
@@ -53,20 +59,28 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
 | 4.1 | W0 | 0.3 design draft for decision 28 (cloud task, like the 0.2 draft), then the WIT | P2 | design reviewed by W7 |
-| 4.2 | W6 | Decoration extras beyond 0.2 §L (decision 28): inline kinds, gutter signs, line backgrounds, namespaces, visible-range pull, `color-swatch`, `decoration-orphaned` | 4.1, 2.6 | TODO highlighter and gutter-sign demo work while editing |
-| 4.3 | W3 | Picker protocol on the 0.2 modal | 4.1 | two extensions contribute sources to one picker |
-| 4.4 | W3 | Code lens, hover, virtual documents, commands in palette and keymap | 4.1 | each has a demo in the gallery |
+| 4.2 | W6 | **Moved to 0.4** (owner, 2026-11-19). Decoration extras beyond 0.2 §L (decision 28): inline kinds, gutter signs, line backgrounds, namespaces, visible-range pull, `color-swatch`, `decoration-orphaned` | 4.1, 2.6 | TODO highlighter and gutter-sign demo work while editing |
+| 4.3 | W3 | **Moved to 0.4** (owner, 2026-11-19). Picker protocol on the 0.2 modal | 4.1 | two extensions contribute sources to one picker |
+| 4.4 | W3 | **Moved to 0.4** (owner, 2026-11-19). Code lens, hover, virtual documents, commands in palette and keymap | 4.1 | each has a demo in the gallery |
 | 4.5 | W3 | T2 consent at first use, held updates for new T2 / domains / programs [21] | 1.5 | spec §4 failure 1 passes |
 | 4.6 | W2c | `network:fetch` host import with domain list and caps [23] | 4.5 | undeclared domain → `denied`; 17 MiB response cut |
 | 4.7 | W2c | `process:spawn`: PATH outside worktree, filtered env, job objects [24] | 4.5 | spec §4 failure 4 passes; reload kills the process tree |
 | 4.8 | W2c | `workspace:edit` (undoable transactions), `agent:observe` read-only sessions | 4.5 | an edit undoes with one ctrl-z; observe cannot accept or reject |
-| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8, and 4.10–4.15 unless cut | review file in `tasks/reviews/` |
+| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30]. At the 1.0 cut, loading 0.1 and 0.2 is removed (owner, 2026-11-19) | 4.1, 4.5–4.8, 4.10–4.15 | review file in `tasks/reviews/` |
 | 4.10 | W2c | Images, host side ([design §12](../wit-0.3/design.md#12-images-plan-410412)): `image` props and validation (alt, sizes, asset paths, panels only), the `images` import with the 1 MiB and 32-handle caps, `ui:images` (T0) [28] | 4.1 | the image bomb and path fixtures are refused; a 0.2 component cannot send `image` |
 | 4.11 | W3 | Images, renderer: decode queue off the main thread, PNG and SVG decoders with the §12 limits, 64 MiB LRU per extension, placeholder with alt text, clipping [28] | 4.10 | logo, file preview and generated SVG show in a panel; the decoder fixtures fail without a large allocation |
 | 4.12 | W4 | Images, SDK and harness: builders, `add_image`, harness asset checks; an image gallery demo [28] | 4.10 | demo runs in Fyx and headless in `fyx-ext test` |
 | 4.13 | W2c | Canvas, host side ([design §13](../wit-0.3/design.md#13-canvas-plan-413415)): draw-op types, caps (16384 ops, segments, text, 16 per surface), float checks, `canvas-click`, `ui:canvas` (T0) [28] | 4.10 | the cap and NaN cases are refused; the lift bench is at most 1 ms per 10 000 ops |
 | 4.14 | W3 | Canvas, renderer: GPUI paint of the draw list with tokens and the data palette, clipping, `scale-down`, hit-test mapping [28] | 4.13 | the 16384-op paint bench is at most 4 ms; click coordinates are right when scaled and scrolled |
 | 4.15 | W4 | Canvas, SDK and harness: typed builders, `canvas-click` in the harness; a bar-chart and sparkline demo [28] | 4.13 | demo runs in Fyx and headless |
+
+**Decisions of 2026-11-19 (owner):**
+- **The smaller 0.3.** 0.3 is images, canvas, the T2 imports and notifications. Tasks 4.2–4.4 move
+  to 0.4, and the staged 0.3 WIT drops their interfaces.
+- **No pre-1.0 support.** The frozen 0.3 becomes `fyx:ui@1.0.0`, and loading 0.1 and 0.2 is
+  removed at the 1.0 cut.
+- **Q1, Q2, Q5, Q8 and Q10 are answered** as recommended
+  ([0.3 open questions](../wit-0.3/open-questions.md)).
 
 **Priority within P4 (owner's rule, 2026-11-18):** P4 is the first candidate to cut. Tasks 4.10–4.15
 rank below every other P4 task. If P4 slips, 4.10–4.12 (images) stay and 4.13–4.15 (canvas) move
