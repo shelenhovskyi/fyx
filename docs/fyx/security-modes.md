@@ -168,7 +168,7 @@ never by quoting it, since the message reaches the agent. The built-in agent's `
 `grep` tools honour the repository's `private_files` too.
 
 **The real file, not the typed path** (triage-3 top-7 #1). Every check runs on each spelling of
-`\?`the path (`fyx_guard::paths`, shared with agent review): the typed path with `..` and `\?\`
+the path (`fyx_guard::paths`, shared with agent review): the typed path with `..` and the `\\?\` prefix
 resolved, Windows' silent renames undone (`.env.`, `.env `, `.env::$DATA` open `.env`), the real
 file behind links (the deepest existing ancestor canonicalized), and on Windows and macOS the
 lower-case form; a protection applies when any of them matches. Under shield an agent may not
