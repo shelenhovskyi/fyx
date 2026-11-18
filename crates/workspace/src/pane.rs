@@ -56,6 +56,15 @@ use util::{
 };
 
 /// A selected entry in e.g. project panel.
+/// fyx: what a pane does with one dropped `.fyxext` package (Fyx's UI extension install
+/// dialog, set by `ui_ext_host`). Without it the file opens as usual.
+#[derive(Clone, Copy)]
+pub struct FyxPackageDrop(
+    pub fn(&mut Workspace, PathBuf, &mut Window, &mut Context<Workspace>),
+);
+
+impl gpui::Global for FyxPackageDrop {}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SelectedEntry {
     pub worktree_id: WorktreeId,
@@ -4150,6 +4159,19 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // fyx: one dropped `.fyxext` package opens Fyx's install dialog instead of the file.
+        if let Some(FyxPackageDrop(handler)) = cx.try_global::<FyxPackageDrop>().copied()
+            && let [path] = paths.paths()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("fyxext"))
+        {
+            let path = path.clone();
+            self.workspace
+                .update(cx, |workspace, cx| handler(workspace, path, window, cx))
+                .ok();
+            return;
+        }
         if let Some(active_item) = self.active_item()
             && active_item.handle_drop(self, paths, window, cx)
         {

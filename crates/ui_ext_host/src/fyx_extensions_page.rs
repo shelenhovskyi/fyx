@@ -1392,10 +1392,36 @@ impl Render for FyxExtensionsPage {
                     .justify_between()
                     .child(Headline::new("Fyx Extensions").size(HeadlineSize::Large))
                     .child(
-                        Button::new("fyx-reg-refresh", "Refresh")
-                            .style(ButtonStyle::Outlined)
-                            .disabled(refreshing)
-                            .on_click(move |_, _, cx| hub.update(cx, |hub, cx| hub.refresh(cx))),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("fyx-reg-from-file", "Install from File…")
+                                    .style(ButtonStyle::Outlined)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(crate::InstallUiExtensionFromFile),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("fyx-reg-dev", "Install Dev Extension…")
+                                    .style(ButtonStyle::Outlined)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(crate::InstallDevUiExtension),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("fyx-reg-refresh", "Refresh")
+                                    .style(ButtonStyle::Outlined)
+                                    .disabled(refreshing)
+                                    .on_click(move |_, _, cx| {
+                                        hub.update(cx, |hub, cx| hub.refresh(cx))
+                                    }),
+                            ),
                     ),
             )
             .when_some(status, |this, (status, color)| {

@@ -134,4 +134,8 @@ pub fn init(cx: &mut App) {
     progress::init(cx);
     images::init(cx);
     fyx_extensions_page::init(cx);
+    // A `.fyxext` dropped on a pane opens the install dialog.
+    cx.set_global(workspace::FyxPackageDrop(
+        store_actions::install_dropped_package,
+    ));
 }
