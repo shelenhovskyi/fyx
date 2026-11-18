@@ -1139,6 +1139,16 @@ async fn test_restart_and_failed_reload(cx: &mut TestAppContext) {
             ) && state.can_restart()
         })
     });
+    // Triage-3, SEC T5: the panic message on stderr reaches the Inspector's log, line by line.
+    let logs = surface.read_with(cx, |state, _| {
+        state.diagnostics().expect("diagnostics").logs
+    });
+    assert!(
+        logs.iter()
+            .any(|log| log.message.starts_with("stderr: ")
+                && log.message.contains("crashed on request")),
+        "{logs:?}"
+    );
     surface.update(cx, |state, cx| state.restart_extension(cx));
     run_until(cx, "the restart", |cx| {
         text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0")
