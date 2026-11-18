@@ -73,3 +73,31 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - Section M (notifications, progress): not in the WIT yet.
 - W3 (2.3): pass `allow_staged` from the release channel and dev-extension flag; rename
   `EffectReply`/`EffectReplyError` to `Reply`/`ReplyError` when the 0.1 shims go.
+
+## Plan 4.10: images, host side (2026-11-18)
+
+- **0.3 WIT staged** in `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit` (copied from
+  `claude/fyx-w10-docs-a5772b` 6d5f9e5462 with a STAGED DRAFT header), `ui_ext::WIT_DIR_V0_3_0`,
+  `ApiVersion::V0_3_0`. `MAX_VERSION = 0.3.0`; 0.3 is staged like 0.2 (`allow_staged`).
+- **`ui_ext::image`**: `ImageProps`, `ImageSource`, `ImageFit`, `ImageFormat`; every §12 limit as
+  a constant (shared with the renderer's decoder, plan 4.11); `check_image_props` (alt 1–256 bytes,
+  box 1–2048), `check_asset_path` (`assets/…`, no `..`, `\`, `:`, NUL, `.png`/`.svg`),
+  `check_image_bytes` (size cap; PNG signature + IHDR read before any allocation, over 2048 × 2048
+  refused; SVG must be UTF-8 with `<svg`, no `<!ENTITY`, no gzip), `check_image_placement` (panels
+  only).
+- **`ui_ext_wasm::images`**: `resolve_asset` / `read_asset` canonicalize inside the version
+  folder, regular files of at most 2 MiB.
+- **0.3 dispatch**: `UiBindings::V0_3` (`fyx_ui_v0_3.rs`); the 0.2 and 0.3 bindings share the
+  `host` imports and the type conversions through macros in `conversions.rs`. Linked: `types`,
+  `host`, `images`; every other 0.3 interface traps when called (`define_unknown_imports_as_traps`),
+  so a component that does not call them works.
+- **`images` import**: `ui:images` declared and granted by the broker at each call, the byte
+  checks, at most 32 live handles, handles never reused; `HostEffect::AddImage { handle, format,
+  bytes }` / `RemoveImage { handle }`. `ui:images` and `ui:canvas` are T0.
+- **Not yet**: `image` nodes are refused (`invalid-argument` in a push, the call's error in a
+  reply) until the model has `Props::Image`, which waits on W3 (asked 2026-11-18: add it to
+  `ui_ext::v0_2::Props`?). Then the host checks `check_image_props` and `check_image_placement` on
+  every update, as it already can.
+- Tests: `fixtures/probe_v0_3` and `tests_v0_3.rs` (the bomb, 1 MiB + 1, entity SVG, junk, the
+  32-handle cap, the capability, image nodes refused, traps), unit tests in `ui_ext::image`,
+  `effects` and `images` (path fixtures, links out on Unix).
