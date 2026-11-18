@@ -329,7 +329,10 @@ and the block-list cache. It never touches the network, the disk or the clock:
   state stays) or `Refused(error)`.
 - **`refresh_blocklist(fetch, now)`**: `BlocklistCache::apply_fetch` with the keyset of the last
   accepted snapshot (revoked keys removed). A snapshot that revokes the key of the cached list
-  drops that list. Due every 6 h (`BlocklistCache::fetch_due`).
+  drops that list. At start, then every 6 h: `blocklist_fetch_due(now)` and
+  `next_blocklist_fetch(now)` (for the host's timer) count from the last attempt, failed ones
+  included, so an offline client retries every 6 h. The attempt time is not stored: a fresh
+  start always fetches (plan 3.4).
 - **`index(now)`**: the verified index, or why installs and updates are stopped
   (`Unavailable`): `NeverFetched`; `Expired` (the last snapshot is past `expires_at`);
   `Refused(error)` (the last fetched snapshot or index failed: a rollback, a bad signature, an
@@ -342,6 +345,10 @@ and the block-list cache. It never touches the network, the disk or the clock:
   block list acts: blocked versions still roll back or are disabled, nothing updates or is held.
   Held updates for new T1/T2 capabilities come from `Permissions::additions`; record the user's
   approval with `Permissions::approve`.
+- **`PlanChanges::between(previous, current)`**: what changed between two `plan_updates` runs,
+  for the host's notifications. A new `Disable` or `Rollback` means "blocked: <reason>"; a
+  `Disable` that went away means the block was lifted. Spec §4 failures 1, 2 and 5 are client
+  tests in `client.rs`.
 - **`download(fetch, release)`**: fetches the package capped at `package.size` and checks it
   with `Release::verify_package` before the install store unpacks it.
 - **`stored_state()` / `restore(keyset, &StoredState)`**: three opaque files (the snapshot state,

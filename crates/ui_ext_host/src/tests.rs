@@ -159,6 +159,7 @@ fn input(value: &str) -> Props {
         value: value.into(),
         placeholder: "Filter".into(),
         secret: false,
+        label: None,
     })
 }
 
@@ -2109,6 +2110,7 @@ async fn test_secret_input_is_redacted(cx: &mut TestAppContext) {
                 value: String::new(),
                 placeholder: "Token".into(),
                 secret: true,
+                label: None,
             }),
         )],
         TreeLimits::default(),

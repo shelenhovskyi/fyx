@@ -23,7 +23,7 @@ pub(crate) mod bindings {
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
     host as wit_host, images as wit_images, io as wit_io, network as wit_network,
-    notifications as wit_notifications, types as wit,
+    notifications as wit_notifications, process as wit_process, types as wit,
 };
 
 /// What the host says for a value its model cannot hold yet.
@@ -126,6 +126,36 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                     net::FetchError::Cancelled => wit_network::FetchError::Cancelled,
                     net::FetchError::Other(error) => wit_network::FetchError::Other(error),
                 }),
+        ))),
+        net::IoEvent::ProcessOutput(output) => {
+            Some(wit_io::IoEvent::ProcessOutput(wit_process::ProcessOutput {
+                process: output.process,
+                stream: match output.stream {
+                    ui_ext::process::OutputStream::Stdout => wit_process::OutputStream::Stdout,
+                    ui_ext::process::OutputStream::Stderr => wit_process::OutputStream::Stderr,
+                },
+                data: output.data,
+            }))
+        }
+        net::IoEvent::ProcessExited(exit) => {
+            Some(wit_io::IoEvent::ProcessExited(wit_process::ProcessExit {
+                process: exit.process,
+                code: exit.code,
+                killed: exit.killed,
+            }))
+        }
+        net::IoEvent::SpawnFailed(id, error) => Some(wit_io::IoEvent::SpawnFailed((
+            id,
+            match error {
+                ui_ext::process::SpawnError::Denied => wit_process::SpawnError::Denied,
+                ui_ext::process::SpawnError::NotFound(program) => {
+                    wit_process::SpawnError::NotFound(program)
+                }
+                ui_ext::process::SpawnError::LimitExceeded => {
+                    wit_process::SpawnError::LimitExceeded
+                }
+                ui_ext::process::SpawnError::Io(error) => wit_process::SpawnError::Io(error),
+            },
         ))),
         // The harness changes no permission on its own.
         net::IoEvent::PermissionChanged(..) => None,

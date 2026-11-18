@@ -15,6 +15,7 @@
 mod backend;
 mod consent;
 mod decorations;
+pub mod fyx_extensions_page;
 mod icons;
 mod inspector;
 mod install;
@@ -52,6 +53,7 @@ pub use decorations::{
     DEV_DECORATIONS_ENV, DecorationId, DecorationPath, DecorationPlacement, DecorationTarget,
     Decorations, text_tree,
 };
+pub use fyx_extensions_page::{OpenFyxExtensions, fyx_extensions_button};
 pub use inspector::{ExtensionInspector, InspectorSnapshot, ToggleExtensionInspector};
 pub use install::{
     FyxExtensionsSettings, InstallDevUiExtension, RemoveDevUiExtension, check_dev_folder,
@@ -125,4 +127,5 @@ pub fn init(cx: &mut App) {
     keyboard::intercept_keys(cx);
     decorations::init(cx);
     progress::init(cx);
+    fyx_extensions_page::init(cx);
 }

@@ -65,6 +65,10 @@ pub struct ExtensionState {
     /// those of held updates they approved (`Permissions::approve`).
     #[serde(default)]
     pub approved: Permissions,
+    /// Why the active version is not loaded: a block-list entry with nothing to roll back to.
+    /// Cleared when the block lifts or another version installs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<String>,
 }
 
 /// Where one installed version came from.
@@ -205,6 +209,22 @@ impl InstallStore {
         result.with_context(|| format!("installing {label}"))
     }
 
+    /// Disables the active version of an id (`Some(reason)`), or enables it again.
+    pub async fn set_disabled(
+        &self,
+        extension_id: &str,
+        reason: Option<String>,
+        fs: &dyn Fs,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.state(fs).await?;
+        let Some(entry) = state.extensions.get_mut(extension_id) else {
+            bail!("{extension_id} is not installed");
+        };
+        entry.disabled = reason;
+        self.write_state(&state, fs).await
+    }
+
     /// Records approved permissions for an installed id (a held update the user approved).
     pub async fn set_approved(
         &self,
@@ -309,6 +329,7 @@ impl InstallStore {
                 pinned: current.is_some_and(|current| current.pinned),
                 sources,
                 approved,
+                disabled: None,
             },
         );
         self.write_state(&state, fs).await?;
@@ -366,12 +387,13 @@ impl InstallStore {
         remove_dir_checked(&self.root.join(extension_id), fs).await
     }
 
-    /// The active version folder of every installed id.
+    /// The active version folder of every installed id that is not disabled.
     pub async fn active(&self, fs: &dyn Fs) -> Result<Vec<(Arc<str>, Version, PathBuf)>> {
         let state = self.state(fs).await?;
         Ok(state
             .extensions
             .into_iter()
+            .filter(|(_, entry)| entry.disabled.is_none())
             .map(|(id, entry)| {
                 let dir = self.version_dir(&id, &entry.active);
                 (id.into(), entry.active, dir)

@@ -211,11 +211,11 @@ fn store(cx: &gpui::App) -> Option<InstallStore> {
 }
 
 /// Records consent for the version now active and rescans, so it loads.
-async fn grant_and_rescan(
+pub(crate) async fn grant_and_rescan(
     store: &InstallStore,
     extension_id: &str,
     fs: Arc<dyn Fs>,
-    cx: &mut AsyncWindowContext,
+    cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
     let state = store.state(fs.as_ref()).await?;
     if let Some(entry) = state.extensions.get(extension_id) {
@@ -223,27 +223,27 @@ async fn grant_and_rescan(
         if let Some((_, manifest)) = ui_ext_wasm::UiManifest::read(fs.as_ref(), &dir).await? {
             let record = ConsentRecord::current(
                 &dir,
-                &manifest.capabilities,
+                &manifest.consent_items(),
                 &dir.join(&manifest.component),
                 false,
                 fs.as_ref(),
                 &cx.background_executor(),
             )
             .await?;
-            cx.update(|_, cx| {
+            cx.update(|cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
                     registry.update(cx, |registry, cx| {
                         registry.grant_consent(extension_id, record, fs.clone(), cx)
                     });
                 }
-            })?;
+            });
         }
     }
-    cx.update(|_, cx| {
+    cx.update(|cx| {
         if let Some(registry) = UiExtensionRegistry::global(cx) {
             registry.update(cx, |registry, cx| registry.rescan(cx));
         }
-    })?;
+    });
     Ok(())
 }
 

@@ -453,7 +453,7 @@ impl Running {
         }
     }
 
-    async fn deliver(&self, event: IoEvent) {
+    pub(crate) async fn deliver(&self, event: IoEvent) {
         let sender = self
             .events
             .lock()
@@ -605,7 +605,7 @@ impl NetworkHandle {
     /// Follows the broker's state changes for this instance, on the current tokio runtime: a
     /// revocation of `network:fetch` ends the running requests with `denied`, and every change
     /// is delivered as `permission-changed`. Only for a component that has `handle-io`.
-    pub(crate) fn watch_permissions(&self) {
+    pub(crate) fn watch_permissions(&self, processes: std::sync::Weak<crate::process::ProcessSet>) {
         let Some(broker) = &self.broker else {
             return;
         };
@@ -619,6 +619,12 @@ impl NetworkHandle {
                 };
                 if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
                     running.revoke_all();
+                }
+                if capability == crate::process::CAPABILITY_PROCESS
+                    && state != PermissionState::Granted
+                    && let Some(processes) = processes.upgrade()
+                {
+                    processes.kill_all();
                 }
                 running
                     .deliver(IoEvent::PermissionChanged(capability, state))
