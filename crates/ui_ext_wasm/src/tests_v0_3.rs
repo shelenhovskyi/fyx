@@ -974,3 +974,204 @@ mod harness_conformance_v0_3 {
         assert!(harness.disabled().is_some());
     }
 }
+
+/// `network:fetch` (plan 4.6) in the host and the harness: the import's checks and ids, the
+/// default without a broker (`denied`), and delivery through `handle-io` with a granted broker.
+mod harness_conformance_fetch {
+    use fyx_ext_harness::{Harness, TestBroker};
+
+    use super::*;
+    use crate::{
+        network::test_server,
+        permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
+    };
+
+    struct GrantAll;
+
+    impl CapabilityCheck for GrantAll {
+        fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+            Ok(())
+        }
+
+        fn state(&self, _: &str, _: &str) -> PermissionState {
+            PermissionState::Granted
+        }
+    }
+
+    fn debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
+        values.iter().map(|value| format!("{value:?}")).collect()
+    }
+
+    fn capabilities() -> Vec<String> {
+        vec![
+            CAPABILITY_PANEL.into(),
+            ui_ext::v0_2::CAPABILITY_STATUS_BAR.into(),
+            ui_ext::v0_2::CAPABILITY_MODAL.into(),
+            "network:fetch".into(),
+        ]
+    }
+
+    async fn both(
+        port: u16,
+        broker: Option<Arc<dyn CapabilityCheck>>,
+        cx: &mut TestAppContext,
+    ) -> (UiExtension, Harness) {
+        let domain = format!("localhost:{port}");
+        let host = load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(capabilities()),
+                network_domains: Some(vec![domain.clone()]),
+                capability_check: broker,
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let capabilities = capabilities();
+        let capabilities = capabilities.iter().map(String::as_str).collect::<Vec<_>>();
+        let harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
+            .and_then(|harness| harness.with_network_domains(&[&domain]))
+            .expect("the harness loads the 0.3 probe");
+        (host, harness)
+    }
+
+    /// Runs probe command `command` in both; the results and effects must match.
+    async fn command(host: &UiExtension, harness: &mut Harness, command: &str) -> String {
+        let event = UiEvent::InputChanged(1, command.into());
+        let reply = host
+            .handle_event_v0_2(SURFACE, event.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+        let raw = harness
+            .handle_event_raw(SURFACE, event)
+            .unwrap_or_else(|error| panic!("{command}: the harness trapped: {error:#}"));
+        assert_eq!(debug(&reply.effects), debug(&raw.effects), "{command}");
+        assert_eq!(
+            format!("{:?}", reply.value),
+            format!("{:?}", raw.value.expect("a report")),
+            "{command}"
+        );
+        format!("{:?}", reply.value)
+    }
+
+    /// The harness's own broker paths: a prompt answered `denied`, and a cancelled request.
+    #[test]
+    fn test_the_harness_prompts_and_cancels() {
+        let capabilities = capabilities();
+        let capabilities = capabilities.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
+            .and_then(|harness| harness.with_network_domains(&["localhost:8080"]))
+            .expect("loads");
+        harness.set_broker(TestBroker::asking(
+            PermissionState::Denied,
+            Box::new(|_| panic!("a refused request never reaches the network")),
+        ));
+        let report = |harness: &mut Harness, command: &str| {
+            format!(
+                "{:?}",
+                harness
+                    .handle_event_raw(SURFACE, UiEvent::InputChanged(1, command.into()))
+                    .expect("no trap")
+                    .value
+            )
+        };
+        assert!(report(&mut harness, "fetch http://localhost:8080/a").contains("\"1\""));
+        let delivered = harness.deliver_io().expect("deliver");
+        assert!(format!("{:?}", delivered[0].effects).contains("fetch-done 1 err denied"));
+        assert_eq!(harness.broker().expect("broker").prompts(), 1);
+        // Denied now: the next fetch is refused at the import.
+        assert!(report(&mut harness, "fetch http://localhost:8080/a").contains("denied"));
+
+        harness.set_broker(TestBroker::granted(Box::new(|_| {
+            panic!("a cancelled request never reaches the network")
+        })));
+        report(&mut harness, "fetch http://localhost:8080/b");
+        report(&mut harness, "cancel 2");
+        let delivered = harness.deliver_io().expect("deliver");
+        assert!(
+            format!("{:?}", delivered[0].effects).contains("fetch-done 2 err cancelled"),
+            "{:?}",
+            delivered[0].effects
+        );
+
+        // A call that traps drops its requests without an outcome, as in the host.
+        assert!(
+            harness
+                .handle_event_raw(
+                    SURFACE,
+                    UiEvent::InputChanged(1, "fetch-trap http://localhost:8080/c".into())
+                )
+                .is_err()
+        );
+        assert!(harness.pending_fetches().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_without_a_broker_fetch_is_denied_alike(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(8080, None, cx).await;
+        let report = command(&host, &mut harness, "fetch http://localhost:8080/hello").await;
+        assert!(report.contains("denied"), "{report}");
+        assert!(harness.pending_fetches().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_granted_fetches_match_the_harness(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let server = test_server::start_in_thread(|path, _| match path {
+            "/hello" => Some(test_server::ok(b"hello")),
+            _ => None,
+        });
+        let (host, mut harness) = both(server.port, Some(Arc::new(GrantAll)), cx).await;
+        let url = format!("http://localhost:{}", server.port);
+        harness.set_broker(TestBroker::granted(Box::new(move |request| {
+            assert!(request.url.ends_with("/hello"), "{}", request.url);
+            Ok(ui_ext::network::FetchResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"hello".to_vec(),
+                url: request.url.clone(),
+            })
+        })));
+        let mut events = host.take_io_events().expect("once");
+
+        // The import's checks: an undeclared host, a bad URL and the scheme, then two accepted.
+        let report = command(
+            &host,
+            &mut harness,
+            &format!(
+                "fetch https://example.com/x ftp://localhost/x not-a-url {url}/hello {url}/hello"
+            ),
+        )
+        .await;
+        assert!(report.contains("1 | 2"), "{report}");
+        assert_eq!(harness.pending_fetches().len(), 2);
+
+        // The same two outcomes through handle-io, with the same pushes. The host's requests
+        // run concurrently, so its order may differ from the harness's, which is by id.
+        let delivered = harness.deliver_io().expect("deliver");
+        assert_eq!(delivered.len(), 2);
+        let mut harness_effects = delivered
+            .iter()
+            .map(|delivered| debug(&delivered.effects))
+            .collect::<Vec<_>>();
+        let mut host_effects = Vec::new();
+        for _ in 0..2 {
+            let event = events.next().await.expect("an outcome");
+            let reply = host.handle_io(event).await.expect("handle-io");
+            host_effects.push(debug(&reply.effects));
+        }
+        harness_effects.sort();
+        host_effects.sort();
+        assert_eq!(host_effects, harness_effects);
+        assert!(
+            host_effects
+                .iter()
+                .flatten()
+                .all(|effect| effect.contains("200 hello")),
+            "{host_effects:?}"
+        );
+        assert!(harness.pending_fetches().is_empty());
+    }
+}

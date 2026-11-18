@@ -225,6 +225,16 @@ On top of these:
   `canvas(surface, id)` returns a canvas's draw list. `canvas_click(surface, id, x, y)` clicks
   it as the renderer would. It fails without a call on a canvas that is not clickable, or at a
   point outside the box.
+- `network:fetch` (0.3) runs the host's import checks: the capability, the domain list
+  (`[fyx_ui.network]`, or `with_network_domains`), `check_request`, and the in-flight and
+  per-minute caps.
+  - With no broker, `fetch` is `denied`, as in a host where the user has not allowed it.
+  - `set_broker(TestBroker::granted(respond))` lets requests reach a closure that answers them.
+    `TestBroker::asking(answer, respond)` prompts on the first delivery, and
+    `TestBroker::denied()` refuses at the import.
+  - Accepted requests wait in `pending_fetches()` until `deliver_io()` delivers each outcome
+    through `handle-io`. A cancelled request ends `cancelled`, and a call that traps drops its
+    requests.
 - In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
   not implement yet (`decorations` included) trap when called.
 

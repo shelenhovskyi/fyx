@@ -130,6 +130,67 @@ pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_NOTIFICATIONS,
 ];
 
+/// What a test broker answers for one request it lets through.
+pub type FetchResponder = Box<
+    dyn FnMut(
+        &ui_ext::network::FetchRequest,
+    )
+        -> std::result::Result<ui_ext::network::FetchResponse, ui_ext::network::FetchError>,
+>;
+
+/// A stand-in for the user and the network, for `network:fetch` tests (0.3). Without one the
+/// harness grants no T2 capability, as the host without a broker: `fetch` returns `denied`.
+pub struct TestBroker {
+    /// The state at the import. `Ask` accepts the request and asks when it is delivered.
+    pub state: ui_ext::network::PermissionState,
+    /// How the user answers the prompt of an `Ask` state.
+    pub answer: ui_ext::network::PermissionState,
+    respond: FetchResponder,
+    prompts: usize,
+}
+
+impl TestBroker {
+    /// Granted: every request reaches `respond`.
+    pub fn granted(respond: FetchResponder) -> Self {
+        Self::asking(ui_ext::network::PermissionState::Granted, respond)
+    }
+
+    /// Not asked yet: the first delivered request prompts, and the user answers `answer`.
+    pub fn asking(answer: ui_ext::network::PermissionState, respond: FetchResponder) -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Ask,
+            answer,
+            respond,
+            prompts: 0,
+        }
+    }
+
+    /// Refused: `fetch` returns `denied` at the import.
+    pub fn denied() -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Denied,
+            answer: ui_ext::network::PermissionState::Denied,
+            respond: Box::new(|_| Err(ui_ext::network::FetchError::Denied)),
+            prompts: 0,
+        }
+    }
+
+    /// How many times the prompt was shown.
+    pub fn prompts(&self) -> usize {
+        self.prompts
+    }
+}
+
+impl std::fmt::Debug for TestBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestBroker")
+            .field("state", &self.state)
+            .field("answer", &self.answer)
+            .field("prompts", &self.prompts)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A running progress as the renderer draws it (design.md M.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Progress {
@@ -592,6 +653,20 @@ impl Bindings {
     }
 }
 
+impl Bindings {
+    /// `handle-io` (0.3 only).
+    fn handle_io(
+        &self,
+        store: &mut Store<State>,
+        event: &v0_3::bindings::fyx::ui::io::IoEvent,
+    ) -> wasmtime::Result<std::result::Result<(), String>> {
+        match self {
+            Self::V0_3(extension) => extension.call_handle_io(store, event),
+            Self::V0_1(_) | Self::V0_2(_) => Ok(Err("handle-io needs fyx:ui 0.3".into())),
+        }
+    }
+}
+
 /// A mounted surface or decoration: the tree in the 0.1 model, which `ui_ext::Tree` validates
 /// (the structure carries over exactly), and the full 0.2 props of every node.
 #[derive(Debug, Clone)]
@@ -773,6 +848,8 @@ pub struct Harness {
     surfaces_v0_1: Vec<ui_ext::Surface>,
     mounted: HashMap<String, Mounted>,
     decorations: BTreeMap<String, model::DecorationLocation>,
+    /// The permission broker for `network:fetch` (0.3); `None` grants nothing, as in the host.
+    broker: Option<TestBroker>,
     /// What the renderer shows of §M: open notifications and running progresses, by id.
     notifications: BTreeMap<u64, model::notifications::Notification>,
     progresses: BTreeMap<u64, Progress>,
@@ -899,6 +976,7 @@ impl Harness {
             surfaces_v0_1: Vec::new(),
             mounted: HashMap::new(),
             decorations: BTreeMap::new(),
+            broker: None,
             notifications: BTreeMap::new(),
             progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
@@ -958,6 +1036,20 @@ impl Harness {
             .with_context(|| format!("reading {component_path:?}"))?;
         let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
             .with_context(|| format!("loading {dir:?}"))?;
+        if let Some(domains) = table
+            .get("network")
+            .and_then(toml::Value::as_table)
+            .and_then(|network| network.get("domains"))
+            .and_then(toml::Value::as_array)
+        {
+            let domains = domains
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>();
+            harness = harness
+                .with_network_domains(&domains)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
         Ok(harness)
@@ -1070,6 +1162,82 @@ impl Harness {
     /// Why the extension is disabled, after a trap or an overrun call.
     pub fn disabled(&self) -> Option<&str> {
         self.disabled.as_deref()
+    }
+
+    /// The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them;
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn with_network_domains(mut self, domains: &[&str]) -> Result<Self> {
+        let domains = domains.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let list = ui_ext::network::DomainList::parse(&domains)
+            .map_err(|error| anyhow::anyhow!("[fyx_ui.network] domains: {error}"))?;
+        self.store.data_mut().api.set_network_domains(list);
+        Ok(self)
+    }
+
+    /// Installs the permission broker and network for `network:fetch`; see [`TestBroker`].
+    pub fn set_broker(&mut self, broker: TestBroker) {
+        self.store
+            .data_mut()
+            .api
+            .set_network_permission(broker.state);
+        self.broker = Some(broker);
+    }
+
+    pub fn broker(&self) -> Option<&TestBroker> {
+        self.broker.as_ref()
+    }
+
+    /// Requests `fetch` accepted that [`Harness::deliver_io`] has not delivered yet, oldest first.
+    pub fn pending_fetches(&self) -> Vec<(u64, ui_ext::network::FetchRequest)> {
+        self.store
+            .data()
+            .api
+            .queued_fetches()
+            .map(|(id, fetch)| (id, fetch.request.clone()))
+            .collect()
+    }
+
+    /// Delivers the outcome of every pending request through `handle-io`, oldest first, and
+    /// applies each call's effects. A cancelled one ends `cancelled`. Otherwise the broker
+    /// decides: an `Ask` state prompts once and takes the answer, a granted request gets the
+    /// responder's answer, and anything else ends `denied`. Returns each call's effects and the
+    /// extension's own result.
+    pub fn deliver_io(&mut self) -> Result<Vec<RawEffects<()>>> {
+        use ui_ext::network::{FetchError, IoEvent, PermissionState};
+        let mut delivered = Vec::new();
+        while let Some((id, fetch)) = self.store.data_mut().api.take_fetch() {
+            let result = if fetch.cancelled {
+                Err(FetchError::Cancelled)
+            } else {
+                match self.broker.as_mut() {
+                    Some(broker) => {
+                        if broker.state == PermissionState::Ask {
+                            broker.prompts += 1;
+                            broker.state = broker.answer;
+                            self.store
+                                .data_mut()
+                                .api
+                                .set_network_permission(broker.state);
+                        }
+                        if broker.state == PermissionState::Granted {
+                            (broker.respond)(&fetch.request)
+                        } else {
+                            Err(FetchError::Denied)
+                        }
+                    }
+                    None => Err(FetchError::Denied),
+                }
+            };
+            let Some(event) = v0_3::io_event(IoEvent::FetchDone(id, result)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        Ok(delivered)
     }
 
     /// The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or
@@ -1650,6 +1818,7 @@ impl Harness {
                 Ok((value, effects))
             }
             Err(error) => {
+                self.store.data_mut().api.abort_call();
                 let error = anyhow::Error::from(error);
                 self.disabled = Some(format!("{error:#}"));
                 Err(error.context("the call trapped or ran over its time budget"))

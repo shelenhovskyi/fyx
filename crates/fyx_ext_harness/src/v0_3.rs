@@ -22,7 +22,8 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    host as wit_host, images as wit_images, notifications as wit_notifications, types as wit,
+    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
+    notifications as wit_notifications, types as wit,
 };
 
 /// What the host says for a value its model cannot hold yet.
@@ -54,11 +55,85 @@ pub(crate) fn add_to_linker(
     wit_host::add_to_linker::<_, State>(linker, |state| state)?;
     wit_images::add_to_linker::<_, State>(linker, |state| state)?;
     wit_notifications::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_network::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
+impl wit_network::Host for State {
+    fn fetch(
+        &mut self,
+        request: wit_network::HttpRequest,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        use ui_ext::network as net;
+        self.count_lifted_text(
+            request.url.len()
+                + request
+                    .headers
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum::<usize>(),
+        )?;
+        let request = net::FetchRequest {
+            method: match request.method {
+                wit_network::HttpMethod::Get => net::Method::Get,
+                wit_network::HttpMethod::Head => net::Method::Head,
+                wit_network::HttpMethod::Post => net::Method::Post,
+                wit_network::HttpMethod::Put => net::Method::Put,
+                wit_network::HttpMethod::Patch => net::Method::Patch,
+                wit_network::HttpMethod::Delete => net::Method::Delete,
+                wit_network::HttpMethod::Options => net::Method::Options,
+            },
+            url: request.url,
+            headers: request.headers,
+            body: request.body,
+            timeout_ms: request.timeout_ms,
+        };
+        Ok(self.api.fetch(request).map_err(Into::into))
+    }
+
+    fn cancel_fetch(&mut self, request: u64) -> wasmtime::Result<()> {
+        self.api.cancel_fetch(request);
+        Ok(())
+    }
+}
+
+/// An outcome for the `handle-io` export.
+pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEvent> {
+    use ui_ext::network as net;
+    match event {
+        net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
+            id,
+            result
+                .map(|response| wit_network::HttpResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                    url: response.url,
+                })
+                .map_err(|error| match error {
+                    net::FetchError::Denied => wit_network::FetchError::Denied,
+                    net::FetchError::HostNotAllowed(host) => {
+                        wit_network::FetchError::HostNotAllowed(host)
+                    }
+                    net::FetchError::RedirectNotAllowed(host) => {
+                        wit_network::FetchError::RedirectNotAllowed(host)
+                    }
+                    net::FetchError::Dns(error) => wit_network::FetchError::Dns(error),
+                    net::FetchError::Connect(error) => wit_network::FetchError::Connect(error),
+                    net::FetchError::Tls(error) => wit_network::FetchError::Tls(error),
+                    net::FetchError::Timeout => wit_network::FetchError::Timeout,
+                    net::FetchError::TooLarge => wit_network::FetchError::TooLarge,
+                    net::FetchError::Cancelled => wit_network::FetchError::Cancelled,
+                    net::FetchError::Other(error) => wit_network::FetchError::Other(error),
+                }),
+        ))),
+        // The harness changes no permission on its own.
+        net::IoEvent::PermissionChanged(..) => None,
+    }
+}
+
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 4] = ["types", "host", "images", "notifications"];
+const LINKED_INTERFACES: [&str; 5] = ["types", "host", "images", "notifications", "network"];
 
 /// The resource type of a stubbed interface; no value of it is ever made.
 struct Unlinked;
