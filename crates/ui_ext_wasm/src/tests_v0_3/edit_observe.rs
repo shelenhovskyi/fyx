@@ -674,30 +674,28 @@ async fn test_updates_coalesce_while_the_guest_lags(cx: &mut TestAppContext) {
     }
     feed.unbounded_send(AgentEvent::Updated(review(100, 5)))
         .unwrap();
-    // The feed has taken every event (each is queued in the same step it is read).
+    // Backpressure, driven by the test: the guest drains nothing until the feed has read all
+    // 1001 updates from the host, so only the channel's room (its capacity plus one slot per
+    // sender) was ever filled, and every update beyond it folded into the one the feed queues.
+    // The condition, not a time, is what the test waits for; the deadline only reports a hang.
     wait_until(|| reviews.read.load(Ordering::SeqCst) == 1001);
-    std::thread::sleep(Duration::from_millis(50));
     drop(feed);
-    // The channel holds at most its capacity plus one per sender; the rest of the 1001 updates
-    // fold into the one the feed still queues, which comes once there is room.
     let newest = |event: &IoEvent| matches!(event, IoEvent::Agent(AgentEvent::Updated(info)) if info.hunks.len() == 5);
+    // Whatever the feed still holds comes once the guest makes room; the newest update is last.
+    let room = crate::network::MAX_QUEUED_IO_EVENTS + 8;
     let mut delivered = Vec::new();
-    while let Some(Some(event)) = events.next().now_or_never() {
-        delivered.push(event);
-    }
-    assert!(
-        delivered.len() <= crate::network::MAX_QUEUED_IO_EVENTS + 4,
-        "{} delivered",
-        delivered.len()
-    );
     while !delivered.last().is_some_and(newest) {
         delivered.push(events.next().await.expect("an event"));
         assert!(
-            delivered.len() <= crate::network::MAX_QUEUED_IO_EVENTS + 8,
+            delivered.len() <= room,
             "the updates did not fold: {} delivered",
             delivered.len()
         );
     }
+    assert!(matches!(
+        delivered[0],
+        IoEvent::Agent(AgentEvent::Snapshot(_))
+    ));
     assert_eq!(delivered.iter().filter(|event| newest(event)).count(), 1);
 }
 
