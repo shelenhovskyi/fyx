@@ -295,7 +295,7 @@ async fn test_an_edit_applies_after_its_call(cx: &mut TestAppContext) {
     let mut events = extension.take_io_events().expect("once");
     let id = command(
         &extension,
-        "edit label=Rename_all src/a.rs@0.0-0.3=fn src/a.rs@2.0-2.0=use_x; #5@1.0-1.4=",
+        "edit label=Rename_all src/a.rs@0.0-0.3=fn src/a.rs@2.0-2.0=use_x; b.rs@1.0-1.4=",
     )
     .await;
     assert_eq!(id, "1");
@@ -329,7 +329,13 @@ async fn test_an_edit_applies_after_its_call(cx: &mut TestAppContext) {
             end: Position { line: 0, column: 3 },
         }
     );
-    assert_eq!(edit.files[1].target, EditTarget::Document(5));
+    assert_eq!(
+        edit.files[1].target,
+        EditTarget::File(crate::process::FileRef {
+            worktree: None,
+            path: "b.rs".into(),
+        })
+    );
     assert_eq!(edit.files[1].edits[0].new_text, "", "a deletion");
 
     // The Extension Inspector's line for it.
@@ -453,7 +459,7 @@ async fn test_editor_errors_reach_the_guest(cx: &mut TestAppContext) {
         Some(EditError::Conflict("a.rs changed".into()));
     let extension = setup.load(cx).await;
     let mut events = extension.take_io_events().expect("once");
-    let id = command(&extension, "edit expect=3 a.rs@0.0-0.0=x").await;
+    let id = command(&extension, "edit a.rs@0.0-0.0=x").await;
     assert_eq!(
         deliver(&extension, &mut events).await,
         format!("edit-done {id} err conflict")
@@ -466,7 +472,16 @@ async fn test_editor_errors_reach_the_guest(cx: &mut TestAppContext) {
         .lock()
         .unwrap()
         .clone();
-    assert_eq!(applied[0].1.files[0].expected_version, Some(3));
+    // 0.3 has no document versions (0.4): the host never gets one.
+    assert_eq!(applied[0].1.files[0].expected_version, None);
+
+    // integration-5 A5: restricted mode is its own case, not a message to match.
+    *setup.edits.as_ref().unwrap().result.lock().unwrap() = Some(EditError::UntrustedWorktree);
+    let id = command(&extension, "edit a.rs@0.0-0.0=x").await;
+    assert_eq!(
+        deliver(&extension, &mut events).await,
+        format!("edit-done {id} err untrusted-worktree")
+    );
 }
 
 #[gpui::test]
@@ -694,7 +709,7 @@ async fn test_updates_coalesce_while_the_guest_lags(cx: &mut TestAppContext) {
     }
     assert!(matches!(
         delivered[0],
-        IoEvent::Agent(AgentEvent::Snapshot(_))
+        IoEvent::Agent(AgentEvent::Snapshot { .. })
     ));
     assert_eq!(delivered.iter().filter(|event| newest(event)).count(), 1);
 }

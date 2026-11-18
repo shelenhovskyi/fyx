@@ -613,6 +613,11 @@ pub enum HostErrorCode {
     /// 0.3: the user refused or revoked a T2 capability the manifest declares. A 0.2 component
     /// never gets it; it sees `not-permitted`.
     Denied,
+    /// 0.3 (integration-5 A5): the worktree a T2 call works in is not trusted (restricted mode).
+    /// A 0.2 component never gets it; it sees `not-permitted`.
+    UntrustedWorktree,
+    /// 0.3: the call needs an open worktree and there is none. A 0.2 component sees `unavailable`.
+    NoWorktree,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
