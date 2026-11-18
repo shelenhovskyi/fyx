@@ -333,7 +333,9 @@ tests is a placeholder or is generated per test run.
   the whole keyset, and every verify call checks the role of its document (`WrongRole` otherwise):
   a release key cannot sign a block list or a snapshot, and the other way round.
 - **Revocation.** A snapshot's `revoked_keys` removes keys from the keyset for releases and block
-  lists without a client release (registry-format.md). See Compromise and open question 3.
+  lists without a client release (registry-format.md). Only a snapshot signed by the offline
+  snapshot rotation key may revoke block-list keys; the regular snapshot key cannot (decided,
+  open question 3). See Compromise.
 - **The client decides.** Only a client release decides which keys are trusted. Changing
   `keys/keyset.json` in this repository changes only what CI checks against.
 
@@ -357,7 +359,7 @@ The two Environments:
 | Secrets | `RELEASE_KEY`, `SNAPSHOT_KEY` | `BLOCKLIST_KEY` |
 | Used by | `publish.yml`, the snapshot job of `refresh.yml` | `blocklist.yml`, the block-list job of `refresh.yml` |
 | Deployment branches | `main` only | `main` only |
-| Required reviewers | none: a reviewer would block T0–T1 auto-merge and the schedule | none: a reviewer would block the 12 h refresh. A block-list *change* still needs the owner, through CODEOWNERS on `blocklist/` |
+| Required reviewers | none: a reviewer would block T0–T1 auto-merge and the schedule | none (accepted 2026-11-18): a reviewer would block the 12 h refresh. A block-list *change* still needs the owner, through CODEOWNERS on `blocklist/` |
 
 Each step passes one secret as `FYX_REGISTRY_SIGNING_KEY`, so no step holds two keys. Neither
 Environment's secrets reach forks, and `pr.yml` references none of them. The protection is that
@@ -401,8 +403,10 @@ documents are always signed with a key that both old and new clients accept.
 
 1. Delete the secret.
 2. Promote the block-list rotation key.
-3. Revoke the leaked key with the next snapshot (`--revoke fyx-bl-2026-a`). Also ship a client
-   release whose keyset drops it.
+3. Revoke the leaked key with an emergency snapshot signed **offline by the snapshot rotation
+   key**, the only key whose revocation of a block-list key clients honour (`--revoke
+   fyx-bl-2026-a`, with a `sequence` above the published one). Also ship a client release whose
+   keyset drops the leaked key.
    - The client verifies its cached copy again when it loads it. A forged list signed by a revoked
      or dropped key then fails verification and is discarded, so the client starts with no cached
      list.
@@ -465,13 +469,12 @@ Task 3.2:
 2. **New T0–T1 extensions with no human review**, as the owner decided. The CI checks above
    (reserved and near-copy ids, owner identity) cover squatting, not intent: a T0 panel can still
    show misleading text. Is a review after publishing, plus the block list, enough?
-3. **May a snapshot revoke block-list keys?** In the format, `revoked_keys` covers every role, so a
-   leaked `release-signing` (snapshot key) can revoke both block-list keys. Clients would then
-   discard their cached block list and accept none until a client update: blocked extensions
-   would be unblocked. *Recommended:* the client ignores `revoked_keys` entries that name a
-   `blocklist` key unless the snapshot is signed by the **snapshot rotation key**, which is kept
-   offline. That needs a small change in `fyx_registry` (W2c) and a test. The alternative is that a
-   snapshot never revokes block-list keys, and a block-list key compromise always needs a client
-   release.
+3. **May a snapshot revoke block-list keys?** **Decided 2026-11-18** (coordinator, for the owner):
+   only a snapshot signed by the offline **snapshot rotation key** may revoke `blocklist` keys.
+   The client ignores such entries in any other snapshot. W2c is implementing it in
+   `fyx_registry`, with a test. Why: in the format, `revoked_keys` covers every role. Without this
+   rule, a leaked `release-signing` environment (its snapshot key) could revoke both block-list
+   keys. Clients would then discard their cached block list and accept none until a client
+   update, which unblocks every blocked extension.
 4. **Where T2 manifest fields live.** `network_domains` and `processes` need `[fyx_ui]` keys and
    `fyx-ext check` support before any T2 entry can pass `build`.
