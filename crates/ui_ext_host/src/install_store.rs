@@ -104,6 +104,8 @@ pub struct PackageInfo {
     pub extension_id: Arc<str>,
     pub version: Version,
     pub manifest: UiManifest,
+    /// The package also holds a Zed extension (`extension.wasm`).
+    pub zed_extension: bool,
 }
 
 /// The result of an install.
@@ -722,6 +724,7 @@ async fn read_package_dir(dir: &Path, fs: &dyn Fs) -> Result<PackageInfo> {
         extension_id,
         version,
         manifest,
+        zed_extension: crate::install::has_zed_extension(dir, fs).await,
     })
 }
 
@@ -806,6 +809,82 @@ mod tests {
             dir,
             _root: root,
         }
+    }
+
+    /// Decision Q1: a package or a dev folder that also holds a Zed extension says so in the
+    /// install dialog and on the consent card; one without says nothing.
+    #[gpui::test]
+    async fn test_a_zed_extension_inside_is_announced(cx: &mut TestAppContext) {
+        use crate::install::ZED_EXTENSION_WARNING;
+        let setup = setup(cx);
+        let fs = setup.fs.as_ref();
+        let toml = manifest("both", "1.0.0", "\"ui:panel\"");
+        let with = zip(&[
+            ("extension.toml", toml.as_bytes()),
+            ("fyx_ui.wasm", b"component"),
+            ("extension.wasm", b"zed"),
+        ])
+        .await;
+        let without = zip(&[
+            ("extension.toml", toml.as_bytes()),
+            ("fyx_ui.wasm", b"component"),
+        ])
+        .await;
+        let package = Path::new("both.fyxext");
+        let info = setup
+            .store
+            .inspect_package_bytes(with, "with", fs)
+            .await
+            .expect("inspects");
+        assert!(info.zed_extension);
+        assert!(
+            crate::store_actions::file_install_detail(&info, package, "")
+                .contains(ZED_EXTENSION_WARNING)
+        );
+        let info = setup
+            .store
+            .inspect_package_bytes(without, "without", fs)
+            .await
+            .expect("inspects");
+        assert!(!info.zed_extension);
+        assert!(
+            !crate::store_actions::file_install_detail(&info, package, "")
+                .contains(ZED_EXTENSION_WARNING)
+        );
+
+        // A dev folder: the install dialog and the consent card of `dev_paths`.
+        let folder = setup.dir.join("dev");
+        std::fs::create_dir_all(&folder).expect("folder");
+        assert!(!crate::install::has_zed_extension(&folder, fs).await);
+        std::fs::write(folder.join("extension.wasm"), b"zed").expect("zed extension");
+        assert!(crate::install::has_zed_extension(&folder, fs).await);
+        assert!(
+            crate::install::dev_install_detail(&info.manifest, &folder, true)
+                .contains(ZED_EXTENSION_WARNING)
+        );
+        assert!(
+            !crate::install::dev_install_detail(&info.manifest, &folder, false)
+                .contains(ZED_EXTENSION_WARNING)
+        );
+        let pending = |zed_extension| crate::registry::PendingConsent {
+            extension_id: "both".into(),
+            dir: folder.clone(),
+            installed_dir: setup.dir.clone(),
+            capabilities: vec!["ui:panel".into()],
+            is_dev: true,
+            new_capabilities: Vec::new(),
+            zed_extension,
+            record: crate::consent::ConsentRecord {
+                capabilities: vec!["ui:panel".into()],
+                grant: crate::consent::Grant::DevFolder {
+                    path: folder.clone(),
+                },
+            },
+        };
+        assert!(crate::registry::consent_card_text(&pending(true)).contains(ZED_EXTENSION_WARNING));
+        assert!(
+            !crate::registry::consent_card_text(&pending(false)).contains(ZED_EXTENSION_WARNING)
+        );
     }
 
     impl Setup {

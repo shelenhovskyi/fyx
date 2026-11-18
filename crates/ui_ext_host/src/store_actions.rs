@@ -62,10 +62,9 @@ pub(crate) fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &RevokeUiExtensionPermission, window, cx| {
         prompt_revoke(workspace, window, cx)
     });
-    workspace
-        .register_action(|workspace, _: &OpenExtensionPanel, window, cx| {
-            prompt_open_panel(workspace, window, cx)
-        });
+    workspace.register_action(|workspace, _: &OpenExtensionPanel, window, cx| {
+        prompt_open_panel(workspace, window, cx)
+    });
 }
 
 /// Picks an extension panel by its title and opens it (triage-3, UX F15): the command palette
@@ -120,11 +119,7 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
     };
-    let grants: Vec<(String, String)> = registry
-        .read(cx)
-        .revocable()
-        .into_iter()
-        .collect();
+    let grants: Vec<(String, String)> = registry.read(cx).revocable().into_iter().collect();
     if grants.is_empty() {
         toast(
             workspace,
@@ -372,12 +367,7 @@ fn install_package(
                 .get(info.extension_id.as_ref())
                 .map(|entry| format!("\nInstalled now: {}", entry.active))
                 .unwrap_or_default();
-            let detail = format!(
-                "It asks for:\n{}\n\nUnsigned, not from the registry.\nPackage: {}{current}",
-                // Every item it is granted, hosts and programs included (integration-5 R9).
-                describe_capability_ids(&info.manifest.consent_items()).join("\n"),
-                package.display(),
-            );
+            let detail = file_install_detail(&info, &package, &current);
             let answer = workspace.update_in(cx, |workspace, window, cx| {
                 crate::choice::confirm(
                     workspace,
@@ -421,6 +411,25 @@ fn install_package(
             .ok();
     })
     .detach();
+}
+
+/// The file-install dialog's text: every item it is granted, hosts and programs included
+/// (integration-5 R9), and the Zed-extension warning when the package has one (decision Q1).
+pub(crate) fn file_install_detail(
+    info: &crate::install_store::PackageInfo,
+    package: &std::path::Path,
+    current: &str,
+) -> String {
+    format!(
+        "It asks for:\n{}\n{}\nUnsigned, not from the registry.\nPackage: {}{current}",
+        describe_capability_ids(&info.manifest.consent_items()).join("\n"),
+        if info.zed_extension {
+            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
+        } else {
+            String::new()
+        },
+        package.display(),
+    )
 }
 
 #[derive(Clone, Copy)]

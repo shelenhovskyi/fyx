@@ -136,9 +136,9 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
             "ui:notifications" => {
                 format!("Shows notifications and progress in the workspace ({capability})")
             }
-            "ui:editor-decorations" => format!(
-                "Adds highlights, gutter marks and notes to your editors ({capability})"
-            ),
+            "ui:editor-decorations" => {
+                format!("Adds highlights, gutter marks and notes to your editors ({capability})")
+            }
             "ui:images" => format!("Shows images from its package or that it makes ({capability})"),
             "ui:canvas" => format!("Draws shapes and charts in its views ({capability})"),
             "workspace:read-buffers" => {
@@ -261,13 +261,8 @@ pub(crate) fn prompt_and_install(
             };
             let source = fs.canonicalize(&source).await.unwrap_or(source);
             let (extension_id, manifest) = check_dev_folder(&source, fs.as_ref()).await?;
-            let detail = format!(
-                "It asks for:\n{}\n\nComponent: {}\nFolder: {}\n\nFyx loads it on every start and \
-                 reloads it when the component is rebuilt.",
-                describe_capabilities(&manifest).join("\n"),
-                manifest.component,
-                source.display()
-            );
+            let zed_extension = has_zed_extension(&source, fs.as_ref()).await;
+            let detail = dev_install_detail(&manifest, &source, zed_extension);
             let answer = workspace.update_in(cx, |workspace, window, cx| {
                 crate::choice::confirm(
                     workspace,
@@ -338,6 +333,36 @@ pub(crate) fn prompt_and_install(
     .detach();
 }
 
+/// What the install dialogs and the consent card add for a folder or package that also holds a
+/// Zed extension (`extension.wasm`), which runs outside `fyx:ui`'s permissions (decision Q1).
+pub const ZED_EXTENSION_WARNING: &str =
+    "Also runs a Zed extension with unrestricted network and process access.";
+
+/// Whether `dir` (an unpacked package or a dev folder) has a Zed extension next to `fyx_ui`.
+pub async fn has_zed_extension(dir: &Path, fs: &dyn Fs) -> bool {
+    fs.is_file(&dir.join("extension.wasm")).await
+}
+
+/// The dev-folder install dialog's text.
+pub(crate) fn dev_install_detail(
+    manifest: &UiManifest,
+    source: &Path,
+    zed_extension: bool,
+) -> String {
+    format!(
+        "It asks for:\n{}\n{}\nComponent: {}\nFolder: {}\n\nFyx loads it on every start and \
+         reloads it when the component is rebuilt.",
+        describe_capabilities(manifest).join("\n"),
+        if zed_extension {
+            format!("{ZED_EXTENSION_WARNING}\n")
+        } else {
+            String::new()
+        },
+        manifest.component,
+        source.display()
+    )
+}
+
 /// The action: pick one of the dev paths and take it off the list.
 pub(crate) fn prompt_and_remove(
     workspace: &mut Workspace,
@@ -358,7 +383,10 @@ pub(crate) fn prompt_and_remove(
         workspace,
         "Remove which dev UI extension?",
         None,
-        paths.iter().map(|path| path.display().to_string()).collect(),
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
         window,
         cx,
     );
