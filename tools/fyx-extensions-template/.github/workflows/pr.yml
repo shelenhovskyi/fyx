@@ -1,0 +1,167 @@
+# Untrusted (registry-repo.md, "pr.yml"): runs the PR's code with a read-only token and no
+# secrets. It cannot comment, label or set statuses; review.yml does that from its artifacts,
+# which it treats as data.
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      entries: ${{ steps.diff.outputs.entries }}
+      keys: ${{ steps.diff.outputs.keys }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --name-only "$BASE...$HEAD" > changed.txt
+          entries=$(grep -E '^extensions/[^/]+\.toml$' changed.txt | jq -R . | jq -sc . || true)
+          echo "entries=${entries:-[]}" >> "$GITHUB_OUTPUT"
+          if grep -q '^keys/' changed.txt; then echo "keys=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Record the PR for review.yml
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p pr
+          jq -n --argjson number "$NUMBER" --arg head "$HEAD" '{number: $number, head: $head}' > pr/pr.json
+          cp changed.txt pr/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr
+          path: pr/
+
+  entry:
+    needs: changes
+    if: needs.changes.outputs.entries != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        file: ${{ fromJSON(needs.changes.outputs.entries) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate the entry
+        env:
+          FILE: ${{ matrix.file }}
+        run: python3 scripts/registry.py entry "$FILE" > entry.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: entry-${{ strategy.job-index }}
+          path: entry.json
+
+  # One job per entry, so one extension's build scripts cannot touch another's artifacts.
+  build:
+    needs: [changes, entry]
+    if: needs.changes.outputs.entries != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        file: ${{ fromJSON(needs.changes.outputs.entries) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the entry and the pinned builder
+        id: entry
+        env:
+          FILE: ${{ matrix.file }}
+        run: |
+          python3 scripts/registry.py entry "$FILE" > entry.json
+          echo "repository=$(jq -r .source.repository entry.json)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(jq -r .source.commit entry.json)" >> "$GITHUB_OUTPUT"
+          echo "path=$(jq -r .source.path entry.json)" >> "$GITHUB_OUTPUT"
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          case "$image" in
+            *@sha256:0000000000000000000000000000000000000000000000000000000000000000)
+              echo "::error::policy/builder.toml has no builder image digest yet (task 3.2)"; exit 1 ;;
+          esac
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Fetch the source at the commit
+        env:
+          REPOSITORY: ${{ steps.entry.outputs.repository }}
+          COMMIT: ${{ steps.entry.outputs.commit }}
+        run: |
+          git init -q source && cd source
+          git remote add origin "$REPOSITORY"
+          git fetch -q --depth 1 origin "$COMMIT"
+          git checkout -q FETCH_HEAD
+          # The commit must be on one of the repository's branches, not only on a fork's PR ref.
+          git fetch -q --filter=blob:none origin '+refs/heads/*:refs/remotes/origin/*'
+          if [ -z "$(git branch -r --contains "$COMMIT")" ]; then
+            echo "::error::$COMMIT is on no branch of $REPOSITORY"; exit 1
+          fi
+          test -f Cargo.lock || { echo "::error::the source has no Cargo.lock"; exit 1; }
+      - name: Fetch dependencies (the only step with network)
+        env:
+          IMAGE: ${{ steps.entry.outputs.image }}
+        run: |
+          docker run --rm -v "$PWD/source:/src" -v "$PWD/cargo-home:/cargo" -e CARGO_HOME=/cargo \
+            -w /src "$IMAGE" cargo fetch --locked
+      - name: Check, test and package, offline
+        env:
+          IMAGE: ${{ steps.entry.outputs.image }}
+          EXTENSION_PATH: ${{ steps.entry.outputs.path }}
+        run: |
+          mkdir -p out
+          docker run --rm --network none -e CARGO_NET_OFFLINE=true -e CARGO_HOME=/cargo \
+            -v "$PWD/source:/src" -v "$PWD/cargo-home:/cargo" -v "$PWD/out:/out" \
+            -w "/src/$EXTENSION_PATH" "$IMAGE" sh -euc '
+              fyx-ext check --deny-warnings
+              fyx-ext test
+              fyx-ext package --out /out
+            '
+      - name: Advisories (reported, not blocking)
+        env:
+          IMAGE: ${{ steps.entry.outputs.image }}
+        run: |
+          docker run --rm --network none -v "$PWD/source:/src" -w /src "$IMAGE" \
+            cargo deny check advisories || echo "::warning::cargo deny reported advisories"
+      - name: The unsigned release and the review inputs
+        env:
+          EXTENSION_PATH: ${{ steps.entry.outputs.path }}
+        run: |
+          package=$(ls out/*.fyxext)
+          python3 scripts/registry.py release --entry entry.json \
+            --manifest "source/$EXTENSION_PATH/extension.toml" --package "$package" > out/release.json
+          sha256sum "$package" > out/package.sha256
+          mkdir -p out/review
+          cp "source/$EXTENSION_PATH/extension.toml" out/review/
+          unzip -l "$package" > out/review/package-files.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ strategy.job-index }}
+          path: out/
+
+  keyset:
+    needs: changes
+    if: needs.changes.outputs.keys == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Role separation
+        env:
+          SNAPSHOT_KEY_ID: ${{ vars.SNAPSHOT_KEY_ID }}
+        run: |
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          docker run --rm --network none -v "$PWD/keys:/keys:ro" "$image" \
+            fyx-registry verify keyset /keys/keyset.json --online-snapshot-key "$SNAPSHOT_KEY_ID"

@@ -80,7 +80,10 @@ line decorations, code lenses, read-only documents, network and processes behind
     own owners, as the PR's author or by an approving review. Any release that is **T2** needs the
     owner of the registry, for every version. So does anything that adds a T2 capability, a network
     domain or a process name. The owner also approves every `urgent` flag. An owner change needs
-    an existing owner of the entry. Every entry PR also gets an **agent review** (owner,
+    an existing owner of the entry. A **reserved id** (`fyx-*`, …) can be registered only by an
+    entry owned by the registry owner alone, with the owner's approval. A PR opened by the owner
+    (of the registry, or of the entry) counts as that owner's approval, since GitHub does not let
+    an author approve their own PR (accepted 2026-11-18). Every entry PR also gets an **agent review** (owner,
     2026-11-18), a CI job that can only escalate.
     - **What it reviews:** the diff and the built package, for capabilities against code,
       obfuscation, network and process use, and dubious assets.
@@ -89,6 +92,11 @@ line decorations, code lenses, read-only documents, network and processes behind
     - **Verdict:** a structured verdict with reasons, posted as a comment. `concern` adds the
       `needs-owner` label and blocks auto-merge until the owner approves. `pass` counts toward T0–T1
       auto-merge and never approves anything.
+    - **Triggers and merge** (accepted 2026-11-18): the decision runs on `workflow_run`, because a
+      review on a fork PR gets a read-only token. Auto-merge uses a GitHub App token
+      (`AUTO_MERGE_TOKEN`, Environment `auto-merge`), because a merge with `GITHUB_TOKEN` would not
+      start the publish workflow. The owner creates that App with the repository; until then green
+      PRs are merged by hand.
 
     Design: [registry-repo.md](registry-repo.md#review-rules).
 17. Client: the Extensions page gets a Fyx tab with search, install, update, uninstall,

@@ -1,0 +1,9 @@
+# The sample T0 entry: Fyx's counter demo panel, built from the Fyx repository.
+# (The real registry reserves fyx-*; this sample is the owner's, see README.md.)
+id     = "fyx-demo-counter"
+owners = ["shelenhovskyi"]
+
+[source]
+repository = "https://github.com/shelenhovskyi/fyx"
+commit     = "1854e93843fc1b29f47ddaa1d8d5597dde8ab26b"
+path       = "extensions/fyx_demo_counter"

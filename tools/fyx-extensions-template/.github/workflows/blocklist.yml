@@ -1,0 +1,58 @@
+# Trusted (registry-repo.md, "blocklist.yml"): sign and publish the block list when
+# blocklist/ changes on main. Its Environment holds the block-list key and nothing else, and the
+# key is only in the environment of the step that signs.
+name: blocklist
+
+on:
+  push:
+    branches: [main]
+    paths: ["blocklist/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blocklist
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    environment: blocklist-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 1. The unsigned block list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          mkdir -p published
+          sequence=1
+          if gh release download index --repo "$REPO" --pattern blocklist.json --dir published; then
+            sequence=$(( $(jq -r .signed.sequence published/blocklist.json) + 1 ))
+          fi
+          python3 scripts/registry.py blocklist blocklist/blocklist.toml --sequence "$sequence" \
+            --now "$(date +%s)" > unsigned.json
+      - name: 2. Sign it
+        env:
+          FYX_REGISTRY_SIGNING_KEY: ${{ secrets.BLOCKLIST_KEY }}
+        run: |
+          docker run --rm --network none -e FYX_REGISTRY_SIGNING_KEY -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry sign blocklist unsigned.json --out blocklist.json
+      - name: 3. Verify it, 4. upload it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          docker run --rm --network none -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry verify blocklist blocklist.json --keyset keys/keyset.json
+          gh release view index --repo "$REPO" > /dev/null 2>&1 \
+            || gh release create index --repo "$REPO" --title index --notes "Registry documents"
+          gh release upload index --repo "$REPO" --clobber blocklist.json
