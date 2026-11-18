@@ -54,7 +54,9 @@ pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
 };
-pub use registry::{DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, UiExtensionRegistry};
+pub use registry::{
+    DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, UiExtensionRegistry,
+};
 pub use store_actions::{
     InstallUiExtensionFromFile, RestartUiExtension, RevokeUiExtensionPermission,
     RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,

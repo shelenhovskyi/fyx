@@ -323,7 +323,15 @@ impl UiExtension {
             )
             .await?;
         let nodes = self.guest_result(result, &effects)?;
-        let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), self.limits)
+        // Validated as a 0.2 tree; the 0.1 copy is for the 0.1 shims, until plan 2.3 drops them.
+        let tree = model::tree::Tree::from_nodes(nodes.clone(), self.limits)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| {
+                Ok(Tree::from_nodes(
+                    nodes.iter().map(shim::node).collect(),
+                    self.limits,
+                )?)
+            })
             .with_context(|| format!("invalid tree from mount({surface_id:?})"));
         match tree {
             Ok(tree) => Ok((nodes, tree, effects)),
@@ -360,6 +368,12 @@ impl UiExtension {
                     "list-rows({surface_id:?}, {list_node}) returned row {} outside {requested:?}",
                     row.index,
                 );
+                model::tree::Tree::from_row(row.nodes.clone(), self.limits).with_context(|| {
+                    format!(
+                        "invalid row {} from list-rows({surface_id:?}, {list_node})",
+                        row.index
+                    )
+                })?;
                 let tree = Tree::from_row(row.nodes.iter().map(shim::node).collect(), self.limits)
                     .with_context(|| {
                         format!(

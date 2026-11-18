@@ -9,12 +9,12 @@ use collections::HashMap;
 use gpui::{App, Context, SharedString, Task};
 use ui_ext::v0_2::{NodeId, Patch, Props, Surface, UiEvent, Update, tree::Tree};
 
-use crate::backend::{PushedUpdate, Reply, ReplyError, UiBackend};
+use crate::backend::{HostEffect, Reply, ReplyError, Row, UiBackend};
 
 /// How a surface reaches the other surfaces of its extension (the registry implements it).
 pub trait SurfaceLink {
     /// Delivers a push that a call on one surface made for another surface of the extension.
-    fn route_push(&self, push: PushedUpdate, cx: &mut App);
+    fn route_effect(&self, effect: HostEffect, cx: &mut App);
     /// The extension's instance is gone (trap, time budget, disabled): every other surface of
     /// it stops too.
     fn extension_failed(&self, from_surface: &str, message: SharedString, cx: &mut App);
@@ -74,6 +74,8 @@ const MAX_WANTED_ROWS: u32 = 256;
 struct CachedRow {
     generation: u64,
     tree: Option<Tree>,
+    /// Levels to indent the row by (0.2's `list-row.indent`, clamped).
+    indent: u8,
 }
 
 /// An event waiting for the extension, with what it was aimed at when the user made it.
@@ -187,14 +189,40 @@ pub fn summarize_update(update: &Update) -> String {
 }
 
 impl SurfaceState {
+    /// A surface that mounts itself from the extension.
     pub fn new(
         backend: Rc<dyn UiBackend>,
         surface: Surface,
         link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::unmounted(backend, surface, link);
+        this.mount(cx);
+        this
+    }
+
+    /// A surface whose first tree is already known (a decoration's `place-decoration` nodes):
+    /// no `mount` call; a later resync or Retry mounts from the extension as usual.
+    pub fn with_tree(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        link: Option<Rc<dyn SurfaceLink>>,
+        tree: Tree,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::unmounted(backend, surface, link);
+        this.set_tree(tree);
+        cx.notify();
+        this
+    }
+
+    fn unmounted(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        link: Option<Rc<dyn SurfaceLink>>,
+    ) -> Self {
         let backend_version = backend.api_version();
-        let mut this = Self {
+        Self {
             backend,
             surface,
             link,
@@ -213,9 +241,7 @@ impl SurfaceState {
             history: VecDeque::new(),
             rules: ApiRules::for_version(&backend_version),
             _mount: None,
-        };
-        this.mount(cx);
-        this
+        }
     }
 
     pub fn surface(&self) -> &Surface {
@@ -285,14 +311,11 @@ impl SurfaceState {
             this.update(cx, |this, cx| {
                 this.resyncing = false;
                 match result {
-                    Ok(Reply { pushed, value }) => {
+                    Ok(Reply { effects, value }) => {
                         // Pushes for this surface made during `mount` are superseded by the tree
-                        // it returns; pushes for other surfaces still apply.
-                        let others = pushed
-                            .into_iter()
-                            .filter(|push| push.surface_id != this.surface.id)
-                            .collect();
-                        this.apply_pushes(others, cx);
+                        // it returns; every other effect still applies.
+                        let others = this.without_own_pushes(effects);
+                        this.apply_effects(others, cx);
                         this.set_tree(value);
                     }
                     Err(error) => {
@@ -301,13 +324,10 @@ impl SurfaceState {
                             this.extension_id(),
                             this.surface.id
                         );
-                        if let Some(pushed) = reply_error_pushes(&error) {
+                        if let Some(effects) = reply_error_effects(&error) {
                             // This surface has no tree to apply its own pushes to.
-                            let others = pushed
-                                .into_iter()
-                                .filter(|push| push.surface_id != this.surface.id)
-                                .collect();
-                            this.apply_pushes(others, cx);
+                            let others = this.without_own_pushes(effects);
+                            this.apply_effects(others, cx);
                             this.fail(format!("{error:#}").into(), true, cx);
                         } else {
                             this.fail_extension(&error, cx);
@@ -557,8 +577,8 @@ impl SurfaceState {
     ) {
         match result {
             // Pushes made during the call first, the reply last.
-            Ok(Reply { pushed, value }) => {
-                if self.apply_pushes(pushed, cx) && self.apply_update(value, cx) {
+            Ok(Reply { effects, value }) => {
+                if self.apply_effects(effects, cx) && self.apply_update(value, cx) {
                     self.remounts_without_input = 0;
                 }
             }
@@ -568,9 +588,9 @@ impl SurfaceState {
                     self.extension_id(),
                     self.surface.id
                 );
-                match reply_error_pushes(&error) {
-                    Some(pushed) => {
-                        self.apply_pushes(pushed, cx);
+                match reply_error_effects(&error) {
+                    Some(effects) => {
+                        self.apply_effects(effects, cx);
                         self.last_error = Some(format!("{error:#}").into());
                         cx.notify();
                     }
@@ -580,25 +600,36 @@ impl SurfaceState {
         }
     }
 
-    /// Applies pushes in order: this surface's here, other surfaces' through the link. Returns
-    /// false if one of this surface's failed: the surface is then being mounted again, so its
-    /// later pushes and the reply no longer fit and are skipped. Pushes for other surfaces are
-    /// still routed, because their mirrors in the extension already count them as applied.
-    fn apply_pushes(&mut self, pushed: Vec<PushedUpdate>, cx: &mut Context<Self>) -> bool {
+    fn without_own_pushes(&self, effects: Vec<HostEffect>) -> Vec<HostEffect> {
+        effects
+            .into_iter()
+            .filter(|effect| {
+                !matches!(effect, HostEffect::Push { surface_id, .. } if *surface_id == self.surface.id)
+            })
+            .collect()
+    }
+
+    /// Applies a call's effects in order: this surface's pushes here, everything else (pushes to
+    /// other surfaces and decorations, ticks, surfaces added, removed, shown or hidden) through the
+    /// link. Returns false if one of this surface's pushes failed: the surface is then being
+    /// mounted again, so its later pushes and the reply no longer fit and are skipped. Other
+    /// effects still apply, because the extension already counts them as done.
+    fn apply_effects(&mut self, effects: Vec<HostEffect>, cx: &mut Context<Self>) -> bool {
         let mut own_ok = true;
-        for push in pushed {
-            if push.surface_id == self.surface.id {
-                if own_ok && !self.apply_update(push.update, cx) {
-                    own_ok = false;
+        for effect in effects {
+            match effect {
+                HostEffect::Push { surface_id, update } if surface_id == self.surface.id => {
+                    if own_ok && !self.apply_update(update, cx) {
+                        own_ok = false;
+                    }
                 }
-            } else if let Some(link) = self.link.clone() {
-                link.route_push(push, cx);
-            } else {
-                log::error!(
-                    "fyx:ui {}: dropping a push for surface {:?}, nothing routes it",
-                    self.backend.extension_id(),
-                    push.surface_id
-                );
+                effect => match self.link.clone() {
+                    Some(link) => link.route_effect(effect, cx),
+                    None => log::error!(
+                        "fyx:ui {}: dropping {effect:?}, nothing routes it",
+                        self.backend.extension_id(),
+                    ),
+                },
             }
         }
         own_ok
@@ -715,6 +746,14 @@ impl SurfaceState {
         self.lists.get(&list)?.rows.get(&index)?.tree.as_ref()
     }
 
+    /// The indent level of a cached row (0 when unknown).
+    pub fn row_indent(&self, list: NodeId, index: u32) -> u8 {
+        self.lists
+            .get(&list)
+            .and_then(|cache| cache.rows.get(&index))
+            .map_or(0, |row| row.indent)
+    }
+
     /// Makes sure rows `range` of `list` are fetched, without waiting for them. Cheap when they
     /// are cached, so views call it for the visible range on every layout. Requests made during
     /// one layout are merged into one `list-rows` call, made right after it.
@@ -802,21 +841,21 @@ impl SurfaceState {
         list: NodeId,
         generation: u64,
         range: Range<u32>,
-        result: anyhow::Result<Reply<Vec<(u32, Tree)>>>,
+        result: anyhow::Result<Reply<Vec<Row>>>,
         cx: &mut Context<Self>,
     ) {
         let result = match result {
-            Ok(Reply { pushed, value }) => {
+            Ok(Reply { effects, value }) => {
                 // A push that touches this list gives it a new generation, so these rows no
                 // longer count and are fetched again.
-                if self.apply_pushes(pushed, cx) {
+                if self.apply_effects(effects, cx) {
                     self.remounts_without_input = 0;
                 }
                 Ok(value)
             }
-            Err(error) => match reply_error_pushes(&error) {
-                Some(pushed) => {
-                    self.apply_pushes(pushed, cx);
+            Err(error) => match reply_error_effects(&error) {
+                Some(effects) => {
+                    self.apply_effects(effects, cx);
                     Err(error)
                 }
                 None => {
@@ -837,10 +876,20 @@ impl SurfaceState {
         if generation == cache.generation {
             match result {
                 Ok(rows) => {
-                    let mut answered: HashMap<u32, Tree> = rows.into_iter().collect();
+                    let mut answered: HashMap<u32, Row> =
+                        rows.into_iter().map(|row| (row.index, row)).collect();
                     for index in range.clone() {
-                        let tree = answered.remove(&index);
-                        cache.rows.insert(index, CachedRow { generation, tree });
+                        let row = answered.remove(&index);
+                        let indent = row.as_ref().map_or(0, |row| row.indent);
+                        let tree = row.map(|row| row.tree);
+                        cache.rows.insert(
+                            index,
+                            CachedRow {
+                                generation,
+                                tree,
+                                indent,
+                            },
+                        );
                     }
                     if cache.rows.len() > MAX_CACHED_ROWS {
                         let keep = range.start.saturating_sub(MAX_CACHED_ROWS as u32 / 4)
@@ -881,11 +930,11 @@ impl RowCache {
 
 /// The pushes a rejected call carries, or `None` when the error is not a rejection: then the
 /// instance itself failed (trap, time budget, disabled) and carries none.
-fn reply_error_pushes(error: &anyhow::Error) -> Option<Vec<PushedUpdate>> {
+fn reply_error_effects(error: &anyhow::Error) -> Option<Vec<HostEffect>> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ReplyError>())
-        .map(|reply_error| reply_error.pushed.clone())
+        .map(|reply_error| reply_error.effects.clone())
 }
 
 fn count_all_inputs(tree: &Tree, input_sets: &mut HashMap<NodeId, u64>) {

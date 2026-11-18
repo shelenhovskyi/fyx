@@ -701,7 +701,7 @@ impl UiBackend for StaticBackend {
             .map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -711,7 +711,7 @@ impl UiBackend for StaticBackend {
     fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -724,10 +724,10 @@ impl UiBackend for StaticBackend {
         _: NodeId,
         _: u32,
         _: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Vec::new(),
             })
         }
