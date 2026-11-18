@@ -18,6 +18,7 @@ use crate::{
     UiState,
     conversions::{self, unsupported},
     network,
+    permissions::PermissionState,
 };
 
 pub(crate) mod bindings {
@@ -84,13 +85,17 @@ impl wit_network::Host for UiState {
             }
             .into()));
         }
-        // The broker at every call; a declared T2 capability it refuses is `denied`.
-        if let Err(denied) = self.check_capability(network::CAPABILITY_NETWORK) {
-            return Ok(Err(model::HostError {
-                code: model::HostErrorCode::Denied,
-                message: denied.to_string(),
+        // The broker at every call. `ask` is accepted: the prompt comes when the request is
+        // applied, after this call returns (design.md §0.3, §7).
+        match self.permission_state(network::CAPABILITY_NETWORK) {
+            PermissionState::Granted | PermissionState::Ask => {}
+            state @ (PermissionState::Denied | PermissionState::Unavailable) => {
+                return Ok(Err(model::HostError {
+                    code: model::HostErrorCode::Denied,
+                    message: format!("{} is {state:?}", network::CAPABILITY_NETWORK),
+                }
+                .into()));
             }
-            .into()));
         }
         let request = network::FetchRequest {
             method: match request.method {
@@ -116,9 +121,27 @@ impl wit_network::Host for UiState {
     }
 }
 
-/// An outcome for the `handle-io` export.
-pub(crate) fn io_event(event: network::IoEvent) -> wit_io::IoEvent {
-    match event {
+/// An outcome for the `handle-io` export; `None` for a capability 0.3 has no name for.
+pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
+    use bindings::fyx::ui::permissions as wit_permissions;
+    Some(match event {
+        network::IoEvent::PermissionChanged(capability, state) => {
+            wit_io::IoEvent::PermissionChanged((
+                match capability.as_str() {
+                    "network:fetch" => wit_permissions::T2Capability::NetworkFetch,
+                    "process:spawn" => wit_permissions::T2Capability::ProcessSpawn,
+                    "workspace:edit" => wit_permissions::T2Capability::WorkspaceEdit,
+                    "agent:observe" => wit_permissions::T2Capability::AgentObserve,
+                    _ => return None,
+                },
+                match state {
+                    PermissionState::Granted => wit_permissions::PermissionState::Granted,
+                    PermissionState::Denied => wit_permissions::PermissionState::Denied,
+                    PermissionState::Ask => wit_permissions::PermissionState::Ask,
+                    PermissionState::Unavailable => wit_permissions::PermissionState::Unavailable,
+                },
+            ))
+        }
         network::IoEvent::FetchDone(id, result) => wit_io::IoEvent::FetchDone((
             id,
             result
@@ -145,7 +168,7 @@ pub(crate) fn io_event(event: network::IoEvent) -> wit_io::IoEvent {
                     network::FetchError::Other(error) => wit_network::FetchError::Other(error),
                 }),
         )),
-    }
+    })
 }
 
 conversions::conversions! {

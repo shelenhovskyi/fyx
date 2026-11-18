@@ -24,6 +24,8 @@ use futures::{
 };
 use http_proxy::HostPattern;
 use ui_ext::v0_2::{HostError, HostErrorCode};
+
+use crate::permissions::{CapabilityCheck, PermissionState};
 use url::Url;
 
 pub const CAPABILITY_NETWORK: &str = "network:fetch";
@@ -138,6 +140,9 @@ impl fmt::Display for FetchError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IoEvent {
     FetchDone(u64, Result<FetchResponse, FetchError>),
+    /// A T2 capability's state changed (the prompt was answered, or the extensions page
+    /// changed it); in-flight work of a revoked one was cancelled first.
+    PermissionChanged(String, crate::permissions::PermissionState),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -684,13 +689,16 @@ async fn read_capped(mut reader: impl futures::AsyncRead + Unpin) -> Result<Vec<
 // ---------------------------------------------------------------------------------------------
 // Running requests
 
-/// The requests of one instance that started and have not delivered yet, so `cancel-fetch`,
-/// a reload and a disable can stop them.
+/// The requests of one instance that started and have not delivered yet, so `cancel-fetch`, a
+/// revocation, a reload and a disable can stop them, and the way their outcomes leave.
 #[derive(Default)]
 pub(crate) struct Running {
     handles: Mutex<HashMap<u64, futures::future::AbortHandle>>,
-    /// Set when the instance goes away: its aborted requests deliver nothing.
-    closed: std::sync::atomic::AtomicBool,
+    /// Aborted because the capability was revoked: they deliver `denied`, not `cancelled`.
+    revoked: Mutex<std::collections::HashSet<u64>>,
+    /// Where outcomes go; `None` once the instance is gone, so nothing delivers after that and
+    /// no task keeps the channel open.
+    events: Mutex<Option<futures::channel::mpsc::Sender<IoEvent>>>,
 }
 
 impl Running {
@@ -713,12 +721,50 @@ impl Running {
         }
     }
 
+    /// The capability was revoked: every running request ends with `denied` (decision 26).
+    pub(crate) fn revoke_all(&self) {
+        let handles: Vec<_> = self.lock().drain().collect();
+        let mut revoked = self.revoked.lock().unwrap_or_else(PoisonError::into_inner);
+        for (id, handle) in handles {
+            revoked.insert(id);
+            handle.abort();
+        }
+    }
+
+    /// The outcome of an aborted request.
+    fn aborted(&self, id: u64) -> FetchError {
+        if self
+            .revoked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+        {
+            FetchError::Denied
+        } else {
+            FetchError::Cancelled
+        }
+    }
+
     /// The instance is gone (reload, disable, uninstall): every request stops and none
     /// delivers, not even `cancelled` (design §0.3 step 7).
     pub(crate) fn cancel_all(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         for (_, handle) in self.lock().drain() {
             handle.abort();
+        }
+    }
+
+    async fn deliver(&self, event: IoEvent) {
+        let sender = self
+            .events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(mut sender) = sender {
+            sender.send(event).await.ok();
         }
     }
 
@@ -841,9 +887,8 @@ pub(crate) struct NetworkHandle {
     extension_id: Arc<str>,
     domains: Arc<DomainList>,
     fetcher: Fetcher,
-    consent: Option<Arc<dyn crate::permissions::T2Consent>>,
+    broker: Option<Arc<dyn CapabilityCheck>>,
     running: Arc<Running>,
-    events: futures::channel::mpsc::Sender<IoEvent>,
     receiver: Mutex<Option<futures::channel::mpsc::Receiver<IoEvent>>>,
 }
 
@@ -856,17 +901,20 @@ impl NetworkHandle {
         extension_id: Arc<str>,
         domains: Arc<DomainList>,
         fetcher: Fetcher,
-        consent: Option<Arc<dyn crate::permissions::T2Consent>>,
+        broker: Option<Arc<dyn CapabilityCheck>>,
         running: Arc<Running>,
     ) -> Self {
         let (events, receiver) = futures::channel::mpsc::channel(MAX_QUEUED_IO_EVENTS);
+        *running
+            .events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(events);
         Self {
             extension_id,
             domains,
             fetcher,
-            consent,
+            broker,
             running,
-            events,
             receiver: Mutex::new(Some(receiver)),
         }
     }
@@ -881,45 +929,64 @@ impl NetworkHandle {
     /// Whether the capability is granted now, for the delivery: a revocation while a request
     /// ran turns its outcome into `denied`.
     pub(crate) fn granted(&self) -> bool {
-        self.consent.as_ref().is_some_and(|consent| {
-            consent.state(&self.extension_id, CAPABILITY_NETWORK)
-                == crate::permissions::ConsentState::Granted
-        })
+        state(self.broker.as_ref(), &self.extension_id) == PermissionState::Granted
+    }
+
+    /// Follows the broker's state changes for this instance, on the current tokio runtime: a
+    /// revocation of `network:fetch` ends the running requests with `denied`, and every change
+    /// is delivered as `permission-changed`. Only for a component that has `handle-io`.
+    pub(crate) fn watch_permissions(&self) {
+        let Some(broker) = &self.broker else {
+            return;
+        };
+        let mut changes = broker.changes(&self.extension_id);
+        let running = Arc::downgrade(&self.running);
+        tokio::spawn(async move {
+            use futures::StreamExt as _;
+            while let Some((capability, state)) = changes.next().await {
+                let Some(running) = running.upgrade() else {
+                    return;
+                };
+                if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
+                    running.revoke_all();
+                }
+                running
+                    .deliver(IoEvent::PermissionChanged(capability, state))
+                    .await;
+            }
+        });
     }
 
     /// Starts `pending` on the current tokio runtime, in call order.
     pub(crate) fn start(&self, pending: Vec<PendingFetch>) {
         for fetch in pending {
             let id = fetch.id;
-            let mut events = self.events.clone();
+            let running = self.running.clone();
             if fetch.cancelled {
                 tokio::spawn(async move {
-                    events
-                        .send(IoEvent::FetchDone(id, Err(FetchError::Cancelled)))
-                        .await
-                        .ok();
+                    running
+                        .deliver(IoEvent::FetchDone(id, Err(FetchError::Cancelled)))
+                        .await;
                 });
                 continue;
             }
             let (handle, registration) = futures::future::AbortHandle::new_pair();
             self.running.insert(id, handle);
-            let running = self.running.clone();
             let fetcher = self.fetcher.clone();
             let domains = self.domains.clone();
-            let consent = self.consent.clone();
+            let broker = self.broker.clone();
             let extension_id = self.extension_id.clone();
             tokio::spawn(async move {
                 let work = async move {
-                    ask_consent(consent, &extension_id, &domains).await?;
+                    ask_consent(broker.as_ref(), &extension_id).await?;
                     fetcher.fetch(&domains, fetch.url, fetch.request).await
                 };
-                let result = futures::future::Abortable::new(work, registration)
-                    .await
-                    .unwrap_or(Err(FetchError::Cancelled));
+                let result = match futures::future::Abortable::new(work, registration).await {
+                    Ok(result) => result,
+                    Err(_) => Err(running.aborted(id)),
+                };
                 running.remove(id);
-                if !running.closed.load(std::sync::atomic::Ordering::SeqCst) {
-                    events.send(IoEvent::FetchDone(id, result)).await.ok();
-                }
+                running.deliver(IoEvent::FetchDone(id, result)).await;
             });
         }
     }
@@ -931,31 +998,28 @@ impl Drop for NetworkHandle {
     }
 }
 
-/// The broker, when a request is applied (design §0.3 step 3, §7): granted runs, denied fails,
-/// `ask` waits for the prompt. Without a broker, T2 is denied.
+fn state(broker: Option<&Arc<dyn CapabilityCheck>>, extension_id: &str) -> PermissionState {
+    broker.map_or(PermissionState::Unavailable, |broker| {
+        broker.state(extension_id, CAPABILITY_NETWORK)
+    })
+}
+
+/// The broker, when a request is applied (design §0.3 step 3, §7): granted runs, `ask` waits
+/// for the prompt, anything else fails with `denied`. Without a broker, T2 is denied.
 async fn ask_consent(
-    consent: Option<Arc<dyn crate::permissions::T2Consent>>,
+    broker: Option<&Arc<dyn CapabilityCheck>>,
     extension_id: &str,
-    domains: &DomainList,
 ) -> Result<(), FetchError> {
-    use crate::permissions::{ConsentRequest, ConsentState};
-    let Some(consent) = consent else {
-        return Err(FetchError::Denied);
-    };
-    match consent.state(extension_id, CAPABILITY_NETWORK) {
-        ConsentState::Granted => Ok(()),
-        ConsentState::Denied => Err(FetchError::Denied),
-        ConsentState::Ask => {
-            let request = ConsentRequest {
-                capability: CAPABILITY_NETWORK.into(),
-                domains: domains.texts(),
-            };
-            if consent.request(extension_id, request).await {
-                Ok(())
-            } else {
-                Err(FetchError::Denied)
-            }
-        }
+    match state(broker, extension_id) {
+        PermissionState::Granted => Ok(()),
+        PermissionState::Ask => match broker {
+            Some(broker) => match broker.request(extension_id, CAPABILITY_NETWORK).await {
+                PermissionState::Granted => Ok(()),
+                _ => Err(FetchError::Denied),
+            },
+            None => Err(FetchError::Denied),
+        },
+        PermissionState::Denied | PermissionState::Unavailable => Err(FetchError::Denied),
     }
 }
 
