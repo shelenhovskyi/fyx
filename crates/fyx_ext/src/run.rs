@@ -93,7 +93,7 @@ pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
         };
         summary.surfaces += 1;
         summary.nodes += tree.len();
-        warn_about_unnamed_buttons(harness, &surface.id, report);
+        warn_about_unnamed_controls(harness, &surface.id, report);
         let Some(tree) = harness.tree(&surface.id) else {
             continue;
         };
@@ -136,9 +136,10 @@ pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
     summary
 }
 
-/// A button with an icon and no label has no accessible name unless it has a tooltip (ux-1 F16).
-/// Tooltips arrived with fyx:ui 0.2, so a 0.1 component is told to add a label instead.
-fn warn_about_unnamed_buttons(harness: &Harness, surface_id: &str, report: &mut Report) {
+/// A button with an icon and no label has no accessible name unless it has a tooltip, and an input
+/// none without a label or a placeholder (ux-1 F16). Tooltips and input labels arrived with
+/// fyx:ui 0.2, so a 0.1 component is told to add a button label or a placeholder instead.
+fn warn_about_unnamed_controls(harness: &Harness, surface_id: &str, report: &mut Report) {
     let Some(nodes) = harness.nodes_v0_2(surface_id) else {
         return;
     };
@@ -158,6 +159,23 @@ fn warn_about_unnamed_buttons(harness: &Harness, surface_id: &str, report: &mut 
         {
             report.warning(format!(
                 "button {} on {surface_id:?} shows only an icon and has no tooltip, so screen readers and hover give it no name; {fix}",
+                node.id
+            ));
+        }
+        if let ui_ext::v0_2::Props::Input(input) = &node.props
+            && input.placeholder.trim().is_empty()
+            && input
+                .label
+                .as_deref()
+                .is_none_or(|label| label.trim().is_empty())
+        {
+            let fix = if harness.ui_api_version() == ui_ext::ApiVersion::V0_1_0 {
+                "add a placeholder (labels need fyx:ui 0.2)"
+            } else {
+                "add `.label(...)` or a placeholder"
+            };
+            report.warning(format!(
+                "input {} on {surface_id:?} has no label and no placeholder, so screen readers give it no name; {fix}",
                 node.id
             ));
         }
