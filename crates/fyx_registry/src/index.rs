@@ -141,7 +141,7 @@ pub struct Release {
     /// [`crate::RUNS_ZED_EXTENSION_WARNING`]. [`Release::verify_package`] checks it against the
     /// package. A client older than this field reads such a release as malformed and skips it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub runs_zed_extension: bool,
+    pub zed_extension: bool,
 }
 
 /// Where the registry CI built the package from (decision 15).
@@ -189,7 +189,7 @@ impl Canonical for Release {
         writer.strings(self.network_domains.iter().map(String::as_str));
         writer.strings(self.processes.iter().map(String::as_str));
         // Written only when set, so every release signed before the field keeps its signature.
-        if self.runs_zed_extension {
+        if self.zed_extension {
             writer.bool(true);
         }
         writer.finish()
@@ -262,7 +262,7 @@ impl Release {
                 )));
             }
         }
-        if self.runs_zed_extension && self.tier != Tier::T2 {
+        if self.zed_extension && self.tier != Tier::T2 {
             return Err(invalid(
                 "a release that runs a Zed extension is T2, whatever it declares".into(),
             ));
@@ -296,8 +296,8 @@ impl Release {
         Ok(())
     }
 
-    /// Checks downloaded package bytes against the signed size and hash, and that the package
-    /// has a Zed `extension.wasm` exactly when the release says so.
+    /// Checks downloaded package bytes against the signed size and hash, and that a package with
+    /// a Zed `extension.wasm` has a release with `zed_extension` set.
     pub fn verify_package(&self, package: &[u8]) -> Result<(), Error> {
         let size = package.len() as u64;
         if size != self.package.size {
@@ -313,18 +313,12 @@ impl Release {
                 self.id, self.version, self.package.sha256
             )));
         }
-        let runs_zed_extension = crate::runs_zed_extension(package);
-        if runs_zed_extension != self.runs_zed_extension {
+        // The signature must not hide a Zed component: a package that has one needs a release
+        // that says so (owner's Q1). A flag without one only over-warns.
+        if crate::runs_zed_extension(package) && !self.zed_extension {
             return Err(Error::PackageMismatch(format!(
-                "{}@{} {} a Zed extension.wasm, the release says {}",
-                self.id,
-                self.version,
-                if runs_zed_extension { "has" } else { "has no" },
-                if self.runs_zed_extension {
-                    "it has one"
-                } else {
-                    "it has none"
-                }
+                "{}@{} has a Zed extension.wasm, and the release does not say zed_extension",
+                self.id, self.version
             )));
         }
         Ok(())
@@ -667,7 +661,7 @@ pub(crate) mod test_support {
             capabilities: ["ui:panel".to_string()].into(),
             network_domains: BTreeSet::new(),
             processes: BTreeSet::new(),
-            runs_zed_extension: false,
+            zed_extension: false,
         }
     }
 
@@ -702,7 +696,7 @@ pub(crate) mod test_support {
             network_domains: reader.strings()?.into_iter().collect(),
             processes: reader.strings()?.into_iter().collect(),
             // Only ever written as `true`; a written `false` is not canonical.
-            runs_zed_extension: if reader.is_empty() {
+            zed_extension: if reader.is_empty() {
                 false
             } else if reader.bool()? {
                 true
@@ -1068,29 +1062,45 @@ mod tests {
     fn a_zed_extension_release_is_declared_and_t2() {
         let mut release = release("todo", "1.0.0");
         let plain = release.canonical_bytes();
-        release.runs_zed_extension = true;
+        release.zed_extension = true;
         assert_ne!(release.canonical_bytes(), plain, "the flag is signed");
-        release.runs_zed_extension = false;
+        release.zed_extension = false;
         assert_eq!(
             release.canonical_bytes(),
             plain,
             "old signatures still verify"
         );
 
-        release.runs_zed_extension = true;
+        release.zed_extension = true;
         assert!(
             matches!(release.validate(), Err(Error::Invalid(message)) if message.contains("T2"))
         );
         release.tier = Tier::T2;
         release.validate().expect("T2 with the flag");
         let json = serde_json::to_value(&release).expect("json");
-        assert_eq!(json["runs_zed_extension"], true);
-        release.runs_zed_extension = false;
+        assert_eq!(json["zed_extension"], true);
+        release.zed_extension = false;
         let json = serde_json::to_value(&release).expect("json");
-        assert!(
-            json.get("runs_zed_extension").is_none(),
-            "omitted when false"
-        );
+        assert!(json.get("zed_extension").is_none(), "omitted when false");
+    }
+
+    /// A package with a Zed `extension.wasm` needs `zed_extension` in its signed release.
+    #[test]
+    fn a_hidden_zed_extension_is_a_mismatch() {
+        // One central directory header naming `extension.wasm`: all `entry_names` reads.
+        let mut package = b"PK".to_vec();
+        package.resize(46, 0);
+        package[28] = 14;
+        package.extend_from_slice(b"extension.wasm");
+        let mut release = release("todo", "1.0.0");
+        release.package.size = package.len() as u64;
+        release.package.sha256 = Sha256Digest::of(&package);
+        assert!(matches!(
+            release.verify_package(&package),
+            Err(Error::PackageMismatch(message)) if message.contains("zed_extension")
+        ));
+        release.zed_extension = true;
+        assert_eq!(release.verify_package(&package), Ok(()));
     }
 
     #[test]
@@ -1144,7 +1154,7 @@ mod tests {
                         capabilities,
                         network_domains,
                         processes,
-                        runs_zed_extension,
+                        zed_extension,
                     ),
                 )| {
                     let mut release = release(&id, "0.0.0");
@@ -1160,7 +1170,7 @@ mod tests {
                     release.capabilities = capabilities;
                     release.network_domains = network_domains;
                     release.processes = processes;
-                    release.runs_zed_extension = runs_zed_extension;
+                    release.zed_extension = zed_extension;
                     release
                 },
             )

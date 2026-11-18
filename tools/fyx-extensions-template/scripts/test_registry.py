@@ -133,12 +133,12 @@ class Entries(unittest.TestCase):
         manifest = 'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\ncapabilities = ["ui:panel"]\n'
         plain = registry.derive_release(entry(), manifest, package("extension.toml", "fyx_ui.wasm"), POLICY)
         self.assertEqual(plain["tier"], "t0")
-        self.assertNotIn("runs_zed_extension", plain)
+        self.assertNotIn("zed_extension", plain)
         for name in ["extension.wasm", "lib/Extension.WASM"]:
             with self.subTest(name):
                 zed = registry.derive_release(entry(), manifest, package("extension.toml", name), POLICY)
                 self.assertEqual(zed["tier"], "t2")
-                self.assertIs(zed["runs_zed_extension"], True)
+                self.assertIs(zed["zed_extension"], True)
 
 
 class Decisions(unittest.TestCase):

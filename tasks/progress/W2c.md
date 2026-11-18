@@ -444,7 +444,7 @@ The 24 h gate counts from the later of `published_at` and when this client first
 
 - A3 (a8c2fee176): the smaller 0.3. The staged WIT has no documents, language, virtual-documents, picker or requests interface, no decoration extras or document targets, and no provider, command or picker exports. position, text-range and file-ref are in types; workspace-edit edits files only. 0.3 links 0.2's decorations. The 0.3 manifest refuses the 0.4 capabilities ("planned for a later version"), and commands and picker_sources are unknown fields.
 - A5 (8b1c611f44): host-error-code gains untrusted-worktree and no-worktree; edit-error gains untrusted-worktree and other; spawn-error gains other; snapshot is review-snapshot {reviews, older-dropped}, and truncated means hunks only.
-- Q1, revised (047e0ac8da replaces 17acb5ed05): a package with a Zed extension.wasm is accepted. The signed Release has runs_zed_extension (in the canonical bytes only when true), such a release must be T2, and verify_package checks the flag against the package. The template derives the flag and the T2 tier. W3 owns the warning text (RUNS_ZED_EXTENSION_WARNING).
+- Q1, revised (047e0ac8da replaces 17acb5ed05): a package with a Zed extension.wasm is accepted. The signed Release has zed_extension (in the canonical bytes only when true; was runs_zed_extension in 047e0ac8da), such a release must be T2, and verify_package checks the flag against the package. The template derives the flag and the T2 tier. W3 owns the warning text (RUNS_ZED_EXTENSION_WARNING).
 - Q2 (eac5325c40): ui_ext::process::RUNS_ANY_CODE, runs_any_code and RUNS_ANY_CODE_PROMPT. Not done: registry review needs args patterns or a written reason. The template refuses T2 today, and a release lists process names only, without args, so this waits until T2 opens in the registry.
 - Q5: apply-edit needs no gesture (only permissions.request takes the activation); showing edits is W3's. Q8: cut_review keeps whole hunks up to 256 KiB for worktree files and nothing outside them. Q10: the prompt is W3's UI; the host side needs no change.
 
@@ -464,7 +464,7 @@ The 24 h gate counts from the later of `published_at` and when this client first
   - 047e0ac8da: Q1, revised.
 - **Pending on others:**
   - W4: SDK, harness and gallery for accessible-label, A3 and A5; the harness must link 0.3 decorations, and api_state's no-worktree must use HostErrorCode::NoWorktree; sdk-reference.md names handle-command and picker-source-event.
-  - W3: primitive_tests.rs:41 accessible_label; the renderer's accessible name; agent_observe Snapshot is a struct variant; workspace_edit untrusted becomes EditError::UntrustedWorktree; registry_service_tests.rs:139 needs runs_zed_extension; the Q1 warning and the Q2 prompt text.
+  - W3: primitive_tests.rs:41 accessible_label; the renderer's accessible name; agent_observe Snapshot is a struct variant; workspace_edit untrusted becomes EditError::UntrustedWorktree; registry_service_tests.rs:139 needs zed_extension; the Q1 warning and the Q2 prompt text.
 - **Open items:**
   - Q2's registry review rule (args patterns or a written reason): wait until T2 opens in the registry template (the coordinator agreed). Releases list process names only, so the args must be added to the release first.
   - Q9: 0.1 and 0.2 loading is removed at the 1.0 cut, after the 0.3 freeze. Nothing is removed yet.

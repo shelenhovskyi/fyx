@@ -239,7 +239,7 @@ def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict
         "capabilities": capabilities,
     }
     if zed:
-        release["runs_zed_extension"] = True
+        release["zed_extension"] = True
     return release
 
 
