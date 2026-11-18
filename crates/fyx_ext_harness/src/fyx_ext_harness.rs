@@ -580,6 +580,15 @@ impl Harness {
                         .join(", ")
                 )
             })?;
+        anyhow::ensure!(
+            ui_api_version != ApiVersion::V0_3_0,
+            "the component targets fyx:ui 0.3.0, which the harness does not run yet (plan 4.12); the harness runs {}",
+            SUPPORTED_API_VERSIONS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         let mut wasi = WasiCtxBuilder::new();
         wasi.inherit_stderr();
@@ -619,6 +628,9 @@ impl Harness {
                 v0_2::UiExtension::instantiate(&mut store, &component, &runtime.linker_v0_2)
                     .map(Bindings::V0_2)
             }
+            ApiVersion::V0_3_0 => Err(wasmtime::Error::msg(
+                "fyx:ui 0.3.0 is not supported by the harness yet",
+            )),
         }
         .map_err(anyhow::Error::from)
         .context("instantiating the component")?;

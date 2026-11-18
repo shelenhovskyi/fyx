@@ -792,10 +792,12 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
+        // The harness runs every version up to 0.2; 0.3 comes to it with plan 4.12, which then
+        // makes the two ranges equal again.
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
-        assert_eq!(harness_versions.first(), Some(&MIN_VERSION));
-        assert_eq!(harness_versions.last(), Some(&MAX_VERSION));
+        assert_eq!(harness_versions, [MIN_VERSION, Version::new(0, 2, 0)]);
         assert!(harness_versions.iter().all(is_supported_api_version));
+        assert_eq!(MAX_VERSION, Version::new(0, 3, 0));
     }
 
     #[gpui::test]
