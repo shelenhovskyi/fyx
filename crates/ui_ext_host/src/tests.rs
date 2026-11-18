@@ -862,7 +862,7 @@ fn retryable(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> bool {
 fn failure(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> Option<String> {
     state.read_with(cx, |state, _| match state.phase() {
         crate::Phase::Failed { message, .. } => Some(message.to_string()),
-        crate::Phase::Mounting | crate::Phase::Ready(_) => None,
+        crate::Phase::Closed | crate::Phase::Mounting | crate::Phase::Ready(_) => None,
     })
 }
 
@@ -1812,6 +1812,88 @@ async fn test_ticks(cx: &mut TestAppContext) {
     });
     advance(cx, 1050);
     assert_eq!(ticks(&backend), 8, "resumed after a user event");
+}
+
+/// Plan 2.3, design C and D: a modal starts closed (no mount), mounts afresh at each show,
+/// echoes keyboard selection into its own tree and coalesces `row-selected`, sends exactly one
+/// `dismissed(reason)` when the user closes it and nothing when the extension does, and drops
+/// its tick on close.
+#[gpui::test]
+async fn test_modal_lifecycle(cx: &mut TestAppContext) {
+    use ui_ext::v0_2::{DismissReason, ModalDescriptor, ModalWidth, SurfaceKind};
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let surface = ui_ext::v0_2::Surface {
+        id: "counter".into(),
+        title: "Pick".into(),
+        kind: SurfaceKind::Modal(ModalDescriptor {
+            width: ModalWidth::Medium,
+        }),
+    };
+    let link: Rc<dyn crate::surface::SurfaceLink> = Rc::new(FakeLink(backend.clone()));
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| SurfaceState::new(dyn_backend, surface, Some(link), cx));
+    cx.run_until_parked();
+    assert!(state.read_with(cx, |state, _| !state.is_open()));
+    assert!(backend.calls().is_empty(), "nothing mounted while closed");
+
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    assert!(state.read_with(cx, |state, _| state.tree().is_some()));
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+
+    // Two rows, then keyboard selection: echoed locally, sent once.
+    for _ in 0..2 {
+        state.update(cx, |state, cx| {
+            state.dispatch(UiEvent::Click(INCREMENT), cx)
+        });
+        cx.run_until_parked();
+    }
+    backend.take_calls();
+    assert_eq!(
+        state.read_with(cx, |state, _| state.first_list()),
+        Some((LIST, None, 2))
+    );
+    state.update(cx, |state, cx| {
+        state.select_row(LIST, 0, cx);
+        state.select_row(LIST, 1, cx);
+    });
+    assert_eq!(
+        state.read_with(cx, |state, _| state.first_list()),
+        Some((LIST, Some(1), 2))
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [UiEvent::RowSelected(LIST, 1)],
+        "consecutive selections are coalesced"
+    );
+
+    // The user closes it: the tree goes, one dismissed goes out, the tick is dropped.
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_secs(1), cx);
+        state.close(Some(DismissReason::Escape), cx);
+    });
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert!(!state.is_open());
+        assert!(state.tree().is_none());
+        assert!(!state.has_pending_tick());
+    });
+    assert_eq!(
+        backend.events(),
+        [UiEvent::Dismissed(DismissReason::Escape)]
+    );
+
+    // Shown again: a fresh mount; closed by the extension: nothing sent.
+    backend.take_calls();
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+    state.update(cx, |state, cx| state.close(None, cx));
+    cx.run_until_parked();
+    assert!(backend.calls().is_empty(), "{:?}", backend.calls());
 }
 
 /// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).

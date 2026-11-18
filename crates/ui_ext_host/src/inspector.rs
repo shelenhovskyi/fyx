@@ -157,6 +157,7 @@ pub fn snapshot(
     };
     let state = loaded.state.read(cx);
     snapshot.phase = match state.phase() {
+        Phase::Closed => "closed (a modal that is not shown)".into(),
         Phase::Mounting => "mounting".into(),
         Phase::Ready(tree) => format!("ready, {} nodes", tree.len()),
         Phase::Failed { message, .. } => format!("failed: {message}"),

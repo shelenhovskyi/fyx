@@ -63,6 +63,8 @@ const MAX_CACHED_ROWS: usize = 1024;
 pub(crate) const ROW_OVERSCAN: u32 = 8;
 
 pub enum Phase {
+    /// A modal that is not shown: no tree, nothing mounted (design.md, C).
+    Closed,
     Mounting,
     Ready(Tree),
     /// `retryable` is false when the extension's instance is gone (trap, time budget, disabled):
@@ -236,9 +238,120 @@ impl SurfaceState {
         link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let modal = matches!(surface.kind, SurfaceKind::Modal(_));
         let mut this = Self::unmounted(backend, surface, link);
-        this.mount(cx);
+        if modal {
+            // A modal mounts each time it is shown.
+            this.phase = Phase::Closed;
+        } else {
+            this.mount(cx);
+        }
         this
+    }
+
+    pub fn is_modal(&self) -> bool {
+        matches!(self.surface.kind, SurfaceKind::Modal(_))
+    }
+
+    /// Whether a modal is shown (anything but `Closed`).
+    pub fn is_open(&self) -> bool {
+        !matches!(self.phase, Phase::Closed)
+    }
+
+    /// `show-surface` of a modal: a fresh mount, since modals keep no tree between showings.
+    /// Showing one that is already shown does nothing.
+    pub fn show(&mut self, cx: &mut Context<Self>) {
+        if self.is_open() {
+            return;
+        }
+        self.phase = Phase::Mounting;
+        self.revision += 1;
+        self.mount(cx);
+        cx.notify();
+    }
+
+    /// Closes a modal: the tree, queued events and the pending tick go. With a `reason` the user
+    /// closed it, and `dismissed(reason)` goes to the extension (the only item left in the
+    /// queue, so it never waits on events for a tree that is gone); without one the extension
+    /// asked (`hide-surface`, `remove-surface`), and nothing is sent.
+    pub fn close(&mut self, reason: Option<ui_ext::v0_2::DismissReason>, cx: &mut Context<Self>) {
+        if !self.is_open() {
+            return;
+        }
+        self.phase = Phase::Closed;
+        self.events.clear();
+        self.lists.clear();
+        self.tick = None;
+        self._tick_timer = None;
+        self.tick_waits_for_mount = false;
+        self._mount = None;
+        self.resyncing = false;
+        self.last_error = None;
+        self.revision += 1;
+        if let Some(reason) = reason {
+            let event = UiEvent::Dismissed(reason);
+            self.record(HistoryEntry::Event {
+                at: std::time::SystemTime::now(),
+                event: event.clone(),
+            });
+            self.events.push_back(Queued::Event(QueuedEvent {
+                event,
+                row_generation: None,
+            }));
+            self.run_queue(cx);
+        }
+        cx.notify();
+    }
+
+    /// Keyboard selection in a list (design.md, C): the host moves `selected` in its own tree
+    /// first, like typed text, then sends `row-selected`. Consecutive selections of one list
+    /// are coalesced. Returns the new index.
+    pub fn select_row(&mut self, list: NodeId, index: u32, cx: &mut Context<Self>) -> Option<u32> {
+        let Phase::Ready(tree) = &mut self.phase else {
+            return None;
+        };
+        let Some(Props::List(props)) = tree.get(list).map(|node| node.props()) else {
+            return None;
+        };
+        if props.row_count == 0 {
+            return None;
+        }
+        let index = index.min(props.row_count - 1);
+        if props.selected == Some(index) {
+            return Some(index);
+        }
+        let mut props = props.clone();
+        props.selected = Some(index);
+        if let Err(error) = tree.apply_patches(vec![Patch::SetProps(list, Props::List(props))]) {
+            log::error!("fyx:ui: failed to record the selection of list {list}: {error}");
+            return None;
+        }
+        self.revision += 1;
+        if let Some(Queued::Event(QueuedEvent {
+            event: UiEvent::RowSelected(queued, _),
+            ..
+        })) = self.events.back()
+            && *queued == list
+        {
+            self.events.pop_back();
+        }
+        self.dispatch(UiEvent::RowSelected(list, index), cx);
+        cx.notify();
+        Some(index)
+    }
+
+    /// The first list node of the tree in pre-order (a modal's keyboard selection moves it).
+    pub fn first_list(&self) -> Option<(NodeId, Option<u32>, u32)> {
+        let tree = self.tree()?;
+        let mut stack: Vec<NodeId> = tree.roots().iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            let node = tree.get(id)?;
+            if let Props::List(list) = node.props() {
+                return Some((id, list.selected, list.row_count));
+            }
+            stack.extend(node.children().iter().rev());
+        }
+        None
     }
 
     /// A surface whose first tree is already known (a decoration's `place-decoration` nodes):
@@ -304,7 +417,7 @@ impl SurfaceState {
     pub fn tree(&self) -> Option<&Tree> {
         match &self.phase {
             Phase::Ready(tree) => Some(tree),
-            Phase::Mounting | Phase::Failed { .. } => None,
+            Phase::Closed | Phase::Mounting | Phase::Failed { .. } => None,
         }
     }
 
@@ -355,6 +468,10 @@ impl SurfaceState {
             let result = call.await;
             this.update(cx, |this, cx| {
                 this.resyncing = false;
+                if !this.is_open() {
+                    // A modal closed while its mount was in flight.
+                    return;
+                }
                 match result {
                     Ok(Reply { effects, value }) => {
                         // Pushes for this surface made during `mount` are superseded by the tree
@@ -575,9 +692,11 @@ impl SurfaceState {
                 }
                 Queued::Event(queued) => queued,
             };
-            let still_there = self
-                .tree()
-                .is_some_and(|tree| event.target().is_none_or(|target| tree.contains(target)));
+            let still_there = match event.target() {
+                // `dismissed` belongs to the whole surface, which has no tree any more.
+                None => true,
+                Some(target) => self.tree().is_some_and(|tree| tree.contains(target)),
+            };
             let same_rows = match (&event, row_generation) {
                 (UiEvent::RowClick(list, _), Some(generation)) => {
                     self.row_generation(*list) == generation

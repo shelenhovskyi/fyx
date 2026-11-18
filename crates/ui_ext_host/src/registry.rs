@@ -54,6 +54,7 @@ use crate::{
     backend::UiBackend,
     consent::{self, ConsentRecord, ConsentState, ConsentStore},
     install_store::InstallStore,
+    modal::ExtensionModal,
     panel::{
         AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
         add_extension_panel,
@@ -122,6 +123,8 @@ pub struct UiExtensionRegistry {
     backends: HashMap<Arc<str>, Rc<dyn UiBackend>>,
     /// Per extension: the token bucket and CPU share of its surfaces' ticks (design.md, B).
     tick_budgets: HashMap<Arc<str>, ui_ext_wasm::ticks::TickBudget>,
+    /// The workspace whose window was active last: where `show-surface` opens a modal.
+    active_workspace: Option<gpui::EntityId>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -132,6 +135,13 @@ pub enum RegistryEvent {
     RevealPanel(SharedString),
     /// `hide-surface` of a panel: close its dock if it is the dock's active panel.
     HidePanel(SharedString),
+    /// `show-surface` of a modal: the workspace named opens it (the active window's).
+    ShowModal {
+        key: SharedString,
+        workspace: gpui::EntityId,
+    },
+    /// The extension closed a modal (`hide-surface`, `remove-surface`): no `dismissed`.
+    CloseModal(SharedString),
 }
 
 impl gpui::EventEmitter<RegistryEvent> for UiExtensionRegistry {}
@@ -487,6 +497,47 @@ impl UiExtensionRegistry {
             info: Rc::new(info),
             state,
         });
+    }
+
+    /// The workspace whose window became active; modals open there.
+    pub fn set_active_workspace(&mut self, workspace: gpui::EntityId) {
+        self.active_workspace = Some(workspace);
+    }
+
+    /// `show-surface` of a modal (the host checked the gesture): a fresh mount, shown in the
+    /// active window. With no workspace window the effect is dropped and the host told.
+    fn show_modal(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        let Some(surface) = self.surface_of(extension_id, surface_id) else {
+            return;
+        };
+        let Some(workspace) = self.active_workspace else {
+            log::warn!(
+                "fyx:ui: {extension_id}: no workspace window to show the modal {surface_id:?} in"
+            );
+            if let Some(backend) = self.backends.get(extension_id) {
+                backend.modal_closed(surface_id);
+            }
+            return;
+        };
+        let key = surface.info.key.clone();
+        if surface.state.read(cx).is_open() {
+            return;
+        }
+        surface.state.update(cx, |state, cx| state.show(cx));
+        cx.emit(RegistryEvent::ShowModal { key, workspace });
+    }
+
+    /// The extension closed a modal: nothing is sent to it.
+    fn close_modal(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        let Some(surface) = self.surface_of(extension_id, surface_id) else {
+            return;
+        };
+        if !surface.state.read(cx).is_modal() {
+            return;
+        }
+        let key = surface.info.key.clone();
+        surface.state.update(cx, |state, cx| state.close(None, cx));
+        cx.emit(RegistryEvent::CloseModal(key));
     }
 
     /// `remove-surface`: its containers close in every workspace; its tree, queued events and
@@ -868,19 +919,27 @@ impl UiExtensionRegistry {
                     log::error!("fyx:ui: {extension_id} added a surface before it was registered");
                     return;
                 };
-                if matches!(surface.kind, SurfaceKind::Modal(_)) {
-                    log::warn!(
-                        "fyx:ui: {extension_id}: modal surfaces are not supported by this renderer \
-                         yet ({:?})",
-                        surface.id
-                    );
-                    return;
-                }
+                // A modal is added closed; panels and status items mount at once.
                 self.add_surface(backend, &surface, cx);
                 cx.notify();
             }
             HostEffect::RemoveSurface { surface_id } => {
+                self.close_modal(extension_id, &surface_id, cx);
                 self.remove_surface(extension_id, &surface_id, cx)
+            }
+            HostEffect::ShowSurface { surface_id }
+                if self
+                    .surface_of(extension_id, &surface_id)
+                    .is_some_and(|surface| surface.state.read(cx).is_modal()) =>
+            {
+                self.show_modal(extension_id, &surface_id, cx)
+            }
+            HostEffect::HideSurface { surface_id }
+                if self
+                    .surface_of(extension_id, &surface_id)
+                    .is_some_and(|surface| surface.state.read(cx).is_modal()) =>
+            {
+                self.close_modal(extension_id, &surface_id, cx)
             }
             HostEffect::ShowSurface { surface_id } => match self
                 .surface_of(extension_id, &surface_id)
@@ -1267,15 +1326,32 @@ fn attach_to_workspace(
 
     cx.subscribe_in(&registry, window, {
         let surfaces = surfaces.clone();
-        move |workspace, _, event: &RegistryEvent, window, cx| {
-            // `show-surface` and `hide-surface` act in the window the user is in.
-            if !window.is_window_active() && cx.active_window().is_some() {
-                return;
-            }
+        move |workspace, registry, event: &RegistryEvent, window, cx| {
             let (key, open) = match event {
+                RegistryEvent::ShowModal {
+                    key,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        open_modal(workspace, &registry, key.clone(), window, cx);
+                    }
+                    return;
+                }
+                RegistryEvent::CloseModal(key) => {
+                    if let Some(modal) = workspace.active_modal::<ExtensionModal>(cx)
+                        && modal.read(cx).key() == key
+                    {
+                        modal.update(cx, |modal, cx| modal.close_by_host(cx));
+                    }
+                    return;
+                }
                 RegistryEvent::RevealPanel(key) => (key, true),
                 RegistryEvent::HidePanel(key) => (key, false),
             };
+            // `show-surface` and `hide-surface` of a panel act in the window the user is in.
+            if !window.is_window_active() && cx.active_window().is_some() {
+                return;
+            }
             let Some(panel_id) = surfaces
                 .borrow()
                 .panels
@@ -1295,6 +1371,26 @@ fn attach_to_workspace(
                     } else if dock.active_panel_index() == Some(index) {
                         dock.set_open(false, window, cx);
                     }
+                });
+            }
+        }
+    })
+    .detach();
+
+    // Modals open in the window the user was in last.
+    let workspace_id = cx.entity_id();
+    registry.update(cx, |registry, _| {
+        if registry.active_workspace.is_none() {
+            registry.set_active_workspace(workspace_id);
+        }
+    });
+    cx.observe_window_activation(window, {
+        let registry = registry.clone();
+        move |_, window, cx| {
+            if window.is_window_active() {
+                let workspace_id = cx.entity_id();
+                registry.update(cx, |registry, _| {
+                    registry.set_active_workspace(workspace_id)
                 });
             }
         }
@@ -1369,6 +1465,36 @@ fn offer_consent(
             },
         );
     }
+}
+
+/// Opens a modal surface in this workspace. The modal layer holds one modal, and toggling one of
+/// the same type only closes it (design.md, C, "Same-type trap"), so the active modal is hidden
+/// first; it gets `dismissed(replaced)`. Showing the modal already shown does nothing.
+fn open_modal(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    key: SharedString,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if workspace
+        .active_modal::<ExtensionModal>(cx)
+        .is_some_and(|modal| *modal.read(cx).key() == key)
+    {
+        return;
+    }
+    let Some(state) = registry
+        .read(cx)
+        .surface(&key)
+        .map(|surface| surface.state.clone())
+    else {
+        return;
+    };
+    let weak = cx.weak_entity();
+    workspace.hide_modal(window, cx);
+    workspace.toggle_modal(window, cx, move |window, cx| {
+        ExtensionModal::new(key, state, weak, window, cx)
+    });
 }
 
 /// Brings the workspace's containers in line with the registry: adds the missing panels and

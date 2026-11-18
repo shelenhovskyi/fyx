@@ -57,6 +57,8 @@ pub struct SurfaceView {
     pub(crate) inputs: HashMap<NodeId, InputEditor>,
     markdown: HashMap<NodeId, Entity<Markdown>>,
     pub(crate) scroll_handles: HashMap<NodeId, UniformListScrollHandle>,
+    /// The `selected` row each list was last scrolled to.
+    scrolled_selection: HashMap<NodeId, u32>,
     /// A read-only diff editor per `diff-view` node.
     pub(crate) diffs: HashMap<NodeId, DiffEditor>,
     /// The view's own focus target: the panel focuses it on activation and Tab starts from it.
@@ -100,6 +102,7 @@ impl SurfaceView {
             inputs: HashMap::default(),
             markdown: HashMap::default(),
             scroll_handles: HashMap::default(),
+            scrolled_selection: HashMap::default(),
             diffs: HashMap::default(),
             focus_handle: cx.focus_handle(),
             button_focus: HashMap::default(),
@@ -161,6 +164,20 @@ impl SurfaceView {
 
     /// Brings the per-window objects (editors, markdown models, scroll handles) in line with the
     /// tree. Runs when the state changes, not per frame.
+    /// Focuses the first input in tree order, or the view itself when there is none (a modal
+    /// opening: Escape must still reach it).
+    pub(crate) fn focus_first_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync(window, cx);
+        let first = self
+            .focus_order
+            .iter()
+            .find_map(|id| self.inputs.get(id).map(|input| input.editor.clone()));
+        match first {
+            Some(editor) => editor.focus_handle(cx).focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.synced_revision == Some(self.state.read(cx).revision()) {
             return;
@@ -173,6 +190,7 @@ impl SurfaceView {
         self.synced_mount = state.mount_count();
 
         let mut inputs = Vec::new();
+        let mut selections: Vec<(NodeId, u32)> = Vec::new();
         let mut markdown = Vec::new();
         let mut diffs = Vec::new();
         let mut lists = Vec::new();
@@ -191,8 +209,18 @@ impl SurfaceView {
                         focus_order.push(id);
                     }
                     Props::Markdown(source) => markdown.push((id, source.clone())),
-                    Props::List(ListProps { row_count, .. })
-                    | Props::Table(TableProps { row_count, .. }) => {
+                    Props::List(ListProps {
+                        row_count,
+                        selected,
+                        ..
+                    }) => {
+                        lists.push((id, *row_count));
+                        if let Some(selected) = selected {
+                            selections.push((id, *selected));
+                        }
+                        focus_order.push(id);
+                    }
+                    Props::Table(TableProps { row_count, .. }) => {
                         lists.push((id, *row_count));
                         focus_order.push(id);
                     }
@@ -308,8 +336,17 @@ impl SurfaceView {
         }
 
         self.scroll_handles.retain(|id, _| lists.contains(id));
-        for id in lists {
-            self.scroll_handles.entry(id).or_default();
+        for id in &lists {
+            self.scroll_handles.entry(*id).or_default();
+        }
+        // A `selected` the extension (or the keyboard) moved is scrolled into view (design C).
+        self.scrolled_selection.retain(|id, _| lists.contains(id));
+        for (id, selected) in selections {
+            if self.scrolled_selection.insert(id, selected) != Some(selected)
+                && let Some(handle) = self.scroll_handles.get(&id)
+            {
+                handle.scroll_to_item(selected as usize, gpui::ScrollStrategy::Nearest);
+            }
         }
         self.restore_focus(focused_before, &old_order, window, cx);
     }
@@ -458,6 +495,7 @@ impl Render for SurfaceView {
             v_flex().size_full().min_h_0()
         };
         let body = match state.phase() {
+            Phase::Closed => div().into_any_element(),
             Phase::Mounting => Label::new("Loading…")
                 .color(Color::Muted)
                 .size(LabelSize::Small)
@@ -912,6 +950,20 @@ impl Renderer<'_, '_> {
         table_columns: Option<usize>,
     ) -> AnyElement {
         let scope = Scope::Row { list, index };
+        // `selected` (0.2) is the extension's highlighted row; the view's own keyboard selection
+        // is drawn the same way.
+        let extension_selected =
+            self.state
+                .tree()
+                .and_then(|tree| tree.get(list))
+                .and_then(|node| match node.props() {
+                    Props::List(props) => props.selected,
+                    _ => None,
+                });
+        let selected =
+            extension_selected == Some(index) || self.view.selection.get(&list) == Some(&index);
+        // Design J: nesting depth, clamped by the host; 0 for 0.1 rows.
+        let indent = self.state.row_indent(list, index);
         let row = div()
             .id(ElementId::NamedInteger("fyx-row".into(), index as u64))
             // Tests find rows by `fyx-row-<list>-<index>`; a no-op outside test builds.
@@ -919,12 +971,15 @@ impl Renderer<'_, '_> {
             .h(px(row_height.into()))
             .w_full()
             .px_1()
+            .when(indent > 0, |this| {
+                this.pl(px(4. + f32::from(indent) * ROW_INDENT_PX))
+            })
             .flex()
             .items_center()
             .overflow_hidden()
             .cursor_pointer()
             .hover(|style| style.bg(self.cx.theme().colors().ghost_element_hover))
-            .when(self.view.selection.get(&list) == Some(&index), |this| {
+            .when(selected, |this| {
                 this.bg(self.cx.theme().colors().element_selected)
             })
             .on_click(self.cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1239,6 +1294,9 @@ fn open_extension_link(url: SharedString, window: &mut Window, cx: &mut App) {
 }
 
 /// Icon names are snake_case `IconName`s (`plus`, `list_todo`); unknown names get a neutral icon.
+/// Pixels per indent level of a list row (design J).
+const ROW_INDENT_PX: f32 = 16.;
+
 pub(crate) fn button_style(style: ButtonStyle) -> UiButtonStyle {
     match style {
         ButtonStyle::Default => UiButtonStyle::Outlined,
