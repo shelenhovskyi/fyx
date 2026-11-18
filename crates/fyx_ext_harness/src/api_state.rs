@@ -116,7 +116,7 @@ impl ApiState {
             ApiVersion::V0_1_0 => {
                 self.live = LiveIds::new(self.version, surfaces, &self.capabilities)?;
             }
-            ApiVersion::V0_2_0 => {
+            ApiVersion::V0_2_0 | ApiVersion::V0_3_0 => {
                 for surface in surfaces {
                     self.live.add_surface(surface, &self.capabilities)?;
                 }
