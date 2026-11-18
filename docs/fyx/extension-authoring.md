@@ -1161,9 +1161,12 @@ fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
     for any text, or `**` last for any rest;
   - a program without `args` runs with no arguments only. Any arguments need `args = ["**"]`,
     which the consent prompt shows. `fyx-ext check` warns about a program without `args`;
-  - only the declared environment names. Fyx never passes names that load code into a program
-    or redirect it, such as `LD_*`, `NODE_OPTIONS`, git's `GIT_DIR` and editors, `CARGO_*` or
-    `PATH`; the manifest check refuses them (`ui_ext::process::is_forbidden_env`).
+  - only the declared environment names, and only names from Fyx's allowlist: `LANG`,
+    `LANGUAGE`, `LC_*`, `TZ`, `TERM`, `COLORTERM`, `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`,
+    `CLICOLOR_FORCE`, `COLUMNS`, `LINES`, `CI`, `RUST_LOG`, `RUST_BACKTRACE`, `NODE_ENV`,
+    `PYTHONUNBUFFERED`, `PYTHONIOENCODING` and `PYTHONUTF8` (`ui_ext::process::ALLOWED_ENV_NAMES`).
+    The manifest check and the call refuse any other name, such as `HOME`, `LD_*`,
+    `NODE_OPTIONS`, `GIT_DIR`, `CARGO_*` or `PATH`.
 - **Stdin:** `.stdin()` keeps it open for `write_stdin` until `close_stdin`.
 
 ### Editing files and watching agent reviews (0.3)

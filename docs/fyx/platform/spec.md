@@ -102,7 +102,10 @@ line decorations, code lenses, read-only documents, network and processes behind
 17. Client: the Extensions page gets a Fyx tab with search, install, update, uninstall,
     enable/disable, **pin version**, **roll back**, capability list in plain language, publisher,
     source link. Auto-update is on, but a new version installs only when it is **at least 24 h
-    old** in the index (security fixes flagged `urgent` skip the wait).
+    old** in the index. A security fix flagged `urgent` skips the wait only to replace an
+    installed version that the block list blocks: the release key signs `urgent`, so the
+    separately held block-list key must agree before the wait is skipped. A fresh install of an
+    `urgent` release waits too (integration-6 R8).
 18. Signatures: releases, the snapshot and the block list are signed by **separate keys**, one role
     each (`release`, `snapshot`, `blocklist`). Separate release and block-list keys were decided by
     the owner on 2026-11-18; the snapshot role came with the format hardening of triage-3.
@@ -128,7 +131,13 @@ line decorations, code lenses, read-only documents, network and processes behind
     notification, and if the kept previous version is not blocked the host rolls back to it. The
     last good block list is cached; a fetch failure never disables anything. A list whose signed
     `generated_at` is 7 days old, or whose `expires_at` has passed, is shown as stale and still
-    applies.
+    applies. **No list never lifts a block** (integration-6 N4, integration-5 R9):
+    - the client keeps the highest sequence it ever accepted, even when it drops the cache (a
+      revoked block-list key), and refuses a lower list;
+    - with no cache, it refuses an expired list;
+    - a block it applied lifts only while it holds a current list that no longer has it;
+    - an entry with a package hash also blocks an install whose hash was never recorded, within
+      its versions.
 20. Zed's extension registry API is not called by Fyx code added in this milestone.
 
 ### Permissions and isolation (security)
@@ -259,7 +268,8 @@ unsupported experiment (decision 3); capability chips
    or "Uninstall".
 2. **The only installed version is blocked and there is nothing to roll back to.** The extension
    is disabled and stays installed; the notification names the reason from the block list; no
-   other version installs without the 24 h age gate unless `urgent`.
+   other version installs without the 24 h age gate, unless it is `urgent` (it replaces the
+   blocked version).
 3. **Hot reload while a modal is open, ticks are scheduled and a fetch is in flight.** The modal
    closes with `dismissed(reload)`, ticks and the request are cancelled, child processes are
    killed, and the new instance mounts; no timer or process from the old instance survives.
