@@ -28,6 +28,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::RemoveDecoration` | variant |  |
 | `HostEffect::RemoveImage` | variant |  |
 | `HostEffect::RemoveSurface` | variant |  |
+| `HostEffect::RequestPermission` | variant | `request_permission`. |
 | `HostEffect::RequestTick` | variant |  |
 | `HostEffect::ShowSurface` | variant |  |
 | `HostEffect::Spawn` | variant | `spawn`; ids are the shared 1, 2, …. |
@@ -52,10 +53,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `progress_start` | fn | Starts a progress, indeterminate until the first `progress_update`, and returns its id (design.md, M.2). Needs `ui:notifications`. At most 4 running per extension and 30 starts per rolling 60 s. A cancellable one sends `UiEvent::ProgressCancelRequested` to `options.owner`. `fyx:ui` 0.2; `unavailable` for 0.1. |
 | `progress_update` | fn | Sets a running progress's value and, when given, a one-line message of at most 120 bytes. At most 64 updates per export call; the host redraws at most 10 times a second. |
 | `push_update` | fn | Sends an update for `surface_id` during a call: from `mount`, `handle-event`, `list-rows` or `tick`, typically for a surface other than the one the call is about. |
+| `query_permission` | fn | `fyx:ui` 0.3, `permissions.query` (design.md §7): the state of a T2 capability as of the start of the current call. `Unavailable` when the manifest does not declare it (or, for `process:spawn` and `workspace:edit`, the worktree is not trusted); `Ask` until the user is asked. Off WASM it answers what `set_permission_state` set, `Ask` by default. |
 | `remove_decoration` | fn | Removes a live decoration in every editor; no event is sent. |
 | `remove_image` | fn | `fyx:ui` 0.3: frees a generated image; nodes that still show it show their alt text. An unknown handle is ignored. |
 | `remove_surface` | fn | Removes a live surface, static or runtime. No event is sent; the id may be added again. |
+| `request_permission` | fn | `fyx:ui` 0.3, `permissions.request`: shows the consent prompt after the current call, if the state is `Ask`; any other state stays as it is. It needs the click-or-Enter activation (call it from a button click) and uses it up; without one, or for an undeclared capability, it is `not-permitted`. The answer arrives in `handle_io` as `IoEvent::PermissionChanged`. |
 | `request_tick` | fn | Asks for one `tick(surface_id)` call at least `delay_ms` after the current call returns. One pending tick per surface: a new request replaces the earlier one. The host clamps the delay up to 100 ms, and further while Fyx is in the background; a tick for a hidden panel waits until it is shown. Re-request it inside `Extension::tick`(crate::Extension::tick) for a periodic timer. |
+| `set_permission_state` | fn (host only) | Off WASM, what `query_permission` answers for `capability` on this thread (`Ask` until set), for unit tests of an extension. |
 | `show_surface` | fn | Opens a modal and focuses it, or reveals a panel. A modal needs a click or Enter: it is allowed during `handle-event` for `click`, `row-click` or `input-submitted`, or within 5 s after one, once. |
 | `spawn` | fn | `fyx:ui` 0.3, `process:spawn` (design.md §9): starts a program the manifest's `[[fyx_ui.processes]]` names, after the current call returns, and returns its id. Output arrives in `Extension::handle_io`(crate::Extension) as `IoEvent::ProcessOutput`, then one `IoEvent::ProcessExited`, or one `IoEvent::SpawnFailed` instead. The first spawn asks the user; if they refuse, it fails with `SpawnError::Denied`. At most 4 processes per extension. A program the manifest does not name gets an id and then `SpawnError::NotFound`. Off WASM it records `HostEffect::Spawn` and hands out ids. |
 | `start_observing` | fn | `fyx:ui` 0.3, `agent:observe` (design.md §11): starts the read-only feed of the host's review of agent edits. A `Snapshot` of the open reviews comes first, then `Opened`, `Updated`, `Resolved`, `Closed`, `TurnEnded`, `UnreviewedChanges` and `ReviewMode` as `IoEvent::Agent`. The first start asks the user. Nothing in the API can accept, reject or comment. |

@@ -427,6 +427,20 @@ pub mod glue {
     /// Nothing to stop: this world has no agent feed.
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn observe_stop() {}
+
+    /// This world has no T2 capabilities.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn query_permission(_capability: crate::T2Capability) -> crate::PermissionState {
+        crate::PermissionState::Unavailable
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn request_permission(_capability: crate::T2Capability) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("request_permission"),
+        })
+    }
 }
 
 #[cfg(test)]

@@ -429,20 +429,31 @@ mod t2 {
     #[test]
     fn without_a_broker_every_section_is_denied() {
         let mut harness = mounted();
-        assert!(shows(&harness, "not asked yet"));
+        // Without a broker, as in a host that grants nothing, every query is `unavailable`.
+        assert!(shows(&harness, "not available here"));
+        let request = harness.find_button(PANEL, "Request fetch").expect("button");
+        assert!(
+            matches!(harness.props(PANEL, request), Some(model::Props::Button(button)) if button.disabled),
+            "a request is only for the ask state"
+        );
         for label in ["Fetch zen", "Run git status", "Insert header", "Start"] {
             harness.click(PANEL, label).expect(label);
         }
         assert!(harness.pending_fetches().is_empty());
-        let denied = harness
+        // Each event reads the states again: `unavailable`, and the section just used shows the
+        // import's `denied`. Nothing started.
+        let refused = harness
             .nodes(PANEL)
             .unwrap_or_default()
             .iter()
             .filter(|node| {
-                matches!(&node.props, model::Props::Text(text) if text.content.starts_with("Permission: denied"))
+                matches!(&node.props, model::Props::Text(text)
+                    if text.content.starts_with("Permission: denied")
+                        || text.content.starts_with("Permission: not available"))
             })
             .count();
-        assert_eq!(denied, 4);
+        assert_eq!(refused, 4);
+        assert!(harness.processes().is_empty() && harness.applied_edits().is_empty());
     }
 
     #[test]
@@ -456,6 +467,28 @@ mod t2 {
         assert_eq!(harness.broker().expect("broker").prompts(), 1);
         assert!(shows(&harness, "Keep it logically awesome."));
         assert!(shows(&harness, "Permission: allowed"));
+    }
+
+    #[test]
+    fn request_shows_the_prompt_and_the_answer_arrives() {
+        let mut harness = mounted();
+        harness.set_broker(TestBroker::asking(PermissionState::Granted, Box::new(zen)));
+        // The panel reads the states when it mounts.
+        harness.mount(PANEL).expect("remount");
+        assert!(shows(&harness, "not asked yet"));
+        harness.click(PANEL, "Request fetch").expect("request");
+        assert_eq!(harness.broker().expect("broker").prompts(), 1);
+        assert!(
+            harness.pending_fetches().is_empty(),
+            "a request fetches nothing"
+        );
+        harness.deliver_io().expect("deliver");
+        assert!(shows(&harness, "Permission: allowed"));
+        let request = harness.find_button(PANEL, "Request fetch").expect("button");
+        assert!(matches!(
+            harness.props(PANEL, request),
+            Some(model::Props::Button(button)) if button.disabled
+        ));
     }
 
     #[test]

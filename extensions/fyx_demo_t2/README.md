@@ -11,13 +11,13 @@ A Fyx UI extension for checking the consent flows of the four T2 capabilities of
 | Edit | `workspace:edit` | inserts a header line at the top of the file named in the input (`README.md`) as one undoable edit; nothing is saved |
 | Agent reviews | `agent:observe` | `Start` lists the open agent reviews (file and state) live; `Stop` ends the feed |
 
-Each section shows its permission state.
-- **First use asks:** the first press of a button shows Fyx's consent prompt. The section reads
-  `waiting for an answer…` until it is answered, then `allowed` or `denied`.
-- **Changing an answer:** a denied capability changes back only on the extensions page. The
-  panel follows the `permission-changed` events Fyx sends.
-- **Why no direct query:** the 0.3 `permissions` interface (`query`, `request`) is not in the
-  host yet, so the demo learns the state from outcomes.
+Each section shows its permission state, read with `permissions.query` when the panel mounts
+and with every event: not asked yet, allowed, denied, or not available here.
+- **Request:** the section's **Request …** button (enabled while the state is `ask`) shows Fyx's
+  consent prompt with `permissions.request`. The first use of the action shows it too.
+- **While a prompt is open:** the section reads `waiting for an answer…`, then follows the
+  `permission-changed` event Fyx sends.
+- **Changing an answer:** a denied capability changes back only on the extensions page.
 
 **Build it for 0.3 only.** It needs `fyx:ui` 0.3, which dev builds run:
 `script/fyx-build-demos --fyx-ui-0-3` puts it in `<target>/fyx-demos-v0_3/fyx_demo_t2/`. The default
