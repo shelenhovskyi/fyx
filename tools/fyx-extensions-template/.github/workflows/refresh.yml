@@ -79,7 +79,9 @@ jobs:
           image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
           echo "IMAGE=$image" >> "$GITHUB_ENV"
           mkdir -p published
-          if gh release download index --repo "$REPO" --pattern blocklist.json --dir published; then
+          # A download error fails the job; only a block list never published is skipped (R6).
+          python3 scripts/published.py --repo "$REPO" --dir published --allow-missing blocklist.json
+          if [ -f published/blocklist.json ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::no block list published yet"
@@ -123,7 +125,8 @@ jobs:
         run: |
           owner=$(python3 -c 'import tomllib; print(tomllib.load(open("policy/registry.toml", "rb"))["owner"])')
           mkdir -p published
-          gh release download index --repo "$REPO" --pattern snapshot.json --pattern blocklist.json --dir published || true
+          python3 scripts/published.py --repo "$REPO" --dir published --allow-missing \
+            snapshot.json blocklist.json
           now=$(date +%s)
           late=""
           for file in published/snapshot.json published/blocklist.json; do

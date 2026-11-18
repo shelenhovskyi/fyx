@@ -154,6 +154,8 @@ pub struct VerifiedSnapshot {
     revocations: BTreeSet<KeyId>,
     /// Entries of `revoked_keys` this snapshot may not revoke, for the log.
     ignored_revocations: BTreeSet<KeyId>,
+    /// When the client first saw each release, carried from snapshot to snapshot (R8).
+    first_seen: crate::FirstSeen,
 }
 
 /// What a client stores between runs: the last accepted snapshot and the revocations in force,
@@ -168,6 +170,9 @@ struct SnapshotState {
     /// Read, merged into `revocations`, never written.
     #[serde(default, skip_serializing)]
     protected_revocations: BTreeSet<KeyId>,
+    /// When the client first saw each release (integration-5 R8).
+    #[serde(default)]
+    first_seen: crate::FirstSeen,
 }
 
 /// Keys only a rotation-key snapshot may revoke.
@@ -210,11 +215,15 @@ impl VerifiedSnapshot {
                 });
             }
         }
-        Ok(Self::with_revocations(
+        let mut verified = Self::with_revocations(
             signed,
             keyset,
             previous.map(|previous| &previous.revocations),
-        ))
+        );
+        if let Some(previous) = previous {
+            verified.first_seen = previous.first_seen.clone();
+        }
+        Ok(verified)
     }
 
     fn with_revocations(
@@ -247,6 +256,7 @@ impl VerifiedSnapshot {
             signed,
             revocations,
             ignored_revocations,
+            first_seen: crate::FirstSeen::default(),
         }
     }
 
@@ -266,6 +276,7 @@ impl VerifiedSnapshot {
                 snapshot: self.signed.clone(),
                 revocations: self.revocations.clone(),
                 protected_revocations: BTreeSet::new(),
+                first_seen: self.first_seen.clone(),
             },
             Document::Snapshot,
         )
@@ -283,11 +294,19 @@ impl VerifiedSnapshot {
             .union(&state.protected_revocations)
             .cloned()
             .collect();
-        Ok(Self::with_revocations(
-            state.snapshot,
-            keyset,
-            Some(&carried),
-        ))
+        let mut restored = Self::with_revocations(state.snapshot, keyset, Some(&carried));
+        restored.first_seen = state.first_seen;
+        Ok(restored)
+    }
+
+    /// When the client first saw each release of the indexes accepted with this snapshot and the
+    /// ones before it.
+    pub fn first_seen(&self) -> &crate::FirstSeen {
+        &self.first_seen
+    }
+
+    pub(crate) fn first_seen_mut(&mut self) -> &mut crate::FirstSeen {
+        &mut self.first_seen
     }
 
     /// Entries of `revoked_keys` that this snapshot was not allowed to revoke (a `blocklist` key
@@ -574,6 +593,23 @@ mod tests {
         /// The emergency snapshot, signed offline by the snapshot rotation key, revokes a leaked
         /// block-list key; the next daily snapshots, signed by the online key, keep it revoked,
         /// and only another rotation-key snapshot lifts it.
+        /// integration-5 R8: when the client first saw each release outlives snapshot updates
+        /// and restarts.
+        #[test]
+        fn first_seen_carries_over_and_is_stored() {
+            let mut first = verify(signed_by(&snapshot_key(), 7, &[]), None);
+            let seen: crate::FirstSeen =
+                serde_json::from_value(serde_json::json!({ "todo@1.1.0#ab": 5_000 }))
+                    .expect("first seen");
+            *first.first_seen_mut() = seen.clone();
+            let next = verify(signed_by(&snapshot_key(), 8, &[]), Some(&first));
+            assert_eq!(next.first_seen(), &seen);
+            let stored = next.to_state_json().expect("stored");
+            let restored =
+                VerifiedSnapshot::from_state_json(&stored, &registry_keyset()).expect("restored");
+            assert_eq!(restored.first_seen(), &seen);
+        }
+
         #[test]
         fn the_offline_rotation_key_can_and_the_revocation_carries_over() {
             let emergency = verify(signed_by(&snapshot_rotation_key(), 8, &["bl-a"]), None);
