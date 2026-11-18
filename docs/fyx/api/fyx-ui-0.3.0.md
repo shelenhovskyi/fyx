@@ -547,7 +547,7 @@ Functions the extension may call on the host. Every function with an effect (an 
 
 ### enum `host-error-code`
 
-Cases: `unknown-surface`, `limit-exceeded`, `invalid-argument`, `not-permitted`, `unavailable`, `denied`.
+Cases: `unknown-surface`, `limit-exceeded`, `invalid-argument`, `not-permitted`, `unavailable`, `denied`, `untrusted-worktree`, `no-worktree`.
 
 ### record `host-error`
 
@@ -735,6 +735,7 @@ Cases: `stdout`, `stderr`.
 | `not-found` | `string` | The program is not on `PATH` outside the worktrees, or is a script the host does not run (`.bat`, `.cmd`). |
 | `limit-exceeded` |  |  |
 | `io` | `string` |  |
+| `other` | `string` | Anything else; the text says what. |
 
 ### `spawn: func(request: spawn-request) -> result<u64, host-error>`
 
@@ -795,6 +796,8 @@ Kills the process and everything it started.
 | `not-found` | `string` |  |
 | `invalid` | `string` |  |
 | `cancelled` |  |  |
+| `untrusted-worktree` |  | A file is in a worktree that is not trusted (Zed's restricted mode). |
+| `other` | `string` | Anything else; the text says what. |
 
 ### `apply-edit: func(edit: workspace-edit) -> result<u64, host-error>`
 
@@ -858,7 +861,16 @@ Cases: `auto-accept`, `always-ask`, `deny`.
 | `resolution` | `resolution` |  |
 | `submitted` | `bool` |  |
 | `hunks` | `list<hunk-info>` | Empty when `file` is `none`. Cut after 256 KiB of hunk text, with `truncated` set. |
-| `truncated` | `bool` |  |
+| `truncated` | `bool` | The hunks were cut (or dropped with `file`), and only that. |
+
+### record `review-snapshot`
+
+Every open review. It replaces whatever the extension knew: it comes first after `start`, and again whenever the host resyncs a feed that fell behind (more than 1024 events queued), in which case the events in between are not sent.
+
+| Field | Type | Notes |
+|---|---|---|
+| `reviews` | `list<review-info>` | At most 1000, oldest first. |
+| `older-dropped` | `bool` | Older reviews were left out to stay within 1000. |
 
 ### record `turn-file`
 
@@ -872,7 +884,7 @@ Cases: `auto-accept`, `always-ask`, `deny`.
 
 | Case | Payload | Notes |
 |---|---|---|
-| `snapshot` | `list<review-info>` | First event after `start`: every open review. |
+| `snapshot` | `review-snapshot` | First event after `start`, and after a resync. |
 | `opened` | `review-info` |  |
 | `updated` | `review-info` |  |
 | `resolved` | `review-info` |  |

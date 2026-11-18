@@ -40,7 +40,11 @@ use bindings::fyx::ui::{
     workspace_edit as wit_edit,
 };
 
-conversions::host_imports!(denied: wit_host::HostErrorCode::Denied);
+conversions::host_imports!(
+    denied: wit_host::HostErrorCode::Denied,
+    untrusted_worktree: wit_host::HostErrorCode::UntrustedWorktree,
+    no_worktree: wit_host::HostErrorCode::NoWorktree
+);
 conversions::notification_imports!();
 conversions::decoration_imports!();
 
@@ -406,9 +410,13 @@ fn review_info(info: observe::ReviewInfo) -> wit_observe::ReviewInfo {
 
 fn agent_event(event: observe::AgentEvent) -> wit_observe::AgentEvent {
     match event {
-        observe::AgentEvent::Snapshot(reviews) => {
-            wit_observe::AgentEvent::Snapshot(reviews.into_iter().map(review_info).collect())
-        }
+        observe::AgentEvent::Snapshot {
+            reviews,
+            older_dropped,
+        } => wit_observe::AgentEvent::Snapshot(wit_observe::ReviewSnapshot {
+            reviews: reviews.into_iter().map(review_info).collect(),
+            older_dropped,
+        }),
         observe::AgentEvent::Opened(info) => wit_observe::AgentEvent::Opened(review_info(info)),
         observe::AgentEvent::Updated(info) => wit_observe::AgentEvent::Updated(review_info(info)),
         observe::AgentEvent::Resolved(info) => wit_observe::AgentEvent::Resolved(review_info(info)),
@@ -461,6 +469,7 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
                 process::SpawnError::NotFound(why) => wit_process::SpawnError::NotFound(why),
                 process::SpawnError::LimitExceeded => wit_process::SpawnError::LimitExceeded,
                 process::SpawnError::Io(why) => wit_process::SpawnError::Io(why),
+                process::SpawnError::Other(why) => wit_process::SpawnError::Other(why),
             },
         )),
         network::IoEvent::PermissionChanged(capability, state) => {
@@ -484,6 +493,8 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
                 edit::EditError::NotFound(why) => wit_edit::EditError::NotFound(why),
                 edit::EditError::Invalid(why) => wit_edit::EditError::Invalid(why),
                 edit::EditError::Cancelled => wit_edit::EditError::Cancelled,
+                edit::EditError::UntrustedWorktree => wit_edit::EditError::UntrustedWorktree,
+                edit::EditError::Other(why) => wit_edit::EditError::Other(why),
             }),
         )),
         network::IoEvent::Agent(event) => wit_io::IoEvent::Agent(agent_event(event)),

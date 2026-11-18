@@ -77,6 +77,9 @@ pub enum EditError {
     NotFound(String),
     Invalid(String),
     Cancelled,
+    /// A file is in a worktree that is not trusted (restricted mode, integration-5 A5).
+    UntrustedWorktree,
+    Other(String),
 }
 
 fn invalid(message: impl Into<String>) -> HostError {

@@ -27,7 +27,11 @@ use bindings::fyx::ui::{
     types as wit,
 };
 
-conversions::host_imports!(denied: wit_host::HostErrorCode::NotPermitted);
+conversions::host_imports!(
+    denied: wit_host::HostErrorCode::NotPermitted,
+    untrusted_worktree: wit_host::HostErrorCode::NotPermitted,
+    no_worktree: wit_host::HostErrorCode::Unavailable
+);
 conversions::notification_imports!();
 conversions::decoration_imports!();
 
