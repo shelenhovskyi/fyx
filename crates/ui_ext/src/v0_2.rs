@@ -322,6 +322,42 @@ impl Props {
         matches!(self, Props::Flex(_))
     }
 
+    /// The string bytes these props retain: what [`tree::MAX_TREE_TEXT_BYTES`] counts, and
+    /// what the host counts against its per-call cap on lifted text.
+    pub fn text_len(&self) -> usize {
+        let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+        let icon_len = |icon: &IconRef| match icon {
+            IconRef::Frozen(_) => 0,
+            IconRef::Upstream(name) => name.len(),
+        };
+        match self {
+            Props::Flex(_) | Props::List(_) => 0,
+            Props::Text(props) => props.content.len(),
+            Props::Button(props) => {
+                props.label.len()
+                    + props.icon.as_ref().map_or(0, icon_len)
+                    + option_len(&props.tooltip)
+            }
+            Props::Input(props) => {
+                props.value.len() + props.placeholder.len() + option_len(&props.label)
+            }
+            Props::Table(props) => props.columns.iter().map(String::len).sum(),
+            Props::Icon(props) => icon_len(&props.name),
+            Props::Markdown(text) => text.len(),
+            Props::DiffView(props) => {
+                props.old_text.len() + props.new_text.len() + option_len(&props.language)
+            }
+            Props::Canvas(props) => crate::canvas::canvas_text_len(props),
+            Props::Image(props) => {
+                props.alt.len()
+                    + match &props.source {
+                        crate::image::ImageSource::Asset(path) => path.len(),
+                        crate::image::ImageSource::Generated(_) => 0,
+                    }
+            }
+        }
+    }
+
     pub fn kind_name(&self) -> &'static str {
         match self {
             Props::Flex(_) => "flex",
