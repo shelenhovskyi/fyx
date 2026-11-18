@@ -129,6 +129,9 @@ pub struct RegistryClient {
     index: Option<AcceptedIndex>,
     blocklist: Option<BlocklistCache>,
     refused: Option<Error>,
+    /// When the last block-list fetch started, successful or not (plan 3.4: at start, then every
+    /// 6 h). Not stored: a fresh start always fetches.
+    last_blocklist_attempt: Option<Timestamp>,
     /// An empty index, for planning while installs and updates are stopped.
     empty: VerifiedIndex,
 }
@@ -143,6 +146,7 @@ impl RegistryClient {
             index: None,
             blocklist: None,
             refused: None,
+            last_blocklist_attempt: None,
             empty,
         }
     }
@@ -264,6 +268,7 @@ impl RegistryClient {
     /// last accepted snapshot. The host stores the state on `Replace` and `Refresh`, and logs
     /// `Keep`. Due every 6 h ([`BlocklistCache::fetch_due`]).
     pub async fn refresh_blocklist(&mut self, fetch: &impl Fetch, now: Timestamp) -> CacheUpdate {
+        self.last_blocklist_attempt = Some(now);
         let keyset = match self.blocklist_keyset() {
             Ok(keyset) => keyset,
             Err(error) => return CacheUpdate::Keep(crate::KeepReason::Invalid(error)),
@@ -285,6 +290,23 @@ impl RegistryClient {
             self.blocklist = Some(cache.clone());
         }
         update
+    }
+
+    /// Whether [`RegistryClient::refresh_blocklist`] is due: never tried since start, or the last
+    /// attempt began 6 h ago or more ([`BlocklistCache::fetch_due`]; a failed attempt counts, so
+    /// an offline client retries every 6 h, not in a loop).
+    pub fn blocklist_fetch_due(&self, now: Timestamp) -> bool {
+        BlocklistCache::fetch_due(self.last_blocklist_attempt, now)
+    }
+
+    /// When the next block-list fetch is due, for the host's timer; `now` if it is due already.
+    pub fn next_blocklist_fetch(&self, now: Timestamp) -> Timestamp {
+        match self.last_blocklist_attempt {
+            Some(last) if !self.blocklist_fetch_due(now) => {
+                last.saturating_add(crate::BLOCKLIST_FETCH_INTERVAL)
+            }
+            _ => now,
+        }
     }
 
     /// The verified index, unless installs and updates are stopped.
@@ -827,6 +849,231 @@ mod tests {
             ready(restored.refresh_index(&files, NOW)),
             IndexRefresh::Refused(Error::Rollback { .. })
         ));
+    }
+
+    /// Plan 3.4: at start, then every 6 h, failed attempts included.
+    #[test]
+    fn the_block_list_is_fetched_at_start_and_every_six_hours() {
+        let files = Files::default();
+        let mut client = RegistryClient::new(keyset());
+        assert!(client.blocklist_fetch_due(NOW));
+        assert_eq!(client.next_blocklist_fetch(NOW), NOW);
+        // Offline: the attempt still counts, so the next one waits 6 h.
+        assert!(matches!(
+            ready(client.refresh_blocklist(&files, NOW)),
+            CacheUpdate::Keep(crate::KeepReason::FetchFailed(_))
+        ));
+        let later = |hours: u64| Timestamp(NOW.0 + hours * HOUR);
+        assert!(!client.blocklist_fetch_due(later(5)));
+        assert_eq!(client.next_blocklist_fetch(later(5)), later(6));
+        assert!(client.blocklist_fetch_due(later(6)));
+        // A clock that jumped back does not postpone it.
+        assert!(client.blocklist_fetch_due(Timestamp(NOW.0 - HOUR)));
+    }
+
+    /// Plan 3.4: lists are checked against the block-list keys only.
+    #[test]
+    fn a_block_list_signed_by_a_release_key_is_refused() {
+        let files = Files::default();
+        let release_only = crate::signing::test_keys::signing_key("rel", 21);
+        let blocklist_only = crate::signing::test_keys::signing_key("bl", 22);
+        let keyset = Keyset::new(vec![
+            registry_key().public_key([crate::KeyRole::Snapshot]),
+            release_only.public_key([crate::KeyRole::Release]),
+            blocklist_only.public_key([crate::KeyRole::Blocklist]),
+        ])
+        .expect("keyset");
+        let mut client = RegistryClient::new(keyset);
+        files.put(
+            RegistryFile::Blocklist,
+            signed_json(blocklist(1, vec![entry("todo", "*")]), &release_only),
+        );
+        assert!(matches!(
+            ready(client.refresh_blocklist(&files, NOW)),
+            CacheUpdate::Keep(crate::KeepReason::Invalid(Error::WrongRole { .. }))
+        ));
+        assert!(client.blocklist().is_none());
+        files.put(
+            RegistryFile::Blocklist,
+            signed_json(blocklist(1, vec![entry("todo", "*")]), &blocklist_only),
+        );
+        assert!(matches!(
+            ready(client.refresh_blocklist(&files, NOW)),
+            CacheUpdate::Replace(_)
+        ));
+    }
+
+    /// Spec section 4, failure 1: an update with a new T2 capability was never approved, then
+    /// the active version is blocked. The extension is disabled, not upgraded to the held version,
+    /// and the hold stays so the page can offer "Approve update".
+    #[test]
+    fn failure_1_a_blocked_version_is_not_replaced_by_a_held_one() {
+        let files = Files::default();
+        let mut held = todo("1.1.0");
+        held.capabilities.insert("network:fetch".into());
+        held.tier = Tier::T2;
+        publish(&files, vec![todo("1.0.0"), held], 1);
+        files.put(
+            RegistryFile::Blocklist,
+            signed_json(blocklist(1, vec![entry("todo", "=1.0.0")]), &registry_key()),
+        );
+        let mut client = RegistryClient::new(keyset());
+        ready(client.refresh_index(&files, NOW));
+        let before = client.plan_updates(&[installed("1.0.0")], NOW);
+        assert!(matches!(
+            &before[..],
+            [PlannedAction {
+                action: Action::Hold { .. },
+                ..
+            }]
+        ));
+        ready(client.refresh_blocklist(&files, NOW));
+        let after = client.plan_updates(&[installed("1.0.0")], NOW);
+        assert!(
+            matches!(
+                &after[..],
+                [
+                    PlannedAction {
+                        action: Action::Disable { .. },
+                        ..
+                    },
+                    PlannedAction {
+                        action: Action::Hold { .. },
+                        ..
+                    },
+                ]
+            ),
+            "{after:?}"
+        );
+        let changes = crate::PlanChanges::between(&before, &after);
+        assert!(matches!(
+            &changes.added[..],
+            [PlannedAction {
+                action: Action::Disable { .. },
+                ..
+            }]
+        ));
+        assert!(changes.removed.is_empty());
+    }
+
+    /// Spec section 4, failure 2: the only installed version is blocked and nothing can roll
+    /// back. It is disabled with the block's reason; a newer release installs only past the 24 h
+    /// age gate, unless it is `urgent`.
+    #[test]
+    fn failure_2_the_only_version_blocked_waits_for_the_age_gate() {
+        let files = Files::default();
+        let mut fix = todo("1.0.1");
+        fix.published_at = Timestamp(NOW.0 - HOUR);
+        publish(&files, vec![todo("1.0.0"), fix.clone()], 1);
+        files.put(
+            RegistryFile::Blocklist,
+            signed_json(blocklist(1, vec![entry("todo", "=1.0.0")]), &registry_key()),
+        );
+        let mut client = RegistryClient::new(keyset());
+        ready(client.refresh_index(&files, NOW));
+        ready(client.refresh_blocklist(&files, NOW));
+        let plan = client.plan_updates(&[installed("1.0.0")], NOW);
+        let [
+            PlannedAction {
+                action: Action::Disable { block },
+                ..
+            },
+            PlannedAction {
+                action: Action::Hold { reasons, .. },
+                ..
+            },
+        ] = &plan[..]
+        else {
+            panic!("{plan:?}");
+        };
+        assert_eq!(block.reason, entry("todo", "=1.0.0").reason);
+        assert!(matches!(&reasons[..], [crate::HoldReason::TooNew { .. }]));
+
+        // Marked urgent, the fix replaces the blocked version at once.
+        fix.urgent = true;
+        publish(&files, vec![todo("1.0.0"), fix], 2);
+        ready(client.refresh_index(&files, NOW));
+        assert!(matches!(
+            &client.plan_updates(&[installed("1.0.0")], NOW)[..],
+            [PlannedAction {
+                action: Action::Update {
+                    reason: crate::UpdateReason::ReplacesBlocked(_),
+                    ..
+                },
+                ..
+            }]
+        ));
+    }
+
+    /// Spec section 4, failure 5: registry and block list unreachable for a week. The cached list
+    /// keeps applying, nothing is disabled for being offline, and after 7 days the list is stale.
+    #[test]
+    fn failure_5_a_week_offline_keeps_the_cached_list() {
+        let files = Files::default();
+        publish(&files, vec![todo("1.0.0")], 1);
+        let mut list = blocklist(1, vec![entry("todo", "=0.9.0")]);
+        list.generated_at = NOW;
+        list.expires_at = Timestamp(NOW.0 + 48 * HOUR);
+        files.put(RegistryFile::Blocklist, signed_json(list, &registry_key()));
+        let mut client = RegistryClient::new(keyset());
+        ready(client.refresh_index(&files, NOW));
+        ready(client.refresh_blocklist(&files, NOW));
+        let stored = client.stored_state().expect("serializes");
+
+        // Offline from here on, with a restart in the middle.
+        files.remove(RegistryFile::Snapshot);
+        files.remove(RegistryFile::Index);
+        files.remove(RegistryFile::Blocklist);
+        let (mut client, problems) = RegistryClient::restore(keyset(), &stored);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut now = NOW;
+        while now.0 < NOW.0 + 7 * 24 * HOUR {
+            if client.blocklist_fetch_due(now) {
+                assert!(matches!(
+                    ready(client.refresh_blocklist(&files, now)),
+                    CacheUpdate::Keep(crate::KeepReason::FetchFailed(_))
+                ));
+                ready(client.refresh_index(&files, now));
+            }
+            assert!(client.blocklist().is_some(), "the cached list stays");
+            // 1.0.0 is not blocked: being offline disables nothing.
+            assert!(client.plan_updates(&[installed("1.0.0")], now).is_empty());
+            now = Timestamp(now.0 + HOUR);
+        }
+        // The list expired after 48 h, which already makes it stale; the 7-day age as well.
+        assert!(matches!(
+            client.blocklist_freshness(Timestamp(NOW.0 + 7 * 24 * HOUR)),
+            Freshness::Stale { age } if age >= Duration::from_secs(7 * 24 * HOUR)
+        ));
+        assert!(
+            client.index(now).is_err(),
+            "the snapshot expired: no installs"
+        );
+    }
+
+    /// A restored cache signed by a key the restored snapshot revoked is dropped and reported.
+    #[test]
+    fn a_cached_list_from_a_revoked_key_is_not_restored() {
+        let files = Files::default();
+        let index = publish(&files, vec![todo("1.0.0")], 1);
+        files.put(
+            RegistryFile::Blocklist,
+            signed_json(blocklist(1, vec![entry("todo", "*")]), &registry_key()),
+        );
+        let mut client = RegistryClient::new(keyset());
+        ready(client.refresh_index(&files, NOW));
+        ready(client.refresh_blocklist(&files, NOW));
+        let mut stored = client.stored_state().expect("serializes");
+        files.put(
+            RegistryFile::Snapshot,
+            snapshot_bytes(&index, 2, &rotation_key(), &["test-registry"]),
+        );
+        ready(client.refresh_index(&files, NOW));
+        stored.snapshot = client.stored_state().expect("serializes").snapshot;
+        let (restored, problems) = RegistryClient::restore(keyset(), &stored);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(restored.blocklist().is_none());
+        assert_eq!(restored.blocklist_freshness(NOW), Freshness::Missing);
     }
 
     /// A rotation-key snapshot that revokes the block-list key drops the list it signed, and
