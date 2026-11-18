@@ -918,10 +918,15 @@ impl UiExtensionRegistry {
             "process:spawn" => {
                 let env = listed("process:env@");
                 let args = listed("process:args@");
+                // Owner's Q2: a shell, an interpreter or a launcher means any program.
+                let any_code: String = crate::install::programs_running_any_code(&declared)
+                    .iter()
+                    .map(|program| format!("\n{program} {}", ui_ext::process::RUNS_ANY_CODE_PROMPT))
+                    .collect();
                 (
                     format!("Allow {name} to run programs?"),
                     format!(
-                        "Programs: {}{}{}",
+                        "Programs: {}{any_code}{}{}",
                         listed("process:spawn@").join(", "),
                         if args.is_empty() {
                             String::new()

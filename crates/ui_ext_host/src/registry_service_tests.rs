@@ -165,6 +165,7 @@ impl TestRegistry {
                 .collect(),
             network_domains: BTreeSet::new(),
             processes: BTreeSet::new(),
+            zed_extension: false,
         };
         self.releases
             .push(Signed::sign(release, &signing_key(RELEASE_KEY)));
