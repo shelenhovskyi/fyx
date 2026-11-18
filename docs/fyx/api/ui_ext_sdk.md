@@ -6,11 +6,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 
 | Item | Kind | Summary |
 |---|---|---|
-| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch). |
+| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch). 0.3 is staged. |
 | `API_VERSION_SECTION` | const | Name of the custom section `register_extension!` adds to every component, from which the host reads the version before instantiating it. |
 | `API_VERSION_SECTION_BYTES` | const | `API_VERSION` as stored in the section: three big-endian `u16`s, as in Zed's `zed:api-version`. |
 | `API_VERSION_V0_1` | const | The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1. |
 | `API_VERSION_V0_1_SECTION_BYTES` | const | `API_VERSION_V0_1` as stored in the section. |
+| `API_VERSION_V0_2` | const | The version `register_extension!(T, v0_2)` exports. |
+| `API_VERSION_V0_2_SECTION_BYTES` | const | `API_VERSION_V0_2` as stored in the section. |
 | `ButtonProps::disabled` | method |  |
 | `ButtonProps::icon` | method |  |
 | `ButtonProps::new` | method |  |
@@ -34,7 +36,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FlexProps::row` | method | A row with no gap, no padding and children aligned to the start. |
 | `HostError` | re-export | `bindings::fyx::ui::host::HostError` |
 | `HostErrorCode` | re-export | `bindings::fyx::ui::host::HostErrorCode` |
-| `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2). |
+| `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3). |
 | `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
 | `IconProps::new` | method |  |
@@ -43,6 +45,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `IdAllocator::new` | method |  |
 | `IdAllocator::peek` | method | The id the next call to `IdAllocator::allocate` returns. |
 | `IdAllocator::starting_at` | method |  |
+| `ImageFormat` | re-export | `bindings::fyx::ui::images::ImageFormat` |
 | `InputProps::new` | method |  |
 | `InputProps::placeholder` | method |  |
 | `InputProps::secret` | method | Masks the text on screen (passwords, tokens). The value still reaches the extension. |

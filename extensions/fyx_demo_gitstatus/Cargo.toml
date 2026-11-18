@@ -15,8 +15,10 @@ test = true
 doctest = false
 
 [features]
-# Export the fyx:ui 0.2 world instead of 0.1 (see the end of the crate root).
+# Export the fyx:ui 0.2 world, or the staged 0.3 world, instead of 0.1 (see the end of the
+# crate root). 0.3 wins when both are on.
 fyx-ui-0-2 = []
+fyx-ui-0-3 = []
 
 [dependencies]
 ui_ext_sdk.workspace = true

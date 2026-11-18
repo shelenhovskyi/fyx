@@ -2,9 +2,10 @@
 //!
 //! Apache-2.0 so that extension authors, proprietary ones included, stay outside the GPL.
 //!
-//! The API is that of `fyx:ui@0.2.0`. An extension implements [`Extension`] and exports it with
-//! [`register_extension!`]: `register_extension!(T)` exports 0.2, and `register_extension!(T,
-//! v0_1)` exports 0.1 from the same code for hosts that only run 0.1. Trees are
+//! The API is that of `fyx:ui@0.3.0`, which is staged: Dev and Nightly builds of Fyx run it. An
+//! extension implements [`Extension`] and exports it with [`register_extension!`]:
+//! `register_extension!(T)` exports 0.3, `register_extension!(T, v0_2)` exports 0.2 and
+//! `register_extension!(T, v0_1)` exports 0.1, all from the same code. Trees are
 //! written as nested Rust code with [`TreeBuilder`], which assigns node ids and parents and emits
 //! the flat, parents-first `list<node>` the `fyx:ui` world expects. [`SurfaceTree`] remembers the
 //! live tree of one surface so `handle-event` can answer with a few patches instead of a full
@@ -48,7 +49,7 @@
 //!     }
 //! }
 //!
-//! // Fyx runs 0.1 today; `register_extension!(Hello)` exports 0.2.
+//! // Every Fyx runs 0.1; `register_extension!(Hello)` exports 0.3.
 //! register_extension!(Hello, v0_1);
 //! ```
 
@@ -60,31 +61,45 @@ use std::ops::Range;
 mod host;
 mod host_model;
 mod v0_1;
+mod v0_2;
 
 pub use host::*;
 
 pub mod bindings {
     wit_bindgen::generate!({
-        path: "../ui_ext/wit/since_v0.2.0",
+        path: "../ui_ext/wit/since_v0.3.0",
         world: "ui-extension",
         pub_export_macro: true,
         default_bindings_module: "ui_ext_sdk::bindings",
-        additional_derives: [PartialEq, Eq],
+        // Not `Eq`: canvas coordinates are `f32`.
+        additional_derives: [PartialEq],
+        // Without this, every interface module holds a `#[used]` reference to the world's type
+        // section, so a 0.1 or 0.2 export links it whenever that module shares a codegen unit
+        // with SDK code it uses, and imports 0.3's type-only interfaces. The world's own
+        // `export!` describes it for a 0.3 export.
+        disable_custom_section_link_helpers: true,
     });
 }
 
 /// The `fyx:ui@0.1.0` bindings, for `register_extension!(T, v0_1)`.
 #[doc(hidden)]
 pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
+/// The `fyx:ui@0.2.0` bindings, for `register_extension!(T, v0_2)`.
+#[doc(hidden)]
+pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
+pub use bindings::fyx::ui::images::ImageFormat;
 pub use bindings::fyx::ui::types::*;
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
-/// patch).
-pub const API_VERSION: (u16, u16, u16) = (0, 2, 0);
+/// patch). 0.3 is staged.
+pub const API_VERSION: (u16, u16, u16) = (0, 3, 0);
+
+/// The version `register_extension!(T, v0_2)` exports.
+pub const API_VERSION_V0_2: (u16, u16, u16) = (0, 2, 0);
 
 /// The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1.
 pub const API_VERSION_V0_1: (u16, u16, u16) = (0, 1, 0);
@@ -106,6 +121,9 @@ const fn version_section_bytes(version: (u16, u16, u16)) -> [u8; 6] {
 /// [`API_VERSION`] as stored in the section: three big-endian `u16`s, as in Zed's
 /// `zed:api-version`.
 pub const API_VERSION_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION);
+
+/// [`API_VERSION_V0_2`] as stored in the section.
+pub const API_VERSION_V0_2_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION_V0_2);
 
 /// [`API_VERSION_V0_1`] as stored in the section.
 pub const API_VERSION_V0_1_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION_V0_1);
@@ -216,9 +234,70 @@ macro_rules! register_extension {
                     extension.tick(&surface_id)
                 })
             }
+
+            // The rest of the 0.3 world. The SDK has no API for these yet (plan 4.2 to 4.8), so
+            // they answer as an extension that provides nothing; the host only calls them for
+            // what the manifest declares.
+            fn handle_io(
+                _event: $crate::bindings::fyx::ui::io::IoEvent,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                Ok(())
+            }
+
+            fn handle_command(
+                command: ::std::string::String,
+                _argument: ::std::option::Option<::std::string::String>,
+                _context: $crate::bindings::fyx::ui::requests::CommandContext,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                Err(::std::format!("no command {command:?}"))
+            }
+
+            fn provide_decorations(
+                _request: $crate::bindings::fyx::ui::requests::DecorationRequest,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::bindings::fyx::ui::decorations::Decoration>,
+                ::std::string::String,
+            > {
+                Ok(::std::vec::Vec::new())
+            }
+
+            fn provide_hover(
+                _request: $crate::bindings::fyx::ui::requests::HoverRequest,
+            ) -> ::std::result::Result<
+                $crate::bindings::fyx::ui::requests::HoverReply,
+                ::std::string::String,
+            > {
+                Err("no hover provider".into())
+            }
+
+            fn provide_code_lenses(
+                _request: $crate::bindings::fyx::ui::requests::CodeLensRequest,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::bindings::fyx::ui::requests::CodeLens>,
+                ::std::string::String,
+            > {
+                Ok(::std::vec::Vec::new())
+            }
+
+            fn provide_virtual_document(
+                path: ::std::string::String,
+            ) -> ::std::result::Result<
+                $crate::bindings::fyx::ui::requests::VirtualDocument,
+                ::std::string::String,
+            > {
+                Err(::std::format!("no virtual document {path:?}"))
+            }
+
+            fn picker_source_event(
+                _source: ::std::string::String,
+                _session: u64,
+                _event: $crate::bindings::fyx::ui::requests::PickerSourceEvent,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                Ok(())
+            }
         }
 
-        $crate::__fyx_host_shims!(v0_2);
+        $crate::__fyx_host_shims!(v0_3);
 
         // In the extension's own crate rather than the SDK's rlib, so the linker cannot drop it
         // as an unreferenced archive member.
@@ -228,6 +307,86 @@ macro_rules! register_extension {
         static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_SECTION_BYTES;
 
         $crate::bindings::export!(__FyxUiExtension with_types_in $crate::bindings);
+    };
+    ($extension_type:ty, v0_2) => {
+        struct __FyxUiExtension;
+
+        fn __fyx_new_extension() -> ::std::boxed::Box<dyn $crate::Extension> {
+            ::std::boxed::Box::new(<$extension_type as $crate::Extension>::new())
+        }
+
+        impl $crate::bindings_v0_2::Guest for __FyxUiExtension {
+            fn surfaces() -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Surface> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_2::surfaces(extension.surfaces())
+                })
+            }
+
+            fn mount(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Node>,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .mount(&surface_id)
+                        .and_then(|nodes| $crate::__private::v0_2::nodes(&nodes))
+                })
+            }
+
+            fn handle_event(
+                surface_id: ::std::string::String,
+                event: $crate::bindings_v0_2::fyx::ui::types::UiEvent,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_2::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .handle_event(&surface_id, $crate::__private::v0_2::event(event))
+                        .and_then(|update| $crate::__private::v0_2::update(&update))
+                })
+            }
+
+            fn list_rows(
+                surface_id: ::std::string::String,
+                list_node: $crate::NodeId,
+                start: u32,
+                count: u32,
+            ) -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::ListRow> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_2::rows(extension.list_rows(
+                        &surface_id,
+                        list_node,
+                        start,
+                        count,
+                    ))
+                })
+            }
+
+            fn tick(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_2::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .tick(&surface_id)
+                        .and_then(|update| $crate::__private::v0_2::update(&update))
+                })
+            }
+        }
+
+        $crate::__fyx_host_shims!(v0_2);
+
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(link_section = "fyx:ui-api-version")]
+        #[used]
+        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_V0_2_SECTION_BYTES;
+
+        $crate::bindings_v0_2::export!(__FyxUiExtension with_types_in $crate::bindings_v0_2);
     };
     ($extension_type:ty, v0_1) => {
         struct __FyxUiExtension;
@@ -380,6 +539,19 @@ macro_rules! __fyx_host_shims {
             ) -> ::std::result::Result<(), $crate::HostError> {
                 $crate::__private::$world::remove_decoration(id)
             }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_add_image(
+                format: $crate::ImageFormat,
+                bytes: &[u8],
+            ) -> ::std::result::Result<u32, $crate::HostError> {
+                $crate::__private::$world::add_image(format, bytes)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_remove_image(image: u32) {
+                $crate::__private::$world::remove_image(image)
+            }
         };
     };
 }
@@ -388,8 +560,9 @@ macro_rules! __fyx_host_shims {
 pub mod __private {
     use super::*;
 
-    pub use crate::host::v0_2;
+    pub use crate::host::v0_3;
     pub use crate::v0_1::glue as v0_1;
+    pub use crate::v0_2::glue as v0_2;
 
     thread_local! {
         static EXTENSION: RefCell<Option<Box<dyn Extension>>> = const { RefCell::new(None) };
@@ -592,7 +765,7 @@ pub fn list_rows(
 }
 
 /// An ordered batch of patches, turned into an `update` with [`PatchSet::into_update`].
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct PatchSet {
     patches: Vec<Patch>,
 }
@@ -739,7 +912,7 @@ impl From<TreeError> for String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct LiveNode {
     parent: Option<NodeId>,
     props: Props,
@@ -894,7 +1067,11 @@ impl SurfaceTree {
             UiEvent::InputChanged((id, _))
             | UiEvent::InputSubmitted((id, _))
             | UiEvent::RowSelected((id, _)) => *id,
-            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => return,
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::Orphaned
+            | UiEvent::CanvasClick(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
@@ -923,7 +1100,11 @@ impl SurfaceTree {
                     list.selected = Some(*index);
                 }
             }
-            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => {}
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::Orphaned
+            | UiEvent::CanvasClick(_) => {}
         }
     }
 
@@ -1204,15 +1385,117 @@ impl SurfaceTree {
     }
 }
 
+/// Every frozen icon in WIT declaration order, written out rather than lifted from an index, so
+/// the SDK's always-linked code calls nothing in the generated bindings (which would link the 0.3
+/// world description into 0.1 and 0.2 exports too). `icons_are_in_wit_order` checks it.
+const ALL_ICONS: [Icon; 101] = [
+    Icon::ArrowUp,
+    Icon::ArrowDown,
+    Icon::ArrowLeft,
+    Icon::ArrowRight,
+    Icon::ChevronUp,
+    Icon::ChevronDown,
+    Icon::ChevronLeft,
+    Icon::ChevronRight,
+    Icon::Expand,
+    Icon::Collapse,
+    Icon::Menu,
+    Icon::Ellipsis,
+    Icon::ListTree,
+    Icon::ListTodo,
+    Icon::Table,
+    Icon::FileTree,
+    Icon::Plus,
+    Icon::Dash,
+    Icon::Check,
+    Icon::CheckDouble,
+    Icon::Close,
+    Icon::Search,
+    Icon::Filter,
+    Icon::Refresh,
+    Icon::Undo,
+    Icon::Copy,
+    Icon::Pencil,
+    Icon::Trash,
+    Icon::Replace,
+    Icon::Download,
+    Icon::Send,
+    Icon::Share,
+    Icon::Link,
+    Icon::Pin,
+    Icon::Unpin,
+    Icon::Play,
+    Icon::Pause,
+    Icon::Stop,
+    Icon::Maximize,
+    Icon::Minimize,
+    Icon::Split,
+    Icon::File,
+    Icon::FileCode,
+    Icon::FileDiff,
+    Icon::FileText,
+    Icon::Folder,
+    Icon::FolderOpen,
+    Icon::Code,
+    Icon::Terminal,
+    Icon::Diff,
+    Icon::Regex,
+    Icon::CaseSensitive,
+    Icon::WholeWord,
+    Icon::Hash,
+    Icon::AtSign,
+    Icon::GitBranch,
+    Icon::GitCommit,
+    Icon::PullRequest,
+    Icon::Info,
+    Icon::Warning,
+    Icon::Error,
+    Icon::Help,
+    Icon::Bell,
+    Icon::BellDot,
+    Icon::Circle,
+    Icon::Dot,
+    Icon::Star,
+    Icon::StarFilled,
+    Icon::Bookmark,
+    Icon::ThumbsUp,
+    Icon::ThumbsDown,
+    Icon::TodoPending,
+    Icon::TodoProgress,
+    Icon::TodoComplete,
+    Icon::Spinner,
+    Icon::Blank,
+    Icon::Settings,
+    Icon::Clock,
+    Icon::Debug,
+    Icon::Eye,
+    Icon::EyeOff,
+    Icon::Lock,
+    Icon::Unlock,
+    Icon::Person,
+    Icon::People,
+    Icon::Chat,
+    Icon::Envelope,
+    Icon::Book,
+    Icon::Notepad,
+    Icon::Image,
+    Icon::Globe,
+    Icon::Server,
+    Icon::Database,
+    Icon::Keyboard,
+    Icon::Box,
+    Icon::Archive,
+    Icon::Sparkle,
+    Icon::Bolt,
+    Icon::Flame,
+    Icon::Power,
+    Icon::Blocks,
+];
+
 impl Icon {
-    /// Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2).
+    /// Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3).
     pub fn all() -> impl ExactSizeIterator<Item = Icon> {
-        (0..ui_ext::v0_2::Icon::ALL.len()).map(|index| {
-            let index = u8::try_from(index).expect("fewer than 256 icons");
-            // SAFETY: wit-bindgen enums are `repr(u8)` in WIT order, like `ui_ext::v0_2::Icon::ALL`,
-            // and `index` is below its length; `icons_are_in_wit_order` checks both.
-            unsafe { Icon::_lift(index) }
-        })
+        ALL_ICONS.into_iter()
     }
 
     /// The WIT case name, such as `arrow-up`.
@@ -1885,11 +2168,16 @@ mod tests {
 
     #[test]
     fn api_versions_match_the_wit_packages() {
-        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 3, 0, 0]);
+        assert_eq!(API_VERSION_V0_2_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
         assert_eq!(API_VERSION_V0_1_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
         for (version, wit) in [
             (
                 API_VERSION,
+                include_str!("../../ui_ext/wit/since_v0.3.0/fyx-ui.wit"),
+            ),
+            (
+                API_VERSION_V0_2,
                 include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit"),
             ),
             (
@@ -2072,7 +2360,7 @@ mod tests {
         add_surface(&picker).expect("add");
         show_surface("picker").expect("show");
         let location = DecorationLocation {
-            path: "src/main.rs".into(),
+            target: DecorationTarget::Path("src/main.rs".into()),
             line: 3,
             placement: DecorationPlacement::Below,
             height_lines: None,

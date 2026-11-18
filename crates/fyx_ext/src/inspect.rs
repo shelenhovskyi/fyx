@@ -123,6 +123,28 @@ pub fn decode_api_version(data: &[u8]) -> Option<Version> {
     ))
 }
 
+/// Whether the top-level import `name` is an instance with no functions in it, at any depth.
+fn is_type_only_import(types: &wasmparser::types::Types, name: &str) -> bool {
+    fn has_functions(
+        types: &wasmparser::types::Types,
+        instance: wasmparser::component_types::ComponentInstanceTypeId,
+    ) -> bool {
+        types[instance].exports.values().any(|item| match item.ty {
+            wasmparser::component_types::ComponentEntityType::Func(_) => true,
+            wasmparser::component_types::ComponentEntityType::Instance(nested) => {
+                has_functions(types, nested)
+            }
+            _ => false,
+        })
+    }
+    match types.component_item_for_import(name).map(|item| item.ty) {
+        Some(wasmparser::component_types::ComponentEntityType::Instance(instance)) => {
+            !has_functions(types, instance)
+        }
+        _ => false,
+    }
+}
+
 /// Checks a built component against its manifest.
 pub fn check_component(manifest: &Manifest, bytes: &[u8], report: &mut Report) {
     if bytes.len() as u64 > MAX_COMPONENT_BYTES {
@@ -131,19 +153,27 @@ pub fn check_component(manifest: &Manifest, bytes: &[u8], report: &mut Report) {
             bytes.len()
         ));
     }
-    if let Err(error) = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+    let types = match wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
         .validate_all(bytes)
     {
-        report.error(format!("the component does not validate: {error}"));
-        return;
-    }
-    let info = match inspect(bytes) {
+        Ok(types) => types,
+        Err(error) => {
+            report.error(format!("the component does not validate: {error}"));
+            return;
+        }
+    };
+    let mut info = match inspect(bytes) {
         Ok(info) => info,
         Err(error) => {
             report.error(format!("{error:#}"));
             return;
         }
     };
+    // An instance import that carries only types needs nothing linked: the host has nothing to
+    // provide for it. An SDK built on a newer world can bring such imports along, because
+    // `wit-component` keeps the type-only interfaces a linked world description names.
+    info.imports
+        .retain(|name| !is_type_only_import(&types, name));
 
     check_api_version(manifest, &info, report);
 

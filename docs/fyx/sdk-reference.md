@@ -1,7 +1,8 @@
 # `ui_ext_sdk` reference
 
 `ui_ext_sdk` is the Rust guest SDK for Fyx UI extensions, built on `wit-bindgen` 0.41 over the
-`fyx:ui@0.1.0` world. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
+`fyx:ui@0.3.0` world, which is staged (Dev and Nightly builds of Fyx run it); one source also
+exports 0.2 and 0.1. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
 outside the GPL. It is not on crates.io yet, so depend on it by path (see
 [Project layout](extension-authoring.md#project-layout)).
 
@@ -71,9 +72,10 @@ Patch::Remove(id)
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `API_VERSION: (u16, u16, u16)` | `(0, 1, 0)` | The `fyx:ui` version the SDK is generated from. A test checks it against the `package fyx:ui@…` line of the WIT. |
+| `API_VERSION: (u16, u16, u16)` | `(0, 3, 0)` | The `fyx:ui` version the SDK is generated from, and what `register_extension!(T)` exports. A test checks it against the `package fyx:ui@…` line of the WIT. |
+| `API_VERSION_V0_2`, `API_VERSION_V0_1` | `(0, 2, 0)`, `(0, 1, 0)` | What `register_extension!(T, v0_2)` and `(T, v0_1)` export. |
 | `API_VERSION_SECTION: &str` | `"fyx:ui-api-version"` | Name of the custom section `register_extension!` embeds. |
-| `API_VERSION_SECTION_BYTES: [u8; 6]` | `[0, 0, 0, 1, 0, 0]` | `API_VERSION` as three big-endian `u16`s, the same layout as Zed's `zed:api-version`. |
+| `API_VERSION_SECTION_BYTES: [u8; 6]` | `[0, 0, 0, 3, 0, 0]` | `API_VERSION` as three big-endian `u16`s, the same layout as Zed's `zed:api-version`; `API_VERSION_V0_2_SECTION_BYTES` and `API_VERSION_V0_1_SECTION_BYTES` likewise. |
 | `ROW_NODE_ID_BASE: NodeId` | `0x8000_0000` | First id inside a list row, so row ids can never be mistaken for main-tree ids (which start at 1). |
 
 <!-- sdk:74-98, 1520-1526 -->
@@ -121,29 +123,41 @@ traps or panics disables the extension for the session.
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
 
 ```rust
-register_extension!(MyExtension);        // exports fyx:ui 0.2
+register_extension!(MyExtension);        // exports fyx:ui 0.3 (staged: Dev and Nightly)
+register_extension!(MyExtension, v0_2);  // exports fyx:ui 0.2
 register_extension!(MyExtension, v0_1);  // exports fyx:ui 0.1, for hosts that only run 0.1
 ```
 
-The SDK's types and functions are those of `fyx:ui@0.2.0` (`API_VERSION`); one extension source
-exports either world. Call the macro once, at the root of your `cdylib` crate. It:
+The SDK's types and functions are those of `fyx:ui@0.3.0` (`API_VERSION`); one extension source
+exports any of the three worlds. Call the macro once, at the root of your `cdylib` crate. It:
 
-- implements the chosen world's `Guest` trait by forwarding each export to your type. With
-  `v0_1`, values are converted at the boundary. Icons become upstream `IconName`s, and
-  tooltips, list selection and row indents are dropped. What 0.1 cannot express is an error that
-  names 0.2: modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank`
-  icon node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
+- implements the chosen world's `Guest` trait by forwarding each export to your type. The 0.3
+  exports the SDK has no API for yet (`handle-io`, `handle-command`, the providers and
+  `picker-source-event`) answer as an extension that provides nothing.
+- With `v0_2`, values are converted at the boundary: what 0.2 cannot express is an error that
+  names 0.3. Image and canvas nodes make the call return `Err`, picker surfaces are left out of
+  `surfaces` (logged), and `add_image` and a decoration anchored to a document return
+  `unavailable`.
+- With `v0_1`, as with `v0_2`, and further: icons become upstream `IconName`s, and tooltips, list
+  selection and row indents are dropped. What 0.1 cannot express is an error that names 0.2 (or
+  0.3): modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank` icon
+  node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
 - defines `extern "Rust"` shims through which the SDK's host functions reach that world's
-  imports, so a 0.1 component imports only `fyx:ui/*@0.1.0`. A 0.2 component always imports
-  `fyx:ui/decorations`; the host checks `ui:editor-decorations` per call, not at import.
+  imports, so a 0.1 component imports only `fyx:ui/*@0.1.0` and a 0.2 component only `@0.2.0`. A
+  0.2 or 0.3 component always imports `fyx:ui/decorations`, and a 0.3 one `fyx:ui/images`; the
+  host checks `ui:editor-decorations` and `ui:images` per call, not at import. A 0.1 or 0.2
+  component also lists some 0.3 interfaces that carry only types (no functions), because the
+  SDK's 0.3 world description gets linked with the SDK's code. A host links nothing for them, and
+  `fyx-ext check` ignores imports without functions.
 - on `wasm32` only, adds a `#[used]` static in the `fyx:ui-api-version` link section holding
-  `API_VERSION_SECTION_BYTES` (0.2) or `API_VERSION_V0_1_SECTION_BYTES` (0.1). The static lives in
-  your crate, so the linker cannot drop it as an unused member of the SDK's rlib;
-- calls the export macro wit-bindgen generates for the world. The 0.1 bindings live in the crate `ui_ext_sdk_v0_1`,
-  because wit-bindgen names the export macro after the world, and both worlds are called
-  `ui-extension`.
+  `API_VERSION_SECTION_BYTES` (0.3), `API_VERSION_V0_2_SECTION_BYTES` or
+  `API_VERSION_V0_1_SECTION_BYTES`. The static lives in your crate, so the linker cannot drop it
+  as an unused member of the SDK's rlib;
+- calls the export macro wit-bindgen generates for the world. The 0.2 and 0.1 bindings live in
+  the crates `ui_ext_sdk_v0_2` and `ui_ext_sdk_v0_1`, because wit-bindgen names the export macro
+  after the world, and every version calls its world `ui-extension`.
 
-<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs (register_extension!, __fyx_host_shims!), crates/ui_ext_sdk/src/v0_1.rs, crates/ui_ext_sdk/src/host.rs -->
+<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs (register_extension!, __fyx_host_shims!), crates/ui_ext_sdk/src/v0_2.rs, crates/ui_ext_sdk/src/v0_1.rs, crates/ui_ext_sdk/src/host.rs -->
 
 <!-- sdk:163-219 -->
 
@@ -504,8 +518,20 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError>;
 pub fn take_host_effects() -> Vec<HostEffect>;
 ```
 
-In an extension exported with `v0_1` they return `HostError` with code `unavailable`
-("needs fyx:ui 0.2"), and `cancel_tick` does nothing. `push_update` converts the update to 0.1 and
+`fyx:ui` 0.3 adds generated images (design 0.3, section 12), for `ImageSource::Generated`:
+
+```rust
+pub fn add_image(format: ImageFormat, bytes: &[u8]) -> Result<GeneratedImage, HostError>;
+pub fn remove_image(image: GeneratedImage);
+```
+
+`GeneratedImage` is a `Copy` handle with no `Drop`: freeing it is the extension's decision.
+`add_image` needs `ui:images`, takes at most 1 MiB and at most 32 live images; off WASM it hands
+out handles 1, 2, … and records `HostEffect::AddImage { image, format, len }`.
+
+In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
+`unavailable` ("needs fyx:ui 0.2"), and `cancel_tick` does nothing; with `v0_1` or `v0_2`,
+`add_image` returns `unavailable` ("needs fyx:ui 0.3") and `remove_image` does nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.
 

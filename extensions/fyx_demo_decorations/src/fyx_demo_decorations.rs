@@ -153,6 +153,7 @@ fn host_error(error: HostError) -> String {
         HostErrorCode::InvalidArgument => "invalid-argument",
         HostErrorCode::NotPermitted => "not-permitted",
         HostErrorCode::Unavailable => "unavailable",
+        HostErrorCode::Denied => "denied",
     };
     format!("{code}: {}", error.message)
 }
@@ -218,7 +219,7 @@ impl Highlighter {
 
     fn location(comment: &Comment) -> DecorationLocation {
         DecorationLocation {
-            path: comment.path.to_string(),
+            target: DecorationTarget::Path(comment.path.to_string()),
             line: comment.line,
             placement: DecorationPlacement::Above,
             height_lines: Some(1),
@@ -442,11 +443,13 @@ impl Extension for Highlighter {
     }
 }
 
-// fyx:ui 0.1 by default, which is what Fyx runs today; there `place-decoration` is unavailable.
-// `--features fyx-ui-0-2` builds the 0.2 world from the same code.
-#[cfg(not(feature = "fyx-ui-0-2"))]
+// fyx:ui 0.1 by default, which is what every Fyx runs; `--features fyx-ui-0-2` builds the 0.2
+// world and `--features fyx-ui-0-3` the staged 0.3 world from the same code.
+#[cfg(not(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3")))]
 register_extension!(Highlighter, v0_1);
-#[cfg(feature = "fyx-ui-0-2")]
+#[cfg(all(feature = "fyx-ui-0-2", not(feature = "fyx-ui-0-3")))]
+register_extension!(Highlighter, v0_2);
+#[cfg(feature = "fyx-ui-0-3")]
 register_extension!(Highlighter);
 
 #[cfg(test)]

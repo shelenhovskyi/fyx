@@ -151,6 +151,20 @@ impl From<&Props> for ui_ext::Props {
             Props::Icon(props) => Self::Icon(props.into()),
             Props::Markdown(source) => Self::Markdown(source.clone()),
             Props::DiffView(props) => Self::DiffView(props.into()),
+            // The 0.1 model has no image or canvas yet. Both are leaves, which is all the tree
+            // rules need, so a text node with their alt text stands in for them.
+            Props::Image(image) => Self::Text(ui_ext::TextProps {
+                content: image.alt.clone(),
+                color: None,
+                bold: false,
+                monospace: false,
+            }),
+            Props::Canvas(canvas) => Self::Text(ui_ext::TextProps {
+                content: canvas.description.clone(),
+                color: None,
+                bold: false,
+                monospace: false,
+            }),
         }
     }
 }

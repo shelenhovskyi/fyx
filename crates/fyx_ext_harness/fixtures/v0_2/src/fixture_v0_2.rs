@@ -87,6 +87,7 @@ fn outcome(result: Result<(), HostError>) -> String {
             HostErrorCode::InvalidArgument => "invalid-argument",
             HostErrorCode::NotPermitted => "not-permitted",
             HostErrorCode::Unavailable => "unavailable",
+            HostErrorCode::Denied => "denied",
         }
         .into(),
     }
@@ -100,7 +101,7 @@ fn set_status(status: &str) -> Update {
 
 fn note_location() -> DecorationLocation {
     DecorationLocation {
-        path: "src/lib.rs".into(),
+        target: DecorationTarget::Path("src/lib.rs".into()),
         line: 3,
         placement: DecorationPlacement::Below,
         height_lines: Some(2),
@@ -353,4 +354,4 @@ impl Extension for Fixture {
     }
 }
 
-register_extension!(Fixture);
+register_extension!(Fixture, v0_2);

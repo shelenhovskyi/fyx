@@ -383,7 +383,7 @@ impl Extension for Panel {
 }
 
 // Exports fyx:ui 0.1, which is what Fyx runs today. Once your Fyx runs 0.2, use
-// `register_extension!(Panel)` and set `api_version = "0.2.0"` in extension.toml.
+// `register_extension!(Panel, v0_2)` and set `api_version = "0.2.0"` in extension.toml.
 register_extension!(Panel, v0_1);
 
 #[cfg(test)]
