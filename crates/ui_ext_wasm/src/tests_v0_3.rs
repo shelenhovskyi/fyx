@@ -2000,13 +2000,16 @@ mod harness_conformance_edit_observe {
     impl AgentReviews for Reviews {
         fn subscribe(
             &self,
-        ) -> (
-            Vec<ReviewInfo>,
-            futures::stream::BoxStream<'static, AgentEvent>,
-        ) {
+        ) -> futures::future::BoxFuture<
+            'static,
+            (
+                Vec<ReviewInfo>,
+                futures::stream::BoxStream<'static, AgentEvent>,
+            ),
+        > {
             let (sender, receiver) = mpsc::unbounded();
             *self.feed.lock().unwrap() = Some(sender);
-            (self.snapshot.clone(), receiver.boxed())
+            futures::future::ready((self.snapshot.clone(), receiver.boxed())).boxed()
         }
     }
 
