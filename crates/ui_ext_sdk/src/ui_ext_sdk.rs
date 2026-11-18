@@ -2,9 +2,10 @@
 //!
 //! Apache-2.0 so that extension authors, proprietary ones included, stay outside the GPL.
 //!
-//! The API is that of `fyx:ui@0.2.0`. An extension implements [`Extension`] and exports it with
-//! [`register_extension!`]: `register_extension!(T)` exports 0.2, and `register_extension!(T,
-//! v0_1)` exports 0.1 from the same code for hosts that only run 0.1. Trees are
+//! The API is that of `fyx:ui@0.3.0`, which is staged: Dev and Nightly builds of Fyx run it. An
+//! extension implements [`Extension`] and exports it with [`register_extension!`]:
+//! `register_extension!(T)` exports 0.3, `register_extension!(T, v0_2)` exports 0.2 and
+//! `register_extension!(T, v0_1)` exports 0.1, all from the same code. Trees are
 //! written as nested Rust code with [`TreeBuilder`], which assigns node ids and parents and emits
 //! the flat, parents-first `list<node>` the `fyx:ui` world expects. [`SurfaceTree`] remembers the
 //! live tree of one surface so `handle-event` can answer with a few patches instead of a full
@@ -48,7 +49,7 @@
 //!     }
 //! }
 //!
-//! // Fyx runs 0.1 today; `register_extension!(Hello)` exports 0.2.
+//! // Every Fyx runs 0.1; `register_extension!(Hello)` exports 0.3.
 //! register_extension!(Hello, v0_1);
 //! ```
 
@@ -60,9 +61,15 @@ use std::ops::Range;
 mod host;
 mod host_model;
 mod v0_1;
+#[cfg(feature = "fyx-ui-0-3")]
+mod v0_2;
 
 pub use host::*;
 
+/// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
+/// `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2
+/// component would list 0.3 interfaces.
+#[cfg(not(feature = "fyx-ui-0-3"))]
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../ui_ext/wit/since_v0.2.0",
@@ -73,18 +80,47 @@ pub mod bindings {
     });
 }
 
+#[cfg(feature = "fyx-ui-0-3")]
+pub mod bindings {
+    wit_bindgen::generate!({
+        path: "../ui_ext/wit/since_v0.3.0",
+        world: "ui-extension",
+        pub_export_macro: true,
+        default_bindings_module: "ui_ext_sdk::bindings",
+        // Not `Eq`: canvas coordinates are `f32`.
+        additional_derives: [PartialEq],
+        // Without this, every interface module holds a `#[used]` reference to the world's type
+        // section, so a 0.1 or 0.2 export links it whenever that module shares a codegen unit
+        // with SDK code it uses, and imports 0.3's type-only interfaces. The world's own
+        // `export!` describes it for a 0.3 export.
+        disable_custom_section_link_helpers: true,
+    });
+}
+
 /// The `fyx:ui@0.1.0` bindings, for `register_extension!(T, v0_1)`.
 #[doc(hidden)]
 pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
+/// The `fyx:ui@0.2.0` bindings, for `register_extension!(T, v0_2)` when the SDK's own world is 0.3.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::images::ImageFormat;
 pub use bindings::fyx::ui::types::*;
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
-/// patch).
+/// patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature.
+#[cfg(feature = "fyx-ui-0-3")]
+pub const API_VERSION: (u16, u16, u16) = (0, 3, 0);
+#[cfg(not(feature = "fyx-ui-0-3"))]
 pub const API_VERSION: (u16, u16, u16) = (0, 2, 0);
+
+/// The version `register_extension!(T, v0_2)` exports.
+pub const API_VERSION_V0_2: (u16, u16, u16) = (0, 2, 0);
 
 /// The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1.
 pub const API_VERSION_V0_1: (u16, u16, u16) = (0, 1, 0);
@@ -106,6 +142,9 @@ const fn version_section_bytes(version: (u16, u16, u16)) -> [u8; 6] {
 /// [`API_VERSION`] as stored in the section: three big-endian `u16`s, as in Zed's
 /// `zed:api-version`.
 pub const API_VERSION_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION);
+
+/// [`API_VERSION_V0_2`] as stored in the section.
+pub const API_VERSION_V0_2_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION_V0_2);
 
 /// [`API_VERSION_V0_1`] as stored in the section.
 pub const API_VERSION_V0_1_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION_V0_1);
@@ -216,9 +255,11 @@ macro_rules! register_extension {
                     extension.tick(&surface_id)
                 })
             }
+
+            $crate::__fyx_v0_3_exports!();
         }
 
-        $crate::__fyx_host_shims!(v0_2);
+        $crate::__fyx_host_shims!(newest);
 
         // In the extension's own crate rather than the SDK's rlib, so the linker cannot drop it
         // as an unreferenced archive member.
@@ -228,6 +269,9 @@ macro_rules! register_extension {
         static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_SECTION_BYTES;
 
         $crate::bindings::export!(__FyxUiExtension with_types_in $crate::bindings);
+    };
+    ($extension_type:ty, v0_2) => {
+        $crate::__fyx_register_v0_2!($extension_type);
     };
     ($extension_type:ty, v0_1) => {
         struct __FyxUiExtension;
@@ -380,16 +424,220 @@ macro_rules! __fyx_host_shims {
             ) -> ::std::result::Result<(), $crate::HostError> {
                 $crate::__private::$world::remove_decoration(id)
             }
+
+            $crate::__fyx_image_shims!($world);
         };
     };
+}
+
+/// The 0.3 exports beyond 0.2's, inside `register_extension!(T)`'s `Guest` impl: the SDK has no
+/// API for them yet (plan 4.2 to 4.8), so they answer as an extension that provides nothing; the
+/// host only calls them for what the manifest declares. Empty without the `fyx-ui-0-3` feature.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_v0_3_exports {
+    () => {
+        fn handle_io(
+            _event: $crate::bindings::fyx::ui::io::IoEvent,
+        ) -> ::std::result::Result<(), ::std::string::String> {
+            Ok(())
+        }
+
+        fn handle_command(
+            command: ::std::string::String,
+            _argument: ::std::option::Option<::std::string::String>,
+            _context: $crate::bindings::fyx::ui::requests::CommandContext,
+        ) -> ::std::result::Result<(), ::std::string::String> {
+            Err(::std::format!("no command {command:?}"))
+        }
+
+        fn provide_decorations(
+            _request: $crate::bindings::fyx::ui::requests::DecorationRequest,
+        ) -> ::std::result::Result<
+            ::std::vec::Vec<$crate::bindings::fyx::ui::decorations::Decoration>,
+            ::std::string::String,
+        > {
+            Ok(::std::vec::Vec::new())
+        }
+
+        fn provide_hover(
+            _request: $crate::bindings::fyx::ui::requests::HoverRequest,
+        ) -> ::std::result::Result<
+            $crate::bindings::fyx::ui::requests::HoverReply,
+            ::std::string::String,
+        > {
+            Err("no hover provider".into())
+        }
+
+        fn provide_code_lenses(
+            _request: $crate::bindings::fyx::ui::requests::CodeLensRequest,
+        ) -> ::std::result::Result<
+            ::std::vec::Vec<$crate::bindings::fyx::ui::requests::CodeLens>,
+            ::std::string::String,
+        > {
+            Ok(::std::vec::Vec::new())
+        }
+
+        fn provide_virtual_document(
+            path: ::std::string::String,
+        ) -> ::std::result::Result<
+            $crate::bindings::fyx::ui::requests::VirtualDocument,
+            ::std::string::String,
+        > {
+            Err(::std::format!("no virtual document {path:?}"))
+        }
+
+        fn picker_source_event(
+            _source: ::std::string::String,
+            _session: u64,
+            _event: $crate::bindings::fyx::ui::requests::PickerSourceEvent,
+        ) -> ::std::result::Result<(), ::std::string::String> {
+            Ok(())
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-3"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_v0_3_exports {
+    () => {};
+}
+
+/// `register_extension!(T, v0_2)`. With the `fyx-ui-0-3` feature the SDK's types are 0.3's and are
+/// converted down; without it they are 0.2's, and this is `register_extension!(T)`.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_register_v0_2 {
+    ($extension_type:ty) => {
+        struct __FyxUiExtension;
+
+        fn __fyx_new_extension() -> ::std::boxed::Box<dyn $crate::Extension> {
+            ::std::boxed::Box::new(<$extension_type as $crate::Extension>::new())
+        }
+
+        impl $crate::bindings_v0_2::Guest for __FyxUiExtension {
+            fn surfaces() -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Surface> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_2::surfaces(extension.surfaces())
+                })
+            }
+
+            fn mount(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Node>,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .mount(&surface_id)
+                        .and_then(|nodes| $crate::__private::v0_2::nodes(&nodes))
+                })
+            }
+
+            fn handle_event(
+                surface_id: ::std::string::String,
+                event: $crate::bindings_v0_2::fyx::ui::types::UiEvent,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_2::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .handle_event(&surface_id, $crate::__private::v0_2::event(event))
+                        .and_then(|update| $crate::__private::v0_2::update(&update))
+                })
+            }
+
+            fn list_rows(
+                surface_id: ::std::string::String,
+                list_node: $crate::NodeId,
+                start: u32,
+                count: u32,
+            ) -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::ListRow> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_2::rows(extension.list_rows(
+                        &surface_id,
+                        list_node,
+                        start,
+                        count,
+                    ))
+                })
+            }
+
+            fn tick(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_2::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .tick(&surface_id)
+                        .and_then(|update| $crate::__private::v0_2::update(&update))
+                })
+            }
+        }
+
+        $crate::__fyx_host_shims!(v0_2);
+
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(link_section = "fyx:ui-api-version")]
+        #[used]
+        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_V0_2_SECTION_BYTES;
+
+        $crate::bindings_v0_2::export!(__FyxUiExtension with_types_in $crate::bindings_v0_2);
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-3"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_register_v0_2 {
+    ($extension_type:ty) => {
+        $crate::register_extension!($extension_type);
+    };
+}
+
+/// The shims of the 0.3 `images` functions; none without the `fyx-ui-0-3` feature.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_image_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_add_image(
+            format: $crate::ImageFormat,
+            bytes: &[u8],
+        ) -> ::std::result::Result<u32, $crate::HostError> {
+            $crate::__private::$world::add_image(format, bytes)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_remove_image(image: u32) {
+            $crate::__private::$world::remove_image(image)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-3"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_image_shims {
+    ($world:ident) => {};
 }
 
 #[doc(hidden)]
 pub mod __private {
     use super::*;
 
-    pub use crate::host::v0_2;
+    pub use crate::host::newest;
     pub use crate::v0_1::glue as v0_1;
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub use crate::v0_2::glue as v0_2;
 
     thread_local! {
         static EXTENSION: RefCell<Option<Box<dyn Extension>>> = const { RefCell::new(None) };
@@ -530,6 +778,12 @@ impl<'a> TreeBuilder<'a> {
         self.node(props)
     }
 
+    /// `fyx:ui` 0.3: an image node (see [`ImageProps`]).
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn image(&mut self, props: ImageProps) -> NodeId {
+        self.node(props)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -592,7 +846,7 @@ pub fn list_rows(
 }
 
 /// An ordered batch of patches, turned into an `update` with [`PatchSet::into_update`].
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct PatchSet {
     patches: Vec<Patch>,
 }
@@ -739,7 +993,7 @@ impl From<TreeError> for String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct LiveNode {
     parent: Option<NodeId>,
     props: Props,
@@ -790,12 +1044,12 @@ impl SurfaceTree {
     /// Builds the surface's tree from scratch and returns it for `mount`. Pending patches are
     /// dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never
     /// names a node of the new tree. Fails, keeping the previous tree, if the new one has more
-    /// nodes than one update may carry.
+    /// nodes than a tree may hold (`max_nodes`, 16384), the host's cap for a mount and a
+    /// `replace`. So a tree grown past 2048 nodes with `insert` can always be mounted again.
     pub fn mount(&mut self, build: impl FnOnce(&mut TreeBuilder)) -> Result<Vec<Node>, TreeError> {
         let mut tree = TreeBuilder::new(&mut self.ids);
         build(&mut tree);
         let nodes = tree.finish();
-        self.check_update_size(nodes.len())?;
         self.check_tree_size(nodes.len())?;
 
         self.nodes.clear();
@@ -885,7 +1139,31 @@ impl SurfaceTree {
     /// mirror holds what the host holds: echoing the typed value back queues nothing (it would
     /// fight the user's typing), and clearing the field afterwards does queue the `set-props`,
     /// which a stale mirror would have dropped as unchanged.
+    ///
+    /// While a `set-props` or `insert` for the node is still queued, the mirror is left alone:
+    /// the host applies the queued patch after the event, so the queued props are what it will
+    /// hold.
     pub fn apply_event(&mut self, event: &UiEvent) {
+        let target = match event {
+            UiEvent::InputChanged((id, _))
+            | UiEvent::InputSubmitted((id, _))
+            | UiEvent::RowSelected((id, _)) => *id,
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(_)
+            | UiEvent::ProgressCancelRequested(_) => return,
+            #[cfg(feature = "fyx-ui-0-3")]
+            UiEvent::Orphaned | UiEvent::CanvasClick(_) => return,
+        };
+        if self.pending.patches().iter().any(|patch| match patch {
+            Patch::SetProps((id, _)) => *id == target,
+            Patch::Insert(op) => op.node.id == target,
+            Patch::Remove(_) | Patch::InvalidateRows(_) => false,
+        }) {
+            return;
+        }
         match event {
             UiEvent::InputChanged((id, value)) | UiEvent::InputSubmitted((id, value)) => {
                 if let Some(LiveNode {
@@ -912,6 +1190,8 @@ impl SurfaceTree {
             | UiEvent::NotificationAction(_)
             | UiEvent::NotificationClosed(_)
             | UiEvent::ProgressCancelRequested(_) => {}
+            #[cfg(feature = "fyx-ui-0-3")]
+            UiEvent::Orphaned | UiEvent::CanvasClick(_) => {}
         }
     }
 
@@ -1192,20 +1472,159 @@ impl SurfaceTree {
     }
 }
 
+/// Every frozen icon in WIT declaration order, written out rather than lifted from an index, so
+/// the SDK's always-linked code calls nothing in the generated bindings (which would link the 0.3
+/// world description into 0.1 and 0.2 exports too). `icons_are_in_wit_order` checks it.
+const ALL_ICONS: [Icon; 101] = [
+    Icon::ArrowUp,
+    Icon::ArrowDown,
+    Icon::ArrowLeft,
+    Icon::ArrowRight,
+    Icon::ChevronUp,
+    Icon::ChevronDown,
+    Icon::ChevronLeft,
+    Icon::ChevronRight,
+    Icon::Expand,
+    Icon::Collapse,
+    Icon::Menu,
+    Icon::Ellipsis,
+    Icon::ListTree,
+    Icon::ListTodo,
+    Icon::Table,
+    Icon::FileTree,
+    Icon::Plus,
+    Icon::Dash,
+    Icon::Check,
+    Icon::CheckDouble,
+    Icon::Close,
+    Icon::Search,
+    Icon::Filter,
+    Icon::Refresh,
+    Icon::Undo,
+    Icon::Copy,
+    Icon::Pencil,
+    Icon::Trash,
+    Icon::Replace,
+    Icon::Download,
+    Icon::Send,
+    Icon::Share,
+    Icon::Link,
+    Icon::Pin,
+    Icon::Unpin,
+    Icon::Play,
+    Icon::Pause,
+    Icon::Stop,
+    Icon::Maximize,
+    Icon::Minimize,
+    Icon::Split,
+    Icon::File,
+    Icon::FileCode,
+    Icon::FileDiff,
+    Icon::FileText,
+    Icon::Folder,
+    Icon::FolderOpen,
+    Icon::Code,
+    Icon::Terminal,
+    Icon::Diff,
+    Icon::Regex,
+    Icon::CaseSensitive,
+    Icon::WholeWord,
+    Icon::Hash,
+    Icon::AtSign,
+    Icon::GitBranch,
+    Icon::GitCommit,
+    Icon::PullRequest,
+    Icon::Info,
+    Icon::Warning,
+    Icon::Error,
+    Icon::Help,
+    Icon::Bell,
+    Icon::BellDot,
+    Icon::Circle,
+    Icon::Dot,
+    Icon::Star,
+    Icon::StarFilled,
+    Icon::Bookmark,
+    Icon::ThumbsUp,
+    Icon::ThumbsDown,
+    Icon::TodoPending,
+    Icon::TodoProgress,
+    Icon::TodoComplete,
+    Icon::Spinner,
+    Icon::Blank,
+    Icon::Settings,
+    Icon::Clock,
+    Icon::Debug,
+    Icon::Eye,
+    Icon::EyeOff,
+    Icon::Lock,
+    Icon::Unlock,
+    Icon::Person,
+    Icon::People,
+    Icon::Chat,
+    Icon::Envelope,
+    Icon::Book,
+    Icon::Notepad,
+    Icon::Image,
+    Icon::Globe,
+    Icon::Server,
+    Icon::Database,
+    Icon::Keyboard,
+    Icon::Box,
+    Icon::Archive,
+    Icon::Sparkle,
+    Icon::Bolt,
+    Icon::Flame,
+    Icon::Power,
+    Icon::Blocks,
+];
+
 impl Icon {
-    /// Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2).
+    /// Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3).
     pub fn all() -> impl ExactSizeIterator<Item = Icon> {
-        (0..ui_ext::v0_2::Icon::ALL.len()).map(|index| {
-            let index = u8::try_from(index).expect("fewer than 256 icons");
-            // SAFETY: wit-bindgen enums are `repr(u8)` in WIT order, like `ui_ext::v0_2::Icon::ALL`,
-            // and `index` is below its length; `icons_are_in_wit_order` checks both.
-            unsafe { Icon::_lift(index) }
-        })
+        ALL_ICONS.into_iter()
     }
 
     /// The WIT case name, such as `arrow-up`.
     pub fn name(self) -> &'static str {
         ui_ext::v0_2::Icon::ALL[self as usize].name()
+    }
+}
+
+impl DecorationLocation {
+    /// A block above or below `line` (zero-based) of the worktree-relative `path`, with the height
+    /// left to the host. The same code builds 0.2's `path` and 0.3's `target`.
+    pub fn at(path: impl Into<String>, line: u32, placement: DecorationPlacement) -> Self {
+        Self {
+            #[cfg(feature = "fyx-ui-0-3")]
+            target: DecorationTarget::Path(path.into()),
+            #[cfg(not(feature = "fyx-ui-0-3"))]
+            path: path.into(),
+            line,
+            placement,
+            height_lines: None,
+        }
+    }
+
+    /// The block's height in editor lines.
+    pub fn height_lines(mut self, lines: u16) -> Self {
+        self.height_lines = Some(lines);
+        self
+    }
+}
+
+impl HostErrorCode {
+    /// The WIT case name, such as `not-permitted`.
+    pub fn name(self) -> &'static str {
+        match self {
+            HostErrorCode::UnknownSurface => "unknown-surface",
+            HostErrorCode::LimitExceeded => "limit-exceeded",
+            HostErrorCode::InvalidArgument => "invalid-argument",
+            HostErrorCode::NotPermitted => "not-permitted",
+            HostErrorCode::Unavailable => "unavailable",
+            #[cfg(feature = "fyx-ui-0-3")]
+            HostErrorCode::Denied => "denied",
+        }
     }
 }
 
@@ -1488,6 +1907,70 @@ impl_into_props! {
     TableProps => Table,
     IconProps => Icon,
     DiffViewProps => DiffView,
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl From<ImageProps> for Props {
+    fn from(props: ImageProps) -> Self {
+        Props::Image(props)
+    }
+}
+
+/// `fyx:ui` 0.3 images (design 0.3, section 12). The host checks them when an update applies:
+/// alt text of 1 to 256 bytes, sides of 1 to 2048 logical pixels, a relative `assets/…` path,
+/// panels and their list rows only. A missing or bad file shows the alt text instead.
+#[cfg(feature = "fyx-ui-0-3")]
+impl ImageProps {
+    /// A PNG or SVG file of the package's `assets/` folder, such as `assets/logo.svg`: scaled to
+    /// fit its box (`contain`), with the image's own size and no tint.
+    pub fn asset(path: impl Into<String>, alt: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Asset(path.into()),
+            alt: alt.into(),
+            width: None,
+            height: None,
+            fit: ImageFit::Contain,
+            tint: None,
+        }
+    }
+
+    /// An image registered with [`add_image`](crate::add_image).
+    pub fn generated(image: crate::GeneratedImage, alt: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Generated(image.handle()),
+            ..Self::asset("", alt)
+        }
+    }
+
+    /// The box in logical pixels; the image keeps its aspect ratio inside it ([`ImageProps::fit`]).
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    /// Only the width; the height follows the aspect ratio.
+    pub fn width(mut self, width: u32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// Only the height; the width follows the aspect ratio.
+    pub fn height(mut self, height: u32) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    pub fn fit(mut self, fit: ImageFit) -> Self {
+        self.fit = fit;
+        self
+    }
+
+    /// SVG only: draw it as a one-colour mask in this theme colour, like the host's own icons.
+    pub fn tint(mut self, color: ColorToken) -> Self {
+        self.tint = Some(color);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -1873,11 +2356,20 @@ mod tests {
 
     #[test]
     fn api_versions_match_the_wit_packages() {
+        #[cfg(feature = "fyx-ui-0-3")]
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 3, 0, 0]);
+        #[cfg(not(feature = "fyx-ui-0-3"))]
         assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
+        assert_eq!(API_VERSION_V0_2_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
         assert_eq!(API_VERSION_V0_1_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
+        #[cfg(feature = "fyx-ui-0-3")]
+        let newest = include_str!("../../ui_ext/wit/since_v0.3.0/fyx-ui.wit");
+        #[cfg(not(feature = "fyx-ui-0-3"))]
+        let newest = include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit");
         for (version, wit) in [
+            (API_VERSION, newest),
             (
-                API_VERSION,
+                API_VERSION_V0_2,
                 include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit"),
             ),
             (
@@ -1949,6 +2441,77 @@ mod tests {
         );
     }
 
+    /// bugs-1 #20: the host applies a queued `set-props` after the event, so the mirror keeps it.
+    #[test]
+    fn apply_event_keeps_a_queued_set_props() {
+        let mut surface = SurfaceTree::new();
+        let mut input = 0;
+        surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    input = tree.input(InputProps::new("draft"));
+                });
+            })
+            .expect("mount");
+        assert_eq!(surface.set_props(input, InputProps::new("")), Ok(true));
+        surface.apply_event(&UiEvent::InputChanged((input, "typed".into())));
+        assert_eq!(surface.props(input), Some(&InputProps::new("").into()));
+        assert_eq!(
+            surface.take_update(),
+            Update::Patches(vec![Patch::SetProps((input, InputProps::new("").into()))])
+        );
+
+        // Nothing queued: the typed text is mirrored, and clearing it queues the set-props again.
+        surface.apply_event(&UiEvent::InputChanged((input, "typed".into())));
+        assert_eq!(surface.props(input), Some(&InputProps::new("typed").into()));
+        assert_eq!(surface.set_props(input, InputProps::new("")), Ok(true));
+    }
+
+    /// bugs-1 #11: a mount is capped like the host's, at `max_nodes`, not at one update's size.
+    #[test]
+    fn a_tree_grown_past_one_update_can_be_mounted_again() {
+        const COUNT: usize = 3000;
+        let mut surface = SurfaceTree::new();
+        let mut root = 0;
+        surface
+            .mount(|tree| {
+                root = tree.column(|_| {});
+            })
+            .expect("mount");
+        for _ in 0..3 {
+            surface
+                .insert(root, None, |tree| {
+                    for _ in 0..COUNT / 3 {
+                        tree.text("row");
+                    }
+                })
+                .expect("insert");
+            surface.take_update();
+        }
+        assert_eq!(surface.len(), COUNT + 1);
+
+        let nodes = surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    for _ in 0..COUNT {
+                        tree.text("row");
+                    }
+                });
+            })
+            .expect("a remount of the grown tree");
+        assert_eq!(nodes.len(), COUNT + 1);
+        assert!(matches!(
+            surface.mount(|tree| {
+                tree.column(|tree| {
+                    for _ in 0..TreeLimits::default().max_nodes {
+                        tree.text("row");
+                    }
+                });
+            }),
+            Err(TreeError::TreeTooLarge { .. })
+        ));
+    }
+
     #[test]
     fn push_records_and_a_failed_push_resends_the_whole_tree() {
         take_host_effects();
@@ -1988,12 +2551,7 @@ mod tests {
         let picker = Surface::modal("picker", "Pick", ModalWidth::Medium);
         add_surface(&picker).expect("add");
         show_surface("picker").expect("show");
-        let location = DecorationLocation {
-            path: "src/main.rs".into(),
-            line: 3,
-            placement: DecorationPlacement::Below,
-            height_lines: None,
-        };
+        let location = DecorationLocation::at("src/main.rs", 3, DecorationPlacement::Below);
         place_decoration("todo-3", &location, &[]).expect("place");
         assert_eq!(
             take_host_effects(),
@@ -2159,16 +2717,16 @@ mod tests {
         assert!(surface.contains(row_id));
         assert_eq!(surface.take_update(), Update::Unchanged);
 
-        let error = surface.mount(|tree| {
+        // A mount is capped by `max_nodes` only, like the host's (bugs-1 #11).
+        let mounted = surface.mount(|tree| {
             tree.column(|tree| {
                 for _ in 0..4 {
                     tree.text("x");
                 }
             });
         });
-        assert_eq!(error, Err(TreeError::UpdateTooLarge { count: 5, max: 4 }));
-        assert_eq!(surface.roots(), [column]);
-        assert!(surface.contains(text_id));
+        assert_eq!(mounted.map(|nodes| nodes.len()), Ok(5));
+        assert!(!surface.contains(text_id));
     }
 
     #[test]

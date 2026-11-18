@@ -385,12 +385,14 @@ dependencies = [
  "editor",
  "fs",
  "futures 0.3.34",
+ "fyx_guard",
  "globset",
  "gpui",
  "language",
  "log",
  "paths",
  "project",
+ "release_channel",
  "serde",
  "serde_json",
  "settings",
@@ -6893,6 +6895,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_images"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_markdown"
 version = "0.1.0"
 dependencies = [
@@ -6933,6 +6942,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "semver",
+ "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",
  "wasmtime",
@@ -19432,6 +19442,7 @@ version = "0.1.0"
 dependencies = [
  "ui_ext",
  "ui_ext_sdk_v0_1",
+ "ui_ext_sdk_v0_2",
  "wit-bindgen 0.41.0",
 ]
 
@@ -19443,10 +19454,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui_ext_sdk_v0_2"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "ui_ext_wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes 1.11.1",
  "fs",
  "futures 0.3.34",
  "fyx_ext_harness",
@@ -19458,6 +19477,7 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
+ "tokio",
  "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",

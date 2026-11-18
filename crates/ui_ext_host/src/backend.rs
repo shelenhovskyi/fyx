@@ -178,6 +178,10 @@ pub trait UiBackend: 'static {
     fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
         None
     }
+    /// `extension.toml`'s `name`, unchecked.
+    fn display_name(&self) -> Option<&str> {
+        None
+    }
 }
 
 impl UiBackend for UiExtension {
@@ -191,6 +195,10 @@ impl UiBackend for UiExtension {
 
     fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
         Some(UiExtension::diagnostics(self))
+    }
+
+    fn display_name(&self) -> Option<&str> {
+        UiExtension::display_name(self)
     }
 
     fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {

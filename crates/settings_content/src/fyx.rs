@@ -86,4 +86,15 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: false
     pub developer_mode: Option<bool>,
+    /// Status bar items of UI extensions not to show, as `"<extension id>/<surface id>"`. Right-click
+    /// an item and pick "Hide Button" to add one; "fyx_ui: show hidden status items" empties it.
+    ///
+    /// Default: []
+    pub hidden_status_items: Option<Vec<String>>,
+    /// The Fyx extension registry: an `https://` base URL, `http://localhost:<port>/` for a
+    /// local test server, or `file:///<dir>` for a registry directory. Empty turns the registry
+    /// off. Nothing is fetched until you open the Fyx tab or an update check is due.
+    ///
+    /// Default: ""
+    pub registry_url: Option<String>,
 }

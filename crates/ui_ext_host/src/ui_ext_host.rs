@@ -21,14 +21,21 @@ mod install;
 pub mod install_store;
 mod keyboard;
 mod modal;
+pub mod notifications;
 mod panel;
+pub mod progress;
 mod registry;
+pub mod registry_service;
+#[cfg(test)]
+mod registry_service_tests;
 mod store_actions;
 mod surface;
 mod view;
 
 #[cfg(test)]
 mod decoration_tests;
+#[cfg(test)]
+mod decoration_wasm_tests;
 #[cfg(test)]
 mod primitive_tests;
 #[cfg(test)]
@@ -117,4 +124,5 @@ pub fn init(cx: &mut App) {
     registry::init(cx);
     keyboard::intercept_keys(cx);
     decorations::init(cx);
+    progress::init(cx);
 }

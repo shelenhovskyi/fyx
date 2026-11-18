@@ -946,6 +946,211 @@ async fn test_v0_2_broker_is_asked_at_every_call(cx: &mut TestAppContext) {
     assert!(format!("{checks:?}").contains("revoked"), "{checks:?}");
 }
 
+/// `fyx_ext_harness` against this host, both running the 0.2 probe (plan 2.4). Each test feeds the
+/// same scripts to both and compares what the guest saw (the report) and the effects. The effect
+/// types differ (the harness has its own, Apache-licensed), so they are compared by their `Debug`
+/// form, which the two share variant for variant.
+mod harness_conformance_v0_2 {
+    use fyx_ext_harness::Harness;
+
+    use super::*;
+
+    async fn both(cx: &mut TestAppContext) -> (UiExtension, Harness) {
+        let host = load(cx).await;
+        let harness = Harness::load(&probe_v0_2_wasm()).expect("the harness loads the 0.2 probe");
+        (host, harness)
+    }
+
+    fn debug<T: std::fmt::Debug>(effects: &[T]) -> Vec<String> {
+        effects.iter().map(|effect| format!("{effect:?}")).collect()
+    }
+
+    /// Stores `script` in both, sends `event` to `surface_id`, and checks that the results and
+    /// effects match. Returns the results.
+    async fn compare_on(
+        host: &UiExtension,
+        harness: &mut Harness,
+        surface_id: &str,
+        event: UiEvent,
+        script: &str,
+    ) -> Vec<String> {
+        set_script(host, script).await;
+        let stored = harness
+            .handle_event_raw_v0_2(SURFACE, UiEvent::InputChanged(SET_SCRIPT, script.into()))
+            .expect("the harness stores the script");
+        assert!(stored.effects.is_empty(), "{script}");
+
+        let (host_effects, host_value) =
+            match host.handle_event_v0_2(surface_id, event.clone()).await {
+                Ok(reply) => (reply.effects, Ok(reply.value)),
+                Err(error) => {
+                    let error = error
+                        .downcast_ref::<EffectReplyError>()
+                        .unwrap_or_else(|| panic!("{script}: not a guest error: {error:#}"));
+                    (error.effects.clone(), Err(()))
+                }
+            };
+        let reply = harness
+            .handle_event_raw_v0_2(surface_id, event)
+            .unwrap_or_else(|error| panic!("{script}: the harness trapped: {error:#}"));
+        assert_eq!(debug(&host_effects), debug(&reply.effects), "{script}");
+        assert_eq!(
+            host_value.as_ref().map(report).map_err(|_| ()),
+            reply.value.as_ref().map(report).map_err(|_| ()),
+            "{script}"
+        );
+        host_value
+            .map(|value| results(&report(&value)))
+            .unwrap_or_default()
+    }
+
+    /// From typing, which is no gesture.
+    async fn compare(host: &UiExtension, harness: &mut Harness, script: &str) -> Vec<String> {
+        compare_on(
+            host,
+            harness,
+            SURFACE,
+            UiEvent::InputChanged(RUN, "x".into()),
+            script,
+        )
+        .await
+    }
+
+    async fn compare_click(host: &UiExtension, harness: &mut Harness, script: &str) -> Vec<String> {
+        compare_on(host, harness, SURFACE, UiEvent::Click(RUN), script).await
+    }
+
+    #[gpui::test]
+    async fn test_load_mount_and_rows_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        // The host lists the static surfaces and leaves `add-surface` during `surfaces()` to
+        // its initial effects; the harness applies those and lists every live surface.
+        assert_eq!(debug(host.initial_effects()), debug(harness.effects()));
+        let mut live = host.surfaces_v0_2().to_vec();
+        for effect in host.initial_effects() {
+            if let HostEffect::AddSurface(surface) = effect {
+                live.push(surface.clone());
+            }
+        }
+        assert_eq!(live, harness.surfaces_v0_2());
+
+        let mut host_nodes = host.mount_v0_2(SURFACE).await.expect("mount").value;
+        harness.mount(SURFACE).expect("mount");
+        let mut harness_nodes = harness.nodes_v0_2(SURFACE).expect("mounted");
+        host_nodes.sort_by_key(|node| node.id);
+        harness_nodes.sort_by_key(|node| node.id);
+        assert_eq!(host_nodes, harness_nodes);
+
+        let host_rows = host
+            .list_rows_v0_2(SURFACE, 4, 30, 5)
+            .await
+            .expect("rows")
+            .value;
+        let harness_rows = harness.rows_v0_2(SURFACE, 4, 30, 5).expect("rows");
+        assert_eq!(host_rows, harness_rows);
+    }
+
+    #[gpui::test]
+    async fn test_host_imports_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        for script in [
+            "push probe remove 1; push nope unchanged; push probe patches 2049; \
+             push probe patches 2048; push probe replace 16385; push probe replace 16384; \
+             push probe invalidate 4",
+            "repeat 70 push probe unchanged",
+            "push probe unchanged; remove probe; push probe unchanged; add panel extra; \
+             push extra unchanged; remove probe",
+            "add panel probe; push probe unchanged",
+            "add panel Bad; add panel probe; add panel boot; add modal picker",
+            "repeat 30 add status s#",
+            "tick nope 100; tick probe 86400001; tick probe 86400000; tick probe 10; \
+             tick probe 500; cancel probe; cancel nope; tick picker 100",
+            "place probe src/a.rs 1; place Bad src/a.rs 1; place d1 ../x.rs 1; \
+             place d1 /abs.rs 1; place d1 src\\a.rs 1; place d1 src/a.rs 1 16385; \
+             place d1 src/a.rs 3; place d1 src/b.rs 4; push d1 unchanged; tick d1 100; \
+             show d1; remove d1; add panel d1; unplace d1; unplace d1; push d1 unchanged",
+            "repeat 300 place a# src/a.rs 1; repeat 212 unplace a#; place z src/a.rs 1; \
+             unplace a299",
+            "push probe unchanged; fail",
+        ] {
+            compare(&host, &mut harness, script).await;
+        }
+        assert!(harness.disabled().is_none());
+    }
+
+    #[gpui::test]
+    async fn test_gestures_and_modals_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        compare(&host, &mut harness, "add modal picker").await;
+        assert_eq!(
+            compare(&host, &mut harness, "show picker").await,
+            ["not-permitted"]
+        );
+        assert_eq!(
+            compare_click(&host, &mut harness, "show picker; show picker").await,
+            ["ok", "ok"]
+        );
+        assert!(harness.is_shown("picker"));
+        assert_eq!(
+            compare(&host, &mut harness, "hide picker; hide picker").await,
+            ["ok", "ok"]
+        );
+        assert!(!harness.is_shown("picker"));
+
+        // A row click and Enter are gestures too.
+        for event in [
+            UiEvent::RowClick(4, 1),
+            UiEvent::InputSubmitted(RUN, "query".into()),
+        ] {
+            assert_eq!(
+                compare_on(&host, &mut harness, SURFACE, event, "show picker").await,
+                ["ok"]
+            );
+            compare(&host, &mut harness, "hide picker").await;
+        }
+
+        // A user dismissal: the host forces the reply to `unchanged`, so compare the effects.
+        compare_click(&host, &mut harness, "show picker").await;
+        set_script(&host, "push probe unchanged").await;
+        harness
+            .handle_event_raw_v0_2(
+                SURFACE,
+                UiEvent::InputChanged(SET_SCRIPT, "push probe unchanged".into()),
+            )
+            .expect("store");
+        let host_reply = host
+            .handle_event_v0_2("picker", UiEvent::Dismissed(DismissReason::Escape))
+            .await
+            .expect("dismissed");
+        let outcome = harness
+            .dismiss("picker", DismissReason::Escape)
+            .expect("dismissed");
+        assert_eq!(debug(&host_reply.effects), debug(&outcome.effects));
+        assert!(!harness.is_shown("picker"));
+        // Closed by the user: showing it needs a new gesture, as on the host.
+        assert_eq!(
+            compare(&host, &mut harness, "show picker").await,
+            ["not-permitted"]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_ticks_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        // The harness ticks mounted surfaces only; mount before a script is stored, since the
+        // probe's mount runs the stored script.
+        harness.mount(SURFACE).expect("mount");
+        compare(&host, &mut harness, "tick probe 100").await;
+        assert_eq!(harness.pending_tick(SURFACE), Some(MIN_TICK_DELAY));
+
+        let host_reply = host.tick(SURFACE).await.expect("tick");
+        let outcome = harness.tick(SURFACE).expect("tick");
+        assert_eq!(debug(&host_reply.effects), debug(&outcome.effects));
+        assert_eq!(report(&host_reply.value), report(&outcome.update));
+        assert_eq!(harness.pending_tick(SURFACE), Some(MIN_TICK_DELAY));
+    }
+}
+
 /// async-1 #5: [`with_budget`] counts only time the call waits on the host. A call that is ready
 /// but not polled (the tokio workers are busy with other work) spends none of its budget.
 #[test]

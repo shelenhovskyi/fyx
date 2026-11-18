@@ -84,16 +84,28 @@ pub enum KeyRole {
     Blocklist,
     /// `snapshot.json`: the index as a whole, and key revocations.
     Snapshot,
+    /// Not a document: a snapshot signed by a key with this role may revoke `blocklist` keys,
+    /// and keys with this role. Only the offline snapshot rotation key has it (registry-repo.md,
+    /// open question 3), so the online snapshot key, which sits next to the release key in CI,
+    /// cannot turn the block list off.
+    #[serde(rename = "blocklist-revocation")]
+    BlocklistRevocation,
 }
 
 impl KeyRole {
-    pub const ALL: [KeyRole; 3] = [KeyRole::Release, KeyRole::Blocklist, KeyRole::Snapshot];
+    pub const ALL: [KeyRole; 4] = [
+        KeyRole::Release,
+        KeyRole::Blocklist,
+        KeyRole::Snapshot,
+        KeyRole::BlocklistRevocation,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             KeyRole::Release => "release",
             KeyRole::Blocklist => "blocklist",
             KeyRole::Snapshot => "snapshot",
+            KeyRole::BlocklistRevocation => "blocklist-revocation",
         }
     }
 }
@@ -158,6 +170,10 @@ impl Keyset {
         &self.keys
     }
 
+    pub fn key(&self, key_id: &KeyId) -> Option<&PublicKey> {
+        self.keys.iter().find(|key| &key.key_id == key_id)
+    }
+
     /// This keyset without the revoked keys; `None` if no key would be left.
     pub fn without(&self, revoked: &BTreeSet<KeyId>) -> Option<Self> {
         let keys: Vec<PublicKey> = self
@@ -167,6 +183,59 @@ impl Keyset {
             .cloned()
             .collect();
         (!keys.is_empty()).then_some(Self { keys })
+    }
+
+    /// The registry's role separation (registry-repo.md, "Keys"), for the keyset the
+    /// registry repository publishes. Clients do not apply it: they only check that a signature
+    /// comes from a key with the right role.
+    ///
+    /// Refuses a key with two signing roles (`release`, `blocklist`, `snapshot`), and
+    /// `blocklist-revocation` on a key without `snapshot`. With `online_snapshot_key`, the key
+    /// the CI signs snapshots with (`SNAPSHOT_KEY`), also refuses that key unless it is in the
+    /// keyset with `snapshot` and without `blocklist-revocation`: a rotation must not put the
+    /// role that may revoke block-list keys into CI by accident.
+    pub fn check_role_separation(&self, online_snapshot_key: Option<&KeyId>) -> Result<(), Error> {
+        for key in &self.keys {
+            let signing_roles: Vec<&str> = key
+                .roles
+                .iter()
+                .filter(|role| **role != KeyRole::BlocklistRevocation)
+                .map(|role| role.as_str())
+                .collect();
+            if signing_roles.len() > 1 {
+                return Err(Error::Invalid(format!(
+                    "key {} has more than one signing role: {}",
+                    key.key_id,
+                    signing_roles.join(", ")
+                )));
+            }
+            if key.roles.contains(&KeyRole::BlocklistRevocation)
+                && !key.roles.contains(&KeyRole::Snapshot)
+            {
+                return Err(Error::Invalid(format!(
+                    "key {} has blocklist-revocation but not snapshot; only the offline snapshot                      rotation key may have it",
+                    key.key_id
+                )));
+            }
+        }
+        if let Some(key_id) = online_snapshot_key {
+            let key = self.key(key_id).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "the online snapshot key {key_id} is not in the keyset"
+                ))
+            })?;
+            if !key.roles.contains(&KeyRole::Snapshot) {
+                return Err(Error::Invalid(format!(
+                    "the online snapshot key {key_id} has no snapshot role"
+                )));
+            }
+            if key.roles.contains(&KeyRole::BlocklistRevocation) {
+                return Err(Error::Invalid(format!(
+                    "the online snapshot key {key_id} has blocklist-revocation; that role                      belongs to the offline rotation key only"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Checks a signature by a key of this keyset that has `role`.
@@ -398,6 +467,54 @@ mod tests {
         assert!(Keyset::new(vec![registry_key().public_key([])]).is_err());
         assert!(Keyset::from_json(br#"{"keys": []}"#).is_err());
         assert!(Keyset::from_json(br#"{"keys": [], "extra": 1}"#).is_err());
+    }
+
+    #[test]
+    fn role_separation() {
+        use KeyRole::*;
+        let key = |name: &str, seed: u8, roles: &[KeyRole]| {
+            signing_key(name, seed).public_key(roles.iter().copied())
+        };
+        let id = |name: &str| KeyId::new(name).expect("valid");
+        // The layout registry-repo.md describes.
+        let registry = Keyset::new(vec![
+            key("release", 1, &[Release]),
+            key("blocklist", 2, &[Blocklist]),
+            key("snap-a", 3, &[Snapshot]),
+            key("snap-b", 4, &[Snapshot, BlocklistRevocation]),
+        ])
+        .expect("keyset");
+        assert_eq!(registry.check_role_separation(None), Ok(()));
+        assert_eq!(registry.check_role_separation(Some(&id("snap-a"))), Ok(()));
+
+        // A rotation that makes the rotation key the online one, without a new rotation key.
+        let error = registry
+            .check_role_separation(Some(&id("snap-b")))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("blocklist-revocation"),
+            "{error}"
+        );
+        for online in ["release", "missing"] {
+            assert!(registry.check_role_separation(Some(&id(online))).is_err());
+        }
+
+        for roles in [
+            &[Release, Snapshot][..],
+            &[Release, Blocklist],
+            &[Blocklist, Snapshot, BlocklistRevocation],
+            &[BlocklistRevocation],
+            &[Blocklist, BlocklistRevocation],
+        ] {
+            let keyset = Keyset::new(vec![key("snap-a", 3, &[Snapshot]), key("k", 1, roles)])
+                .expect("keyset");
+            assert!(
+                keyset.check_role_separation(None).is_err(),
+                "{roles:?} should be refused"
+            );
+        }
+        // The test keyset, with every role on both keys, is not a registry keyset.
+        assert!(keyset().check_role_separation(None).is_err());
     }
 
     #[test]

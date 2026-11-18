@@ -6,16 +6,21 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 
 | Item | Kind | Summary |
 |---|---|---|
-| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch). |
+| `API_VERSION` | const |  |
+| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature. |
 | `API_VERSION_SECTION` | const | Name of the custom section `register_extension!` adds to every component, from which the host reads the version before instantiating it. |
 | `API_VERSION_SECTION_BYTES` | const | `API_VERSION` as stored in the section: three big-endian `u16`s, as in Zed's `zed:api-version`. |
 | `API_VERSION_V0_1` | const | The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1. |
 | `API_VERSION_V0_1_SECTION_BYTES` | const | `API_VERSION_V0_1` as stored in the section. |
+| `API_VERSION_V0_2` | const | The version `register_extension!(T, v0_2)` exports. |
+| `API_VERSION_V0_2_SECTION_BYTES` | const | `API_VERSION_V0_2` as stored in the section. |
 | `ButtonProps::disabled` | method |  |
 | `ButtonProps::icon` | method |  |
 | `ButtonProps::new` | method |  |
 | `ButtonProps::style` | method |  |
 | `ButtonProps::tooltip` | method | Shown on hover; the host truncates text over 1024 bytes. |
+| `DecorationLocation::at` | method | A block above or below `line` (zero-based) of the worktree-relative `path`, with the height left to the host. The same code builds 0.2's `path` and 0.3's `target`. |
+| `DecorationLocation::height_lines` | method | The block's height in editor lines. |
 | `DiffViewProps::language` | method |  |
 | `DiffViewProps::new` | method |  |
 | `Extension` | trait | A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it from a single thread, one call at a time. |
@@ -34,7 +39,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FlexProps::row` | method | A row with no gap, no padding and children aligned to the start. |
 | `HostError` | re-export | `bindings::fyx::ui::host::HostError` |
 | `HostErrorCode` | re-export | `bindings::fyx::ui::host::HostErrorCode` |
-| `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2). |
+| `HostErrorCode::name` | method | The WIT case name, such as `not-permitted`. |
+| `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3). |
 | `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
 | `IconProps::new` | method |  |
@@ -43,6 +49,14 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `IdAllocator::new` | method |  |
 | `IdAllocator::peek` | method | The id the next call to `IdAllocator::allocate` returns. |
 | `IdAllocator::starting_at` | method |  |
+| `ImageFormat` | re-export | `bindings::fyx::ui::images::ImageFormat` |
+| `ImageProps::asset` | method | A PNG or SVG file of the package's `assets/` folder, such as `assets/logo.svg`: scaled to fit its box (`contain`), with the image's own size and no tint. |
+| `ImageProps::fit` | method |  |
+| `ImageProps::generated` | method | An image registered with `add_image`(crate::add_image). |
+| `ImageProps::height` | method | Only the height; the width follows the aspect ratio. |
+| `ImageProps::size` | method | The box in logical pixels; the image keeps its aspect ratio inside it (`ImageProps::fit`). |
+| `ImageProps::tint` | method | SVG only: draw it as a one-colour mask in this theme colour, like the host's own icons. |
+| `ImageProps::width` | method | Only the width; the height follows the aspect ratio. |
 | `InputProps::new` | method |  |
 | `InputProps::placeholder` | method |  |
 | `InputProps::secret` | method | Masks the text on screen (passwords, tokens). The value still reaches the extension. |
@@ -77,7 +91,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SurfaceTree::is_unsynced` | method | Whether a failed push left the host behind the mirror. |
 | `SurfaceTree::len` | method |  |
 | `SurfaceTree::limits` | method |  |
-| `SurfaceTree::mount` | method | Builds the surface's tree from scratch and returns it for `mount`. Pending patches are dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never names a node of the new tree. Fails, keeping the previous tree, if the new one has more nodes than one update may carry. |
+| `SurfaceTree::mount` | method | Builds the surface's tree from scratch and returns it for `mount`. Pending patches are dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never names a node of the new tree. Fails, keeping the previous tree, if the new one has more nodes than a tree may hold (`max_nodes`, 16384), the host's cap for a mount and a `replace`. So a tree grown past 2048 nodes with `insert` can always be mounted again. |
 | `SurfaceTree::new` | method |  |
 | `SurfaceTree::parent` | method |  |
 | `SurfaceTree::pending` | method |  |
@@ -104,6 +118,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeBuilder::finish` | method |  |
 | `TreeBuilder::flex` | method | Adds a flex node and the children `build_children` adds, and returns the node's id. Only flex nodes have children; the host rejects children under any other kind. |
 | `TreeBuilder::icon` | method |  |
+| `TreeBuilder::image` | method | `fyx:ui` 0.3: an image node (see `ImageProps`). |
 | `TreeBuilder::input` | method |  |
 | `TreeBuilder::list` | method | A virtualized list; the host pulls its rows with `list-rows`. |
 | `TreeBuilder::markdown` | method |  |
@@ -126,6 +141,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeError::UpdateTooLarge` | variant |  |
 | `TreeLimits` | re-export | The host's caps on a surface, which `SurfaceTree` enforces before the host sees an update. |
 | `bindings` | module |  |
+| `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |
 | `host::*` | re-export | `host::*` |
 | `list_row` | fn | Builds one row of a virtualized list; its ids start at `ROW_NODE_ID_BASE`. `build` must add exactly one top-level node, the row's root, and the row must pass the host's own checks (`ui_ext::Tree::from_row`), or the host would reject the whole `list-rows` answer. |

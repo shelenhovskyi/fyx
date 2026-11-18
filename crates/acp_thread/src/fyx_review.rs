@@ -74,6 +74,12 @@ impl AgentFileOperation {
 }
 
 pub trait AgentWriteGate: 'static {
+    /// Whether any write may need review now. `false` (review mode off and no project restriction)
+    /// lets every write through untouched, without copying the buffer, as upstream.
+    fn wants_review(&self, _cx: &App) -> bool {
+        true
+    }
+
     fn review_write(&self, write: AgentWrite, cx: &mut App) -> Task<Result<AgentWriteOutcome>>;
 
     /// Notes for the agent that no answer could carry (a permission answer has no message), taken
@@ -106,6 +112,12 @@ pub fn has_agent_write_gate(cx: &App) -> bool {
     cx.has_global::<GlobalAgentWriteGate>()
 }
 
+/// Whether agent changes may need host review now: a gate is installed and wants them.
+pub fn wants_agent_review(cx: &App) -> bool {
+    cx.try_global::<GlobalAgentWriteGate>()
+        .is_some_and(|gate| gate.0.wants_review(cx))
+}
+
 pub(crate) async fn gate_agent_write(
     thread: &WeakEntity<AcpThread>,
     abs_path: PathBuf,
@@ -113,12 +125,37 @@ pub(crate) async fn gate_agent_write(
     snapshot: &BufferSnapshot,
     new_text: String,
     cx: &mut AsyncApp,
-) -> Result<(String, Option<String>)> {
-    if !cx.update(|cx| has_agent_write_gate(cx)) {
-        return Ok((new_text, None));
+) -> Result<(String, Option<String>, ReviewedVersion)> {
+    if !cx.update(|cx| wants_agent_review(cx)) {
+        return Ok((new_text, None, ReviewedVersion(None)));
     }
     let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone())?;
-    review_agent_edit(session_id, abs_path, buffer, snapshot.text(), new_text, cx).await
+    review_agent_edit_checked(session_id, abs_path, buffer, snapshot.text(), new_text, cx).await
+}
+
+/// The buffer version a review decided against, checked again in the same foreground update as the
+/// edit that lands the reviewed text: a keystroke between the review's checks and the edit would be
+/// merged into a write nobody reviewed.
+pub struct ReviewedVersion(Option<Box<dyn Fn(&Buffer) -> bool>>);
+
+impl ReviewedVersion {
+    pub fn ensure_unchanged(&self, buffer: &Entity<Buffer>, cx: &App) -> Result<()> {
+        let Some(changed) = &self.0 else {
+            return Ok(());
+        };
+        if changed(buffer.read(cx)) {
+            let path = buffer
+                .read(cx)
+                .file()
+                .map(|file| file.full_path(cx).display().to_string())
+                .unwrap_or_else(|| "The file".into());
+            return Err(feedback_error(format!(
+                "{path} changed while your reviewed edit was being written, so nothing was \
+                 written. Read the file again and propose the edit against its current content."
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The user's prompt, with the host review's pending notes for the agent in front of it.
@@ -169,14 +206,36 @@ pub async fn review_agent_edit(
     new_text: String,
     cx: &mut AsyncApp,
 ) -> Result<(String, Option<String>)> {
+    review_agent_edit_checked(session_id, abs_path, buffer, old_text, new_text, cx)
+        .await
+        .map(|(content, feedback, _)| (content, feedback))
+}
+
+async fn review_agent_edit_checked(
+    session_id: acp_v2::SessionId,
+    abs_path: PathBuf,
+    buffer: &Entity<Buffer>,
+    old_text: String,
+    new_text: String,
+    cx: &mut AsyncApp,
+) -> Result<(String, Option<String>, ReviewedVersion)> {
     let gate = cx.update(|cx| {
         cx.try_global::<GlobalAgentWriteGate>()
             .map(|gate| gate.0.clone())
     });
-    let Some(gate) = gate else {
-        return Ok((new_text, None));
+    let Some(gate) = gate.filter(|gate| cx.update(|cx| gate.wants_review(cx))) else {
+        return Ok((new_text, None, ReviewedVersion(None)));
     };
-    let version_before = cx.update(|cx| buffer.read(cx).version());
+    // The file as the buffer names it, compared after the review: the agent's spelling (`src/../a`,
+    // `\\?\C:\a`) may differ from it without the file having moved.
+    let (version_before, path_before) = cx.update(|cx| {
+        let buffer = buffer.read(cx);
+        let path = buffer
+            .file()
+            .and_then(|file| file.as_local())
+            .map(|file| file.abs_path(cx));
+        (buffer.version(), path)
+    });
     let write = AgentWrite {
         session_id,
         abs_path: abs_path.clone(),
@@ -206,7 +265,9 @@ pub async fn review_agent_edit(
                 )));
             }
             if let Some(current) = file.as_local().map(|file| file.abs_path(cx))
-                && current != abs_path
+                && path_before
+                    .as_ref()
+                    .is_some_and(|before| *before != current)
             {
                 return Err(feedback_error(format!(
                     "{path} was moved to {} while your edit was under review, so nothing was \
@@ -223,7 +284,10 @@ pub async fn review_agent_edit(
         }
         Ok(())
     })?;
-    Ok((content, outcome.feedback))
+    let reviewed = ReviewedVersion(Some(Box::new(move |buffer: &Buffer| {
+        buffer.version().changed_since(&version_before)
+    })));
+    Ok((content, outcome.feedback, reviewed))
 }
 
 /// An error that reaches the agent with the review feedback as its JSON-RPC message (and, as for any

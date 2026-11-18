@@ -35,6 +35,8 @@ actions!(
         RevokeUiExtensionPermission,
         /// Opens one of the extension panels, picked by title.
         OpenExtensionPanel,
+        /// Shows again every extension status bar item hidden with "Hide Button".
+        ShowHiddenStatusItems,
     ]
 );
 
@@ -52,6 +54,9 @@ pub(crate) fn register(workspace: &mut Workspace) {
         run(workspace, window, cx, StoreCommand::Uninstall)
     });
     workspace.register_action(|_, _: &RestartUiExtension, window, cx| prompt_restart(window, cx));
+    workspace.register_action(|_, _: &ShowHiddenStatusItems, _, cx| {
+        crate::install::set_status_item_hidden(None, cx)
+    });
     workspace.register_action(|workspace, _: &RevokeUiExtensionPermission, window, cx| {
         prompt_revoke(workspace, window, cx)
     });

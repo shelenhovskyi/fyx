@@ -5,7 +5,7 @@
 
 use std::{ops::Range, sync::Arc, time::Duration};
 
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::{
     Editor, EditorEvent, EditorMode, HiddenUnstagedDiffHunkRenderer, MinimapVisibility,
     SizingBehavior,
@@ -70,6 +70,8 @@ pub struct SurfaceView {
     pub(crate) selection: HashMap<NodeId, u32>,
     /// Enabled buttons, inputs, lists and tables in tree order: the Tab order.
     pub(crate) focus_order: Vec<NodeId>,
+    /// The host's own buttons around the surface; they follow `focus_order` in the Tab order.
+    pub(crate) host_focus: HashMap<HostControl, FocusHandle>,
     /// The panel body scrolls when the tree is taller than the panel.
     pub(crate) body_scroll: ScrollHandle,
     synced_revision: Option<u64>,
@@ -109,6 +111,10 @@ impl SurfaceView {
             list_focus: HashMap::default(),
             selection: HashMap::default(),
             focus_order: Vec::new(),
+            host_focus: HostControl::ALL
+                .iter()
+                .map(|control| (*control, cx.focus_handle()))
+                .collect(),
             body_scroll: ScrollHandle::new(),
             synced_revision: None,
             synced_mount: 0,
@@ -265,18 +271,25 @@ impl SurfaceView {
         }
         self.focus_order = focus_order;
 
-        self.button_focus.retain(|id, _| buttons.contains(id));
+        // Sets for the membership checks below: with lists they were quadratic in the number of
+        // nodes (triage-3, PERF 5).
+        let button_ids: HashSet<NodeId> = buttons.iter().copied().collect();
+        let list_ids: HashSet<NodeId> = lists.iter().map(|(id, _)| *id).collect();
+        let input_ids: HashSet<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let markdown_ids: HashSet<NodeId> = markdown.iter().map(|(id, _)| *id).collect();
+        let row_counts: HashMap<NodeId, u32> = lists.iter().copied().collect();
+
+        self.button_focus.retain(|id, _| button_ids.contains(id));
         for id in buttons {
             self.button_focus
                 .entry(id)
                 .or_insert_with(|| cx.focus_handle());
         }
-        self.list_focus
-            .retain(|id, _| lists.iter().any(|(list, _)| list == id));
+        self.list_focus.retain(|id, _| list_ids.contains(id));
         self.selection.retain(|id, selected| {
-            lists
-                .iter()
-                .any(|(list, row_count)| list == id && *selected < *row_count)
+            row_counts
+                .get(id)
+                .is_some_and(|row_count| *selected < *row_count)
         });
         for (id, _) in &lists {
             self.list_focus
@@ -296,11 +309,12 @@ impl SurfaceView {
             .copied()
             .collect();
         let new_inputs: Vec<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let old_input_ids: HashSet<NodeId> = old_inputs.iter().copied().collect();
         let carried: Vec<(usize, String, bool)> = old_inputs
             .iter()
             .enumerate()
             .filter(|_| remounted)
-            .filter(|(_, id)| !new_inputs.contains(id))
+            .filter(|(_, id)| !input_ids.contains(id))
             .filter_map(|(position, id)| {
                 let input = self.inputs.get(id)?;
                 let focused = focused_before == Some(*id);
@@ -309,8 +323,7 @@ impl SurfaceView {
             })
             .collect();
 
-        self.inputs
-            .retain(|id, _| inputs.iter().any(|(input, _)| input == id));
+        self.inputs.retain(|id, _| input_ids.contains(id));
         for (id, props) in inputs {
             self.sync_input(id, props, window, cx);
         }
@@ -318,7 +331,7 @@ impl SurfaceView {
             let Some(&id) = new_inputs.get(position) else {
                 continue;
             };
-            if old_inputs.contains(&id) {
+            if old_input_ids.contains(&id) {
                 continue;
             }
             let Some(input) = self.inputs.get_mut(&id) else {
@@ -335,20 +348,24 @@ impl SurfaceView {
             }
         }
 
-        self.diffs.retain(|id, diff| {
-            diffs
-                .iter()
-                .any(|(node, props)| node == id && *props == diff.props)
-        });
+        {
+            let diff_props: HashMap<NodeId, &DiffViewProps> =
+                diffs.iter().map(|(id, props)| (*id, props)).collect();
+            self.diffs.retain(|id, diff| {
+                diff_props
+                    .get(id)
+                    .is_some_and(|props| **props == diff.props)
+            });
+        }
         for (id, props) in diffs {
             if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(id) {
                 entry.insert(DiffEditor::new(props, window, cx));
             }
         }
 
-        self.markdown
-            .retain(|id, _| markdown.iter().any(|(node, _)| node == id));
+        self.markdown.retain(|id, _| markdown_ids.contains(id));
         for (id, source) in markdown {
+            let source = without_images(&source);
             match self.markdown.get(&id) {
                 Some(entity) => {
                     if entity.read(cx).source().as_ref() != source {
@@ -362,12 +379,13 @@ impl SurfaceView {
             }
         }
 
-        self.scroll_handles.retain(|id, _| lists.contains(id));
+        self.scroll_handles.retain(|id, _| list_ids.contains(id));
         for id in &lists {
             self.scroll_handles.entry(*id).or_default();
         }
         // A `selected` the extension (or the keyboard) moved is scrolled into view (design C).
-        self.scrolled_selection.retain(|id, _| lists.contains(id));
+        self.scrolled_selection
+            .retain(|id, _| list_ids.contains(id));
         for (id, selected) in selections {
             if self.scrolled_selection.insert(id, selected) != Some(selected)
                 && let Some(handle) = self.scroll_handles.get(&id)
@@ -392,6 +410,8 @@ impl SurfaceView {
                 editor.set_text(props.value.as_str(), window, cx);
                 // Design K: a secret input is masked.
                 editor.set_masked(props.secret, cx);
+                // Triage-3 #5: a blinking caret repaints the whole surface twice a second.
+                editor.disable_cursor_blink(cx);
                 editor
             });
             let sets_seen = self.state.read(cx).input_set_count(id);
@@ -517,6 +537,105 @@ impl SurfaceView {
     }
 }
 
+/// The host's own buttons around a surface: what a failed surface offers and the error footer's.
+/// They come after the surface's nodes in the Tab order, so a keyboard user can reach them
+/// (triage-3, UX F6, F21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HostControl {
+    Retry,
+    Restart,
+    CopyError,
+    ReloadRetry,
+    DismissError,
+}
+
+impl HostControl {
+    const ALL: [Self; 5] = [
+        Self::Retry,
+        Self::Restart,
+        Self::CopyError,
+        Self::ReloadRetry,
+        Self::DismissError,
+    ];
+}
+
+impl SurfaceView {
+    /// The host controls shown now, in the order they are drawn.
+    pub(crate) fn host_controls(&self, cx: &App) -> Vec<HostControl> {
+        let state = self.state.read(cx);
+        let mut controls = Vec::new();
+        if let Phase::Failed { retryable, .. } = state.phase() {
+            if *retryable {
+                controls.push(HostControl::Retry);
+            } else if state.can_restart() {
+                controls.push(HostControl::Restart);
+            }
+            if state.failure_detail().is_some() {
+                controls.push(HostControl::CopyError);
+            }
+        }
+        if !self.compact && state.last_error().is_some() {
+            if state.reload_failed() && state.can_restart() {
+                controls.push(HostControl::ReloadRetry);
+            }
+            controls.push(HostControl::DismissError);
+        }
+        controls
+    }
+
+    pub(crate) fn run_host_control(
+        &mut self,
+        control: HostControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match control {
+            HostControl::Retry => self.state.update(cx, |state, cx| state.retry(cx)),
+            HostControl::Restart | HostControl::ReloadRetry => self
+                .state
+                .update(cx, |state, cx| state.restart_extension(cx)),
+            HostControl::CopyError => {
+                if let Some(detail) = self.state.read(cx).failure_detail() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.to_string()));
+                }
+            }
+            HostControl::DismissError => self.state.update(cx, |state, cx| state.dismiss_error(cx)),
+        }
+        // A control that went away with what it did leaves focus with the surface, so Tab and
+        // Escape keep working.
+        if self.host_focus[&control].is_focused(window)
+            && !self.host_controls(cx).contains(&control)
+        {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
+    /// A host control: focusable, in the button key context (Space and Enter press it), with a
+    /// focus ring.
+    fn host_button(
+        &self,
+        control: HostControl,
+        button: AnyElement,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let focus = &self.host_focus[&control];
+        div()
+            .id(("fyx-ui-host-control", control as usize))
+            .key_context(crate::keyboard::BUTTON_CONTEXT)
+            .track_focus(focus)
+            .rounded_sm()
+            .border_1()
+            .border_color(focus_ring(focus.is_focused(window), cx))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                this.run_host_control(control, window, cx);
+            }))
+            .child(button)
+            .into_any_element()
+    }
+}
+
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
@@ -543,34 +662,28 @@ impl Render for SurfaceView {
                 // A dead instance refuses every call, so a retry could only fail again: it gets a
                 // fresh instance instead.
                 .when(*retryable, |this| {
-                    this.child(
-                        Button::new("fyx-ui-retry", "Retry")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.state.update(cx, |state, cx| state.retry(cx))
-                            })),
-                    )
+                    this.child(self.host_button(
+                        HostControl::Retry,
+                        Button::new("fyx-ui-retry", "Retry").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
                 .when(!*retryable && state.can_restart(), |this| {
-                    this.child(
-                        Button::new("fyx-ui-restart", "Restart extension")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.state
-                                    .update(cx, |state, cx| state.restart_extension(cx))
-                            })),
-                    )
+                    this.child(self.host_button(
+                        HostControl::Restart,
+                        Button::new("fyx-ui-restart", "Restart extension").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
-                .when_some(state.failure_detail().cloned(), |this, detail| {
-                    this.child(
-                        Button::new("fyx-ui-copy-error", "Copy Error Details")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(move |_: &ClickEvent, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    detail.to_string(),
-                                ))
-                            }),
-                    )
+                .when(state.failure_detail().is_some(), |this| {
+                    this.child(self.host_button(
+                        HostControl::CopyError,
+                        Button::new("fyx-ui-copy-error", "Copy Error Details").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
                 .into_any_element(),
             Phase::Ready(tree) => {
@@ -629,16 +742,24 @@ impl Render for SurfaceView {
                         .truncate(),
                 )
                 .when(reload_failed, |this| {
-                    this.child(
-                        Button::new("fyx-ui-reload-retry", "Retry")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.state
-                                    .update(cx, |state, cx| state.restart_extension(cx))
-                            })),
-                    )
+                    this.child(self.host_button(
+                        HostControl::ReloadRetry,
+                        Button::new("fyx-ui-reload-retry", "Retry").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
+                .child(
+                    self.host_button(
+                        HostControl::DismissError,
+                        IconButton::new("fyx-ui-dismiss-error", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Dismiss"))
+                            .into_any_element(),
+                        window,
+                        cx,
+                    ),
+                )
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.state.update(cx, |state, cx| state.dismiss_error(cx));
@@ -1336,6 +1457,28 @@ fn focus_ring(focused: bool, cx: &App) -> Hsla {
     } else {
         colors.border_transparent
     }
+}
+
+/// Extension markdown shows no images (triage-3, SEC T8): `markdown` decodes `data:` images
+/// in-process while parsing, before anything is drawn. Every `![` that would open one gets a
+/// backslash, so the parser sees a `!` and, after it, at most a link (which `link_is_allowed`
+/// filters). Inside code the backslash shows; `![` there is rare.
+pub(crate) fn without_images(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut backslashes = 0;
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '!' && chars.peek() == Some(&'[') && backslashes % 2 == 0 {
+            out.push('\\');
+        }
+        backslashes = if character == '\\' {
+            backslashes + 1
+        } else {
+            0
+        };
+        out.push(character);
+    }
+    out
 }
 
 /// Only web links leave an extension's markdown: `http` and `https`. Anything else (`file:`,

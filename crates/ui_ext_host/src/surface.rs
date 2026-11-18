@@ -501,9 +501,10 @@ impl SurfaceState {
                     }
                     Err(error) => {
                         log::error!(
-                            "fyx:ui {}/{}: mount failed: {error:#}",
+                            "fyx:ui {}/{}: mount failed: {}",
                             this.extension_id(),
-                            this.surface.id
+                            this.surface.id,
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
                         );
                         if let Some(effects) = reply_error_effects(&error) {
                             // This surface has no tree to apply its own pushes to.
@@ -906,9 +907,10 @@ impl SurfaceState {
             }
             Err(error) => {
                 log::error!(
-                    "fyx:ui {}/{}: tick failed: {error:#}",
+                    "fyx:ui {}/{}: tick failed: {}",
                     self.extension_id(),
-                    self.surface.id
+                    self.surface.id,
+                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                 );
                 match reply_error_effects(&error) {
                     Some(effects) => {
@@ -990,10 +992,11 @@ impl SurfaceState {
             }
             Err(error) => {
                 log::error!(
-                    "fyx:ui {}/{}: handle-event({:?}) failed: {error:#}",
+                    "fyx:ui {}/{}: handle-event({:?}) failed: {}",
                     self.extension_id(),
                     self.surface.id,
-                    self.redacted(event)
+                    self.redacted(event),
+                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                 );
                 match reply_error_effects(&error) {
                     Some(effects) => {
@@ -1120,9 +1123,10 @@ impl SurfaceState {
             }
             Err(error) => {
                 log::error!(
-                    "fyx:ui {}/{}: invalid update, mounting again: {error}",
+                    "fyx:ui {}/{}: invalid update, mounting again: {}",
                     self.backend.extension_id(),
-                    self.surface.id
+                    self.surface.id,
+                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                 );
                 self.last_error =
                     Some(format!("Invalid update from the extension: {error}").into());
@@ -1315,9 +1319,10 @@ impl SurfaceState {
                 }
                 Err(error) => {
                     log::error!(
-                        "fyx:ui {}/{}: list-rows({list}, {range:?}) failed: {error:#}",
+                        "fyx:ui {}/{}: list-rows({list}, {range:?}) failed: {}",
                         self.backend.extension_id(),
-                        self.surface.id
+                        self.surface.id,
+                        ui_ext::sanitize_for_log(&format!("{error:#}"))
                     );
                     cache.failed_generation = Some(generation);
                     self.last_error = Some(format!("{error:#}").into());
@@ -1371,11 +1376,17 @@ fn reply_error_effects(error: &anyhow::Error) -> Option<Vec<HostEffect>> {
         .map(|reply_error| reply_error.effects.clone())
 }
 
+/// Walks from the roots instead of copying the tree (triage-3, PERF 15).
 fn count_all_inputs(tree: &Tree, input_sets: &mut HashMap<NodeId, u64>) {
-    for node in tree.to_nodes() {
-        if let Props::Input(_) = node.props {
-            *input_sets.entry(node.id).or_default() += 1;
+    let mut stack: Vec<NodeId> = tree.roots().to_vec();
+    while let Some(id) = stack.pop() {
+        let Some(node) = tree.get(id) else {
+            continue;
+        };
+        if let Props::Input(_) = node.props() {
+            *input_sets.entry(id).or_default() += 1;
         }
+        stack.extend_from_slice(node.children());
     }
 }
 

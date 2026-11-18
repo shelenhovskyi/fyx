@@ -39,7 +39,11 @@ pub const RUST_CRATES: &[(&str, &str)] = &[
 ];
 
 /// The WIT packages that get a page: the directory with the package.
-pub const WIT_DIRS: &[&str] = &["crates/ui_ext/wit", "crates/ui_ext/wit/since_v0.2.0"];
+pub const WIT_DIRS: &[&str] = &[
+    "crates/ui_ext/wit",
+    "crates/ui_ext/wit/since_v0.2.0",
+    "crates/ui_ext/wit/since_v0.3.0",
+];
 
 pub fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

@@ -15,7 +15,7 @@ fn init_test(cx: &mut TestAppContext) {
         let mut settings_store = SettingsStore::test(cx);
         settings_store.register_setting::<feature_flags::FeatureFlagsSettings>();
         cx.set_global(settings_store);
-        fyx_guard::init(cx);
+        fyx_guard::init_without_persistence(cx);
     });
 }
 

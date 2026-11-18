@@ -136,6 +136,15 @@ enum VerifyDocument {
         #[arg(long)]
         keyset: PathBuf,
     },
+    /// Check the registry's role separation in a keyset: one signing role per key, and
+    /// `blocklist-revocation` only on an offline snapshot key.
+    Keyset {
+        file: PathBuf,
+        /// The key id of the CI's online snapshot key (`SNAPSHOT_KEY`); refused if it has
+        /// `blocklist-revocation`.
+        #[arg(long)]
+        online_snapshot_key: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -325,6 +334,16 @@ fn run(
                     blocklist.entries().len(),
                     blocklist.signed().signature.key_id
                 )?;
+                Ok(())
+            }
+            VerifyDocument::Keyset {
+                file,
+                online_snapshot_key,
+            } => {
+                let keyset = read_keyset(&file)?;
+                let online_snapshot_key = online_snapshot_key.map(KeyId::new).transpose()?;
+                keyset.check_role_separation(online_snapshot_key.as_ref())?;
+                writeln!(stdout, "ok: {} keys", keyset.keys().len())?;
                 Ok(())
             }
         },
@@ -894,6 +913,49 @@ mod tests {
             [KeyRole::Release, KeyRole::Snapshot].into()
         );
         assert!(!printed.contains(&BASE64.encode([1u8; 32])));
+    }
+
+    #[test]
+    fn verify_keyset_checks_role_separation() {
+        let fixture = Fixture::new();
+        let public_key = |key_id: &str, seed: u8, roles: &[KeyRole]| {
+            SigningKey::from_json(test_key_json(key_id, seed).as_bytes())
+                .expect("test key")
+                .public_key(roles.iter().copied())
+        };
+        let registry = json!({"keys": [
+            public_key("release", 1, &[KeyRole::Release]),
+            public_key("blocklist", 2, &[KeyRole::Blocklist]),
+            public_key("snap-a", 3, &[KeyRole::Snapshot]),
+            public_key("snap-b", 4, &[KeyRole::Snapshot, KeyRole::BlocklistRevocation]),
+        ]});
+        fixture.write("registry.json", registry.to_string().as_bytes());
+        let verify = |online: &str| {
+            fixture.run(&[
+                "verify",
+                "keyset",
+                "{dir}/registry.json",
+                "--online-snapshot-key",
+                online,
+            ])
+        };
+        assert_eq!(
+            verify("snap-a").expect("separated"),
+            "ok: 4 keys
+"
+        );
+        let error = verify("snap-b").expect_err("online key with blocklist-revocation");
+        assert!(
+            error.to_string().contains("blocklist-revocation"),
+            "{error}"
+        );
+        assert!(verify("nope").is_err());
+        // The fixture's own keyset gives one key every role.
+        assert!(
+            fixture
+                .run(&["verify", "keyset", "{dir}/keyset.json"])
+                .is_err()
+        );
     }
 
     #[test]

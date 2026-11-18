@@ -130,6 +130,10 @@ mod probe {
     pub const PUSH_THEN_PATCH: NodeId = 4;
     pub const PUSH_THEN_FAIL: NodeId = 5;
     pub const PUSH_FLOOD: NodeId = 6;
+    pub const ALLOCATE: NodeId = 7;
+    pub const PUSH_BULK: NodeId = 8;
+    pub const PUSH_TEXT: NodeId = 10;
+    pub const LOG_LONG: NodeId = 11;
 }
 
 #[test]
@@ -272,6 +276,49 @@ fn a_push_flood_traps_and_disables() {
         .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH))
         .expect_err("disabled");
     assert!(error.to_string().contains("disabled"), "{error}");
+}
+
+/// security-2 T9: the host's memory cap applies here too, so a guest that grows past it fails in
+/// tests as it does in Fyx.
+#[test]
+fn growing_past_the_memory_cap_traps_and_disables() {
+    let mut harness = Harness::load(&probe_wasm()).expect("load");
+    harness
+        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
+        .expect_err("300 MiB is over the 256 MiB cap");
+    assert!(harness.disabled().is_some());
+}
+
+/// The host's per-call caps on pushed items and on text, which trap.
+#[test]
+fn per_call_item_and_text_caps_trap_as_in_the_host() {
+    let mut harness = Harness::load(&probe_wasm()).expect("load");
+    let error = harness
+        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_BULK))
+        .expect_err("40 pushes of 200 patches are over 4096 items");
+    assert!(
+        format!("{error:#}").contains("patches and nodes in one call"),
+        "{error:#}"
+    );
+
+    let mut harness = Harness::load(&probe_wasm()).expect("load");
+    let error = harness
+        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_TEXT))
+        .expect_err("20 MiB of text is over 16 MiB");
+    assert!(format!("{error:#}").contains("bytes of text"), "{error:#}");
+
+    // A 1 MiB log line is under the text cap, and kept cut to 16 KiB.
+    let mut harness = Harness::load(&probe_wasm()).expect("load");
+    harness
+        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::LOG_LONG))
+        .expect("under the cap");
+    let (_, message) = harness.logs().last().expect("logged");
+    assert!(
+        message.len() < MAX_LOG_MESSAGE_LEN + 64,
+        "{}",
+        message.len()
+    );
+    assert!(message.ends_with("bytes, cut)"), "{message:.40}");
 }
 
 #[test]
@@ -635,3 +682,4 @@ fn the_counter_demo_runs_as_0_2() {
 }
 
 mod demos_v0_2;
+mod demos_v0_3;

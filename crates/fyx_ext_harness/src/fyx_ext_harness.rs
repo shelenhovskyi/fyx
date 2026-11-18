@@ -42,7 +42,7 @@
 //! when it returns to WebAssembly, while the host's async runtime stops waiting at the deadline.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
 mod v0_2;
+mod v0_3;
 
 pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
@@ -76,7 +77,11 @@ mod bindings {
 use bindings::fyx::ui::{host as wit_host, types as wit};
 
 /// The `fyx:ui` versions the harness runs, the same as the host's supported range.
-pub const SUPPORTED_API_VERSIONS: &[Version] = &[Version::new(0, 1, 0), Version::new(0, 2, 0)];
+pub const SUPPORTED_API_VERSIONS: &[Version] = &[
+    Version::new(0, 1, 0),
+    Version::new(0, 2, 0),
+    Version::new(0, 3, 0),
+];
 /// The section `register_extension!` writes: three big-endian `u16`s.
 pub const API_VERSION_SECTION: &str = "fyx:ui-api-version";
 /// Instantiation and `surfaces()` together.
@@ -85,10 +90,27 @@ pub const INIT_BUDGET: Duration = Duration::from_secs(2);
 pub const CALL_BUDGET: Duration = Duration::from_millis(200);
 pub const EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 pub const MAX_PUSHES_PER_CALL: usize = 64;
+/// Patches plus nodes all of one call's 0.1 pushes may carry; past it the call traps.
+pub const MAX_PUSHED_ITEMS_PER_CALL: usize = 4096;
+/// String bytes all of one call's host-import arguments may carry together (`push-update`,
+/// `log`, and in 0.2 every other import); past it the call traps.
+pub const MAX_LIFTED_TEXT_PER_CALL: usize = 16 << 20;
+/// Longest `log` message kept; the rest is cut off. It still counts in full toward
+/// [`MAX_LIFTED_TEXT_PER_CALL`].
+pub const MAX_LOG_MESSAGE_LEN: usize = 16 << 10;
+/// Linear memory one component may grow to, and its other store caps: the host's
+/// (`ui_ext_wasm::UI_*_LIMIT`). Growing past one traps, which disables the extension.
+pub const MEMORY_LIMIT: usize = 256 << 20;
+pub const TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
+pub const INSTANCES_LIMIT: usize = 32;
+pub const TABLES_LIMIT: usize = 32;
+pub const MEMORIES_LIMIT: usize = 8;
 /// Consecutive `tick` errors after which a surface's ticks stop until an event on it.
 pub const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 3;
 /// `fyx-ext test` sets it to the built component; [`Harness::from_env`] reads it.
 pub const COMPONENT_VARIABLE: &str = "FYX_EXT_COMPONENT";
+/// `fyx-ext test` sets it to the extension folder; [`Harness::from_env`] prefers it.
+pub const PACKAGE_VARIABLE: &str = "FYX_EXT_PACKAGE";
 /// What [`Harness::load`] grants: every `[fyx_ui].capabilities` entry a component can use.
 pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_PANEL,
@@ -150,11 +172,29 @@ pub(crate) struct State {
     ctx: WasiCtx,
     /// 0.1 pushes of the running call.
     pushes: Vec<Pushed>,
+    /// Patches and nodes of the running call's 0.1 pushes.
+    pushed_items: usize,
+    /// String bytes the running call passed to host imports.
+    lifted_text: usize,
     /// 0.2 checks and effects.
     api: ApiState,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
+    limits: wasmtime::StoreLimits,
+}
+
+/// The host's store caps (`ui_ext_wasm`'s `ui_store_limits`), so a guest that grows too far
+/// fails here as it fails in Fyx (security-2 T9).
+fn store_limits() -> wasmtime::StoreLimits {
+    wasmtime::StoreLimitsBuilder::new()
+        .memory_size(MEMORY_LIMIT)
+        .table_elements(TABLE_ELEMENTS_LIMIT)
+        .instances(INSTANCES_LIMIT)
+        .tables(TABLES_LIMIT)
+        .memories(MEMORIES_LIMIT)
+        .trap_on_grow_failure(true)
+        .build()
 }
 
 impl State {
@@ -162,7 +202,41 @@ impl State {
         self.call_started = Instant::now();
         self.call_budget = budget;
         self.pushes.clear();
+        self.pushed_items = 0;
+        self.lifted_text = 0;
         self.api.begin_call();
+    }
+
+    /// The host's per-call text cap (`ui_ext_wasm`'s `count_lifted_text`).
+    pub(crate) fn count_lifted_text(&mut self, bytes: usize) -> wasmtime::Result<()> {
+        self.lifted_text = self.lifted_text.saturating_add(bytes);
+        if self.lifted_text > MAX_LIFTED_TEXT_PER_CALL {
+            wasmtime::bail!(
+                "passed more than {MAX_LIFTED_TEXT_PER_CALL} bytes of text to push-update and log \
+                 in one call"
+            );
+        }
+        Ok(())
+    }
+
+    /// `log` of either world: counted, cut at [`MAX_LOG_MESSAGE_LEN`], kept at once.
+    pub(crate) fn write_log(
+        &mut self,
+        level: ui_ext::LogLevel,
+        mut message: String,
+    ) -> wasmtime::Result<()> {
+        self.count_lifted_text(message.len())?;
+        if message.len() > MAX_LOG_MESSAGE_LEN {
+            let mut end = MAX_LOG_MESSAGE_LEN;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            let total = message.len();
+            message.truncate(end);
+            message.push_str(&format!("… ({total} bytes, cut)"));
+        }
+        self.logs.push((level, message));
+        Ok(())
     }
 
     /// The effects of the call that just returned: a 0.1 component's pushes or a 0.2
@@ -201,16 +275,72 @@ impl wit_host::Host for State {
         if self.pushes.len() >= MAX_PUSHES_PER_CALL {
             wasmtime::bail!("pushed more than {MAX_PUSHES_PER_CALL} updates in one call");
         }
-        self.pushes.push(Pushed {
-            surface_id,
-            update: update.into(),
-        });
+        let update: ui_ext::Update = update.into();
+        self.count_lifted_text(
+            surface_id.len() + update_text_len(&model::Update::from(update.clone())),
+        )?;
+        self.pushed_items += match &update {
+            ui_ext::Update::Unchanged => 0,
+            ui_ext::Update::Replace(nodes) => nodes.len(),
+            ui_ext::Update::Patches(patches) => patches.len(),
+        };
+        if self.pushed_items > MAX_PUSHED_ITEMS_PER_CALL {
+            wasmtime::bail!(
+                "pushed more than {MAX_PUSHED_ITEMS_PER_CALL} patches and nodes in one call"
+            );
+        }
+        self.pushes.push(Pushed { surface_id, update });
         Ok(())
     }
 
     fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
-        self.logs.push((level.into(), message));
-        Ok(())
+        self.write_log(level.into(), message)
+    }
+}
+
+/// String bytes of a node's props, as the host counts them: frozen icons carry none.
+pub(crate) fn props_text_len(props: &model::Props) -> usize {
+    let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+    let icon_len = |icon: &model::IconRef| match icon {
+        model::IconRef::Frozen(_) => 0,
+        model::IconRef::Upstream(name) => name.len(),
+    };
+    match props {
+        model::Props::Flex(_) | model::Props::List(_) => 0,
+        model::Props::Text(props) => props.content.len(),
+        model::Props::Button(props) => {
+            props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
+        }
+        model::Props::Input(props) => props.value.len() + props.placeholder.len(),
+        model::Props::Table(props) => props.columns.iter().map(String::len).sum(),
+        model::Props::Icon(props) => icon_len(&props.name),
+        model::Props::Markdown(text) => text.len(),
+        model::Props::DiffView(props) => {
+            props.old_text.len() + props.new_text.len() + option_len(&props.language)
+        }
+        model::Props::Image(props) => {
+            props.alt.len()
+                + match &props.source {
+                    ui_ext::image::ImageSource::Asset(path) => path.len(),
+                    ui_ext::image::ImageSource::Generated(_) => 0,
+                }
+        }
+    }
+}
+
+/// String bytes an update carries.
+pub(crate) fn update_text_len(update: &model::Update) -> usize {
+    match update {
+        model::Update::Unchanged => 0,
+        model::Update::Replace(nodes) => nodes.iter().map(|node| props_text_len(&node.props)).sum(),
+        model::Update::Patches(patches) => patches
+            .iter()
+            .map(|patch| match patch {
+                model::Patch::SetProps(_, props) => props_text_len(props),
+                model::Patch::Insert(insert) => props_text_len(&insert.node.props),
+                model::Patch::Remove(_) | model::Patch::InvalidateRows(_) => 0,
+            })
+            .sum(),
     }
 }
 
@@ -218,6 +348,8 @@ struct Runtime {
     engine: Engine,
     linker_v0_1: Linker<State>,
     linker_v0_2: Linker<State>,
+    /// What the host implements of the staged 0.3 world; instantiation adds traps for the rest.
+    linker_v0_3: Linker<State>,
 }
 
 fn runtime() -> Result<&'static Runtime> {
@@ -252,10 +384,14 @@ fn build_runtime() -> Result<Runtime> {
     let mut linker_v0_2 = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker_v0_2)?;
     v0_2::UiExtension::add_to_linker::<_, State>(&mut linker_v0_2, |state| state)?;
+    let mut linker_v0_3 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker_v0_3)?;
+    v0_3::add_to_linker(&mut linker_v0_3)?;
     Ok(Runtime {
         engine,
         linker_v0_1,
         linker_v0_2,
+        linker_v0_3,
     })
 }
 
@@ -263,6 +399,31 @@ fn build_runtime() -> Result<Runtime> {
 enum Bindings {
     V0_1(bindings::UiExtension),
     V0_2(v0_2::UiExtension),
+    V0_3(v0_3::UiExtension),
+}
+
+/// A 0.3 value the model cannot hold, or an `image` node the host refuses, as the guest's own
+/// error for that call: the host rejects it like a bad reply instead of disabling the extension.
+fn guest_value<T>(
+    value: std::result::Result<T, model::HostError>,
+) -> std::result::Result<T, String> {
+    value.map_err(|error| error.message)
+}
+
+/// A 0.3 reply, with its `image` nodes checked against the state after the call, as the host
+/// checks them (design 0.3, section 12).
+fn checked_images(
+    store: &Store<State>,
+    surface_id: &str,
+    update: model::Update,
+) -> std::result::Result<model::Update, String> {
+    guest_value(
+        store
+            .data()
+            .api
+            .check_images(surface_id, api_state::update_props(&update)),
+    )
+    .map(|()| update)
 }
 
 impl Bindings {
@@ -278,6 +439,8 @@ impl Bindings {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            Self::V0_3(extension) => v0_3::try_collect(extension.call_surfaces(store)?)
+                .map_err(|error| wasmtime::Error::msg(error.message))?,
         })
     }
 
@@ -296,6 +459,18 @@ impl Bindings {
             Self::V0_2(extension) => extension
                 .call_mount(store, surface_id)?
                 .map(|nodes| nodes.into_iter().map(Into::into).collect()),
+            Self::V0_3(extension) => extension
+                .call_mount(&mut *store, surface_id)?
+                .and_then(|nodes| guest_value(v0_3::try_collect::<_, model::Node>(nodes)))
+                .and_then(|nodes| {
+                    guest_value(
+                        store
+                            .data()
+                            .api
+                            .check_images(surface_id, nodes.iter().map(|node| &node.props)),
+                    )
+                    .map(|()| nodes)
+                }),
         })
     }
 
@@ -318,6 +493,10 @@ impl Bindings {
             Self::V0_2(extension) => extension
                 .call_handle_event(store, surface_id, &event.into())?
                 .map(Into::into),
+            Self::V0_3(extension) => extension
+                .call_handle_event(&mut *store, surface_id, &event.into())?
+                .and_then(|update| guest_value(model::Update::try_from(update)))
+                .and_then(|update| checked_images(store, surface_id, update)),
         })
     }
 
@@ -328,9 +507,9 @@ impl Bindings {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> wasmtime::Result<Vec<model::ListRow>> {
+    ) -> wasmtime::Result<std::result::Result<Vec<model::ListRow>, String>> {
         Ok(match self {
-            Self::V0_1(extension) => extension
+            Self::V0_1(extension) => Ok(extension
                 .call_list_rows(store, surface_id, list, start, count)?
                 .into_iter()
                 .map(|row| {
@@ -339,12 +518,25 @@ impl Bindings {
                         nodes: row.nodes.into_iter().map(Into::into).collect(),
                     })
                 })
-                .collect(),
-            Self::V0_2(extension) => extension
+                .collect()),
+            Self::V0_2(extension) => Ok(extension
                 .call_list_rows(store, surface_id, list, start, count)?
                 .into_iter()
                 .map(Into::into)
-                .collect(),
+                .collect()),
+            Self::V0_3(extension) => guest_value(v0_3::try_collect::<_, model::ListRow>(
+                extension.call_list_rows(&mut *store, surface_id, list, start, count)?,
+            ))
+            .and_then(|rows| {
+                guest_value(
+                    store.data().api.check_images(
+                        surface_id,
+                        rows.iter()
+                            .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                    ),
+                )
+                .map(|()| rows)
+            }),
         })
     }
 
@@ -357,6 +549,10 @@ impl Bindings {
         Ok(match self {
             Self::V0_1(_) => Ok(model::Update::Unchanged),
             Self::V0_2(extension) => extension.call_tick(store, surface_id)?.map(Into::into),
+            Self::V0_3(extension) => extension
+                .call_tick(&mut *store, surface_id)?
+                .and_then(|update| guest_value(model::Update::try_from(update)))
+                .and_then(|update| checked_images(store, surface_id, update)),
         })
     }
 }
@@ -524,6 +720,10 @@ pub struct Harness {
     pushed: Vec<Pushed>,
     logs: Vec<(ui_ext::LogLevel, String)>,
     disabled: Option<String>,
+    /// The extension folder of `load_package`, for asset images.
+    package: Option<PathBuf>,
+    /// What the renderer would draw as alt text: assets that are missing or bad, dead handles.
+    image_failures: Vec<String>,
 }
 
 impl Harness {
@@ -562,7 +762,6 @@ impl Harness {
                         .join(", ")
                 )
             })?;
-
         let mut wasi = WasiCtxBuilder::new();
         wasi.inherit_stderr();
         let mut store = Store::new(
@@ -571,6 +770,8 @@ impl Harness {
                 table: ResourceTable::new(),
                 ctx: wasi.build(),
                 pushes: Vec::new(),
+                pushed_items: 0,
+                lifted_text: 0,
                 api: ApiState::new(
                     ui_api_version,
                     capabilities.iter().map(ToString::to_string).collect(),
@@ -578,8 +779,10 @@ impl Harness {
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
+                limits: store_limits(),
             },
         );
+        store.limiter(|state| &mut state.limits);
         store.epoch_deadline_callback(|context| {
             let state = context.data();
             if state.call_started.elapsed() > state.call_budget {
@@ -599,11 +802,14 @@ impl Harness {
                 v0_2::UiExtension::instantiate(&mut store, &component, &runtime.linker_v0_2)
                     .map(Bindings::V0_2)
             }
-            // The staged 0.3 world runs in the host (ui_ext_wasm); the harness gains it with the
-            // 0.3 SDK (plan 4.12).
-            ApiVersion::V0_3_0 => Err(wasmtime::Error::msg(
-                "fyx:ui 0.3 is staged; the test harness does not run 0.3 components yet",
-            )),
+            // What the host does not implement of the staged 0.3 world traps when called, as in
+            // the host; a component that never calls it loads and runs.
+            ApiVersion::V0_3_0 => {
+                let mut linker = runtime.linker_v0_3.clone();
+                v0_3::define_unlinked_as_traps(&mut linker, &runtime.engine, &component)
+                    .and_then(|()| v0_3::UiExtension::instantiate(&mut store, &component, &linker))
+                    .map(Bindings::V0_3)
+            }
         }
         .map_err(anyhow::Error::from)
         .context("instantiating the component")?;
@@ -635,6 +841,8 @@ impl Harness {
             pushed: Vec::new(),
             logs,
             disabled: None,
+            package: None,
+            image_failures: Vec::new(),
         };
         harness.record(&effects);
         let follow_ups = harness.apply_effects(&effects);
@@ -649,12 +857,71 @@ impl Harness {
         Self::load(&wasm).with_context(|| format!("loading {path:?}"))
     }
 
-    /// Loads the component named by `FYX_EXT_COMPONENT`, which `fyx-ext test` sets.
+    /// Loads an extension folder as Fyx installs it: `extension.toml` (its `[fyx_ui]`
+    /// `component` and `capabilities`), the component, and `assets/` for image nodes.
+    pub fn load_package(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let manifest_path = dir.join("extension.toml");
+        let manifest: toml::Table = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("reading {manifest_path:?}"))?
+            .parse()
+            .with_context(|| format!("parsing {manifest_path:?}"))?;
+        let table = manifest
+            .get("fyx_ui")
+            .and_then(toml::Value::as_table)
+            .with_context(|| format!("{manifest_path:?} has no [fyx_ui] table"))?;
+        let component = table
+            .get("component")
+            .and_then(toml::Value::as_str)
+            .with_context(|| format!("{manifest_path:?} has no [fyx_ui].component"))?
+            .replace('\\', "/");
+        let capabilities = table
+            .get("capabilities")
+            .and_then(toml::Value::as_array)
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let component_path = dir.join(&component);
+        let wasm = std::fs::read(&component_path)
+            .with_context(|| format!("reading {component_path:?}"))?;
+        let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
+            .with_context(|| format!("loading {dir:?}"))?;
+        harness.package =
+            Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
+        Ok(harness)
+    }
+
+    /// Checks asset images against the extension folder `dir`, as [`Harness::load_package`]
+    /// does, for a harness loaded from bytes.
+    pub fn with_package_root(mut self, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        self.package =
+            Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
+        Ok(self)
+    }
+
+    /// Loads what `fyx-ext test` names: the extension folder in `FYX_EXT_PACKAGE`, or else the
+    /// component in `FYX_EXT_COMPONENT`.
     pub fn from_env() -> Result<Self> {
+        if let Some(dir) = std::env::var_os(PACKAGE_VARIABLE) {
+            return Self::load_package(dir);
+        }
         let path = std::env::var_os(COMPONENT_VARIABLE).with_context(|| {
             format!("{COMPONENT_VARIABLE} is not set; run the tests with `fyx-ext test`, or set it to a built component")
         })?;
         Self::load_file(path)
+    }
+
+    /// Image nodes the renderer would draw as their alt text, with the reason (design 0.3,
+    /// section 12; decisions D1, D2, D4): an asset that is missing, outside the package, too
+    /// large or not a valid PNG or SVG, a generated image that is no longer live, or `tint` on a
+    /// PNG (drawn untinted). None of them is an update error.
+    pub fn image_failures(&self) -> &[String] {
+        &self.image_failures
     }
 
     pub fn api_version(&self) -> &Version {
@@ -963,12 +1230,15 @@ impl Harness {
         let follow_ups = self.apply_effects(&effects);
         let applied = match result {
             Ok(update) => match self.mounted.get_mut(surface_id) {
-                Some(mounted) => mounted
-                    .apply(&update, self.limits)
-                    .with_context(|| {
+                Some(mounted) => {
+                    let applied = mounted.apply(&update, self.limits).with_context(|| {
                         format!("the host would reject the reply to {what} on {surface_id:?}")
-                    })
-                    .map(|applied| (update, applied)),
+                    });
+                    if applied.is_ok() {
+                        self.inspect_images(api_state::update_props(&update));
+                    }
+                    applied.map(|applied| (update, applied))
+                }
                 // The effects removed or closed it: the host discards the reply.
                 None => Ok((update, Applied::default())),
             },
@@ -997,6 +1267,13 @@ impl Harness {
         })?;
         let follow_ups = self.apply_effects(&effects);
         self.run_follow_ups(follow_ups);
+        let rows = rows
+            .map_err(|message| anyhow::anyhow!("list-rows({surface_id:?}, {list}): {message}"))?;
+        self.inspect_images(
+            rows.iter()
+                .flat_map(|row| row.nodes.iter().map(|node| &node.props))
+                .collect::<Vec<_>>(),
+        );
         let requested = start..start.saturating_add(count);
         rows.into_iter()
             .map(|row| {
@@ -1027,10 +1304,78 @@ impl Harness {
                     .with_context(|| format!("invalid tree from mount({surface_id:?})"))
             });
         if let Ok(mounted) = &mounted {
+            self.inspect_images(mounted.props.values());
             self.mounted.insert(surface_id.to_string(), mounted.clone());
         }
         self.run_follow_ups(follow_ups);
         mounted.map(drop)
+    }
+
+    /// What the renderer's decoder would find for the image nodes it is about to draw (design
+    /// 0.3, section 12): failures become alt text and a `warn` line, never an update error.
+    fn inspect_images<'a>(&mut self, props: impl IntoIterator<Item = &'a model::Props>) {
+        let mut failures = Vec::new();
+        for props in props {
+            let model::Props::Image(image) = props else {
+                continue;
+            };
+            match &image.source {
+                ui_ext::image::ImageSource::Generated(handle) => {
+                    if !self.store.data().api.image_is_live(*handle) {
+                        failures.push(format!(
+                            "image {:?} shows generated image {handle}, which is not live; the \
+                             renderer draws its alt text",
+                            image.alt
+                        ));
+                    }
+                }
+                ui_ext::image::ImageSource::Asset(path) => {
+                    if let Err(failure) = self.check_asset(path, image) {
+                        failures.push(failure);
+                    }
+                }
+            }
+        }
+        for failure in failures {
+            self.logs.push((
+                ui_ext::LogLevel::Warn,
+                format!("fyx-ext-harness: {failure}"),
+            ));
+            self.image_failures.push(failure);
+        }
+    }
+
+    /// An asset as the decoder reads it: inside the package, at most 2 MiB, a valid PNG or SVG
+    /// header; `tint` is for SVG only.
+    fn check_asset(
+        &self,
+        path: &str,
+        image: &ui_ext::image::ImageProps,
+    ) -> std::result::Result<(), String> {
+        let Some(root) = &self.package else {
+            return Err(format!(
+                "asset {path:?} is not checked: load the extension with Harness::load_package (or \
+                 `fyx-ext test`) to check assets"
+            ));
+        };
+        let format = ui_ext::image::check_asset_path(path).map_err(|error| error.to_string())?;
+        let resolved = std::fs::canonicalize(root.join(path))
+            .map_err(|error| format!("asset {path:?} cannot be read: {error}"))?;
+        if !resolved.starts_with(root) {
+            return Err(format!(
+                "asset {path:?} resolves outside the extension folder"
+            ));
+        }
+        let bytes = std::fs::read(&resolved)
+            .map_err(|error| format!("asset {path:?} cannot be read: {error}"))?;
+        ui_ext::image::check_image_bytes(format, &bytes, ui_ext::image::MAX_ASSET_BYTES)
+            .map_err(|error| format!("asset {path:?}: {error}"))?;
+        if image.tint.is_some() && format == ui_ext::image::ImageFormat::Png {
+            return Err(format!(
+                "asset {path:?} is a PNG, so its tint is ignored (tint is for SVG only)"
+            ));
+        }
+        Ok(())
     }
 
     /// Runs one export call with the call budget and records its effects. A trap or an overrun
@@ -1072,10 +1417,12 @@ impl Harness {
         for effect in effects {
             match effect {
                 HostEffect::Push { surface_id, update } => {
-                    if let Some(mounted) = self.mounted.get_mut(surface_id)
-                        && mounted.apply(update, self.limits).is_err()
-                    {
-                        follow_ups.push(FollowUp::Mount(surface_id.clone()));
+                    if let Some(mounted) = self.mounted.get_mut(surface_id) {
+                        if mounted.apply(update, self.limits).is_ok() {
+                            self.inspect_images(api_state::update_props(update));
+                        } else {
+                            follow_ups.push(FollowUp::Mount(surface_id.clone()));
+                        }
                     }
                 }
                 HostEffect::RequestTick { surface_id, delay } => {
@@ -1119,6 +1466,8 @@ impl Harness {
                         }
                     }
                 }
+                // Decoding is the renderer's; the harness checks what it can in check_images.
+                HostEffect::AddImage { .. } | HostEffect::RemoveImage { .. } => {}
                 HostEffect::RemoveDecoration { id } => {
                     self.decorations.remove(id);
                     self.mounted.remove(id);

@@ -3,9 +3,11 @@
 //! Every entry point returns early while `fyx_security.mode` is `off`, so Fyx then behaves exactly
 //! like Zed. The mode is read from the global settings value only: project settings have no
 //! `fyx_security` key, so a repository can neither raise nor lower it. A repository can only
-//! tighten, through `.fyx/security.toml` (see [`RepoPolicy`]). While Fyx runs, a settings change
-//! that lowers protection waits for the user's confirmation (see [`init`]).
+//! tighten, through `.fyx/security.toml` (see [`RepoPolicy`]). A settings change that lowers
+//! protection waits for the user's confirmation, while Fyx runs and across restarts (see
+//! [`init`]).
 
+pub mod paths;
 mod policy;
 
 use std::{
@@ -25,9 +27,13 @@ use settings::{FyxSecurityMode, RegisterSetting, Settings, SettingsStore};
 use util::rel_path::RelPath;
 
 pub use policy::{
-    RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, env_name_matches, protected_config,
-    protected_config_rel, secret_env_names,
+    RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, env_name_matches, is_credential_url,
+    protected_config, protected_config_rel, sanitize_for_log, secret_env_names, secret_env_vars,
 };
+
+/// Where the last settings the user accepted are kept, so a lowering they declined does not apply
+/// silently at the next start (security-2 T3).
+const CONFIRMED_FILE: &str = "fyx_security_confirmed.toml";
 
 /// Ordered by strength: `Off < Audit < Shield`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,6 +50,46 @@ pub enum SecurityMode {
 pub struct SecuritySettings {
     pub mode: SecurityMode,
     pub allow_env: Vec<String>,
+}
+
+/// [`SecuritySettings`] as stored in [`CONFIRMED_FILE`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ConfirmedFile {
+    mode: String,
+    allow_env: Vec<String>,
+}
+
+impl SecuritySettings {
+    fn to_confirmed_toml(&self) -> Option<Vec<u8>> {
+        let mode = match self.mode {
+            SecurityMode::Off => "off",
+            SecurityMode::Audit => "audit",
+            SecurityMode::Shield => "shield",
+        };
+        toml::to_string(&ConfirmedFile {
+            mode: mode.into(),
+            allow_env: self.allow_env.clone(),
+        })
+        .ok()
+        .map(String::into_bytes)
+    }
+
+    /// An unreadable or unknown file counts as `shield` with no `allow_env`: whoever damaged it
+    /// does not get a lower mode for it.
+    fn from_confirmed_toml(bytes: &[u8]) -> Self {
+        let file = std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| toml::from_str::<ConfirmedFile>(text).ok());
+        let mode = match file.as_ref().map(|file| file.mode.as_str()) {
+            Some("off") => SecurityMode::Off,
+            Some("audit") => SecurityMode::Audit,
+            _ => SecurityMode::Shield,
+        };
+        Self {
+            mode,
+            allow_env: file.map(|file| file.allow_env).unwrap_or_default(),
+        }
+    }
 }
 
 impl Settings for SecuritySettings {
@@ -101,12 +147,20 @@ fn enforce(
     match mode {
         SecurityMode::Off => Ok(()),
         SecurityMode::Audit => {
-            log::warn!("fyx_guard audit: would block {}: {reason}", action());
+            log::warn!(
+                "fyx_guard audit: would block {}: {}",
+                sanitize_for_log(&action()),
+                sanitize_for_log(&reason)
+            );
             Ok(())
         }
         SecurityMode::Shield => {
             let action = action();
-            log::warn!("fyx_guard: blocked {action}: {reason}");
+            log::warn!(
+                "fyx_guard: blocked {}: {}",
+                sanitize_for_log(&action),
+                sanitize_for_log(&reason)
+            );
             Err(format!(
                 "Fyx's security shield blocked {action}: {reason}. Do not retry or work around \
                  this; ask the user if the task needs it."
@@ -132,12 +186,84 @@ pub fn check_private_path(
             display_project_path(project, path, cx)
         )
     };
-    enforce(mode, action, private_denial(path, cx)).map_err(|message| {
+    enforce(mode, action, private_denial(path, project, cx)).map_err(|message| {
         acp_v1::Error::new(ErrorCode::INVALID_PARAMS.value(), message.clone()).data(message)
     })
 }
 
-fn private_denial(path: &ProjectPath, cx: &App) -> Option<String> {
+/// Hook for the built-in agent's `read_file` tool, beside its own `private_files` checks: the
+/// worktree's `.fyx/security.toml` (w9-step1 F7), and every spelling of the path, so a link or a
+/// Windows alias does not get around Zed's `private_files` either. The tool reports the error to
+/// the model.
+pub fn check_agent_read(project: &Project, path: &ProjectPath, cx: &App) -> Result<(), String> {
+    let mode = mode(cx);
+    if mode == SecurityMode::Off {
+        return Ok(());
+    }
+    let action = || format!("an agent read of {}", path.path.as_unix_str());
+    enforce(mode, action, private_denial(path, project, cx))
+}
+
+/// Hook for the built-in agent's `grep` tool: whether to skip a file the shield makes private.
+/// Audit mode logs and skips nothing.
+pub fn agent_read_blocked(project: &Project, path: &ProjectPath, cx: &App) -> bool {
+    check_agent_read(project, path, cx).is_err()
+}
+
+/// Every spelling of the file `path` names, as project paths: the typed one, Windows' rewrites
+/// of it, the real file behind links, and on case-insensitive file systems the lower-case form
+/// (triage-3 top-7 #1, security-2 S1 and T4, bugs-1 #14 and #16). A protection applies when any
+/// of them matches.
+fn project_path_spellings(project: &Project, path: &ProjectPath, cx: &App) -> Vec<ProjectPath> {
+    let mut spellings = vec![path.clone()];
+    if let Some(abs_path) = project.absolute_path(path, cx) {
+        for candidate in resolve_path(project, &abs_path).candidates() {
+            if let Some(found) = project.find_project_path(candidate, cx)
+                && !spellings.contains(&found)
+            {
+                spellings.push(found);
+            }
+        }
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+        let lower: Vec<ProjectPath> = spellings
+            .iter()
+            .filter_map(|spelling| {
+                let lower = spelling.path.as_unix_str().to_lowercase();
+                let lower = RelPath::from_unix_str(&lower).ok()?;
+                Some(ProjectPath {
+                    worktree_id: spelling.worktree_id,
+                    path: lower.into(),
+                })
+            })
+            .collect();
+        for lower in lower {
+            if !spellings.contains(&lower) {
+                spellings.push(lower);
+            }
+        }
+    }
+    spellings
+}
+
+/// [`paths::resolve_blocking`] on a real file system: hooks are synchronous, and resolving costs
+/// one `canonicalize` of the deepest existing ancestor. A fake file system (tests) gets the
+/// spellings without the real file.
+fn resolve_path(project: &Project, abs_path: &Path) -> paths::ResolvedPath {
+    if project.fs().is_fake() {
+        paths::unresolved(abs_path)
+    } else {
+        paths::resolve_blocking(abs_path)
+    }
+}
+
+fn private_denial(path: &ProjectPath, project: &Project, cx: &App) -> Option<String> {
+    project_path_spellings(project, path, cx)
+        .iter()
+        .find_map(|spelling| private_denial_of(spelling, cx))
+}
+
+fn private_denial_of(path: &ProjectPath, cx: &App) -> Option<String> {
     if WorktreeSettings::get_global(cx).is_path_private(&path.path) {
         return Some("it matches the global `private_files` setting".into());
     }
@@ -277,17 +403,64 @@ fn write_check(project: &Project, path: &Path, cx: &App) -> Result<(), String> {
     enforce(mode, action, write_denial(project, path, cx))
 }
 
+/// Inside a worktree the protected names are matched against the worktree-relative path only, so
+/// a project that itself lives under a `.claude/` or `.codex/` folder (an agent's worktree) is
+/// not read-only as a whole (bugs-1 #15). Outside every worktree the absolute path is matched.
 fn write_denial(project: &Project, path: &Path, cx: &App) -> Option<String> {
+    let resolved = resolve_path(project, path);
+    if resolved.has_windows_alias() {
+        return Some(
+            "its name uses a spelling Windows rewrites (a trailing dot or space, or ':'), so it \
+             could name a protected file"
+                .into(),
+        );
+    }
+    if let Some(canonical) = &resolved.canonical
+        && project.find_project_path(&resolved.lexical, cx).is_some()
+        && !inside_worktrees(project, canonical, cx)
+    {
+        return Some("it resolves outside the project through a link".into());
+    }
+    let mut spellings: Vec<PathBuf> = resolved
+        .candidates()
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect();
+    if cfg!(any(windows, target_os = "macos")) {
+        let lower: Vec<PathBuf> = spellings
+            .iter()
+            .filter_map(|path| path.to_str().map(|text| PathBuf::from(text.to_lowercase())))
+            .collect();
+        spellings.extend(lower);
+    }
+    spellings
+        .iter()
+        .find_map(|spelling| write_denial_of(project, spelling, cx))
+}
+
+/// Whether `path` (a real, canonical path) is inside one of the project's worktrees, whose roots
+/// are resolved too.
+fn inside_worktrees(project: &Project, path: &Path, cx: &App) -> bool {
+    project.find_project_path(path, cx).is_some()
+        || project.worktrees(cx).any(|worktree| {
+            let root = worktree.read(cx).abs_path();
+            resolve_path(project, &root)
+                .canonical
+                .is_some_and(|root| path.starts_with(root))
+        })
+}
+
+fn write_denial_of(project: &Project, path: &Path, cx: &App) -> Option<String> {
     let project_path = project.find_project_path(path, cx);
     let read_only_config =
         |rule: String| format!("agent configs ({rule}) are read-only for agents");
-    protected_config(path)
+    let protected = match &project_path {
+        Some(project_path) => protected_config_rel(&project_path.path),
+        None => protected_config(path),
+    };
+    protected
         .or_else(|| user_config(path))
         .map(read_only_config)
-        .or_else(|| {
-            let project_path = project_path.as_ref()?;
-            protected_config_rel(&project_path.path).map(read_only_config)
-        })
         .or_else(|| {
             let project_path = project_path.as_ref()?;
             repo_denial(project_path.worktree_id, cx, |state| {
@@ -303,8 +476,12 @@ fn user_config(path: &Path) -> Option<String> {
         Ok(rest) => util::paths::home_dir().join(rest),
         Err(_) => path.to_path_buf(),
     };
-    let config_dir = paths::config_dir();
-    policy::is_within(&path, config_dir).then(|| format!("{}/", config_dir.display()))
+    let config_dir = ::paths::config_dir();
+    if policy::is_within(&path, config_dir) {
+        return Some(format!("{}/", config_dir.display()));
+    }
+    let confirmed = ::paths::data_dir().join(CONFIRMED_FILE);
+    policy::is_within(&path, &confirmed).then(|| confirmed.display().to_string())
 }
 
 /// Hook for the environment an agent terminal inherits, applied before the variables the agent
@@ -319,21 +496,28 @@ pub fn scrub_env(env: &mut HashMap<String, String>, cx: &App) {
         return;
     }
     let inherited = std::env::vars_os()
-        .filter_map(|(name, _)| name.into_string().ok())
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok())))
         .collect::<Vec<_>>();
     scrub(env, &inherited, settings.mode, &settings.allow_env);
 }
 
+/// `inherited` is Fyx's own environment, with values where they are UTF-8: a value that is a
+/// credential URL is secret whatever the variable is called.
 fn scrub(
     env: &mut HashMap<String, String>,
-    inherited: &[String],
+    inherited: &[(String, Option<String>)],
     mode: SecurityMode,
     allow: &[String],
 ) -> Vec<String> {
-    let mut names = env.keys().chain(inherited).cloned().collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    let secret = secret_env_names(&names, allow);
+    let vars = env
+        .iter()
+        .map(|(name, value)| (name, Some(value.as_str())))
+        .chain(
+            inherited
+                .iter()
+                .map(|(name, value)| (name, value.as_deref())),
+        );
+    let secret = secret_env_vars(vars, allow);
     if secret.is_empty() {
         return secret;
     }
@@ -394,9 +578,11 @@ struct Guard {
     /// A lowering from the settings file that the user has not answered yet.
     pending: Option<SecuritySettings>,
     /// A lowering the user declined. It is not asked about again until the file asks for
-    /// something else; it applies at the next start.
+    /// something else or Fyx restarts; it applies only once the user confirms it.
     declined: Option<SecuritySettings>,
     prompt_open: bool,
+    /// [`CONFIRMED_FILE`]: written whenever the settings in force change, read at start.
+    confirmed_file: Option<PathBuf>,
 }
 
 impl Global for Guard {}
@@ -413,9 +599,44 @@ fn repo_denial(
 /// Reads the settings once and then follows them. Raising protection applies at once. Lowering it
 /// (a lower mode, or `allow_env` entries the current mode does not have) keeps the stricter
 /// settings and asks the user in a window prompt, because an agent's terminal can write the user
-/// settings file: the lower value applies only once the user confirms, or at the next start.
+/// settings file: the lower value applies only once the user confirms. The settings in force are
+/// kept in [`CONFIRMED_FILE`], so at the next start a lowering the user never confirmed is still
+/// held back and asked about again (security-2 T3).
 pub fn init(cx: &mut App) {
-    cx.set_global(Guard::default());
+    init_with_confirmed_file(Some(::paths::data_dir().join(CONFIRMED_FILE)), cx);
+}
+
+/// [`init`] without [`CONFIRMED_FILE`], for tests: they must not read or write the user's data
+/// folder. A lowering then waits only while the app runs.
+#[doc(hidden)]
+pub fn init_without_persistence(cx: &mut App) {
+    init_with_confirmed_file(None, cx);
+}
+
+fn init_with_confirmed_file(confirmed_file: Option<PathBuf>, cx: &mut App) {
+    // One small local file, read once before any project exists.
+    let confirmed = confirmed_file
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|bytes| SecuritySettings::from_confirmed_toml(&bytes));
+    cx.set_global(Guard {
+        confirmed_file,
+        ..Guard::default()
+    });
+    if let Some(confirmed) = confirmed {
+        let requested = SecuritySettings::get_global(cx).clone();
+        if lowers(&confirmed, &requested) {
+            log::warn!(
+                "fyx_guard: the settings file asks for {} but the user last confirmed {}; keeping \
+                 {} until the user confirms",
+                describe(&requested),
+                describe(&confirmed),
+                describe(&confirmed),
+            );
+            cx.global_mut::<Guard>().effective = Some(confirmed.clone());
+            apply(confirmed, cx);
+        }
+    }
     on_settings_changed(cx);
     cx.observe_global::<SettingsStore>(on_settings_changed)
         .detach();
@@ -431,8 +652,13 @@ fn track_project(project: Entity<Project>, cx: &mut App) {
     let guard = cx.global_mut::<Guard>();
     guard.projects.retain(|project| project.upgrade().is_some());
     guard.projects.push(project.downgrade());
+    // A lowering held back at start has had no window to ask in until now.
+    let ask = guard.pending.is_some() && !guard.prompt_open;
     cx.subscribe(&project, on_project_event).detach();
     load_project_policies(&project, cx);
+    if ask {
+        cx.defer(ask_to_lower);
+    }
 }
 
 /// Whether `requested` protects less than `current`. A higher mode protects more whatever its
@@ -510,6 +736,21 @@ fn apply(settings: SecuritySettings, cx: &mut App) {
     let guard = cx.global_mut::<Guard>();
     let previous = guard.effective.as_ref().map(|settings| settings.mode);
     let mode = settings.mode;
+    if let Some(path) = guard.confirmed_file.clone()
+        && let Some(bytes) = settings.to_confirmed_toml()
+    {
+        cx.background_executor()
+            .spawn(async move {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).ok();
+                }
+                if let Err(error) = std::fs::write(&path, bytes) {
+                    log::error!("fyx_guard: cannot save {}: {error}", path.display());
+                }
+            })
+            .detach();
+    }
+    let guard = cx.global_mut::<Guard>();
     guard.effective = Some(settings);
     if mode == SecurityMode::Off {
         guard.worktrees.clear();
@@ -535,7 +776,7 @@ fn ask_to_lower(cx: &mut App) {
         .or_else(|| cx.windows().into_iter().next())
     else {
         log::warn!(
-            "fyx_guard: no window to confirm lowering security in; keeping {} until the next start",
+            "fyx_guard: no window to confirm lowering security in; keeping {} until one opens",
             describe(&current)
         );
         return;
@@ -545,9 +786,10 @@ fn ask_to_lower(cx: &mut App) {
         describe(&current),
         describe(&requested)
     );
-    let detail = "`fyx_security` changed in your settings file. An agent's terminal can write that \
-                  file, so a change that lowers protection waits for you. If you keep the current \
-                  mode, the file's value applies the next time Fyx starts.";
+    let detail = "`fyx_security` in your settings file asks for less protection than you last \
+                  confirmed. An agent's terminal can write that file, so a change that lowers \
+                  protection waits for you. If you keep the current mode, Fyx asks again the next \
+                  time it starts.";
     let answer = window.update(cx, |_, window, cx| {
         window.prompt(
             PromptLevel::Warning,
@@ -598,7 +840,8 @@ fn on_lowering_answered(asked: SecuritySettings, lower: bool, cx: &mut App) {
         apply(asked, cx);
     } else {
         log::warn!(
-            "fyx_guard: the user kept the current security mode; {} applies at the next start",
+            "fyx_guard: the user kept the current security mode; {} is asked about again at the \
+             next start",
             describe(&asked)
         );
         guard.declined = Some(asked);
@@ -774,7 +1017,14 @@ mod tests {
             ("OPENAI_API_KEY", "sk-x"),
             ("SSH_AUTH_SOCK", "/tmp/agent"),
         ]);
-        let inherited = ["AWS_SECRET_ACCESS_KEY".to_string(), "HOME".to_string()];
+        let inherited = [
+            ("AWS_SECRET_ACCESS_KEY".to_string(), Some("x".to_string())),
+            ("HOME".to_string(), Some("/home/u".to_string())),
+            (
+                "CI_REPOSITORY".to_string(),
+                Some("https://ci:glpat-x@gitlab.example/a.git".to_string()),
+            ),
+        ];
 
         let mut audited = original.clone();
         let secret = scrub(&mut audited, &inherited, SecurityMode::Audit, &[]);
@@ -783,6 +1033,7 @@ mod tests {
             secret,
             [
                 "AWS_SECRET_ACCESS_KEY",
+                "CI_REPOSITORY",
                 "GITHUB_TOKEN",
                 "OPENAI_API_KEY",
                 "SSH_AUTH_SOCK"
@@ -805,11 +1056,12 @@ mod tests {
         assert!(!shielded.contains_key("HOME"));
     }
 
+    /// [`init`] without a confirmed file: tests must not read or write the user's data folder.
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
-            init(cx);
+            init_with_confirmed_file(None, cx);
         });
     }
 
@@ -908,9 +1160,56 @@ mod tests {
         set_mode(FyxSecurityMode::Off, cx);
         assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Shield);
 
-        // The next start reads the file as it is.
-        cx.update(init);
+        // Without a confirmed file the next start reads the settings file as it is.
+        cx.update(|cx| init_with_confirmed_file(None, cx));
         assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Off);
+    }
+
+    /// security-2 T3: a lowering the user declined, or never saw, is still held back after a
+    /// restart, and asked about again once a project window opens.
+    #[gpui::test]
+    async fn declined_lowering_survives_a_restart(cx: &mut TestAppContext) {
+        let directory = std::env::temp_dir().join(format!("fyx-guard-{}", std::process::id()));
+        let confirmed = directory.join(CONFIRMED_FILE);
+        std::fs::remove_file(&confirmed).ok();
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            init_with_confirmed_file(Some(confirmed.clone()), cx);
+        });
+        cx.add_window(|_, _| TestView);
+        set_mode(FyxSecurityMode::Shield, cx);
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        set_mode(FyxSecurityMode::Off, cx);
+        cx.simulate_prompt_answer("Keep Current Mode");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Shield);
+        let saved = std::fs::read(&confirmed).expect("saved");
+        assert_eq!(
+            SecuritySettings::from_confirmed_toml(&saved).mode,
+            SecurityMode::Shield
+        );
+
+        // Restart: the file still says "off", the confirmed value says "shield".
+        cx.update(|cx| init_with_confirmed_file(Some(confirmed.clone()), cx));
+        assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Shield);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/p"), json!({ "a.rs": "" })).await;
+        let _project = Project::test(fs, [path!("/p").as_ref()], cx).await;
+        cx.run_until_parked();
+        let (message, _) = cx.pending_prompt().expect("asked again");
+        assert!(message.contains("\"shield\" to \"off\""), "{message}");
+        cx.simulate_prompt_answer("Lower Protection");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Off);
+
+        // A damaged file counts as shield.
+        assert_eq!(
+            SecuritySettings::from_confirmed_toml(b"{nope").mode,
+            SecurityMode::Shield
+        );
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[gpui::test]
@@ -983,7 +1282,7 @@ mod tests {
         assert!(read(".env", cx));
         assert!(read("keys/prod.json", cx));
         assert!(write(path!("/p/.claude/settings.json"), cx));
-        assert!(write(&paths::settings_file().to_string_lossy(), cx));
+        assert!(write(&::paths::settings_file().to_string_lossy(), cx));
         assert!(cx.update(|cx| cx.global::<Guard>().worktrees.is_empty()));
 
         // Audit: logged only.
@@ -1001,14 +1300,45 @@ mod tests {
         assert!(!write(path!("/p/.claude/settings.json"), cx));
         assert!(!write(path!("/p/.git/hooks/pre-commit"), cx));
         assert!(!write(path!("/p/.git/config"), cx));
-        assert!(!write(&paths::settings_file().to_string_lossy(), cx));
+        assert!(!write(&::paths::settings_file().to_string_lossy(), cx));
         assert!(!write(
-            &paths::config_dir().join("tasks.json").to_string_lossy(),
+            &::paths::config_dir().join("tasks.json").to_string_lossy(),
             cx
         ));
         assert!(!write("~/.claude/settings.json", cx));
         assert!(!write(path!("/p/Makefile"), cx));
         assert!(write(path!("/p/src/main.rs"), cx));
+        assert!(!write(path!("/p/AGENTS.md"), cx));
+        assert!(!write(path!("/p/.vscode/tasks.json"), cx));
+        assert!(!write(
+            &::paths::data_dir().join(CONFIRMED_FILE).to_string_lossy(),
+            cx
+        ));
+
+        // The built-in agent's read tool sees the repository's private files too (F7).
+        let agent_read = |path: &str, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_agent_read(project, &project_path(path), cx).is_ok()
+            })
+        };
+        assert!(!agent_read("keys/prod.json", cx));
+        assert!(agent_read("src/main.rs", cx));
+
+        // Windows aliases (triage-3 top-7 #1): `.env.` and `.env::$DATA` open `.env`; a trailing
+        // dot or a stream on a protected name cannot be written either.
+        assert!(!read(".env.", cx));
+        assert!(!read(".env::$DATA", cx));
+        assert!(!agent_read("keys./prod.json", cx));
+        assert!(!write(path!("/p/.claude./settings.json"), cx));
+        assert!(!write(path!("/p/src/main.rs "), cx));
+        assert!(!write(path!("/p/AGENTS.md::$DATA"), cx));
+        assert!(write(path!("/p/src/main.rs"), cx));
+        // Case: on Windows and macOS `.ENV` is `.env`.
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(!read(".ENV", cx));
+            assert!(!read("Keys/Prod.json", cx));
+            assert!(!write(path!("/p/MAKEFILE"), cx));
+        }
 
         // A file that does not parse fails closed for the whole worktree.
         fs.save(
@@ -1052,5 +1382,147 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
         assert!(read("src/main.rs", cx));
+    }
+
+    /// bugs-1 #15: a project inside an agent's worktree folder is not read-only as a whole.
+    #[gpui::test]
+    async fn projects_under_agent_folders_are_writable(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/repo/.claude/worktrees/feature"),
+            json!({ "src": { "main.rs": "" }, ".claude": { "settings.json": "{}" } }),
+        )
+        .await;
+        let project =
+            Project::test(fs, [path!("/repo/.claude/worktrees/feature").as_ref()], cx).await;
+        set_mode(FyxSecurityMode::Shield, cx);
+        cx.run_until_parked();
+        let write = |path: &str, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_config_write(project, Path::new(path), cx).is_ok()
+            })
+        };
+        assert!(write(
+            path!("/repo/.claude/worktrees/feature/src/main.rs"),
+            cx
+        ));
+        assert!(!write(
+            path!("/repo/.claude/worktrees/feature/.claude/settings.json"),
+            cx
+        ));
+        // Outside the project, the absolute path still counts.
+        assert!(!write(path!("/repo/.claude/settings.json"), cx));
+    }
+
+    /// security-2 S1: a committed link to a protected or outside file does not get around the
+    /// shield. Real files: links need the real file system.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn links_are_followed(cx: &mut TestAppContext) {
+        init_test(cx);
+        let temp_dir = std::env::temp_dir().join(format!("fyx-guard-links-{}", std::process::id()));
+        std::fs::remove_dir_all(&temp_dir).ok();
+        let temp = temp_dir.as_path();
+        let root = temp.join("p");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(temp.join("outside.txt"), "").unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join(".claude"), root.join("config")).unwrap();
+        std::os::unix::fs::symlink(temp.join("outside.txt"), root.join("out.txt")).unwrap();
+        // The real file system's watcher runs on its own thread.
+        cx.executor().allow_parking();
+        let fs = fs::RealFs::new(None, cx.executor());
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        set_mode(FyxSecurityMode::Shield, cx);
+        cx.run_until_parked();
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        let read = |path: &str, cx: &mut TestAppContext| {
+            let path = ProjectPath {
+                worktree_id,
+                path: rel_path(path).into(),
+            };
+            project.read_with(cx, |project, cx| {
+                check_private_path(project, &path, cx).is_ok()
+            })
+        };
+        let write = |path: &Path, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_config_write(project, path, cx).is_ok()
+            })
+        };
+        assert!(!read("notes.txt", cx), "the link opens .env");
+        assert!(
+            !write(&root.join("config/settings.json"), cx),
+            "through a link into .claude/"
+        );
+        assert!(!write(&root.join("out.txt"), cx), "out of the project");
+        assert!(write(&root.join("new.txt"), cx));
+        drop(project);
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// The directory cases of [`links_are_followed`] on Windows, with junctions, which need no
+    /// privilege (file symlinks do, so those stay Unix-only).
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn junctions_are_followed(cx: &mut TestAppContext) {
+        // Test setup, before any executor work: blocking on `mklink` here is fine.
+        #[allow(clippy::disallowed_methods)]
+        fn junction(link: &Path, target: &Path) {
+            let status = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J {}", link.display());
+        }
+
+        init_test(cx);
+        let temp_dir =
+            std::env::temp_dir().join(format!("fyx-guard-junctions-{}", std::process::id()));
+        std::fs::remove_dir_all(&temp_dir).ok();
+        let temp = temp_dir.as_path();
+        let root = temp.join("p");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::create_dir_all(temp.join("outside")).unwrap();
+        std::fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+        junction(&root.join("config"), &root.join(".claude"));
+        junction(&root.join("shared"), &temp.join("outside"));
+        // The real file system's watcher runs on its own thread.
+        cx.executor().allow_parking();
+        let fs = fs::RealFs::new(None, cx.executor());
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        set_mode(FyxSecurityMode::Shield, cx);
+        cx.run_until_parked();
+        let write = |path: &Path, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_config_write(project, path, cx).is_ok()
+            })
+        };
+        assert!(
+            !write(&root.join("config/settings.json"), cx),
+            "through a junction into .claude/"
+        );
+        assert!(
+            !write(&root.join("config/new.json"), cx),
+            "a new file through a junction into .claude/"
+        );
+        assert!(
+            !write(&root.join("shared/notes.txt"), cx),
+            "through a junction out of the project"
+        );
+        assert!(write(&root.join("new.txt"), cx));
+        drop(project);
+        // `remove_dir_all` removes a junction without following it.
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

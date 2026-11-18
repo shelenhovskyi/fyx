@@ -84,6 +84,11 @@
       "dev_paths": [],
       // Show the Extension Inspector panel in release builds too (dev builds always have it).
       "developer_mode": false,
+      // Status bar items of UI extensions not to show, as "<extension id>/<surface id>"
+      // (right-click an item, "Hide Button").
+      "hidden_status_items": [],
+      // The Fyx extension registry (https://, http://localhost or file://). Empty: off.
+      "registry_url": "",
     },
   },
 }
