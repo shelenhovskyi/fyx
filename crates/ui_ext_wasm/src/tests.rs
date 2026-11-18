@@ -773,10 +773,11 @@ mod harness_conformance {
         assert_eq!(fyx_ext_harness::INIT_BUDGET, UI_INIT_BUDGET);
         assert_eq!(fyx_ext_harness::EPOCH_INTERVAL, UI_EPOCH_INTERVAL);
         assert_eq!(fyx_ext_harness::API_VERSION_SECTION, API_VERSION_SECTION);
+        // The harness runs 0.2 ahead of this host (plan 2.4). It must run every version the host
+        // runs; once the host runs 0.2 (plan 2.2), the two ranges are equal again.
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(harness_versions.first(), Some(&MIN_VERSION));
-        assert_eq!(harness_versions.last(), Some(&MAX_VERSION));
-        assert!(harness_versions.iter().all(is_supported_api_version));
+        assert!(harness_versions.contains(&MAX_VERSION));
     }
 
     #[gpui::test]

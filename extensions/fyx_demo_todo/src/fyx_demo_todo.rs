@@ -298,7 +298,7 @@ impl TodoPanel {
                     let button = tree.button(kind_button(kind, self.kind));
                     nodes.kind_buttons.push((kind, button));
                 }
-                nodes.rescan = tree.button(ButtonProps::new("Rescan").icon("rotate_cw"));
+                nodes.rescan = tree.button(ButtonProps::new("Rescan").icon(Icon::Refresh));
             });
             nodes.list = tree.list(self.list());
             nodes.detail = tree.text(self.detail());
@@ -408,7 +408,7 @@ impl Extension for TodoPanel {
             SURFACE_ID,
             "TODOs",
             DockPosition::Left,
-            "list_todo",
+            Icon::ListTodo,
             360,
         )]
     }
@@ -467,9 +467,11 @@ impl Extension for TodoPanel {
                     .copied();
                 self.sync(false)
             }
-            UiEvent::InputChanged(_) | UiEvent::InputSubmitted(_) | UiEvent::RowClick(_) => {
-                Ok(Update::Unchanged)
-            }
+            UiEvent::InputChanged(_)
+            | UiEvent::InputSubmitted(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::RowSelected(_)
+            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
         }
     }
 
@@ -492,6 +494,11 @@ impl Extension for TodoPanel {
     }
 }
 
+// fyx:ui 0.1 by default, which is what Fyx runs today; `--features fyx-ui-0-2` builds the 0.2
+// world from the same code.
+#[cfg(not(feature = "fyx-ui-0-2"))]
+register_extension!(TodoPanel, v0_1);
+#[cfg(feature = "fyx-ui-0-2")]
 register_extension!(TodoPanel);
 
 #[cfg(test)]

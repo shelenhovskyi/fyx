@@ -59,14 +59,15 @@ impl FileStatus {
         }
     }
 
-    fn icon(self) -> &'static str {
+    fn icon(self) -> Icon {
         match self {
-            Self::Modified => "pencil",
-            Self::Added => "plus",
-            Self::Deleted => "trash",
-            Self::Renamed { .. } => "arrow_right",
-            Self::Untracked => "circle_help",
-            Self::Conflicted => "git_merge_conflict",
+            Self::Modified => Icon::Pencil,
+            Self::Added => Icon::Plus,
+            Self::Deleted => Icon::Trash,
+            Self::Renamed { .. } => Icon::ArrowRight,
+            Self::Untracked => Icon::Help,
+            // The frozen 0.2 set has no merge-conflict icon.
+            Self::Conflicted => Icon::Warning,
         }
     }
 
@@ -314,7 +315,7 @@ impl Extension for GitStatusPanel {
             SURFACE_ID,
             "Git status",
             DockPosition::Left,
-            "git_branch",
+            Icon::GitBranch,
             320,
         )]
     }
@@ -331,7 +332,7 @@ impl Extension for GitStatusPanel {
         let mounted = self.tree.mount(|tree| {
             tree.flex(FlexProps::column().gap(8).padding(8).grow(), |tree| {
                 tree.flex(FlexProps::row().gap(8).align(Align::Center), |tree| {
-                    tree.icon(IconProps::new("git_branch").color(ColorToken::TextAccent));
+                    tree.icon(IconProps::new(Icon::GitBranch).color(ColorToken::TextAccent));
                     tree.text(TextProps::new(branch).bold());
                     tree.text(tracking);
                 });
@@ -360,7 +361,9 @@ impl Extension for GitStatusPanel {
             UiEvent::Click(_)
             | UiEvent::InputChanged(_)
             | UiEvent::InputSubmitted(_)
-            | UiEvent::RowClick(_) => Ok(Update::Unchanged),
+            | UiEvent::RowClick(_)
+            | UiEvent::RowSelected(_)
+            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
         }
     }
 
@@ -390,6 +393,11 @@ impl Extension for GitStatusPanel {
     }
 }
 
+// fyx:ui 0.1 by default, which is what Fyx runs today; `--features fyx-ui-0-2` builds the 0.2
+// world from the same code.
+#[cfg(not(feature = "fyx-ui-0-2"))]
+register_extension!(GitStatusPanel, v0_1);
+#[cfg(feature = "fyx-ui-0-2")]
 register_extension!(GitStatusPanel);
 
 #[cfg(test)]
@@ -469,7 +477,9 @@ mod tests {
         assert_eq!(first[0].id, ROW_NODE_ID_BASE);
         assert_eq!(
             first[1].props,
-            IconProps::new("pencil").color(ColorToken::Warning).into()
+            IconProps::new(Icon::Pencil)
+                .color(ColorToken::Warning)
+                .into()
         );
         assert_eq!(
             first[2].props,
@@ -485,7 +495,7 @@ mod tests {
         let deleted = &rows[2].nodes;
         assert_eq!(
             deleted[1].props,
-            IconProps::new("trash").color(ColorToken::Error).into()
+            IconProps::new(Icon::Trash).color(ColorToken::Error).into()
         );
         assert_eq!(deleted.len(), 4);
 

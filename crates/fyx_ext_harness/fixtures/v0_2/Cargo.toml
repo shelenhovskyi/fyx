@@ -1,0 +1,16 @@
+# fyx:ui 0.2 guest for the harness tests: ticks, a modal, runtime surfaces, decorations and
+# invalidate-rows, written with the SDK. A member of the fixture workspace in
+# `crates/fyx_ext_harness/fixtures`.
+[package]
+name = "fyx_harness_fixture_v0_2"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/fixture_v0_2.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+ui_ext_sdk = { path = "../../../ui_ext_sdk" }
