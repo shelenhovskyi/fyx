@@ -2051,6 +2051,52 @@ async fn test_stale_instance_results_are_dropped(cx: &mut TestAppContext) {
     assert_eq!(failure(&state, cx).as_deref(), Some("stopped"));
 }
 
+/// Triage-3 (ASYNC 10): a guest that never answers cannot make the queue grow without end.
+#[gpui::test]
+async fn test_event_queue_is_bounded(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(GatedBackend::default());
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| SurfaceState::new(dyn_backend, panel_surface("p", "P"), None, cx));
+    backend
+        .mounts
+        .borrow_mut()
+        .remove(0)
+        .send(gated_tree("t"))
+        .ok();
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        for _ in 0..(crate::surface::MAX_QUEUED_EVENTS + 20) {
+            state.dispatch(UiEvent::Click(3), cx);
+        }
+    });
+    cx.run_until_parked();
+    // One is in flight; the rest wait, at most the cap.
+    let queued = state.read_with(cx, |state, _| state.queued_events().len());
+    assert!(
+        queued <= crate::surface::MAX_QUEUED_EVENTS,
+        "{queued} queued"
+    );
+}
+
+/// Triage-3 (BUG 31): a reinstall's new title reaches the registry's surface info.
+#[gpui::test]
+async fn test_reinstall_takes_the_new_title(cx: &mut TestAppContext) {
+    init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel_surface("main", "Old")], cx)
+    });
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend, &[panel_surface("main", "New")], cx)
+    });
+    let title = registry.read_with(cx, |registry, _| {
+        registry.surface_of("fake", "main").unwrap().info.title
+    });
+    assert_eq!(title, "New");
+}
+
 /// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).
 #[gpui::test]
 async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {

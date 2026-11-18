@@ -222,7 +222,9 @@ impl SurfaceView {
             (Selection::Next | Selection::Previous | Selection::First, None) => 0,
             (Selection::First, Some(_)) => 0,
             (Selection::Last, _) => last,
-            (Selection::PageDown, current) => current.map_or(0, |index| index + page).min(last),
+            (Selection::PageDown, current) => current
+                .map_or(0, |index| index.saturating_add(page))
+                .min(last),
             (Selection::PageUp, current) => current.map_or(0, |index| index.saturating_sub(page)),
         };
         self.selection.insert(list, next);

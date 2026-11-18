@@ -430,6 +430,13 @@ impl UiState {
         }
     }
 
+    /// A fresh time budget without dropping the effects made so far: `surfaces` right after
+    /// instantiation, whose effects (and the instantiation's) apply together (triage-3, BUG 32).
+    fn restart_budget(&mut self, budget: Duration) {
+        self.call_started = Instant::now();
+        self.call_budget = budget;
+    }
+
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
@@ -995,7 +1002,7 @@ impl UiExtension {
                     })
                     .await
                     .context("failed to instantiate fyx:ui component")?;
-                    store.data_mut().begin_call(UI_INIT_BUDGET);
+                    store.data_mut().restart_budget(UI_INIT_BUDGET);
                     let surfaces = with_budget(UI_INIT_BUDGET, async {
                         extension
                             .call_surfaces(&mut store)

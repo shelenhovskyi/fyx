@@ -53,6 +53,9 @@ enum Next {
     Tick,
 }
 
+/// Events a surface queues for its extension before it drops new ones.
+pub const MAX_QUEUED_EVENTS: usize = 64;
+
 /// Remounts in a row caused by updates that did not fit, with no user input between them, before
 /// the surface gives up (judge review w3-deep-1, finding 4).
 const MAX_REMOUNTS_WITHOUT_INPUT: u32 = 3;
@@ -654,6 +657,17 @@ impl SurfaceState {
         }
         // A user event lets ticks resume after errors stopped them.
         self.tick_errors.on_user_event();
+        // A guest that never answers must not let the queue grow without end (triage-3, ASYNC 10).
+        if self.events.len() >= MAX_QUEUED_EVENTS {
+            log::warn!(
+                "fyx:ui {}/{}: {} events are waiting; dropping {:?}",
+                self.extension_id(),
+                self.surface.id,
+                self.events.len(),
+                self.redacted(&event)
+            );
+            return;
+        }
         let row_generation = match &event {
             // The generation of the row the user saw, which may be older than the list's
             // current one while its replacement is on the way (integration-3 finding 9).
