@@ -1,9 +1,9 @@
 //! The staged 0.3 world against `fixtures/probe_v0_3`: the `images` interface (plan 4.10), image
-//! nodes, and the 0.3 interfaces this build links as traps.
+//! nodes and their checks, and the 0.3 interfaces this build links as traps.
 
 use gpui::TestAppContext;
 use ui_ext::{
-    image::ImageFormat,
+    image::{ImageFit, ImageFormat, ImageProps, ImageSource},
     v0_2::{Icon, Props, UiEvent, Update},
 };
 
@@ -66,7 +66,7 @@ async fn test_v0_3_probe_loads_as_staged_v0_3(cx: &mut TestAppContext) {
     let extension = load(cx).await;
     assert_eq!(extension.api_version(), &Version::new(0, 3, 0));
     assert_eq!(extension.ui_api_version(), ApiVersion::V0_3_0);
-    assert_eq!(extension.surfaces_v0_2().len(), 1);
+    assert_eq!(extension.surfaces_v0_2().len(), 3);
 
     let error = load_with(
         LoadOptions {
@@ -133,7 +133,11 @@ async fn test_v0_3_at_most_32_generated_images(cx: &mut TestAppContext) {
 async fn test_v0_3_images_need_the_capability(cx: &mut TestAppContext) {
     let extension = load_with(
         LoadOptions {
-            capabilities: Some(vec![CAPABILITY_PANEL.into()]),
+            capabilities: Some(vec![
+                CAPABILITY_PANEL.into(),
+                ui_ext::v0_2::CAPABILITY_STATUS_BAR.into(),
+                ui_ext::v0_2::CAPABILITY_MODAL.into(),
+            ]),
             allow_staged: Some(true),
             ..LoadOptions::default()
         },
@@ -146,28 +150,113 @@ async fn test_v0_3_images_need_the_capability(cx: &mut TestAppContext) {
     assert!(effects.is_empty());
 }
 
-/// Until the renderer model holds `image` nodes (plan 4.10/4.11), they are refused, never passed
-/// through in a lossy form.
-#[gpui::test]
-async fn test_v0_3_image_nodes_are_refused_for_now(cx: &mut TestAppContext) {
-    let extension = load(cx).await;
-    assert_eq!(case(&extension, 4).await.0, ["invalid-argument"]);
+fn logo() -> Props {
+    Props::Image(ImageProps {
+        source: ImageSource::Asset("assets/logo.svg".into()),
+        alt: "Logo".into(),
+        width: Some(32),
+        height: None,
+        fit: ImageFit::Contain,
+        tint: None,
+    })
+}
 
-    let error = extension
+/// Design.md §12, errors: an `image` push is checked when it is applied, which for a push is the
+/// call. A handle removed since is not an error; one never returned is.
+#[gpui::test]
+async fn test_v0_3_image_pushes(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let (results, effects) = case(&extension, 4).await;
+    assert_eq!(
+        results,
+        [
+            "ok",
+            "ok",
+            "ok",
+            "invalid-argument",
+            "invalid-argument",
+            "invalid-argument",
+            "invalid-argument",
+            "invalid-argument",
+            "invalid-argument",
+            "invalid-argument",
+            "ok",
+            "ok"
+        ]
+    );
+    let pushes: Vec<&Update> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            HostEffect::Push { surface_id, update } if surface_id == SURFACE => Some(update),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pushes.len(), 5);
+    assert_eq!(
+        pushes[0],
+        &Update::Replace(vec![ui_ext::v0_2::Node {
+            id: 2,
+            parent: None,
+            props: logo(),
+        }])
+    );
+    assert!(matches!(
+        &effects[effects.len() - 3..],
+        [
+            HostEffect::Push { .. },
+            HostEffect::RemoveImage { handle: 1 },
+            HostEffect::Push { .. }
+        ]
+    ));
+}
+
+/// Replies are checked like pushes; a bad one is rejected (a resync), not fatal.
+#[gpui::test]
+async fn test_v0_3_image_replies(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let reply = extension
         .handle_event_v0_2(SURFACE, UiEvent::Click(5))
         .await
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("an image node is not supported"),
-        "{error:#}"
-    );
-    assert!(error.downcast_ref::<EffectReplyError>().is_some());
-    // A rejected reply is not fatal.
+        .expect("an image in a panel");
+    assert!(matches!(&reply.value, Update::Replace(nodes) if nodes[0].props == logo()));
+    let rows = extension
+        .list_rows_v0_2(SURFACE, 7, 0, 1)
+        .await
+        .expect("an image in a panel row");
+    assert_eq!(rows.value[0].nodes[0].props, logo());
+
+    for surface in ["status", "modal"] {
+        let error = extension
+            .handle_event_v0_2(surface, UiEvent::Click(5))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("can only be in a panel"),
+            "{error:#}"
+        );
+        assert!(error.downcast_ref::<EffectReplyError>().is_some());
+        let error = extension.mount_v0_2(surface).await.unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_some(),
+            "{error:#}"
+        );
+        let error = extension
+            .list_rows_v0_2(surface, 7, 0, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_some(),
+            "{error:#}"
+        );
+    }
+    // The panel mounts, and nothing above was fatal.
+    extension.mount_v0_2(SURFACE).await.expect("mounts");
     assert_eq!(case(&extension, 1).await.0, ["1", "2"]);
 }
 
 /// A 0.3 interface this build does not implement traps when called, which disables the
-/// extension; it still loads, because nothing calls it at instantiation.
+/// extension; it still loads, because nothing calls it at instantiation. WASI imports at a newer
+/// patch version than the host's (std's `HashMap` seed in the probe's `surfaces`) still resolve.
 #[gpui::test]
 async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
     let extension = load(cx).await;
@@ -178,6 +267,10 @@ async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
     assert!(
         error.downcast_ref::<EffectReplyError>().is_none(),
         "{error:#}"
+    );
+    assert!(
+        format!("{error:?}").contains("fyx:ui/permissions@0.3.0#query is not implemented"),
+        "{error:?}"
     );
     let error = extension
         .handle_event_v0_2(SURFACE, UiEvent::Click(1))

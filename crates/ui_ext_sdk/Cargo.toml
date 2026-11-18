@@ -14,7 +14,13 @@ path = "src/ui_ext_sdk.rs"
 test = true
 doctest = false
 
+[features]
+# The SDK's world: fyx:ui 0.2 without it, the staged 0.3 with it. Only a 0.3 build may link the
+# 0.3 world description, so a 0.1 or 0.2 component imports nothing of 0.3.
+fyx-ui-0-3 = ["dep:ui_ext_sdk_v0_2"]
+
 [dependencies]
 ui_ext.workspace = true
 ui_ext_sdk_v0_1.workspace = true
+ui_ext_sdk_v0_2 = { workspace = true, optional = true }
 wit-bindgen = "0.41"

@@ -31,6 +31,23 @@ fn guest_value<T>(value: Result<T, model::HostError>) -> Result<T, String> {
     value.map_err(|error| error.message)
 }
 
+/// A 0.3 reply update, with its `image` nodes checked against the state after the call
+/// ([`crate::effects::ApiState::check_images`]). A bad one is the guest's error, so the renderer
+/// resyncs instead of applying it.
+fn checked_images(
+    store: &Store<UiState>,
+    surface_id: &str,
+    update: model::Update,
+) -> Result<model::Update, String> {
+    guest_value(
+        store
+            .data()
+            .api
+            .check_images(surface_id, crate::effects::update_props(&update)),
+    )
+    .map(|()| update)
+}
+
 impl UiBindings {
     pub(crate) async fn instantiate(
         version: ApiVersion,
@@ -43,7 +60,8 @@ impl UiBindings {
                 // The 0.3 interfaces this build does not implement yet trap when called (they are
                 // staged with the WIT, plan 4.x); a component that never calls them works.
                 let mut linker = runtime.linker_v0_3.clone();
-                linker.define_unknown_imports_as_traps(component)?;
+                let engine = store.engine().clone();
+                fyx_ui_v0_3::define_unbuilt_as_traps(&mut linker, component, &engine)?;
                 Self::V0_3(
                     fyx_ui_v0_3::UiExtension::instantiate_async(store, component, &linker).await?,
                 )
@@ -87,9 +105,18 @@ impl UiBindings {
     ) -> wasmtime::Result<Result<Vec<model::Node>, String>> {
         Ok(match self {
             Self::V0_3(extension) => extension
-                .call_mount(store, surface_id)
+                .call_mount(&mut *store, surface_id)
                 .await?
-                .and_then(|nodes| guest_value(try_collect(nodes))),
+                .and_then(|nodes| guest_value(try_collect::<_, model::Node>(nodes)))
+                .and_then(|nodes| {
+                    guest_value(
+                        store
+                            .data()
+                            .api
+                            .check_images(surface_id, nodes.iter().map(|node| &node.props)),
+                    )
+                    .map(|()| nodes)
+                }),
             Self::V0_2(extension) => extension
                 .call_mount(store, surface_id)
                 .await?
@@ -111,9 +138,10 @@ impl UiBindings {
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
             Self::V0_3(extension) => extension
-                .call_handle_event(store, surface_id, &event.into())
+                .call_handle_event(&mut *store, surface_id, &event.into())
                 .await?
-                .and_then(|update| guest_value(update.try_into())),
+                .and_then(|update| guest_value(update.try_into()))
+                .and_then(|update| checked_images(store, surface_id, update)),
             Self::V0_2(extension) => extension
                 .call_handle_event(store, surface_id, &event.into())
                 .await?
@@ -147,11 +175,21 @@ impl UiBindings {
         count: u32,
     ) -> wasmtime::Result<Result<Vec<model::ListRow>, String>> {
         Ok(match self {
-            Self::V0_3(extension) => guest_value(try_collect(
+            Self::V0_3(extension) => guest_value(try_collect::<_, model::ListRow>(
                 extension
-                    .call_list_rows(store, surface_id, list_node, start, count)
+                    .call_list_rows(&mut *store, surface_id, list_node, start, count)
                     .await?,
-            )),
+            ))
+            .and_then(|rows| {
+                guest_value(
+                    store.data().api.check_images(
+                        surface_id,
+                        rows.iter()
+                            .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                    ),
+                )
+                .map(|()| rows)
+            }),
             Self::V0_2(extension) => guest_value(try_collect(
                 extension
                     .call_list_rows(store, surface_id, list_node, start, count)
@@ -179,9 +217,10 @@ impl UiBindings {
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
             Self::V0_3(extension) => extension
-                .call_tick(store, surface_id)
+                .call_tick(&mut *store, surface_id)
                 .await?
-                .and_then(|update| guest_value(update.try_into())),
+                .and_then(|update| guest_value(update.try_into()))
+                .and_then(|update| checked_images(store, surface_id, update)),
             Self::V0_2(extension) => extension
                 .call_tick(store, surface_id)
                 .await?
@@ -499,7 +538,7 @@ impl UiExtension {
 /// component, whose data came from the 0.1 types. For a 0.2 component (loaded only in dev builds)
 /// it drops what 0.1 cannot express: tooltips, `secret`, `selected`, `indent`, `invalidate-rows`,
 /// modals and every effect but pushes; frozen icons become their snake_case name, which is
-/// upstream's name for most of them.
+/// upstream's name for most of them; a 0.3 image becomes its alt text.
 pub(crate) mod shim {
     use super::*;
 
@@ -535,6 +574,11 @@ pub(crate) mod shim {
             }),
             model::Props::Markdown(text) => ui_ext::Props::Markdown(text.clone()),
             model::Props::DiffView(props) => ui_ext::Props::DiffView(props.clone()),
+            // 0.3 only; 0.1 has no image, so its alt text stands in.
+            model::Props::Image(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: props.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
         }
     }
 

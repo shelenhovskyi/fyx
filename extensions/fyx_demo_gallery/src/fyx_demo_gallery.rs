@@ -37,7 +37,7 @@
 
 use ui_ext_sdk::*;
 
-#[cfg(feature = "fyx-ui-0-2")]
+#[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
 mod next;
 
 const GALLERY_SURFACE: &str = "gallery";
@@ -364,7 +364,7 @@ struct Gallery {
     gallery_nodes: Option<GalleryNodes>,
     status: SurfaceTree,
     status_label: Option<NodeId>,
-    #[cfg(feature = "fyx-ui-0-2")]
+    #[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
     next: next::Next,
 }
 
@@ -859,7 +859,7 @@ impl Extension for Gallery {
             ),
             Surface::status_item(STATUS_SURFACE, "Gallery selection", StatusBarSide::Right, 0),
         ];
-        #[cfg(feature = "fyx-ui-0-2")]
+        #[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
         surfaces.extend(next::surfaces());
         surfaces
     }
@@ -868,20 +868,20 @@ impl Extension for Gallery {
         match surface_id {
             GALLERY_SURFACE => self.mount_gallery(),
             STATUS_SURFACE => self.mount_status(),
-            #[cfg(feature = "fyx-ui-0-2")]
+            #[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
             surface_id if next::owns(surface_id) => self.next.mount(surface_id),
             _ => Err(unknown_surface(surface_id)),
         }
     }
 
-    #[cfg(feature = "fyx-ui-0-2")]
+    #[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
     fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
         self.next.tick(surface_id)
     }
 
     fn handle_event(&mut self, surface_id: &str, event: UiEvent) -> Result<Update, String> {
         match surface_id {
-            #[cfg(feature = "fyx-ui-0-2")]
+            #[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
             surface_id if next::owns(surface_id) => self.next.handle_event(surface_id, event),
             GALLERY_SURFACE => self.handle_gallery_event(event),
             STATUS_SURFACE => {
@@ -901,7 +901,7 @@ impl Extension for Gallery {
         start: u32,
         count: u32,
     ) -> Vec<ListRow> {
-        #[cfg(feature = "fyx-ui-0-2")]
+        #[cfg(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3"))]
         if next::owns(surface_id) {
             return self.next.list_rows(surface_id, list_node, start, count);
         }
@@ -927,11 +927,13 @@ impl Extension for Gallery {
     }
 }
 
-// fyx:ui 0.1 by default, which is what Fyx runs today; `--features fyx-ui-0-2` builds the 0.2
-// world from the same code.
-#[cfg(not(feature = "fyx-ui-0-2"))]
+// fyx:ui 0.1 by default, which is what every Fyx runs; `--features fyx-ui-0-2` builds the 0.2
+// world and `--features fyx-ui-0-3` the staged 0.3 world from the same code.
+#[cfg(not(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3")))]
 register_extension!(Gallery, v0_1);
-#[cfg(feature = "fyx-ui-0-2")]
+#[cfg(all(feature = "fyx-ui-0-2", not(feature = "fyx-ui-0-3")))]
+register_extension!(Gallery, v0_2);
+#[cfg(feature = "fyx-ui-0-3")]
 register_extension!(Gallery);
 
 #[cfg(test)]
