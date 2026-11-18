@@ -72,7 +72,8 @@ pub fn api_version_range(channel: ReleaseChannel) -> RangeInclusive<Version> {
 `MIN_VERSION` stays 0.1.0 for every 0.3 build (spec decision 29; design Q9 for what happens at
 1.0).
 
-**Manifest parsing.** `UiManifest` is `deny_unknown_fields` (`ui_ext_wasm.rs:197-207`). A 0.3
+**Manifest parsing** (implemented: W2c, d65c68a2fc; design §0.6, "What the host checks
+today"). `UiManifest` is `deny_unknown_fields`. A 0.3
 manifest has new tables (`network`, `processes`, `process`, `commands`, `picker_sources`). Read it
 in two steps: first only `api_version` (a lenient struct), check the version, then the full
 manifest for that version. An older host then says "targets fyx:ui 0.3.0, this build supports
@@ -92,6 +93,10 @@ Per version, the manifest accepts:
 
 An error, not a warning, for capabilities an older world cannot use: otherwise the install dialog
 would ask consent for something the component cannot do.
+
+`[[fyx_ui.commands]]` (≤ 64, title ≤ 128 bytes) and `[[fyx_ui.picker_sources]]` (≤ 64,
+`picker = "<extension>/<surface>"`) are accepted and checked in 0.3 manifests. No host feature
+uses them yet.
 
 **Linkers.** A third `Linker<UiState>` with WASI and `since_v0_3_0::UiExtension::add_to_linker`.
 Every 0.3 interface is linked for every 0.3 component and checks its capability per call, as 0.2
