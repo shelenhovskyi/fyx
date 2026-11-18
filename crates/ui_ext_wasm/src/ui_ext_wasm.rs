@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use fs::Fs;
 use futures::{
     FutureExt as _, StreamExt as _,
@@ -289,10 +289,136 @@ pub struct UiManifest {
     /// 0.2 [`CAPABILITY_MODAL`] and [`CAPABILITY_EDITOR_DECORATIONS`].
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// `network:fetch`: the hosts requests may go to, `example.com` or `*.example.com`
+    /// (spec decision 23); `localhost` and `127.0.0.1` may name a port.
+    #[serde(default)]
+    pub network_domains: Vec<String>,
+    /// `process:spawn`: the programs it may run, by name (spec decision 24).
+    #[serde(default)]
+    pub processes: Vec<ProcessSpec>,
     /// `name` from the top of `extension.toml`, as its author wrote it: check it before showing
     /// it (the provenance line of notifications, design.md M.4).
     #[serde(skip)]
     pub name: Option<String>,
+}
+
+/// One `[[fyx_ui.processes]]` entry.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSpec {
+    /// A program name resolved on `PATH`, never a path.
+    pub name: String,
+    /// Environment variables passed through besides `PATH`, `HOME`/`USERPROFILE` and `LANG`.
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// The consent item of a network domain: an update that adds one is held (decision 21).
+pub fn domain_consent_item(domain: &str) -> String {
+    format!("network:fetch@{domain}")
+}
+
+/// The consent item of a program.
+pub fn process_consent_item(program: &str) -> String {
+    format!("process:spawn@{program}")
+}
+
+impl UiManifest {
+    /// What the user consents to: the capabilities, each network domain and each program, so an
+    /// update that adds any of them is held until it is approved.
+    pub fn consent_items(&self) -> Vec<String> {
+        self.capabilities
+            .iter()
+            .cloned()
+            .chain(
+                self.network_domains
+                    .iter()
+                    .map(|domain| domain_consent_item(domain)),
+            )
+            .chain(
+                self.processes
+                    .iter()
+                    .map(|process| process_consent_item(&process.name)),
+            )
+            .collect()
+    }
+
+    /// The domain and process rules (spec decisions 23, 24), checked when the manifest is read.
+    pub fn check_network_and_processes(&self) -> Result<()> {
+        for domain in &self.network_domains {
+            check_domain(domain)?;
+        }
+        if !self.network_domains.is_empty()
+            && !self.capabilities.iter().any(|c| c == "network:fetch")
+        {
+            bail!("[fyx_ui].network_domains needs the network:fetch capability");
+        }
+        for process in &self.processes {
+            let name = &process.name;
+            let plain = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !name.starts_with('.');
+            if !plain {
+                bail!("[[fyx_ui.processes]] name {name:?} must be a program name, not a path");
+            }
+            for variable in &process.env {
+                let valid = !variable.is_empty()
+                    && variable
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    bail!("[[fyx_ui.processes]] {name}: env {variable:?} is not a variable name");
+                }
+            }
+        }
+        if !self.processes.is_empty() && !self.capabilities.iter().any(|c| c == "process:spawn") {
+            bail!("[[fyx_ui.processes]] needs the process:spawn capability");
+        }
+        Ok(())
+    }
+}
+
+/// `example.com`, `*.example.com`, or `localhost` / `127.0.0.1` with an optional port.
+fn check_domain(domain: &str) -> Result<()> {
+    let (host, port) = match domain.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (domain, None),
+    };
+    let local = matches!(host, "localhost" | "127.0.0.1");
+    if let Some(port) = port {
+        if !local || port.parse::<u16>().map_or(true, |port| port == 0) {
+            bail!("network domain {domain:?}: only localhost and 127.0.0.1 take a port");
+        }
+        return Ok(());
+    }
+    if local {
+        return Ok(());
+    }
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    let labels: Vec<&str> = name.split('.').collect();
+    let valid = labels.len() >= 2
+        && name.len() <= 253
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        && !labels
+            .last()
+            .is_some_and(|tld| tld.chars().all(|c| c.is_ascii_digit()));
+    if !valid {
+        bail!(
+            "network domain {domain:?} must be a lowercase host name like example.com or *.example.com"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -323,6 +449,9 @@ impl UiManifest {
             permissions::grantable_tier(capability)
                 .with_context(|| format!("extension {id}, in {path:?}"))?;
         }
+        manifest
+            .check_network_and_processes()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
             "extension {id} targets fyx:ui {}, this build supports 0.1.0, 0.2.0 and 0.3.0 (staged)",

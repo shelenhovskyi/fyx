@@ -1650,7 +1650,8 @@ async fn found_at(
             extension_id,
             component,
             is_dev,
-            capabilities: manifest.capabilities.clone(),
+            // With its domains and programs, so an update that adds one is held (plan 4.5).
+            capabilities: manifest.consent_items(),
             source,
             cache,
             manifest,
@@ -2409,7 +2410,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
         if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
-            declared = manifest.capabilities;
+            declared = manifest.consent_items();
         }
         UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?

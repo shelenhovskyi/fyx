@@ -394,6 +394,119 @@ mod tests {
         }
     }
 
+    /// Plan 4.5: the manifest's network domains and programs are consent items, so an update
+    /// that adds one, or adds a T2 capability, is held like one that adds T1; the rules for them
+    /// are checked when the manifest is read.
+    #[test]
+    fn test_domains_programs_and_t2_hold_updates() {
+        let manifest = |extra: &str| -> ui_ext_wasm::UiManifest {
+            toml::from_str(&format!(
+                "api_version = \"0.3.0\"
+component = \"x.wasm\"
+{extra}"
+            ))
+            .expect("manifest")
+        };
+        let v1 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\"]
+network_domains = [\"api.example.com\"]",
+        );
+        v1.check_network_and_processes().expect("valid");
+        let mut store = ConsentStore::default();
+        let items = |m: &ui_ext_wasm::UiManifest| {
+            let mut items = m.consent_items();
+            items.sort();
+            items
+        };
+        let granted = ConsentRecord {
+            capabilities: items(&v1),
+            grant: component(),
+        };
+        store.grant("ext", granted.clone());
+        assert_eq!(store.state("ext", &granted), ConsentState::Allowed);
+
+        // A new domain: held.
+        let v2 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\"]
+network_domains = [\"api.example.com\", \"*.cdn.example.org\"]",
+        );
+        v2.check_network_and_processes().expect("valid");
+        let update = ConsentRecord {
+            capabilities: items(&v2),
+            grant: component(),
+        };
+        assert_eq!(
+            store.state("ext", &update),
+            ConsentState::NeedsApproval {
+                new_capabilities: vec!["network:fetch@*.cdn.example.org".into()]
+            }
+        );
+        // A new T2 capability with its program: held, both listed.
+        let v3 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]
+network_domains = [\"api.example.com\"]
+[[processes]]
+name = \"git\"",
+        );
+        v3.check_network_and_processes().expect("valid");
+        let ConsentState::NeedsApproval { new_capabilities } = store.state(
+            "ext",
+            &ConsentRecord {
+                capabilities: items(&v3),
+                grant: component(),
+            },
+        ) else {
+            panic!("held")
+        };
+        assert_eq!(new_capabilities, ["process:spawn", "process:spawn@git"]);
+        assert_eq!(
+            crate::install::describe_capability_ids(&new_capabilities)[1],
+            "Runs git"
+        );
+
+        // The rules.
+        for bad in [
+            "capabilities = [\"network:fetch\"]
+network_domains = [\"Example.com\"]",
+            "capabilities = [\"network:fetch\"]
+network_domains = [\"example\"]",
+            "capabilities = [\"network:fetch\"]
+network_domains = [\"example.com:443\"]",
+            "capabilities = [\"network:fetch\"]
+network_domains = [\"*.*.example.com\"]",
+            "network_domains = [\"example.com\"]",
+            "capabilities = [\"process:spawn\"]
+[[processes]]
+name = \"bin/git\"",
+            "capabilities = [\"process:spawn\"]
+[[processes]]
+name = \"..\"",
+            "[[processes]]
+name = \"git\"",
+            "capabilities = [\"process:spawn\"]
+[[processes]]
+name = \"git\"
+env = [\"A=B\"]",
+        ] {
+            assert!(
+                manifest(bad).check_network_and_processes().is_err(),
+                "{bad}"
+            );
+        }
+        for good in [
+            "capabilities = [\"network:fetch\"]
+network_domains = [\"localhost:8080\", \"127.0.0.1\", \"*.example.com\"]",
+            "capabilities = [\"process:spawn\"]
+[[processes]]
+name = \"git\"
+env = [\"GIT_DIR\"]",
+        ] {
+            manifest(good)
+                .check_network_and_processes()
+                .unwrap_or_else(|error| panic!("{good}: {error:#}"));
+        }
+    }
+
     /// The broker's check: T0 needs only the declaration, T1 a grant, and a revocation applies
     /// to the very next check of the same checker.
     #[test]
