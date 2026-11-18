@@ -375,6 +375,72 @@ pub mod glue {
     /// Nothing to cancel: 0.1 has no network.
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn cancel_fetch(_request: u64) {}
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn spawn(_request: &crate::SpawnRequest) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("spawn"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn write_stdin(_process: u64, _data: &[u8]) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("write_stdin"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn close_stdin(_process: u64) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("close_stdin"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn kill(_process: u64) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("kill"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn apply_edit(_edit: &crate::WorkspaceEdit) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("apply_edit"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn observe_start() -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("start_observing"),
+        })
+    }
+
+    /// Nothing to stop: this world has no agent feed.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn observe_stop() {}
+
+    /// This world has no T2 capabilities.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn query_permission(_capability: crate::T2Capability) -> crate::PermissionState {
+        crate::PermissionState::Unavailable
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn request_permission(_capability: crate::T2Capability) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("request_permission"),
+        })
+    }
 }
 
 #[cfg(test)]

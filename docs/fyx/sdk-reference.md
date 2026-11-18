@@ -605,11 +605,158 @@ pub fn cancel_fetch(request: u64);
 - **Off WASM:** `fetch` hands out ids and records `HostEffect::Fetch { id, request }`;
   `cancel_fetch` records `HostEffect::CancelFetch`.
 
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `process:spawn` (design 0.3, section 9; plan
+4.7):
+
+```rust
+pub fn spawn(request: &SpawnRequest) -> Result<u64, HostError>;
+pub fn write_stdin(process: u64, data: &[u8]) -> Result<(), HostError>;
+pub fn close_stdin(process: u64) -> Result<(), HostError>;
+pub fn kill(process: u64) -> Result<(), HostError>;
+```
+
+- **Building a request:** `SpawnRequest::new(program)` (a name the manifest declares, never a
+  path), with `.arg(a)`, `.args(..)`, `.cwd(path)` (relative to the worktree root), `.env(name,
+  value)` (only names in `[fyx_ui.process] env`) and `.stdin()` (keep stdin open).
+- **Outcomes:** they come to `Extension::handle_io`.
+  - Output arrives as `IoEvent::ProcessOutput` (`ProcessOutput::text()` gives it as lossy text).
+  - Then exactly one `IoEvent::ProcessExited` follows (`code`, and `killed` for a kill).
+  - A process that cannot start gets one `IoEvent::SpawnFailed` instead (`SpawnError`
+    implements `Display`). A program the manifest does not name gets an id, then
+    `SpawnError::NotFound`.
+- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with their
+  argument patterns, and the environment names:
+
+  ```toml
+  [[fyx_ui.processes]]
+  name = "git"
+  args = ["status", "**"]
+
+  [fyx_ui.process]
+  env = ["NO_COLOR"]
+  ```
+
+  - **Arguments:** a program without `args` runs with no arguments only; `args = ["**"]` allows
+    any.
+  - **Environment names:** names that load code or redirect a program (`LD_*`, `GIT_DIR`,
+    `CARGO_*`, `PATH`, …) are refused (`ui_ext::process::is_forbidden_env`).
+
+- **Consent and limits:**
+  - `process:spawn` is T2: the first spawn asks the user, and a refusal ends
+    `SpawnError::Denied`;
+  - a spawn needs an open, trusted worktree;
+  - at most 4 processes, 256 arguments (128 KiB), 32 environment pairs;
+  - stdin: 1 MiB per write and 4 MiB queued.
+- **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `workspace:edit` and `agent:observe` (design
+0.3, sections 10 and 11; plan 4.8):
+
+```rust
+pub fn apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError>;
+pub fn start_observing() -> Result<(), HostError>;
+pub fn stop_observing();
+```
+
+- **Building an edit:** `WorkspaceEdit::new(label).file(FileEdit::path("src/main.rs")
+  .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), text).insert(at, text))`.
+  - `FileEdit::document(id)` targets an open document instead of a path.
+  - `.expected_version(v)` makes the edit fail with `EditError::Conflict` if the file changed.
+  - `.create()` creates a missing file.
+- **How an edit applies:**
+  - all its files or none, as one undo step per buffer;
+  - nothing is saved: edited buffers stay dirty;
+  - the outcome arrives in `handle_io` as `IoEvent::EditDone((id, result))`, and `EditError`
+    implements `Display`;
+  - protected paths (`.git/`, `.fyx/`, `.zed/`, `.vscode/`, `.idea/`) are refused with
+    `NotAllowed`, and overlapping edits with `Invalid`.
+- **Limits:**
+  - at most 4 edits in flight;
+  - 64 files and 4096 text edits each;
+  - 4 MiB of new text;
+  - a label of 1 to 128 bytes.
+- **The agent feed:** after `start_observing`, `handle_io` gets `IoEvent::Agent`. A `Snapshot`
+  of the open reviews comes first, then `Opened`, `Updated`, `Resolved`, `Closed`, `TurnEnded`,
+  `UnreviewedChanges` and `ReviewMode`.
+  - The ids are opaque to the extension, and long hunks are cut (`truncated`).
+  - The feed is read-only: nothing in the API can accept, reject or comment.
+- **Consent:** both capabilities are T2. The first use asks the user.
+- **Off WASM:** the calls record `HostEffect::ApplyEdit`, `StartObserving` and `StopObserving`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `permissions` for the T2 capabilities
+(`network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe`; design 0.3, section 7):
+
+```rust
+pub fn query_permission(capability: T2Capability) -> PermissionState;
+pub fn request_permission(capability: T2Capability) -> Result<(), HostError>;
+```
+
+- **`query_permission`:** the state as of the start of the current call. The first query of a
+  capability fixes the answer for the rest of the call.
+  - `Granted` or `Denied`: the user answered.
+  - `Ask`: not asked yet; the first use, or a request, shows the prompt.
+  - `Unavailable`: not declared in the manifest, or the worktree is not trusted.
+- **`request_permission`:** shows the prompt after the call, and only in the `Ask` state. In any
+  other state it is `Ok` and nothing happens.
+  - It needs the click-or-Enter activation, so call it from a button click; it uses the
+    activation up. Without one, or for an undeclared capability, it is `not-permitted`.
+  - The answer arrives in `handle_io` as `IoEvent::PermissionChanged((capability, state))`, as
+    does every later change on the extensions page.
+- **Off WASM:** `query_permission` answers `Ask` unless a test called
+  `set_permission_state(capability, state)`, and `request_permission` records
+  `HostEffect::RequestPermission`.
+
+## Canvases (`fyx-ui-0-3`)
+
+A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
+generated records: `Point`, `Rect`, `Paint`, `Stroke`, `DrawOp` and the rest. The SDK adds
+builders on top:
+
+```rust
+let mut draw = DrawList::new();
+for (day, value) in values.iter().enumerate() {
+    draw.rect(bar(day, *value), Some(Paint::data(DataColor::cycle(day))), None);
+}
+draw.path(Path::polyline(points).stroke(Stroke::new(Paint::token(ColorToken::TextAccent), 1.5)));
+draw.text_with(pt(140.0, 132.0), "Week", Paint::token(ColorToken::TextMuted),
+    TextStyle::default().anchor(TextAnchor::Middle));
+let canvas = CanvasProps::new(280, 140, "Commits per day").draw(draw).clickable()
+    .fit(CanvasFit::ScaleDown);
+tree.canvas(canvas);
+```
+
+- **Values:**
+  - `pt(x, y)`, `Rect::new(x, y, w, h)` and `rect.contains(x, y)`;
+  - `Paint::token(ColorToken)` and `Paint::data(DataColor)`, opaque, with `.opacity(percent)`;
+  - `Stroke::new(paint, width)`;
+  - `DataColor::cycle(index)`, the eight series colours repeating.
+- **`DrawList`:** a `&mut` builder with `line`, `rect`, `rounded_rect`, `circle`, `path`,
+  `text` and `text_with(…, TextStyle)`. `len()`, `segments()` and `text_bytes()` show how close
+  it is to the caps. Extensions cannot measure text: place labels with `TextAnchor`.
+- **`Path`:** `move_to`, `line_to`, `quad_to`, `cubic_to`, `close`, then `fill` and/or `stroke`.
+  `Path::polyline(points)` is a polyline.
+- **`CanvasProps::new(width, height, description)`:** not clickable, `CanvasFit::Clip`. Setters:
+  `.draw(list)`, `.clickable()` and `.fit(..)`. Also `TreeBuilder::canvas` and
+  `From<CanvasProps> for Props`.
+- **`CanvasHits<V>`:**
+  - `add(rect, value)` records a region next to the draw list;
+  - `at(x, y)` returns the topmost region's value for a `UiEvent::CanvasClick`, since
+    hit-testing is the extension's job;
+  - a click is a gesture, like a button click.
+- **Checks before the host:** `SurfaceTree` and `list_row` run the host's rules
+  (`ui_ext::canvas`). These are `TreeError::InvalidCanvas` (caps, finite coordinates within
+  ±32768, strokes 0.5 to 16, description 1 to 1024 bytes), `TooManyCanvases` (16 per surface)
+  and `CanvasInRow`. The host also allows canvases in panels only.
+- **The whole draw list is sent in every `set-props`.** A tick-driven chart re-sends it at most
+  every 100 ms.
+
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,
-`add_image` and `fetch` return `unavailable` ("needs fyx:ui 0.3"), and `remove_image` and
-`cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
+`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin`, `kill`, `apply_edit`,
+`start_observing` and `request_permission` return `unavailable`, `query_permission` answers
+`Unavailable`,
+("needs fyx:ui 0.3"), and `remove_image` and `cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.
 

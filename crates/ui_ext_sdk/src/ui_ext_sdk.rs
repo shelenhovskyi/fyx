@@ -58,12 +58,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
+#[cfg(feature = "fyx-ui-0-3")]
+mod canvas;
 mod host;
 mod host_model;
 mod v0_1;
 #[cfg(feature = "fyx-ui-0-3")]
 mod v0_2;
 
+#[cfg(feature = "fyx-ui-0-3")]
+pub use canvas::*;
 pub use host::*;
 
 /// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
@@ -105,6 +109,12 @@ pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
 #[doc(hidden)]
 pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::agent_observe::{
+    AgentEvent, HunkDecision, HunkInfo, Resolution, ReviewInfo, ReviewSource, RuleKind, TurnFile,
+};
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::documents::{FileRef, Position, TextRange};
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::images::ImageFormat;
@@ -116,7 +126,18 @@ pub use bindings::fyx::ui::notifications::{
     Notification, NotificationAction, NotificationLevel, ProgressLocation, ProgressOptions,
     ProgressValue,
 };
+/// The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them.
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::permissions::{PermissionState, T2Capability};
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::process::{
+    OutputStream, ProcessExit, ProcessOutput, SpawnError, SpawnRequest,
+};
 pub use bindings::fyx::ui::types::*;
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::workspace_edit::{
+    EditError, EditTarget, FileEdit, TextEdit, WorkspaceEdit,
+};
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
@@ -681,6 +702,60 @@ macro_rules! __fyx_image_shims {
         fn __fyx_ui_cancel_fetch(request: u64) {
             $crate::__private::$world::cancel_fetch(request)
         }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_spawn(
+            request: &$crate::SpawnRequest,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::$world::spawn(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_write_stdin(
+            process: u64,
+            data: &[u8],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::write_stdin(process, data)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_close_stdin(process: u64) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::close_stdin(process)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_kill(process: u64) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::kill(process)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_apply_edit(
+            edit: &$crate::WorkspaceEdit,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::$world::apply_edit(edit)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_observe_start() -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::observe_start()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_observe_stop() {
+            $crate::__private::$world::observe_stop()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_query_permission(capability: $crate::T2Capability) -> $crate::PermissionState {
+            $crate::__private::$world::query_permission(capability)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_request_permission(
+            capability: $crate::T2Capability,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::request_permission(capability)
+        }
     };
 }
 
@@ -845,6 +920,13 @@ impl<'a> TreeBuilder<'a> {
         self.node(props)
     }
 
+    /// `fyx:ui` 0.3: a canvas node (see [`CanvasProps`] and [`DrawList`]). Panels only, not in
+    /// list rows; at most 16 per surface.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn canvas(&mut self, props: CanvasProps) -> NodeId {
+        self.node(props)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -871,6 +953,14 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         TreeLimits::default(),
     )
     .map_err(TreeError::InvalidRow)?;
+    #[cfg(feature = "fyx-ui-0-3")]
+    if row
+        .nodes
+        .iter()
+        .any(|node| matches!(node.props, Props::Canvas(_)))
+    {
+        return Err(TreeError::CanvasInRow);
+    }
     Ok(row)
 }
 
@@ -1015,6 +1105,21 @@ pub enum TreeError {
         node: NodeId,
         kind: &'static str,
     },
+    /// `fyx:ui` 0.3: a canvas the host would reject (`ui_ext::canvas::check_canvas_props`).
+    #[cfg(feature = "fyx-ui-0-3")]
+    InvalidCanvas {
+        node: NodeId,
+        error: ui_ext::canvas::CanvasError,
+    },
+    /// `fyx:ui` 0.3: more canvases on one surface than the host allows.
+    #[cfg(feature = "fyx-ui-0-3")]
+    TooManyCanvases {
+        count: usize,
+        max: usize,
+    },
+    /// `fyx:ui` 0.3: canvases are not allowed in list rows.
+    #[cfg(feature = "fyx-ui-0-3")]
+    CanvasInRow,
 }
 
 impl fmt::Display for TreeError {
@@ -1042,11 +1147,31 @@ impl fmt::Display for TreeError {
                 formatter,
                 "node {node} is a {kind}; only a list or a table has rows to invalidate"
             ),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::InvalidCanvas { node, error } => write!(formatter, "canvas {node}: {error}"),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::TooManyCanvases { count, max } => write!(
+                formatter,
+                "the surface would have {count} canvases, the cap is {max}"
+            ),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::CanvasInRow => write!(formatter, "a canvas cannot be in a list row"),
         }
     }
 }
 
 impl std::error::Error for TreeError {}
+
+/// Whether `props` is a canvas; never without `fyx-ui-0-3`.
+fn is_canvas(props: &Props) -> bool {
+    #[cfg(feature = "fyx-ui-0-3")]
+    return matches!(props, Props::Canvas(_));
+    #[cfg(not(feature = "fyx-ui-0-3"))]
+    {
+        let _ = props;
+        false
+    }
+}
 
 impl From<TreeError> for String {
     fn from(error: TreeError) -> Self {
@@ -1112,6 +1237,7 @@ impl SurfaceTree {
         build(&mut tree);
         let nodes = tree.finish();
         self.check_tree_size(nodes.len())?;
+        self.check_canvases(nodes.iter().map(|node| (node.id, &node.props)), 0)?;
 
         self.nodes.clear();
         self.roots.clear();
@@ -1187,6 +1313,8 @@ impl SurfaceTree {
         }
         Self::check_container(id, node, &props)?;
         self.check_update_size(self.pending.len() + 1)?;
+        let others = self.canvas_count() - usize::from(is_canvas(&node.props));
+        self.check_canvases([(id, &props)], others)?;
 
         self.node_mut(id)?.props = props.clone();
         self.pending.set_props(id, props);
@@ -1284,6 +1412,10 @@ impl SurfaceTree {
         let nodes = tree.finish();
         self.check_update_size(self.pending.len() + nodes.len())?;
         self.check_tree_size(self.nodes.len() + nodes.len())?;
+        self.check_canvases(
+            nodes.iter().map(|node| (node.id, &node.props)),
+            self.canvas_count(),
+        )?;
         Ok(self.commit_insert(parent, position, before, nodes))
     }
 
@@ -1319,6 +1451,10 @@ impl SurfaceTree {
         let nodes = tree.finish();
         self.check_update_size(self.pending.len() + 1 + nodes.len())?;
         self.check_tree_size(self.nodes.len() - removed + nodes.len())?;
+        self.check_canvases(
+            nodes.iter().map(|node| (node.id, &node.props)),
+            self.canvas_count() - self.subtree_canvases(id),
+        )?;
 
         self.commit_remove(id);
         Ok(self.commit_insert(parent, position, next_sibling, nodes))
@@ -1457,6 +1593,56 @@ impl SurfaceTree {
                 }),
             None => Ok(siblings.len()),
         }
+    }
+
+    fn canvas_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|node| is_canvas(&node.props))
+            .count()
+    }
+
+    fn subtree_canvases(&self, id: NodeId) -> usize {
+        let mut count = 0;
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            count += self
+                .nodes
+                .get(&id)
+                .map_or(0, |node| usize::from(is_canvas(&node.props)));
+            stack.extend_from_slice(self.children(id));
+        }
+        count
+    }
+
+    /// The new nodes' canvases against the host's rules: each canvas's props, and at most 16 on
+    /// the surface with the `others` that stay. Nothing to check without `fyx-ui-0-3`.
+    #[cfg_attr(
+        not(feature = "fyx-ui-0-3"),
+        allow(clippy::unused_self, unused_variables)
+    )]
+    fn check_canvases<'a>(
+        &self,
+        nodes: impl IntoIterator<Item = (NodeId, &'a Props)>,
+        others: usize,
+    ) -> Result<(), TreeError> {
+        #[cfg(feature = "fyx-ui-0-3")]
+        {
+            let mut count = others;
+            for (node, props) in nodes {
+                let Props::Canvas(canvas) = props else {
+                    continue;
+                };
+                ui_ext::canvas::check_canvas_props(&canvas::host_canvas(canvas))
+                    .map_err(|error| TreeError::InvalidCanvas { node, error })?;
+                count += 1;
+            }
+            let max = ui_ext::canvas::MAX_CANVASES_PER_SURFACE;
+            if count > max {
+                return Err(TreeError::TooManyCanvases { count, max });
+            }
+        }
+        Ok(())
     }
 
     fn subtree_len(&self, id: NodeId) -> usize {
@@ -1905,6 +2091,170 @@ impl HttpRequest {
     pub fn timeout_ms(mut self, timeout_ms: u32) -> Self {
         self.timeout_ms = Some(timeout_ms);
         self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl SpawnRequest {
+    /// `program` as the manifest's `[[fyx_ui.processes]]` names it (never a path): no
+    /// arguments, the first worktree's root, no environment, stdin closed.
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            stdin: false,
+        }
+    }
+
+    /// At most 256 arguments, 128 KiB in total; they must fit the manifest's patterns.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// A directory relative to the root of the one worktree that has it.
+    pub fn cwd(mut self, path: impl Into<String>) -> Self {
+        self.cwd = Some(FileRef {
+            worktree: None,
+            path: path.into(),
+        });
+        self
+    }
+
+    /// Only names the manifest lists in `[fyx_ui.process] env`; at most 32.
+    pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+
+    /// Keeps stdin open for [`write_stdin`] until [`close_stdin`].
+    pub fn stdin(mut self) -> Self {
+        self.stdin = true;
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl WorkspaceEdit {
+    /// An edit named `label` (1 to 128 bytes, one line): the undo step's name.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            files: Vec::new(),
+        }
+    }
+
+    /// Edits of one file; at most 64 files per edit, each named once.
+    pub fn file(mut self, file: FileEdit) -> Self {
+        self.files.push(file);
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl FileEdit {
+    /// Edits of the file at `path`, relative to the root of the one worktree that has it.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self::target(EditTarget::File(FileRef {
+            worktree: None,
+            path: path.into(),
+        }))
+    }
+
+    /// Edits of an open document, by its `documents` id.
+    pub fn document(id: u64) -> Self {
+        Self::target(EditTarget::Document(id))
+    }
+
+    fn target(target: EditTarget) -> Self {
+        Self {
+            target,
+            expected_version: None,
+            create: false,
+            edits: Vec::new(),
+        }
+    }
+
+    /// Replaces `range` with `new_text`. Ranges are half-open and must not overlap.
+    pub fn replace(mut self, range: TextRange, new_text: impl Into<String>) -> Self {
+        self.edits.push(TextEdit {
+            range,
+            new_text: new_text.into(),
+        });
+        self
+    }
+
+    /// Inserts `text` at `at`.
+    pub fn insert(self, at: Position, text: impl Into<String>) -> Self {
+        self.replace(TextRange { start: at, end: at }, text)
+    }
+
+    /// Fails the whole edit with `EditError::Conflict` if the document changed since `version`.
+    pub fn expected_version(mut self, version: u64) -> Self {
+        self.expected_version = Some(version);
+        self
+    }
+
+    /// Creates the file (empty) first if it does not exist; its directory must.
+    pub fn create(mut self) -> Self {
+        self.create = true;
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl Position {
+    /// Zero-based line, and a column in UTF-8 bytes from the start of the line.
+    pub fn new(line: u32, column: u32) -> Self {
+        Self { line, column }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl TextRange {
+    pub fn new(start: Position, end: Position) -> Self {
+        Self { start, end }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditError::Denied => f.write_str("editing files was denied"),
+            EditError::Conflict(why) => write!(f, "the file changed: {why}"),
+            EditError::NotAllowed(why) => write!(f, "not allowed: {why}"),
+            EditError::NotFound(why) => write!(f, "not found: {why}"),
+            EditError::Invalid(why) => write!(f, "invalid edit: {why}"),
+            EditError::Cancelled => f.write_str("the edit was cancelled"),
+        }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl ProcessOutput {
+    /// The chunk as text; a chunk may end inside a UTF-8 character, so this is lossy.
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.data)
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpawnError::Denied => f.write_str("running programs was denied"),
+            SpawnError::NotFound(program) => write!(f, "program not found: {program}"),
+            SpawnError::LimitExceeded => f.write_str("too many processes"),
+            SpawnError::Io(error) => write!(f, "starting the program failed: {error}"),
+        }
     }
 }
 
@@ -2793,6 +3143,97 @@ mod tests {
                     nodes: Vec::new()
                 },
             ]
+        );
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    #[test]
+    fn edits_and_the_agent_feed_record_their_effects() {
+        take_host_effects();
+        let edit = WorkspaceEdit::new("Sort imports").file(
+            FileEdit::path("src/main.rs")
+                .replace(
+                    TextRange::new(Position::new(0, 0), Position::new(2, 0)),
+                    "use a;
+use b;
+",
+                )
+                .insert(
+                    Position::new(5, 4),
+                    "// sorted
+",
+                )
+                .expected_version(7),
+        );
+        assert_eq!(edit.files[0].edits.len(), 2);
+        assert_eq!(edit.files[0].expected_version, Some(7));
+        let id = apply_edit(&edit).expect("apply");
+        start_observing().expect("start");
+        stop_observing();
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::ApplyEdit { id, edit },
+                HostEffect::StartObserving,
+                HostEffect::StopObserving,
+            ]
+        );
+        assert_eq!(
+            EditError::NotAllowed(".git/config is a protected path".into()).to_string(),
+            "not allowed: .git/config is a protected path"
+        );
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    #[test]
+    fn spawn_builds_and_records_requests() {
+        take_host_effects();
+        let request = SpawnRequest::new("cargo")
+            .arg("check")
+            .args(["--message-format", "short"])
+            .cwd("crates/app")
+            .env("CARGO_TERM_COLOR", "never")
+            .stdin();
+        assert_eq!(request.args, ["check", "--message-format", "short"]);
+        assert_eq!(
+            request.cwd,
+            Some(FileRef {
+                worktree: None,
+                path: "crates/app".into()
+            })
+        );
+        assert!(request.stdin);
+        let id = spawn(&request).expect("spawn");
+        write_stdin(
+            id, b"y
+",
+        )
+        .expect("write");
+        close_stdin(id).expect("close");
+        kill(id).expect("kill");
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::Spawn { id, request },
+                HostEffect::WriteStdin {
+                    process: id,
+                    data: b"y
+"
+                    .to_vec()
+                },
+                HostEffect::CloseStdin(id),
+                HostEffect::Kill(id),
+            ]
+        );
+        let output = ProcessOutput {
+            process: id,
+            stream: OutputStream::Stdout,
+            data: b"ok".to_vec(),
+        };
+        assert_eq!(output.text(), "ok");
+        assert_eq!(
+            SpawnError::NotFound("cargo".into()).to_string(),
+            "program not found: cargo"
         );
     }
 

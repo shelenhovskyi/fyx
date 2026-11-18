@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 
 use ui_ext::image::{self, ImageFormat};
 
+use ui_ext::edit::{EditCounters, WorkspaceEdit};
+use ui_ext::network::{self as net, DomainList, FetchCounters, FetchRequest, PermissionState};
+use ui_ext::process::{self as proc, ProcessCounters, ProcessPolicy, SpawnCheck, SpawnRequest};
 use ui_ext::v0_2 as model;
 use ui_ext::v0_2::notifications::{self as notify, Notification, ProgressOptions, ProgressValue};
 use ui_ext::{ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement};
@@ -132,6 +135,54 @@ pub(crate) struct ApiState {
     /// `notify` effects and `progress-update` calls of the running call.
     notification_effects: usize,
     progress_updates: usize,
+    /// `network:fetch` (0.3): the manifest's domains, the host's counters, accepted requests not
+    /// delivered yet, the ones the running call made, and the broker's state at the import.
+    network_domains: DomainList,
+    fetch_counters: FetchCounters,
+    fetches: BTreeMap<u64, QueuedFetch>,
+    call_fetches: Vec<u64>,
+    /// The broker's state at the import, for every T2 capability.
+    network_permission: PermissionState,
+    /// `process:spawn` (0.3): the manifest's programs and environment names, the host's
+    /// counters, the processes not finished yet, and the ones the running call spawned. The
+    /// harness has one worktree, trusted unless a test says otherwise.
+    process_policy: ProcessPolicy,
+    process_counters: ProcessCounters,
+    processes: BTreeMap<u64, FakeProcess>,
+    call_spawns: Vec<u64>,
+    worktree: Option<bool>,
+    /// `workspace:edit` (0.3): edits accepted and not delivered yet, and the running call's.
+    edit_counters: EditCounters,
+    edits: BTreeMap<u64, WorkspaceEdit>,
+    call_edits: Vec<u64>,
+    /// `agent:observe` (0.3): whether the host has agent reviews here, and what the running call
+    /// asked for (`Some(true)` start, `Some(false)` stop), applied after it.
+    agent_reviews_available: bool,
+    observe_op: Option<bool>,
+    /// `permissions` (0.3): the states the running call saw (the first query of a capability
+    /// fixes its answer for the call), and the prompts it asked for.
+    permission_mirror: BTreeMap<&'static str, PermissionState>,
+    permission_requests: Vec<&'static str>,
+}
+
+/// A process `spawn` accepted, until its `process-exited` or `spawn-failed` is delivered.
+#[derive(Clone, Debug)]
+pub(crate) struct FakeProcess {
+    pub(crate) request: SpawnRequest,
+    /// The program is not in the manifest: the outcome is `spawn-failed(not-found)`.
+    pub(crate) not_declared: bool,
+    /// Started by `Harness::deliver_io`, which ran it once stdin is closed.
+    pub(crate) started: bool,
+    pub(crate) stdin_open: bool,
+    pub(crate) stdin: Vec<u8>,
+    pub(crate) killed: bool,
+}
+
+/// A request `fetch` accepted, waiting for `Harness::deliver_io`.
+#[derive(Clone, Debug)]
+pub(crate) struct QueuedFetch {
+    pub(crate) request: FetchRequest,
+    pub(crate) cancelled: bool,
 }
 
 impl ApiState {
@@ -158,6 +209,24 @@ impl ApiState {
             progress_start_times: VecDeque::new(),
             notification_effects: 0,
             progress_updates: 0,
+            network_domains: DomainList::default(),
+            fetch_counters: FetchCounters::default(),
+            fetches: BTreeMap::new(),
+            call_fetches: Vec::new(),
+            // As the host without a broker: no T2 capability is granted.
+            network_permission: PermissionState::Unavailable,
+            process_policy: ProcessPolicy::default(),
+            process_counters: ProcessCounters::default(),
+            processes: BTreeMap::new(),
+            call_spawns: Vec::new(),
+            worktree: Some(true),
+            edit_counters: EditCounters::default(),
+            edits: BTreeMap::new(),
+            call_edits: Vec::new(),
+            agent_reviews_available: true,
+            observe_op: None,
+            permission_mirror: BTreeMap::new(),
+            permission_requests: Vec::new(),
         }
     }
 
@@ -190,6 +259,12 @@ impl ApiState {
         self.decoration_effects = 0;
         self.notification_effects = 0;
         self.progress_updates = 0;
+        self.call_fetches.clear();
+        self.call_spawns.clear();
+        self.call_edits.clear();
+        self.observe_op = None;
+        self.permission_mirror.clear();
+        self.permission_requests.clear();
         if let Activation::Until(until) = self.activation
             && Instant::now() >= until
         {
@@ -512,6 +587,14 @@ impl ApiState {
         props: impl IntoIterator<Item = &'a model::Props>,
     ) -> Result<(), model::HostError> {
         for props in props {
+            if let model::Props::Canvas(canvas) = props {
+                ui_ext::canvas::check_canvas_props(canvas)
+                    .and_then(|()| {
+                        ui_ext::canvas::check_canvas_placement(self.live.surface_kind(surface_id))
+                    })
+                    .map_err(|error| host_error(error.code(), error.to_string()))?;
+                continue;
+            }
             let model::Props::Image(props) = props else {
                 continue;
             };
@@ -733,6 +816,373 @@ impl ApiState {
         if self.running_progresses.remove(&id).is_some() {
             self.effects.push(HostEffect::ProgressEnd { id });
         }
+    }
+}
+
+/// `network:fetch` (design.md §8), as the host's import checks it: the capability, the broker's
+/// state, the domain list, `ui_ext::network::check_request`, then the shared counters.
+impl ApiState {
+    pub(crate) fn set_network_domains(&mut self, domains: DomainList) {
+        self.network_domains = domains;
+    }
+
+    pub(crate) fn set_network_permission(&mut self, state: PermissionState) {
+        self.network_permission = state;
+    }
+
+    pub(crate) fn fetch(&mut self, request: FetchRequest) -> Result<u64, model::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == net::CAPABILITY_NETWORK)
+        {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{:?} is not in the manifest", net::CAPABILITY_NETWORK),
+            ));
+        }
+        // `ask` is accepted: the prompt comes when the request is applied.
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => {}
+            state @ (PermissionState::Denied | PermissionState::Unavailable) => {
+                return Err(host_error(
+                    model::HostErrorCode::Denied,
+                    format!("{} is {state:?}", net::CAPABILITY_NETWORK),
+                ));
+            }
+        }
+        if self.network_domains.is_empty() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "fetch needs {:?} and [fyx_ui.network] domains in the manifest",
+                    net::CAPABILITY_NETWORK
+                ),
+            ));
+        }
+        net::check_request(&request, &self.network_domains)?;
+        let id = self.fetch_counters.start(Instant::now())?;
+        self.fetches.insert(
+            id,
+            QueuedFetch {
+                request,
+                cancelled: false,
+            },
+        );
+        self.call_fetches.push(id);
+        Ok(id)
+    }
+
+    /// `cancel-fetch`: unknown or delivered ids are ignored; a waiting one ends `cancelled`.
+    pub(crate) fn cancel_fetch(&mut self, id: u64) {
+        if let Some(fetch) = self.fetches.get_mut(&id) {
+            fetch.cancelled = true;
+        }
+    }
+
+    /// A call that trapped or ran over: its requests are dropped without an outcome, and they
+    /// do not count, as in the host.
+    pub(crate) fn abort_call(&mut self) {
+        for id in std::mem::take(&mut self.call_fetches) {
+            self.fetches.remove(&id);
+            self.fetch_counters.finished(id);
+        }
+        for id in std::mem::take(&mut self.call_spawns) {
+            self.processes.remove(&id);
+            self.process_counters.finished(id);
+        }
+        for id in std::mem::take(&mut self.call_edits) {
+            self.edits.remove(&id);
+            self.edit_counters.finished(id);
+        }
+        self.observe_op = None;
+        self.permission_requests.clear();
+    }
+
+    pub(crate) fn queued_fetches(&self) -> impl Iterator<Item = (u64, &QueuedFetch)> {
+        self.fetches.iter().map(|(id, fetch)| (*id, fetch))
+    }
+
+    /// The oldest accepted request, for delivery; it stops counting as in flight, as the host
+    /// does before `handle-io`.
+    pub(crate) fn take_fetch(&mut self) -> Option<(u64, QueuedFetch)> {
+        let (id, fetch) = self.fetches.pop_first()?;
+        self.fetch_counters.finished(id);
+        Some((id, fetch))
+    }
+}
+
+/// `process:spawn` (design.md §9), as the host's import checks it: the capability and the
+/// broker's state, the manifest's programs, `ui_ext::process::check_spawn`, the worktree, then the
+/// shared counters.
+impl ApiState {
+    pub(crate) fn set_process_policy(&mut self, policy: ProcessPolicy) {
+        self.process_policy = policy;
+    }
+
+    /// `None`: no worktree is open; `Some(trusted)`.
+    pub(crate) fn set_worktree(&mut self, worktree: Option<bool>) {
+        self.worktree = worktree;
+    }
+
+    fn permit_process(&self) -> Result<(), model::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == proc::CAPABILITY_PROCESS)
+        {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{:?} is not in the manifest", proc::CAPABILITY_PROCESS),
+            ));
+        }
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => Ok(()),
+            state => Err(host_error(
+                model::HostErrorCode::Denied,
+                format!("{} is {state:?}", proc::CAPABILITY_PROCESS),
+            )),
+        }
+    }
+
+    pub(crate) fn spawn(&mut self, request: SpawnRequest) -> Result<u64, model::HostError> {
+        self.permit_process()?;
+        if self.process_policy.programs.is_empty() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "spawn needs {:?} and [[fyx_ui.processes]] in the manifest",
+                    proc::CAPABILITY_PROCESS
+                ),
+            ));
+        }
+        let not_declared = matches!(
+            proc::check_spawn(&request, &self.process_policy)?,
+            SpawnCheck::NotDeclared
+        );
+        match self.worktree {
+            None => {
+                return Err(host_error(
+                    model::HostErrorCode::Unavailable,
+                    "no worktree is open",
+                ));
+            }
+            Some(false) => {
+                return Err(host_error(
+                    model::HostErrorCode::Denied,
+                    "the worktree is not trusted",
+                ));
+            }
+            Some(true) => {}
+        }
+        let id = self.process_counters.start()?;
+        self.processes.insert(
+            id,
+            FakeProcess {
+                stdin_open: request.stdin,
+                request,
+                not_declared,
+                started: false,
+                stdin: Vec::new(),
+                killed: false,
+            },
+        );
+        self.call_spawns.push(id);
+        Ok(id)
+    }
+
+    pub(crate) fn write_stdin(&mut self, id: u64, data: Vec<u8>) -> Result<(), model::HostError> {
+        self.permit_process()?;
+        if data.len() > proc::MAX_STDIN_WRITE_BYTES {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!(
+                    "at most {} bytes per write-stdin",
+                    proc::MAX_STDIN_WRITE_BYTES
+                ),
+            ));
+        }
+        let process = self.live_process(id)?;
+        if !process.stdin_open {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!(
+                    "process {id} has no stdin open (spawn it with stdin, and do not close it)"
+                ),
+            ));
+        }
+        if process.stdin.len() + data.len() > proc::MAX_STDIN_QUEUED_BYTES {
+            return Err(host_error(
+                model::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} bytes queued for stdin",
+                    proc::MAX_STDIN_QUEUED_BYTES
+                ),
+            ));
+        }
+        process.stdin.extend(data);
+        Ok(())
+    }
+
+    pub(crate) fn close_stdin(&mut self, id: u64) -> Result<(), model::HostError> {
+        self.live_process(id)?.stdin_open = false;
+        Ok(())
+    }
+
+    /// An id that exited (or never was) is `invalid-argument`.
+    pub(crate) fn kill(&mut self, id: u64) -> Result<(), model::HostError> {
+        if !self.process_counters.is_live(id) {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!("process {id} has exited"),
+            ));
+        }
+        self.live_process(id)?.killed = true;
+        Ok(())
+    }
+
+    fn live_process(&mut self, id: u64) -> Result<&mut FakeProcess, model::HostError> {
+        self.processes.get_mut(&id).ok_or_else(|| {
+            host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!("process {id} has exited"),
+            )
+        })
+    }
+
+    pub(crate) fn processes(&self) -> impl Iterator<Item = (u64, &FakeProcess)> {
+        self.processes.iter().map(|(id, process)| (*id, process))
+    }
+
+    pub(crate) fn process_mut(&mut self, id: u64) -> Option<&mut FakeProcess> {
+        self.processes.get_mut(&id)
+    }
+
+    /// Its `process-exited` or `spawn-failed` is about to be delivered.
+    pub(crate) fn process_finished(&mut self, id: u64) -> Option<FakeProcess> {
+        self.process_counters.finished(id);
+        self.processes.remove(&id)
+    }
+}
+
+/// `workspace:edit` and `agent:observe` (design.md §10, §11), as the host checks them: the
+/// capability and the broker's state, then `ui_ext::edit::check_edit` and the in-flight cap, or
+/// whether agent reviews exist here.
+impl ApiState {
+    fn permit_t2(&self, capability: &str) -> Result<(), model::HostError> {
+        if !self.capabilities.iter().any(|name| name == capability) {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{capability:?} is not in the manifest"),
+            ));
+        }
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => Ok(()),
+            state => Err(host_error(
+                model::HostErrorCode::Denied,
+                format!("{capability} is {state:?}"),
+            )),
+        }
+    }
+
+    pub(crate) fn apply_edit(&mut self, edit: WorkspaceEdit) -> Result<u64, model::HostError> {
+        self.permit_t2(ui_ext::edit::CAPABILITY_EDIT)?;
+        if self.worktree.is_none() {
+            return Err(host_error(
+                model::HostErrorCode::Unavailable,
+                "no workspace is open",
+            ));
+        }
+        ui_ext::edit::check_edit(&edit)?;
+        let id = self.edit_counters.start()?;
+        self.edits.insert(id, edit);
+        self.call_edits.push(id);
+        Ok(id)
+    }
+
+    /// The oldest accepted edit, for delivery; it stops counting as in flight.
+    pub(crate) fn take_edit(&mut self) -> Option<(u64, WorkspaceEdit)> {
+        let (id, edit) = self.edits.pop_first()?;
+        self.edit_counters.finished(id);
+        Some((id, edit))
+    }
+
+    pub(crate) fn set_agent_reviews_available(&mut self, available: bool) {
+        self.agent_reviews_available = available;
+    }
+
+    pub(crate) fn observe_start(&mut self) -> Result<(), model::HostError> {
+        self.permit_t2(ui_ext::observe::CAPABILITY_OBSERVE)?;
+        if !self.agent_reviews_available {
+            return Err(host_error(
+                model::HostErrorCode::Unavailable,
+                "agent reviews are not available here",
+            ));
+        }
+        self.observe_op = Some(true);
+        Ok(())
+    }
+
+    pub(crate) fn observe_stop(&mut self) {
+        self.observe_op = Some(false);
+    }
+
+    /// `permissions.query`: `unavailable` for an undeclared capability, else the broker's
+    /// state as of the first query of the call.
+    pub(crate) fn query_permission(&mut self, capability: &'static str) -> PermissionState {
+        if !self.capabilities.iter().any(|name| name == capability) {
+            return PermissionState::Unavailable;
+        }
+        *self
+            .permission_mirror
+            .entry(capability)
+            .or_insert(self.network_permission)
+    }
+
+    /// `permissions.request`: declared, and the click-or-Enter activation, which it uses up.
+    /// Only `ask` has a prompt, shown after the call, once per capability per call.
+    pub(crate) fn request_permission(
+        &mut self,
+        capability: &'static str,
+    ) -> Result<(), model::HostError> {
+        if !self.capabilities.iter().any(|name| name == capability) {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{capability:?} is not in the manifest"),
+            ));
+        }
+        if !self.take_activation() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                "permissions.request needs a click or Enter: during handle-event for click, \
+                 row-click or input-submitted, a command or an accepted picker item, or shortly \
+                 after it, once",
+            ));
+        }
+        if self.query_permission(capability) == PermissionState::Ask
+            && !self.permission_requests.contains(&capability)
+        {
+            self.permission_requests.push(capability);
+        }
+        Ok(())
+    }
+
+    /// The prompts the call that just finished asked for.
+    pub(crate) fn take_permission_requests(&mut self) -> Vec<&'static str> {
+        std::mem::take(&mut self.permission_requests)
+    }
+
+    fn take_activation(&mut self) -> bool {
+        let had = self.has_activation();
+        if had {
+            self.activation = Activation::None;
+        }
+        had
+    }
+
+    /// What the call that just finished asked of the agent feed.
+    pub(crate) fn take_observe_op(&mut self) -> Option<bool> {
+        self.observe_op.take()
     }
 }
 

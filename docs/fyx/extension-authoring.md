@@ -217,8 +217,53 @@ On top of these:
   that is missing, outside the package, over 2 MiB or not a valid PNG or SVG, a freed generated
   image, and `tint` on a PNG. Each is also a `warn` log line, and `fyx-ext test` reports them as
   warnings. Assets are only checked in a harness made by `load_package` (or `fyx-ext test`).
-- In 0.3, `canvas` nodes and picker surfaces are refused as not supported yet, and the 0.3
-  interfaces the host does not implement yet (`decorations` included) trap when called.
+- Canvases (0.3) are checked as the host checks them:
+  - the caps, finite coordinates, and panels only;
+  - none in list rows;
+  - at most 16 per surface.
+
+  `canvas(surface, id)` returns a canvas's draw list. `canvas_click(surface, id, x, y)` clicks
+  it as the renderer would. It fails without a call on a canvas that is not clickable, or at a
+  point outside the box.
+- `network:fetch` (0.3) runs the host's import checks: the capability, the domain list
+  (`[fyx_ui.network]`, or `with_network_domains`), `check_request`, and the in-flight and
+  per-minute caps.
+  - With no broker, `fetch` is `denied`, as in a host where the user has not allowed it.
+  - `set_broker(TestBroker::granted(respond))` lets requests reach a closure that answers them.
+    `TestBroker::asking(answer, respond)` prompts on the first delivery, and
+    `TestBroker::denied()` refuses at the import.
+  - Accepted requests wait in `pending_fetches()` until `deliver_io()` delivers each outcome
+    through `handle-io`. A cancelled request ends `cancelled`, and a call that traps drops its
+    requests.
+- `process:spawn` (0.3) runs the host's import checks too: the capability, the programs
+  (`[[fyx_ui.processes]]`, or `with_processes`), `check_spawn`, the worktree, and the 4-process
+  cap. The broker decides as for `fetch`.
+  - Real programs never run. `fake_program(name, |request, stdin| FakeRun::ok(..))` stands in for
+    one, and `deliver_io()` delivers its output and exit once its stdin is closed.
+  - A kill ends with `killed`, and a declared program with no fake ends `spawn-failed`
+    (`not-found`).
+  - `set_worktree(None)` or `set_worktree(Some(false))` tests the unavailable and untrusted
+    cases.
+- `workspace:edit` and `agent:observe` (0.3) follow the host too: the capability and the
+  broker, then `check_edit` and the in-flight cap. When an edit is applied, `check_targets`
+  refuses protected paths and overlaps.
+  - Allowed edits apply unless `set_edit_answer` says otherwise, and `applied_edits()` lists
+    them.
+  - `set_agent_reviews(Some(reviews))` is the snapshot `start` sends; `None` makes `start`
+    unavailable.
+  - `agent_event(event)` feeds a running feed with the host's ids, and the harness maps them to
+    opaque ones as the host does.
+  - `deliver_io()` delivers `edit-done` and the agent events.
+- `permissions` (0.3) follows the host:
+  - `query` answers `unavailable` for an undeclared capability, otherwise the broker's state,
+    fixed for the call by its first query;
+  - `request` needs a click and uses it up, and prompts only from `ask`, once per capability per
+    call. The broker answers after the call, and `deliver_io()` delivers the answer as
+    `permission-changed`;
+  - `TestBroker::granted` starts granted, and `TestBroker::asking(answer, …)` starts at `ask`.
+    The broker's state is the state of every T2 capability.
+- In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
+  not implement yet (`decorations` included) trap when called.
 
 The host's 0.2 rules apply: each import is checked when it is called, and its effect applies after
 the call. Showing a modal needs a click or Enter, a modal mounts when it is shown, and three failed
@@ -334,9 +379,10 @@ Fyx does.
 (0.3). A file over 2 MiB is an error. These are warnings, because Fyx draws the image's alt text
 instead and does not fail the update:
 
-- a file that is not a valid PNG or SVG;
+- a file that is not a valid PNG or SVG (a compressed `.svgz` is not one);
 - a PNG over 2048 px on a side;
 - an SVG that declares XML entities;
+- an SVG whose `<style>` uses `url(…)`;
 - a name an image node cannot use.
 
 An SVG with `<image>`, `<script>` or `<foreignObject>` is also a warning, since Fyx drops those
@@ -875,13 +921,273 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 |---|---|
 | `extensions/fyx_demo_counter` | the smallest complete extension: a mount, `set-props` replies, `list-rows` |
 | `extensions/fyx_demo_todo` | inputs without echo, filter buttons, `row-click`, rebuilding a list |
-| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows` and all 101 frozen icons |
+| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows`, all 101 frozen icons, and notifications and progress (`Notify`, `Run job`) |
 | `extensions/fyx_demo_markdown` | an input previewed live in a `markdown` node, clearing an input after Enter |
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
 | `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
+| `extensions/fyx_demo_charts` | canvases (0.3): a clickable bar chart with click-to-select through `CanvasHits`, and a tick-driven sparkline with Pause and Resume |
+| `extensions/fyx_demo_t2` | the T2 capabilities (0.3 only): fetch `api.github.com/zen`, run `git status --short`, insert a header as one undoable edit, and list agent reviews live, each with its permission state and first-use prompt |
 | `extensions/fyx_demo_images` | images (0.3): SVG and PNG assets, `tint`, `contain` and `cover`, a chart made at run time with `add_image` and swapped on Shuffle, a missing asset's alt text, thumbnails in list rows |
 
-`script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a
+`script/fyx-build-demos` builds all of them; `fyx_demo_t2` only with `--fyx-ui-0-3`. `extensions/fyx_demo_counter/tests/headless.rs` is a
 headless test of the counter's contract; run it with
 `fyx-ext test --path extensions/fyx_demo_counter`.
+
+## Newer worlds: `fyx:ui` 0.2 and the staged 0.3
+
+Releases of Fyx run `fyx:ui` 0.1. The 0.2 and 0.3 worlds are staged: dev builds load them (debug
+builds, or with `FYX_UI_DEV_EXTENSIONS` set), and `fyx-ext check` warns that they are staged.
+Every snippet below is taken from a demo in `extensions/` that builds and is tested.
+
+### Choosing a world
+
+The SDK's types are 0.2's by default. The crate feature `fyx-ui-0-3` switches them to the staged
+0.3 world. `register_extension!` exports the world you name, and it converts down where it can:
+
+```toml
+[features]
+fyx-ui-0-2 = []
+fyx-ui-0-3 = ["ui_ext_sdk/fyx-ui-0-3"]
+```
+
+```rust
+#[cfg(not(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3")))]
+register_extension!(MyPanel, v0_1);
+#[cfg(all(feature = "fyx-ui-0-2", not(feature = "fyx-ui-0-3")))]
+register_extension!(MyPanel, v0_2);
+#[cfg(feature = "fyx-ui-0-3")]
+register_extension!(MyPanel);
+```
+
+- **What a lower world does with newer features:** a host function returns `unavailable`
+  ("needs fyx:ui 0.3"), and a node that the world cannot hold makes the call return `Err`.
+- **The manifest's `api_version`** must match the world the component exports.
+  `script/fyx-build-demos --fyx-ui-0-2` and `--fyx-ui-0-3` set it in the copies they write to
+  the target directory.
+- **Tests for each world:** the demos keep one panel for 0.1 that says what is missing, and gate
+  their newer code and tests with `#[cfg(feature = "fyx-ui-0-3")]`.
+
+### Notifications and progress (0.2)
+
+Declare `ui:notifications`. The events come to the owner's `handle_event`.
+
+```rust
+// in handle_event, on a button click:
+let notification = Notification::new(MAIN, NotificationLevel::Info, "Saved").action("undo", "Undo");
+let id = notify(&notification)?;
+
+let options = ProgressOptions::new(MAIN, "Indexing", ProgressLocation::Panel).cancellable();
+let job = progress_start(&options)?;
+progress_update(job, ProgressValue::Percent(10), Some("1 of 10"))?;
+
+// later, in handle_event:
+match event {
+    UiEvent::NotificationAction(action) => { /* action.notification, action.action == "undo" */ }
+    UiEvent::ProgressCancelRequested(job) => progress_end(job),
+    _ => {}
+}
+```
+
+The caps are 3 open notifications and 5 per minute, and 4 running progresses. Past a cap, the
+call returns `limit-exceeded` and the title goes to the log. (From
+`crates/fyx_ext_harness/fixtures/v0_2`.)
+
+### Images (0.3)
+
+Declare `ui:images`. Put files in the package's `assets/` folder; `fyx-ext package` ships it.
+
+```rust
+tree.image(ImageProps::asset("assets/logo.svg", "The Fyx logo").size(48, 48));
+tree.image(
+    ImageProps::asset("assets/logo.svg", "The Fyx logo in the accent colour")
+        .size(48, 48)
+        .tint(ColorToken::TextAccent), // SVG only; ignored with a warning on a PNG
+);
+tree.image(ImageProps::asset("assets/sample.png", "A photo").size(96, 96).fit(ImageFit::Cover));
+
+// An image made at run time: register it, show it, free the old one.
+let chart = add_image(ImageFormat::Svg, chart_svg(&bars).as_bytes())?;
+self.panel.set_props(node, ImageProps::generated(chart, "A bar chart").size(240, 96))?;
+remove_image(old_chart);
+```
+
+- **Where they go:** panels and panel list rows only.
+- **A bad image is not an update error:** a missing or broken asset, or a freed handle, draws the
+  alt text and logs a warning. `fyx-ext check` reports assets over 2 MiB, invalid files, and SVGs
+  whose parts Fyx drops.
+- **SVGs that Fyx refuses** (it draws the alt text instead):
+  - `url(…)` inside `<style>`: set `fill` or `style` on the element instead;
+  - compressed `.svgz` files;
+  - XML entity declarations;
+  - `<use>` and `url(#…)` references that expand past 100 000 nodes or 16 levels, or form a cycle;
+  - elements nested over 256 deep.
+
+  Fyx checks these before it parses, for assets and for `add_image` bytes alike.
+- **The demo:** `extensions/fyx_demo_images`.
+
+### Canvases (0.3)
+
+Declare `ui:canvas`. A canvas holds a draw list. The whole list is sent again with every
+`set_props`, so redraw from your state.
+
+```rust
+pub fn bar_chart(selected: Option<usize>) -> (CanvasProps, CanvasHits<usize>) {
+    let mut draw = DrawList::new();
+    let mut hits = CanvasHits::new();
+    for day in 0..DAYS.len() {
+        let stroke = (selected == Some(day))
+            .then(|| Stroke::new(Paint::token(ColorToken::TextAccent), 2.0));
+        draw.rect(bar(day), Some(Paint::data(DataColor::cycle(day))), stroke);
+        hits.add(Rect::new(day as f32 * SLOT, 0.0, SLOT, BAR_BOTTOM), day);
+    }
+    let canvas = CanvasProps::new(280, 140, "Commits per day this week")
+        .draw(draw)
+        .clickable()
+        .fit(CanvasFit::ScaleDown);
+    (canvas, hits)
+}
+
+// in handle_event: a click arrives in canvas coordinates; hit-testing is yours.
+UiEvent::CanvasClick(click) if Some(click.canvas) == self.chart_node() => {
+    self.selected = self.hits.at(click.x, click.y).copied();
+    // ...set_props the chart and the label, then take_update()
+}
+```
+
+- **Colours:** `Paint::data(DataColor::…)` gives eight chart colours that stay readable in every
+  theme; `Paint::token` gives the theme's own.
+- **Limits:**
+  - canvases are for panels only, not list rows, at most 16 per surface;
+  - 16384 ops per canvas;
+  - every number must be finite.
+
+  `SurfaceTree` rejects a canvas the host would refuse, with a `TreeError`.
+- **Animation:** only through ticks, as in the demo's sparkline.
+- **The demo:** `extensions/fyx_demo_charts`.
+
+### Fetching (0.3)
+
+Declare `network:fetch` and the hosts. The first fetch asks the user.
+
+```toml
+[fyx_ui]
+api_version = "0.3.0"
+capabilities = ["ui:panel", "network:fetch"]
+
+[fyx_ui.network]
+domains = ["api.example.com", "localhost:8080"]
+```
+
+```rust
+let id = fetch(&HttpRequest::get("https://api.example.com/items").header("accept", "application/json"))?;
+
+// Outcomes are not tied to a surface: they come to handle_io, and you push updates yourself.
+fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+    if let IoEvent::FetchDone((id, result)) = event {
+        let line = match result {
+            Ok(response) if response.is_success() => response.text().unwrap_or("").to_string(),
+            Ok(response) => format!("HTTP {}", response.status),
+            Err(error) => error.to_string(), // "network access was denied", …
+        };
+        self.panel.set_props(self.status, TextProps::new(line))?;
+        self.panel.push(PANEL).map_err(|error| error.message)?;
+    }
+    Ok(())
+}
+```
+
+Only `https://` URLs on the listed hosts are allowed, plus `http://` to a listed `localhost` with
+its port. The caps are 8 requests in flight and 120 per minute.
+
+### Running programs (0.3)
+
+Declare `process:spawn`, the programs, and the environment names you pass:
+
+```toml
+[[fyx_ui.processes]]
+name = "git"
+args = ["status", "**"]
+
+[fyx_ui.process]
+env = ["NO_COLOR"]
+```
+
+```rust
+let id = spawn(&SpawnRequest::new("git").args(["status", "--short"]))?;
+
+fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+    match event {
+        IoEvent::ProcessOutput(output) => self.log.push_str(&output.text()),
+        IoEvent::ProcessExited(exit) => { /* exit.code, exit.killed */ }
+        IoEvent::SpawnFailed((id, error)) => { /* error.to_string() */ }
+        _ => {}
+    }
+    Ok(())
+}
+```
+
+- **Permissions:** the first spawn asks the user, and it needs an open, trusted worktree.
+- **Limits:**
+  - at most 4 processes;
+  - the arguments must fit the declared patterns: one per position, a literal, `*` inside one
+    for any text, or `**` last for any rest;
+  - a program without `args` runs with no arguments only. Any arguments need `args = ["**"]`,
+    which the consent prompt shows. `fyx-ext check` warns about a program without `args`;
+  - only the declared environment names. Fyx never passes names that load code into a program
+    or redirect it, such as `LD_*`, `NODE_OPTIONS`, git's `GIT_DIR` and editors, `CARGO_*` or
+    `PATH`; the manifest check refuses them (`ui_ext::process::is_forbidden_env`).
+- **Stdin:** `.stdin()` keeps it open for `write_stdin` until `close_stdin`.
+
+### Editing files and watching agent reviews (0.3)
+
+Declare `workspace:edit` and `agent:observe`. Both ask the user on first use.
+
+```rust
+let edit = WorkspaceEdit::new("Sort imports").file(
+    FileEdit::path("src/main.rs")
+        .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), "use a;\nuse b;\n")
+        .expected_version(version),
+);
+let id = apply_edit(&edit)?;
+start_observing()?;
+
+fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+    match event {
+        IoEvent::EditDone((id, Err(error))) => { /* error.to_string(): "the file changed: …" */ }
+        IoEvent::Agent(AgentEvent::Snapshot(reviews)) => { /* the open reviews */ }
+        IoEvent::Agent(AgentEvent::Opened(review)) => { /* review.file, review.hunks */ }
+        _ => {}
+    }
+    Ok(())
+}
+```
+
+An edit applies all its files or none, as one undo step per buffer, and nothing is saved.
+Protected paths such as `.git/` are refused. The agent feed is read-only.
+
+### Testing 0.3 features headless
+
+`Harness::load_package(dir)` loads the folder as Fyx installs it: the manifest's capabilities,
+domains and programs, and the assets. Nothing reaches the network or runs a program. The test
+plays the user and the outside world:
+
+```rust
+let mut harness = Harness::load_package(package)?;
+harness.mount("charts")?;
+harness.canvas_click("charts", chart, 100.0, 60.0)?; // fails outside the box
+assert!(harness.find_text("charts", "Wed: 42 commits").is_some());
+
+harness.set_broker(TestBroker::granted(Box::new(|request| {
+    Ok(FetchResponse { status: 200, headers: vec![], body: b"[]".to_vec(), url: request.url.clone() })
+})));
+harness.fake_program("git", |_request, _stdin| FakeRun::ok(" M src/main.rs\n"));
+harness.click("main", "Refresh")?;
+harness.deliver_io()?; // fetch-done, process output and exit, through handle_io
+```
+
+- **Without a broker:** every T2 capability is denied, as in a host where the user has not
+  allowed it.
+- **Images:** `image_failures()` lists the images Fyx would draw as alt text.
+- **Comparison with the host:** `ui_ext_wasm`'s `harness_conformance*` tests run the same
+  components in the host and the harness and compare every effect, so the harness cannot drift.

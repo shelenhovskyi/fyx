@@ -127,8 +127,114 @@ pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_MODAL,
     model::CAPABILITY_EDITOR_DECORATIONS,
     ui_ext::image::CAPABILITY_IMAGES,
+    ui_ext::canvas::CAPABILITY_CANVAS,
     model::CAPABILITY_NOTIFICATIONS,
 ];
+
+/// What a test broker answers for one request it lets through.
+pub type FetchResponder = Box<
+    dyn FnMut(
+        &ui_ext::network::FetchRequest,
+    )
+        -> std::result::Result<ui_ext::network::FetchResponse, ui_ext::network::FetchError>,
+>;
+
+/// What the editor answers an edit the user allowed: `Ok` applies it (all or nothing), or an
+/// error such as a conflict.
+pub type EditAnswer = Box<
+    dyn FnMut(&ui_ext::edit::WorkspaceEdit) -> std::result::Result<(), ui_ext::edit::EditError>,
+>;
+
+/// What a fake program does when it runs: it sees the request and everything written to its
+/// stdin, and returns its output and exit code.
+pub type FakeProgram = Box<dyn FnMut(&ui_ext::process::SpawnRequest, &[u8]) -> FakeRun>;
+
+/// The run of a fake program: its whole stdout and stderr, and its exit code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FakeRun {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// `None` as for a program ended by a signal.
+    pub code: Option<i32>,
+}
+
+impl FakeRun {
+    /// Prints `stdout` and exits with 0.
+    pub fn ok(stdout: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: Vec::new(),
+            code: Some(0),
+        }
+    }
+
+    /// Prints `stderr` and exits with `code`.
+    pub fn fail(code: i32, stderr: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+            code: Some(code),
+        }
+    }
+}
+
+/// A stand-in for the user and the network, for `network:fetch` and `process:spawn` tests (0.3);
+/// its state is the state of every T2 capability. Without one the
+/// harness grants no T2 capability, as the host without a broker: `fetch` returns `denied`.
+pub struct TestBroker {
+    /// The state at the import. `Ask` accepts the request and asks when it is delivered.
+    pub state: ui_ext::network::PermissionState,
+    /// How the user answers the prompt of an `Ask` state.
+    pub answer: ui_ext::network::PermissionState,
+    respond: FetchResponder,
+    prompts: usize,
+}
+
+impl TestBroker {
+    /// Granted already: `query` says `granted`, nothing prompts, and every request reaches
+    /// `respond`.
+    pub fn granted(respond: FetchResponder) -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Granted,
+            ..Self::asking(ui_ext::network::PermissionState::Granted, respond)
+        }
+    }
+
+    /// Not asked yet: the first delivered request prompts, and the user answers `answer`.
+    pub fn asking(answer: ui_ext::network::PermissionState, respond: FetchResponder) -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Ask,
+            answer,
+            respond,
+            prompts: 0,
+        }
+    }
+
+    /// Refused: `fetch` returns `denied` at the import.
+    pub fn denied() -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Denied,
+            answer: ui_ext::network::PermissionState::Denied,
+            respond: Box::new(|_| Err(ui_ext::network::FetchError::Denied)),
+            prompts: 0,
+        }
+    }
+
+    /// How many times the prompt was shown.
+    pub fn prompts(&self) -> usize {
+        self.prompts
+    }
+}
+
+impl std::fmt::Debug for TestBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestBroker")
+            .field("state", &self.state)
+            .field("answer", &self.answer)
+            .field("prompts", &self.prompts)
+            .finish_non_exhaustive()
+    }
+}
 
 /// A running progress as the renderer draws it (design.md M.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,6 +666,17 @@ impl Bindings {
                     ),
                 )
                 .map(|()| rows)
+            })
+            .and_then(|rows| {
+                // The host's row tree refuses canvases, as `ui_ext::v0_2::Tree::from_row` does.
+                match rows
+                    .iter()
+                    .flat_map(|row| &row.nodes)
+                    .find(|node| matches!(node.props, model::Props::Canvas(_)))
+                {
+                    Some(node) => Err(ui_ext::TreeError::CanvasInRow(node.id).to_string()),
+                    None => Ok(rows),
+                }
             }),
         })
     }
@@ -581,6 +698,20 @@ impl Bindings {
     }
 }
 
+impl Bindings {
+    /// `handle-io` (0.3 only).
+    fn handle_io(
+        &self,
+        store: &mut Store<State>,
+        event: &v0_3::bindings::fyx::ui::io::IoEvent,
+    ) -> wasmtime::Result<std::result::Result<(), String>> {
+        match self {
+            Self::V0_3(extension) => extension.call_handle_io(store, event),
+            Self::V0_1(_) | Self::V0_2(_) => Ok(Err("handle-io needs fyx:ui 0.3".into())),
+        }
+    }
+}
+
 /// A mounted surface or decoration: the tree in the 0.1 model, which `ui_ext::Tree` validates
 /// (the structure carries over exactly), and the full 0.2 props of every node.
 #[derive(Debug, Clone)]
@@ -596,20 +727,47 @@ struct Applied {
 }
 
 impl Mounted {
-    fn new(nodes: &[model::Node], limits: TreeLimits) -> Result<Self, ui_ext::TreeError> {
+    fn new(nodes: &[model::Node], limits: TreeLimits) -> Result<Self> {
         let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), limits)?;
-        Ok(Self {
+        let mounted = Self {
             tree,
             props: nodes
                 .iter()
                 .map(|node| (node.id, node.props.clone()))
                 .collect(),
-        })
+        };
+        mounted.check_canvas_count()?;
+        Ok(mounted)
     }
 
     /// Applies an update atomically, as the host's tree does. An `invalidate-rows` target must be
-    /// a list or table at that point of the update.
+    /// a list or table at that point of the update, and the surface keeps at most 16 canvases.
     fn apply(&mut self, update: &model::Update, limits: TreeLimits) -> Result<Applied> {
+        let before = self.clone();
+        let applied = self.apply_unchecked(update, limits);
+        let applied = applied.and_then(|applied| self.check_canvas_count().map(|()| applied));
+        if applied.is_err() {
+            *self = before;
+        }
+        applied
+    }
+
+    /// `ui_ext::canvas::MAX_CANVASES_PER_SURFACE`, which the host's tree enforces.
+    fn check_canvas_count(&self) -> Result<()> {
+        let count = self
+            .props
+            .values()
+            .filter(|props| matches!(props, model::Props::Canvas(_)))
+            .count();
+        anyhow::ensure!(
+            count <= ui_ext::canvas::MAX_CANVASES_PER_SURFACE,
+            "the surface would have {count} canvases, the cap is {}",
+            ui_ext::canvas::MAX_CANVASES_PER_SURFACE
+        );
+        Ok(())
+    }
+
+    fn apply_unchecked(&mut self, update: &model::Update, limits: TreeLimits) -> Result<Applied> {
         update.check_caps(limits)?;
         let mut applied = Applied::default();
         match update {
@@ -735,6 +893,22 @@ pub struct Harness {
     surfaces_v0_1: Vec<ui_ext::Surface>,
     mounted: HashMap<String, Mounted>,
     decorations: BTreeMap<String, model::DecorationLocation>,
+    /// The permission broker for the T2 capabilities (0.3); `None` grants nothing, as in the
+    /// host.
+    broker: Option<TestBroker>,
+    /// What `process:spawn` runs instead of real programs, by name.
+    fake_programs: HashMap<String, FakeProgram>,
+    /// `workspace:edit` (0.3): what the editor answers, and the edits it applied.
+    edit_answer: Option<EditAnswer>,
+    applied_edits: Vec<ui_ext::edit::WorkspaceEdit>,
+    /// `agent:observe` (0.3): the host's open reviews, whether the feed runs, the events queued
+    /// for it, and this extension's opaque ids.
+    agent_snapshot: Vec<ui_ext::observe::ReviewInfo>,
+    observing: bool,
+    agent_events: Vec<ui_ext::observe::AgentEvent>,
+    opaque_ids: ui_ext::observe::OpaqueIds,
+    /// `permission-changed` events for `deliver_io`: the answers of prompts `request` showed.
+    permission_events: Vec<ui_ext::network::IoEvent>,
     /// What the renderer shows of §M: open notifications and running progresses, by id.
     notifications: BTreeMap<u64, model::notifications::Notification>,
     progresses: BTreeMap<u64, Progress>,
@@ -861,6 +1035,15 @@ impl Harness {
             surfaces_v0_1: Vec::new(),
             mounted: HashMap::new(),
             decorations: BTreeMap::new(),
+            broker: None,
+            fake_programs: HashMap::new(),
+            edit_answer: None,
+            applied_edits: Vec::new(),
+            agent_snapshot: Vec::new(),
+            observing: false,
+            agent_events: Vec::new(),
+            opaque_ids: ui_ext::observe::OpaqueIds::default(),
+            permission_events: Vec::new(),
             notifications: BTreeMap::new(),
             progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
@@ -920,6 +1103,40 @@ impl Harness {
             .with_context(|| format!("reading {component_path:?}"))?;
         let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
             .with_context(|| format!("loading {dir:?}"))?;
+        if let Some(domains) = table
+            .get("network")
+            .and_then(toml::Value::as_table)
+            .and_then(|network| network.get("domains"))
+            .and_then(toml::Value::as_array)
+        {
+            let domains = domains
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>();
+            harness = harness
+                .with_network_domains(&domains)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(programs) = table.get("processes") {
+            let programs: Vec<ui_ext::process::ProcessSpec> = programs
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.processes]] in {manifest_path:?}"))?;
+            let env = table
+                .get("process")
+                .and_then(toml::Value::as_table)
+                .and_then(|process| process.get("env"))
+                .and_then(toml::Value::as_array)
+                .map(|env| {
+                    env.iter()
+                        .filter_map(toml::Value::as_str)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            harness = harness
+                .with_processes(programs, &env)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
         Ok(harness)
@@ -1034,6 +1251,391 @@ impl Harness {
         self.disabled.as_deref()
     }
 
+    /// The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them;
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn with_network_domains(mut self, domains: &[&str]) -> Result<Self> {
+        let domains = domains.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let list = ui_ext::network::DomainList::parse(&domains)
+            .map_err(|error| anyhow::anyhow!("[fyx_ui.network] domains: {error}"))?;
+        self.store.data_mut().api.set_network_domains(list);
+        Ok(self)
+    }
+
+    /// Installs the permission broker and network for `network:fetch`; see [`TestBroker`].
+    pub fn set_broker(&mut self, broker: TestBroker) {
+        self.store
+            .data_mut()
+            .api
+            .set_network_permission(broker.state);
+        self.broker = Some(broker);
+    }
+
+    pub fn broker(&self) -> Option<&TestBroker> {
+        self.broker.as_ref()
+    }
+
+    /// The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env`
+    /// declare them; [`Harness::load_package`] reads them from the manifest.
+    pub fn with_processes(
+        mut self,
+        programs: Vec<ui_ext::process::ProcessSpec>,
+        env: &[&str],
+    ) -> Result<Self> {
+        for name in env {
+            ui_ext::process::check_env_name(name)
+                .map_err(|error| anyhow::anyhow!("[fyx_ui.process] env: {error}"))?;
+        }
+        self.store
+            .data_mut()
+            .api
+            .set_process_policy(ui_ext::process::ProcessPolicy {
+                programs,
+                env: env.iter().map(ToString::to_string).collect(),
+            });
+        Ok(self)
+    }
+
+    /// Runs `program` for spawns of `name` instead of a real program. A declared program with
+    /// no fake ends `spawn-failed(not-found)`.
+    pub fn fake_program(
+        &mut self,
+        name: &str,
+        program: impl FnMut(&ui_ext::process::SpawnRequest, &[u8]) -> FakeRun + 'static,
+    ) {
+        self.fake_programs
+            .insert(name.to_string(), Box::new(program));
+    }
+
+    /// The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it
+    /// is trusted (an untrusted one is `denied`). Trusted by default.
+    pub fn set_worktree(&mut self, worktree: Option<bool>) {
+        self.store.data_mut().api.set_worktree(worktree);
+    }
+
+    /// How the editor answers `workspace:edit` edits the user allowed; without one they apply.
+    pub fn set_edit_answer(
+        &mut self,
+        answer: impl FnMut(
+            &ui_ext::edit::WorkspaceEdit,
+        ) -> std::result::Result<(), ui_ext::edit::EditError>
+        + 'static,
+    ) {
+        self.edit_answer = Some(Box::new(answer));
+    }
+
+    /// The edits the editor applied, oldest first.
+    pub fn applied_edits(&self) -> &[ui_ext::edit::WorkspaceEdit] {
+        &self.applied_edits
+    }
+
+    /// The host's open agent reviews, which `agent-observe.start` sends first as a snapshot
+    /// (with this extension's opaque ids, cut as the host cuts them). `None`: there are no agent
+    /// reviews here, so `start` is `unavailable`.
+    pub fn set_agent_reviews(&mut self, reviews: Option<Vec<ui_ext::observe::ReviewInfo>>) {
+        self.store
+            .data_mut()
+            .api
+            .set_agent_reviews_available(reviews.is_some());
+        self.agent_snapshot = reviews.unwrap_or_default();
+    }
+
+    /// Queues an event of the host's agent review, with the host's ids, for
+    /// [`Harness::deliver_io`]. Only a running feed delivers it; otherwise it is dropped.
+    pub fn agent_event(&mut self, event: ui_ext::observe::AgentEvent) {
+        if self.observing {
+            self.agent_events.push(event);
+        }
+    }
+
+    /// Whether the agent feed runs: started, allowed, and not stopped.
+    pub fn is_observing(&self) -> bool {
+        self.observing
+    }
+
+    /// Processes `spawn` accepted that have not finished, oldest first.
+    pub fn processes(&self) -> Vec<(u64, ui_ext::process::SpawnRequest)> {
+        self.store
+            .data()
+            .api
+            .processes()
+            .map(|(id, process)| (id, process.request.clone()))
+            .collect()
+    }
+
+    /// Requests `fetch` accepted that [`Harness::deliver_io`] has not delivered yet, oldest first.
+    pub fn pending_fetches(&self) -> Vec<(u64, ui_ext::network::FetchRequest)> {
+        self.store
+            .data()
+            .api
+            .queued_fetches()
+            .map(|(id, fetch)| (id, fetch.request.clone()))
+            .collect()
+    }
+
+    /// Delivers the outcome of every pending request through `handle-io`, oldest first, and
+    /// applies each call's effects. A cancelled one ends `cancelled`. Otherwise the broker
+    /// decides: an `Ask` state prompts once and takes the answer, a granted request gets the
+    /// responder's answer, and anything else ends `denied`. Returns each call's effects and the
+    /// extension's own result.
+    pub fn deliver_io(&mut self) -> Result<Vec<RawEffects<()>>> {
+        use ui_ext::network::{FetchError, IoEvent, PermissionState};
+        let mut delivered = Vec::new();
+        while let Some((id, fetch)) = self.store.data_mut().api.take_fetch() {
+            let result = if fetch.cancelled {
+                Err(FetchError::Cancelled)
+            } else {
+                match self.broker.as_mut() {
+                    Some(broker) => {
+                        if broker.state == PermissionState::Ask {
+                            broker.prompts += 1;
+                            broker.state = broker.answer;
+                            self.store
+                                .data_mut()
+                                .api
+                                .set_network_permission(broker.state);
+                        }
+                        if broker.state == PermissionState::Granted {
+                            (broker.respond)(&fetch.request)
+                        } else {
+                            Err(FetchError::Denied)
+                        }
+                    }
+                    None => Err(FetchError::Denied),
+                }
+            };
+            let Some(event) = v0_3::io_event(IoEvent::FetchDone(id, result)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        for event in std::mem::take(&mut self.permission_events) {
+            let Some(event) = v0_3::io_event(event) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        for event in self.run_edits() {
+            let Some(event) = v0_3::io_event(event) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        for event in std::mem::take(&mut self.agent_events) {
+            if !self.observing {
+                break;
+            }
+            let event = self.opaque_ids.event(event);
+            let Some(event) = v0_3::io_event(ui_ext::network::IoEvent::Agent(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        for event in self.run_processes() {
+            let Some(event) = v0_3::io_event(event) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        Ok(delivered)
+    }
+
+    /// The broker's answer for a T2 request being applied: an `Ask` state prompts once.
+    fn consent(&mut self) -> bool {
+        use ui_ext::network::PermissionState;
+        match self.broker.as_mut() {
+            Some(broker) => {
+                if broker.state == PermissionState::Ask {
+                    broker.prompts += 1;
+                    broker.state = broker.answer;
+                    self.store
+                        .data_mut()
+                        .api
+                        .set_network_permission(broker.state);
+                }
+                broker.state == PermissionState::Granted
+            }
+            None => false,
+        }
+    }
+
+    /// The outcome of every accepted edit, oldest first: refused, or checked with
+    /// `ui_ext::edit::check_targets` and then answered by the editor.
+    fn run_edits(&mut self) -> Vec<ui_ext::network::IoEvent> {
+        use ui_ext::edit::EditError;
+        let mut events = Vec::new();
+        while let Some((id, edit)) = self.store.data_mut().api.take_edit() {
+            let result = if !self.consent() {
+                Err(EditError::Denied)
+            } else {
+                ui_ext::edit::check_targets(&edit).and_then(|()| match self.edit_answer.as_mut() {
+                    Some(answer) => answer(&edit),
+                    None => Ok(()),
+                })
+            };
+            if result.is_ok() {
+                self.applied_edits.push(edit);
+            }
+            events.push(ui_ext::network::IoEvent::EditDone(id, result));
+        }
+        events
+    }
+
+    /// After a call: the prompts `permissions.request` asked for. The broker answers each; the
+    /// answer is a `permission-changed` for `deliver_io`. Without a broker nothing is asked.
+    fn apply_permission_requests(&mut self) {
+        use ui_ext::network::{IoEvent, PermissionState};
+        for capability in self.store.data_mut().api.take_permission_requests() {
+            let Some(broker) = self.broker.as_mut() else {
+                continue;
+            };
+            if broker.state != PermissionState::Ask {
+                continue;
+            }
+            broker.prompts += 1;
+            broker.state = broker.answer;
+            let state = broker.state;
+            self.store.data_mut().api.set_network_permission(state);
+            self.permission_events
+                .push(IoEvent::PermissionChanged(capability.to_string(), state));
+        }
+    }
+
+    /// After a call: `agent-observe.start` asks for consent and sends the snapshot first;
+    /// `stop` ends the feed and drops what was queued for it.
+    fn apply_observe(&mut self) {
+        match self.store.data_mut().api.take_observe_op() {
+            Some(true) if !self.observing => {
+                if self.consent() {
+                    self.observing = true;
+                    self.agent_events.insert(
+                        0,
+                        ui_ext::observe::AgentEvent::Snapshot(self.agent_snapshot.clone()),
+                    );
+                }
+            }
+            Some(false) => {
+                self.observing = false;
+                self.agent_events.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// The outcomes of the processes that can move, oldest first: a start (the prompt of an
+    /// `Ask` broker, `spawn-failed` for a refusal or an unknown program), the run of a fake
+    /// program once its stdin is closed (its output in chunks, then `process-exited`), or a
+    /// kill. A process whose stdin is open waits for `close-stdin`.
+    fn run_processes(&mut self) -> Vec<ui_ext::network::IoEvent> {
+        use ui_ext::network::{IoEvent, PermissionState};
+        use ui_ext::process::{OutputStream, ProcessExit, ProcessOutput, SpawnError};
+        let ids = self
+            .store
+            .data()
+            .api
+            .processes()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for id in ids {
+            let Some(process) = self.store.data_mut().api.process_mut(id).map(|p| p.clone()) else {
+                continue;
+            };
+            if process.killed {
+                self.store.data_mut().api.process_finished(id);
+                events.push(IoEvent::ProcessExited(ProcessExit {
+                    process: id,
+                    code: None,
+                    killed: true,
+                }));
+                continue;
+            }
+            if !process.started {
+                let failure = if process.not_declared {
+                    Some(SpawnError::NotFound(process.request.program.clone()))
+                } else {
+                    let state = match self.broker.as_mut() {
+                        Some(broker) => {
+                            if broker.state == PermissionState::Ask {
+                                broker.prompts += 1;
+                                broker.state = broker.answer;
+                                self.store
+                                    .data_mut()
+                                    .api
+                                    .set_network_permission(broker.state);
+                            }
+                            broker.state
+                        }
+                        None => PermissionState::Unavailable,
+                    };
+                    if state != PermissionState::Granted {
+                        Some(SpawnError::Denied)
+                    } else if !self.fake_programs.contains_key(&process.request.program) {
+                        Some(SpawnError::NotFound(format!(
+                            "{} (no fake program in the harness)",
+                            process.request.program
+                        )))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(failure) = failure {
+                    self.store.data_mut().api.process_finished(id);
+                    events.push(IoEvent::SpawnFailed(id, failure));
+                    continue;
+                }
+                if let Some(process) = self.store.data_mut().api.process_mut(id) {
+                    process.started = true;
+                }
+            }
+            if process.stdin_open {
+                continue;
+            }
+            let Some(program) = self.fake_programs.get_mut(&process.request.program) else {
+                continue;
+            };
+            let run = program(&process.request, &process.stdin);
+            self.store.data_mut().api.process_finished(id);
+            for (stream, bytes) in [
+                (OutputStream::Stdout, &run.stdout),
+                (OutputStream::Stderr, &run.stderr),
+            ] {
+                for chunk in bytes.chunks(ui_ext::process::MAX_OUTPUT_CHUNK_BYTES) {
+                    events.push(IoEvent::ProcessOutput(ProcessOutput {
+                        process: id,
+                        stream,
+                        data: chunk.to_vec(),
+                    }));
+                }
+            }
+            events.push(IoEvent::ProcessExited(ProcessExit {
+                process: id,
+                code: run.code,
+                killed: false,
+            }));
+        }
+        events
+    }
+
     /// The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or
     /// acted on. The harness has no clock, so `auto_dismiss` ones stay until
     /// [`Harness::close_notification`].
@@ -1102,6 +1704,48 @@ impl Harness {
         );
         let owner = progress.options.owner.clone();
         self.event(&owner, model::UiEvent::ProgressCancelRequested(id))
+    }
+
+    /// The draw list of canvas node `id` on a mounted surface (0.3), for assertions.
+    pub fn canvas(&self, surface_id: &str, id: NodeId) -> Option<&ui_ext::canvas::CanvasProps> {
+        match self.props(surface_id, id)? {
+            model::Props::Canvas(canvas) => Some(canvas),
+            _ => None,
+        }
+    }
+
+    /// Clicks canvas `id` at `(x, y)` in canvas coordinates, as the renderer does: it sends
+    /// `canvas-click`, a gesture like a button click. It fails without a call when the node is
+    /// not a canvas, the canvas is not `clickable`, or the point lies outside its box, since the
+    /// renderer never sends those.
+    pub fn canvas_click(
+        &mut self,
+        surface_id: &str,
+        id: NodeId,
+        x: f32,
+        y: f32,
+    ) -> Result<Outcome> {
+        let canvas = self
+            .canvas(surface_id, id)
+            .with_context(|| format!("node {id} on {surface_id:?} is not a mounted canvas"))?;
+        anyhow::ensure!(
+            canvas.clickable,
+            "canvas {id} on {surface_id:?} is not clickable"
+        );
+        anyhow::ensure!(
+            (0.0..=canvas.width as f32).contains(&x) && (0.0..=canvas.height as f32).contains(&y),
+            "({x}, {y}) is outside canvas {id}, which is {} × {}",
+            canvas.width,
+            canvas.height
+        );
+        self.event(
+            surface_id,
+            model::UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                canvas: id,
+                x: x.into(),
+                y: y.into(),
+            }),
+        )
     }
 
     /// Mounts a live surface or decoration (again, if it was mounted) and returns its validated
@@ -1567,9 +2211,12 @@ impl Harness {
         match result {
             Ok(value) => {
                 self.record(&effects);
+                self.apply_observe();
+                self.apply_permission_requests();
                 Ok((value, effects))
             }
             Err(error) => {
+                self.store.data_mut().api.abort_call();
                 let error = anyhow::Error::from(error);
                 self.disabled = Some(format!("{error:#}"));
                 Err(error.context("the call trapped or ran over its time budget"))

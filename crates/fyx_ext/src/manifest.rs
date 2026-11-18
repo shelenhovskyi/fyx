@@ -28,6 +28,14 @@ pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 1, 0);
 pub const MAX_NETWORK_DOMAINS: usize = 64;
 
 const NETWORK_FETCH: &str = "network:fetch";
+const PROCESS_SPAWN: &str = "process:spawn";
+/// The T2 capabilities the host refuses at load for an `api_version` before they arrive.
+const T2_CAPABILITIES: &[&str] = &[
+    NETWORK_FETCH,
+    PROCESS_SPAWN,
+    "workspace:edit",
+    "agent:observe",
+];
 
 /// Capabilities a manifest may declare (platform spec, decision 21). Ones the current world does
 /// not provide yet are accepted with a warning, so a manifest can be written ahead of the host.
@@ -51,7 +59,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
         NETWORK_FETCH,
         CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
-    ("ui:canvas", CapabilityStatus::Planned(NOT_BUILT)),
+    ("ui:canvas", CapabilityStatus::Since(Version::new(0, 3, 0))),
     ("ui:picker", CapabilityStatus::Planned(NOT_BUILT)),
     ("ui:code-lens", CapabilityStatus::Planned(NOT_BUILT)),
     ("ui:hover", CapabilityStatus::Planned(NOT_BUILT)),
@@ -71,15 +79,15 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     ),
     (
         "workspace:edit",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
     (
-        "process:spawn",
-        CapabilityStatus::Planned("a later release"),
+        PROCESS_SPAWN,
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
     (
         "agent:observe",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
 ];
 
@@ -126,6 +134,20 @@ pub struct FyxUiTable {
     /// 0.3, with `network:fetch`: the hosts the extension may fetch from.
     #[serde(default)]
     pub network: Option<NetworkTable>,
+    /// 0.3, with `process:spawn`: the programs the extension may run.
+    #[serde(default)]
+    pub processes: Vec<ui_ext::process::ProcessSpec>,
+    /// 0.3, with `process:spawn`: the environment names passed through.
+    #[serde(default)]
+    pub process: Option<ProcessTable>,
+}
+
+/// `[fyx_ui.process]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessTable {
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// `[fyx_ui.network]`.
@@ -259,7 +281,9 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
             )),
             Some((_, CapabilityStatus::Since(since))) => match &api_version {
                 // The host refuses a T2 capability it cannot grant at that version.
-                Some(version) if version < since && capability == NETWORK_FETCH => {
+                Some(version)
+                    if version < since && T2_CAPABILITIES.contains(&capability.as_str()) =>
+                {
                     report.error(format!(
                         "capability {capability:?} needs [fyx_ui].api_version {since} or newer"
                     ))
@@ -273,6 +297,7 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
         }
     }
     check_network(&table, report);
+    check_processes(&table, report);
 
     Ok(Manifest {
         dir: dir.to_path_buf(),
@@ -326,6 +351,65 @@ fn check_network(table: &FyxUiTable, report: &mut Report) {
             report.error(format!(
                 "network domain {domain:?}: localhost needs a port, such as localhost:8080"
             ));
+        }
+    }
+}
+
+/// `[[fyx_ui.processes]]` and `[fyx_ui.process] env` against `process:spawn`, with the host's
+/// rules for environment names. The host resolves the programs when it loads the extension.
+fn check_processes(table: &FyxUiTable, report: &mut Report) {
+    let declares = table.capabilities.iter().any(|name| name == PROCESS_SPAWN);
+    if declares && table.processes.is_empty() {
+        report.error(format!(
+            "capability {PROCESS_SPAWN:?} needs [[fyx_ui.processes]], the programs it may run"
+        ));
+    }
+    if !declares && (!table.processes.is_empty() || table.process.is_some()) {
+        report.error(format!(
+            "[[fyx_ui.processes]] and [fyx_ui.process] need {PROCESS_SPAWN:?} in \
+             [fyx_ui].capabilities"
+        ));
+    }
+    for (index, spec) in table.processes.iter().enumerate() {
+        if spec.name.trim().is_empty() || spec.name.contains(['/', '\\']) {
+            report.error(format!(
+                "[[fyx_ui.processes]] {index}: name {:?} must be a program name, not a path \
+                 (use `path` for a program in the worktree)",
+                spec.name
+            ));
+        }
+        if spec.args.is_empty() {
+            report.warning(format!(
+                "[[fyx_ui.processes]] {:?} has no `args`, so it may only run with no arguments; \
+                 `args = [\"**\"]` allows any",
+                spec.name
+            ));
+        }
+        if table.processes[..index]
+            .iter()
+            .any(|other| other.name == spec.name)
+        {
+            report.error(format!(
+                "[[fyx_ui.processes]] declares {:?} twice",
+                spec.name
+            ));
+        }
+        if spec
+            .args
+            .iter()
+            .rev()
+            .skip(1)
+            .any(|pattern| pattern == "**")
+        {
+            report.error(format!(
+                "[[fyx_ui.processes]] {:?}: `**` may only be the last argument pattern",
+                spec.name
+            ));
+        }
+    }
+    for name in table.process.iter().flat_map(|process| &process.env) {
+        if let Err(error) = ui_ext::process::check_env_name(name) {
+            report.error(format!("[fyx_ui.process] env: {error}"));
         }
     }
 }
@@ -520,6 +604,53 @@ capabilities = ["ui:panel"]
             report.warnings[0].contains("needs fyx:ui 0.2.0"),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn processes_need_their_table_and_safe_env_names() {
+        let spawn = VALID
+            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+            .replace("[\"ui:panel\"]", "[\"ui:panel\", \"process:spawn\"]");
+        let (_, report) = check(&spawn);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("needs [[fyx_ui.processes]]")),
+            "{report:?}"
+        );
+        let declared = format!(
+            "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"status\", \"**\"]\n\n[fyx_ui.process]\nenv = [\"NO_COLOR\"]\n"
+        );
+        let (_, report) = check(&declared);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings.iter().all(|w| !w.contains("no `args`")),
+            "{report:?}"
+        );
+
+        // Without `args` a program runs with no arguments only (integration-5 S6).
+        let bare = format!("{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\n");
+        let (_, report) = check(&bare);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings.iter().any(|w| w.contains("no `args`")),
+            "{report:?}"
+        );
+        // git's directories and PATH are never passed.
+        for name in ["GIT_DIR", "PATH", "CARGO_HOME"] {
+            let env = format!(
+                "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"**\"]\n\n[fyx_ui.process]\nenv = [\"{name}\"]\n"
+            );
+            let (_, report) = check(&env);
+            assert_eq!(report.errors.len(), 1, "{name}: {report:?}");
+        }
+
+        let bad = format!(
+            "{spawn}\n[[fyx_ui.processes]]\nname = \"bin/tool\"\nargs = [\"**\", \"x\"]\n\n[fyx_ui.process]\nenv = [\"LD_PRELOAD\"]\n"
+        );
+        let (_, report) = check(&bad);
+        assert_eq!(report.errors.len(), 3, "{report:?}");
     }
 
     #[test]
