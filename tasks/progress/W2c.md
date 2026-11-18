@@ -439,3 +439,11 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 ## R8 (integration-5): age gate from first sight
 
 The 24 h gate counts from the later of `published_at` and when this client first saw the release (`FirstSeen`, kept in the snapshot state, carried across snapshots). The first index a client ever accepts records `published_at`. A backdated release from a leaked release key still waits 24 h.
+
+## Owner decisions 2026-11-19 (A3, A5, Q1, Q2; Q5/Q8/Q10 checked)
+
+- A3 (a8c2fee176): the smaller 0.3. The staged WIT has no documents, language, virtual-documents, picker or requests interface, no decoration extras or document targets, and no provider, command or picker exports. position, text-range and file-ref are in types; workspace-edit edits files only. 0.3 links 0.2's decorations. The 0.3 manifest refuses the 0.4 capabilities ("planned for a later version"), and commands and picker_sources are unknown fields.
+- A5 (8b1c611f44): host-error-code gains untrusted-worktree and no-worktree; edit-error gains untrusted-worktree and other; spawn-error gains other; snapshot is review-snapshot {reviews, older-dropped}, and truncated means hunks only.
+- Q1 (17acb5ed05): Release::verify_package refuses a Zed extension.wasm (Error::PackageRefused). W3 owns the local-install warning.
+- Q2 (eac5325c40): ui_ext::process::RUNS_ANY_CODE, runs_any_code and RUNS_ANY_CODE_PROMPT. Not done: registry review needs args patterns or a written reason. The template refuses T2 today, and a release lists process names only, without args, so this waits until T2 opens in the registry.
+- Q5: apply-edit needs no gesture (only permissions.request takes the activation); showing edits is W3's. Q8: cut_review keeps whole hunks up to 256 KiB for worktree files and nothing outside them. Q10: the prompt is W3's UI; the host side needs no change.
