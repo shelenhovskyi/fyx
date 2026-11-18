@@ -56,9 +56,12 @@ mod bindings {
 
 use bindings::fyx::ui::{host as wit_host, types as wit};
 
+mod conversions;
 mod dispatch;
 mod effects;
 mod fyx_ui_v0_2;
+mod fyx_ui_v0_3;
+pub mod images;
 pub mod ticks;
 
 pub use effects::{
@@ -117,7 +120,7 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 }
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
-pub const MAX_VERSION: Version = Version::new(0, 2, 0);
+pub const MAX_VERSION: Version = Version::new(0, 3, 0);
 /// The newest frozen version. Newer ones are staged: they load only where
 /// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). The
 /// commit that declares 0.2 frozen sets this to [`MAX_VERSION`].
@@ -211,11 +214,12 @@ pub fn staged_api_allowed_by_default() -> bool {
 }
 
 /// Every capability a surface or decoration can need, for a load without a manifest.
-const ALL_UI_CAPABILITIES: [&str; 4] = [
+const ALL_UI_CAPABILITIES: [&str; 5] = [
     CAPABILITY_PANEL,
     CAPABILITY_STATUS_BAR,
     CAPABILITY_MODAL,
     CAPABILITY_EDITOR_DECORATIONS,
+    ui_ext::image::CAPABILITY_IMAGES,
 ];
 
 /// Reads the [`API_VERSION_SECTION`], if the component has one.
@@ -309,7 +313,7 @@ impl UiManifest {
         }
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
-            "extension {id} targets fyx:ui {}, this build supports 0.1.0 and 0.2.0",
+            "extension {id} targets fyx:ui {}, this build supports 0.1.0, 0.2.0 and 0.3.0 (staged)",
             manifest.api_version,
         );
         anyhow::ensure!(
@@ -573,6 +577,9 @@ struct UiRuntime {
     /// One linker per world, so each version's imports are exactly what its world declares.
     linker: Linker<UiState>,
     linker_v0_2: Linker<UiState>,
+    /// Only what this build implements of the staged 0.3 world; instantiation adds traps for the
+    /// rest.
+    linker_v0_3: Linker<UiState>,
 }
 
 fn ui_runtime() -> Result<&'static UiRuntime> {
@@ -672,10 +679,14 @@ fn build_ui_runtime() -> Result<UiRuntime> {
     let mut linker_v0_2 = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_2)?;
     fyx_ui_v0_2::UiExtension::add_to_linker::<_, UiState>(&mut linker_v0_2, |state| state)?;
+    let mut linker_v0_3 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_3)?;
+    fyx_ui_v0_3::add_to_linker(&mut linker_v0_3)?;
     Ok(UiRuntime {
         engine,
         linker,
         linker_v0_2,
+        linker_v0_3,
     })
 }
 
@@ -928,7 +939,7 @@ impl UiExtension {
                 let ui_api_version = known_api_version(&api_version).with_context(|| {
                     format!(
                         "extension {extension_id} targets fyx:ui {api_version}, this build \
-                         supports 0.1.0 and 0.2.0"
+                         supports 0.1.0, 0.2.0 and 0.3.0 (staged)"
                     )
                 })?;
                 anyhow::ensure!(
@@ -1355,3 +1366,5 @@ pub mod test_support;
 mod tests;
 #[cfg(test)]
 mod tests_v0_2;
+#[cfg(test)]
+mod tests_v0_3;

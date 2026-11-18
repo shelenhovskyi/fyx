@@ -1,0 +1,16 @@
+# Guest fixture for the fyx:ui 0.3 host tests: images, image nodes and the not-yet-built 0.3 interfaces.
+# Built from the staged 0.3 WIT with wit-bindgen directly.
+# A member of the fixture workspace in `crates/ui_ext_wasm/fixtures`.
+[package]
+name = "fyx_ui_test_probe_v0_3"
+version = "0.3.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/probe_v0_3.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"

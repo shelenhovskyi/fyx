@@ -42,6 +42,8 @@ pub const T0_CAPABILITIES: &[&str] = &[
     "ui:modal",
     "ui:notifications",
     "ui:editor-decorations",
+    "ui:images",
+    "ui:canvas",
     "ui:picker",
     "ui:code-lens",
     "ui:hover",
