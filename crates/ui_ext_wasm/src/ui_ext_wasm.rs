@@ -214,12 +214,13 @@ pub fn staged_api_allowed_by_default() -> bool {
 }
 
 /// Every capability a surface or decoration can need, for a load without a manifest.
-const ALL_UI_CAPABILITIES: [&str; 5] = [
+const ALL_UI_CAPABILITIES: [&str; 6] = [
     CAPABILITY_PANEL,
     CAPABILITY_STATUS_BAR,
     CAPABILITY_MODAL,
     CAPABILITY_EDITOR_DECORATIONS,
     ui_ext::image::CAPABILITY_IMAGES,
+    ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
 ];
 
 /// Reads the [`API_VERSION_SECTION`], if the component has one.

@@ -16,7 +16,10 @@ pub(crate) mod bindings {
 }
 
 pub(crate) use bindings::UiExtension;
-use bindings::fyx::ui::{decorations as wit_decorations, host as wit_host, types as wit};
+use bindings::fyx::ui::{
+    decorations as wit_decorations, host as wit_host, notifications as wit_notifications,
+    types as wit,
+};
 
 impl wit::Host for State {}
 
@@ -86,6 +89,48 @@ impl wit_host::Host for State {
         };
         self.logs.push((level, message));
         Ok(())
+    }
+}
+
+/// §M is not in the harness yet (W4 adds the caps and the events): every call is refused, so an
+/// extension that uses notifications still loads and runs in tests.
+impl wit_notifications::Host for State {
+    fn notify(
+        &mut self,
+        _: wit_notifications::Notification,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        Ok(Err(notifications_not_in_harness()))
+    }
+
+    fn dismiss_notification(&mut self, _: u64) -> wasmtime::Result<()> {
+        Ok(())
+    }
+
+    fn progress_start(
+        &mut self,
+        _: wit_notifications::ProgressOptions,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        Ok(Err(notifications_not_in_harness()))
+    }
+
+    fn progress_update(
+        &mut self,
+        _: u64,
+        _: wit_notifications::ProgressValue,
+        _: Option<String>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(Err(notifications_not_in_harness()))
+    }
+
+    fn progress_end(&mut self, _: u64) -> wasmtime::Result<()> {
+        Ok(())
+    }
+}
+
+fn notifications_not_in_harness() -> wit_host::HostError {
+    wit_host::HostError {
+        code: wit_host::HostErrorCode::NotPermitted,
+        message: "the test harness does not run notifications and progress yet".into(),
     }
 }
 
@@ -356,6 +401,25 @@ impl From<model::UiEvent> for wit::UiEvent {
                 model::DismissReason::Replaced => wit::DismissReason::Replaced,
                 model::DismissReason::WindowClosed => wit::DismissReason::WindowClosed,
             }),
+            model::UiEvent::NotificationAction(event) => {
+                Self::NotificationAction(wit::NotificationActionEvent {
+                    notification: event.notification,
+                    action: event.action,
+                })
+            }
+            model::UiEvent::NotificationClosed(id, reason) => Self::NotificationClosed((
+                id,
+                match reason {
+                    model::NotificationCloseReason::User => wit::NotificationCloseReason::User,
+                    model::NotificationCloseReason::Expired => {
+                        wit::NotificationCloseReason::Expired
+                    }
+                    model::NotificationCloseReason::WindowClosed => {
+                        wit::NotificationCloseReason::WindowClosed
+                    }
+                },
+            )),
+            model::UiEvent::ProgressCancelRequested(id) => Self::ProgressCancelRequested(id),
         }
     }
 }

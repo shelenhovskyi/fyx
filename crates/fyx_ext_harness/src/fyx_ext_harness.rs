@@ -474,7 +474,10 @@ impl Mounted {
             }
             model::UiEvent::Click(_)
             | model::UiEvent::RowClick(..)
-            | model::UiEvent::Dismissed(_) => {}
+            | model::UiEvent::Dismissed(_)
+            | model::UiEvent::NotificationAction(_)
+            | model::UiEvent::NotificationClosed(..)
+            | model::UiEvent::ProgressCancelRequested(_) => {}
         }
     }
 

@@ -906,7 +906,12 @@ impl SurfaceTree {
                     list.selected = Some(*index);
                 }
             }
-            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => {}
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(_)
+            | UiEvent::ProgressCancelRequested(_) => {}
         }
     }
 

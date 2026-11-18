@@ -158,7 +158,7 @@ async fn test_v0_2_probe_loads_as_v0_2(cx: &mut TestAppContext) {
     assert_eq!(extension.ui_api_version(), ApiVersion::V0_2_0);
     assert_eq!(
         extension.capabilities().len(),
-        5,
+        6,
         "no manifest: every capability"
     );
     assert_eq!(extension.surfaces_v0_2(), &[panel(SURFACE, Icon::Box)]);
@@ -988,4 +988,275 @@ fn test_budget_ignores_time_spent_waiting_for_a_worker() {
         format!("{error:#}").contains("blocked in a host call"),
         "{error:#}"
     );
+}
+
+/// §M (design.md M.8, host): notifications and progress.
+mod notifications {
+    use super::*;
+    use ui_ext::v0_2::{
+        NotificationActionEvent, NotificationCloseReason, ProgressLocation, ProgressOptions,
+        ProgressValue,
+    };
+
+    #[gpui::test]
+    async fn test_needs_the_capability_and_a_live_owner(cx: &mut TestAppContext) {
+        let extension = load_with(
+            LoadOptions {
+                capabilities: Some(vec![CAPABILITY_PANEL.into()]),
+                allow_staged: Some(true),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let (results, effects) =
+            run(&extension, "notify probe info Hi; pstart probe status Job").await;
+        assert_eq!(results, ["not-permitted", "not-permitted"]);
+        assert!(effects.is_empty());
+
+        let extension = load(cx).await;
+        let (results, _) = run(&extension, "notify nope info Hi; pstart nope status Job").await;
+        assert_eq!(results, ["unknown-surface", "unknown-surface"]);
+    }
+
+    #[gpui::test]
+    async fn test_text_rules(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, effects) = run(
+            &extension,
+            r"notify probe info a\nb; notify probe info Fyx{rlo}gnp; notify probe info {long};
+              notify probe info Hi a=A b=B c=C; notify probe info Hi a=A a=B;
+              notify probe info Hi Bad=B; notify probe info Hi a={long}",
+        )
+        .await;
+        assert_eq!(results, ["invalid-argument"; 7]);
+        assert!(effects.is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_effects_and_ids(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, effects) = run(
+            &extension,
+            "notify probe warning Build_done open=Open stay; pstart probe status Indexing cancel; \
+             pupdate 1 40 Step_2; pupdate 1 spin; pend 1; pend 1; dismiss 1; dismiss 1",
+        )
+        .await;
+        assert_eq!(
+            results,
+            ["1", "1", "ok", "ok", "done", "done", "done", "done"]
+        );
+        assert_eq!(
+            effects,
+            [
+                HostEffect::Notify {
+                    id: 1,
+                    notification: ui_ext::v0_2::Notification {
+                        owner: SURFACE.into(),
+                        level: ui_ext::v0_2::NotificationLevel::Warning,
+                        title: "Build done".into(),
+                        body: None,
+                        actions: vec![ui_ext::v0_2::NotificationAction {
+                            id: "open".into(),
+                            label: "Open".into(),
+                        }],
+                        auto_dismiss: false,
+                    },
+                },
+                HostEffect::ProgressStart {
+                    id: 1,
+                    options: ProgressOptions {
+                        owner: SURFACE.into(),
+                        title: "Indexing".into(),
+                        location: ProgressLocation::StatusBar,
+                        cancellable: true,
+                    },
+                },
+                HostEffect::ProgressUpdate {
+                    id: 1,
+                    value: ProgressValue::Percent(40),
+                    message: Some("Step 2".into()),
+                },
+                HostEffect::ProgressUpdate {
+                    id: 1,
+                    value: ProgressValue::Indeterminate,
+                    message: None,
+                },
+                HostEffect::ProgressEnd { id: 1 },
+                HostEffect::DismissNotification { id: 1 },
+            ]
+        );
+        // Ids are never reused.
+        let (results, _) = run(
+            &extension,
+            "notify probe info Again; pstart probe status Again",
+        )
+        .await;
+        assert_eq!(results, ["2", "2"]);
+    }
+
+    #[gpui::test]
+    async fn test_notification_caps(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        // 3 open at most; a 4th is refused, and the host closes nothing to make room.
+        let (results, _) = run(
+            &extension,
+            "notify probe info A; notify probe info B; notify probe info C; notify probe info D",
+        )
+        .await;
+        assert_eq!(results, ["1", "2", "3", "limit-exceeded"]);
+        let (results, _) = run(
+            &extension,
+            "dismiss 1; dismiss 2; dismiss 3; notify probe info E; dismiss 4",
+        )
+        .await;
+        assert_eq!(results, ["done", "done", "done", "4", "done"]);
+        // 5 accepted per rolling minute (A, B, C, E, F): the 6th is refused.
+        let (results, _) = run(
+            &extension,
+            "notify probe info F; dismiss 5; notify probe info G",
+        )
+        .await;
+        assert_eq!(results, ["5", "done", "limit-exceeded"]);
+
+        // At most 4 notify effects per call: the 5th is refused although the minute has room,
+        // and the next call may make it.
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "notify probe info A; dismiss 1; notify probe info B; dismiss 2; notify probe info C; \
+             dismiss 3; notify probe info D; dismiss 4; notify probe info E",
+        )
+        .await;
+        assert_eq!(
+            results,
+            [
+                "1",
+                "done",
+                "2",
+                "done",
+                "3",
+                "done",
+                "4",
+                "done",
+                "limit-exceeded"
+            ]
+        );
+        let (results, _) = run(&extension, "notify probe info F").await;
+        assert_eq!(results, ["5"]);
+    }
+
+    #[gpui::test]
+    async fn test_progress_caps_and_owner_rules(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "pstart boot panel Job; pstart probe panel Job; pupdate 1 101; pupdate 9 10; \
+             pstart probe status A; pstart probe status B; pstart probe status C; \
+             pstart probe status D",
+        )
+        .await;
+        assert_eq!(
+            results,
+            [
+                "invalid-argument",
+                "1",
+                "invalid-argument",
+                "invalid-argument",
+                "2",
+                "3",
+                "4",
+                "limit-exceeded"
+            ]
+        );
+        let (results, effects) = run(&extension, "repeat 70 pupdate 1 50").await;
+        assert_eq!(results, ["ok*64,limit-exceeded*6"]);
+        assert_eq!(effects.len(), 64);
+    }
+
+    #[gpui::test]
+    async fn test_events_free_slots_and_actions_are_gestures(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "add modal picker; notify probe info A; notify probe info B; notify probe info C",
+        )
+        .await;
+        assert_eq!(results, ["ok", "1", "2", "3"]);
+
+        // An action click closes the notification, and it is a gesture.
+        let (results, effects) = run_on(
+            &extension,
+            SURFACE,
+            UiEvent::NotificationAction(NotificationActionEvent {
+                notification: 1,
+                action: "open".into(),
+            }),
+            "show picker; notify probe info D",
+        )
+        .await;
+        assert_eq!(results, ["ok", "4"]);
+        assert_eq!(
+            effects[0],
+            HostEffect::ShowSurface {
+                surface_id: "picker".into()
+            }
+        );
+
+        // A closed notification frees its slot; closing and cancelling are not gestures.
+        let (results, _) = run_on(
+            &extension,
+            SURFACE,
+            UiEvent::NotificationClosed(2, NotificationCloseReason::Expired),
+            "hide picker; show picker; notify probe info E",
+        )
+        .await;
+        assert_eq!(results, ["ok", "not-permitted", "5"]);
+        let (results, _) = run_on(
+            &extension,
+            SURFACE,
+            UiEvent::ProgressCancelRequested(1),
+            "show picker",
+        )
+        .await;
+        assert_eq!(results, ["not-permitted"]);
+    }
+
+    #[gpui::test]
+    async fn test_removing_the_owner_closes_and_ends(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "add panel extra; notify extra info A; notify extra info B; notify extra info C; \
+             pstart extra panel P; pstart extra status Q; pstart extra status R; \
+             pstart extra status S",
+        )
+        .await;
+        assert_eq!(results, ["ok", "1", "2", "3", "1", "2", "3", "4"]);
+        let (results, effects) = run(
+            &extension,
+            "remove extra; notify probe info D; pstart probe status T",
+        )
+        .await;
+        assert_eq!(results, ["ok", "4", "5"]);
+        // No dismiss or end effects: the renderer closes them with the surface.
+        assert!(matches!(effects[0], HostEffect::RemoveSurface { .. }));
+        assert_eq!(effects.len(), 3);
+    }
+
+    /// A trap after `notify` shows nothing: the effect list is dropped with the call (A).
+    #[gpui::test]
+    async fn test_a_trap_drops_the_notification(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        set_script(&extension, "notify probe info Hi; spin").await;
+        let error = extension
+            .handle_event_v0_2(SURFACE, UiEvent::InputChanged(RUN, "x".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_none(),
+            "{error:#}"
+        );
+    }
 }

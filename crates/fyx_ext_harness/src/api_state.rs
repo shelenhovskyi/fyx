@@ -151,7 +151,12 @@ impl ApiState {
             model::UiEvent::Dismissed(_) => {
                 self.shown_modals.remove(surface_id);
             }
-            model::UiEvent::InputChanged(..) | model::UiEvent::RowSelected(..) => {}
+            // §M: a clicked notification action is a gesture, as in the host.
+            model::UiEvent::NotificationAction(_) => self.activation = Activation::DuringCall,
+            model::UiEvent::InputChanged(..)
+            | model::UiEvent::RowSelected(..)
+            | model::UiEvent::NotificationClosed(..)
+            | model::UiEvent::ProgressCancelRequested(_) => {}
         }
     }
 
