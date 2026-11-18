@@ -774,15 +774,28 @@ mod harness_conformance {
         assert_eq!(fyx_ext_harness::EPOCH_INTERVAL, UI_EPOCH_INTERVAL);
         assert_eq!(fyx_ext_harness::API_VERSION_SECTION, API_VERSION_SECTION);
         assert_eq!(fyx_ext_harness::MEMORY_LIMIT, UI_MEMORY_LIMIT);
-        assert_eq!(fyx_ext_harness::TABLE_ELEMENTS_LIMIT, UI_TABLE_ELEMENTS_LIMIT);
+        assert_eq!(
+            fyx_ext_harness::TABLE_ELEMENTS_LIMIT,
+            UI_TABLE_ELEMENTS_LIMIT
+        );
         assert_eq!(fyx_ext_harness::INSTANCES_LIMIT, UI_INSTANCES_LIMIT);
         assert_eq!(fyx_ext_harness::TABLES_LIMIT, UI_TABLES_LIMIT);
         assert_eq!(fyx_ext_harness::MEMORIES_LIMIT, UI_MEMORIES_LIMIT);
-        // The harness runs 0.2 ahead of this host (plan 2.4). It must run every version the host
-        // runs; once the host runs 0.2 (plan 2.2), the two ranges are equal again.
+        assert_eq!(
+            fyx_ext_harness::MAX_PUSHED_ITEMS_PER_CALL_V0_2,
+            MAX_PUSHED_ITEMS_PER_CALL_V0_2
+        );
+        assert_eq!(fyx_ext_harness::MIN_TICK_DELAY, MIN_TICK_DELAY);
+        assert_eq!(fyx_ext_harness::MAX_TICK_DELAY, MAX_TICK_DELAY);
+        assert_eq!(fyx_ext_harness::ACTIVATION_WINDOW, ACTIVATION_WINDOW);
+        assert_eq!(
+            fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
+            crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
+        );
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(harness_versions.first(), Some(&MIN_VERSION));
-        assert!(harness_versions.contains(&MAX_VERSION));
+        assert_eq!(harness_versions.last(), Some(&MAX_VERSION));
+        assert!(harness_versions.iter().all(is_supported_api_version));
     }
 
     #[gpui::test]
