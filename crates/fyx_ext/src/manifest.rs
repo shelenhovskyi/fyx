@@ -27,20 +27,11 @@ pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 2, 0);
 /// `[fyx_ui.network] domains` entries per manifest, the host's `network::MAX_DOMAINS`.
 pub const MAX_NETWORK_DOMAINS: usize = 64;
 
-/// `[[fyx_ui.commands]]` per manifest, the host's `MAX_COMMANDS`.
-pub const MAX_COMMANDS: usize = 64;
-/// A command title's bytes, the host's `MAX_COMMAND_TITLE_BYTES`.
-pub const MAX_COMMAND_TITLE_BYTES: usize = 128;
-/// `[[fyx_ui.picker_sources]]` per manifest, the host's `MAX_PICKER_SOURCES`.
-pub const MAX_PICKER_SOURCES: usize = 64;
-/// An extension id's bytes in a `picker`, the host's `MAX_ID_LEN`.
-const MAX_EXTENSION_ID_BYTES: usize = 64;
-
 const NETWORK_FETCH: &str = "network:fetch";
 const PROCESS_SPAWN: &str = "process:spawn";
 
-/// What each world before 0.3 accepts, the host's `world_capabilities` (`UiManifest::check_world`,
-/// migration.md §2). 0.3 accepts every known capability; `None` means that.
+/// What each world accepts, the host's `world_capabilities` (`UiManifest::check_world`,
+/// migration.md §2). 0.3 is the smaller 0.3 (A3): what is planned stays out.
 fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
     const V0_1: &[&str] = &[
         "ui:panel",
@@ -56,8 +47,21 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         "ui:editor-decorations",
         "ui:notifications",
     ];
+    const V0_3: &[&str] = &[
+        "ui:panel",
+        "ui:status-bar",
+        "ui:modal",
+        "ui:editor-decorations",
+        "ui:notifications",
+        "ui:images",
+        "ui:canvas",
+        NETWORK_FETCH,
+        PROCESS_SPAWN,
+        "workspace:edit",
+        "agent:observe",
+    ];
     if *version >= Version::new(0, 3, 0) {
-        None
+        Some(V0_3)
     } else if *version >= Version::new(0, 2, 0) {
         Some(V0_2)
     } else {
@@ -124,7 +128,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
 pub const SURFACE_CAPABILITIES: &[&str] = &["ui:panel", "ui:status-bar", "ui:modal"];
 
 /// fyx:ui 0.3 parts the host does not run yet: their imports trap and their nodes are refused.
-const NOT_BUILT: &str = "a later build of fyx:ui 0.3";
+const NOT_BUILT: &str = "fyx:ui 0.4";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityStatus {
@@ -168,28 +172,6 @@ pub struct FyxUiTable {
     /// 0.3, with `process:spawn`: the environment names passed through.
     #[serde(default)]
     pub process: Option<ProcessTable>,
-    /// 0.3: the commands the extension adds.
-    #[serde(default)]
-    pub commands: Vec<CommandTable>,
-    /// 0.3: the sources the extension adds to another extension's picker.
-    #[serde(default)]
-    pub picker_sources: Vec<PickerSourceTable>,
-}
-
-/// One `[[fyx_ui.commands]]` entry.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandTable {
-    pub id: String,
-    pub title: String,
-}
-
-/// One `[[fyx_ui.picker_sources]]` entry: `picker` is `"<extension>/<picker surface>"`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PickerSourceTable {
-    pub id: String,
-    pub picker: String,
 }
 
 /// `[fyx_ui.process]`.
@@ -335,14 +317,16 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
                     (status, Some((version, Some(world))))
                         if !world.contains(&capability.as_str()) =>
                     {
-                        let since = match status {
-                            CapabilityStatus::Since(since) => since.clone(),
-                            CapabilityStatus::Planned(_) => Version::new(0, 3, 0),
-                        };
-                        report.error(format!(
-                            "capability {capability:?} needs fyx:ui {since}; this extension \
-                             targets {version}"
-                        ));
+                        report.error(match status {
+                            CapabilityStatus::Since(since) => format!(
+                                "capability {capability:?} needs fyx:ui {since}; this extension \
+                                 targets {version}"
+                            ),
+                            CapabilityStatus::Planned(release) => format!(
+                                "capability {capability:?} is not in fyx:ui {version}; it is \
+                                 planned for {release}"
+                            ),
+                        });
                     }
                     (CapabilityStatus::Planned(release), _) => report.warning(format!(
                         "capability {capability:?} arrives with {release}; the current host \
@@ -364,7 +348,6 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
     }
     check_network(&table, report);
     check_processes(&table, report);
-    check_commands(&table, report);
 
     Ok(Manifest {
         dir: dir.to_path_buf(),
@@ -385,99 +368,10 @@ fn check_world_tables(table: &FyxUiTable, version: &Version, report: &mut Report
         (table.network.is_some(), "[fyx_ui.network]"),
         (!table.processes.is_empty(), "[[fyx_ui.processes]]"),
         (table.process.is_some(), "[fyx_ui.process]"),
-        (!table.commands.is_empty(), "[[fyx_ui.commands]]"),
-        (
-            !table.picker_sources.is_empty(),
-            "[[fyx_ui.picker_sources]]",
-        ),
     ] {
         if present {
             report.error(format!(
                 "{name} needs fyx:ui 0.3.0; this extension targets {version}"
-            ));
-        }
-    }
-}
-
-/// An id the host takes for a command, a picker source or a surface: `[a-z0-9._-]{1,64}`.
-fn is_valid_command_id(id: &str) -> bool {
-    ui_ext::ApiVersion::V0_3_0.check_surface_id(id).is_ok()
-}
-
-/// An extension id in a `picker`, the host's `validate_id`: 1 to 64 of `[a-z0-9_-]`, starting
-/// with a letter or digit.
-fn is_valid_extension_id(id: &str) -> bool {
-    (1..=MAX_EXTENSION_ID_BYTES).contains(&id.len())
-        && id.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
-        })
-        && id.as_bytes()[0].is_ascii_alphanumeric()
-}
-
-/// `[[fyx_ui.commands]]` and `[[fyx_ui.picker_sources]]`, with the host's rules (design.md §2,
-/// §5).
-fn check_commands(table: &FyxUiTable, report: &mut Report) {
-    if table.commands.len() > MAX_COMMANDS {
-        report.error(format!(
-            "{} [[fyx_ui.commands]]; at most {MAX_COMMANDS}",
-            table.commands.len()
-        ));
-    }
-    for (index, command) in table.commands.iter().enumerate() {
-        if !is_valid_command_id(&command.id) {
-            report.error(format!(
-                "command id {:?}: use 1 to 64 of a-z, 0-9, '.', '_' and '-'",
-                command.id
-            ));
-        }
-        if table.commands[..index]
-            .iter()
-            .any(|other| other.id == command.id)
-        {
-            report.error(format!("[[fyx_ui.commands]] names {:?} twice", command.id));
-        }
-        if command.title.trim().is_empty()
-            || command.title.len() > MAX_COMMAND_TITLE_BYTES
-            || command.title.chars().any(char::is_control)
-        {
-            report.error(format!(
-                "command {:?}: the title must be one line of 1 to {MAX_COMMAND_TITLE_BYTES} bytes",
-                command.id
-            ));
-        }
-    }
-    if table.picker_sources.len() > MAX_PICKER_SOURCES {
-        report.error(format!(
-            "{} [[fyx_ui.picker_sources]]; at most {MAX_PICKER_SOURCES}",
-            table.picker_sources.len()
-        ));
-    }
-    for (index, source) in table.picker_sources.iter().enumerate() {
-        if !is_valid_command_id(&source.id) {
-            report.error(format!(
-                "picker source id {:?}: use 1 to 64 of a-z, 0-9, '.', '_' and '-'",
-                source.id
-            ));
-        }
-        if table.picker_sources[..index]
-            .iter()
-            .any(|other| other.id == source.id)
-        {
-            report.error(format!(
-                "[[fyx_ui.picker_sources]] names {:?} twice",
-                source.id
-            ));
-        }
-        let valid = source
-            .picker
-            .split_once('/')
-            .is_some_and(|(extension, picker)| {
-                is_valid_extension_id(extension) && is_valid_command_id(picker)
-            });
-        if !valid {
-            report.error(format!(
-                "picker source {:?}: picker must be \"<extension>/<picker surface>\", got {:?}",
-                source.id, source.picker
             ));
         }
     }
@@ -747,26 +641,29 @@ capabilities = ["ui:panel"]
     }
 
     #[test]
-    fn planned_and_duplicate_capabilities_are_warnings() {
+    fn planned_capabilities_are_errors_and_duplicates_warnings() {
         let text = VALID.replace(
             "[\"ui:panel\"]",
             "[\"ui:panel\", \"ui:panel\", \"ui:hover\"]",
         );
-        // 0.3 takes every known capability; one not built yet is a warning.
-        let (_, report) =
-            check(&text.replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\""));
-        assert!(report.errors.is_empty(), "{report:?}");
-        let warnings = report.warnings.join("\n");
-        assert_eq!(report.warnings.len(), 3, "{warnings}");
-        assert!(warnings.contains("declared twice") && warnings.contains("arrives with"));
-        // Before 0.3 the host refuses it.
-        let (_, report) = check(&text);
-        assert_eq!(report.errors.len(), 1, "{report:?}");
-        assert!(
-            report.errors[0]
-                .contains("\"ui:hover\" needs fyx:ui 0.3.0; this extension targets 0.1.0"),
-            "{report:?}"
-        );
+        // Every world refuses what is planned for 0.4, the smaller 0.3 (A3) too.
+        for version in ["0.1.0", "0.3.0"] {
+            let (_, report) = check(&text.replace(
+                "api_version = \"0.1.0\"",
+                &format!("api_version = \"{version}\""),
+            ));
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert!(
+                report.errors[0].contains(&format!(
+                    "\"ui:hover\" is not in fyx:ui {version}; it is planned for fyx:ui 0.4"
+                )),
+                "{report:?}"
+            );
+            assert!(
+                report.warnings.iter().any(|w| w.contains("declared twice")),
+                "{report:?}"
+            );
+        }
     }
 
     #[test]
@@ -810,44 +707,6 @@ capabilities = ["ui:panel"]
         assert!(report.errors.is_empty(), "{report:?}");
         assert_eq!(report.warnings.len(), 2, "{report:?}");
         assert!(report.warnings[0].contains("accepted but unused until fyx:ui 0.2.0"));
-    }
-
-    #[test]
-    fn commands_and_picker_sources_follow_the_host() {
-        let v0_3 = VALID.replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"");
-        let good = format!(
-            "{v0_3}\n[[fyx_ui.commands]]\nid = \"todo.add\"\ntitle = \"Add a todo\"\n\n\
-             [[fyx_ui.picker_sources]]\nid = \"files\"\npicker = \"fyx-demo-gallery/picker\"\n"
-        );
-        let (_, report) = check(&good);
-        assert!(report.errors.is_empty(), "{report:?}");
-
-        let bad = format!(
-            "{v0_3}\n[[fyx_ui.commands]]\nid = \"Add\"\ntitle = \"two\\nlines\"\n\n\
-             [[fyx_ui.commands]]\nid = \"Add\"\ntitle = \"x\"\n\n\
-             [[fyx_ui.picker_sources]]\nid = \"files\"\npicker = \"no-surface\"\n"
-        );
-        let (_, report) = check(&bad);
-        let errors = report.errors.join("\n");
-        // The id twice, the title, the duplicate, and the picker.
-        assert_eq!(report.errors.len(), 5, "{errors}");
-
-        let old = good.replace("api_version = \"0.3.0\"", "api_version = \"0.2.0\"");
-        let (_, report) = check(&old);
-        let errors = report.errors.join("\n");
-        assert!(
-            errors.contains("[[fyx_ui.commands]] needs fyx:ui 0.3.0"),
-            "{errors}"
-        );
-        assert!(
-            errors.contains("[[fyx_ui.picker_sources]] needs fyx:ui 0.3.0"),
-            "{errors}"
-        );
-
-        let unknown =
-            format!("{v0_3}\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\nkey = \"x\"\n");
-        let (manifest, _) = check(&unknown);
-        assert!(manifest.is_err(), "unknown keys are refused");
     }
 
     #[test]

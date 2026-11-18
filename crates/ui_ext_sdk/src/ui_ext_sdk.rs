@@ -113,8 +113,6 @@ pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 pub use bindings::fyx::ui::agent_observe::{
     AgentEvent, HunkDecision, HunkInfo, Resolution, ReviewInfo, ReviewSource, RuleKind, TurnFile,
 };
-#[cfg(feature = "fyx-ui-0-3")]
-pub use bindings::fyx::ui::documents::{FileRef, Position, TextRange};
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::images::ImageFormat;
@@ -135,9 +133,7 @@ pub use bindings::fyx::ui::process::{
 };
 pub use bindings::fyx::ui::types::*;
 #[cfg(feature = "fyx-ui-0-3")]
-pub use bindings::fyx::ui::workspace_edit::{
-    EditError, EditTarget, FileEdit, TextEdit, WorkspaceEdit,
-};
+pub use bindings::fyx::ui::workspace_edit::{EditError, FileEdit, TextEdit, WorkspaceEdit};
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
@@ -500,9 +496,8 @@ macro_rules! __fyx_host_shims {
     };
 }
 
-/// The 0.3 exports beyond 0.2's, inside `register_extension!(T)`'s `Guest` impl: the SDK has no
-/// API for them yet (plan 4.2 to 4.8), so they answer as an extension that provides nothing; the
-/// host only calls them for what the manifest declares. Empty without the `fyx-ui-0-3` feature.
+/// The 0.3 export beyond 0.2's, inside `register_extension!(T)`'s `Guest` impl: `handle-io`.
+/// Empty without the `fyx-ui-0-3` feature.
 #[cfg(feature = "fyx-ui-0-3")]
 #[doc(hidden)]
 #[macro_export]
@@ -512,58 +507,6 @@ macro_rules! __fyx_v0_3_exports {
             $crate::__private::with_extension(__fyx_new_extension, |extension| {
                 extension.handle_io(event)
             })
-        }
-
-        fn handle_command(
-            command: ::std::string::String,
-            _argument: ::std::option::Option<::std::string::String>,
-            _context: $crate::bindings::fyx::ui::requests::CommandContext,
-        ) -> ::std::result::Result<(), ::std::string::String> {
-            Err(::std::format!("no command {command:?}"))
-        }
-
-        fn provide_decorations(
-            _request: $crate::bindings::fyx::ui::requests::DecorationRequest,
-        ) -> ::std::result::Result<
-            ::std::vec::Vec<$crate::bindings::fyx::ui::decorations::Decoration>,
-            ::std::string::String,
-        > {
-            Ok(::std::vec::Vec::new())
-        }
-
-        fn provide_hover(
-            _request: $crate::bindings::fyx::ui::requests::HoverRequest,
-        ) -> ::std::result::Result<
-            $crate::bindings::fyx::ui::requests::HoverReply,
-            ::std::string::String,
-        > {
-            Err("no hover provider".into())
-        }
-
-        fn provide_code_lenses(
-            _request: $crate::bindings::fyx::ui::requests::CodeLensRequest,
-        ) -> ::std::result::Result<
-            ::std::vec::Vec<$crate::bindings::fyx::ui::requests::CodeLens>,
-            ::std::string::String,
-        > {
-            Ok(::std::vec::Vec::new())
-        }
-
-        fn provide_virtual_document(
-            path: ::std::string::String,
-        ) -> ::std::result::Result<
-            $crate::bindings::fyx::ui::requests::VirtualDocument,
-            ::std::string::String,
-        > {
-            Err(::std::format!("no virtual document {path:?}"))
-        }
-
-        fn picker_source_event(
-            _source: ::std::string::String,
-            _session: u64,
-            _event: $crate::bindings::fyx::ui::requests::PickerSourceEvent,
-        ) -> ::std::result::Result<(), ::std::string::String> {
-            Ok(())
         }
     };
 }
@@ -1344,7 +1287,7 @@ impl SurfaceTree {
             | UiEvent::NotificationClosed(_)
             | UiEvent::ProgressCancelRequested(_) => return,
             #[cfg(feature = "fyx-ui-0-3")]
-            UiEvent::Orphaned | UiEvent::CanvasClick(_) => return,
+            UiEvent::CanvasClick(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
@@ -1380,7 +1323,7 @@ impl SurfaceTree {
             | UiEvent::NotificationClosed(_)
             | UiEvent::ProgressCancelRequested(_) => {}
             #[cfg(feature = "fyx-ui-0-3")]
-            UiEvent::Orphaned | UiEvent::CanvasClick(_) => {}
+            UiEvent::CanvasClick(_) => {}
         }
     }
 
@@ -1840,12 +1783,9 @@ impl Icon {
 
 impl DecorationLocation {
     /// A block above or below `line` (zero-based) of the worktree-relative `path`, with the height
-    /// left to the host. The same code builds 0.2's `path` and 0.3's `target`.
+    /// left to the host.
     pub fn at(path: impl Into<String>, line: u32, placement: DecorationPlacement) -> Self {
         Self {
-            #[cfg(feature = "fyx-ui-0-3")]
-            target: DecorationTarget::Path(path.into()),
-            #[cfg(not(feature = "fyx-ui-0-3"))]
             path: path.into(),
             line,
             placement,
@@ -2171,21 +2111,16 @@ impl WorkspaceEdit {
 impl FileEdit {
     /// Edits of the file at `path`, relative to the root of the one worktree that has it.
     pub fn path(path: impl Into<String>) -> Self {
-        Self::target(EditTarget::File(FileRef {
+        Self::file(FileRef {
             worktree: None,
             path: path.into(),
-        }))
+        })
     }
 
-    /// Edits of an open document, by its `documents` id.
-    pub fn document(id: u64) -> Self {
-        Self::target(EditTarget::Document(id))
-    }
-
-    fn target(target: EditTarget) -> Self {
+    /// Edits of `file`, in the worktree it names.
+    pub fn file(file: FileRef) -> Self {
         Self {
-            target,
-            expected_version: None,
+            file,
             create: false,
             edits: Vec::new(),
         }
@@ -2203,12 +2138,6 @@ impl FileEdit {
     /// Inserts `text` at `at`.
     pub fn insert(self, at: Position, text: impl Into<String>) -> Self {
         self.replace(TextRange { start: at, end: at }, text)
-    }
-
-    /// Fails the whole edit with `EditError::Conflict` if the document changed since `version`.
-    pub fn expected_version(mut self, version: u64) -> Self {
-        self.expected_version = Some(version);
-        self
     }
 
     /// Creates the file (empty) first if it does not exist; its directory must.
@@ -3172,11 +3101,9 @@ use b;
                     Position::new(5, 4),
                     "// sorted
 ",
-                )
-                .expected_version(7),
+                ),
         );
         assert_eq!(edit.files[0].edits.len(), 2);
-        assert_eq!(edit.files[0].expected_version, Some(7));
         let id = apply_edit(&edit).expect("apply");
         start_observing().expect("start");
         stop_observing();

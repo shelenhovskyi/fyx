@@ -141,9 +141,8 @@ SDK's. Code that must build both ways uses `DecorationLocation::at(path, line, p
 `HostErrorCode::name()`, which hide the two shapes 0.3 changed, and a wildcard arm for the
 events 0.3 adds. Call the macro once, at the root of your `cdylib` crate. It:
 
-- implements the chosen world's `Guest` trait by forwarding each export to your type. The 0.3
-  exports the SDK has no API for yet (`handle-io`, `handle-command`, the providers and
-  `picker-source-event`) answer as an extension that provides nothing.
+- implements the chosen world's `Guest` trait by forwarding each export to your type. In 0.3
+  that includes `handle-io`, which goes to `Extension::handle_io`.
 - With `v0_2` and the `fyx-ui-0-3` feature, values are converted at the boundary: what 0.2
   cannot express is an error that names 0.3. Image and canvas nodes make the call return `Err`,
   picker surfaces are left out of `surfaces` (logged), and `add_image` and a decoration anchored
@@ -660,8 +659,7 @@ pub fn stop_observing();
 
 - **Building an edit:** `WorkspaceEdit::new(label).file(FileEdit::path("src/main.rs")
   .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), text).insert(at, text))`.
-  - `FileEdit::document(id)` targets an open document instead of a path.
-  - `.expected_version(v)` makes the edit fail with `EditError::Conflict` if the file changed.
+  - `FileEdit::file(FileRef { worktree: Some(id), path })` names the worktree.
   - `.create()` creates a missing file.
 - **How an edit applies:**
   - all its files or none, as one undo step per buffer;
