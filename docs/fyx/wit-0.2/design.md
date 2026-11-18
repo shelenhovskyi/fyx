@@ -37,7 +37,7 @@ Cargo features (finding 3, migration.md §4), and the small points of finding 5.
 | J | `list-row.indent`, `button-props.tooltip` | backlog #8, W8 | **accepted**: indent on the row, not on flex |
 | K | `input-props.secret` | integration-2 W8-5 | **accepted** |
 | L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **accepted**, in 0.2 (decided 2026-11-17) |
-| M | Notifications and progress: `notify`, `progress-start` / `-update` / `-end` | [platform spec](../platform/spec.md) decision 22 | **planned**, to be drafted; not in the WIT yet, which has a `TODO` where it goes |
+| M | Notifications and progress: `fyx:ui/notifications` with `notify` / `dismiss-notification`, `progress-start` / `-update` / `-end`, three owner events | [platform spec](../platform/spec.md) decision 22 | **drafted 2026-11-18, for review**; WIT diff in M.6, not yet in the landed WIT, which still has its `TODO` |
 | — | Panel visibility events, surface rename, commands, raw colours, in-row node clicks, `ignoreFocusOut` | various | **rejected or deferred**; see [Rejected and deferred](#rejected-and-deferred) |
 
 Not changed: the flat tree, theme tokens only, the `mount` / `handle-event` / `list-rows`
@@ -732,6 +732,365 @@ error it can handle. Checked per call, the same component works either way.
     `handle-event(id)`;
   - SDK: both effects in `take_host_effects`.
 
+## M. Notifications and progress (`fyx:ui/notifications`)
+
+**Status: drafted 2026-11-18, for review.** 0.2 is staged, not frozen, so M can join it. The WIT
+change below is for W2c (host) and W3 (renderer) to land. The landed WIT is not edited by this
+draft: its `TODO` marks the place.
+
+**Motivation.** Spec decision 22, `docs/vscode-coverage.md` (`showInformationMessage`,
+`withProgress`). Extensions need these cases, and today each one needs a panel:
+- "Build finished" or "3 problems found" after work an extension ran on a tick;
+- a short choice such as "Reload now?" with two buttons;
+- progress for long work.
+
+**Shape.** One interface, `notifications`, imported by the world and checked per call, for L's
+reason: a component that imports it still instantiates without the capability, and gets
+`not-permitted`.
+
+- `notify(notification) -> result<u64, host-error>` and `dismiss-notification(id)`.
+- `progress-start(options) -> result<u64, host-error>`,
+  `progress-update(id, value, message) -> result<_, host-error>` and `progress-end(id)`.
+- Three new `ui-event` cases, delivered to the **owner**: `notification-action`,
+  `notification-closed` and `progress-cancel-requested`.
+
+**Owner.** Every notification and progress names an owner: a live surface or decoration id of the
+extension.
+- **Why:** user actions must come back as a `ui-event` (`handle-event(surface-id, event)`), and
+  the reply needs a tree to apply to. The reply is an `update` for the owner, like any event's.
+- **Lifetime.** Removing the owner (`remove-surface`, `remove-decoration`, a reload, a disable)
+  closes its notifications and ends its progresses, without events. Nothing outlives the
+  surface that can react to it.
+- **Rejected:** a separate export `notification-event(id, event)`. It would return no update, so
+  every action would need a `push-update`, and it would add an export to a world whose exports
+  are otherwise all per surface.
+
+### M.1 Notifications
+
+| Field | Rule (checked at the call, A) |
+|---|---|
+| `owner` | a live surface or decoration id, otherwise `unknown-surface` |
+| `level` | `info`, `success`, `warning`, `error`; the host picks the icon and colour |
+| `title` | 1–80 bytes, one line |
+| `body` | at most 500 bytes, at most 4 lines |
+| `actions` | at most 2; ids `[a-z0-9._-]{1,64}`, unique; labels 1–24 bytes, one line |
+| `auto-dismiss` | `true`: host-chosen time (6 s for info and success, 10 s for warning and error); `false`: stays until closed |
+
+- **Text rules.** All text is plain: no markdown, links or icons. It may not contain control
+  characters (Cc), format characters (Cf: bidi overrides, zero-width) or U+2028/U+2029, the
+  registry's rules for `description` (registry-format.md). A violation is `invalid-argument`.
+- **Where.** The notification appears in the active workspace window when the effect is applied,
+  in Zed's notification stack. It never takes focus and never opens a modal. With no workspace
+  window it is dropped, with one log line and `notification-closed(id, window-closed)` to the
+  owner.
+- **Time.**
+  - The extension cannot choose a duration, so it cannot flash a notification for 50 ms or make
+    one look like host UI by its timing.
+  - The timer pauses while the pointer is over the notification and while the window is in the
+    background, so an expired notification was on screen for its full time.
+  - `auto-dismiss: false` is meant for questions, so it is limited by the open cap below.
+- **Events** (to `handle-event(owner, …)`):
+  - **`notification-action({notification, action})`** when a button is clicked. The notification
+    closes, and no `notification-closed` follows.
+  - **`notification-closed(id, reason)`**, with reason `user`, `expired` or `window-closed`.
+  - `dismiss-notification` sends no event (D's rule for `hide-surface`). Removing the owner sends
+    none either.
+- **Caps** (spec decision 22, made exact):
+  - **Rate:** at most **5 accepted `notify` calls per rolling 60 s** per extension. The 6th returns
+    `limit-exceeded` and writes the title to the log at `info`, under `fyx_ui`, with the
+    extension id. That is the spec's "extra ones go to the log".
+  - **Open:** at most **3 open notifications** per extension. A 4th returns `limit-exceeded`. The
+    host does not close older ones to make room, so an extension cannot rotate its notifications
+    to stay on screen.
+  - **Per call:** at most 4 notification effects per export call.
+- **Click guard.** For **750 ms** after a notification appears, its buttons ignore clicks: it may
+  have popped up under the pointer just as the user clicked something else (classic
+  click-jacking). The close button works at once.
+
+### M.2 Progress
+
+| Field | Rule |
+|---|---|
+| `owner` | a live surface or decoration id; a **panel** for `location: panel` (otherwise `invalid-argument`) |
+| `title` | 1–80 bytes, one line, same text rules |
+| `location` | `status-bar` or `panel` |
+| `cancellable` | draws a Cancel button that sends `progress-cancel-requested(id)` to the owner |
+| `progress-update.value` | `indeterminate` or `percent(0..=100)`; more than 100 is `invalid-argument` |
+| `progress-update.message` | at most 120 bytes, one line, same text rules; `none` keeps the previous message |
+
+- **`status-bar`.** One host status-bar item per extension that has a running status-bar progress.
+  It is not an extension surface and does not count against the 32 surfaces. It shows a spinner
+  or the percentage, the extension's name and the newest progress's title. Its tooltip lists
+  every running progress of the extension with its message. Clicking it reveals the owner if the
+  owner is a panel.
+- **`panel`.** A thin bar under the owner panel's header, with the title and message on hover.
+  Several progresses on one panel stack, at most 4.
+- **Drawing.** The host redraws a progress at most 10 times a second and keeps only the last
+  value. A guest can send updates on every tick (B), bounded by B's 100 ms floor, and on every
+  event. Updates for an ended or unknown id return `invalid-argument`, so a stale handle shows up
+  in the SDK.
+- **End.** `progress-end`, removing the owner, or the extension stopping (a trap, the time
+  budget, a disable, a reload or an uninstall) ends the progress, without an event. There is no
+  timeout: progress for long work is legitimate, and the user sees which extension it is.
+- **Cancel.**
+  - `progress-cancel-requested` is a request. The progress stays, with its Cancel button disabled,
+    until the extension calls `progress-end`. The extension owns the work, so only it knows when
+    the work has stopped.
+  - The event does not grant an activation, so Cancel can never open a modal.
+- **Caps:** at most **4 running progresses** per extension and 30 `progress-start` calls per
+  rolling 60 s (`limit-exceeded`), and at most 64 `progress-update` calls per export call (as for
+  pushes, F).
+
+### M.3 Interaction with the modal gesture rule (C)
+
+| Source | Grants the click-or-Enter activation? |
+|---|---|
+| `notification-action` | **Yes**: a real click on a button of this extension, after the 750 ms guard. "Pick a branch" can open the extension's picker modal. |
+| `notification-closed` (any reason) | No. Closing a notification is not a request for more UI. |
+| `progress-cancel-requested` | No (M.2). |
+| `notify`, `progress-*` themselves | Need no gesture: they do not take focus. |
+
+`notify` from inside a `handle-event` for a click does not pass the activation on to the
+notification. The notification's own button click is a new gesture.
+
+### M.4 Anti-spoofing
+
+The risk: a notification that looks like Fyx's own, such as "Fyx: review rules changed, Apply"
+or "Enable this extension", which users have learned to click.
+
+1. **Provenance line.** The host draws a first line on every extension notification and on the
+   status-bar progress item: a puzzle-piece icon, then the extension's name, then its id in
+   muted text, for example `🧩 Todo · todo`.
+   - The name comes from the installed manifest, the id from `extension.toml`. The host applies
+     the registry's `name` rule to every name, including dev and from-file installs: letters,
+     digits and plain punctuation, no bidi controls, at most 64 characters. A name that fails it
+     is replaced by the id.
+   - The extension has no field that changes this line, its icon, its colour or its position.
+   - Registry ids such as `fyx` or `fyx-*` are reserved (registry-repo.md), so the id cannot say
+     "Fyx".
+2. **No host styling.** The extension picks only the `level`. Fyx's own notifications (review
+   rules, consent, security) never carry the provenance line, and consent and security prompts
+   are modals or notifications that only the host creates.
+3. **Plain text** (M.1). No links to click, no icons to imitate host buttons, and no bidi tricks
+   that reorder the name.
+4. **Click guard** (M.1), and at most 2 buttons, labelled with plain text.
+5. **Owner panels only for `panel` progress**, so a progress bar cannot appear on another
+   extension's or a host panel.
+
+### M.5 Capability
+
+`ui:notifications`, tier **T0**, already named in spec decision 21 and in
+`ui_ext_wasm::permissions` and `fyx-ext check`'s known capabilities. It covers notifications and
+progress. It is T0 because it reads nothing, and the rate and open caps bound the annoyance. The
+extensions page lists it as "shows notifications and progress". Users who still find an
+extension too noisy can disable it. A per-extension mute is a later, additive host setting.
+
+### M.6 WIT change (for W2c and W3)
+
+It applies to the landed `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` and replaces its `TODO`. The
+result parses with `wasm-tools component wit` (1.263.0), and a dummy component embedded from it
+validates (`component embed --dummy` + `component new` + `validate`).
+
+```diff
+@@ -305,6 +305,32 @@
+         row-selected(tuple<node-id, u32>),
+         /// The host closed a modal surface; its tree is gone. The reply must be `unchanged`.
+         dismissed(dismiss-reason),
++        /// §M. The user clicked an action button of a notification this surface owns. Grants the
++        /// click-or-Enter activation, like `click`.
++        notification-action(notification-action-event),
++        /// §M. A notification this surface owns closed without the extension asking (an
++        /// extension's own `dismiss-notification` sends nothing).
++        notification-closed(tuple<u64, notification-close-reason>),
++        /// §M. The user pressed Cancel on a cancellable progress this surface owns. The progress
++        /// stays until the extension calls `progress-end`.
++        progress-cancel-requested(u64),
++    }
++
++    /// §M. Which action of which notification was clicked.
++    record notification-action-event {
++        notification: u64,
++        /// The `id` the extension gave the action.
++        action: string,
++    }
++
++    /// §M. Why a notification closed when the extension did not close it.
++    enum notification-close-reason {
++        /// The user closed it (its close button, or Escape while it had focus).
++        user,
++        /// It was `auto-dismiss` and its time ran out.
++        expired,
++        /// The window that showed it closed.
++        window-closed,
+     }
+ 
+     enum dock-position { left, right, bottom }
+@@ -459,18 +485,97 @@
+     remove-decoration: func(id: string) -> result<_, host-error>;
+ }
+ 
+-// TODO(design.md section M, platform plan 2.1): notifications and progress (platform spec
+-// decision 22: `notify(level, text, actions)`, `progress-start` / `progress-update` /
+-// `progress-end`, at most 5 notifications per minute per extension). design.md has only a
+-// placeholder row for M: the action and progress types, how an action reaches the extension,
+-// the ids, the capability and the error codes are not specified yet. Add the interface here,
+-// before 0.2 is frozen, once M is drafted.
++/// Notifications and progress (design.md, "M"). Needs the `ui:notifications` capability (tier
++/// T0); without it every call returns `not-permitted`. Every function follows the effect rule of
++/// `host`: checked at the call, applied after the export returns, dropped by a trap.
++///
++/// Every notification and progress has an **owner**: a live surface or decoration id of this
++/// extension. Its events arrive as `handle-event(owner, …)`, and removing the owner closes them
++/// without an event. The host always draws the extension's name and id above a notification
++/// and next to a progress; the extension cannot style, hide or replace that line.
++interface notifications {
++    use host.{host-error};
++
++    enum notification-level { info, success, warning, error }
++
++    record notification-action {
++        /// 1 to 64 bytes of `[a-z0-9._-]`, unique within the notification. Sent back in
++        /// `notification-action-event`.
++        id: string,
++        /// The button text: 1 to 24 bytes of plain text on one line.
++        label: string,
++    }
++
++    record notification {
++        /// The surface or decoration whose `handle-event` gets this notification's events.
++        owner: string,
++        level: notification-level,
++        /// 1 to 80 bytes of plain text on one line.
++        title: string,
++        /// At most 500 bytes of plain text, at most 4 lines. No markdown, links or icons.
++        body: option<string>,
++        /// At most 2. Drawn as buttons in list order; the first is the primary one.
++        actions: list<notification-action>,
++        /// `true`: the host closes it after a time it chooses by level (6 s for `info` and
++        /// `success`, 10 s for `warning` and `error`), paused while the pointer is over it or the
++        /// window is in the background. `false`: it stays until the user or the extension closes
++        /// it.
++        auto-dismiss: bool,
++    }
++
++    /// Shows a notification in the active workspace window, without moving focus, and returns its
++    /// id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension;
++    /// past either, `limit-exceeded`, and the title is written to the log instead.
++    notify: func(notification: notification) -> result<u64, host-error>;
++
++    /// Closes a notification of this extension; no event is sent. Unknown or closed ids are
++    /// ignored.
++    dismiss-notification: func(id: u64);
++
++    enum progress-location {
++        /// One host status-bar item per extension, showing its newest running progress; its
++        /// tooltip lists all of them.
++        status-bar,
++        /// A bar under the header of the owner, which must be a panel.
++        panel,
++    }
++
++    record progress-options {
++        /// The surface or decoration whose `handle-event` gets `progress-cancel-requested`; a
++        /// panel for `location: panel`.
++        owner: string,
++        /// 1 to 80 bytes of plain text on one line.
++        title: string,
++        location: progress-location,
++        /// Draws a Cancel button that sends `progress-cancel-requested`.
++        cancellable: bool,
++    }
++
++    variant progress-value {
++        indeterminate,
++        /// 0 to 100.
++        percent(u8),
++    }
++
++    /// Starts a progress, indeterminate until the first `progress-update`, and returns its id.
++    /// At most 4 running progresses per extension and 30 starts per rolling 60 s.
++    progress-start: func(options: progress-options) -> result<u64, host-error>;
++
++    /// Sets the value and, when given, a one-line message (at most 120 bytes). The host redraws
++    /// at most 10 times a second and keeps the last value. At most 64 updates per export call.
++    progress-update: func(id: u64, value: progress-value, message: option<string>) -> result<_, host-error>;
++
++    /// Ends a progress. Unknown or ended ids are ignored. Disabling, reloading or unloading the
++    /// extension, or removing the owner, ends its progresses too.
++    progress-end: func(id: u64);
++}
+ 
+ world ui-extension {
+     use types.{surface, node, node-id, ui-event, update, list-row};
+ 
+     import host;
+     import decorations;
++    import notifications;
+ 
+     /// Called once after instantiation; declares the static surfaces. More can be added with
+     /// `add-surface`.
+```
+
+Ids are `u64`, chosen by the host, increasing, never reused within an instance, and separate for
+notifications and progresses (A's id rule for host-chosen ids, 0.3 §0.5).
+
+### M.7 Changes by component
+
+- **WIT (W0, after review):** the diff above.
+- **Model (W2c), `crates/ui_ext/src/v0_2.rs`:**
+  - `Notification`, `NotificationAction`, `NotificationLevel`, `ProgressOptions`,
+    `ProgressLocation`, `ProgressValue`;
+  - `UiEvent::{NotificationAction, NotificationClosed, ProgressCancelRequested}`;
+  - the text-rule check, shared with `fyx_registry`'s rules where possible.
+- **Host (W2c), `crates/ui_ext_wasm`:**
+  - link `notifications` for 0.2;
+  - `HostEffect::{Notify, DismissNotification, ProgressStart, ProgressUpdate, ProgressEnd}`;
+  - in `UiState`: the rolling-window counters, open and running counts, id counters, and the
+    owner check against live surfaces and decorations;
+  - the 0.2 conversions.
+- **Renderer (W3), `crates/ui_ext_host`:**
+  - **new `notifications.rs`:** a `MessageNotification`-style view with the provenance line,
+    level icon, up to two buttons with the 750 ms guard, the auto-dismiss timer with pause on
+    hover and in the background, and close-reason tracking;
+  - **new `progress.rs`:** the per-extension status-bar item, the panel bar in `panel.rs`'s
+    header, and redraw coalescing;
+  - **`registry.rs`:** apply the effects, route events to the owner, and close or end on owner
+    removal and on unload.
+  - **No upstream hook expected:** `Workspace::show_notification` and `dismiss_notification` are
+    public, and status items come from W3's existing registration.
+- **SDK (W4), `crates/ui_ext_sdk`:**
+  - `notify(Notification) -> Result<NotificationId, HostError>`, `dismiss_notification`;
+  - a `Progress` guard whose `Drop` calls `progress-end`;
+  - builders, and the three events in `Extension::handle_event`;
+  - `take_host_effects` records the five effects;
+  - the harness (`fyx_ext_harness`) gets the caps and the events.
+- **Sidecar (W8):** maps `showInformationMessage`, `showWarningMessage` and `showErrorMessage`
+  (up to two items) and `withProgress` (`ProgressLocation.Notification` maps to `status-bar`,
+  `Window` to `status-bar`, `SourceControl` and views to `panel`).
+
+### M.8 Tests
+
+- **Host:**
+  - `not-permitted` without the capability, and an unknown owner;
+  - each text rule (a newline in the title, a bidi override, 81 bytes, a third action, a
+    duplicate action id);
+  - the 6th `notify` in 60 s (`limit-exceeded`, a log line) and the 4th open one;
+  - `percent(101)`, a `panel` progress owned by a status item, the 5th running progress, the
+    65th update in one call;
+  - a trap after `notify` shows nothing (A).
+- **Renderer:**
+  - the provenance line is present and cannot be altered by any field;
+  - the button click guard (a click at 500 ms is ignored, one at 800 ms is sent);
+  - auto-dismiss pauses on hover and in the background;
+  - `notification-action` reaches `handle-event(owner)` and grants an activation that a
+    following `show-surface` of a modal consumes;
+  - `notification-closed(expired)` and `(user)`; no event on `dismiss-notification`;
+  - owner removal closes and ends without events;
+  - status-bar progress shows the newest and lists all; updates coalesce to 10 per second;
+  - Cancel is disabled after the request, and the progress stays until `progress-end`.
+- **SDK and harness:** the `Progress` guard ends on drop; the effects are recorded; the demo
+  gallery gets a "Notify" and a "Run job" button.
+
 ## Rejected and deferred
 
 | Proposal | Source | Why not in 0.2 |
@@ -766,7 +1125,8 @@ error it can handle. Checked per call, the same component works either way.
 | SDK | `crates/ui_ext_sdk/src/ui_ext_sdk.rs`, `host_model.rs`, `Cargo.toml` | bindings for both versions in every build, the world chosen in `register_extension!`, `Extension::tick`, host-function wrappers returning `HostError`, `SurfaceTree::push` and the unsynced flag, `SurfaceTree::mount` capped at `max_nodes`, `invalidate_rows`, builders for the new fields, `place_decoration`, `take_host_effects` (A–L); migration.md, "SDK" |
 | Demos | `extensions/fyx_demo_counter`, `fyx_demo_todo`, `fyx_demo_gallery` | clock status item (ticks), a picker modal, `invalidate-rows` instead of re-keying, frozen icons |
 | Sidecar | `sidecars/vscode-host/src/schema.ts`, `host.ts`, `mock-host.ts`, `ui/surfaces.ts`, `ui/quickpick.ts`, `ui/treeview.ts`, `ui/output.ts`, `ui/statusbar.ts`, `test/*.test.ts` | the JSON mirror of every type change, version negotiation in `initialize`, `fyx/surfacesChanged` and `fyx/surfaceClosed` replaced by WIT-equivalent requests (C–K) |
-| Docs | `docs/fyx/sdk-reference.md`, `extension-authoring.md`, `limits-and-gotchas.md`, `docs/vscode-coverage.md`, `tasks/wit-0.2.md` | new APIs, the limits table from B, C and E, coverage updates, close the backlog rows |
+| M (drafted) | see M.7 | `notifications` interface, three `ui-event` cases, notification and progress views, caps |
+| Docs | `docs/fyx/sdk-reference.md`, `extension-authoring.md`, `limits-and-gotchas.md`, `docs/vscode-coverage.md`, `tasks/wit-0.2.md` | new APIs, the limits table from B, C, E and M, coverage updates, close the backlog rows |
 
 ## Decisions (2026-11-17)
 

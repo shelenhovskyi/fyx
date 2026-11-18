@@ -191,8 +191,9 @@ time of the index. Rules:
   shows up.
 - `revoked_keys` (optional, at most 256) are removed from the keyset for releases and block
   lists.
-  Revocation covers every role, so a snapshot key can also revoke the block-list keys; see
-  registry-repo.md, open question 3, for the recommended limit.
+  Decided (registry-repo.md, open question 3): a `blocklist` key may be revoked only by a snapshot
+  signed by the snapshot rotation key, and the client ignores such entries in any other snapshot.
+  W2c is implementing it; until then, the code revokes keys of every role.
 
 A client verifies the snapshot first (`VerifiedSnapshot::verify`), then the index with
 `Index::verify_with_snapshot(bytes, &snapshot, &keyset)`. Canonical order: schema, sequence,

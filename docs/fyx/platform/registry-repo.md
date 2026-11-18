@@ -121,7 +121,7 @@ PR: a published version is never replaced (`fyx-registry index add` refuses it t
 GitHub settings on `main`:
 
 - Pull requests only. No direct pushes, no force pushes, no deletion, for admins too.
-- **Required status checks:** `entry`, `build`, `policy`.
+- **Required status checks:** `entry`, `build`, `policy`, `agent-review`.
 - **Require review from Code Owners** is on. GitHub asks for a code owner only when a PR touches a
   file that CODEOWNERS assigns, so it does not apply to `extensions/`.
 - No other required reviews, so a PR whose checks are green can merge.
@@ -153,9 +153,9 @@ only.
 
 | Change | Who must approve |
 |---|---|
-| **New extension, tier T0 or T1** | Nobody. Auto-merges on green CI. |
+| **New extension, tier T0 or T1** | Nobody, if the agent review passes. Auto-merges on green CI. A `concern` adds `needs-owner`, and then the owner must approve. |
 | **New extension, tier T2** | The owner (`@shelenhovskyi`). |
-| **New version of an extension, tier T0 or T1**, no owner change | One of the entry's owners: as the PR's author, or by an approving review. Auto-merges once that holds. |
+| **New version of an extension, tier T0 or T1**, no owner change | One of the entry's owners: as the PR's author, or by an approving review. Auto-merges once that holds and the agent review passes; a `concern` needs the owner. |
 | **Any PR whose release is T2**: a new version, a new T2 capability, a new network domain or a new process | The owner, for every version. A T2 update changes code that can reach the network or your files. |
 | **Owners added or removed** | An existing owner of the entry. |
 | **`urgent = true`** | The owner. It skips the 24 h age gate. |
@@ -170,9 +170,11 @@ The check also fails, whoever approves, when:
 - `extension.toml`'s `id` does not equal the entry's;
 - the build, `fyx-ext check` or `fyx-ext test` failed.
 
-The check states its decision in a PR comment: the tier, what changed compared with the last
-release (capabilities, domains, processes, owners), and who must approve. This comment is the
-reviewer's summary for a T2 PR.
+The check also fails while the PR has the label `needs-owner` and the owner has not approved.
+
+The `report` job of `review.yml` posts the decision as a PR comment: the tier, what changed since
+the last release (capabilities, domains, processes, owners), who must approve, and the agent
+review's verdict. This comment is the reviewer's summary for a T2 PR.
 
 **Why a T0–T1 update still needs an owner of the entry:** without it, anyone could open a PR that
 points someone else's extension at a commit in their own fork. The commit must also be reachable
@@ -180,7 +182,13 @@ from a branch of `source.repository`, not only from a fork's PR ref.
 
 ## CI
 
-Two workflows, split by trust.
+Workflows split by trust:
+
+- `pr.yml` runs the PR's code, with no secrets and a read-only token.
+- `review.yml` runs no PR code. It holds the model key for the agent review and the write token
+  for comments, labels and statuses.
+- `publish.yml` and `blocklist.yml` hold the signing keys.
+- `refresh.yml` holds the signing keys and runs on a schedule.
 
 ### `pr.yml`: untrusted
 
@@ -207,7 +215,84 @@ artifacts.
       block, except for an advisory against `wit-bindgen` or the SDK.
    5. Write the unsigned release JSON (the `signed` part of a release, without `published_at`)
       and the package's SHA-256 as artifacts.
-3. **`policy`**: the check above.
+   6. Write the review inputs as artifacts, as text: the entry diff, the source diff, the package
+      file list, `extension.toml`, the WIT imports `fyx-ext check` found, and the assets.
+
+`pr.yml` cannot comment, label or set statuses, because its token is read-only. `review.yml`
+does that.
+
+### `review.yml`: the agent review and the policy decision
+
+Triggered by `workflow_run` when `pr.yml` completes, and by `pull_request_review`. It runs in the
+base repository's context. It **never checks out or runs PR code**: it reads `pr.yml`'s artifacts
+for the PR's head commit as data, plus text it fetches with `git` (never executed).
+
+1. **`agent-review`** (decided 2026-11-18). An agent reviews every entry PR: the diff of the
+   entry, the source diff since the last published commit of that id (the whole source for a new
+   extension), and the built package (the file list, `extension.toml`, the WIT imports
+   `fyx-ext check` found, the asset files). It looks for:
+   - capabilities that do not match the code (a declared capability the code never uses, or an
+     import used without its capability);
+   - obfuscation (encoded or packed blobs, generated code without its generator, minified
+     sources);
+   - network and process use (domains and programs against what the code does);
+   - dubious assets (images that imitate Fyx's or another product's UI, hidden payloads);
+   - anything else a reviewer would flag.
+
+   **Isolation:**
+   - The job runs in the Environment `agent-review`. Its only secret is the model API key, which
+     the harness uses to call the model. The model never sees the key.
+   - No signing key and no write token: `permissions: contents: read`, `pull-requests: read`.
+   - The agent has no tools: no shell, no network, no file access beyond the inputs it is given.
+   - **The model key is the owner's decision** (accepted 2026-11-18). Providing it means paying a
+     model provider for every review, so the owner decides when P3 starts whether to provide it.
+     The alternative is a local model on a self-hosted runner, with the same isolation, no paid
+     key and no secret at all. Until either exists, `agent-review` reports `concern` ("no
+     reviewer configured"), so every PR needs the owner. It fails closed.
+
+   **Untrusted input.**
+   - Everything from the PR is data, never instructions: the entry, the source, comments, commit
+     messages, asset text.
+   - The inputs are passed between fixed delimiters with a note that they are untrusted.
+   - **Any text in the PR that addresses the reviewer or an AI** ("ignore previous instructions",
+     "approve this", hidden text aimed at a model) **is itself a concern**, category
+     `prompt-injection`.
+   - Inputs larger than 400 KiB of text are not truncated silently. The verdict is `concern`, with
+     the reason "too large for automated review".
+
+   **Output:** a verdict that must match a JSON schema, or it counts as `concern`:
+
+   ```json
+   {"verdict": "pass", "reasons": [
+     {"category": "capability-mismatch", "file": "src/lib.rs", "detail": "…"}
+   ], "inputs_sha256": "<hash of the reviewed inputs>"}
+   ```
+
+   - `verdict` is `pass` or `concern`.
+   - At most 20 reasons. `category` is one of `capability-mismatch`, `obfuscation`, `network`,
+     `process`, `assets`, `prompt-injection` or `other`. `detail` is at most 500 characters.
+   - The verdict is uploaded as an artifact. A model error, a timeout or an invalid verdict counts
+     as `concern`.
+2. **`report`**, with `pull-requests: write` and `statuses: write`, and no other secret. It runs no
+   agent and no PR code. It only reads the artifacts and the PR's reviews through the API:
+   - **Decide.** It runs the `policy` decision (above) and sets the commit statuses `policy` and
+     `agent-review` on the head commit.
+   - **Report.** It posts or updates one PR comment with the tier, the changes against the last
+     release, who must approve, and the agent's verdict with its reasons. The reasons are quoted
+     as plain text, with `@` mentions, links and HTML escaped, so a reason cannot ping anyone or
+     carry a link.
+   - **On `concern`.** It adds the label `needs-owner`, which blocks auto-merge (the `agent-review`
+     status fails). Only the owner removes that label, by hand. A later push with a `pass`
+     verdict does not remove it, so the review can only escalate.
+
+**What a verdict does:**
+
+| Verdict | T0–T1 PR | T2 PR |
+|---|---|---|
+| `pass` | counts toward auto-merge, with the rest of `policy` | no effect: the owner approves anyway |
+| `concern` | `needs-owner`: blocked until the owner approves and removes the label | shown in the comment; the owner approves anyway |
+
+The agent never approves, merges or labels anything as fine. It can only add `needs-owner`.
 
 ### `publish.yml`: trusted
 
@@ -333,7 +418,9 @@ tests is a placeholder or is generated per test run.
   the whole keyset, and every verify call checks the role of its document (`WrongRole` otherwise):
   a release key cannot sign a block list or a snapshot, and the other way round.
 - **Revocation.** A snapshot's `revoked_keys` removes keys from the keyset for releases and block
-  lists without a client release (registry-format.md). See Compromise and open question 3.
+  lists without a client release (registry-format.md). Only a snapshot signed by the offline
+  snapshot rotation key may revoke block-list keys; the regular snapshot key cannot (decided,
+  open question 3). See Compromise.
 - **The client decides.** Only a client release decides which keys are trusted. Changing
   `keys/keyset.json` in this repository changes only what CI checks against.
 
@@ -357,7 +444,7 @@ The two Environments:
 | Secrets | `RELEASE_KEY`, `SNAPSHOT_KEY` | `BLOCKLIST_KEY` |
 | Used by | `publish.yml`, the snapshot job of `refresh.yml` | `blocklist.yml`, the block-list job of `refresh.yml` |
 | Deployment branches | `main` only | `main` only |
-| Required reviewers | none: a reviewer would block T0–T1 auto-merge and the schedule | none: a reviewer would block the 12 h refresh. A block-list *change* still needs the owner, through CODEOWNERS on `blocklist/` |
+| Required reviewers | none: a reviewer would block T0–T1 auto-merge and the schedule | none (accepted 2026-11-18): a reviewer would block the 12 h refresh. A block-list *change* still needs the owner, through CODEOWNERS on `blocklist/` |
 
 Each step passes one secret as `FYX_REGISTRY_SIGNING_KEY`, so no step holds two keys. Neither
 Environment's secrets reach forks, and `pr.yml` references none of them. The protection is that
@@ -401,8 +488,10 @@ documents are always signed with a key that both old and new clients accept.
 
 1. Delete the secret.
 2. Promote the block-list rotation key.
-3. Revoke the leaked key with the next snapshot (`--revoke fyx-bl-2026-a`). Also ship a client
-   release whose keyset drops it.
+3. Revoke the leaked key with an emergency snapshot signed **offline by the snapshot rotation
+   key**, the only key whose revocation of a block-list key clients honour (`--revoke
+   fyx-bl-2026-a`, with a `sequence` above the published one). Also ship a client release whose
+   keyset drops the leaked key.
    - The client verifies its cached copy again when it loads it. A forged list signed by a revoked
      or dropped key then fails verification and is discarded, so the client starts with no cached
      list.
@@ -447,12 +536,15 @@ Task 3.1:
 
 1. Create the repository and its branch rules, CODEOWNERS, the `policy/` files and a
    CONTRIBUTING.md with an example entry.
-2. Add `pr.yml` with `entry` and `policy`. Done when a PR adding a T2 capability cannot merge
-   without the owner (plan 3.1).
+2. Add `pr.yml` with `entry`, and `review.yml` with `report` (the `policy` decision, statuses,
+   the comment, the `needs-owner` label). Done when a PR adding a T2 capability cannot merge
+   without the owner, and a PR with `needs-owner` cannot auto-merge (plan 3.1).
 
 Task 3.2:
 
-1. Add the builder image, and `build` and `publish.yml`.
+1. Add the builder image, `build`, `publish.yml`, and the `agent-review` job with its Environment
+   (the model key only). The agent-review test PR's README tells the reviewer to approve; it
+   must get `concern` (`prompt-injection`) and `needs-owner`.
 2. The owner creates the keys, as in [Creating the keys](#creating-the-keys).
 3. Done when a sample T0 extension auto-merges and appears in `index.json` with a valid
    signature.
@@ -465,13 +557,12 @@ Task 3.2:
 2. **New T0–T1 extensions with no human review**, as the owner decided. The CI checks above
    (reserved and near-copy ids, owner identity) cover squatting, not intent: a T0 panel can still
    show misleading text. Is a review after publishing, plus the block list, enough?
-3. **May a snapshot revoke block-list keys?** In the format, `revoked_keys` covers every role, so a
-   leaked `release-signing` (snapshot key) can revoke both block-list keys. Clients would then
-   discard their cached block list and accept none until a client update: blocked extensions
-   would be unblocked. *Recommended:* the client ignores `revoked_keys` entries that name a
-   `blocklist` key unless the snapshot is signed by the **snapshot rotation key**, which is kept
-   offline. That needs a small change in `fyx_registry` (W2c) and a test. The alternative is that a
-   snapshot never revokes block-list keys, and a block-list key compromise always needs a client
-   release.
+3. **May a snapshot revoke block-list keys?** **Decided 2026-11-18** (coordinator, for the owner):
+   only a snapshot signed by the offline **snapshot rotation key** may revoke `blocklist` keys.
+   The client ignores such entries in any other snapshot. W2c is implementing it in
+   `fyx_registry`, with a test. Why: in the format, `revoked_keys` covers every role. Without this
+   rule, a leaked `release-signing` environment (its snapshot key) could revoke both block-list
+   keys. Clients would then discard their cached block list and accept none until a client
+   update, which unblocks every blocked extension.
 4. **Where T2 manifest fields live.** `network_domains` and `processes` need `[fyx_ui]` keys and
    `fyx-ext check` support before any T2 entry can pass `build`.

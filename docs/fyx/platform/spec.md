@@ -80,8 +80,17 @@ line decorations, code lenses, read-only documents, network and processes behind
     own owners, as the PR's author or by an approving review. Any release that is **T2** needs the
     owner of the registry, for every version. So does anything that adds a T2 capability, a network
     domain or a process name. The owner also approves every `urgent` flag. An owner change needs
-    an existing owner of the entry. Design:
-    [registry-repo.md](registry-repo.md#review-rules).
+    an existing owner of the entry. Every entry PR also gets an **agent review** (owner,
+    2026-11-18), a CI job that can only escalate.
+    - **What it reviews:** the diff and the built package, for capabilities against code,
+      obfuscation, network and process use, and dubious assets.
+    - **Isolation:** no signing keys or write token, and the PR content is untrusted data. Text in
+      the PR that addresses the reviewer is itself a concern.
+    - **Verdict:** a structured verdict with reasons, posted as a comment. `concern` adds the
+      `needs-owner` label and blocks auto-merge until the owner approves. `pass` counts toward T0–T1
+      auto-merge and never approves anything.
+
+    Design: [registry-repo.md](registry-repo.md#review-rules).
 17. Client: the Extensions page gets a Fyx tab with search, install, update, uninstall,
     enable/disable, **pin version**, **roll back**, capability list in plain language, publisher,
     source link. Auto-update is on, but a new version installs only when it is **at least 24 h
@@ -136,9 +145,17 @@ line decorations, code lenses, read-only documents, network and processes behind
       Extension, and one added to `dev_paths` by hand.
     - **After that, only T1 matters.** An update that adds T0 or changes the component loads
       silently. One that adds T1 is held until **Approve**.
-22. Section M of 0.2, notifications and progress: `notify(level, text, actions)` and
-    `progress-start` / `progress-update` / `progress-end`; at most **5 notifications per minute**
-    per extension, extra ones go to the log.
+22. Section M of 0.2, notifications and progress (design drafted 2026-11-18 in
+    [wit-0.2/design.md §M](../wit-0.2/design.md#m-notifications-and-progress-fyxuinotifications)).
+    `ui:notifications`, tier T0.
+    - **`notify`.** Level, title, body and at most 2 actions, with host-timed auto-dismiss. At most
+      **5 notifications per minute** per extension and 3 open at once; extra ones go to the log.
+    - **Progress.** `progress-start` / `progress-update` / `progress-end`, shown in the status
+      bar or on the owner panel, at most 4 running.
+    - **Events.** Actions, closes and progress cancels come back as `ui-event`s to an owner
+      surface. An action click grants the modal gesture.
+    - **Provenance.** The extension's name and id are always drawn by the host, and the extension
+      cannot style them.
 23. `network:fetch` is a host import, not WASI sockets. The manifest lists domains
     (`example.com` or `*.example.com`); others fail with `denied`. HTTPS only, except
     `localhost`/`127.0.0.1`. Timeout **30 s**, response cap **16 MiB**, at most **8** requests
