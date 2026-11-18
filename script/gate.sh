@@ -79,8 +79,10 @@ profile_snapshot() {
     for dir in "${profile_candidates[@]}"; do
         [[ -d "$dir" ]] || continue
         # Content, not mtime: upstream's dev-mode credentials provider rewrites
-        # `development_credentials` unchanged during upstream tests; only real changes count.
-        find "$dir" -type f -not -path '*/logs/*' -not -path '*/db/*' -exec sha256sum {} + 2>/dev/null
+        # `development_credentials` unchanged during upstream tests; only real changes count. LMDB
+        # `lock.mdb` files change whenever any process opens the database and hold no user data.
+        find "$dir" -type f -not -path '*/logs/*' -not -path '*/db/*' -not -name 'lock.mdb' \
+            -exec sha256sum {} + 2>/dev/null
     done | sort -u
 }
 profile_before=$(profile_snapshot)
