@@ -94,6 +94,7 @@ fn props(props: &Props) -> Result<v2::Props, String> {
             },
             disabled: button.disabled,
             tooltip: button.tooltip.clone(),
+            accessible_label: button.accessible_label.clone(),
         }),
         Props::Input(input) => v2::Props::Input(v2::InputProps {
             value: input.value.clone(),
@@ -599,6 +600,7 @@ mod tests {
                 style: v2::ButtonStyle::Default,
                 disabled: false,
                 tooltip: Some("Run it".into()),
+                accessible_label: None,
             })
         );
         assert!(matches!(&converted[1].props, v2::Props::Input(input) if input.secret));

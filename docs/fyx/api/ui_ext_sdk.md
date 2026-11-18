@@ -15,6 +15,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `API_VERSION_V0_2` | const | The version `register_extension!(T, v0_2)` exports. |
 | `API_VERSION_V0_2_SECTION_BYTES` | const | `API_VERSION_V0_2` as stored in the section. |
 | `AgentEvent` | re-export | `bindings::fyx::ui::agent_observe::AgentEvent` |
+| `ButtonProps::accessible_label` | method | The name screen readers announce, for a button whose label does not say what it does (an icon-only button, or a `+`). Without one, the host announces the label, else the tooltip, else the icon's name. At most 256 bytes are used. A 0.1 host drops it. |
 | `ButtonProps::disabled` | method |  |
 | `ButtonProps::icon` | method |  |
 | `ButtonProps::new` | method |  |

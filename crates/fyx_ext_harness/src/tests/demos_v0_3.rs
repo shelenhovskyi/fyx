@@ -455,6 +455,11 @@ mod t2 {
             matches!(harness.props(PANEL, request), Some(model::Props::Button(button)) if button.disabled),
             "a request is only for the ask state"
         );
+        assert_eq!(
+            harness.accessible_name(PANEL, request).as_deref(),
+            Some("Request fetch"),
+            "without an accessible-label the label is announced"
+        );
         for label in ["Fetch zen", "Run git status", "Insert header", "Start"] {
             harness.click(PANEL, label).expect(label);
         }
