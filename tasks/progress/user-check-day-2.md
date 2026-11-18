@@ -51,16 +51,17 @@
 |---|---|---|
 | W2c: інтерфейс `permissions` 0.3 у хості (стан і запит дозволу) | `4ecf7ef885` | блок 3 |
 | W4: кнопки **Request …** у `fyx_demo_t2`, стан дозволу при відкритті | `9cd5a28180` | блок 3 |
-| W3: хост `workspace:edit` і `agent:observe` | «ЗАПОВНИТИ: коміт W3» (на гілці W3, ще не в `integration`) | блок 3, кроки T3, T4 |
+| W3: хост `workspace:edit` і `agent:observe` | `f5a3b863fc` | блок 3, кроки T3, T4, T9 |
 | W3: розділ Inspector «Network, programs, edits» | `885f563c50` | блок 5 |
 | W5: Tab / Shift+Tab / Escape у панелі огляду | `f868421052` | блок 6 |
-| W4: **Notify** і **Run job** у gallery-next, `ui:notifications` | `27e6220906` | блок 1, кроки N1–N4 |
+| W4: **Notify** і **Run job** у gallery-next, `ui:notifications` | `27e6220906` | блок 1, кроки N1–N6 |
+| `integration`, з якого W4 зібрав демо (виправлення `fyx_demo_t2` для T6 і недовіреної папки) | `6bc8a1c12b` | блоки 1–3 |
 | W3: правильні описи `ui:editor-decorations` і `ui:notifications` у картці згоди | «ЗАПОВНИТИ: коміт W3, ще не зроблено» | блок 1 |
 
 Перевірка з кореня репозиторію (Git Bash). Кожен рядок має закінчуватися на `yes`:
 
 ```bash
-for c in 4ecf7ef885 9cd5a28180 885f563c50 f868421052 27e6220906; do git merge-base --is-ancestor $c «ЗАПОВНИТИ: коміт» && echo "$c yes" || echo "$c NO"; done
+for c in 4ecf7ef885 9cd5a28180 f5a3b863fc 885f563c50 f868421052 27e6220906 6bc8a1c12b; do git merge-base --is-ancestor $c «ЗАПОВНИТИ: коміт» && echo "$c yes" || echo "$c NO"; done
 ```
 
 ### Чистий стан
@@ -89,12 +90,20 @@ for c in 4ecf7ef885 9cd5a28180 885f563c50 f868421052 27e6220906; do git merge-ba
 
 Нічого не збирайте самі: усе готує координатор.
 
-- **Демо 0.2:** «ЗАПОВНИТИ: тека, напр. `D:\fyx-user-check\demos-0.2-next\`». Це
-  `fyx_demo_gallery\` (з **Notify** і **Run job**) і `fyx_demo_decorations\`. Теки першого дня
-  (`demos-0.2\`) не підходять, бо в їхній gallery немає сповіщень.
-- **Демо 0.3:** `D:\fyx-user-check\demos-0.3\`, теки `fyx_demo_images\`, `fyx_demo_charts\` і
-  `fyx_demo_t2\` («ЗАПОВНИТИ: W4 кладе їх туди; перевірити, що в кожній є `extension.toml` з
-  `api_version = "0.3.0"`, `fyx_ui.wasm` і, для images, `assets\`»).
+Демо вже готові. W4 зібрав їх з `integration` `6bc8a1c12b` (debug, `wasm32-wasip2`), і кожне
+проходить `fyx-ext check`. Я перевірив теки й маніфести 2026-11-18.
+
+- **Демо 0.2** у `D:\fyx-user-check\demos-0.2\`:
+  - `fyx_demo_gallery\`: перезібрана, з **Notify** і **Run job**, просить `ui:panel`,
+    `ui:status-bar`, `ui:modal` і `ui:notifications`. Вона замінила копію першого дня.
+  - `fyx_demo_decorations\`: та сама, що в перший день, просить `ui:panel` і
+    `ui:editor-decorations`.
+- **Демо 0.3** у `D:\fyx-user-check\demos-0.3\`, кожне з `api_version = "0.3.0"`:
+  - `fyx_demo_images\`: з `assets\` (`logo.svg`, `sample.png`, `kinds\`), просить `ui:panel` і
+    `ui:images`;
+  - `fyx_demo_charts\`: просить `ui:panel` і `ui:canvas`;
+  - `fyx_demo_t2\`: просить `ui:panel`, `network:fetch`, `process:spawn`, `workspace:edit` і
+    `agent:observe`.
 - **Реєстри:** три теки, які готує `script/fyx-test-registry`. Опис у блоці 4.
   - `D:\fyx-user-check\registry-1\`: `fyx-demo-counter` 0.1.0.
   - `D:\fyx-user-check\registry-2\`: `fyx-demo-counter` 0.2.0, а також оновлення, що додає домен
@@ -125,8 +134,8 @@ for c in 4ecf7ef885 9cd5a28180 885f563c50 f868421052 27e6220906; do git merge-ba
      "fyx": { "extensions": {
        "developer_mode": true,
        "dev_paths": [
-         "«ЗАПОВНИТИ: …\\demos-0.2-next\\fyx_demo_gallery»",
-         "«ЗАПОВНИТИ: …\\demos-0.2-next\\fyx_demo_decorations»",
+         "D:\\fyx-user-check\\demos-0.2\\fyx_demo_gallery",
+         "D:\\fyx-user-check\\demos-0.2\\fyx_demo_decorations",
          "D:\\fyx-user-check\\demos-0.3\\fyx_demo_images",
          "D:\\fyx-user-check\\demos-0.3\\fyx_demo_charts",
          "D:\\fyx-user-check\\demos-0.3\\fyx_demo_t2"
@@ -142,8 +151,8 @@ for c in 4ecf7ef885 9cd5a28180 885f563c50 f868421052 27e6220906; do git merge-ba
    ```
 
 3. Якщо Fyx питає, чи довіряти папці, натисніть **Trust and Continue**. У заголовку не має бути
-   **Restricted Mode**. Без довіри `git` і правки в блоці 3 повертають `denied`, і це схоже на
-   відмову в дозволі.
+   **Restricted Mode**. Без довіри демо в блоці 3 пише `Trust this project to use git` або
+   `Trust this project to edit its files` замість результату.
 4. Для кожної теки з'явиться картка
    `The UI extension <id> is installed but not enabled. It asks for: …` з **Enable** і **Not now**.
    Натисніть **Enable** для всіх п'яти.
@@ -255,16 +264,16 @@ for c in 4ecf7ef885 9cd5a28180 885f563c50 f868421052 27e6220906; do git merge-ba
 |---|---|---|---|
 | T1 | Fetch | **Request fetch** → **Allow**. Потім **Fetch zen** | Запит `Allow T2 capabilities demo to connect to the internet?` з `Hosts: api.github.com`. Після Allow `Permission: allowed`. Fetch: спершу `Fetching…`, потім короткий афоризм GitHub. |
 | T2 | Process | **Request process** → **Allow**. Потім **Run git status** | Запит `Allow T2 capabilities demo to run programs?` з переліком програм (`Programs: git …`; запишіть точний текст). Результат: `Exited with 0: the worktree is clean.` |
-| T3 | Edit, відмова | **Request edit** → **Don't Allow**. Потім **Insert header** | Запит `Allow T2 capabilities demo to edit files in your projects?`. Після відмови `Permission: denied (change it on the extensions page)`. **Insert header** дає `denied: workspace:edit is Denied`. `README.md` не змінено: `git -C D:\fyx-user-check\t2-project diff` порожній. |
+| T3 | Edit, відмова | **Request edit** → **Don't Allow**. Потім **Insert header** | Запит `Allow T2 capabilities demo to edit files in your projects?`. Після відмови `Permission: denied (change it on the extensions page)`. **Insert header** дає `denied: … (permission: denied)`. `README.md` не змінено: `git -C D:\fyx-user-check\t2-project diff` порожній. |
 | T4 | Agent | **Request agent** → **Allow**. Потім **Start** | Запит `Allow T2 capabilities demo to watch agent sessions?`. Після **Start** кнопка стає **Stop**, видно `0 open reviews`. До цього розділу повернемося в блоці 6. |
 | T5 | Повторний запит | Ще раз **Fetch zen** | Запиту більше немає, одразу результат. |
-| T6 | Закрити запит без відповіді | Якщо якийсь розділ ще на `not asked yet`, натисніть його **Request …** і закрийте діалог хрестиком | Fyx нічого не запам'ятовує. Запишіть, що показує демо. Відомо, що розділ може застрягти на `waiting for an answer…`, а кнопка **Request** лишається неактивною. |
+| T6 | Закрити запит без відповіді | Якщо якийсь розділ ще на `not asked yet`, натисніть його **Request …** і закрийте діалог хрестиком. Потім клацніть будь-де в панелі | Fyx нічого не запам'ятовує. Поки запит відкритий, видно `Permission: waiting for an answer…`. Після наступного кліку знову `Permission: not asked yet`, і **Request …** знову активна. |
 
 **Відкликати й дозволити знову.**
 
 | # | Що зробити | Очікується |
 |---|---|---|
-| T7 | Палітра команд: `fyx_ui: revoke UI extension permission` → `fyx-demo-t2: network:fetch` | Toast `Revoked network:fetch from fyx-demo-t2`. Рядок стану Fetch: `Permission: denied (change it on the extensions page)`. **Fetch zen** дає `denied: network:fetch is Denied`. |
+| T7 | Палітра команд: `fyx_ui: revoke UI extension permission` → `fyx-demo-t2: network:fetch` | Toast `Revoked network:fetch from fyx-demo-t2`. Рядок стану Fetch: `Permission: denied (change it on the extensions page)`. **Fetch zen** дає `denied: … (permission: denied)`. |
 | T8 | `fyx_ui: open fyx extensions`, рядок **T2 capabilities demo** у **Installed** | Рядки `Network: not allowed` з **Allow**, `Runs Programs: allowed` з **Revoke**, `Edits Files: not allowed`, `Watches Agents: allowed`. **Allow** біля Network повертає дозвіл, і **Fetch zen** знову працює. «ЗАПОВНИТИ: зараз сторінка не показує dev-розширення, тож цих рядків не буде; див. "Відомі прогалини"» |
 | T9 | На тій самій сторінці **Allow** біля `Edits Files`, потім у демо **Insert header**. Залежить від T8: без рядків на сторінці відмову з T3 не скасувати | `Inserted at the top of README.md; undo with Ctrl+Z.` З'являється картка `T2 capabilities demo: Insert the T2 demo header, 1 file` з **Show** і **Undo**. **Undo** прибирає рядок. Fyx нічого не зберігає сам: `README.md` лишається незбереженим. |
 
@@ -275,7 +284,7 @@ for c in 4ecf7ef885 9cd5a28180 885f563c50 f868421052 27e6220906; do git merge-ba
 | T3 | правки: Don't Allow, `denied`, файл не змінено | |
 | T4 | агент: запит, Allow, Start | |
 | T5 | повторно без запиту | |
-| T6 | закритий без відповіді запит (що показало демо) | |
+| T6 | закритий без відповіді запит → знову `not asked yet` | |
 | T7 | відкликання командою | |
 | T8 | рядки T2 на сторінці, Allow знову | |
 | T9 | правка з **Show** / **Undo**, без збереження | |
@@ -385,8 +394,10 @@ Edits**. У тому самому вікні відкрийте панель T2:
    запуску немає. Примітку `Blocked (…)` на сторінці видно після **Refresh**.
 5. **Install на сторінці** ставить найновіший реліз з індексу, не перевіряючи 24-годинну
    затримку і блок-лист. Перевіряйте блокування через G7, а не через Install.
-6. **Недовірена папка** виглядає в демо як відмова в дозволі, бо демо трактує кожен `denied` як
-   «permission denied». Тому крок 3 «Першого запуску» обов'язковий.
+6. **Недовірена папка і закритий запит.** Закрито у `fyx_demo_t2` з `6bc8a1c12b`:
+   - недовірена папка дає `Trust this project to …`;
+   - інша відмова показує повідомлення Fyx і `(permission: <state>)`;
+   - закритий без відповіді запит після наступного кліку повертається до `not asked yet`.
 
 ## Після перевірки
 
