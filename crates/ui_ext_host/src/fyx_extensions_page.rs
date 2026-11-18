@@ -42,8 +42,8 @@ use workspace::{
 
 use crate::{
     UiExtensionRegistry,
-    registry::LocalExtension,
     install::{FyxExtensionsSettings, capability_chip_label, describe_capability_ids},
+    registry::LocalExtension,
     registry_service::{
         RefreshOutcome, Registry, RegistryLocation, RegistryStateDir, UPDATE_CHECK_INTERVAL,
         compiled_keyset, now,
@@ -579,12 +579,14 @@ fn describe_additions(additions: &fyx_registry::Additions) -> Vec<String> {
             .iter()
             .map(|domain| format!("Connects to {domain}")),
     );
-    lines.extend(
-        additions
-            .processes
-            .iter()
-            .map(|program| format!("Runs {program}")),
-    );
+    lines.extend(additions.processes.iter().map(|program| {
+        let any_code = ui_ext::process::runs_any_code(&ui_ext::process::ProcessSpec {
+            name: program.clone(),
+            args: Vec::new(),
+            path: None,
+        });
+        crate::install::runs_line(program, any_code)
+    }));
     if let Some(tier) = additions.tier_raised {
         lines.push(format!("Permission tier {tier:?}"));
     }
@@ -643,8 +645,15 @@ fn install_release(
                 let asks = describe_additions(&additions);
                 if !asks.is_empty() {
                     let detail = format!(
-                        "It asks for:\n{}\n\nFrom the Fyx registry, published by {}.\nSource: {} at {}",
+                        "It asks for:\n{}\n{}\nFrom the Fyx registry, published by {}.\nSource: {} at {}",
                         asks.join("\n"),
+                        // The signed release says it also runs a Zed extension (owner's Q1);
+                        // `verify_package` refuses a download that has one it does not declare.
+                        if release.zed_extension {
+                            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
+                        } else {
+                            String::new()
+                        },
                         release.owners.iter().cloned().collect::<Vec<_>>().join(", "),
                         release.source.repository,
                         &release.source.commit[..release.source.commit.len().min(12)],
@@ -1019,6 +1028,13 @@ impl FyxExtensionsPage {
             .when_some(note, |this, (note, color)| {
                 this.child(Label::new(note).size(LabelSize::Small).color(color))
             })
+            .when(release.zed_extension, |this| {
+                this.child(
+                    Label::new(crate::install::ZED_EXTENSION_WARNING)
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                )
+            })
             .child(
                 h_flex()
                     .gap_1()
@@ -1261,7 +1277,8 @@ impl FyxExtensionsPage {
                             .on_click(move |_, _, cx| {
                                 let fs = <dyn Fs>::global(cx);
                                 if let Some(registry) = UiExtensionRegistry::global(cx) {
-                                    registry.update(cx, |registry, cx| registry.enable(&id, fs, cx));
+                                    registry
+                                        .update(cx, |registry, cx| registry.enable(&id, fs, cx));
                                 }
                             }),
                         )
@@ -1281,7 +1298,11 @@ impl FyxExtensionsPage {
                         describe_capability_ids(&new).join(", ")
                     )
                 };
-                this.child(Label::new(note).size(LabelSize::Small).color(Color::Warning))
+                this.child(
+                    Label::new(note)
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                )
             })
             .children(permission_rows(&id, cx))
     }

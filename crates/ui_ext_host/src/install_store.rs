@@ -199,10 +199,15 @@ impl InstallStore {
         label: &str,
         fs: &dyn Fs,
     ) -> Result<PackageInfo> {
+        // Any `extension.wasm` in the archive, at any depth or case (owner's Q1).
+        let zed_extension = fyx_registry::runs_zed_extension(&bytes);
         let staging = self.unpack_bytes_to_staging(bytes, label, fs).await?;
         let info = read_package_dir(&staging, fs).await;
         remove_dir(&staging, fs).await;
-        info
+        info.map(|mut info| {
+            info.zed_extension |= zed_extension;
+            info
+        })
     }
 
     /// Installs a verified registry download of `release`. The package must be that release
@@ -852,11 +857,25 @@ mod tests {
                 .contains(ZED_EXTENSION_WARNING)
         );
 
+        // Any depth or case in a package counts (owner's Q1, `fyx_registry::runs_zed_extension`).
+        let nested = zip(&[
+            ("extension.toml", toml.as_bytes()),
+            ("fyx_ui.wasm", b"component"),
+            ("sub/Extension.WASM", b"zed"),
+        ])
+        .await;
+        let info = setup
+            .store
+            .inspect_package_bytes(nested, "nested", fs)
+            .await
+            .expect("inspects");
+        assert!(info.zed_extension);
+
         // A dev folder: the install dialog and the consent card of `dev_paths`.
         let folder = setup.dir.join("dev");
         std::fs::create_dir_all(&folder).expect("folder");
         assert!(!crate::install::has_zed_extension(&folder, fs).await);
-        std::fs::write(folder.join("extension.wasm"), b"zed").expect("zed extension");
+        std::fs::write(folder.join("EXTENSION.wasm"), b"zed").expect("zed extension");
         assert!(crate::install::has_zed_extension(&folder, fs).await);
         assert!(
             crate::install::dev_install_detail(&info.manifest, &folder, true)
@@ -884,6 +903,37 @@ mod tests {
         assert!(crate::registry::consent_card_text(&pending(true)).contains(ZED_EXTENSION_WARNING));
         assert!(
             !crate::registry::consent_card_text(&pending(false)).contains(ZED_EXTENSION_WARNING)
+        );
+    }
+
+    /// Owner's Q2: a program that can run anything says so wherever it is listed.
+    #[test]
+    fn test_programs_that_run_any_code_are_named() {
+        let items: Vec<String> = [
+            "process:args@git status",
+            "process:spawn",
+            "process:spawn@bash",
+            "process:spawn@git",
+            "process:spawn@lint (node_modules/.bin/eslint)",
+        ]
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+        assert_eq!(crate::install::programs_running_any_code(&items), ["bash"]);
+        let lines = crate::install::describe_capability_ids(&items);
+        assert!(lines.contains(&format!(
+            "Runs bash, which {}",
+            ui_ext::process::RUNS_ANY_CODE_PROMPT
+        )));
+        assert!(lines.contains(&"Runs git".to_string()));
+        // Git with an option that sets its configuration can run anything too.
+        let configured: Vec<String> = ["process:args@git -c", "process:spawn@git"]
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+        assert_eq!(
+            crate::install::programs_running_any_code(&configured),
+            ["git"]
         );
     }
 

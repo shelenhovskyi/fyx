@@ -127,6 +127,7 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
     if capabilities.is_empty() {
         return vec!["Nothing beyond its own UI".into()];
     }
+    let any_code = programs_running_any_code(capabilities);
     capabilities
         .iter()
         .map(|capability| match capability.as_str() {
@@ -166,7 +167,8 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
                 format!("Connects to {}", &other["network:fetch@".len()..])
             }
             other if other.starts_with("process:spawn@") => {
-                format!("Runs {}", &other["process:spawn@".len()..])
+                let program = &other["process:spawn@".len()..];
+                runs_line(program, any_code.iter().any(|any| any == program))
             }
             other if other.starts_with("process:args@") => {
                 let (program, pattern) = other["process:args@".len()..]
@@ -333,14 +335,84 @@ pub(crate) fn prompt_and_install(
     .detach();
 }
 
-/// What the install dialogs and the consent card add for a folder or package that also holds a
-/// Zed extension (`extension.wasm`), which runs outside `fyx:ui`'s permissions (decision Q1).
-pub const ZED_EXTENSION_WARNING: &str =
-    "Also runs a Zed extension with unrestricted network and process access.";
+/// What the install dialogs, the consent card and the Fyx tab add for a folder or package that
+/// also holds a Zed extension (`extension.wasm`), which runs outside `fyx:ui`'s permissions
+/// (owner's Q1).
+pub const ZED_EXTENSION_WARNING: &str = fyx_registry::RUNS_ZED_EXTENSION_WARNING;
 
-/// Whether `dir` (an unpacked package or a dev folder) has a Zed extension next to `fyx_ui`.
+/// Whether `dir` (an unpacked package or a dev folder) has a Zed extension next to `fyx_ui`: a
+/// file at its root that [`fyx_registry::is_zed_extension_wasm`] names one (any case).
 pub async fn has_zed_extension(dir: &Path, fs: &dyn Fs) -> bool {
-    fs.is_file(&dir.join("extension.wasm")).await
+    use futures::StreamExt as _;
+    let Ok(mut entries) = fs.read_dir(dir).await else {
+        return false;
+    };
+    while let Some(entry) = entries.next().await {
+        if let Ok(path) = entry
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(fyx_registry::is_zed_extension_wasm)
+            && fs.is_file(&path).await
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The programs among consent items (`process:spawn@<program>`, with its `process:args@`
+/// patterns) that can run any program on the computer (owner's Q2,
+/// [`ui_ext::process::runs_any_code`]), as the items name them.
+pub fn programs_running_any_code(items: &[String]) -> Vec<String> {
+    let mut specs: Vec<(String, ui_ext::process::ProcessSpec)> = items
+        .iter()
+        .filter_map(|item| item.strip_prefix("process:spawn@"))
+        .map(|program| {
+            let (name, path) = match program
+                .strip_suffix(')')
+                .and_then(|program| program.split_once(" ("))
+            {
+                Some((name, path)) => (name.to_string(), Some(path.to_string())),
+                None => (program.to_string(), None),
+            };
+            (
+                program.to_string(),
+                ui_ext::process::ProcessSpec {
+                    name,
+                    args: Vec::new(),
+                    path,
+                },
+            )
+        })
+        .collect();
+    for args in items
+        .iter()
+        .filter_map(|item| item.strip_prefix("process:args@"))
+    {
+        if let Some((name, pattern)) = args.split_once(' ') {
+            for (_, spec) in specs.iter_mut().filter(|(_, spec)| spec.name == name) {
+                spec.args.push(pattern.to_string());
+            }
+        }
+    }
+    specs
+        .into_iter()
+        .filter(|(_, spec)| ui_ext::process::runs_any_code(spec))
+        .map(|(program, _)| program)
+        .collect()
+}
+
+/// "Runs <program>", and for one that can run anything, that it can (owner's Q2).
+pub fn runs_line(program: &str, runs_any_code: bool) -> String {
+    if runs_any_code {
+        format!(
+            "Runs {program}, which {}",
+            ui_ext::process::RUNS_ANY_CODE_PROMPT
+        )
+    } else {
+        format!("Runs {program}")
+    }
 }
 
 /// The dev-folder install dialog's text.
@@ -352,7 +424,8 @@ pub(crate) fn dev_install_detail(
     format!(
         "It asks for:\n{}\n{}\nComponent: {}\nFolder: {}\n\nFyx loads it on every start and \
          reloads it when the component is rebuilt.",
-        describe_capabilities(manifest).join("\n"),
+        // Every item it is granted, hosts and programs included, as the file install shows them.
+        describe_capability_ids(&manifest.consent_items()).join("\n"),
         if zed_extension {
             format!("{ZED_EXTENSION_WARNING}\n")
         } else {
