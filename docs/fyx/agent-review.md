@@ -35,18 +35,27 @@ refused before review, so it never opens a review pane.
 
 ## Reviewing
 
+- A new review never takes the keyboard or the active tab. A notification says an edit waits and
+  offers **Review**. `ctrl-k y` (`cmd-k y` on macOS), the status bar item, or the agent panel's
+  **Open review** open it too.
 - One review pane per agent turn. It lists the turn's files and shows one diff at a time.
 - Each hunk has its own Accept and Reject buttons.
-- Keys while the pane has focus:
+- Keys while the pane has focus (on macOS, `cmd` instead of `ctrl`). They are keymap bindings in the
+  `AgentReview` context, so the keymap editor lists them and you can rebind them:
 
   | Keys | Action |
   |---|---|
   | `alt-y` / `alt-n` | Accept / reject the hunk |
   | `shift-alt-y` / `shift-alt-n` | Accept / reject the whole file |
-  | `ctrl-shift-y` / `ctrl-shift-n` | Accept / reject everything in the turn, including later edits of the turn |
+  | `ctrl-k shift-y` / `ctrl-k shift-n` | Accept / reject everything in the turn, including later edits of the turn. When more than one file waits, Fyx asks first. |
+  | `ctrl-k shift-x` | Stop accepting (or rejecting) the rest of the turn: later edits wait for you again |
   | `alt-j` / `alt-k` | Next / previous hunk |
   | `alt-c` | Comment on the hunk |
   | `ctrl-enter` | Submit |
+
+- Closing a review tab decides nothing: its edits keep waiting (the tab shows them as unsaved), and
+  a notification offers **Review** to open it again. **Reject and close** in the pane rejects every
+  waiting edit of the turn and closes it.
 
 - Comments, and the hunks you rejected, go back to the agent.
   - When the agent wrote through Fyx, the write fails with a message that lists them.
@@ -60,7 +69,7 @@ refused before review, so it never opens a review pane.
 - While Fyx reviews an edit that came with a permission request, the request's card in the agent
   panel says so and offers **Open review** instead of Allow and Reject: the review decides it.
 - When the agent's turn stops, or its connection drops, its waiting edits are cancelled: the agent
-  is told the file is unchanged. The same happens when you close the last pane of a turn.
+  is told the file is unchanged.
 
 ## See also
 

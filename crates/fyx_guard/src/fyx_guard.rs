@@ -6,6 +6,7 @@
 //! tighten, through `.fyx/security.toml` (see [`RepoPolicy`]). While Fyx runs, a settings change
 //! that lowers protection waits for the user's confirmation (see [`init`]).
 
+pub mod paths;
 mod policy;
 
 use std::{

@@ -1,9 +1,10 @@
 //! The review UI: one workspace item per open review, showing the proposed edit in Zed's diff editor
 //! (an `acp_thread::Diff` multibuffer, as the agent panel renders it) with per-hunk Accept / Reject.
 //!
-//! While a review pane has focus the host owns the keyboard: a keystroke interceptor turns the review
-//! keys into review actions before the focused editor's own bindings see them. The interceptor survives
-//! keymap reloads, which clear bindings registered with `bind_keys`.
+//! The review keys are ordinary keymap bindings under the pane's `AgentReview` key context
+//! (`assets/keymaps/default-*.json`, next to the editor's), so the keymap editor shows them and they can
+//! be rebound. A new review never takes the keyboard or the active tab: a toast per turn offers
+//! **Review**, as does `agent_review::OpenReviews` (`ctrl-k y`, `cmd-k y` on macOS).
 
 use std::{ops::Range, path::Path, sync::Arc};
 
@@ -16,14 +17,15 @@ use editor::{
     ToPoint as _, actions::GoToHunk, actions::GoToPreviousHunk,
 };
 use gpui::{
-    Action, AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, Keystroke, Pixels,
+    Action, AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, Pixels, PromptLevel,
     SharedString, Subscription, WeakEntity, Window, actions, prelude::*,
 };
 use project::Project;
 use ui::{Button, ButtonStyle, Label, LabelSize, Tooltip, prelude::*};
 use workspace::{
-    HideStatusItem, Item, ItemHandle, OpenOptions, StatusItemView, Workspace,
+    HideStatusItem, Item, ItemHandle, OpenOptions, StatusItemView, Toast, Workspace,
     item::{ItemEvent, TabContentParams},
+    notifications::NotificationId,
 };
 
 use acp_thread::PermissionRequestId;
@@ -48,6 +50,10 @@ actions!(
         AcceptTurn,
         /// Rejects every edit of the agent's turn, including edits the turn proposes later.
         RejectTurn,
+        /// Stops accepting or rejecting the rest of the turn: its later edits wait for review again.
+        ClearTurnDecision,
+        /// Rejects every waiting edit of the turn and closes its review pane.
+        RejectAndClose,
         /// Moves to the next hunk.
         NextHunk,
         /// Moves to the previous hunk.
@@ -62,67 +68,16 @@ actions!(
         OpenReviews,
         /// Turns review of agent edits on or off.
         ToggleReviewMode,
+        /// Applies a changed `.fyx/review.toml` that removes restrictions, once you checked it.
+        ApplyReviewRules,
+        /// Opens the project's `.fyx/review.toml`.
+        ShowReviewRules,
     ]
 );
 
 const KEY_CONTEXT: &str = "AgentReview";
 
-/// Keys the host routes while a review pane has focus.
-fn review_keys() -> Vec<(Keystroke, Box<dyn Action>)> {
-    [
-        ("alt-y", AcceptHunk.boxed_clone()),
-        ("alt-n", RejectHunk.boxed_clone()),
-        ("shift-alt-y", AcceptAllHunks.boxed_clone()),
-        ("shift-alt-n", RejectAllHunks.boxed_clone()),
-        ("ctrl-shift-y", AcceptTurn.boxed_clone()),
-        ("ctrl-shift-n", RejectTurn.boxed_clone()),
-        ("alt-j", NextHunk.boxed_clone()),
-        ("alt-k", PreviousHunk.boxed_clone()),
-        ("alt-c", CommentHunk.boxed_clone()),
-        ("escape", FocusDiff.boxed_clone()),
-        ("ctrl-enter", SubmitReview.boxed_clone()),
-    ]
-    .into_iter()
-    .filter_map(|(key, action)| Some((Keystroke::parse(key).ok()?, action)))
-    .collect()
-}
-
-fn key_label(action: &dyn Action) -> &'static str {
-    let name = action.name();
-    match name {
-        _ if name == AcceptHunk.name() => "alt-y",
-        _ if name == RejectHunk.name() => "alt-n",
-        _ if name == AcceptAllHunks.name() => "shift-alt-y",
-        _ if name == RejectAllHunks.name() => "shift-alt-n",
-        _ if name == AcceptTurn.name() => "ctrl-shift-y",
-        _ if name == RejectTurn.name() => "ctrl-shift-n",
-        _ if name == CommentHunk.name() => "alt-c",
-        _ if name == SubmitReview.name() => "ctrl-enter",
-        _ => "",
-    }
-}
-
 pub(crate) fn init(cx: &mut App) {
-    let keys = review_keys();
-    cx.intercept_keystrokes(move |event, window, cx| {
-        let in_review = event
-            .context_stack
-            .iter()
-            .any(|context| context.contains(KEY_CONTEXT));
-        if !in_review {
-            return;
-        }
-        let pressed = &event.keystroke;
-        let Some((_, action)) = keys.iter().find(|(keystroke, _)| {
-            keystroke.modifiers == pressed.modifiers && keystroke.key == pressed.key
-        }) else {
-            return;
-        };
-        window.dispatch_action(action.boxed_clone(), cx);
-        cx.stop_propagation();
-    })
-    .detach();
-
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -133,6 +88,20 @@ pub(crate) fn init(cx: &mut App) {
         workspace.register_action(|_, _: &ToggleReviewMode, _, cx| {
             crate::set_review_mode_setting(!crate::review_mode(cx), cx);
         });
+        workspace.register_action(|workspace, _: &ApplyReviewRules, _, cx| {
+            apply_review_rules(workspace, cx);
+        });
+        workspace.register_action(|workspace, _: &ShowReviewRules, window, cx| {
+            let roots = worktree_roots(workspace, cx);
+            if let Some(root) = roots.first() {
+                show_rules_file(
+                    workspace,
+                    crate::review_rules::rules_file_path(root),
+                    window,
+                    cx,
+                );
+            }
+        });
         let Some(review) = AgentReview::global(cx) else {
             return;
         };
@@ -140,24 +109,23 @@ pub(crate) fn init(cx: &mut App) {
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_right_item(status, window, cx)
         });
-        cx.subscribe_in(
-            &review,
-            window,
-            |workspace, _, event, window, cx| match event {
-                AgentReviewEvent::Opened(id) => open_reviews(workspace, Some(*id), window, cx),
-                AgentReviewEvent::UnreviewedChanges(turn) => {
-                    show_unreviewed_changes(workspace, *turn, window, cx)
-                }
-                _ => {}
-            },
-        )
+        cx.subscribe_in(&review, window, |workspace, _, event, _, cx| match event {
+            AgentReviewEvent::Opened(id) => notify_review_waiting(workspace, *id, cx),
+            AgentReviewEvent::UnreviewedChanges(turn) => {
+                show_unreviewed_changes(workspace, *turn, cx)
+            }
+            AgentReviewEvent::DecidedByRule { turn, entry } => {
+                show_rule_decision(workspace, *turn, *entry, cx)
+            }
+            _ => {}
+        })
         .detach();
     })
     .detach();
 }
 
-/// Opens (or brings forward) the turn pane of each open review (or only `only`) whose file belongs to
-/// this workspace's project.
+/// Opens (or brings forward) and focuses the turn pane of each open review (or only `only`) whose
+/// file belongs to this workspace's project: the user asked for them.
 fn open_reviews(
     workspace: &mut Workspace,
     only: Option<ReviewId>,
@@ -174,42 +142,17 @@ fn open_reviews(
         .iter()
         .filter(|candidate| only.is_none_or(|id| candidate.id() == id))
         .filter(|candidate| !candidate.is_submitted())
-        .filter(|candidate| {
-            project
-                .read(cx)
-                .project_path_for_absolute_path(candidate.edit().abs_path(), cx)
-                .is_some()
-        })
+        .filter(|candidate| in_project(&project, candidate.edit().abs_path(), cx))
         .map(|candidate| candidate.turn())
         .collect::<Vec<_>>();
     turns.dedup();
     for turn in turns {
-        let existing = workspace
-            .items_of_type::<ReviewPane>(cx)
-            .find(|pane| pane.read(cx).turn == turn);
-        let pane = match existing {
-            Some(pane) => {
-                let focus = window.is_window_active();
-                workspace.activate_item(&pane, true, focus, window, cx);
-                pane
-            }
-            None => {
-                let workspace_handle = cx.weak_entity();
-                let pane = cx.new(|cx| {
-                    ReviewPane::new(review.clone(), turn, project.clone(), workspace_handle, cx)
-                });
-                let focus = window.is_window_active();
-                workspace.add_item_to_active_pane(Box::new(pane.clone()), None, focus, window, cx);
-                pane
-            }
-        };
-        pane.update(cx, |pane, cx| pane.show_next(window, cx));
+        open_turn_pane(workspace, turn, window, cx);
     }
 }
 
-/// Opens the turn's pane, without focusing it, when files of this workspace's project changed during
-/// the turn without review.
-fn show_unreviewed_changes(
+/// Opens (or brings forward) the pane of `turn` and gives it the keyboard.
+fn open_turn_pane(
     workspace: &mut Workspace,
     turn: TurnId,
     window: &mut Window,
@@ -218,21 +161,279 @@ fn show_unreviewed_changes(
     let Some(review) = AgentReview::global(cx) else {
         return;
     };
-    let project = workspace.project().clone();
-    let in_project = review.read(cx).unreviewed_changes(turn).any(|path| {
-        project
-            .read(cx)
-            .project_path_for_absolute_path(path, cx)
-            .is_some()
+    workspace.dismiss_toast(&review_toast_id(turn), cx);
+    let focus = window.is_window_active();
+    let existing = workspace
+        .items_of_type::<ReviewPane>(cx)
+        .find(|pane| pane.read(cx).turn == turn);
+    let pane = match existing {
+        Some(pane) => {
+            workspace.activate_item(&pane, true, focus, window, cx);
+            pane
+        }
+        None => {
+            let project = workspace.project().clone();
+            let workspace_handle = cx.weak_entity();
+            let pane = cx.new(|cx| ReviewPane::new(review, turn, project, workspace_handle, cx));
+            workspace.add_item_to_active_pane(Box::new(pane.clone()), None, focus, window, cx);
+            pane
+        }
+    };
+    pane.update(cx, |pane, cx| {
+        pane.show_next(window, cx);
+        if focus {
+            window.focus(&pane.diff_focus_handle(cx), cx);
+        }
     });
+}
+
+fn in_project(project: &Entity<Project>, path: &Path, cx: &App) -> bool {
+    project
+        .read(cx)
+        .project_path_for_absolute_path(path, cx)
+        .is_some()
+}
+
+struct ReviewWaiting;
+struct RuleDecided;
+struct NoPendingRules;
+
+fn worktree_roots(workspace: &Workspace, cx: &App) -> Vec<std::path::PathBuf> {
+    workspace
+        .project()
+        .read(cx)
+        .visible_worktrees(cx)
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        .collect()
+}
+
+fn show_rules_file(
+    workspace: &mut Workspace,
+    path: std::path::PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace
+        .open_abs_path(path, OpenOptions::default(), window, cx)
+        .detach_and_log_err(cx);
+}
+
+/// `agent_review: apply review rules`: the changed rules files of this project that wait for the
+/// user, applied.
+fn apply_review_rules(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let mut applied = 0;
+    for root in worktree_roots(workspace, cx) {
+        if review.read(cx).has_pending_rules(&root) {
+            review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
+            applied += 1;
+        }
+    }
+    if applied == 0 {
+        workspace.show_toast(
+            Toast::new(
+                NotificationId::unique::<NoPendingRules>(),
+                "Agent review: no changed review rules are waiting to be applied.",
+            )
+            .autohide(),
+            cx,
+        );
+    }
+}
+
+/// A rule refused an edit, or let it land without review: say so once per turn and rule, with a
+/// way to the rule.
+fn show_rule_decision(
+    workspace: &mut Workspace,
+    turn: TurnId,
+    entry: usize,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let project = workspace.project().clone();
+    let Some(entry) = review.read(cx).turn_history(turn).get(entry).cloned() else {
+        return;
+    };
+    let Some(rule) = entry.rule.clone() else {
+        return;
+    };
+    if !in_project(&project, &entry.path, cx) {
+        return;
+    }
+    let path = display_path(&project, &entry.path, cx);
+    let (message, rules_file) = match rule.kind {
+        crate::RuleKind::AutoAccept => (
+            format!(
+                "Agent review: the agent's edit to {path} landed without review, by rule {}. Later \
+                 edits matching it in this turn are not announced.",
+                rule.describe()
+            ),
+            paths::settings_file().clone(),
+        ),
+        _ => (
+            format!(
+                "Agent review: the agent's edit to {path} was refused, by rule {}.",
+                rule.describe()
+            ),
+            std::path::PathBuf::from(&rule.source),
+        ),
+    };
+    let handle = cx.weak_entity();
+    let id = NotificationId::composite::<RuleDecided>(SharedString::from(format!(
+        "{turn:?} {}",
+        rule.describe()
+    )));
+    let mut toast = Toast::new(id, message).on_click("Show Review Rules", move |window, cx| {
+        let rules_file = rules_file.clone();
+        handle
+            .update(cx, |workspace, cx| {
+                show_rules_file(workspace, rules_file, window, cx)
+            })
+            .ok();
+    });
+    if rule.kind == crate::RuleKind::AutoAccept {
+        toast = toast.autohide();
+    }
+    workspace.show_toast(toast, cx);
+}
+
+pub(crate) fn review_toast_id(turn: TurnId) -> NotificationId {
+    NotificationId::composite::<ReviewWaiting>(SharedString::from(format!("{turn:?}")))
+}
+
+/// Tells the user that a turn has something to review, without taking the keyboard or the active
+/// tab: one toast per turn, whose **Review** opens the turn's pane.
+fn show_review_toast(
+    workspace: &mut Workspace,
+    turn: TurnId,
+    message: String,
+    cx: &mut Context<Workspace>,
+) {
+    let handle = cx.weak_entity();
+    let toast = Toast::new(review_toast_id(turn), message).on_click("Review", move |window, cx| {
+        handle
+            .update(cx, |workspace, cx| {
+                open_turn_pane(workspace, turn, window, cx)
+            })
+            .ok();
+    });
+    workspace.show_toast(toast, cx);
+}
+
+/// A new review of this workspace's project: the turn's pane shows it if one is open, else a toast
+/// says it waits.
+fn notify_review_waiting(workspace: &mut Workspace, id: ReviewId, cx: &mut Context<Workspace>) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let Some(opened) = review.read(cx).review(id) else {
+        return;
+    };
+    let turn = opened.turn();
+    let project = workspace.project().clone();
+    if !in_project(&project, opened.edit().abs_path(), cx) {
+        return;
+    }
     let has_pane = workspace
         .items_of_type::<ReviewPane>(cx)
         .any(|pane| pane.read(cx).turn == turn);
-    if in_project && !has_pane {
-        let workspace_handle = cx.weak_entity();
-        let pane = cx.new(|cx| ReviewPane::new(review, turn, project, workspace_handle, cx));
-        workspace.add_item_to_active_pane(Box::new(pane), None, false, window, cx);
+    if has_pane {
+        return;
     }
+    let message = waiting_message(&review.read(cx), turn, &project, cx);
+    show_review_toast(workspace, turn, message, cx);
+}
+
+fn waiting_message(
+    review: &AgentReview,
+    turn: TurnId,
+    project: &Entity<Project>,
+    cx: &App,
+) -> String {
+    let waiting = review.open_reviews_in_turn(turn).collect::<Vec<_>>();
+    match waiting.as_slice() {
+        [single] => format!(
+            "Agent review: the agent's edit to {} waits for your review.",
+            display_path(project, single.edit().abs_path(), cx)
+        ),
+        _ => format!(
+            "Agent review: {} agent edits wait for your review.",
+            waiting.len()
+        ),
+    }
+}
+
+/// When files of this workspace's project changed during the turn without review, a toast says so
+/// (unless the turn's pane is open and lists them).
+fn show_unreviewed_changes(workspace: &mut Workspace, turn: TurnId, cx: &mut Context<Workspace>) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let project = workspace.project().clone();
+    let count = review
+        .read(cx)
+        .unreviewed_changes(turn)
+        .filter(|path| in_project(&project, path, cx))
+        .count();
+    let has_pane = workspace
+        .items_of_type::<ReviewPane>(cx)
+        .any(|pane| pane.read(cx).turn == turn);
+    if count > 0 && !has_pane {
+        let files = if count == 1 { "file" } else { "files" };
+        show_review_toast(
+            workspace,
+            turn,
+            format!(
+                "Agent review: {count} {files} changed without review during the agent's turn."
+            ),
+            cx,
+        );
+    }
+}
+
+/// `path` relative to its worktree, with control and bidirectional characters escaped, so a file
+/// name cannot pose as another.
+pub(crate) fn display_path(project: &Entity<Project>, path: &Path, cx: &App) -> String {
+    let project = project.read(cx);
+    let text = project
+        .project_path_for_absolute_path(path, cx)
+        .and_then(|project_path| {
+            let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
+            let worktree = worktree.read(cx);
+            let relative = project_path
+                .path
+                .display(worktree.path_style())
+                .into_owned();
+            Some(if project.visible_worktrees(cx).count() > 1 {
+                format!("{}/{relative}", worktree.root_name().as_unix_str())
+            } else {
+                relative
+            })
+        })
+        .unwrap_or_else(|| path.display().to_string());
+    escape_for_display(&text)
+}
+
+/// Escapes control characters and the Unicode bidirectional and invisible formatting characters.
+pub(crate) fn escape_for_display(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        let invisible = character.is_control()
+            || matches!(
+                character,
+                '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+            );
+        if invisible {
+            escaped.push_str(&character.escape_unicode().to_string());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 pub enum ReviewPaneEvent {
@@ -274,8 +475,7 @@ impl ReviewPane {
     ) -> Self {
         review.update(cx, |review, _| review.pane_opened(turn));
         cx.on_release(move |this, cx| {
-            this.review
-                .update(cx, |review, cx| review.pane_closed(turn, cx));
+            this.review.update(cx, |review, _| review.pane_closed(turn));
         })
         .detach();
         Self {
@@ -298,7 +498,7 @@ impl ReviewPane {
         let turn = self.turn;
         let comment_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Comment for the agent on this hunk (alt-c)", window, cx);
+            editor.set_placeholder_text("Comment for the agent on this hunk", window, cx);
             editor
         });
         self._subscriptions = vec![
@@ -386,6 +586,8 @@ impl ReviewPane {
     /// Shows review `id` of this turn in the diff editor.
     pub fn show_review(&mut self, id: ReviewId, window: &mut Window, cx: &mut Context<Self>) {
         self.subscribe(window, cx);
+        // The next file takes the keyboard only from this pane, never from where the user types.
+        let had_focus = self.focus_handle.contains_focused(window, cx);
         let Some(edit) = self
             .review
             .read(cx)
@@ -454,9 +656,7 @@ impl ReviewPane {
         });
         self.current_hunk = None;
         let focus = editor.focus_handle(cx);
-        // A review that opens in a background window must not take the keyboard from the window the
-        // user is typing in.
-        if window.is_window_active() {
+        if had_focus {
             window.focus(&focus, cx);
         }
         focus.dispatch_action(&GoToHunk, window, cx);
@@ -634,12 +834,76 @@ impl ReviewPane {
         }
     }
 
-    fn accept_turn(&mut self, _: &AcceptTurn, _: &mut Window, cx: &mut Context<Self>) {
-        self.decide_turn(HunkDecision::Accepted, cx);
+    /// Decides the turn, after asking when more than one file waits: one stray key must not decide
+    /// a whole turn.
+    fn confirm_turn(
+        &mut self,
+        decision: HunkDecision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.review.read(cx).open_reviews_in_turn(self.turn).count();
+        if waiting <= 1 {
+            self.decide_turn(decision, cx);
+            return;
+        }
+        let (message, button) = match decision {
+            HunkDecision::Rejected => (
+                format!("Reject all {waiting} waiting files?"),
+                "Reject All in Turn",
+            ),
+            _ => (
+                format!("Accept all {waiting} waiting files?"),
+                "Accept All in Turn",
+            ),
+        };
+        let detail = "Edits the agent proposes later in this turn are decided the same way, until \
+                      you choose Stop.";
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(detail),
+            &[button, "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update(cx, |this, cx| this.decide_turn(decision, cx))
+                    .ok();
+            }
+        })
+        .detach();
     }
 
-    fn reject_turn(&mut self, _: &RejectTurn, _: &mut Window, cx: &mut Context<Self>) {
-        self.decide_turn(HunkDecision::Rejected, cx);
+    fn accept_turn(&mut self, _: &AcceptTurn, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_turn(HunkDecision::Accepted, window, cx);
+    }
+
+    fn reject_turn(&mut self, _: &RejectTurn, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_turn(HunkDecision::Rejected, window, cx);
+    }
+
+    fn clear_turn_decision(
+        &mut self,
+        _: &ClearTurnDecision,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let turn = self.turn;
+        self.review
+            .update(cx, |review, cx| review.clear_turn_decision(turn, cx));
+    }
+
+    fn reject_and_close(&mut self, _: &RejectAndClose, _: &mut Window, cx: &mut Context<Self>) {
+        let turn = self.turn;
+        if let Err(error) = self
+            .review
+            .update(cx, |review, cx| review.reject_waiting(turn, cx))
+        {
+            log::info!("fyx: turn not rejected: {error:#}");
+            return;
+        }
+        cx.emit(ReviewPaneEvent::Close);
     }
 
     fn next_hunk(&mut self, _: &NextHunk, window: &mut Window, cx: &mut Context<Self>) {
@@ -787,11 +1051,19 @@ impl ReviewPane {
                             .color(Color::Muted),
                     )
                     .child(div().flex_1())
+                    .children(turn_decision.map(|decision| {
+                        let label = match decision {
+                            HunkDecision::Rejected => "Stop rejecting",
+                            _ => "Stop accepting",
+                        };
+                        self.action_button("clear-turn", label, &ClearTurnDecision, cx)
+                    }))
                     .child(self.action_button("accept-turn", "Accept all in turn", &AcceptTurn, cx))
+                    .child(self.action_button("reject-turn", "Reject all in turn", &RejectTurn, cx))
                     .child(self.action_button(
-                        "reject-turn",
-                        "Reject all in turn",
-                        &RejectTurn,
+                        "reject-and-close",
+                        "Reject and close",
+                        &RejectAndClose,
                         cx,
                     )),
             )
@@ -821,7 +1093,7 @@ impl ReviewPane {
                     decision_label(decision)
                 )
             }
-            _ => "Move the cursor into a hunk (alt-j / alt-k)".into(),
+            _ => "Move the cursor into a hunk (Next Hunk, Previous Hunk)".into(),
         };
         let path = edit.map_or_else(String::new, |edit| edit.abs_path().display().to_string());
         let rule = self.current_review_id().and_then(|id| {
@@ -904,9 +1176,9 @@ impl ReviewPane {
         _cx: &mut Context<Self>,
     ) -> Button {
         let action = action.boxed_clone();
-        let key = key_label(action.as_ref());
+        // The tooltip shows the binding from the keymap, as the user has it.
         Button::new(id, label)
-            .tooltip(Tooltip::text(key))
+            .tooltip(Tooltip::for_action_title(label, action.as_ref()))
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     }
 }
@@ -976,6 +1248,8 @@ impl Render for ReviewPane {
             .on_action(cx.listener(Self::reject_all))
             .on_action(cx.listener(Self::accept_turn))
             .on_action(cx.listener(Self::reject_turn))
+            .on_action(cx.listener(Self::clear_turn_decision))
+            .on_action(cx.listener(Self::reject_and_close))
             .on_action(cx.listener(Self::next_hunk))
             .on_action(cx.listener(Self::previous_hunk))
             .on_action(cx.listener(Self::comment_hunk))
@@ -1010,6 +1284,39 @@ impl Item for ReviewPane {
         match event {
             ReviewPaneEvent::Close => f(ItemEvent::CloseItem),
         }
+    }
+
+    /// Edits wait for review: closing the tab keeps them held (see [`Self::on_removed`]).
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.review
+            .read(cx)
+            .open_reviews_in_turn(self.turn)
+            .next()
+            .is_some()
+    }
+
+    /// Closing the tab decides nothing: the edits stay held, and a toast offers the pane again.
+    fn on_removed(&self, cx: &mut Context<Self>) {
+        let turn = self.turn;
+        let review = self.review.clone();
+        let workspace = self.workspace.clone();
+        let project = self.project.clone();
+        cx.defer(move |cx| {
+            if review.read(cx).open_reviews_in_turn(turn).next().is_none() {
+                return;
+            }
+            let message = waiting_message(&review.read(cx), turn, &project, cx);
+            workspace
+                .update(cx, |workspace, cx| {
+                    if !workspace
+                        .items_of_type::<ReviewPane>(cx)
+                        .any(|pane| pane.read(cx).turn == turn)
+                    {
+                        show_review_toast(workspace, turn, message, cx);
+                    }
+                })
+                .ok();
+        });
     }
 }
 
@@ -1189,6 +1496,61 @@ mod tests {
     const OLD: &str = "one\ntwo\nthree\nfour\nfive\n";
     const NEW: &str = "ONE\ntwo\nthree\nfour\nFIVE\n";
 
+    #[cfg(target_os = "macos")]
+    const KEYMAP: &str = include_str!("../../../assets/keymaps/default-macos.json");
+    #[cfg(target_os = "windows")]
+    const KEYMAP: &str = include_str!("../../../assets/keymaps/default-windows.json");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    const KEYMAP: &str = include_str!("../../../assets/keymaps/default-linux.json");
+    const MOD: &str = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+
+    /// The review bindings of this platform's default keymap, as the app loads them.
+    fn bind_default_review_keys(cx: &mut App) {
+        let bindings = match settings::KeymapFile::load(KEYMAP, cx) {
+            settings::KeymapFileLoadResult::Success { key_bindings }
+            | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+            settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                panic!("default keymap: {error}")
+            }
+        };
+        let review_bindings = bindings
+            .into_iter()
+            .filter(|binding| binding.action().name().starts_with("agent_review::"))
+            .collect::<Vec<_>>();
+        assert!(review_bindings.len() > 20, "the review blocks load");
+        cx.bind_keys(review_bindings);
+    }
+
+    #[test]
+    fn turn_keys_collide_with_nothing_on_any_os() {
+        for (keymap, modifier) in [
+            (
+                include_str!("../../../assets/keymaps/default-windows.json"),
+                "ctrl",
+            ),
+            (
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                "ctrl",
+            ),
+            (
+                include_str!("../../../assets/keymaps/default-macos.json"),
+                "cmd",
+            ),
+        ] {
+            settings::KeymapFile::parse(keymap).expect("every default keymap parses");
+            for key in ["k y", "k shift-y", "k shift-n", "k shift-x"] {
+                let binding = format!("\"{modifier}-{key}\"");
+                // Once in `Workspace` (`k y`) or twice (the pane and its editors), nothing else.
+                let expected = if key == "k y" { 1 } else { 2 };
+                assert_eq!(keymap.matches(&binding).count(), expected, "{binding}");
+            }
+        }
+    }
+
     #[gpui::test]
     async fn one_pane_shows_every_file_of_the_turn(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -1196,6 +1558,7 @@ mod tests {
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             crate::init(None, cx);
+            bind_default_review_keys(cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -1223,6 +1586,17 @@ mod tests {
             held.push(review.update(cx, |review, cx| review.review_write(write, cx)));
         }
         cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .items_of_type::<ReviewPane>(cx)
+                .next()
+                .is_none()),
+            "a new review takes neither the keyboard nor the active tab"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_reviews(workspace, None, window, cx)
+        });
+        cx.run_until_parked();
 
         let panes = workspace.read_with(cx, |workspace, cx| {
             workspace
@@ -1239,8 +1613,19 @@ mod tests {
             Some(first)
         );
 
+        // Two files wait: deciding the turn asks first, and Cancel decides nothing.
+        cx.simulate_keystrokes(&format!("{MOD}-k shift-y"));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            2
+        );
+
         cx.simulate_keystrokes("shift-alt-y");
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes(&format!("{MOD}-enter"));
         cx.run_until_parked();
         assert_eq!(
             pane.read_with(cx, |pane, _| pane.current_review_id()),
@@ -1248,7 +1633,8 @@ mod tests {
             "the pane moves on to the turn's next file"
         );
 
-        cx.simulate_keystrokes("ctrl-shift-n");
+        // One file waits, so the turn is rejected without asking.
+        cx.simulate_keystrokes(&format!("{MOD}-k shift-n"));
         cx.run_until_parked();
         let mut outcomes = Vec::new();
         for task in held {
@@ -1265,6 +1651,7 @@ mod tests {
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             crate::init(None, cx);
+            bind_default_review_keys(cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -1287,6 +1674,10 @@ mod tests {
         };
         let held = review.update(cx, |review, cx| review.review_write(write, cx));
         cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_reviews(workspace, None, window, cx)
+        });
+        cx.run_until_parked();
 
         let pane = workspace
             .read_with(cx, |workspace, cx| {
@@ -1297,7 +1688,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(pane.read_with(cx, |pane, _| pane.current_hunk), Some(0));
 
-        // The editor binds none of these; the interceptor routes them to the review.
+        // Keymap bindings in the `AgentReview` context, over the editor's own.
         cx.simulate_keystrokes("alt-y");
         cx.run_until_parked();
         assert_eq!(
@@ -1317,7 +1708,7 @@ mod tests {
             assert_eq!(decisions, [HunkDecision::Accepted, HunkDecision::Rejected]);
         });
 
-        cx.simulate_keystrokes("ctrl-enter");
+        cx.simulate_keystrokes(&format!("{MOD}-enter"));
         cx.run_until_parked();
         let outcome = held.await.unwrap();
         assert_eq!(
