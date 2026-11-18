@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod tree;
+
 use crate::api_version::{ApiError, ApiVersion, MAX_INDENT_LEVELS, MAX_TOOLTIP_BYTES};
 use crate::tree::{TreeError, TreeLimits};
 use crate::types as v0_1;

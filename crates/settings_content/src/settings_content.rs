@@ -213,10 +213,10 @@ pub struct SettingsContent {
     pub agent_servers: Option<AllAgentServersSettings>,
     /// Host review of agent edits.
     pub agent_review: Option<AgentReviewSettingsContent>, // fyx: agent_review
-    /// Security modes for agents.
-    pub fyx_security: Option<FyxSecuritySettingsContent>, // fyx: fyx_guard
     /// Fyx's own settings.
     pub fyx: Option<FyxSettingsContent>, // fyx: settings of Fyx crates
+    /// Security modes for agents.
+    pub fyx_security: Option<FyxSecuritySettingsContent>, // fyx: fyx_guard
 
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
