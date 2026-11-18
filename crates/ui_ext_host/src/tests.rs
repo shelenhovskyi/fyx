@@ -83,6 +83,8 @@ struct FakeBackend {
     fail_ticks: Cell<bool>,
     /// Modals the renderer reported as not shown.
     modals_closed: RefCell<Vec<String>>,
+    /// The guest execution the Inspector records for the last tick call, if any.
+    tick_executed: Cell<Option<Duration>>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -173,6 +175,24 @@ fn button(label: &str) -> Props {
 }
 
 impl UiBackend for FakeBackend {
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        let executed = self.tick_executed.get()?;
+        let mut diagnostics = ui_ext_wasm::diagnostics::Diagnostics::default();
+        diagnostics
+            .calls
+            .push_back(ui_ext_wasm::diagnostics::CallRecord {
+                kind: "tick",
+                surface_id: "counter".into(),
+                at: std::time::SystemTime::now(),
+                duration: executed * 10,
+                executed,
+                budget: Duration::from_millis(200),
+                pushes: 0,
+                error: None,
+            });
+        Some(diagnostics)
+    }
+
     fn extension_id(&self) -> &str {
         "fake"
     }
@@ -3211,7 +3231,11 @@ async fn test_replaced_backend_drops_the_old_tick(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_secs(5));
     cx.run_until_parked();
     assert!(!old.calls().contains(&Call::Tick), "{:?}", old.calls());
-    assert_eq!(new.take_calls(), [Call::Mount], "the new instance is only mounted");
+    assert_eq!(
+        new.take_calls(),
+        [Call::Mount],
+        "the new instance is only mounted"
+    );
 }
 
 /// integration-5 L4 (design C): in a modal, PageDown / PageUp move its first list by the page the
@@ -3244,4 +3268,56 @@ async fn test_modal_page_keys_move_by_a_page(cx: &mut TestAppContext) {
     assert!(page > 1 && page < 299, "a page is {page} rows");
     key("pageup", vcx);
     assert_eq!(selected(vcx), Some(0));
+}
+
+/// integration-5 L3: a tick's CPU share counts the guest's own execution from the call record,
+/// not the wall time the call spent behind others; the wall time only without a record.
+#[gpui::test]
+async fn test_tick_share_counts_guest_execution(cx: &mut TestAppContext) {
+    struct TickLink(RefCell<Vec<Duration>>);
+    impl crate::surface::SurfaceLink for TickLink {
+        fn route_effect(&self, _: HostEffect, _: &mut App) {}
+        fn extension_failed(&self, _: &str, _: gpui::SharedString, _: &mut App) {}
+        fn restart_extension(&self, _: &mut App) {}
+        fn record_tick(&self, _: std::time::Instant, busy: Duration, _: &mut App) {
+            self.0.borrow_mut().push(busy);
+        }
+    }
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.tick_executed.set(Some(Duration::from_millis(7)));
+    let link = Rc::new(TickLink(RefCell::new(Vec::new())));
+    let dyn_link: Rc<dyn crate::surface::SurfaceLink> = link.clone();
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| {
+        SurfaceState::new(
+            dyn_backend,
+            panel_surface("counter", "Counter"),
+            Some(dyn_link),
+            cx,
+        )
+    });
+    let panel = cx.update(|cx| cx.new(|_| ()).entity_id());
+    state.update(cx, |state, cx| state.set_visible(panel, true, cx));
+    cx.run_until_parked();
+    let tick = |cx: &mut TestAppContext| {
+        state.update(cx, |state, cx| {
+            state.request_tick(Duration::from_millis(100), cx)
+        });
+        cx.executor().advance_clock(Duration::from_millis(1050));
+        cx.run_until_parked();
+    };
+    tick(cx);
+    assert_eq!(
+        *link.0.borrow(),
+        [Duration::from_millis(7)],
+        "the record's execution"
+    );
+    backend.tick_executed.set(None);
+    tick(cx);
+    assert_eq!(link.0.borrow().len(), 2);
+    assert!(
+        link.0.borrow()[1] < Duration::from_millis(7),
+        "the wall time without a record"
+    );
 }

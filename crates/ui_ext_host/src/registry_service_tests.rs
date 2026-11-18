@@ -1053,3 +1053,20 @@ fn test_release_keyset_needs_role_separation() {
     assert!(parse_release_keyset(&merged).is_none());
     assert!(parse_release_keyset("not json").is_none());
 }
+
+/// Owner's Q1 (W2c 226eea0e96): an update that starts running a Zed extension asks with the
+/// warning among what it asks for.
+#[test]
+fn test_a_new_zed_extension_is_asked_for_with_the_warning() {
+    use crate::fyx_extensions_page::describe_additions;
+    let additions = fyx_registry::Additions {
+        zed_extension: true,
+        ..Default::default()
+    };
+    assert!(!additions.is_empty());
+    assert_eq!(
+        describe_additions(&additions),
+        [crate::install::ZED_EXTENSION_WARNING]
+    );
+    assert!(describe_additions(&fyx_registry::Additions::default()).is_empty());
+}

@@ -520,14 +520,6 @@ pub(crate) async fn apply_plan(
                 else {
                     continue;
                 };
-                // The owner's Q1 warning is shown before a release starts running a Zed
-                // extension, so such an update waits for the page's Update and its dialog.
-                if newly_runs_zed_extension(store, id, release, fs).await {
-                    note(format!(
-                        "{id} {to} also runs a Zed extension; update it from the extensions page"
-                    ));
-                    continue;
-                }
                 let result = async {
                     let bytes = registry.download(release).await?;
                     store
@@ -588,27 +580,6 @@ pub(crate) async fn apply_plan(
     }
 }
 
-/// Whether `release` (an update of the installed `id`) runs a Zed extension that the active
-/// version does not (owner's Q1): its update must show the warning first. With nothing installed
-/// it is a fresh install, which always confirms.
-pub(crate) async fn newly_runs_zed_extension(
-    store: &crate::install_store::InstallStore,
-    id: &str,
-    release: &Release,
-    fs: &dyn Fs,
-) -> bool {
-    if !release.zed_extension {
-        return false;
-    }
-    let Ok(state) = store.state(fs).await else {
-        return true;
-    };
-    let Some(entry) = state.extensions.get(id) else {
-        return true;
-    };
-    !crate::install::has_zed_extension(&store.version_dir(id, &entry.active), fs).await
-}
-
 /// Whether the client holds a verified block list that has not expired
 /// ([`fyx_registry::RegistryClient::blocks_can_lift`]) and is fresh, so that an extension it no
 /// longer blocks may be enabled again (integration-6 N4).
@@ -620,7 +591,7 @@ pub(crate) fn lifts_blocks(
 }
 
 /// What a confirmation lists: the capabilities, domains and programs a release adds.
-fn describe_additions(additions: &fyx_registry::Additions) -> Vec<String> {
+pub(crate) fn describe_additions(additions: &fyx_registry::Additions) -> Vec<String> {
     let mut lines =
         describe_capability_ids(&additions.capabilities.iter().cloned().collect::<Vec<_>>());
     if additions.capabilities.is_empty() {
@@ -642,6 +613,10 @@ fn describe_additions(additions: &fyx_registry::Additions) -> Vec<String> {
     }));
     if let Some(tier) = additions.tier_raised {
         lines.push(format!("Permission tier {tier:?}"));
+    }
+    // The owner's Q1: a release that starts running a Zed extension says so where it asks.
+    if additions.zed_extension {
+        lines.push(crate::install::ZED_EXTENSION_WARNING.to_string());
     }
     lines
 }
@@ -696,12 +671,9 @@ fn install_release(
                 let base = approved_before.clone().unwrap_or_default();
                 let additions = base.additions(&release);
                 let asks = describe_additions(&additions);
-                // An update that starts running a Zed extension asks too, for the warning
-                // (owner's Q1), even when it adds no permission.
-                let zed_news = matches!(mode, InstallMode::Update(_))
-                    && newly_runs_zed_extension(&store, release.id.as_str(), &release, fs.as_ref())
-                        .await;
-                if !asks.is_empty() || zed_news {
+                // An update that starts running a Zed extension is an addition (W2c 226eea0e96),
+                // so it asks with the owner's Q1 warning among the asks.
+                if !asks.is_empty() {
                     let detail = format!(
                         "{}{}From the Fyx registry, published by {}.\nSource: {} at {}",
                         if asks.is_empty() {
@@ -711,7 +683,7 @@ fn install_release(
                         },
                         // The signed release says it also runs a Zed extension (owner's Q1);
                         // `verify_package` refuses a download that has one it does not declare.
-                        if release.zed_extension {
+                        if release.zed_extension && !additions.zed_extension {
                             format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
                         } else {
                             String::new()
