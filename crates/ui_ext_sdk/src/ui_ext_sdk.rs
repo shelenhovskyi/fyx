@@ -2081,7 +2081,9 @@ impl SpawnRequest {
         self
     }
 
-    /// Only names the manifest lists in `[fyx_ui.process] env`; at most 32.
+    /// Only names the manifest lists in `[fyx_ui.process] env`; at most 32. That list is itself
+    /// limited to the host's allowlist (locale, terminal and logging names such as `NO_COLOR`,
+    /// `TERM`, `RUST_LOG`, plus `LC_*`).
     pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((name.into(), value.into()));
         self
