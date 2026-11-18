@@ -5,16 +5,19 @@ hunk. Fyx decides what lands. The agent only proposes, and no extension can deci
 
 ## Turning it on
 
-- Setting: `"agent_review": { "enabled": true }` in your user settings. You can also use the agent
-  panel's options menu (**Review Agent Edits**) or the command `agent_review: toggle review mode`.
-- The `FYX_AGENT_REVIEW` environment variable overrides the setting: `0` turns review off, any other
-  value turns it on.
+- Setting: `"agent_review": { "enabled": true }` in your user settings, or **Review Agent Edits**
+  in the Settings window (Panels, Agent Panel). You can also use the agent panel's options menu
+  (**Review Agent Edits**) or the command `agent_review: toggle review mode`.
+- In dev builds only, the `FYX_AGENT_REVIEW` environment variable overrides the setting: `0` turns
+  review off, any other value turns it on. The status bar item then names the variable. Other
+  builds ignore it, so a repository's `.envrc` cannot switch review off.
 - Only your user settings can turn review off. A project can only make it stricter, with
   [review rules](review-rules.md).
 - Turning review off does not release edits that are already waiting. They still need a decision.
 
-While review mode is on, the status bar shows **Review on**. When reviews are waiting, it shows
-their count; click it to bring the waiting reviews forward.
+While review mode is on, the status bar shows **Review on**. When reviews of this project are
+waiting, it shows their count; click it to bring them forward. With nothing waiting, it opens a menu
+(**Show Review Rules**, **Turn Off Review**).
 
 ## What is reviewed
 
@@ -50,9 +53,13 @@ refused before review, so it never opens a review pane.
   | `ctrl-k shift-y` / `ctrl-k shift-n` | Accept / reject everything in the turn, including later edits of the turn. When more than one file waits, Fyx asks first. |
   | `ctrl-k shift-x` | Stop accepting (or rejecting) the rest of the turn: later edits wait for you again |
   | `alt-j` / `alt-k` | Next / previous hunk |
+  | `ctrl-k j` / `ctrl-k k` | Next / previous waiting file of the turn |
   | `alt-c` | Comment on the hunk |
   | `ctrl-enter` | Submit |
 
+- An action that cannot be done (submitting with undecided hunks, say) shows why above the diff.
+- File names show their path in the project, with control and bidirectional characters escaped, so
+  a name cannot pose as another file.
 - Closing a review tab decides nothing: its edits keep waiting (the tab shows them as unsaved), and
   a notification offers **Review** to open it again. **Reject and close** in the pane rejects every
   waiting edit of the turn and closes it.

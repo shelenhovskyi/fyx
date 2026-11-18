@@ -7042,7 +7042,8 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn agent_panel_section() -> [SettingsPageItem; 7] {
+    fn agent_panel_section() -> [SettingsPageItem; 8] {
+        // fyx: + Review Agent Edits
         [
             SettingsPageItem::SectionHeader("Agent Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7068,6 +7069,26 @@ fn panels_page() -> SettingsPage {
                     pick: |settings_content| settings_content.agent.as_ref()?.dock.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            // fyx: agent review (crates/agent_review, docs/fyx/agent-review.md).
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Review Agent Edits",
+                description: "Hold agent edits for review, hunk by hunk, before they land.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent_review.enabled"),
+                    pick: |settings_content| {
+                        settings_content.agent_review.as_ref()?.enabled.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent_review
+                            .get_or_insert_default()
+                            .enabled = value;
                     },
                 }),
                 metadata: None,

@@ -119,8 +119,10 @@ impl RulesMemory for FileRulesMemory {
     }
 }
 
-/// Overrides the `agent_review.enabled` setting: `0` turns review off, any other value turns it on.
-const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
+/// Overrides the `agent_review.enabled` setting in dev builds only: `0` turns review off, any other
+/// value turns it on. A release build ignores it: a repository's `.envrc` could set it for an app
+/// started from that shell.
+pub const REVIEW_MODE_VAR: &str = "FYX_AGENT_REVIEW";
 
 /// `agent_review` in settings (schema in `settings_content::AgentReviewSettingsContent`, default in
 /// `assets/settings/fyx.json`).
@@ -151,20 +153,36 @@ fn user_auto_accept(cx: &App) -> UserAutoAccept {
     UserAutoAccept::new(&AgentReviewSettings::get_global(cx).auto_accept)
 }
 
-fn review_mode_override() -> Option<bool> {
+/// `FYX_AGENT_REVIEW` as set, in any build.
+fn env_override() -> Option<bool> {
     std::env::var_os(REVIEW_MODE_VAR).map(|value| value != "0")
 }
 
-/// Whether agent edits are reviewed: the environment override, else the setting.
+/// `FYX_AGENT_REVIEW`, when it applies: in dev builds only. The status bar says so while it does.
+pub fn review_mode_override(cx: &App) -> Option<bool> {
+    let value = env_override()?;
+    let dev = release_channel::ReleaseChannel::try_global(cx)
+        == Some(release_channel::ReleaseChannel::Dev);
+    if !dev {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!("fyx: {REVIEW_MODE_VAR} is ignored outside dev builds");
+        });
+        return None;
+    }
+    Some(value)
+}
+
+/// Whether agent edits are reviewed: the environment override (dev builds), else the setting.
 pub fn review_mode(cx: &App) -> bool {
-    review_mode_override().unwrap_or_else(|| {
+    review_mode_override(cx).unwrap_or_else(|| {
         cx.has_global::<SettingsStore>() && AgentReviewSettings::get_global(cx).enabled
     })
 }
 
 /// Writes `agent_review.enabled` to the user's settings; review mode follows the settings change.
 pub fn set_review_mode_setting(enabled: bool, cx: &App) {
-    if review_mode_override().is_some() {
+    if review_mode_override(cx).is_some() {
         log::warn!("fyx: {REVIEW_MODE_VAR} is set and overrides the agent_review.enabled setting");
     }
     settings::update_settings_file(<dyn Fs>::global(cx), cx, move |settings, _| {
@@ -178,7 +196,7 @@ pub fn review_mode_menu_entry(menu: ContextMenu, cx: &App) -> ContextMenu {
     menu.toggleable_entry_disabled_when(
         "Review Agent Edits",
         enabled,
-        review_mode_override().is_some(),
+        review_mode_override(cx).is_some(),
         IconPosition::Start,
         Some(ToggleReviewMode.boxed_clone()),
         move |_, cx| set_review_mode_setting(!enabled, cx),
@@ -440,6 +458,8 @@ pub struct AgentReview {
     /// What the agent should learn about reviews answered through a permission (which carries no
     /// message): sent in front of the user's next prompt in the session.
     prompt_notes: HashMap<acp_v2::SessionId, Vec<String>>,
+    /// The latest read of each worktree's rules file: an older read that finishes later is dropped.
+    rules_loads: HashMap<PathBuf, u64>,
     /// Rules already announced per turn ([`AgentReviewEvent::DecidedByRule`]).
     announced_rules: HashSet<(TurnId, String)>,
     /// Resolves the paths rules are matched against (symlinks, 8.3 names). Without it (tests that
@@ -810,6 +830,17 @@ impl AgentReview {
                 }
             })
         })
+    }
+
+    /// Starts a read of the rules file at `root`; only the latest read of a root may apply.
+    fn begin_rules_load(&mut self, root: &Path) -> u64 {
+        let generation = self.rules_loads.entry(root.to_path_buf()).or_default();
+        *generation += 1;
+        *generation
+    }
+
+    fn is_latest_rules_load(&self, root: &Path, generation: u64) -> bool {
+        self.rules_loads.get(root) == Some(&generation)
     }
 
     /// Replaces the user's `auto_accept` patterns (tests; in the app they follow the settings).
@@ -2047,6 +2078,7 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
     for worktree in worktrees {
         let root = worktree.read(cx).abs_path().to_path_buf();
         let rules_path = review_rules::rules_file_path(&root);
+        let generation = review.update(cx, |review, _| review.begin_rules_load(&root));
         let review = review.downgrade();
         let project = project.downgrade();
         let fs = fs.clone();
@@ -2106,7 +2138,14 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
                     cx,
                 );
             }
-            let loosened = match review.update(cx, |review, cx| review.load_rules(rules, cx)) {
+            let loosened = match review.update(cx, |review, cx| {
+                // Two changes in a row: the read that started last wins, whichever finishes last.
+                if review.is_latest_rules_load(&root, generation) {
+                    review.load_rules(rules, cx)
+                } else {
+                    Vec::new()
+                }
+            }) {
                 Ok(loosened) => loosened,
                 Err(error) => {
                     log::debug!("review closed before its rules loaded: {error}");
@@ -2195,6 +2234,9 @@ async fn write_accepted_hunks(
     // Saving would also write the user's unsaved edits elsewhere in the file.
     let was_dirty = cx.update(|cx| buffer.read(cx).is_dirty());
     cx.update(|cx| {
+        // The shield may have changed since the review opened: Fyx's own write is checked as the
+        // agent's would be, in the same update as the edit.
+        fyx_guard::check_config_write(project.read(cx), edit.abs_path(), cx)?;
         let range = locate_fragment(&buffer.read(cx).text(), &fragment)?;
         action_log.update(cx, |action_log, cx| {
             action_log.buffer_read(buffer.clone(), cx)
@@ -4014,7 +4056,7 @@ mod tests {
 
     #[gpui::test]
     async fn review_mode_follows_the_setting(cx: &mut TestAppContext) {
-        if review_mode_override().is_some() {
+        if env_override().is_some() {
             // FYX_AGENT_REVIEW in the test environment overrides the setting.
             return;
         }
@@ -4052,7 +4094,7 @@ mod tests {
 
     #[gpui::test]
     async fn only_user_settings_turn_review_off(cx: &mut TestAppContext) {
-        if review_mode_override().is_some() {
+        if env_override().is_some() {
             return;
         }
         cx.update(|cx| {
@@ -4088,7 +4130,7 @@ mod tests {
 
     #[gpui::test]
     async fn changing_the_setting_keeps_held_writes(cx: &mut TestAppContext) {
-        if review_mode_override().is_some() {
+        if env_override().is_some() {
             return;
         }
         cx.update(|cx| {
