@@ -64,11 +64,14 @@ of memory; see "Limits" in `limits-and-gotchas.md`). Besides WASI, the host func
 ## Quick start: `fyx-ext`
 
 `fyx-ext` is a command-line tool in this repository (`crates/fyx_ext`). Install it from a Fyx
-checkout:
+checkout. The checkout's `.cargo/config.toml` asks for `sccache`; the empty `RUSTC_WRAPPER`
+installs without it:
 
 ```bash
-cargo install --path crates/fyx_ext
+RUSTC_WRAPPER= cargo install --path crates/fyx_ext
 ```
+
+The first install fetches every git dependency of the Fyx workspace, which takes a few minutes.
 
 Then create an extension, and run it in Fyx with rebuilds on every change:
 
@@ -145,8 +148,13 @@ What `check` reports, as errors unless marked:
   fails.
 - **Loading:** `check` loads the component in the test harness, as Fyx would. A component that
   fails to load is an error. Every surface `surfaces()` declares needs the capability of its
-  kind (`ui:panel`, `ui:status-bar`), as on the host. An unused surface capability, or no
-  surfaces at all, is a warning.
+  kind (`ui:panel`, `ui:status-bar`, and `ui:modal` in 0.2), as on the host. An unused surface
+  capability, or no surfaces at all, is a warning.
+- **Running guest code:** `check`, `test`, `dev` and `package` instantiate the component and call
+  `surfaces()`; `test` also mounts every surface. The harness applies Fyx's limits: the time
+  budgets, 256 MiB of memory, and a WASI with stderr only. Still, run these commands on an
+  untrusted extension, such as one under review in registry CI, inside a sandbox, as for any build
+  of someone else's code.
 
 <!-- crates/fyx_ext/src/manifest.rs, inspect.rs, run.rs -->
 

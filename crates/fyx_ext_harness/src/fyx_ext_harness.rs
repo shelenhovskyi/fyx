@@ -85,6 +85,13 @@ pub const INIT_BUDGET: Duration = Duration::from_secs(2);
 pub const CALL_BUDGET: Duration = Duration::from_millis(200);
 pub const EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 pub const MAX_PUSHES_PER_CALL: usize = 64;
+/// Linear memory one component may grow to, and its other store caps: the host's
+/// (`ui_ext_wasm::UI_*_LIMIT`). Growing past one traps, which disables the extension.
+pub const MEMORY_LIMIT: usize = 256 << 20;
+pub const TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
+pub const INSTANCES_LIMIT: usize = 32;
+pub const TABLES_LIMIT: usize = 32;
+pub const MEMORIES_LIMIT: usize = 8;
 /// Consecutive `tick` errors after which a surface's ticks stop until an event on it.
 pub const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 3;
 /// `fyx-ext test` sets it to the built component; [`Harness::from_env`] reads it.
@@ -155,6 +162,20 @@ pub(crate) struct State {
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
+    limits: wasmtime::StoreLimits,
+}
+
+/// The host's store caps (`ui_ext_wasm`'s `ui_store_limits`), so a guest that grows too far
+/// fails here as it fails in Fyx (security-2 T9).
+fn store_limits() -> wasmtime::StoreLimits {
+    wasmtime::StoreLimitsBuilder::new()
+        .memory_size(MEMORY_LIMIT)
+        .table_elements(TABLE_ELEMENTS_LIMIT)
+        .instances(INSTANCES_LIMIT)
+        .tables(TABLES_LIMIT)
+        .memories(MEMORIES_LIMIT)
+        .trap_on_grow_failure(true)
+        .build()
 }
 
 impl State {
@@ -575,8 +596,10 @@ impl Harness {
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
+                limits: store_limits(),
             },
         );
+        store.limiter(|state| &mut state.limits);
         store.epoch_deadline_callback(|context| {
             let state = context.data();
             if state.call_started.elapsed() > state.call_budget {

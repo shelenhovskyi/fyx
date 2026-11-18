@@ -130,6 +130,7 @@ mod probe {
     pub const PUSH_THEN_PATCH: NodeId = 4;
     pub const PUSH_THEN_FAIL: NodeId = 5;
     pub const PUSH_FLOOD: NodeId = 6;
+    pub const ALLOCATE: NodeId = 7;
 }
 
 #[test]
@@ -272,6 +273,17 @@ fn a_push_flood_traps_and_disables() {
         .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH))
         .expect_err("disabled");
     assert!(error.to_string().contains("disabled"), "{error}");
+}
+
+/// security-2 T9: the host's memory cap applies here too, so a guest that grows past it fails in
+/// tests as it does in Fyx.
+#[test]
+fn growing_past_the_memory_cap_traps_and_disables() {
+    let mut harness = Harness::load(&probe_wasm()).expect("load");
+    harness
+        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
+        .expect_err("300 MiB is over the 256 MiB cap");
+    assert!(harness.disabled().is_some());
 }
 
 #[test]

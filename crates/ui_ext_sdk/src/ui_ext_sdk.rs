@@ -790,12 +790,12 @@ impl SurfaceTree {
     /// Builds the surface's tree from scratch and returns it for `mount`. Pending patches are
     /// dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never
     /// names a node of the new tree. Fails, keeping the previous tree, if the new one has more
-    /// nodes than one update may carry.
+    /// nodes than a tree may hold (`max_nodes`, 16384), the host's cap for a mount and a
+    /// `replace`. So a tree grown past 2048 nodes with `insert` can always be mounted again.
     pub fn mount(&mut self, build: impl FnOnce(&mut TreeBuilder)) -> Result<Vec<Node>, TreeError> {
         let mut tree = TreeBuilder::new(&mut self.ids);
         build(&mut tree);
         let nodes = tree.finish();
-        self.check_update_size(nodes.len())?;
         self.check_tree_size(nodes.len())?;
 
         self.nodes.clear();
@@ -885,7 +885,24 @@ impl SurfaceTree {
     /// mirror holds what the host holds: echoing the typed value back queues nothing (it would
     /// fight the user's typing), and clearing the field afterwards does queue the `set-props`,
     /// which a stale mirror would have dropped as unchanged.
+    ///
+    /// While a `set-props` or `insert` for the node is still queued, the mirror is left alone:
+    /// the host applies the queued patch after the event, so the queued props are what it will
+    /// hold.
     pub fn apply_event(&mut self, event: &UiEvent) {
+        let target = match event {
+            UiEvent::InputChanged((id, _))
+            | UiEvent::InputSubmitted((id, _))
+            | UiEvent::RowSelected((id, _)) => *id,
+            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => return,
+        };
+        if self.pending.patches().iter().any(|patch| match patch {
+            Patch::SetProps((id, _)) => *id == target,
+            Patch::Insert(op) => op.node.id == target,
+            Patch::Remove(_) | Patch::InvalidateRows(_) => false,
+        }) {
+            return;
+        }
         match event {
             UiEvent::InputChanged((id, value)) | UiEvent::InputSubmitted((id, value)) => {
                 if let Some(LiveNode {
@@ -1944,6 +1961,77 @@ mod tests {
         );
     }
 
+    /// bugs-1 #20: the host applies a queued `set-props` after the event, so the mirror keeps it.
+    #[test]
+    fn apply_event_keeps_a_queued_set_props() {
+        let mut surface = SurfaceTree::new();
+        let mut input = 0;
+        surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    input = tree.input(InputProps::new("draft"));
+                });
+            })
+            .expect("mount");
+        assert_eq!(surface.set_props(input, InputProps::new("")), Ok(true));
+        surface.apply_event(&UiEvent::InputChanged((input, "typed".into())));
+        assert_eq!(surface.props(input), Some(&InputProps::new("").into()));
+        assert_eq!(
+            surface.take_update(),
+            Update::Patches(vec![Patch::SetProps((input, InputProps::new("").into()))])
+        );
+
+        // Nothing queued: the typed text is mirrored, and clearing it queues the set-props again.
+        surface.apply_event(&UiEvent::InputChanged((input, "typed".into())));
+        assert_eq!(surface.props(input), Some(&InputProps::new("typed").into()));
+        assert_eq!(surface.set_props(input, InputProps::new("")), Ok(true));
+    }
+
+    /// bugs-1 #11: a mount is capped like the host's, at `max_nodes`, not at one update's size.
+    #[test]
+    fn a_tree_grown_past_one_update_can_be_mounted_again() {
+        const COUNT: usize = 3000;
+        let mut surface = SurfaceTree::new();
+        let mut root = 0;
+        surface
+            .mount(|tree| {
+                root = tree.column(|_| {});
+            })
+            .expect("mount");
+        for _ in 0..3 {
+            surface
+                .insert(root, None, |tree| {
+                    for _ in 0..COUNT / 3 {
+                        tree.text("row");
+                    }
+                })
+                .expect("insert");
+            surface.take_update();
+        }
+        assert_eq!(surface.len(), COUNT + 1);
+
+        let nodes = surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    for _ in 0..COUNT {
+                        tree.text("row");
+                    }
+                });
+            })
+            .expect("a remount of the grown tree");
+        assert_eq!(nodes.len(), COUNT + 1);
+        assert!(matches!(
+            surface.mount(|tree| {
+                tree.column(|tree| {
+                    for _ in 0..TreeLimits::default().max_nodes {
+                        tree.text("row");
+                    }
+                });
+            }),
+            Err(TreeError::TreeTooLarge { .. })
+        ));
+    }
+
     #[test]
     fn push_records_and_a_failed_push_resends_the_whole_tree() {
         take_host_effects();
@@ -2154,16 +2242,16 @@ mod tests {
         assert!(surface.contains(row_id));
         assert_eq!(surface.take_update(), Update::Unchanged);
 
-        let error = surface.mount(|tree| {
+        // A mount is capped by `max_nodes` only, like the host's (bugs-1 #11).
+        let mounted = surface.mount(|tree| {
             tree.column(|tree| {
                 for _ in 0..4 {
                     tree.text("x");
                 }
             });
         });
-        assert_eq!(error, Err(TreeError::UpdateTooLarge { count: 5, max: 4 }));
-        assert_eq!(surface.roots(), [column]);
-        assert!(surface.contains(text_id));
+        assert_eq!(mounted.map(|nodes| nodes.len()), Ok(5));
+        assert!(!surface.contains(text_id));
     }
 
     #[test]

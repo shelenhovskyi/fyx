@@ -56,15 +56,15 @@ does.
 
 | Cap | Value | Host applies it to | `SurfaceTree` applies it to |
 |---|---|---|---|
-| `max_nodes_per_update` | **2048** | patches in one `patches` update; nodes in one list row | queued patches (an inserted subtree counts one per node), **and** the nodes of a `mount`/`replace` |
+| `max_nodes_per_update` | **2048** | patches in one `patches` update; nodes in one list row | queued patches (an inserted subtree counts one per node) |
 | `max_nodes` | **16384** | nodes in the whole tree, so also in a `mount` or `replace` | the mirror after any edit |
 | `max_depth` | **64** | levels from a root to its deepest node (a root is level 1), in the tree and in each list row; a deeper insert fails as `TooDeep` and the whole update is rejected | the same, on the mirror |
 
 <!-- crates/ui_ext/src/tree.rs:9-25, 96-104, 168-173, 190-191, 255-258; crates/ui_ext_sdk/src/ui_ext_sdk.rs:605-618, 685, 717-718, 752-753 -->
 
-Gotcha: **through `SurfaceTree`, a mount is capped at 2048 nodes**, although the host accepts
-16384. Grow a bigger tree with `insert` across several events, or keep large collections in
-virtualized lists, which is what lists are for.
+A `mount` or `replace` through `SurfaceTree` is capped at `max_nodes` (16384), as in the host,
+so a tree grown past 2048 nodes with `insert` across several events can always be mounted again.
+Large collections still belong in virtualized lists.
 
 Other caps:
 
