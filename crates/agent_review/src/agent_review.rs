@@ -228,7 +228,11 @@ pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
         if let Some(review) = AgentReview::global(cx) {
             let session_id = thread.session_id().clone();
             let thread_id = cx.entity_id();
-            review.update(cx, |review, _| review.thread_opened(session_id, thread_id));
+            let thread = cx.weak_entity();
+            review.update(cx, |review, _| {
+                review.thread_opened(session_id.clone(), thread_id);
+                review.threads.insert(session_id, thread);
+            });
         }
         let project = thread.project().clone();
         reload_rules(&project, cx);
@@ -407,6 +411,8 @@ pub struct AgentReview {
     panes: HashMap<TurnId, usize>,
     /// Live threads per session.
     session_threads: HashMap<acp_v2::SessionId, HashSet<EntityId>>,
+    /// The latest thread of each session.
+    threads: HashMap<acp_v2::SessionId, WeakEntity<AcpThread>>,
     /// What the agent should learn about reviews answered through a permission (which carries no
     /// message): sent in front of the user's next prompt in the session.
     prompt_notes: HashMap<acp_v2::SessionId, Vec<String>>,
@@ -549,6 +555,11 @@ impl AgentReview {
             .insert(thread_id);
     }
 
+    /// The live thread of a session, if any.
+    pub fn thread_for_session(&self, session_id: &acp_v2::SessionId) -> Option<Entity<AcpThread>> {
+        self.threads.get(session_id)?.upgrade()
+    }
+
     /// Returns whether it was the session's last thread.
     fn thread_released(&mut self, session_id: &acp_v2::SessionId, thread_id: EntityId) -> bool {
         let Some(threads) = self.session_threads.get_mut(session_id) else {
@@ -557,6 +568,7 @@ impl AgentReview {
         threads.remove(&thread_id);
         if threads.is_empty() {
             self.session_threads.remove(session_id);
+            self.threads.remove(session_id);
             true
         } else {
             false

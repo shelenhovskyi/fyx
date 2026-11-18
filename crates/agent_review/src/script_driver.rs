@@ -10,6 +10,9 @@
 //! reject 2
 //! comment 2 keep it lowercase
 //! submit
+//! prompt status       # send a user message in the reviewed session (as typed in the panel)
+//! operation delete a.txt          # the built-in agent's file operations, through the review;
+//! operation move a.txt b.txt      # paths are relative to the reviewed file's directory
 //! wait 3              # seconds
 //! quit
 //! ```
@@ -17,7 +20,13 @@
 //! Decisions go through the same actions the review keys dispatch (`AcceptHunk`, `RejectHunk`,
 //! `SubmitReview`), focused on the pane, so the check exercises the pane rather than the model.
 
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use acp_thread::fyx_review::AgentFileOperation;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{Action, AnyWindowHandle, App, AsyncApp, Entity};
@@ -43,6 +52,8 @@ enum Step {
     RejectTurn,
     Reject(usize),
     Comment(usize, String),
+    Prompt(String),
+    Operation(String, Vec<String>),
     Submit,
     Wait(u64),
     Quit,
@@ -110,6 +121,19 @@ fn parse(script: &str) -> Result<Vec<Step>> {
                 Step::Comment(hunk(number)?, text.trim().to_string())
             }
             "submit" => Step::Submit,
+            "prompt" => Step::Prompt(rest.to_string()),
+            "operation" => {
+                let mut words = rest.split_whitespace().map(str::to_string);
+                let kind = words.next().context("operation needs a kind")?;
+                let paths = words.collect::<Vec<_>>();
+                let expected = if kind == "delete" { 1 } else { 2 };
+                anyhow::ensure!(
+                    matches!(kind.as_str(), "delete" | "move" | "copy") && paths.len() == expected,
+                    "line {}: operation delete <path> | move <from> <to> | copy <from> <to>",
+                    index + 1
+                );
+                Step::Operation(kind, paths)
+            }
             "wait" => Step::Wait(rest.parse().context("bad wait")?),
             "quit" => Step::Quit,
             other => bail!("line {}: unknown command {other:?}", index + 1),
@@ -128,6 +152,8 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
     .await
     .context("no workspace window")?;
     let mut seen = HashSet::new();
+    let mut last_session = None;
+    let mut last_directory: Option<PathBuf> = None;
     let mut current: Option<(ReviewId, Entity<ReviewPane>)> = None;
     for step in steps {
         log::info!("fyx: review script: {step:?}");
@@ -145,6 +171,14 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
                     .await
                     .context("no review pane opened")?;
                 seen.insert(found.0);
+                cx.update(|cx| {
+                    if let Some(review) = AgentReview::global(cx)
+                        && let Some(reviewed) = review.read(cx).review(found.0)
+                    {
+                        last_session = Some(reviewed.session_id().clone());
+                        last_directory = reviewed.edit().abs_path().parent().map(Path::to_path_buf);
+                    }
+                });
                 let path = cx.update(|cx| {
                     found
                         .1
@@ -188,6 +222,87 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
                 cx.background_executor()
                     .timer(Duration::from_secs(seconds))
                     .await;
+            }
+            Step::Prompt(text) => {
+                let (review_id, _) = current.as_ref().context("prompt before review")?;
+                let review_id = *review_id;
+                cx.update(|cx| -> Result<()> {
+                    let review = AgentReview::global(cx).context("no review store")?;
+                    let session_id = review
+                        .read(cx)
+                        .review(review_id)
+                        .map(|review| review.session_id().clone())
+                        .or_else(|| last_session.clone())
+                        .context("the reviewed session is gone")?;
+                    let thread = review
+                        .read(cx)
+                        .thread_for_session(&session_id)
+                        .context("the reviewed thread is gone")?;
+                    let submission = thread.update(cx, |thread, cx| {
+                        thread.send(
+                            vec![agent_client_protocol::v2::schema::ContentBlock::Text(
+                                agent_client_protocol::v2::schema::TextContent::new(text),
+                            )],
+                            cx,
+                        )
+                    });
+                    cx.spawn(async move |_| {
+                        if let Err(error) = submission.response.await {
+                            log::error!("fyx: review script: prompt failed: {error:#}");
+                        }
+                    })
+                    .detach();
+                    Ok(())
+                })?;
+            }
+            Step::Operation(kind, paths) => {
+                let (review_id, _) = current.as_ref().context("operation before review")?;
+                let review_id = *review_id;
+                cx.update(|cx| -> Result<()> {
+                    let review = AgentReview::global(cx).context("no review store")?;
+                    let (session_id, directory) = {
+                        let review = review.read(cx);
+                        let reviewed = review.review(review_id);
+                        let session_id = reviewed
+                            .map(|review| review.session_id().clone())
+                            .or_else(|| last_session.clone())
+                            .context("the reviewed session is gone")?;
+                        let directory = reviewed
+                            .and_then(|review| {
+                                review.edit().abs_path().parent().map(Path::to_path_buf)
+                            })
+                            .or_else(|| last_directory.clone())
+                            .context("no directory to resolve the paths in")?;
+                        (session_id, directory)
+                    };
+                    let path = |index: usize| directory.join(&paths[index]);
+                    let operation = match kind.as_str() {
+                        "delete" => AgentFileOperation::Delete {
+                            path: path(0),
+                            text: std::fs::read_to_string(path(0)).ok(),
+                        },
+                        "move" => AgentFileOperation::Move {
+                            from: path(0),
+                            to: path(1),
+                        },
+                        _ => AgentFileOperation::Copy {
+                            from: path(0),
+                            to: path(1),
+                        },
+                    };
+                    let description = operation.describe();
+                    let decided = review.update(cx, |review, cx| {
+                        review.review_operation(session_id, operation, cx)
+                    });
+                    cx.spawn(async move |_| match decided.await {
+                        Ok(()) => log::info!("fyx: review script: allowed: {description}"),
+                        Err(error) => {
+                            log::info!("fyx: review script: stopped: {description}: {error:#}")
+                        }
+                    })
+                    .detach();
+                    Ok(())
+                })?;
             }
             Step::Quit => {
                 cx.update(|cx| cx.quit());
@@ -296,6 +411,27 @@ mod tests {
             ]
         );
         assert!(parse("accept 0").is_err());
+        assert_eq!(
+            parse(
+                "prompt status
+operation delete a.txt
+operation copy a.txt b.txt"
+            )
+            .unwrap(),
+            [
+                Step::Prompt("status".into()),
+                Step::Operation("delete".into(), vec!["a.txt".into()]),
+                Step::Operation("copy".into(), vec!["a.txt".into(), "b.txt".into()]),
+            ]
+        );
+        assert!(parse("operation move a.txt").is_err());
+        assert!(parse("operation chmod a.txt").is_err());
+        let script = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-agent/e2e-full.script"
+        ))
+        .unwrap();
+        parse(&script).expect("the checked-in end-to-end script parses");
         assert!(action_allowed("agent::NewExternalAgentThread"));
         assert!(!action_allowed("agent_review::ToggleReviewMode"));
         assert!(!action_allowed("zed::OpenSettings"));
