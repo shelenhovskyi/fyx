@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use fyx_ext::CheckDepth;
 use fyx_ext::build::{BuildOptions, DevOptions};
 use fyx_ext::template::{GitReference, NewExtension, SdkSource};
 
@@ -31,7 +32,7 @@ enum Command {
         /// Depend on the SDK from this git repository instead.
         #[arg(long)]
         sdk_git: Option<String>,
-        /// Branch of --sdk-git (default: integration).
+        /// Branch of --sdk-git (default: fyx/main, the repository's main branch).
         #[arg(long, requires = "sdk_git", conflicts_with = "sdk_rev")]
         sdk_branch: Option<String>,
         /// Commit of --sdk-git.
@@ -40,9 +41,10 @@ enum Command {
     },
     /// Build for wasm32-wasip2 and copy the component next to extension.toml.
     Build {
-        /// The extension directory.
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Build with the release profile.
         #[arg(long)]
         release: bool,
         /// Arguments for cargo build, after `--`.
@@ -51,6 +53,7 @@ enum Command {
     },
     /// Build, start Fyx with the extension loaded, and rebuild on every change.
     Dev {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// The Fyx binary (default: FYX_BIN, then `fyx` on PATH).
@@ -68,14 +71,26 @@ enum Command {
     },
     /// Check extension.toml and the built component the way Fyx does when it loads them.
     Check {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Fail on warnings too.
         #[arg(long)]
         deny_warnings: bool,
     },
+    /// Build, check, run every surface headless, then the crate's own `cargo test` with
+    /// FYX_EXT_COMPONENT set to the built component.
+    Test {
+        /// The extension directory (with extension.toml).
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Arguments for cargo test, after `--`.
+        #[arg(last = true)]
+        cargo_args: Vec<String>,
+    },
     /// Build for release, check, and write <id>-<version>.fyxext.
     Package {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Where the package goes (default: the extension directory).
@@ -113,7 +128,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     reference: match sdk_rev {
                         Some(rev) => GitReference::Rev(rev),
                         None => GitReference::Branch(
-                            sdk_branch.unwrap_or_else(|| "integration".to_string()),
+                            sdk_branch.unwrap_or_else(|| "fyx/main".to_string()),
                         ),
                     },
                 },
@@ -128,7 +143,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             })?;
             eprintln!("fyx-ext: created {}", crate_dir.display());
             eprintln!(
-                "Next:\n  cd {}\n  fyx-ext dev --fyx <path to fyx>",
+                "Next:\n  cd {}\n  fyx-ext dev --fyx <path to the fyx binary>\n(If fyx-ext is not on PATH: RUSTC_WRAPPER= cargo install --path <fyx checkout>/crates/fyx_ext)",
                 crate_dir.display()
             );
             Ok(ExitCode::SUCCESS)
@@ -145,7 +160,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     cargo_args,
                 },
             )?;
-            let (_, report) = fyx_ext::check(&path)?;
+            let (_, report) = fyx_ext::check(&path, CheckDepth::Load)?;
             report.print();
             Ok(exit_code(report.has_errors()))
         }
@@ -172,13 +187,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
             path,
             deny_warnings,
         } => {
-            let (manifest, report) = fyx_ext::check(&path)?;
+            let (manifest, report) = fyx_ext::check(&path, CheckDepth::Load)?;
             report.print();
             let failed = report.has_errors() || (deny_warnings && !report.warnings.is_empty());
             if !failed {
                 eprintln!("fyx-ext: {} {} passes", manifest.id, manifest.version);
             }
             Ok(exit_code(failed))
+        }
+        Command::Test { path, cargo_args } => {
+            let passed = fyx_ext::run::test(&path, &cargo_args)?;
+            Ok(exit_code(!passed))
         }
         Command::Package {
             path,
@@ -195,7 +214,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 )?;
             }
             let out = out.unwrap_or_else(|| path.clone());
-            fyx_ext::package::package(&path, &out)?;
+            fyx_ext::package::package(&path, &out, CheckDepth::Load)?;
             Ok(ExitCode::SUCCESS)
         }
     }

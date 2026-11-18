@@ -14,7 +14,7 @@
 //! `push <surface> unchanged|remove <id>|patches <n>|replace <n>|invalidate <list>|rich`,
 //! `tick <surface> <ms>`, `cancel <surface>`, `add panel|status|modal <id>`, `remove <id>`,
 //! `show <id>`, `hide <id>`, `place <id> <path> <line> [<nodes>]`, `unplace <id>`, `log <text>`,
-//! `repeat <n> <command>` (`#` in the command becomes the iteration index; results run-length
+//! `busy <ms>` (computes for that long), `repeat <n> <command>` (`#` in the command becomes the iteration index; results run-length
 //! encoded, `ok*64,limit-exceeded*6`), `fail` (answers
 //! `err` with the report so far), `spin`, `sleep <ms>`.
 
@@ -245,6 +245,14 @@ fn run_command(words: &[&str]) -> Result<String, String> {
         },
         "sleep" => {
             std::thread::sleep(std::time::Duration::from_millis(number(1)?.into()));
+            "done".into()
+        }
+        "busy" => {
+            let until =
+                std::time::Instant::now() + std::time::Duration::from_millis(number(1)?.into());
+            while std::time::Instant::now() < until {
+                std::hint::spin_loop();
+            }
             "done".into()
         }
         "fail" => return Err("fail".into()),

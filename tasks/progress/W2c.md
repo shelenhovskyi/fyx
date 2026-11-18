@@ -101,3 +101,18 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - Tests: `fixtures/probe_v0_3` and `tests_v0_3.rs` (the bomb, 1 MiB + 1, entity SVG, junk, the
   32-handle cap, the capability, image nodes refused, traps), unit tests in `ui_ext::image`,
   `effects` and `images` (path fixtures, links out on Unix).
+
+## Triage-3 (2026-11-18)
+
+- Registry (`claude/fyx-w2c-registry`): every row; see that branch's commit.
+- `fyx_guard` (`claude/fyx-w2c-guard`, on `fyx-w9-fixes`): every row but the shared real-path
+  resolver (top-7 #1), which waits for W5's `fyx_guard::paths`.
+- W2c rows, here:
+  - ASYNC 5 done: the epoch callback counts executed epochs (`UiState::executed`), and
+    `with_budget` counts only time a call waits on the host, not time it is ready but unpolled.
+    `CallRecord::executed` is the same counter, for the renderer's tick CPU-share throttle
+    (`ticks::TickBudget::record`). Pinned by `test_budget_ignores_time_spent_waiting_for_a_worker`,
+    which fails on the old wall-clock budget.
+  - UX F16 (an accessible `label` next to `button-props.tooltip`) and PERF 6/12 (`Arc` props,
+    in-place apply) change `ui_ext::v0_2` types and `v0_2::tree`, which W3 is moving the
+    renderer onto (plan 2.3); held until 2.3 lands, per the coordinator.

@@ -6075,6 +6075,11 @@ impl ToolCallEventStream {
         *self.cancellation_rx.clone().borrow()
     }
 
+    // fyx: the owning thread, for the host review of file operations (crates/agent_review).
+    pub(crate) fn owning_thread(&self) -> Option<&WeakEntity<Thread>> {
+        self.thread.as_ref()
+    }
+
     pub fn tool_use_id(&self) -> &LanguageModelToolUseId {
         &self.tool_use_id
     }

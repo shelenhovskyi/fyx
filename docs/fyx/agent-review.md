@@ -5,16 +5,19 @@ hunk. Fyx decides what lands. The agent only proposes, and no extension can deci
 
 ## Turning it on
 
-- Setting: `"agent_review": { "enabled": true }` in your user settings. You can also use the agent
-  panel's options menu (**Review Agent Edits**) or the command `agent_review: toggle review mode`.
-- The `FYX_AGENT_REVIEW` environment variable overrides the setting: `0` turns review off, any other
-  value turns it on.
+- Setting: `"agent_review": { "enabled": true }` in your user settings, or **Review Agent Edits**
+  in the Settings window (Panels, Agent Panel). You can also use the agent panel's options menu
+  (**Review Agent Edits**) or the command `agent_review: toggle review mode`.
+- In dev builds only, the `FYX_AGENT_REVIEW` environment variable overrides the setting: `0` turns
+  review off, any other value turns it on. The status bar item then names the variable. Other
+  builds ignore it, so a repository's `.envrc` cannot switch review off.
 - Only your user settings can turn review off. A project can only make it stricter, with
   [review rules](review-rules.md).
 - Turning review off does not release edits that are already waiting. They still need a decision.
 
-While review mode is on, the status bar shows **Review on**. When reviews are waiting, it shows
-their count; click it to bring the waiting reviews forward.
+While review mode is on, the status bar shows **Review on**. When reviews of this project are
+waiting, it shows their count; click it to bring them forward. With nothing waiting, it opens a menu
+(**Show Review Rules**, **Turn Off Review**).
 
 ## What is reviewed
 
@@ -26,7 +29,7 @@ their count; click it to bring the waiting reviews forward.
 | ACP v2 edits Fyx cannot show as a diff: several files in one request, no patch text, or a patch that does not apply | No. A notification says so; decide in the agent panel. |
 | Shell and terminal commands (`sed -i`, `cat >`, scripts) | No. Files that change on disk during the agent's turn without going through review are listed in the turn's review pane as "changed without review". Nothing is blocked. |
 | Zed's built-in agent: edit and write tools | Yes: what the agent streamed into the file is held before it is saved; only accepted hunks are kept, and the agent is told about the rest. |
-| Zed's built-in agent: delete, move and copy tools | No. They ask permission as in Zed. |
+| Zed's built-in agent: delete, move and copy tools | Yes: the operation waits for your decision. A deleted text file shows as its removed content, a move or copy as one line saying what happens. Accept lets it happen, Reject stops it. Rules apply to every path involved. |
 
 The same summary is in the setting's description and under every review pane.
 
@@ -35,28 +38,45 @@ refused before review, so it never opens a review pane.
 
 ## Reviewing
 
+- A new review never takes the keyboard or the active tab. A notification says an edit waits and
+  offers **Review**. `ctrl-k y` (`cmd-k y` on macOS), the status bar item, or the agent panel's
+  **Open review** open it too.
 - One review pane per agent turn. It lists the turn's files and shows one diff at a time.
 - Each hunk has its own Accept and Reject buttons.
-- Keys while the pane has focus:
+- Keys while the pane has focus (on macOS, `cmd` instead of `ctrl`). They are keymap bindings in the
+  `AgentReview` context, so the keymap editor lists them and you can rebind them:
 
   | Keys | Action |
   |---|---|
   | `alt-y` / `alt-n` | Accept / reject the hunk |
   | `shift-alt-y` / `shift-alt-n` | Accept / reject the whole file |
-  | `ctrl-shift-y` / `ctrl-shift-n` | Accept / reject everything in the turn, including later edits of the turn |
+  | `ctrl-k shift-y` / `ctrl-k shift-n` | Accept / reject everything in the turn, including later edits of the turn. When more than one file waits, Fyx asks first. |
+  | `ctrl-k shift-x` | Stop accepting (or rejecting) the rest of the turn: later edits wait for you again |
   | `alt-j` / `alt-k` | Next / previous hunk |
+  | `ctrl-k j` / `ctrl-k k` | Next / previous waiting file of the turn |
   | `alt-c` | Comment on the hunk |
   | `ctrl-enter` | Submit |
 
-- Comments, and the hunks you rejected, go back to the agent when it wrote through Fyx: the write
-  fails with a message that lists them. An ACP permission answer carries no message.
+- An action that cannot be done (submitting with undecided hunks, say) shows why above the diff.
+- File names show their path in the project, with control and bidirectional characters escaped, so
+  a name cannot pose as another file.
+- Closing a review tab decides nothing: its edits keep waiting (the tab shows them as unsaved), and
+  a notification offers **Review** to open it again. **Reject and close** in the pane rejects every
+  waiting edit of the turn and closes it.
+
+- Comments, and the hunks you rejected, go back to the agent.
+  - When the agent wrote through Fyx, the write fails with a message that lists them.
+  - An ACP permission answer carries no message. So when you partly accept a permission request (the
+    agent is answered "rejected" although Fyx wrote the accepted hunks) or comment on it, Fyx puts a
+    short "[Fyx review: …]" note in front of your next message in that thread. You see it in your
+    message.
 - If Fyx cannot write the hunks you accepted (for example, the text moved in the meantime), the
   review stays open with the reason. Submit again, or reject the file.
 - If the file has unsaved edits of yours, Fyx applies the accepted hunks but does not save the file.
 - While Fyx reviews an edit that came with a permission request, the request's card in the agent
   panel says so and offers **Open review** instead of Allow and Reject: the review decides it.
 - When the agent's turn stops, or its connection drops, its waiting edits are cancelled: the agent
-  is told the file is unchanged. The same happens when you close the last pane of a turn.
+  is told the file is unchanged.
 
 ## See also
 

@@ -70,6 +70,12 @@ async function prompt(params) {
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join(" ");
+  log(`prompt received: ${JSON.stringify(text.slice(0, 600))}`);
+  // "status" asks for nothing: the prompt only carries what Fyx put in front of it.
+  if (/\bstatus\b/.test(text)) {
+    say(sessionId, "Noted.");
+    return { stopReason: "end_turn" };
+  }
   const named = /edit\s+(\S+)/.exec(text);
   const file = path.resolve(cwd, named ? named[1] : "demo.txt");
   return runEdit(sessionId, file, /\bdirect\b/.test(text));
@@ -154,12 +160,13 @@ async function scenarioTurnRulesBypass(sessionId, cwd) {
 }
 
 // `REVIEW_STUB_SCENARIO=full`, one turn:
-// 1. rules: a denied write (Cargo.lock), an auto-accepted one (docs/guide.md);
+// 1. rules: a write denied by the project (Cargo.lock), one auto-accepted by the user's settings
+//    (docs/guide.md);
 // 2. a permission request with a diff (demo3.txt), as Claude Agent asks;
 // 3. two writes at once (demo.txt, demo2.txt);
 // 4. a file written straight to disk (outside.txt);
-// 5. the agent rewrites `.fyx/review.toml` to deny docs/**, then writes docs/guide.md again: the new
-//    rules must not apply before the user confirms them.
+// 5. the agent empties `.fyx/review.toml` on disk, then writes Cargo.lock again: removing the deny
+//    must wait for the user, so the write is still refused.
 async function scenarioFull(sessionId, cwd) {
   await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten by the agent\n");
   await writeWhole(sessionId, path.resolve(cwd, "docs", "guide.md"), "# Guide, edited by the agent\n");
@@ -171,10 +178,10 @@ async function scenarioFull(sessionId, cwd) {
   const fs = require("fs");
   fs.writeFileSync(path.resolve(cwd, "outside.txt"), "written by a shell command\n");
   log("wrote outside.txt directly on disk");
-  fs.writeFileSync(path.resolve(cwd, ".fyx", "review.toml"), 'deny = ["docs/**"]\n');
-  log("rewrote .fyx/review.toml directly on disk");
+  fs.writeFileSync(path.resolve(cwd, ".fyx", "review.toml"), "# no rules\n");
+  log("emptied .fyx/review.toml directly on disk");
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  await writeWhole(sessionId, path.resolve(cwd, "docs", "guide.md"), "# Guide, edited again\n");
+  await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten again\n");
 }
 
 async function handle(message) {

@@ -93,6 +93,7 @@ impl AgentTool for DeletePathTool {
             if let ToolPermissionDecision::Deny(reason) = decision {
                 return Err(reason);
             }
+            fyx_guard::check_agent_delete(&project, &path, cx)?; // fyx: read-only agent configs
 
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
             let canonical_roots = canonicalize_worktree_roots(&project, &fs, cx).await;
@@ -158,6 +159,8 @@ impl AgentTool for DeletePathTool {
             if let Some(authorize) = authorize {
                 authorize.await.map_err(|e| e.to_string())?;
             }
+            // fyx: host review (crates/agent_review); W9's guard comes after it.
+            super::fyx_file_operations::delete(&project, &event_stream, &path, cx).await?;
 
             if let Some(global_skill_path) = global_skill_path {
                 let metadata = fs

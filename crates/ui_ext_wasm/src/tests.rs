@@ -764,9 +764,159 @@ fn test_epoch_thread_parks_without_calls() {
 
     // A call waiting on the epoch thread's clock finishes, so the thread woke for it.
     futures::executor::block_on(with_budget(Duration::from_secs(5), async {
-        Deadline(Instant::now() + UI_EPOCH_INTERVAL * 5).await;
+        // Ready only after some time, and woken only by the epoch thread.
+        let ready_at = Instant::now() + UI_EPOCH_INTERVAL * 5;
+        futures::future::poll_fn(|_| {
+            if Instant::now() >= ready_at {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
         anyhow::Ok(())
     }))
     .expect("the call finishes in its budget");
     assert!(EPOCH_TICKS.load(Ordering::Relaxed) > idle);
+}
+
+/// `fyx_ext_harness` (Apache-2.0) runs guests for extension tests without this GPL runtime, so it
+/// mirrors the runtime's call contract instead of depending on it. These run the same guests
+/// through both and compare every call, so the two cannot drift apart unnoticed.
+mod harness_conformance {
+    use fyx_ext_harness::{Harness, Pushed};
+
+    use super::*;
+
+    fn pushes(host: &[PushedUpdate]) -> Vec<Pushed> {
+        host.iter()
+            .map(|push| Pushed {
+                surface_id: push.surface_id.clone(),
+                update: push.update.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn limits_match() {
+        assert_eq!(fyx_ext_harness::MAX_PUSHES_PER_CALL, MAX_PUSHES_PER_CALL);
+        assert_eq!(
+            fyx_ext_harness::MAX_PUSHED_ITEMS_PER_CALL,
+            MAX_PUSHED_ITEMS_PER_CALL
+        );
+        assert_eq!(
+            fyx_ext_harness::MAX_LIFTED_TEXT_PER_CALL,
+            MAX_LIFTED_TEXT_PER_CALL
+        );
+        assert_eq!(fyx_ext_harness::MAX_LOG_MESSAGE_LEN, MAX_LOG_MESSAGE_LEN);
+        assert_eq!(fyx_ext_harness::CALL_BUDGET, UI_CALL_BUDGET);
+        assert_eq!(fyx_ext_harness::INIT_BUDGET, UI_INIT_BUDGET);
+        assert_eq!(fyx_ext_harness::EPOCH_INTERVAL, UI_EPOCH_INTERVAL);
+        assert_eq!(fyx_ext_harness::API_VERSION_SECTION, API_VERSION_SECTION);
+        assert_eq!(fyx_ext_harness::MEMORY_LIMIT, UI_MEMORY_LIMIT);
+        assert_eq!(
+            fyx_ext_harness::TABLE_ELEMENTS_LIMIT,
+            UI_TABLE_ELEMENTS_LIMIT
+        );
+        assert_eq!(fyx_ext_harness::INSTANCES_LIMIT, UI_INSTANCES_LIMIT);
+        assert_eq!(fyx_ext_harness::TABLES_LIMIT, UI_TABLES_LIMIT);
+        assert_eq!(fyx_ext_harness::MEMORIES_LIMIT, UI_MEMORIES_LIMIT);
+        assert_eq!(
+            fyx_ext_harness::MAX_PUSHED_ITEMS_PER_CALL_V0_2,
+            MAX_PUSHED_ITEMS_PER_CALL_V0_2
+        );
+        assert_eq!(fyx_ext_harness::MIN_TICK_DELAY, MIN_TICK_DELAY);
+        assert_eq!(fyx_ext_harness::MAX_TICK_DELAY, MAX_TICK_DELAY);
+        assert_eq!(fyx_ext_harness::ACTIVATION_WINDOW, ACTIVATION_WINDOW);
+        assert_eq!(
+            fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
+            crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
+        );
+        // The harness runs every version up to 0.2; 0.3 comes to it with plan 4.12, which then
+        // makes the two ranges equal again.
+        let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
+        assert_eq!(harness_versions, [MIN_VERSION, Version::new(0, 2, 0)]);
+        assert!(harness_versions.iter().all(is_supported_api_version));
+        assert_eq!(MAX_VERSION, Version::new(0, 3, 0));
+    }
+
+    #[gpui::test]
+    async fn test_counter_matches_the_harness(cx: &mut TestAppContext) {
+        use counter::*;
+
+        let wasm = demo_counter_wasm();
+        let (host, _pushed) = load("fyx-demo-counter", wasm.clone(), cx).await;
+        let mut harness = Harness::load(&wasm).expect("the harness loads the counter");
+        assert_eq!(host.surfaces(), harness.surfaces());
+
+        let mut tree = host.mount(SURFACE).await.expect("mount").value;
+        assert_eq!(&tree, harness.mount(SURFACE).expect("mount"));
+
+        for id in [INCREMENT, INCREMENT, DECREMENT, RESET, ROOT, INCREMENT] {
+            let reply = host
+                .handle_event(SURFACE, UiEvent::Click(id))
+                .await
+                .expect("event");
+            let outcome = harness.event(SURFACE, UiEvent::Click(id)).expect("event");
+            assert_eq!(pushes(&reply.pushed), outcome.pushed, "click {id}");
+            assert_eq!(reply.value, outcome.update, "click {id}");
+            tree.apply_update(reply.value).expect("apply");
+            assert_eq!(Some(&tree), harness.tree(SURFACE), "click {id}");
+        }
+
+        let host_rows = host
+            .list_rows(SURFACE, LIST, 0, 10)
+            .await
+            .expect("rows")
+            .value;
+        let harness_rows = harness.rows(SURFACE, LIST, 0, 10).expect("rows");
+        assert_eq!(host_rows, harness_rows);
+        assert!(!host_rows.is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_probe_matches_the_harness(cx: &mut TestAppContext) {
+        let wasm = probe_wasm();
+        let (host, _pushed) = load("probe", wasm.clone(), cx).await;
+        let mut harness = Harness::load(&wasm).expect("the harness loads the probe");
+        assert_eq!(host.surfaces(), harness.surfaces());
+
+        for id in [probe::PUSH, probe::PUSH_THEN_PATCH, probe::PUSH_THEN_FAIL] {
+            let event = UiEvent::Click(id);
+            let (host_pushed, host_value) =
+                match host.handle_event(probe::SURFACE, event.clone()).await {
+                    Ok(reply) => (pushes(&reply.pushed), Ok(reply.value)),
+                    Err(error) => {
+                        let error = error
+                            .downcast_ref::<ReplyError>()
+                            .unwrap_or_else(|| panic!("click {id}: not a guest error: {error:#}"));
+                        (pushes(&error.pushed), Err(()))
+                    }
+                };
+            let reply = harness
+                .handle_event_raw(probe::SURFACE, event)
+                .expect("no trap");
+            assert_eq!(host_pushed, reply.pushed, "click {id}");
+            assert_eq!(host_value, reply.value.map_err(|_| ()), "click {id}");
+        }
+
+        let flood = UiEvent::Click(probe::PUSH_FLOOD);
+        assert!(
+            host.handle_event(probe::SURFACE, flood.clone())
+                .await
+                .is_err()
+        );
+        assert!(harness.handle_event_raw(probe::SURFACE, flood).is_err());
+        let next = UiEvent::Click(probe::PUSH);
+        assert!(
+            host.handle_event(probe::SURFACE, next.clone())
+                .await
+                .is_err(),
+            "disabled"
+        );
+        assert!(
+            harness.handle_event_raw(probe::SURFACE, next).is_err(),
+            "disabled"
+        );
+    }
 }

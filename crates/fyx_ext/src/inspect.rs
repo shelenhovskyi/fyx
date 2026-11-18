@@ -46,8 +46,10 @@ pub fn import_need(import: &str) -> ImportNeed {
     let interface = import.split('@').next().unwrap_or(import);
     match interface {
         "fyx:ui/types" | "fyx:ui/host" => ImportNeed::Nothing,
-        // fyx:ui 0.2, section L of docs/fyx/wit-0.2/design.md.
-        "fyx:ui/decorations" => ImportNeed::Capability("ui:editor-decorations"),
+        // fyx:ui 0.2, design.md section L: linked for every 0.2 component, with
+        // `ui:editor-decorations` checked per call, so importing it needs nothing. The SDK's 0.2
+        // export imports it whether or not the extension places decorations.
+        "fyx:ui/decorations" => ImportNeed::Nothing,
         _ if interface.starts_with("wasi:filesystem/")
             || interface.starts_with("wasi:sockets/")
             || interface.starts_with("wasi:http/") =>
@@ -158,9 +160,12 @@ pub fn check_component(manifest: &Manifest, bytes: &[u8], report: &mut Report) {
 
 fn check_api_version(manifest: &Manifest, info: &ComponentInfo, report: &mut Report) {
     match info.api_version_sections.as_slice() {
-        [] => report.warning(format!(
-            "no {API_VERSION_SECTION} section: the SDK predates it, so the host falls back to the versions of the fyx:ui imports"
-        )),
+        [] => {
+            report.warning(format!(
+                "no {API_VERSION_SECTION} section: the SDK predates it, so the host falls back to the versions of the fyx:ui imports"
+            ));
+            check_import_versions(manifest, info, report);
+        }
         [data] => match (decode_api_version(data), &manifest.api_version) {
             (None, _) => report.error(format!(
                 "the {API_VERSION_SECTION} section is not 6 bytes: {data:?}"
@@ -173,6 +178,46 @@ fn check_api_version(manifest: &Manifest, info: &ComponentInfo, report: &mut Rep
         _ => report.error(format!(
             "{} {API_VERSION_SECTION} sections; the host reads them as one invalid section. Remove the extra one (only register_extension! should write it)",
             info.api_version_sections.len()
+        )),
+    }
+}
+
+/// The versions in the `@x.y.z` of the component's `fyx:ui/*` imports, in import order without
+/// repeats.
+pub fn import_versions(info: &ComponentInfo) -> Vec<String> {
+    let mut versions = Vec::new();
+    for import in &info.imports {
+        if let Some((interface, version)) = import.split_once('@')
+            && interface.starts_with("fyx:ui/")
+            && !versions.iter().any(|known| known == version)
+        {
+            versions.push(version.to_string());
+        }
+    }
+    versions
+}
+
+/// Without a version section the host takes the version from the `fyx:ui` imports (bugs-1 #25),
+/// so they must agree with each other and with `[fyx_ui].api_version`.
+fn check_import_versions(manifest: &Manifest, info: &ComponentInfo, report: &mut Report) {
+    match import_versions(info).as_slice() {
+        [] => report.error(
+            "the component imports no fyx:ui interface and has no version section, so the host cannot tell which world it implements",
+        ),
+        [version] => match (Version::parse(version), &manifest.api_version) {
+            (Err(_), _) => report.error(format!(
+                "the fyx:ui imports carry the version {version:?}, which is not a version"
+            )),
+            (Ok(component), Some(declared)) if &component != declared => {
+                report.error(format!(
+                    "the component imports fyx:ui {component}, but [fyx_ui].api_version says {declared}; the host refuses the mismatch"
+                ))
+            }
+            _ => {}
+        },
+        versions => report.error(format!(
+            "the component imports fyx:ui interfaces of several versions ({}); a component implements one world",
+            versions.join(", ")
         )),
     }
 }
@@ -202,11 +247,14 @@ pub fn check_capabilities(declared: &[String], imports: &[String], report: &mut 
         }
     }
     for capability in declared {
-        if SURFACE_CAPABILITIES.contains(&capability.as_str()) {
-            report.note(format!(
-                "{capability:?} is needed by the surfaces the extension declares; the host checks it when it loads the extension"
-            ));
-        } else if !used.contains(&capability.as_str())
+        // Used by `surfaces()`, not by an import: checked by loading the component
+        // (`CheckDepth::Load`).
+        if SURFACE_CAPABILITIES.contains(&capability.as_str())
+            || capability == "ui:editor-decorations"
+        {
+            continue;
+        }
+        if !used.contains(&capability.as_str())
             && crate::manifest::KNOWN_CAPABILITIES
                 .iter()
                 .any(|(name, _)| name == capability)
@@ -291,10 +339,9 @@ pub mod tests {
             report.errors.is_empty() && report.warnings.is_empty(),
             "{report:?}"
         );
-        assert_eq!(
-            report.notes.len(),
-            1,
-            "ui:panel is checked at load: {report:?}"
+        assert!(
+            report.is_empty(),
+            "ui:panel is checked by loading the component: {report:?}"
         );
     }
 
@@ -333,6 +380,36 @@ pub mod tests {
         );
     }
 
+    /// bugs-1 #25: without a section the host reads the import versions, and so does `check`.
+    #[test]
+    fn without_a_section_the_import_versions_must_match_the_manifest() {
+        let mut report = Report::default();
+        check_component(&manifest(&[]), &component_v0_1(), &mut report);
+        assert!(report.errors.is_empty(), "{report:?}");
+
+        let mut report = Report::default();
+        check_component(&manifest(&[]), &component_v0_2(), &mut report);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("imports fyx:ui 0.2.0, but [fyx_ui].api_version says 0.1.0")),
+            "{report:?}"
+        );
+
+        let info = ComponentInfo {
+            imports: vec!["fyx:ui/types@0.1.0".into(), "fyx:ui/host@0.2.0".into()],
+            ..ComponentInfo::default()
+        };
+        assert_eq!(import_versions(&info), ["0.1.0", "0.2.0"]);
+        let mut report = Report::default();
+        check_api_version(&manifest(&[]), &info, &mut report);
+        assert!(
+            report.errors.iter().any(|e| e.contains("several versions")),
+            "{report:?}"
+        );
+    }
+
     #[test]
     fn a_core_module_is_not_a_component() {
         let error = inspect(b"\0asm\x01\0\0\0").expect_err("a core module");
@@ -340,7 +417,7 @@ pub mod tests {
     }
 
     #[test]
-    fn decorations_need_their_capability() {
+    fn decorations_are_checked_per_call_not_at_import() {
         let info = inspect(&component_v0_2()).expect("inspect");
         assert!(
             info.imports
@@ -348,23 +425,8 @@ pub mod tests {
                 .any(|name| name == "fyx:ui/decorations@0.2.0"),
             "{info:?}"
         );
-
         let mut report = Report::default();
         check_capabilities(&["ui:panel".into()], &info.imports, &mut report);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|e| e.contains("needs \"ui:editor-decorations\"")),
-            "{report:?}"
-        );
-
-        let mut report = Report::default();
-        check_capabilities(
-            &["ui:panel".into(), "ui:editor-decorations".into()],
-            &info.imports,
-            &mut report,
-        );
         assert!(report.errors.is_empty(), "{report:?}");
     }
 
@@ -376,7 +438,7 @@ pub mod tests {
             "acme:secret/api@1.0.0".to_string(),
         ];
         let mut report = Report::default();
-        check_capabilities(&["ui:editor-decorations".into()], &imports, &mut report);
+        check_capabilities(&["network:fetch".into()], &imports, &mut report);
         assert!(
             report
                 .warnings

@@ -17,7 +17,7 @@ use std::{
     future::Future,
     ops::RangeInclusive,
     path::{Component as PathComponent, Path, PathBuf},
-    pin::{Pin, pin},
+    pin::pin,
     sync::{
         Arc, Condvar, Mutex, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -31,7 +31,7 @@ use fs::Fs;
 use futures::{
     FutureExt as _, StreamExt as _,
     channel::{mpsc, oneshot},
-    future::{BoxFuture, Either},
+    future::BoxFuture,
 };
 use gpui::{AsyncApp, Task};
 use semver::Version;
@@ -381,6 +381,8 @@ pub struct UiState {
     limits: wasmtime::StoreLimits,
     call_started: Instant,
     call_budget: Duration,
+    /// Epochs the running call has executed in, as time: what its budget counts.
+    executed: Duration,
     /// Surfaces `mount` has been called for, so only the first mount gets
     /// [`UI_FIRST_MOUNT_BUDGET`].
     mounted: std::collections::HashSet<String>,
@@ -428,6 +430,7 @@ impl UiState {
             limits: ui_store_limits(),
             call_started: Instant::now(),
             call_budget: UI_INIT_BUDGET,
+            executed: Duration::ZERO,
             mounted: Default::default(),
             disabled: None,
         }
@@ -443,6 +446,7 @@ impl UiState {
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
+        self.executed = Duration::ZERO;
         self.pushes.clear();
         self.pushed_items = 0;
         self.lifted_text = 0;
@@ -746,7 +750,7 @@ impl Drop for ActiveCall {
     }
 }
 
-/// Wakers of pending [`Deadline`]s, woken on every epoch tick.
+/// Wakers of calls waiting in [`with_budget`], woken on every epoch tick.
 static DEADLINE_WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
 
 fn wake_deadlines() {
@@ -760,38 +764,77 @@ fn wake_deadlines() {
     }
 }
 
-/// Completes once `Instant::now()` passes the deadline, at the resolution of the epoch thread.
-/// It needs no executor timer, so it works on tokio and in GPUI tests alike.
-struct Deadline(Instant);
+/// The waker a guest call is polled with: it notes when the call was first woken, so
+/// [`with_budget`] can tell a call that waits on the host (not woken) from one that is ready but
+/// not polled because the tokio workers are busy (woken).
+struct RecordingWaker {
+    woken_at: Mutex<Option<Instant>>,
+    inner: Waker,
+}
 
-impl Future for Deadline {
-    type Output = ();
+impl std::task::Wake for RecordingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if Instant::now() >= self.0 {
-            return Poll::Ready(());
-        }
-        DEADLINE_WAKERS
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken_at
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(cx.waker().clone());
-        Poll::Pending
+            .get_or_insert_with(Instant::now);
+        self.inner.wake_by_ref();
     }
 }
 
-/// Runs a guest call with `budget`. The epoch callback interrupts a guest that keeps executing;
-/// this drops the call when the guest is blocked in a host call instead (`wasi:io/poll` behind
-/// `thread::sleep`, for example), where no epoch callback runs.
+/// Runs a guest call with `budget`. The epoch callback interrupts a guest that keeps executing
+/// longer than `budget`, counting only epochs it executed in (`UiState::executed`). This drops the
+/// call when the guest is blocked in a host call instead (`wasi:io/poll` behind `thread::sleep`,
+/// for example), where no epoch callback runs.
+///
+/// Both count the call's own time, not wall time (async-1 #5): a call that is ready but waits for
+/// a busy tokio worker spends neither, so other work on the shared runtime, or other UI
+/// extensions, cannot get a healthy extension disabled.
 async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
-    // Every guest call runs in here, so this is what keeps the epoch thread ticking.
+    // Every guest call runs in here, so this is what keeps the epoch thread ticking (triage-3,
+    // PERF 7); a call waiting on the host counts too, since the epoch thread polls it again.
     let _active = ActiveCall::begin();
-    let deadline = Deadline(Instant::now() + budget + UI_DEADLINE_SLACK);
-    match futures::future::select(pin!(call), deadline).await {
-        Either::Left((result, _)) => result,
-        Either::Right(((), _)) => Err(anyhow!(
-            "exceeded its time budget of {budget:?} while blocked in a host call"
-        )),
-    }
+    let limit = budget + UI_DEADLINE_SLACK;
+    let mut call = pin!(call);
+    let mut blocked = Duration::ZERO;
+    let mut waiting: Option<(Instant, Arc<RecordingWaker>)> = None;
+    futures::future::poll_fn(move |cx| {
+        let now = Instant::now();
+        if let Some((since, waker)) = waiting.take() {
+            let woken_at = *waker
+                .woken_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let until = woken_at.map_or(now, |at| at.clamp(since, now));
+            blocked += until.saturating_duration_since(since);
+        }
+        if blocked > limit {
+            return Poll::Ready(Err(anyhow!(
+                "exceeded its time budget of {budget:?} while blocked in a host call"
+            )));
+        }
+        let waker = Arc::new(RecordingWaker {
+            woken_at: Mutex::new(None),
+            inner: cx.waker().clone(),
+        });
+        let result = call
+            .as_mut()
+            .poll(&mut Context::from_waker(&Waker::from(waker.clone())));
+        if result.is_pending() {
+            waiting = Some((Instant::now(), waker));
+            // The epoch thread polls the call again, so time blocked in the host is counted.
+            DEADLINE_WAKERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(cx.waker().clone());
+        }
+        result
+    })
+    .await
 }
 
 type UiCall =
@@ -1036,9 +1079,13 @@ impl UiExtension {
                         ),
                     );
                     store.limiter(|state| &mut state.limits);
-                    store.epoch_deadline_callback(|context| {
-                        let state = context.data();
-                        if state.call_started.elapsed() > state.call_budget {
+                    // The callback runs only while the guest executes: once per epoch it runs
+                    // through, and once on resuming after it yielded, however long it waited
+                    // (async-1 #5).
+                    store.epoch_deadline_callback(|mut context| {
+                        let state = context.data_mut();
+                        state.executed += UI_EPOCH_INTERVAL;
+                        if state.executed > state.call_budget {
                             Ok(UpdateDeadline::Interrupt)
                         } else {
                             Ok(UpdateDeadline::Yield(1))
@@ -1247,6 +1294,7 @@ impl UiExtension {
                             surface_id,
                             at: std::time::SystemTime::now(),
                             duration: store.data().call_started.elapsed(),
+                            executed: store.data().executed,
                             budget,
                             pushes: effects
                                 .iter()

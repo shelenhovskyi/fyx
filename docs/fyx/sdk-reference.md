@@ -92,6 +92,10 @@ pub trait Extension: 'static {
         -> Vec<ListRow> {
         Vec::new()
     }
+    /// fyx:ui 0.2: the tick `request_tick` asked for.
+    fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
+        Ok(Update::Unchanged)
+    }
 }
 ```
 
@@ -117,16 +121,29 @@ traps or panics disables the extension for the session.
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
 
 ```rust
-register_extension!(MyExtension);
+register_extension!(MyExtension);        // exports fyx:ui 0.2
+register_extension!(MyExtension, v0_1);  // exports fyx:ui 0.1, for hosts that only run 0.1
 ```
 
-Call the macro once, at the root of your `cdylib` crate. It:
+The SDK's types and functions are those of `fyx:ui@0.2.0` (`API_VERSION`); one extension source
+exports either world. Call the macro once, at the root of your `cdylib` crate. It:
 
-- implements the generated `bindings::Guest` trait by forwarding each export to your type;
+- implements the chosen world's `Guest` trait by forwarding each export to your type. With
+  `v0_1`, values are converted at the boundary. Icons become upstream `IconName`s, and
+  tooltips, list selection and row indents are dropped. What 0.1 cannot express is an error that
+  names 0.2: modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank`
+  icon node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
+- defines `extern "Rust"` shims through which the SDK's host functions reach that world's
+  imports, so a 0.1 component imports only `fyx:ui/*@0.1.0`. A 0.2 component always imports
+  `fyx:ui/decorations`; the host checks `ui:editor-decorations` per call, not at import.
 - on `wasm32` only, adds a `#[used]` static in the `fyx:ui-api-version` link section holding
-  `API_VERSION_SECTION_BYTES`. The static lives in your crate, so the linker cannot drop it as an
-  unused member of the SDK's rlib;
-- calls `bindings::export!` to export the world.
+  `API_VERSION_SECTION_BYTES` (0.2) or `API_VERSION_V0_1_SECTION_BYTES` (0.1). The static lives in
+  your crate, so the linker cannot drop it as an unused member of the SDK's rlib;
+- calls the export macro wit-bindgen generates for the world. The 0.1 bindings live in the crate `ui_ext_sdk_v0_1`,
+  because wit-bindgen names the export macro after the world, and both worlds are called
+  `ui-extension`.
+
+<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs (register_extension!, __fyx_host_shims!), crates/ui_ext_sdk/src/v0_1.rs, crates/ui_ext_sdk/src/host.rs -->
 
 <!-- sdk:163-219 -->
 
@@ -143,18 +160,23 @@ checks nothing: the rules apply when a node goes into a tree.
 
 | Type | Constructor and defaults | Setters |
 |---|---|---|
-| `Surface` | `Surface::panel(id, title, DockPosition, icon, default_size: u32)`<br>`Surface::status_item(id, title, StatusBarSide, priority: i32)` | — |
+| `Surface` | `Surface::panel(id, title, DockPosition, Icon, default_size: u32)`<br>`Surface::status_item(id, title, StatusBarSide, priority: i32)`<br>`Surface::modal(id, title, ModalWidth)`: closed until `show_surface`; needs `ui:modal` | — |
 | `FlexProps` | `FlexProps::column()`, `FlexProps::row()`: gap 0, padding 0, no grow, `Align::Start`, no background | `.gap(u16)`, `.padding(u16)`, `.grow()`, `.align(Align)`, `.background(ColorToken)` |
 | `TextProps` | `TextProps::new(content)`: no colour, not bold, not monospace; also `From<&str>` and `From<String>` | `.color(ColorToken)`, `.bold()`, `.monospace()` |
-| `ButtonProps` | `ButtonProps::new(label)`: no icon, `ButtonStyle::Default`, enabled; also `From<&str>` and `From<String>` | `.icon(name)`, `.style(ButtonStyle)`, `.disabled(bool)` |
-| `InputProps` | `InputProps::new(value)`: empty placeholder | `.placeholder(text)` |
-| `ListProps` | `ListProps::new(row_count: u32, row_height: u16)` | — |
+| `ButtonProps` | `ButtonProps::new(label)`: no icon, `ButtonStyle::Default`, enabled, no tooltip; also `From<&str>` and `From<String>` | `.icon(Icon)`, `.style(ButtonStyle)`, `.disabled(bool)`, `.tooltip(text)` |
+| `InputProps` | `InputProps::new(value)`: empty placeholder, not secret | `.placeholder(text)`, `.secret()` |
+| `ListProps` | `ListProps::new(row_count: u32, row_height: u16)`: no selected row | `.selected(Option<u32>)` |
 | `TableProps` | `TableProps::new(columns: impl IntoIterator<Item = impl Into<String>>, row_count: u32)` | — |
-| `IconProps` | `IconProps::new(name)`: no colour; also `From<&str>` | `.color(ColorToken)` |
+| `IconProps` | `IconProps::new(Icon)`: no colour; also `From<Icon>` | `.color(ColorToken)` |
+| `ListRow` | `list_row(index, build)` (below): indent 0 | `.with_indent(u8)`: nesting depth, at most 32 levels drawn |
 | `DiffViewProps` | `DiffViewProps::new(old_text, new_text)`: no language | `.language(name)` |
 
 `From<XProps> for Props` exists for all eight records, so any function that takes
 `impl Into<Props>` accepts them directly.
+
+`Icon` is the frozen icon set of `fyx:ui` 0.2: `Icon::all()` lists all 101 in WIT order, and
+`icon.name()` is the WIT name, such as `arrow-up`. An extension exported as 0.1 sends the upstream
+`IconName` instead.
 
 <!-- sdk:919-1163 -->
 
@@ -168,7 +190,7 @@ How the host renders each kind, and the units it uses:
 | input | A single-line editor in a bordered box. |
 | list | A `uniform_list` with fixed `row_height` (0 means 24 px). It is at least `min(row_count, 3)` rows tall, and rows come from `list-rows`. |
 | table | A header from `columns`, then rows from `list-rows` at a fixed 24 px. If a row's root is a flex node, its children become equal-width cells. |
-| icon | `ui::Icon` by snake_case `IconName`. An unknown name shows the `blocks` icon. |
+| icon | A frozen `Icon`, which the host maps to its own icon set; `spinner` is animated. A 0.1 component names a snake_case upstream `IconName`, and an unknown name shows the `blocks` icon. |
 | markdown | Zed's markdown element. Inside list rows it is a plain label. |
 | diff-view | **Placeholder**: common leading and trailing lines as context, the middle as removed then added lines. It is not Zed's diff editor, and `language` is unused. |
 
@@ -284,7 +306,7 @@ The rules come from `ui_ext` itself, not from a copy: `ui_ext::Props::is_contain
 
 | Method | Returns | Checks, and errors |
 |---|---|---|
-| `mount(build)` | `Result<Vec<Node>, TreeError>`: the tree to return from `Extension::mount` | Node count ≤ `max_nodes_per_update` (**2048**, stricter than the host's 16384 for a mount) → `UpdateTooLarge`. Node count ≤ `max_nodes` → `TreeTooLarge`. On success, the previous mirror **and any queued patches are dropped**. On error, the previous tree is kept. |
+| `mount(build)` | `Result<Vec<Node>, TreeError>`: the tree to return from `Extension::mount` | Node count ≤ `max_nodes` (16384, the host's cap for a mount) → `TreeTooLarge`. On success, the previous mirror **and any queued patches are dropped**. On error, the previous tree is kept. |
 | `replace(build)` | `Result<Update, TreeError>`: `Update::Replace(nodes)` | Same as `mount`. For a `handle_event` answer where patching would be more work than rebuilding. |
 
 <!-- sdk:601-624 -->
@@ -320,6 +342,7 @@ counts one patch per node.
 | `remove(id) -> Result<(), _>` | Removes the node and its whole subtree (one `remove` patch). | `UpdateTooLarge`. |
 | `rebuild(id, build) -> Result<Vec<NodeId>, _>` | Replaces `id` and its subtree with the nodes `build` adds, at the same position, **with new ids** (`remove` + inserts). The host treats them as new nodes, so a rebuilt list has all its rows requested again. Checked as a whole: on error nothing is removed. | `IsRoot(id)` if `id` has no parent: wrap anything you want to rebuild in a flex node. `NotAChild` if the mirror is inconsistent. `UpdateTooLarge` if queue + 1 + new nodes > 2048. `TreeTooLarge`. |
 | `clear_children(parent) -> Result<(), _>` | Removes every child of `parent` (one `remove` per child). | `UpdateTooLarge`. |
+| `invalidate_rows(list, Option<RowRange>) -> Result<(), _>` | Queues `invalidate-rows`: the host fetches those rows again (all for `None`), keeping the scroll position. Exported as 0.1, it queues an unchanged `set-props` of the list instead, after which a 0.1 host fetches every row again. | `NotAList { node, kind }` if `list` is not a list or table. `UpdateTooLarge`. |
 | `take_update() -> Update` | Returns the queue, `Update::Unchanged` if empty, and clears it. | — |
 
 <!-- sdk:677-772, 778-843 -->
@@ -457,11 +480,34 @@ return `Result<_, String>`. The string is what the user sees.
 ## `log`, `push_update`, `take_pushed_updates`
 
 ```rust
+pub fn exported_api_version() -> (u16, u16, u16);
 pub fn log(level: LogLevel, message: &str);
-pub fn push_update(surface_id: &str, update: &Update);
+pub fn push_update(surface_id: &str, update: &Update) -> Result<(), HostError>;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn take_pushed_updates() -> Vec<(String, Update)>;
 ```
+
+`fyx:ui` 0.2 adds these host functions; each is checked when called and its effect happens after
+the current call returns (design.md, section A):
+
+```rust
+pub fn request_tick(surface_id: &str, delay_ms: u32) -> Result<(), HostError>;
+pub fn cancel_tick(surface_id: &str);
+pub fn add_surface(surface: &Surface) -> Result<(), HostError>;
+pub fn remove_surface(surface_id: &str) -> Result<(), HostError>;
+pub fn show_surface(surface_id: &str) -> Result<(), HostError>;
+pub fn hide_surface(surface_id: &str) -> Result<(), HostError>;
+pub fn place_decoration(id: &str, location: &DecorationLocation, nodes: &[Node])
+    -> Result<(), HostError>;
+pub fn remove_decoration(id: &str) -> Result<(), HostError>;
+#[cfg(not(target_arch = "wasm32"))]
+pub fn take_host_effects() -> Vec<HostEffect>;
+```
+
+In an extension exported with `v0_1` they return `HostError` with code `unavailable`
+("needs fyx:ui 0.2"), and `cancel_tick` does nothing. `push_update` converts the update to 0.1 and
+returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
+queued update; after a refused push it sends the whole tree as a `replace` next time.
 
 <!-- sdk:100-131 -->
 
@@ -494,9 +540,10 @@ another surface of the same extension. Rules:
 
 <!-- tasks/progress/W2.md:21-32 (push ordering rule); crates/ui_ext_wasm/src/ui_ext_wasm.rs:206-241, 277-287 (cap 64), 498-502, 693-734; crates/ui_ext_host/src/surface.rs:137-145, 240-285 (apply_reply: the Err arm never downcasts ReplyError), 291-298, 404-417; crates/ui_ext_host/src/registry.rs:109-156 -->
 
-Off WASM, `push_update` records the update in a thread local, and `take_pushed_updates()`
-returns and clears what was recorded on the current thread. The SDK does this because
-`wit-bindgen`'s off-WASM import stubs abort the test process.
+Off WASM, every host function records a `HostEffect` in a thread local and succeeds.
+`take_host_effects()` returns and clears what was recorded on the current thread;
+`take_pushed_updates()` takes only the pushes. The SDK does this because `wit-bindgen`'s off-WASM
+import stubs abort the test process.
 
 <!-- tasks/progress/W4.md:124-126 -->
 
@@ -505,7 +552,7 @@ returns and clears what was recorded on the current thread. The SDK does this be
 | Helper | Children only under flex | Patch / row cap (2048) | Tree cap (16384) | Single-root rows | Unknown ids / siblings |
 |---|---|---|---|---|---|
 | `TreeBuilder` | by construction | — | — | — | — |
-| `SurfaceTree` | yes | yes (also caps `mount` at 2048) | yes | — | yes |
+| `SurfaceTree` | yes | yes | yes (also for `mount`) | — | yes |
 | `PatchSet` | — | — | — | — | — |
 | `list_row` / `list_rows` | by construction | yes (per row) | — | yes | — |
 | host (`ui_ext::Tree`) | yes | patches and rows | yes (mount, replace, patches) | yes | yes |

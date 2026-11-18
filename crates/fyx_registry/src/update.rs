@@ -10,7 +10,10 @@ use std::{collections::BTreeSet, time::Duration};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::{BlockEntry, ExtensionId, Release, Tier, Timestamp, VerifiedBlocklist, VerifiedIndex};
+use crate::{
+    BlockEntry, Error, ExtensionId, Release, Sha256Digest, Tier, Timestamp, VerifiedBlocklist,
+    VerifiedIndex,
+};
 
 /// A release installs only once it has been in the index this long, unless it is `urgent`.
 pub const AGE_GATE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -137,6 +140,23 @@ pub enum Origin {
 pub struct InstalledVersion {
     pub version: Version,
     pub origin: Origin,
+    /// SHA-256 of the installed `.fyxext`, so hash block entries apply to it (security-2 S13).
+    /// `None` for an install made before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_sha256: Option<Sha256Digest>,
+}
+
+/// The version of a `.fyxext` from disk must be plain `major.minor.patch`, like a registry
+/// release: a pre-release or build suffix could otherwise pick its way around a block entry
+/// (security-2 S13). The install store calls this before installing a local file.
+pub fn check_local_version(version: &Version) -> Result<(), Error> {
+    if version.pre.is_empty() && version.build.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "version {version} of a local package must be major.minor.patch without a suffix"
+        )))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,8 +246,8 @@ fn plan_extension(
     blocklist: Option<&VerifiedBlocklist>,
     now: Timestamp,
 ) -> Vec<Action> {
-    let block_for = |version: &Version| {
-        blocklist.and_then(|blocklist| blocklist.block_for(&extension.id, version))
+    let block_for = |version: &Version, package_sha256: Option<&Sha256Digest>| {
+        blocklist.and_then(|blocklist| blocklist.block_for(&extension.id, version, package_sha256))
     };
 
     let mut update = None;
@@ -238,7 +258,7 @@ fn plan_extension(
             if release.version <= extension.active.version {
                 break;
             }
-            if block_for(&release.version).is_some() {
+            if block_for(&release.version, Some(&release.package.sha256)).is_some() {
                 continue;
             }
             let reasons = hold_reasons(extension, release, now);
@@ -256,12 +276,15 @@ fn plan_extension(
     }
 
     let mut actions = Vec::new();
-    match block_for(&extension.active.version) {
+    match block_for(
+        &extension.active.version,
+        extension.active.package_sha256.as_ref(),
+    ) {
         Some(block) => {
-            let rollback_target = extension
-                .previous
-                .as_ref()
-                .filter(|previous| !extension.pinned && block_for(&previous.version).is_none());
+            let rollback_target = extension.previous.as_ref().filter(|previous| {
+                !extension.pinned
+                    && block_for(&previous.version, previous.package_sha256.as_ref()).is_none()
+            });
             actions.push(match (update, rollback_target) {
                 (Some(release), _) => Action::Update {
                     to: release.version.clone(),
@@ -333,9 +356,9 @@ pub fn plan_install<'a>(
     let mut first_block = None;
     let mut newest_waiting = None;
     for release in index.releases(id).rev() {
-        if let Some(block) =
-            blocklist.and_then(|blocklist| blocklist.block_for(id, &release.version))
-        {
+        if let Some(block) = blocklist.and_then(|blocklist| {
+            blocklist.block_for(id, &release.version, Some(&release.package.sha256))
+        }) {
             first_block.get_or_insert(block);
             continue;
         }
@@ -412,10 +435,12 @@ mod tests {
             active: InstalledVersion {
                 version: version(active),
                 origin: Origin::Registry,
+                package_sha256: None,
             },
             previous: previous.map(|previous| InstalledVersion {
                 version: version(previous),
                 origin: Origin::Registry,
+                package_sha256: None,
             }),
             pinned: false,
             approved: Permissions::of(&todo(active)),
@@ -799,5 +824,12 @@ mod tests {
             plan_install(&id(), &index, Some(&blocklist), LATER),
             Err(InstallRefusal::Blocked { block })
         );
+    }
+
+    #[test]
+    fn local_versions_are_plain() {
+        assert!(check_local_version(&version("1.2.0")).is_ok());
+        assert!(check_local_version(&version("1.2.0+local")).is_err());
+        assert!(check_local_version(&version("1.2.0-rc.1")).is_err());
     }
 }

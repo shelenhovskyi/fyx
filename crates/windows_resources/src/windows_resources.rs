@@ -101,8 +101,10 @@ BEGIN
             VALUE "FileVersion", "{pkg_version}\0"
             VALUE "ProductName", "{product_name}\0"
             VALUE "ProductVersion", "{product_version}\0"
+            // fyx: company, copyright holder (Zed Industries kept) and non-affiliation notice
             VALUE "CompanyName", "Fyx contributors\0"
-            VALUE "LegalCopyright", "Copyright 2022 - 2025 Zed Industries, Inc.\0"
+            VALUE "LegalCopyright", "Copyright 2026 Hennadii Shelenhovskyi. Based on Zed, copyright 2022-2025 Zed Industries, Inc.\0"
+            VALUE "Comments", "Fyx is an independent fork of Zed and is not affiliated with or endorsed by Zed Industries.\0"
         END
     END
     BLOCK "VarFileInfo"

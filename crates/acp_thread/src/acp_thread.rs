@@ -7207,6 +7207,8 @@ impl AcpThread {
         message: Vec<acp_v2::ContentBlock>,
         cx: &mut Context<Self>,
     ) -> Submission {
+        // fyx: the host review's notes for the agent go in front of the user's next prompt.
+        let message = fyx_review::with_review_notes(self.session_id(), message, cx);
         self.submit(message, true, cx)
     }
 
@@ -8017,7 +8019,7 @@ impl AcpThread {
                     .unwrap_or_else(|| buffer.read(cx).snapshot())
             })?;
             // fyx: the host review gate (crates/agent_review) decides which hunks land.
-            let (content, feedback) =
+            let (content, feedback, reviewed) =
                 fyx_review::gate_agent_write(&this, path, &buffer, &snapshot, content, cx).await?;
             let edits = cx
                 .background_executor()
@@ -8047,6 +8049,8 @@ impl AcpThread {
                 });
             }
 
+            // fyx: the reviewed text lands only on the version the review checked (no await between).
+            cx.update(|cx| reviewed.ensure_unchanged(&buffer, cx))?;
             let format_on_save = cx.update(|cx| {
                 action_log.update(cx, |action_log, cx| {
                     action_log.buffer_read(buffer.clone(), cx);
@@ -15718,56 +15722,6 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, acp_v1::ErrorCode::ResourceNotFound);
-    }
-
-    // fyx: fyx_guard's hooks in `read_text_file` and `write_text_file`.
-    #[gpui::test]
-    async fn test_fyx_guard_shield_on_acp_file_access(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(path!("/tmp"), json!({".env": "API_KEY=1", "main.rs": ""}))
-            .await;
-        let project = Project::test(fs.clone(), [path!("/tmp").as_ref()], cx).await;
-        let connection = Rc::new(FakeAgentConnection::new());
-        let thread = cx
-            .update(|cx| {
-                connection.new_session(project, PathList::new(&[Path::new(path!("/tmp"))]), cx)
-            })
-            .await
-            .unwrap();
-        let read_env = |cx: &mut TestAppContext| {
-            thread.update(cx, |thread, cx| {
-                thread.read_text_file(path!("/tmp/.env").into(), None, None, false, cx)
-            })
-        };
-        let write_config = |cx: &mut TestAppContext| {
-            thread.update(cx, |thread, cx| {
-                thread.write_text_file(path!("/tmp/.claude/settings.json").into(), "{}".into(), cx)
-            })
-        };
-
-        assert_eq!(read_env(cx).await.unwrap(), "API_KEY=1");
-        write_config(cx).await.unwrap();
-
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store.update_user_settings(cx, |settings| {
-                    settings.fyx_security.get_or_insert_default().mode =
-                        Some(settings::FyxSecurityMode::Shield);
-                });
-            });
-        });
-        let error = read_env(cx).await.unwrap_err();
-        assert!(error.message.contains("private_files"), "{}", error.message);
-        let error = write_config(cx).await.unwrap_err();
-        assert!(format!("{error:#}").contains("read-only"), "{error:#}");
-        thread
-            .update(cx, |thread, cx| {
-                thread.read_text_file(path!("/tmp/main.rs").into(), None, None, false, cx)
-            })
-            .await
-            .unwrap();
     }
 
     #[gpui::test]

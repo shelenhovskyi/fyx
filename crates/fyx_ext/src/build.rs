@@ -15,6 +15,8 @@ pub const TARGET: &str = "wasm32-wasip2";
 /// The variable the dev build reads at startup (`ui_ext_host` registry).
 pub const DEV_EXTENSIONS_VARIABLE: &str = "FYX_UI_DEV_EXTENSIONS";
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// A Fyx that exits successfully this soon after the start handed off to a running instance.
+const QUICK_EXIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
@@ -145,17 +147,24 @@ pub fn dev(dir: &Path, options: &DevOptions) -> Result<()> {
         &dir.canonicalize()
             .with_context(|| format!("opening {}", dir.display()))?,
     ));
+    // Before the build, which takes a while the first time (ux-1 F20 f).
+    let fyx = if options.launch {
+        Some(find_fyx(options.fyx.as_deref())?)
+    } else {
+        None
+    };
     build(&dir, &options.build)?;
-    let (_, report) = crate::check(&dir)?;
+    let (manifest, report) = crate::check(&dir, crate::CheckDepth::Load)?;
     report.print();
     anyhow::ensure!(!report.has_errors(), "fix the errors above first");
+    let component = manifest.component_path();
 
     let extensions = dev_extensions_value(
         &display_path(&dir),
         std::env::var(DEV_EXTENSIONS_VARIABLE).ok(),
     );
-    let mut child = if options.launch {
-        let fyx = find_fyx(options.fyx.as_deref())?;
+    let started = std::time::Instant::now();
+    let mut child = if let Some(fyx) = fyx {
         eprintln!(
             "fyx-ext: starting {} with {DEV_EXTENSIONS_VARIABLE}={extensions}",
             fyx.display()
@@ -179,21 +188,31 @@ pub fn dev(dir: &Path, options: &DevOptions) -> Result<()> {
         "fyx-ext: watching {} for changes (Ctrl-C to stop)",
         dir.display()
     );
-    let mut snapshot = source_snapshot(&dir);
+    let mut snapshot = source_snapshot(&dir, &component);
     loop {
         std::thread::sleep(WATCH_INTERVAL);
-        if let Some(child) = child.as_mut()
-            && let Some(status) = child.try_status().context("waiting for Fyx")?
+        if let Some(running) = child.as_mut()
+            && let Some(status) = running.try_status().context("waiting for Fyx")?
         {
-            eprintln!("fyx-ext: Fyx exited ({status})");
-            return Ok(());
+            // A release build hands off to a Fyx that is already running and exits at once
+            // (ux-1 F18); that Fyx never saw the variable, so keep watching for a manual start.
+            if status.success() && started.elapsed() < QUICK_EXIT {
+                eprintln!(
+                    "fyx-ext: Fyx exited right away, probably because another Fyx is running; that one did not load the extension. Quit it and run fyx-ext dev again, or start Fyx yourself with {DEV_EXTENSIONS_VARIABLE}={extensions}. Still watching for changes."
+                );
+                child = None;
+            } else {
+                eprintln!("fyx-ext: Fyx exited ({status})");
+                return Ok(());
+            }
         }
-        let current = source_snapshot(&dir);
+        let current = source_snapshot(&dir, &component);
         if current == snapshot {
             continue;
         }
         snapshot = current;
-        match build(&dir, &options.build).and_then(|_| crate::check(&dir)) {
+        match build(&dir, &options.build).and_then(|_| crate::check(&dir, crate::CheckDepth::Load))
+        {
             Ok((_, report)) => report.print(),
             Err(error) => eprintln!("error: {error:#}"),
         }
@@ -209,8 +228,14 @@ pub fn dev_extensions_value(dir: &str, existing: Option<String>) -> String {
     }
 }
 
-fn display_path(path: &Path) -> String {
+/// A canonical path in the form people and other programs read: `\\?\C:\x` becomes `C:\x`, and
+/// `\\?\UNC\server\share\x` becomes `\\server\share\x` (bugs-1 #33). Without the second rule the
+/// result would be the relative path `UNC\server\…`.
+pub fn display_path(path: &Path) -> String {
     let text = path.to_string_lossy();
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }
 
@@ -230,8 +255,11 @@ fn find_fyx(explicit: Option<&Path>) -> Result<PathBuf> {
         .context("no Fyx binary: pass --fyx <path>, set FYX_BIN, or use --no-launch")
 }
 
-/// Modification times of the files a rebuild depends on: everything except build output.
-fn source_snapshot(dir: &Path) -> Vec<(PathBuf, SystemTime)> {
+/// Modification times of the files a rebuild depends on: everything except build output. Paths
+/// are matched relative to `dir`, so an extension under `/home/u/assets/` is not all "assets"
+/// (bugs-1 #34), and the built `component` never counts, whatever its name.
+fn source_snapshot(dir: &Path, component: &Path) -> Vec<(PathBuf, SystemTime)> {
+    let component = component.canonicalize().ok();
     let mut files = walkdir::WalkDir::new(dir)
         .into_iter()
         .filter_entry(|entry| {
@@ -243,14 +271,22 @@ fn source_snapshot(dir: &Path) -> Vec<(PathBuf, SystemTime)> {
         .filter(|entry| {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy();
+            let relative = path.strip_prefix(dir).unwrap_or(path);
+            let is_component = || {
+                component
+                    .as_ref()
+                    .is_some_and(|component| path.canonicalize().ok().as_ref() == Some(component))
+            };
             path.extension().is_none_or(|extension| extension != "wasm")
                 && !name.ends_with(".fyxext")
                 && (name == MANIFEST_FILE
                     || name == "Cargo.toml"
                     || path.extension().is_some_and(|extension| extension == "rs")
-                    || path
+                    || relative
                         .components()
-                        .any(|component| component.as_os_str() == "assets"))
+                        .next()
+                        .is_some_and(|first| first.as_os_str() == crate::package::ASSETS_DIR))
+                && !is_component()
         })
         .filter_map(|entry| {
             let modified = entry.metadata().ok()?.modified().ok()?;
@@ -312,7 +348,7 @@ not json"#
         ] {
             std::fs::write(root.join(file), "x").expect("write");
         }
-        let names = source_snapshot(root)
+        let names = source_snapshot(root, &root.join("fyx_ui.wasm"))
             .into_iter()
             .map(|(path, _)| {
                 path.strip_prefix(root)
@@ -322,5 +358,37 @@ not json"#
             })
             .collect::<Vec<_>>();
         assert_eq!(names, ["Cargo.toml", "extension.toml", "src/lib.rs"]);
+    }
+
+    /// bugs-1 #34: `assets` is matched relative to the extension, and the component never counts.
+    #[test]
+    fn snapshot_matches_assets_inside_the_extension_only() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().join("assets").join("ext");
+        std::fs::create_dir_all(root.join("assets")).expect("mkdir");
+        for file in ["README.md", "assets/logo.svg", "assets/ui.component"] {
+            std::fs::write(root.join(file), "x").expect("write");
+        }
+        let names = source_snapshot(&root, &root.join("assets/ui.component"))
+            .into_iter()
+            .map(|(path, _)| {
+                path.strip_prefix(&root)
+                    .expect("inside")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["assets/logo.svg"]);
+    }
+
+    /// bugs-1 #33.
+    #[test]
+    fn verbatim_paths_are_shown_in_their_usual_form() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\fyx\ext")), r"C:\fyx\ext");
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\ext")),
+            r"\\server\share\ext"
+        );
+        assert_eq!(display_path(Path::new("/home/u/ext")), "/home/u/ext");
     }
 }

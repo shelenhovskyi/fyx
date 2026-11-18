@@ -55,6 +55,11 @@ pub struct ImportCursorSettings {
 
 pub const FIRST_OPEN: &str = "first_open";
 
+/// fyx: set by Fyx, which has no telemetry endpoint; the basics page then hides its telemetry
+/// opt-in.
+pub struct HideTelemetryOptIn;
+impl gpui::Global for HideTelemetryOptIn {}
+
 actions!(
     onboarding,
     [
@@ -347,7 +352,7 @@ impl Render for Onboarding {
                                     .child(
                                         h_flex()
                                             .gap_4()
-                                            .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
+                                            .child(Vector::square(VectorName::FyxLogo, rems(2.5))) // fyx: logo
                                             .child(
                                                 v_flex()
                                                     .child(

@@ -18,7 +18,11 @@ pub struct CallRecord {
     pub kind: &'static str,
     pub surface_id: String,
     pub at: SystemTime,
+    /// Wall time, from the call being taken off the queue to its end.
     pub duration: Duration,
+    /// The guest's own execution, in epochs of `UI_EPOCH_INTERVAL`: what the budget counts, and
+    /// what a tick CPU-share throttle should count (`ticks::TickBudget::record`).
+    pub executed: Duration,
     pub budget: Duration,
     pub pushes: usize,
     /// A trap, a time budget or a refused call; the guest's own `Err` replies are not errors here.

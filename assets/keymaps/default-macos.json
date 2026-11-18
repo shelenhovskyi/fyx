@@ -1801,4 +1801,53 @@
       "right": ["tabular_data::MoveFocusedCell", { "direction": "right" }],
     },
   },
+  // fyx: agent review (crates/agent_review). Turn-wide decisions sit on `cmd-k` chords, which no
+  // default or base keymap uses, and ask before deciding more than one waiting file.
+  {
+    "context": "Workspace",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-k y": "agent_review::OpenReviews",
+    },
+  },
+  {
+    "context": "AgentReview",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-y": "agent_review::AcceptHunk",
+      "alt-n": "agent_review::RejectHunk",
+      "shift-alt-y": "agent_review::AcceptAllHunks",
+      "shift-alt-n": "agent_review::RejectAllHunks",
+      "cmd-k shift-y": "agent_review::AcceptTurn",
+      "cmd-k shift-n": "agent_review::RejectTurn",
+      "cmd-k shift-x": "agent_review::ClearTurnDecision",
+      "alt-j": "agent_review::NextHunk",
+      "alt-k": "agent_review::PreviousHunk",
+      "cmd-k j": "agent_review::NextFile",
+      "cmd-k k": "agent_review::PreviousFile",
+      "alt-c": "agent_review::CommentHunk",
+      "cmd-enter": "agent_review::SubmitReview",
+    },
+  },
+  {
+    // The diff and comment editors inside a review pane: these win over the editor's own keys.
+    "context": "AgentReview > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-y": "agent_review::AcceptHunk",
+      "alt-n": "agent_review::RejectHunk",
+      "shift-alt-y": "agent_review::AcceptAllHunks",
+      "shift-alt-n": "agent_review::RejectAllHunks",
+      "cmd-k shift-y": "agent_review::AcceptTurn",
+      "cmd-k shift-n": "agent_review::RejectTurn",
+      "cmd-k shift-x": "agent_review::ClearTurnDecision",
+      "alt-j": "agent_review::NextHunk",
+      "alt-k": "agent_review::PreviousHunk",
+      "cmd-k j": "agent_review::NextFile",
+      "cmd-k k": "agent_review::PreviousFile",
+      "alt-c": "agent_review::CommentHunk",
+      "cmd-enter": "agent_review::SubmitReview",
+      "escape": "agent_review::FocusDiff",
+    },
+  },
 ]

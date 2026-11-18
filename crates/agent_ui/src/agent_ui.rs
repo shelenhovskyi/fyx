@@ -3,6 +3,7 @@ pub mod agent_connection_store;
 mod agent_diff;
 mod agent_model_selector;
 mod agent_panel;
+pub use agent_panel::OnboardingUpsell; // fyx: zed::fyx skips its zed.dev card
 mod agent_registry_ui;
 mod buffer_codegen;
 mod completion_provider;
@@ -684,7 +685,7 @@ pub fn init(
 ) {
     agent::ThreadStore::init_global(cx);
     prompt_store::init(cx);
-    agent_review::init(cx); // fyx: host review of agent edits
+    agent_review::init(Some(fs.clone()), cx); // fyx: host review of agent edits
 
     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {
         let workspaces: Vec<_> = workspace::AppState::global(cx)

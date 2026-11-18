@@ -385,11 +385,14 @@ dependencies = [
  "editor",
  "fs",
  "futures 0.3.34",
+ "fyx_guard",
  "globset",
  "gpui",
  "language",
  "log",
+ "paths",
  "project",
+ "release_channel",
  "serde",
  "serde_json",
  "settings",
@@ -6844,7 +6847,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_api_docs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "syn 2.0.117",
+ "wit-parser 0.254.2",
+]
+
+[[package]]
 name = "fyx_demo_counter"
+version = "0.1.0"
+dependencies = [
+ "fyx_ext_harness",
+ "ui_ext_sdk",
+]
+
+[[package]]
+name = "fyx_demo_decorations"
 version = "0.1.0"
 dependencies = [
  "ui_ext_sdk",
@@ -6897,26 +6917,46 @@ dependencies = [
  "async_zip",
  "clap",
  "futures 0.3.34",
+ "fyx_ext_harness",
  "semver",
  "serde",
  "serde_json",
  "smol",
  "tempfile",
  "toml 0.9.8",
+ "ui_ext",
  "walkdir",
  "wasmparser 0.254.2",
+]
+
+[[package]]
+name = "fyx_ext_harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "semver",
+ "ui_ext",
+ "wasmparser 0.254.2",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
 name = "fyx_guard"
 version = "0.1.0"
 dependencies = [
+ "acp_thread",
+ "action_log",
+ "agent",
  "agent-client-protocol",
+ "agent_settings",
  "anyhow",
  "collections",
+ "feature_flags",
  "fs",
  "gpui",
  "log",
+ "paths",
  "project",
  "serde",
  "serde_json",
@@ -19370,6 +19410,7 @@ dependencies = [
  "menu",
  "paths",
  "project",
+ "release_channel",
  "schemars 1.0.4",
  "semver",
  "serde",
@@ -19392,6 +19433,14 @@ name = "ui_ext_sdk"
 version = "0.1.0"
 dependencies = [
  "ui_ext",
+ "ui_ext_sdk_v0_1",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "ui_ext_sdk_v0_1"
+version = "0.1.0"
+dependencies = [
  "wit-bindgen 0.41.0",
 ]
 
@@ -19402,6 +19451,7 @@ dependencies = [
  "anyhow",
  "fs",
  "futures 0.3.34",
+ "fyx_ext_harness",
  "gpui",
  "gpui_tokio",
  "log",
