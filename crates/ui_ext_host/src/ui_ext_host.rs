@@ -29,6 +29,8 @@ mod view;
 #[cfg(test)]
 mod decoration_tests;
 #[cfg(test)]
+mod decoration_wasm_tests;
+#[cfg(test)]
 mod primitive_tests;
 #[cfg(test)]
 mod tests;

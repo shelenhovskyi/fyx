@@ -31,7 +31,7 @@ use crate::{
 /// The text node of [`text_tree`].
 const TEXT_SELECTOR: &str = "fyx-node-2";
 
-fn init(cx: &mut TestAppContext) -> Entity<Decorations> {
+pub(crate) fn init(cx: &mut TestAppContext) -> Entity<Decorations> {
     crate::tests::init_test(cx);
     cx.update(|cx| {
         crate::decorations::init(cx);
@@ -58,7 +58,7 @@ async fn scratch_buffer(text: &str, cx: &mut TestAppContext) -> (Entity<Project>
     (project, buffer)
 }
 
-fn open_editor(
+pub(crate) fn open_editor(
     project: &Entity<Project>,
     buffer: &Entity<Buffer>,
     cx: &mut TestAppContext,
@@ -72,13 +72,13 @@ fn open_editor(
     (editor, vcx)
 }
 
-fn redraw(cx: &mut VisualTestContext) {
+pub(crate) fn redraw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
 
-fn only_block(
+pub(crate) fn only_block(
     decorations: &Entity<Decorations>,
     editor: &Entity<Editor>,
     id: DecorationId,
@@ -91,7 +91,11 @@ fn only_block(
     blocks[0]
 }
 
-fn block_row(editor: &Entity<Editor>, block: CustomBlockId, cx: &mut VisualTestContext) -> u32 {
+pub(crate) fn block_row(
+    editor: &Entity<Editor>,
+    block: CustomBlockId,
+    cx: &mut VisualTestContext,
+) -> u32 {
     editor
         .update(cx, |editor, cx| editor.row_for_block(block, cx))
         .expect("block is in the display map")
@@ -105,7 +109,7 @@ fn text_top(cx: &mut VisualTestContext) -> Pixels {
         .y
 }
 
-fn insert(buffer: &Entity<Buffer>, at: Point, text: &str, cx: &mut VisualTestContext) {
+pub(crate) fn insert(buffer: &Entity<Buffer>, at: Point, text: &str, cx: &mut VisualTestContext) {
     buffer.update(cx, |buffer, cx| buffer.edit([(at..at, text)], None, cx));
     redraw(cx);
 }
