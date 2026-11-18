@@ -22,7 +22,6 @@ async-compression.workspace = true
 bytes.workspace = true
 fs.workspace = true
 futures.workspace = true
-fyx_registry.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
 http_proxy.workspace = true
@@ -34,7 +33,7 @@ serde.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["net", "time"] }
 toml = { workspace = true, features = ["display"] }
-ui_ext.workspace = true
+ui_ext = { workspace = true, features = ["network"] }
 url.workspace = true
 wasmparser.workspace = true
 wasmtime-wasi.workspace = true

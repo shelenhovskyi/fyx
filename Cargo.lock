@@ -6989,6 +6989,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.17",
+ "ui_ext",
  "zeroize",
 ]
 
@@ -19396,6 +19397,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+ "url",
 ]
 
 [[package]]
@@ -19472,7 +19474,6 @@ dependencies = [
  "fs",
  "futures 0.3.34",
  "fyx_ext_harness",
- "fyx_registry",
  "gpui",
  "gpui_tokio",
  "http_proxy",

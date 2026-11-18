@@ -396,7 +396,7 @@ impl UiManifest {
                     "[fyx_ui.network] needs {:?} in capabilities",
                     network::CAPABILITY_NETWORK
                 );
-                network::DomainList::parse(&table.domains)?;
+                network::DomainList::parse(&table.domains).map_err(anyhow::Error::msg)?;
             }
             None => anyhow::ensure!(
                 !declares,
@@ -1251,7 +1251,7 @@ impl UiExtension {
         let domains = match network_domains {
             Some(domains) if declares_network => match network::DomainList::parse(&domains) {
                 Ok(domains) => domains,
-                Err(error) => return Task::ready(Err(error)),
+                Err(error) => return Task::ready(Err(anyhow::Error::msg(error))),
             },
             _ => network::DomainList::default(),
         };

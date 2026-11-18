@@ -32,9 +32,9 @@ pub use index::{
     INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
     RejectedRelease, Release, Source, VerifiedIndex,
 };
-pub use text::is_public_suffix;
 pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
 pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};
+pub use text::is_public_suffix;
 pub use update::{
     AGE_GATE, Action, Additions, AgeGate, HoldReason, InstallRefusal, InstalledExtension,
     InstalledVersion, Origin, Permissions, PlanChanges, PlannedAction, UpdateReason, age_gate,

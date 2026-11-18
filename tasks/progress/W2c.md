@@ -230,3 +230,21 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   canvas reply), and a `canvas-click` report.
 - **Not done here:** the renderer and the hit-test mapping (W3, 4.14), the SDK and the harness
   (W4, 4.15), and the bench.
+
+## `ui_ext::network`, for the Apache harness (2026-11-18, W4's request, coordinator-approved)
+
+- The pure part of `network:fetch` moved to `crates/ui_ext/src/network.rs`, behind the `ui_ext`
+  feature `network`, so guests don't compile `url`. It holds:
+  - the `CAPABILITY_NETWORK` and `MAX_*` constants;
+  - `Method`, `FetchRequest`, `FetchResponse`, `FetchError`, `IoEvent` and `PermissionState`;
+  - `DomainList::{parse, texts, allows}` and `check_request`;
+  - `FetchCounters`, the in-flight and per-minute caps;
+  - `is_public_suffix` (the list, moved from `fyx_registry`, which now re-exports it).
+- No GPL dependency: `http_proxy::HostPattern` was reimplemented on `url::Host::parse`
+  (IDNA, case, trailing dot, `*.` subdomains only, IP literals and `localhost` refused), and
+  header syntax on RFC 9110 `token` and `field-value`.
+- `ui_ext_wasm::network` keeps the engine (resolver, address rules, redirects, the decoded cap,
+  running requests, delivery) and re-exports the rest; `ui_ext_wasm::permissions::PermissionState`
+  is a re-export.
+- `ui_ext_wasm` no longer depends on `fyx_registry`.
+
