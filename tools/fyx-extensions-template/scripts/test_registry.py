@@ -179,6 +179,18 @@ class Decisions(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertTrue(result["auto_merge"])
 
+    def test_a_zed_extension_needs_the_owner_and_warns(self):
+        flagged = dict(release=release(tier="t2"), zed_extension=["zed/extension.wasm"])
+        result = decision(**flagged)
+        self.assertEqual(result["status"], "pending")
+        self.assertFalse(result["auto_merge"])
+        self.assertIn("unrestricted Zed extension", result["required"][-1]["reason"])
+        approved = decision(**flagged, approvals=["shelenhovskyi"])
+        self.assertEqual(approved["status"], "success")
+        self.assertFalse(approved["auto_merge"])
+        self.assertIn("**Warning:** this extension runs an unrestricted Zed extension",
+                      registry.comment(approved))
+
     def test_t2_and_urgent_need_the_owner(self):
         result = decision(release=release(tier="t2", capabilities=["network:fetch"]))
         self.assertEqual(result["status"], "pending")
@@ -339,6 +351,41 @@ class Packages(unittest.TestCase):
                 self.assertEqual(
                     archive.namelist(), ["extension.toml", "fyx_ui.wasm", "assets/logo.svg"]
                 )
+
+    def test_a_zed_extension_makes_the_release_t2(self):
+        import io
+        import zipfile
+
+        manifest = 'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\ncapabilities = ["ui:panel"]\n'
+
+        def package(*names: str) -> bytes:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                for name in names:
+                    archive.writestr(name, b"\0asm")
+            return buffer.getvalue()
+
+        plain = registry.derive_release(
+            entry(), manifest, package("extension.toml", "fyx_ui.wasm"), POLICY
+        )
+        self.assertEqual(plain["tier"], "t0")
+        self.assertNotIn("zed_extension", plain)
+        for name in ["extension.wasm", "zed/Extension.WASM", "a\\extension.wasm", "x/extension.wasm. "]:
+            with self.subTest(name):
+                derived = registry.derive_release(
+                    entry(), manifest, package("extension.toml", "fyx_ui.wasm", name), POLICY
+                )
+                self.assertEqual(derived["tier"], "t2")
+                self.assertIs(derived["zed_extension"], True)
+        # The trusted decision has no package, only the source file list.
+        from_source = registry.derive_release(
+            entry(), manifest, b"", POLICY, ["src/lib.rs", "zed/extension.wasm"]
+        )
+        self.assertEqual(from_source["tier"], "t2")
+        self.assertEqual(
+            registry.zed_extension_files(b"", ["src/lib.rs", "zed/extension.wasm"]),
+            ["zed/extension.wasm"],
+        )
 
 
 if __name__ == "__main__":

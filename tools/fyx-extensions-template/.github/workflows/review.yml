@@ -72,11 +72,14 @@ jobs:
       - name: Review
         env:
           MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+          # Off until the owner decides about the model key (registry-repo.md, "review.yml"):
+          # the repository variable AGENT_REVIEW must be `on` as well.
+          AGENT_REVIEW: ${{ vars.AGENT_REVIEW }}
         run: |
           # Fails closed: without a configured reviewer (the model key is the owner's decision,
           # or a local model on a self-hosted runner), the verdict is `concern`, "no reviewer
           # configured", and every entry PR needs the owner.
-          if [ -n "$MODEL_API_KEY" ] && [ -x scripts/agent-review ]; then
+          if [ "$AGENT_REVIEW" = "on" ] && [ -n "$MODEL_API_KEY" ] && [ -x scripts/agent-review ]; then
             scripts/agent-review inputs > raw-verdict.json || true
             python3 scripts/registry.py verdict raw-verdict.json \
               --inputs-sha256 "$(cat inputs.sha256)" --inputs-size "$(cat inputs.size)" > verdict.json
@@ -136,6 +139,8 @@ jobs:
             git init -q source
             if git -C source fetch -q --depth 1 "$repository" "$commit"; then
               git -C source show "FETCH_HEAD:$path/extension.toml" > data/extension.toml || true
+              # The file list, as text, so the decision sees a Zed extension (0.3 design Q1).
+              git -C source ls-tree -r --name-only FETCH_HEAD -- "$path" > data/source-files.txt || true
             fi
           fi
           # pr.yml's job results for this head commit.
@@ -147,7 +152,7 @@ jobs:
           python3 scripts/registry.py decision-input --pr data/pr.json --jobs data/jobs.json \
             --before data/before --after data/after --manifest data/extension.toml \
             --index data/index.json --blocklist data/blocklist.json --verdict verdict.json \
-            > data/input.json
+            --source-files data/source-files.txt > data/input.json
           python3 scripts/registry.py decide data/input.json > data/decision.json
           python3 scripts/registry.py comment data/decision.json > data/comment.md
           cat data/decision.json

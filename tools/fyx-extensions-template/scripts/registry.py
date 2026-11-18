@@ -27,6 +27,7 @@ import json
 import re
 import sys
 import tomllib
+import io
 import zipfile
 from pathlib import Path
 
@@ -184,23 +185,47 @@ def tier_of(capability: str, tiers: dict) -> str:
     return tiers.get(capability, "t2")
 
 
+# A Zed extension inside a Fyx package gets upstream's `fetch` and `process:exec` with none of
+# Fyx's domain or program checks. The registry accepts it, but such a release is always tier T2
+# (the owner approves every version, no auto-merge), records `zed_extension: true` (signed;
+# `fyx_registry::Release`), and is flagged as running an unrestricted Zed extension (0.3 design
+# Q1, decided by the owner 2026-11-19).
+ZED_EXTENSION_COMPONENT = "extension.wasm"
+ZED_EXTENSION_NOTICE = (
+    "runs an unrestricted Zed extension (extension.wasm): its network and process access "
+    "bypasses Fyx's permission checks"
+)
+
+
+def is_zed_extension_name(name: str) -> bool:
+    """`extension.wasm` at any depth, in any letter case, with Windows' trailing dots and spaces
+    ignored, as `fyx_registry::runs_zed_extension` matches it."""
+    return re.split(r"[/\\]", name)[-1].rstrip(". ").lower() == ZED_EXTENSION_COMPONENT
+
+
+def zed_extension_files(package: bytes = b"", source_files: list[str] | tuple = ()) -> list[str]:
+    """The `extension.wasm` files in the package and in the entry's source file list."""
+    names = list(source_files)
+    if package and zipfile.is_zipfile(io.BytesIO(package)):
+        # Only `fyx-ext package` output reaches here in CI; the client checks the format.
+        names += zipfile.ZipFile(io.BytesIO(package)).namelist()
+    return sorted({name for name in names if is_zed_extension_name(name)})
+
+
 def runs_zed_extension(package: bytes) -> bool:
-    """Whether the package has a Zed `extension.wasm` at any depth, in any case (owner's Q1, as
-    `fyx_registry::runs_zed_extension`). Such a package also runs as a Zed extension, with
-    unrestricted network and process access."""
-    import io
-
-    try:
-        names = zipfile.ZipFile(io.BytesIO(package)).namelist()
-    except zipfile.BadZipFile:
-        return False
-    return any(
-        re.split(r"[/\\]", name)[-1].rstrip(". ").lower() == "extension.wasm" for name in names
-    )
+    """Whether the package has a Zed `extension.wasm` (as `fyx_registry::runs_zed_extension`)."""
+    return bool(zed_extension_files(package))
 
 
-def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict) -> dict:
-    """The `signed` part of a release, without `published_at` (registry-repo.md, the entry)."""
+def derive_release(
+    entry: dict,
+    manifest_text: str,
+    package: bytes,
+    policy: dict,
+    source_files: list[str] | tuple = (),
+) -> dict:
+    """The `signed` part of a release, without `published_at` (registry-repo.md, the entry).
+    A release that carries a Zed extension is tier T2 whatever its capabilities say."""
     manifest = tomllib.loads(manifest_text)
     if manifest.get("id") != entry["id"]:
         raise Refused(
@@ -219,7 +244,7 @@ def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict
     name = entry["id"] + "-" + version
     # A package that also runs a Zed extension is T2 whatever it declares, so it always needs
     # the owner's approval and never auto-merges (owner's Q1, 2026-11-19).
-    zed = runs_zed_extension(package)
+    zed = bool(zed_extension_files(package, source_files))
     if zed:
         tier = "t2"
     release = {
@@ -238,6 +263,7 @@ def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict
         "tier": tier,
         "capabilities": capabilities,
     }
+    # Signed only when true: fyx_registry's Release skips `zed_extension` when false.
     if zed:
         release["zed_extension"] = True
     return release
@@ -404,9 +430,10 @@ def decide(data: dict) -> dict:
                 }
             )
     if tier == "t2":
-        required.append(
-            {"who": owner, "reason": "a T2 release", "satisfied": approved_by_owner()}
-        )
+        reason = "a T2 release"
+        if data.get("zed_extension"):
+            reason = "a T2 release: it " + ZED_EXTENSION_NOTICE
+        required.append({"who": owner, "reason": reason, "satisfied": approved_by_owner()})
     if after and is_reserved(after["id"], data.get("reserved_ids", [])):
         required.append(
             {"who": owner, "reason": "a reserved id", "satisfied": approved_by_owner()}
@@ -452,6 +479,7 @@ def decide(data: dict) -> dict:
         "agent_review": "success" if agent_ok else "failure",
         "verdict": verdict,
         "add_labels": add_labels,
+        "zed_extension": data.get("zed_extension", []),
     }
 
 
@@ -466,6 +494,7 @@ def decision_input(
     blocklist: dict | None,
     verdict: dict | None,
     policy: dict,
+    source_files: list[str] | tuple = (),
 ) -> dict:
     """`decide`'s input, from what the trusted report job fetched itself: the PR from the API,
     the entry before (base) and after (head) as files, extension.toml at the source commit, and
@@ -492,6 +521,7 @@ def decision_input(
         "entry_errors": [],
         "ci": ci_results(jobs),
         "agent_verdict": verdict,
+        "zed_extension": zed_extension_files(package or b"", source_files),
     }
     if len(entry_files) != 1:
         return data
@@ -519,7 +549,9 @@ def decision_input(
         data["entry_errors"].append("extension.toml could not be read at source.commit")
         return data
     try:
-        data["release"] = derive_release(after, manifest_text, package or b"", policy)
+        data["release"] = derive_release(
+            after, manifest_text, package or b"", policy, source_files
+        )
     except Refused as error:
         data["entry_errors"].append(str(error))
     return data
@@ -572,6 +604,9 @@ def comment(decision: dict) -> str:
         lines.append("Not an entry change: the owner reviews it through Code Owners.")
         return "\n".join(lines) + "\n"
     lines.append(f"- Change: {decision['kind']}, tier {decision['tier'] or 'unknown'}")
+    if decision.get("zed_extension"):
+        files = ", ".join(escape(name) for name in decision["zed_extension"])
+        lines.append(f"- **Warning:** this extension {ZED_EXTENSION_NOTICE}. Files: {files}")
     lines.append(f"- Status: **{decision['status']}**")
     for failure in decision["failures"]:
         lines.append(f"- Refused: {escape(failure)}")
@@ -676,6 +711,9 @@ def main(argv: list[str]) -> int:
     assemble.add_argument("--pr", type=Path, required=True)
     assemble.add_argument("--jobs", type=Path)
     assemble.add_argument("--before", type=Path, required=True)
+    assemble.add_argument(
+        "--source-files", type=Path, help="the entry's source file list, one path per line"
+    )
     assemble.add_argument("--after", type=Path, required=True)
     assemble.add_argument("--manifest", type=Path)
     assemble.add_argument("--package", type=Path)
@@ -768,6 +806,9 @@ def main(argv: list[str]) -> int:
                     optional_json(args.blocklist),
                     optional_json(args.verdict),
                     load_policy(args.policy),
+                    args.source_files.read_text(encoding="utf-8").splitlines()
+                    if args.source_files and args.source_files.exists()
+                    else (),
                 ),
                 out,
                 indent=2,

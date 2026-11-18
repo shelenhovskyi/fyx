@@ -4,9 +4,8 @@
 name: dry-run
 
 on:
+  # Manual only: it builds fyx-registry and the demos from source, about 20-30 runner minutes.
   workflow_dispatch:
-  pull_request:
-    paths: ["scripts/**", "policy/**", ".github/workflows/**"]
 
 permissions:
   contents: read

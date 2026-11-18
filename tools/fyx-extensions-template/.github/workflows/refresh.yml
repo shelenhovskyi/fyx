@@ -5,9 +5,11 @@
 name: refresh
 
 on:
-  schedule:
-    - cron: "17 */12 * * *"
+  # schedule:
+  #   - cron: "17 */12 * * *"
   workflow_dispatch:
+# Paused until launch (plan 3.2, 2026-11-19): Actions minutes on this private repository cost
+# money, so nothing runs on its own. Restore the trigger above with the owner's go-ahead.
 
 permissions:
   contents: read
