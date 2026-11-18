@@ -322,21 +322,43 @@ pub(crate) fn installed_outcome(done: String, loaded: Result<(), String>) -> Out
 }
 
 fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some(store) = store(cx) else {
-        return;
-    };
-    let fs = workspace.app_state().fs.clone();
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
         multiple: false,
         prompt: Some("Install UI Extension Package".into()),
     });
+    install_package(
+        workspace,
+        async move { Ok(paths.await??.and_then(|paths| paths.into_iter().next())) },
+        window,
+        cx,
+    )
+}
+
+/// A `.fyxext` file dropped on a pane: the same dialog as "Install from File…".
+pub(crate) fn install_dropped_package(
+    workspace: &mut Workspace,
+    package: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    install_package(workspace, async move { Ok(Some(package)) }, window, cx)
+}
+
+fn install_package(
+    workspace: &mut Workspace,
+    package: impl Future<Output = Result<Option<PathBuf>>> + 'static,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(store) = store(cx) else {
+        return;
+    };
+    let fs = workspace.app_state().fs.clone();
     cx.spawn_in(window, async move |workspace, cx| {
         let result: Result<Option<Outcome>> = async {
-            let Some(package): Option<PathBuf> =
-                paths.await??.and_then(|paths| paths.into_iter().next())
-            else {
+            let Some(package) = package.await? else {
                 return Ok(None);
             };
             // Read once: what the dialog shows is what installs (integration-5 R5).
