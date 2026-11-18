@@ -932,7 +932,7 @@ impl Renderer<'_, '_> {
             Props::Markdown(source) => self.markdown(id, source, scope),
             Props::DiffView(props) => self.diff_view(id, props, scope),
             Props::Image(props) => self.image(props),
-            Props::Canvas(props) => self.canvas_placeholder(props),
+            Props::Canvas(props) => self.canvas(id, node.props_arc(), props, scope),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -1348,28 +1348,35 @@ impl Renderer<'_, '_> {
             .into_any_element()
     }
 
-    /// Until plan 4.14 paints the ops: the canvas's box with its description.
-    fn canvas_placeholder(&self, props: &ui_ext::canvas::CanvasProps) -> AnyElement {
-        div()
-            .w(px(props.width as f32))
-            .h(px(props.height as f32))
-            .max_w_full()
-            .p_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .rounded_sm()
-            .border_1()
-            .border_color(self.cx.theme().colors().border_variant)
-            .bg(self.cx.theme().colors().element_background)
-            .child(
-                Label::new(props.description.clone())
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .truncate(),
-            )
-            .into_any_element()
+    /// A canvas node (plan 4.14): the host paints its draw list; a click on a clickable one
+    /// sends `canvas-click` in canvas coordinates.
+    fn canvas(
+        &self,
+        id: NodeId,
+        arc: &Arc<Props>,
+        props: &ui_ext::canvas::CanvasProps,
+        scope: Scope,
+    ) -> AnyElement {
+        // The draw list is shared with the tree, not copied, each frame (PERF 12).
+        let shared = arc.clone();
+        let on_click: Option<std::rc::Rc<dyn Fn(f32, f32, &mut Window, &mut App)>> =
+            (props.clickable && matches!(scope, Scope::Surface)).then(|| {
+                let view = self.cx.entity().downgrade();
+                std::rc::Rc::new(move |x: f32, y: f32, _: &mut Window, cx: &mut App| {
+                    view.update(cx, |view, cx| {
+                        view.dispatch(
+                            UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                                canvas: id,
+                                x: ui_ext::canvas::Num(x),
+                                y: ui_ext::canvas::Num(y),
+                            }),
+                            cx,
+                        )
+                    })
+                    .ok();
+                }) as std::rc::Rc<dyn Fn(f32, f32, &mut Window, &mut App)>
+            });
+        crate::canvas::canvas_element(scope.element_id(id), shared, on_click)
     }
 
     fn icon(&self, props: &IconProps) -> AnyElement {

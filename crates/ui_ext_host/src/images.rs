@@ -10,8 +10,9 @@
 //!   one that takes longer than [`DECODE_TIMEOUT`] or panics is a failure.
 //! - **PNG:** the header is read first; anything over [`MAX_IMAGE_SIDE`] on a side is refused
 //!   before a pixel is allocated, and the decoder's allocation is capped.
-//! - **SVG:** `usvg` with every `<image>` href refused, no resource folder and no fonts (so the
-//!   system's cannot be probed), then the node and blur caps, then `resvg` at the box's pixel size.
+//! - **SVG:** `usvg` with every `<image>` href refused, no resource folder, and only Fyx's bundled
+//!   fonts (loaded once, on the first SVG; the system's are never read, so they cannot be probed),
+//!   then the node and blur caps, then `resvg` at the box's pixel size.
 //! - **Cache:** per extension, by (source, pixel size, tint), least recently drawn first out once
 //!   [`MAX_DECODED_BYTES_PER_EXTENSION`] is reached. An image larger than what is left shows its
 //!   alt text, and the log says "image limit reached".
@@ -107,6 +108,25 @@ pub struct ImageCache {
     clock: Cell<u64>,
     /// Images renders found missing, for [`Self::request`] after the frame.
     wanted: RefCell<Vec<(Arc<str>, ImageKey)>>,
+    /// Fyx's bundled fonts for SVG text, loaded on the first SVG decode.
+    fonts: Option<Arc<usvg::fontdb::Database>>,
+}
+
+/// A font database with only the fonts bundled in Fyx's assets (`fonts/**/*.ttf`).
+fn bundled_fonts(cx: &App) -> Arc<usvg::fontdb::Database> {
+    let mut fonts = usvg::fontdb::Database::new();
+    let source = cx.asset_source();
+    for path in source.list("fonts").unwrap_or_default() {
+        if path.ends_with(".ttf")
+            && let Ok(Some(bytes)) = source.load(&path)
+        {
+            fonts.load_font_data(bytes.into_owned());
+        }
+    }
+    fonts.set_sans_serif_family("IBM Plex Sans");
+    fonts.set_serif_family("IBM Plex Sans");
+    fonts.set_monospace_family("Lilex");
+    Arc::new(fonts)
 }
 
 struct GlobalImageCache(Entity<ImageCache>);
@@ -288,6 +308,9 @@ impl ImageCache {
             let Some((extension_id, key)) = next else {
                 return;
             };
+            if self.fonts.is_none() {
+                self.fonts = Some(bundled_fonts(cx));
+            }
             let Some(job) = self.job(&extension_id, &key) else {
                 self.finish(&extension_id, key, Err(anyhow!("its source is gone")), cx);
                 continue;
@@ -336,6 +359,7 @@ impl ImageCache {
             input,
             pixels: key.pixels,
             tint: key.tint,
+            fonts: self.fonts.clone().unwrap_or_default(),
         })
     }
 
@@ -395,6 +419,7 @@ struct DecodeJob {
     input: DecodeInput,
     pixels: Option<(u32, u32)>,
     tint: Option<u32>,
+    fonts: Arc<usvg::fontdb::Database>,
 }
 
 fn decode_job(job: DecodeJob) -> Result<(RenderImage, u64)> {
@@ -407,13 +432,15 @@ fn decode_job(job: DecodeJob) -> Result<(RenderImage, u64)> {
         }
     };
     // A decoder panic is a host bug; it fails this image only (§12, threat 1).
-    std::panic::catch_unwind(move || match format {
+    // The inputs are owned and dropped with the closure, so nothing half-updated is seen after a
+    // panic.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || match format {
         ImageFormat::Png => decode_png(&bytes),
         ImageFormat::Svg => {
             let (width, height) = job.pixels.context("an SVG needs a size to be drawn at")?;
-            decode_svg(&bytes, width, height, job.tint)
+            decode_svg(&bytes, width, height, job.tint, job.fonts)
         }
-    })
+    }))
     .map_err(|_| anyhow!("the decoder failed"))?
 }
 
@@ -450,13 +477,15 @@ pub fn decode_png(bytes: &[u8]) -> Result<(RenderImage, u64)> {
     Ok((RenderImage::new(vec![frame]), bytes))
 }
 
-/// An SVG drawn at `width` × `height` pixels, as BGRA. No `<image>` href is resolved, no file is
-/// read and no font is available; the parsed tree must stay under the node and blur caps.
+/// An SVG drawn at `width` × `height` pixels, as BGRA. No `<image>` href is resolved and no file
+/// is read; text uses `fonts` only (Fyx's bundled fonts); the parsed tree must stay under the node
+/// and blur caps.
 pub fn decode_svg(
     bytes: &[u8],
     width: u32,
     height: u32,
     tint: Option<u32>,
+    fonts: Arc<usvg::fontdb::Database>,
 ) -> Result<(RenderImage, u64)> {
     if width == 0 || height == 0 || width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
         bail!(
@@ -465,7 +494,7 @@ pub fn decode_svg(
     }
     let options = usvg::Options {
         resources_dir: None,
-        fontdb: Arc::new(usvg::fontdb::Database::new()),
+        fontdb: fonts,
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: Box::new(|_, _, _| None),
             resolve_string: Box::new(|_, _| None),
@@ -617,7 +646,7 @@ mod tests {
             <image href="file:///C:/Windows/win.ini" width="10" height="10"/>
             <image xlink:href="https://example.com/track.png" width="10" height="10"/>
         </svg>"##;
-        let (image, bytes) = decode_svg(svg, 20, 20, None).expect("draws");
+        let (image, bytes) = decode_svg(svg, 20, 20, None, Default::default()).expect("draws");
         assert_eq!(bytes, 20 * 20 * 4);
         assert_eq!(
             pixel(&image, 10, 10),
@@ -625,10 +654,39 @@ mod tests {
             "red in BGRA, the hrefs dropped"
         );
         // Tinted: a one-colour mask.
-        let (tinted, _) = decode_svg(svg, 20, 20, Some(0x00ff00ff)).expect("draws");
+        let (tinted, _) =
+            decode_svg(svg, 20, 20, Some(0x00ff00ff), Default::default()).expect("draws");
         assert_eq!(pixel(&tinted, 10, 10), [0, 255, 0, 255]);
-        assert!(decode_svg(svg, 0, 20, None).is_err());
-        assert!(decode_svg(svg, 4096, 20, None).is_err());
+        assert!(decode_svg(svg, 0, 20, None, Default::default()).is_err());
+        assert!(decode_svg(svg, 4096, 20, None, Default::default()).is_err());
+    }
+
+    /// SVG text uses Fyx's bundled fonts and nothing else: with none loaded it draws nothing (no
+    /// system font is reached).
+    #[test]
+    fn test_svg_text_uses_bundled_fonts_only() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+            <text x="2" y="16" font-family="monospace" font-size="16" fill="black">Wi</text></svg>"#;
+        let inked = |image: &RenderImage| {
+            image
+                .as_bytes(0)
+                .expect("frame")
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] > 0)
+                .count()
+        };
+        let (none, _) = decode_svg(svg, 40, 20, None, Default::default()).expect("draws");
+        assert_eq!(inked(&none), 0, "no fonts, no text");
+        let lilex = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/fonts/lilex/Lilex-Regular.ttf"),
+        )
+        .expect("bundled font");
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_font_data(lilex);
+        fonts.set_monospace_family("Lilex");
+        let (text, _) = decode_svg(svg, 40, 20, None, Arc::new(fonts)).expect("draws");
+        assert!(inked(&text) > 10, "the bundled font draws the text");
     }
 
     #[test]
@@ -639,13 +697,15 @@ mod tests {
             many.push_str(r#"<rect width="1" height="1"/>"#);
         }
         many.push_str("</svg>");
-        let error = decode_svg(many.as_bytes(), 10, 10, None).expect_err("too many nodes");
+        let error = decode_svg(many.as_bytes(), 10, 10, None, Default::default())
+            .expect_err("too many nodes");
         assert!(format!("{error:#}").contains("nodes"), "{error:#}");
 
         let blur = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
             <filter id="b"><feGaussianBlur stdDeviation="100"/></filter>
             <rect width="10" height="10" filter="url(#b)"/></svg>"#;
-        let error = decode_svg(blur, 10, 10, None).expect_err("blur over the cap");
+        let error =
+            decode_svg(blur, 10, 10, None, Default::default()).expect_err("blur over the cap");
         assert!(format!("{error:#}").contains("blur"), "{error:#}");
     }
 

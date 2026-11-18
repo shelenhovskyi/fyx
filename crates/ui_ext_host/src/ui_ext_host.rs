@@ -13,6 +13,7 @@
 //! [`DEV_DECORATIONS_ENV`].
 
 mod backend;
+mod canvas;
 mod consent;
 mod decorations;
 pub mod fyx_extensions_page;
@@ -33,6 +34,7 @@ mod registry_service_tests;
 mod store_actions;
 mod surface;
 mod view;
+mod worktrees;
 
 #[cfg(test)]
 mod decoration_tests;
