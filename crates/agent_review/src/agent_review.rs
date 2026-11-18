@@ -225,6 +225,16 @@ pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
     })
     .detach();
     set_agent_write_gate(Rc::new(WriteGate(review.downgrade())), cx);
+    cx.on_app_quit({
+        let review = review.downgrade();
+        move |cx| {
+            if let Some(review) = review.upgrade() {
+                review.update(cx, |review, cx| review.close_all(cx));
+            }
+            async {}
+        }
+    })
+    .detach();
     cx.observe_new(|thread: &mut AcpThread, _, cx: &mut Context<AcpThread>| {
         cx.subscribe_self(on_thread_event).detach();
         if let Some(review) = AgentReview::global(cx) {
@@ -338,6 +348,8 @@ pub struct Review {
     responder: Option<Responder>,
     /// A submitted preview whose host write is in flight.
     applying: bool,
+    /// Closed while applying: it goes once the apply finished and was recorded.
+    closing: bool,
     /// Why the last submit could not be carried out; the review stays open.
     error: Option<String>,
     /// For a delete, move or copy: what happens when it is accepted.
@@ -468,7 +480,7 @@ impl AgentReview {
     pub fn open_reviews_in_turn(&self, turn: TurnId) -> impl Iterator<Item = &Review> {
         self.reviews
             .iter()
-            .filter(move |review| review.turn == turn && !review.is_submitted())
+            .filter(move |review| review.turn == turn && !review.is_submitted() && !review.applying)
     }
 
     pub fn turn_history(&self, turn: TurnId) -> &[TurnEntry] {
@@ -647,7 +659,7 @@ impl AgentReview {
     pub fn open_review_count(&self) -> usize {
         self.reviews
             .iter()
-            .filter(|review| !review.is_submitted())
+            .filter(|review| !review.is_submitted() && !review.applying)
             .count()
     }
 
@@ -672,6 +684,24 @@ impl AgentReview {
             self.submit(id, cx)?;
         }
         Ok(())
+    }
+
+    /// Records a write that took over allowed previews of its file: one entry per file, not one for
+    /// the preview and another for the write.
+    fn record_replacing_preview(
+        &mut self,
+        turn: TurnId,
+        edit: &ProposedEdit,
+        rule: Option<RuleMatch>,
+    ) {
+        if let Some(history) = self.turn_history.get_mut(&turn)
+            && let Some(index) = history
+                .iter()
+                .rposition(|entry| entry.path == edit.abs_path())
+        {
+            history.remove(index);
+        }
+        self.record(turn, edit, rule);
     }
 
     fn record(&mut self, turn: TurnId, edit: &ProposedEdit, rule: Option<RuleMatch>) {
@@ -907,10 +937,13 @@ impl AgentReview {
                     return Err(anyhow!("review was already submitted"));
                 };
                 let (turn, rule) = (review.turn, review.rule.clone());
-                if sender.send(outcome).is_err() {
-                    log::debug!("agent write finished before its review was submitted");
+                if sender.send(outcome).is_ok() {
+                    self.record(turn, &edit, rule);
+                } else {
+                    log::info!(
+                        "fyx: agent review: the write was dropped before its review was submitted"
+                    );
                 }
-                self.record(turn, &edit, rule);
                 self.reviews.retain(|review| review.id != id);
                 cx.emit(AgentReviewEvent::Resolved(id));
                 cx.emit(AgentReviewEvent::Closed(id));
@@ -950,7 +983,13 @@ impl AgentReview {
             return;
         };
         review.applying = false;
+        let closing = review.closing;
         if let Err(error) = result {
+            if closing {
+                log::error!("fyx: agent review: closed while applying: {error:#}");
+                self.close(id, cx);
+                return;
+            }
             review.error = Some(format!("{error:#}"));
             cx.emit(AgentReviewEvent::Updated(id));
             cx.notify();
@@ -966,11 +1005,23 @@ impl AgentReview {
         cx.emit(AgentReviewEvent::Resolved(id));
         // An allowed preview stays until the agent's write adopts its decisions; after a denial no
         // write follows.
-        if verdict != PermissionVerdict::Allow {
+        if verdict != PermissionVerdict::Allow || closing {
             self.reviews.retain(|review| review.id != id);
             cx.emit(AgentReviewEvent::Closed(id));
         }
         cx.notify();
+    }
+
+    /// Closes every review (the app quits): held writes fail, so agents learn nothing landed.
+    pub fn close_all(&mut self, cx: &mut Context<Self>) {
+        let ids = self
+            .reviews
+            .iter()
+            .map(|review| review.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.close(id, cx);
+        }
     }
 
     /// Closes every review of a session, e.g. when its thread is released. Held writes fail.
@@ -987,8 +1038,18 @@ impl AgentReview {
         self.end_turn(session_id, cx);
     }
 
-    /// Closes a review without a decision. A held write then fails without touching the file.
+    /// Closes a review without a decision. A held write then fails without touching the file. A
+    /// preview whose accepted hunks are being written goes once that finished, so its outcome is
+    /// recorded and the agent's note kept.
     pub fn close(&mut self, id: ReviewId, cx: &mut Context<Self>) {
+        if let Some(review) = self
+            .reviews
+            .iter_mut()
+            .find(|review| review.id == id && review.applying)
+        {
+            review.closing = true;
+            return;
+        }
         let count = self.reviews.len();
         self.reviews.retain(|review| review.id != id);
         if self.reviews.len() != count {
@@ -1032,6 +1093,7 @@ impl AgentReview {
             edit,
             responder: Some(responder),
             applying: false,
+            closing: false,
             error: None,
             operation: None,
         });
@@ -1107,7 +1169,10 @@ impl AgentReview {
             .reviews
             .iter()
             .filter(|review| {
-                review.source == ReviewSource::Permission(request_id) && review.responder.is_some()
+                // A preview being applied is answered by Fyx itself.
+                review.source == ReviewSource::Permission(request_id)
+                    && review.responder.is_some()
+                    && !review.applying
             })
             .map(|review| review.id)
             .collect::<Vec<_>>();
@@ -1212,6 +1277,7 @@ impl AgentReview {
                 feedback: Some(feedback),
             }));
         }
+        let took_over_preview = !previews.is_empty();
         for id in previews.iter().rev() {
             self.close(*id, cx);
         }
@@ -1227,12 +1293,38 @@ impl AgentReview {
             edit.decide_pending(decision);
         }
         if !edit.resolution().is_pending() {
-            self.record(turn, &edit, rule);
+            if took_over_preview {
+                self.record_replacing_preview(turn, &edit, rule);
+            } else {
+                self.record(turn, &edit, rule);
+            }
             cx.notify();
             return Task::ready(write_outcome(&edit));
         }
+        let (_, receiver, alive) = self.hold(session_id, edit, rule, cx);
+        cx.spawn(async move |_, _| {
+            let _alive = alive;
+            receiver
+                .await
+                .map_err(|_| anyhow!("The review of this edit was closed; the file is unchanged."))
+        })
+    }
+
+    /// Holds a write (or file operation) for review. The review closes by itself when the returned
+    /// `alive` sender is dropped before a decision: the request it answers went away.
+    fn hold(
+        &mut self,
+        session_id: acp_v2::SessionId,
+        edit: ProposedEdit,
+        rule: Option<RuleMatch>,
+        cx: &mut Context<Self>,
+    ) -> (
+        ReviewId,
+        oneshot::Receiver<AgentWriteOutcome>,
+        oneshot::Sender<()>,
+    ) {
         let (sender, receiver) = oneshot::channel();
-        self.insert(
+        let id = self.insert(
             session_id,
             ReviewSource::Write,
             edit,
@@ -1240,11 +1332,25 @@ impl AgentReview {
             rule,
             cx,
         );
-        cx.spawn(async move |_, _| {
-            receiver
-                .await
-                .map_err(|_| anyhow!("The review of this edit was closed; the file is unchanged."))
+        let (alive, gone) = oneshot::channel::<()>();
+        cx.spawn(async move |this, cx| {
+            gone.await.ok();
+            this.update(cx, |this, cx| this.write_gone(id, cx)).ok();
         })
+        .detach();
+        (id, receiver, alive)
+    }
+
+    /// The request of a held write is gone (answered, or dropped by the agent's side).
+    fn write_gone(&mut self, id: ReviewId, cx: &mut Context<Self>) {
+        let still_held = self
+            .reviews
+            .iter()
+            .any(|review| review.id == id && matches!(review.responder, Some(Responder::Write(_))));
+        if still_held {
+            log::info!("fyx: agent review: a held write's request went away; its review closes");
+            self.close(id, cx);
+        }
     }
 }
 
@@ -1326,19 +1432,12 @@ impl AgentReview {
             cx.notify();
             return Task::ready(operation_outcome(&edit, &description));
         }
-        let (sender, receiver) = oneshot::channel();
-        let id = self.insert(
-            session_id,
-            ReviewSource::Write,
-            edit,
-            Responder::Write(sender),
-            rule,
-            cx,
-        );
+        let (id, receiver, alive) = self.hold(session_id, edit, rule, cx);
         if let Some(review) = self.reviews.iter_mut().find(|review| review.id == id) {
             review.operation = Some(description.clone());
         }
         cx.spawn(async move |_, _| {
+            let _alive = alive;
             let outcome = receiver
                 .await
                 .map_err(|_| anyhow!("The review was closed: {description} did not happen."))?;
@@ -1707,15 +1806,23 @@ fn v2_edit_request(
     let Some((_, tool_call)) = thread.tool_call(&subject.tool_call.tool_call_id) else {
         return V2EditRequest::NotAnEdit;
     };
-    let Some(diff) = tool_call
+    let diffs = tool_call
         .content()
         .iter()
-        .find_map(|content| match content {
+        .filter_map(|content| match content {
             ToolCallContent::DiffPatch { source, .. } => Some(source),
             _ => None,
         })
-    else {
-        return V2EditRequest::NotAnEdit;
+        .collect::<Vec<_>>();
+    let diff = match diffs.as_slice() {
+        [] => return V2EditRequest::NotAnEdit,
+        [diff] => *diff,
+        _ => {
+            return V2EditRequest::Unreviewable(format!(
+                "one tool call carries {} diffs",
+                diffs.len()
+            ));
+        }
     };
     let [change] = diff.changes.as_slice() else {
         return V2EditRequest::Unreviewable(format!(
@@ -3333,6 +3440,104 @@ mod tests {
         accept_held(cx);
         write.await.unwrap();
         assert_eq!(fs.load(&path).await.unwrap(), NEW);
+    }
+
+    #[gpui::test]
+    async fn a_preview_closed_while_applying_is_still_recorded(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let (finish, finished) = oneshot::channel::<()>();
+        let finished = Rc::new(RefCell::new(Some(finished)));
+        let respond: PermissionResponder = Rc::new(move |_, _, cx| {
+            let finished = finished.borrow_mut().take();
+            cx.background_spawn(async move {
+                if let Some(finished) = finished {
+                    finished.await.ok();
+                }
+                Ok(())
+            })
+        });
+        let request_id = new_request_id();
+        let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+        let id = review
+            .update(cx, |review, cx| {
+                review.open_permission_preview(session(), request_id, preview, respond, None, cx)
+            })
+            .unwrap();
+        let turn = review.read_with(cx, |review, _| review.review(id).unwrap().turn());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+        // Fyx's own answer, then the turn ending, arrive while the answer is in flight.
+        review.update(cx, |review, cx| {
+            review.permission_answered(request_id, cx);
+            review.close_session(&session(), cx);
+            assert!(review.review(id).is_some(), "kept until the apply finished");
+            assert_eq!(review.open_review_count(), 0, "but no longer waiting");
+        });
+        finish.send(()).unwrap();
+        cx.run_until_parked();
+        review.read_with(cx, |review, _| {
+            assert!(review.review(id).is_none());
+            assert_eq!(
+                review.turn_history(turn).len(),
+                1,
+                "the outcome is recorded"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_dropped_write_closes_its_review(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1
+        );
+        drop(held);
+        cx.run_until_parked();
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            0
+        );
+    }
+
+    #[gpui::test]
+    async fn a_write_after_its_preview_is_one_entry(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let (respond, _) = recording_responder();
+        let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+        let id = review
+            .update(cx, |review, cx| {
+                review.open_permission_preview(
+                    session(),
+                    new_request_id(),
+                    preview,
+                    respond,
+                    None,
+                    cx,
+                )
+            })
+            .unwrap();
+        let turn = review.read_with(cx, |review, _| review.review(id).unwrap().turn());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+        let outcome = gate_write(&review, agent_write("/p/a.txt", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.content.as_deref(), Some(NEW));
+        assert_eq!(
+            review.read_with(cx, |review, _| review.turn_history(turn).len()),
+            1
+        );
     }
 
     #[gpui::test]
