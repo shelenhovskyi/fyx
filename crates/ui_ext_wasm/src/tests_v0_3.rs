@@ -948,7 +948,7 @@ mod process_spawn {
     fn spec(name: &str) -> ProcessSpec {
         ProcessSpec {
             name: name.into(),
-            args: Vec::new(),
+            args: vec!["**".into()],
             path: None,
         }
     }

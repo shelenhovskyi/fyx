@@ -100,26 +100,56 @@ impl Resolve for SystemResolver {
 /// `HTTP_PROXY`-style environment variables, which may carry credentials meant for other tools.
 /// The host keeps it current (`set` on every settings change); each request reads it.
 #[derive(Clone, Default)]
-pub struct ProxySetting(Arc<std::sync::RwLock<Option<Url>>>);
+pub struct ProxySetting(Arc<std::sync::RwLock<Proxied>>);
+
+/// Whether Fyx is set to use a proxy, and which (`None`: set, but not to a usable one).
+#[derive(Clone, Default)]
+enum Proxied {
+    #[default]
+    Direct,
+    Through(Option<Url>),
+}
 
 impl ProxySetting {
-    /// The proxy a `proxy` setting names: `http`, `https`, `socks5` or `socks5h` with a host;
-    /// `None` for an empty or unusable value (the requests then go direct).
+    /// The proxy a `proxy` setting names: `http`, `https`, `socks5` or `socks5h` with a host and
+    /// no credentials (decision 23: the user's credentials never travel with an extension's
+    /// request); `None` for an empty or unusable value.
     pub fn parse(setting: &str) -> Option<Url> {
         let url = Url::parse(setting.trim()).ok()?;
-        (matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") && url.has_host())
-            .then_some(url)
+        (matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none())
+        .then_some(url)
+    }
+
+    /// Whether a `proxy` setting is set at all, usable or not: then extension requests to
+    /// declared domains are refused rather than sent around it.
+    pub fn is_configured(setting: Option<&str>) -> bool {
+        setting.is_some_and(|setting| !setting.trim().is_empty())
     }
 
     /// Sets it from the setting's text; returns whether it names a usable proxy.
     pub fn set(&self, setting: Option<&str>) -> bool {
-        let proxy = setting.and_then(Self::parse);
-        let usable = proxy.is_some();
+        let proxy = if Self::is_configured(setting) {
+            Proxied::Through(setting.and_then(Self::parse))
+        } else {
+            Proxied::Direct
+        };
+        let usable = matches!(proxy, Proxied::Through(Some(_)));
         *self.0.write().unwrap_or_else(PoisonError::into_inner) = proxy;
         usable
     }
 
+    /// The proxy in force: `None` when requests go direct.
     pub fn get(&self) -> Option<Url> {
+        match &*self.0.read().unwrap_or_else(PoisonError::into_inner) {
+            Proxied::Through(proxy) => proxy.clone(),
+            Proxied::Direct => None,
+        }
+    }
+
+    fn state(&self) -> Proxied {
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -224,6 +254,7 @@ impl Fetcher {
     ) -> Result<FetchResponse, FetchError> {
         let mut method = request.method;
         let mut body = request.body;
+        let mut headers = request.headers;
         for hop in 0..=MAX_REDIRECTS {
             let allowed = match domains.allows(&url) {
                 Some(allowed) if url.scheme() == "https" || allowed.loopback => allowed,
@@ -233,7 +264,7 @@ impl Fetcher {
                 _ => return Err(FetchError::RedirectNotAllowed(host_and_port(&url))),
             };
             let response = self
-                .send(&url, allowed, method, &request.headers, body.clone())
+                .send(&url, allowed, method, &headers, body.clone())
                 .await?;
             let status = response.status();
             if status.is_redirection()
@@ -253,6 +284,11 @@ impl Fetcher {
                 {
                     method = Method::Get;
                     body = None;
+                }
+                // As browsers do: credentials never follow a redirect to another origin
+                // (integration-5 S7).
+                if next.origin() != url.origin() {
+                    headers.retain(|(name, _)| !is_credential_header(name));
                 }
                 url = next;
                 continue;
@@ -324,15 +360,17 @@ impl Fetcher {
             };
             // Connect to the checked addresses only: reqwest does not resolve this name again.
             builder = builder.resolve_to_addrs(&host, &addrs);
-            // Through Fyx's proxy, if one is set. The addresses were still checked here, though
-            // the proxy resolves the name on its own; `localhost` is never proxied.
+            // With a proxy set, a request to a declared domain is refused (integration-5 S4): the
+            // proxy would resolve the name again, so the addresses checked here would not be the
+            // ones reached, and going around the proxy would ignore the user's setting.
+            // `localhost` is never proxied.
             if !allowed.loopback
-                && let Some(proxy) = self.proxy.get()
+                && let Proxied::Through(_) = self.proxy.state()
             {
-                builder = builder.proxy(
-                    reqwest::Proxy::all(proxy.as_str())
-                        .map_err(|error| FetchError::Other(format!("proxy: {error}")))?,
-                );
+                return Err(FetchError::Other(
+                    "Fyx is set to use a proxy, and network:fetch does not go through proxies yet"
+                        .into(),
+                ));
             }
         }
         let client = builder
@@ -462,6 +500,13 @@ async fn read_response(
         body,
         url: url.to_string(),
     })
+}
+
+/// Headers that carry credentials, dropped on a cross-origin redirect.
+fn is_credential_header(name: &str) -> bool {
+    ["authorization", "cookie", "proxy-authorization"]
+        .iter()
+        .any(|credential| name.eq_ignore_ascii_case(credential))
 }
 
 /// The encodings the host decodes, so the only ones it asks for; the guest cannot set the
@@ -1523,47 +1568,30 @@ mod tests {
         }
     }
 
-    /// Plan 4.6 follow-up: requests go through Fyx's proxy setting (here a proxy that records
-    /// the `CONNECT` and refuses it), after the same address checks, and `localhost` goes
-    /// direct.
+    /// integration-5 S4: with a proxy set, a request to a declared domain is refused before
+    /// anything is sent (the proxy would resolve the name again), whether the setting is usable
+    /// or not; `localhost` goes direct; clearing the setting applies to the next request.
     #[tokio::test]
-    async fn requests_use_the_proxy_setting() {
-        let tunnels = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let proxy_server = test_server::start({
-            let tunnels = tunnels.clone();
-            move |target, _| {
-                tunnels.lock().unwrap().push(target.to_string());
-                Some(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n".to_vec())
-            }
-        })
-        .await;
+    async fn proxied_domain_fetches_are_refused() {
+        let proxy_server = test_server::start(|_, _| Some(test_server::ok(b"via proxy"))).await;
         let proxy = ProxySetting::default();
         assert!(proxy.set(Some(&format!(" http://127.0.0.1:{} ", proxy_server.port))));
         let proxied =
             Fetcher::new("probe".into(), Some(Arc::new(Public))).with_proxy(proxy.clone());
         let domains = list(&["api.example.com"]);
         let result = run(&domains, &proxied, request("https://api.example.com/v1")).await;
-        assert!(result.is_err(), "the proxy refused the tunnel: {result:?}");
-        assert_eq!(*tunnels.lock().unwrap(), ["api.example.com:443"]);
-
-        // A private answer is refused before the proxy is asked.
-        let private = Fetcher::new(
-            "probe".into(),
-            Some(Arc::new(Rebinding {
-                first: vec![SocketAddr::new("10.0.0.1".parse().unwrap(), 443)],
-                later: Vec::new(),
-                calls: Default::default(),
-            })),
-        )
-        .with_proxy(proxy.clone());
-        let result = run(&domains, &private, request("https://api.example.com/v1")).await;
         assert!(
-            matches!(result, Err(FetchError::HostNotAllowed(_))),
+            matches!(&result, Err(FetchError::Other(why)) if why.contains("proxy")),
             "{result:?}"
         );
-        assert_eq!(proxy_server.connections(), 1);
+        // A setting with credentials is unusable, and still refuses rather than going around.
+        assert!(!proxy.set(Some("http://user:pw@proxy.corp:3128")));
+        let result = run(&domains, &proxied, request("https://api.example.com/v1")).await;
+        assert!(matches!(result, Err(FetchError::Other(_))), "{result:?}");
+        assert_eq!(proxy_server.connections(), 0);
 
         // `localhost` goes direct.
+        assert!(proxy.set(Some(&format!("http://127.0.0.1:{}", proxy_server.port))));
         let target =
             test_server::start(|path, _| (path == "/hello").then(|| test_server::ok(b"direct")))
                 .await;
@@ -1576,18 +1604,69 @@ mod tests {
         .await
         .expect("direct");
         assert_eq!(response.body, b"direct");
-        assert_eq!(proxy_server.connections(), 1);
+        assert_eq!(proxy_server.connections(), 0);
 
-        // Clearing the setting takes effect on the next request.
+        // Cleared: domain requests are no longer refused for the proxy.
         assert!(!proxy.set(None));
         assert!(proxy.get().is_none());
+        let result = run(&domains, &proxied, request("https://api.example.com/v1")).await;
+        assert!(
+            !matches!(&result, Err(FetchError::Other(why)) if why.contains("proxy")),
+            "{result:?}"
+        );
+    }
+
+    /// integration-5 S7: `authorization` and `cookie` follow a same-origin redirect only.
+    #[tokio::test]
+    async fn credentials_do_not_follow_a_cross_origin_redirect() {
+        // Another port is another origin; every test server echoes `/echo-request`.
+        let other = test_server::start(|_, _| None).await;
+        let other_port = other.port;
+        let server = test_server::start(move |path, port| match path {
+            "/same" => Some(test_server::redirect(&format!(
+                "http://localhost:{port}/echo-request"
+            ))),
+            "/cross" => Some(test_server::redirect(&format!(
+                "http://localhost:{other_port}/echo-request"
+            ))),
+            _ => None,
+        })
+        .await;
+        let domains = list(&[
+            &format!("localhost:{}", server.port),
+            &format!("localhost:{other_port}"),
+        ]);
+        let with_credentials = |path: &str| {
+            let mut request = request(&format!("http://localhost:{}{path}", server.port));
+            request.headers = vec![
+                ("Authorization".into(), "Bearer s3cret".into()),
+                ("Cookie".into(), "session=s3cret".into()),
+                ("X-Trace".into(), "kept".into()),
+            ];
+            request
+        };
+        let same = run(&domains, &fetcher(), with_credentials("/same"))
+            .await
+            .expect("same origin");
+        let same = String::from_utf8_lossy(&same.body).to_ascii_lowercase();
+        assert!(same.contains("authorization: bearer s3cret"), "{same}");
+        assert!(same.contains("cookie: session=s3cret"), "{same}");
+        let cross = run(&domains, &fetcher(), with_credentials("/cross"))
+            .await
+            .expect("cross origin");
+        let cross = String::from_utf8_lossy(&cross.body).to_ascii_lowercase();
+        assert!(
+            cross.contains(&format!("host: localhost:{other_port}")),
+            "{cross}"
+        );
+        assert!(!cross.contains("s3cret"), "{cross}");
+        assert!(cross.contains("x-trace: kept"), "{cross}");
     }
 
     #[test]
     fn only_usable_proxy_settings_are_taken() {
         for good in [
             "http://proxy.corp:3128",
-            "https://user:pw@proxy.corp",
             "socks5://127.0.0.1:1080",
             "socks5h://proxy.corp:1080",
         ] {

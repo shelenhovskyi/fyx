@@ -204,6 +204,21 @@ pub fn check_agent_read(project: &Project, path: &ProjectPath, cx: &App) -> Resu
     enforce(mode, action, private_denial(path, project, cx))
 }
 
+/// For the extension host (`agent:observe`, `workspace:edit` reads): why `path` is private, in
+/// every security mode, shield or not (integration-5 S1). Zed's `private_files` (global and
+/// worktree) and the worktree's `.fyx/security.toml`, matched against every spelling of the path.
+/// An extension never gets the text of such a file.
+pub fn extension_read_denial(project: &Project, path: &ProjectPath, cx: &App) -> Option<String> {
+    private_denial(path, project, cx)
+}
+
+/// For the extension host (`workspace:edit`): why an extension may not write `abs_path`, in
+/// every security mode (integration-5 S2). Agent configs at any depth, the worktree's `read_only`
+/// patterns, and links out of the project, as [`check_config_write`] checks under shield.
+pub fn extension_write_denial(project: &Project, abs_path: &Path, cx: &App) -> Option<String> {
+    write_denial(project, abs_path, cx)
+}
+
 /// Hook for the built-in agent's `grep` tool: whether to skip a file the shield makes private.
 /// Audit mode logs and skips nothing.
 pub fn agent_read_blocked(project: &Project, path: &ProjectPath, cx: &App) -> bool {
@@ -883,11 +898,10 @@ fn load_project_policies(project: &Entity<Project>, cx: &mut App) {
 }
 
 /// Loads a worktree's `.fyx/security.toml`. Until it has loaded, and if it cannot be read or
-/// parsed, the worktree is treated as fully restricted (fail closed).
+/// parsed, the worktree is treated as fully restricted (fail closed). Loaded in every mode: the
+/// agent hooks ignore it while the shield is off, but the extension host's checks
+/// ([`extension_read_denial`], [`extension_write_denial`]) always apply it.
 fn load_policy(project: &Entity<Project>, worktree: &Entity<Worktree>, cx: &mut App) {
-    if mode(cx) == SecurityMode::Off {
-        return;
-    }
     let worktree_id = worktree.read(cx).id();
     let Ok(security_file) = RelPath::from_unix_str(SECURITY_FILE) else {
         return;
@@ -1277,13 +1291,14 @@ mod tests {
             })
         };
 
-        // Off: nothing is checked and the repository file is not even read.
+        // Off: the agent hooks check nothing. The repository file is still read, because the
+        // extension host applies it in every mode (integration-5 S1).
         cx.run_until_parked();
         assert!(read(".env", cx));
         assert!(read("keys/prod.json", cx));
         assert!(write(path!("/p/.claude/settings.json"), cx));
         assert!(write(&::paths::settings_file().to_string_lossy(), cx));
-        assert!(cx.update(|cx| cx.global::<Guard>().worktrees.is_empty()));
+        assert!(cx.update(|cx| !cx.global::<Guard>().worktrees.is_empty()));
 
         // Audit: logged only.
         set_mode(FyxSecurityMode::Audit, cx);
