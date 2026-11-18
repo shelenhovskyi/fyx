@@ -78,7 +78,12 @@ pub struct TurnFile {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
-    Snapshot(Vec<ReviewInfo>),
+    /// Every open review; it replaces what the extension knew. `older_dropped`: reviews were left
+    /// out to stay within [`MAX_SNAPSHOT_REVIEWS`] (the host's own snapshots set it `false`).
+    Snapshot {
+        reviews: Vec<ReviewInfo>,
+        older_dropped: bool,
+    },
     Opened(ReviewInfo),
     Updated(ReviewInfo),
     Resolved(ReviewInfo),
@@ -99,8 +104,18 @@ impl AgentEvent {
 }
 
 /// Cuts a review to [`MAX_HUNK_TEXT_BYTES`] of hunk text, keeping whole hunks, and drops every
-/// hunk of a review whose file is outside the worktrees (design.md §11).
+/// hunk of a review whose file is outside the worktrees (design.md §11). A file matching Zed's
+/// default `private_files` ([`crate::protected::is_default_private`]) loses its path and hunks
+/// too (integration-5 S1); the host applies the user's own `private_files` and `.fyx/security.toml`
+/// before this.
 pub fn cut_review(mut info: ReviewInfo) -> ReviewInfo {
+    if info
+        .file
+        .as_ref()
+        .is_some_and(|file| crate::protected::is_default_private(&file.path))
+    {
+        info.file = None;
+    }
     if info.file.is_none() {
         info.truncated = info.truncated || !info.hunks.is_empty();
         info.hunks.clear();
@@ -124,18 +139,15 @@ pub fn cut_review(mut info: ReviewInfo) -> ReviewInfo {
 }
 
 /// A snapshot as the extension gets it: at most [`MAX_SNAPSHOT_REVIEWS`], the oldest dropped
-/// first (reviews are given oldest first), with `truncated` set on the last one kept.
-pub fn cut_snapshot(mut reviews: Vec<ReviewInfo>) -> Vec<ReviewInfo> {
+/// first (reviews are given oldest first), and whether any were dropped. `truncated` stays about
+/// each review's hunks only (integration-5 A5).
+pub fn cut_snapshot(mut reviews: Vec<ReviewInfo>) -> (Vec<ReviewInfo>, bool) {
     let mut dropped = false;
     if reviews.len() > MAX_SNAPSHOT_REVIEWS {
         reviews.drain(..reviews.len() - MAX_SNAPSHOT_REVIEWS);
         dropped = true;
     }
-    let mut reviews: Vec<ReviewInfo> = reviews.into_iter().map(cut_review).collect();
-    if dropped && let Some(last) = reviews.last_mut() {
-        last.truncated = true;
-    }
-    reviews
+    (reviews.into_iter().map(cut_review).collect(), dropped)
 }
 
 /// Maps the host's review, session and turn ids to opaque ones of one extension (design.md §0.5):
@@ -178,12 +190,16 @@ impl OpaqueIds {
     /// The event with this extension's ids, and its reviews cut.
     pub fn event(&mut self, event: AgentEvent) -> AgentEvent {
         match event {
-            AgentEvent::Snapshot(reviews) => AgentEvent::Snapshot(
-                cut_snapshot(reviews)
-                    .into_iter()
-                    .map(|info| self.info(info))
-                    .collect(),
-            ),
+            AgentEvent::Snapshot {
+                reviews,
+                older_dropped,
+            } => {
+                let (reviews, dropped) = cut_snapshot(reviews);
+                AgentEvent::Snapshot {
+                    reviews: reviews.into_iter().map(|info| self.info(info)).collect(),
+                    older_dropped: older_dropped || dropped,
+                }
+            }
             AgentEvent::Opened(info) => AgentEvent::Opened(self.info(cut_review(info))),
             AgentEvent::Updated(info) => AgentEvent::Updated(self.info(cut_review(info))),
             AgentEvent::Resolved(info) => AgentEvent::Resolved(self.info(cut_review(info))),
@@ -249,6 +265,19 @@ mod tests {
     }
 
     #[test]
+    fn private_files_have_no_path_and_no_hunks() {
+        let mut env = review(1, true, vec![hunk(10)]);
+        env.file = Some(FileRef {
+            worktree: Some(1),
+            path: "app/.env.local".into(),
+        });
+        let cut = cut_review(env);
+        assert!(cut.file.is_none());
+        assert!(cut.hunks.is_empty());
+        assert!(cut.truncated);
+    }
+
+    #[test]
     fn files_outside_the_worktrees_have_no_hunks() {
         let outside = cut_review(review(1, false, vec![hunk(10)]));
         assert!(outside.hunks.is_empty());
@@ -258,10 +287,17 @@ mod tests {
     #[test]
     fn snapshots_keep_the_newest_thousand() {
         let reviews: Vec<ReviewInfo> = (0..1005).map(|id| review(id, true, Vec::new())).collect();
-        let cut = cut_snapshot(reviews);
+        let (cut, dropped) = cut_snapshot(reviews);
         assert_eq!(cut.len(), MAX_SNAPSHOT_REVIEWS);
         assert_eq!(cut[0].review, 5);
-        assert!(cut.last().unwrap().truncated);
+        assert!(dropped);
+        assert!(
+            !cut.last().unwrap().truncated,
+            "truncated is about hunks only"
+        );
+        let (whole, dropped) = cut_snapshot(vec![review(1, true, Vec::new())]);
+        assert_eq!(whole.len(), 1);
+        assert!(!dropped);
     }
 
     #[test]

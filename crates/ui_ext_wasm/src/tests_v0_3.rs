@@ -335,30 +335,20 @@ async fn test_v0_3_canvas_replies_and_clicks(cx: &mut TestAppContext) {
     );
 }
 
-/// A 0.3 interface this build does not implement traps when called, which disables the
-/// extension; it still loads, because nothing calls it at instantiation. WASI imports at a newer
-/// patch version than the host's (std's `HashMap` seed in the probe's `surfaces`) still resolve.
+/// The smaller 0.3 (integration-5 A3) links every interface of its world: a 0.3 component keeps
+/// 0.2's `place-decoration`. WASI imports at a newer patch version than the host's (std's
+/// `HashMap` seed in the probe's `surfaces`) still resolve.
 #[gpui::test]
-async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
+async fn test_v0_3_keeps_place_decoration(cx: &mut TestAppContext) {
     let extension = load(cx).await;
-    let error = extension
-        .handle_event_v0_2(SURFACE, UiEvent::Click(6))
-        .await
-        .unwrap_err();
+    let (results, effects) = case(&extension, 6).await;
+    assert_eq!(results, ["done"]);
     assert!(
-        error.downcast_ref::<EffectReplyError>().is_none(),
-        "{error:#}"
+        effects
+            .iter()
+            .any(|effect| matches!(effect, HostEffect::PlaceDecoration { id, .. } if id == "probe-decoration")),
+        "{effects:?}"
     );
-    assert!(
-        format!("{error:?}")
-            .contains("fyx:ui/language@0.3.0#unregister-provider is not implemented"),
-        "{error:?}"
-    );
-    let error = extension
-        .handle_event_v0_2(SURFACE, UiEvent::Click(1))
-        .await
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
 #[test]
@@ -830,7 +820,7 @@ mod network_fetch {
             (
                 "api_version = \"0.2.0\"\ncapabilities = [\"network:fetch\"]\n\
                  [fyx_ui.network]\ndomains = [\"api.example.com\"]\n",
-                "T2",
+                "needs fyx:ui 0.3",
             ),
             (
                 "api_version = \"0.3.0\"\ncapabilities = [\"network:fetch\"]\n",
@@ -858,6 +848,81 @@ mod network_fetch {
                 "{problem}: {error:#}"
             );
         }
+    }
+}
+
+/// integration-5 A4: the manifest is read version first, and each world declares only what it
+/// can use (wit-0.3/migration.md §2).
+#[gpui::test]
+async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
+    let fs = fs::FakeFs::new(cx.executor());
+    fs.create_dir(Path::new("/ext/m")).await.expect("dir");
+    let read = |fyx_ui: &str| {
+        let fs = fs.clone();
+        let text = format!(
+            "id = \"m\"\nname = \"M\"\nversion = \"0.1.0\"\nschema_version = 1\n[fyx_ui]\n\
+             component = \"fyx_ui.wasm\"\n{fyx_ui}"
+        );
+        async move {
+            fs.insert_file("/ext/m/extension.toml", text.into_bytes())
+                .await;
+            UiManifest::read(fs.as_ref(), Path::new("/ext/m")).await
+        }
+    };
+    for fyx_ui in [
+        "api_version = \"0.1.0\"\ncapabilities = [\"ui:panel\", \"ui:modal\"]\n",
+        "api_version = \"0.2.0\"\ncapabilities = [\"ui:notifications\", \"ui:editor-decorations\"]\n",
+        "api_version = \"0.3.0\"\ncapabilities = [\"ui:canvas\", \"ui:images\", \"network:fetch\"]\n[fyx_ui.network]\ndomains = [\"api.example.com\"]\n",
+    ] {
+        read(fyx_ui)
+            .await
+            .unwrap_or_else(|error| panic!("{fyx_ui}: {error:#}"));
+    }
+    for (fyx_ui, problem) in [
+        // A newer world's tables do not hide its version.
+        (
+            "api_version = \"0.4.0\"\n[fyx_ui.future]\nx = 1\n",
+            "targets fyx:ui 0.4.0",
+        ),
+        (
+            "api_version = \"0.2.0\"\ncapabilities = [\"ui:canvas\"]\n",
+            "\"ui:canvas\" needs fyx:ui 0.3",
+        ),
+        (
+            "api_version = \"0.1.0\"\ncapabilities = [\"ui:notifications\"]\n",
+            "\"ui:notifications\" needs fyx:ui 0.2",
+        ),
+        // The smaller 0.3 (integration-5 A3): the 0.4 capabilities and tables are refused.
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"ui:picker\"]\n",
+            "\"ui:picker\" is not in fyx:ui 0.3.0; it is planned for a later version",
+        ),
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"workspace:read-buffers\"]\n",
+            "planned for a later version",
+        ),
+        (
+            "api_version = \"0.2.0\"\ncapabilities = [\"ui:commands\"]\n",
+            "planned for a later version",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n",
+            "unknown field `commands`",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.picker_sources]]\nid = \"s\"\npicker = \"a/b\"\n",
+            "unknown field `picker_sources`",
+        ),
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"ui:sparkles\"]\n",
+            "unknown capability",
+        ),
+    ] {
+        let error = read(fyx_ui).await.err().expect("refused");
+        assert!(
+            format!("{error:#}").contains(problem),
+            "{problem}: {error:#}"
+        );
     }
 }
 
@@ -948,7 +1013,7 @@ mod process_spawn {
     fn spec(name: &str) -> ProcessSpec {
         ProcessSpec {
             name: name.into(),
-            args: Vec::new(),
+            args: vec!["**".into()],
             path: None,
         }
     }
@@ -1283,14 +1348,17 @@ mod process_spawn {
         assert_eq!(end, format!("spawn-failed {id} denied"));
     }
 
-    /// Decision 26: an untrusted worktree is `denied` without a prompt; no worktree is
-    /// `unavailable`.
+    /// Decision 26: an untrusted worktree is refused without a prompt; integration-5 A5 gives it
+    /// and "no worktree" their own codes, so an extension need not match the message.
     #[gpui::test]
     async fn test_worktree_rules(cx: &mut TestAppContext) {
         let mut setup = Setup::new(&["hostname"]);
         setup.trusted = false;
         let extension = setup.load(cx).await;
-        assert_eq!(command(&extension, "spawn -- hostname").await, "denied");
+        assert_eq!(
+            command(&extension, "spawn -- hostname").await,
+            "untrusted-worktree"
+        );
         let none = load_with(
             LoadOptions {
                 allow_staged: Some(true),
@@ -1308,7 +1376,7 @@ mod process_spawn {
         )
         .await
         .expect("loads");
-        assert_eq!(command(&none, "spawn -- hostname").await, "unavailable");
+        assert_eq!(command(&none, "spawn -- hostname").await, "no-worktree");
     }
 
     /// The child sees only the filtered environment, and stdin reaches it.
@@ -1497,29 +1565,12 @@ mod harness_conformance_v0_3 {
         compare(&host, &mut harness, SURFACE, UiEvent::Click(1)).await;
     }
 
-    /// An interface this build does not implement traps alike, and disables both.
+    /// 0.3 keeps 0.2's `place-decoration` in the harness too (integration-5 A3).
     #[gpui::test]
-    async fn test_unbuilt_interfaces_trap_in_the_harness(cx: &mut TestAppContext) {
+    async fn test_place_decoration_matches_the_harness(cx: &mut TestAppContext) {
         let host = load(cx).await;
         let mut harness = harness();
-        let host_error = host
-            .handle_event_v0_2(SURFACE, UiEvent::Click(6))
-            .await
-            .unwrap_err();
-        let harness_error = harness
-            .handle_event_raw_v0_2(SURFACE, UiEvent::Click(6))
-            .unwrap_err();
-        let message =
-            "fyx:ui/language@0.3.0#unregister-provider is not implemented by this build of Fyx yet";
-        assert!(
-            format!("{host_error:?}").contains(message),
-            "{host_error:?}"
-        );
-        assert!(
-            format!("{harness_error:?}").contains(message),
-            "{harness_error:?}"
-        );
-        assert!(harness.disabled().is_some());
+        compare(&host, &mut harness, SURFACE, UiEvent::Click(6)).await;
     }
 }
 
@@ -1777,9 +1828,10 @@ mod harness_conformance_process {
                 args: vec!["status".into(), "**".into()],
                 path: None,
             },
+            // Any arguments: without patterns a program runs with none (integration-5 S6).
             ProcessSpec {
                 name: format!("{MISSING}-2"),
-                args: Vec::new(),
+                args: vec!["**".into()],
                 path: None,
             },
         ]

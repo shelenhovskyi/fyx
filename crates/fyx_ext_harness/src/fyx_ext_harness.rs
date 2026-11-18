@@ -127,6 +127,7 @@ pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_MODAL,
     model::CAPABILITY_EDITOR_DECORATIONS,
     ui_ext::image::CAPABILITY_IMAGES,
+    ui_ext::canvas::CAPABILITY_CANVAS,
     model::CAPABILITY_NOTIFICATIONS,
 ];
 

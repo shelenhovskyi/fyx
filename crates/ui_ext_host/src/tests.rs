@@ -81,6 +81,8 @@ struct FakeBackend {
     tick_again: Cell<Option<Duration>>,
     /// Each tick fails with the extension's own error.
     fail_ticks: Cell<bool>,
+    /// Modals the renderer reported as not shown.
+    modals_closed: RefCell<Vec<String>>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -300,6 +302,10 @@ impl UiBackend for FakeBackend {
             })
         }
         .boxed_local()
+    }
+
+    fn modal_closed(&self, surface_id: &str) {
+        self.modals_closed.borrow_mut().push(surface_id.to_string());
     }
 
     fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
@@ -965,6 +971,34 @@ async fn test_remounts_without_input_are_bounded(cx: &mut TestAppContext) {
     assert_eq!(props_of(&state, LABEL, cx), text("Count: 5"));
 }
 
+/// integration-5 M1: good pushes between the bad updates do not reset the bound; only a user
+/// event's applied reply does.
+#[gpui::test]
+async fn test_pushes_do_not_reset_the_remount_bound(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(5);
+    backend.bad_rows_push.set(true);
+    let state = new_state(&backend, cx);
+    backend.take_calls();
+    for round in 0..10 {
+        state.update(cx, |state, cx| state.request_rows(LIST, 0..5, cx));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            state.apply_pushed_update(
+                Update::Patches(vec![Patch::SetProps(
+                    LABEL,
+                    text(&format!("pushed {round}")),
+                )]),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+    }
+    let message = failure(&state, cx).expect("the surface gave up");
+    assert!(message.contains("keeps sending updates"), "{message}");
+}
+
 /// Finding 5: an error without a `ReplyError` (trap, budget, disabled) stops every surface of the
 /// extension; nothing is dispatched any more until a retry.
 #[gpui::test]
@@ -1500,10 +1534,11 @@ async fn test_one_layout_makes_one_row_call(cx: &mut TestAppContext) {
     );
 }
 
-/// Finding 9: an update pushed from elsewhere that applies is progress, like an event reply, so a
-/// surface fed only by pushes does not fail after a few recovered desyncs over a session.
+/// Finding 9: a surface fed only by pushes does not fail after a few recovered desyncs over a
+/// session: a desync a minute after the last remount starts the count again (pushes themselves
+/// no longer reset it, integration-5 M1).
 #[gpui::test]
-async fn test_applied_pushes_reset_the_remount_bound(cx: &mut TestAppContext) {
+async fn test_occasional_desyncs_recover(cx: &mut TestAppContext) {
     init_test(cx);
     let backend = Rc::new(FakeBackend::default());
     let state = new_state(&backend, cx);
@@ -1526,6 +1561,8 @@ async fn test_applied_pushes_reset_the_remount_bound(cx: &mut TestAppContext) {
                 cx,
             )
         });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(61));
         cx.run_until_parked();
     }
     assert_eq!(failure(&state, cx), None);
@@ -1930,6 +1967,93 @@ async fn test_runtime_surfaces(cx: &mut TestAppContext) {
         assert!(registry.surface_of("fake", "added").is_none());
         assert!(registry.surface_of("fake", "main").is_some());
     });
+}
+
+/// integration-5 M4: a modal the modal layer did not take is closed again and the extension told,
+/// so the next `show-surface` mounts it afresh instead of being a no-op.
+#[gpui::test]
+async fn test_modal_not_shown_is_closed_again(cx: &mut TestAppContext) {
+    use ui_ext::v0_2::{ModalDescriptor, ModalWidth, SurfaceKind};
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let modal = ui_ext::v0_2::Surface {
+        id: "pick".into(),
+        title: "Pick".into(),
+        kind: SurfaceKind::Modal(ModalDescriptor {
+            width: ModalWidth::Medium,
+        }),
+    };
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(dyn_backend, std::slice::from_ref(&modal), cx)
+    });
+    cx.run_until_parked();
+    let state = registry.read_with(cx, |registry, _| {
+        registry
+            .surface("fake/pick")
+            .expect("surface")
+            .state
+            .clone()
+    });
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    assert!(state.read_with(cx, |state, _| state.is_open()));
+    backend.take_calls();
+
+    registry.update(cx, |registry, cx| registry.modal_not_shown("fake/pick", cx));
+    cx.run_until_parked();
+    assert!(state.read_with(cx, |state, _| !state.is_open()));
+    assert_eq!(*backend.modals_closed.borrow(), ["pick"]);
+    assert!(
+        backend.events().is_empty(),
+        "no dismissed for a modal never shown"
+    );
+
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    assert_eq!(backend.take_calls(), [Call::Mount], "shown again, afresh");
+}
+
+/// integration-5 H1: a shown modal ticks, and stops when it goes.
+#[gpui::test]
+async fn test_modal_ticks_while_shown(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let ticks = |backend: &FakeBackend| {
+        backend
+            .calls()
+            .iter()
+            .filter(|call| **call == Call::Tick)
+            .count()
+    };
+    let (modal, vcx) = cx.add_window_view(|window, cx| {
+        crate::modal::ExtensionModal::new(
+            "fake/modal".into(),
+            state.clone(),
+            gpui::WeakEntity::new_invalid(),
+            window,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    state.update(vcx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    vcx.executor().advance_clock(Duration::from_millis(1050));
+    vcx.run_until_parked();
+    assert_eq!(ticks(&backend), 1, "the shown modal ticked");
+
+    vcx.update(|window, _| window.remove_window());
+    drop(modal);
+    vcx.run_until_parked();
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    cx.executor().advance_clock(Duration::from_millis(5000));
+    cx.run_until_parked();
+    assert_eq!(ticks(&backend), 1, "a closed modal is not ticked");
 }
 
 /// Plan 2.3, design B: a requested tick fires once after its delay (at least 1 s while no window

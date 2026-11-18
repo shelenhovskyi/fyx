@@ -378,6 +378,13 @@ fn check_processes(table: &FyxUiTable, report: &mut Report) {
                 spec.name
             ));
         }
+        if spec.args.is_empty() {
+            report.warning(format!(
+                "[[fyx_ui.processes]] {:?} has no `args`, so it may only run with no arguments; \
+                 `args = [\"**\"]` allows any",
+                spec.name
+            ));
+        }
         if table.processes[..index]
             .iter()
             .any(|other| other.name == spec.name)
@@ -613,10 +620,31 @@ capabilities = ["ui:panel"]
             "{report:?}"
         );
         let declared = format!(
-            "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"status\", \"**\"]\n\n[fyx_ui.process]\nenv = [\"GIT_DIR\"]\n"
+            "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"status\", \"**\"]\n\n[fyx_ui.process]\nenv = [\"NO_COLOR\"]\n"
         );
         let (_, report) = check(&declared);
         assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings.iter().all(|w| !w.contains("no `args`")),
+            "{report:?}"
+        );
+
+        // Without `args` a program runs with no arguments only (integration-5 S6).
+        let bare = format!("{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\n");
+        let (_, report) = check(&bare);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings.iter().any(|w| w.contains("no `args`")),
+            "{report:?}"
+        );
+        // git's directories and PATH are never passed.
+        for name in ["GIT_DIR", "PATH", "CARGO_HOME"] {
+            let env = format!(
+                "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"**\"]\n\n[fyx_ui.process]\nenv = [\"{name}\"]\n"
+            );
+            let (_, report) = check(&env);
+            assert_eq!(report.errors.len(), 1, "{name}: {report:?}");
+        }
 
         let bad = format!(
             "{spawn}\n[[fyx_ui.processes]]\nname = \"bin/tool\"\nargs = [\"**\", \"x\"]\n\n[fyx_ui.process]\nenv = [\"LD_PRELOAD\"]\n"

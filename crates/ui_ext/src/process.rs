@@ -28,22 +28,71 @@ pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Environment names never passed to a program, even when the manifest declares them: they load
-/// code into it (design.md §9, "Environment").
+/// code into it, name another program for it to run, or choose where it finds programs and
+/// configuration (design.md §9, "Environment"; integration-5 S6). Matched in ASCII upper case.
 const FORBIDDEN_ENV_NAMES: &[&str] = &[
+    // Interpreters and runtimes.
     "NODE_OPTIONS",
+    "NODE_PATH",
     "PYTHONSTARTUP",
     "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONUSERBASE",
     "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
     "RUBYOPT",
+    "RUBYLIB",
+    "LUA_PATH",
+    "LUA_CPATH",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "DOTNET_STARTUP_HOOKS",
+    "PSMODULEPATH",
+    // Shells.
     "BASH_ENV",
     "ENV",
+    "PROMPT_COMMAND",
+    // Programs other programs start.
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
+    "GIT_EXTERNAL_DIFF",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
     "GIT_EXEC_PATH",
     "GIT_ASKPASS",
     "SSH_ASKPASS",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTDOC",
+    // Where git finds its repository, hooks and configuration.
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_TEMPLATE_DIR",
+    // Where programs are found: the host passes its own, filtered (design.md §9).
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
 ];
-const FORBIDDEN_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_CONFIG_"];
+const FORBIDDEN_ENV_PREFIXES: &[&str] = &[
+    "LD_",
+    "DYLD_",
+    "GIT_CONFIG_",
+    "NPM_CONFIG_",
+    "YARN_",
+    "CARGO_",
+    "COR_",
+    "CORECLR_",
+];
 
 /// One `[[fyx_ui.processes]]` entry.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -51,8 +100,9 @@ const FORBIDDEN_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_CONFIG_"];
 pub struct ProcessSpec {
     /// What `request.program` names; without `path`, resolved on `PATH` outside the worktrees.
     pub name: String,
-    /// Argument patterns the program may be run with (none: any arguments). One per position:
-    /// a literal, `*` within it for any text, or `**` as the last pattern for any rest.
+    /// Argument patterns the program may be run with. One per position: a literal, `*` within it
+    /// for any text, or `**` as the last pattern for any rest. None: no arguments at all (an
+    /// open program needs `args = ["**"]`, which the consent prompt shows; integration-5 S6).
     #[serde(default)]
     pub args: Vec<String>,
     /// A worktree-relative program, which needs a trusted worktree.
@@ -94,11 +144,8 @@ pub fn check_env_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `args` fit `patterns` (see [`ProcessSpec::args`]). No patterns: any arguments.
+/// Whether `args` fit `patterns` (see [`ProcessSpec::args`]). No patterns: no arguments.
 pub fn args_match(patterns: &[String], args: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
     let rest = patterns.last().is_some_and(|last| last == "**");
     let fixed = if rest {
         &patterns[..patterns.len() - 1]
@@ -123,6 +170,113 @@ fn glob(pattern: &[u8], text: &[u8]) -> bool {
             .split_first()
             .is_some_and(|(first, text)| first == byte && glob(rest, text)),
     }
+}
+
+/// Programs that run whatever code they are given: shells, interpreters and launchers (owner's
+/// Q2, 2026-11-19). The manifest may name them, with `args` patterns like any program, but a grant
+/// of one means "any program", and the consent prompt says so ([`RUNS_ANY_CODE_PROMPT`]). Names
+/// are compared case-insensitively, without a Windows executable extension.
+pub const RUNS_ANY_CODE: &[&str] = &[
+    // Shells.
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "mksh",
+    "csh",
+    "tcsh",
+    "nu",
+    "elvish",
+    "xonsh",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "osascript",
+    "wscript",
+    "cscript",
+    "mshta",
+    // Interpreters and runtimes.
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "npx",
+    "bunx",
+    "python",
+    "python2",
+    "python3",
+    "py",
+    "pypy",
+    "pypy3",
+    "perl",
+    "ruby",
+    "irb",
+    "php",
+    "lua",
+    "luajit",
+    "tclsh",
+    "wish",
+    "rscript",
+    "julia",
+    "java",
+    "jshell",
+    "dotnet",
+    "awk",
+    "gawk",
+    "mawk",
+    "nawk",
+    // Programs that run another program.
+    "env",
+    "xargs",
+    "sudo",
+    "doas",
+    "runas",
+    "nohup",
+    "nice",
+    "time",
+    "timeout",
+    "watch",
+    "busybox",
+    "start",
+];
+
+/// What the consent prompt says about a program in [`RUNS_ANY_CODE`] (owner's Q2).
+pub const RUNS_ANY_CODE_PROMPT: &str = "can run any program on your computer";
+
+/// Whether granting `spec` means "any program" (owner's Q2): a program in [`RUNS_ANY_CODE`], or
+/// `git` with options before the subcommand that can set its configuration (`-c`,
+/// `--config-env`, `--exec-path`, or a wildcard), since a config value can name a command git runs.
+pub fn runs_any_code(spec: &ProcessSpec) -> bool {
+    let base = spec
+        .path
+        .as_deref()
+        .unwrap_or(&spec.name)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let program = [".exe", ".cmd", ".bat", ".com", ".ps1"]
+        .iter()
+        .find_map(|extension| base.strip_suffix(extension))
+        .unwrap_or(&base);
+    if RUNS_ANY_CODE.contains(&program) {
+        return true;
+    }
+    // Git's own options come before the subcommand: one of them that sets configuration, or a
+    // wildcard there (which could be one), makes a config value name a command git runs.
+    program == "git"
+        && spec
+            .args
+            .iter()
+            .take_while(|pattern| pattern.starts_with('-') || pattern.contains('*'))
+            .any(|pattern| {
+                pattern.contains('*')
+                    || pattern.starts_with("-c")
+                    || pattern.starts_with("--config-env")
+                    || pattern.starts_with("--exec-path")
+            })
 }
 
 /// A file or directory in a worktree: the WIT `file-ref`.
@@ -198,6 +352,7 @@ pub enum SpawnError {
     NotFound(String),
     LimitExceeded,
     Io(String),
+    Other(String),
 }
 
 fn invalid(message: impl Into<String>) -> HostError {
@@ -303,6 +458,34 @@ impl ProcessCounters {
 mod tests {
     use super::*;
 
+    /// Owner's Q2: interpreters and shells may be named, and count as "any program".
+    #[test]
+    fn interpreters_and_shells_run_any_code() {
+        let spec = |name: &str, args: &[&str]| ProcessSpec {
+            name: name.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            path: None,
+        };
+        for name in [
+            "bash", "Python3", "node.exe", "PWSH.EXE", "cmd", "env", "npx.cmd",
+        ] {
+            assert!(runs_any_code(&spec(name, &["**"])), "{name}");
+            assert!(runs_any_code(&spec(name, &[])), "{name} without arguments");
+        }
+        let mut local = spec("lint", &[]);
+        local.path = Some("tools/python.exe".into());
+        assert!(runs_any_code(&local));
+        for name in ["rustfmt", "eslint", "prettier", "hostname", "pythonic"] {
+            assert!(!runs_any_code(&spec(name, &["**"])), "{name}");
+        }
+        assert!(!runs_any_code(&spec("git", &["status", "--porcelain"])));
+        assert!(!runs_any_code(&spec("git", &["log", "**"])));
+        assert!(runs_any_code(&spec("git", &["**"])));
+        assert!(runs_any_code(&spec("git", &["-c", "*", "**"])));
+        assert!(runs_any_code(&spec("git", &["*"])));
+        assert_eq!(RUNS_ANY_CODE_PROMPT, "can run any program on your computer");
+    }
+
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -317,7 +500,7 @@ mod tests {
                 },
                 ProcessSpec {
                     name: "echo".into(),
-                    args: Vec::new(),
+                    args: strings(&["**"]),
                     path: None,
                 },
             ],
@@ -354,7 +537,13 @@ mod tests {
         let exact = strings(&["--version"]);
         assert!(args_match(&exact, &strings(&["--version"])));
         assert!(!args_match(&exact, &strings(&["--version", "x"])));
-        assert!(args_match(&[], &strings(&["anything", "at", "all"])));
+        // No patterns: no arguments (integration-5 S6); `**` alone: any.
+        assert!(!args_match(&[], &strings(&["-c", "alias.x=!cmd", "x"])));
+        assert!(args_match(&[], &[]));
+        assert!(args_match(
+            &strings(&["**"]),
+            &strings(&["anything", "at", "all"])
+        ));
     }
 
     #[test]

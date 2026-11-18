@@ -6,6 +6,7 @@
 //! and an SVG that declares entities (the "billion laughs" bomb) or is compressed is refused. The
 //! renderer's decoder (plan 4.11) applies the rest of the limits while it decodes.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -287,9 +288,377 @@ pub fn check_image_placement(kind: Option<&SurfaceKind>) -> Result<(), ImageErro
     }
 }
 
+/// Elements nested deeper than this are refused by the scan (the expansion recurses per level).
+pub const MAX_SVG_NESTING: usize = 256;
+
+/// The scan before `usvg` parses an SVG (integration-5 S3): `usvg` expands `<use>` (and
+/// references to patterns, markers, clip paths) while it parses, before [`check_svg_tree`] can
+/// count anything, so ten levels of ten `<use>`s would make 10^10 nodes. This counts every element
+/// with what its references would expand to, without building anything:
+/// - an element is 1 plus its children plus, for each reference it makes (`href="#id"` in any
+///   namespace, `url(#id)` in any attribute, `style` included), what the referenced element
+///   expands to;
+/// - a `<style>` element may not use `url(…)`: its selectors apply references to elements this
+///   scan cannot see, so they could not be counted;
+/// - the whole must stay within [`MAX_SVG_NODES`], chains of references within
+///   [`MAX_SVG_USE_DEPTH`], nesting within [`MAX_SVG_NESTING`]; a reference cycle is refused.
+///
+/// It over-counts rather than under-counts: a reference `usvg` would ignore still counts.
+pub fn prescan_svg(text: &str) -> Result<(), String> {
+    #[derive(Default)]
+    struct Element {
+        children: Vec<usize>,
+        references: Vec<String>,
+    }
+    let mut elements: Vec<Element> = Vec::new();
+    let mut roots = Vec::new();
+    let mut ids: HashMap<String, usize> = HashMap::new();
+    // Open elements, and whether each is a `<style>`.
+    let mut open: Vec<(usize, bool)> = Vec::new();
+    let mut at = 0;
+    // CSS function names are case-insensitive (`URL(`), and a CSS escape can spell one
+    // (`u\72l(`): a `<style>` may hold neither `url(` in any case nor a backslash.
+    let check_text = |text: &str, open: &[(usize, bool)]| -> Result<(), String> {
+        if open.last().is_some_and(|(_, style)| *style) {
+            let text = decode_references(text).to_ascii_lowercase();
+            if text.contains("url(") || text.contains('\\') {
+                return Err(
+                    "a <style> in an SVG may not use url(…) or CSS escapes; use the element's \
+                     fill or style"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    };
+    while let Some(offset) = text[at..].find('<') {
+        let start = at + offset;
+        check_text(&text[at..start], &open)?;
+        let rest = &text[start..];
+        let skip_to = |end: &str| rest.find(end).map_or(rest.len(), |found| found + end.len());
+        if rest.starts_with("<!--") {
+            at = start + skip_to("-->");
+            continue;
+        }
+        if rest.starts_with("<![CDATA[") {
+            let end = skip_to("]]>");
+            check_text(&rest[..end], &open)?;
+            at = start + end;
+            continue;
+        }
+        if rest.starts_with("<?") {
+            at = start + skip_to("?>");
+            continue;
+        }
+        if rest.starts_with("<!") {
+            at = start + skip_to(">");
+            continue;
+        }
+        if rest.starts_with("</") {
+            open.pop();
+            at = start + skip_to(">");
+            continue;
+        }
+        let end = tag_end(rest).ok_or_else(|| "an SVG tag is not closed".to_string())?;
+        let tag = &rest[1..end];
+        let self_closing = tag.ends_with('/');
+        let name = tag
+            .split(|character: char| character.is_whitespace() || character == '/')
+            .next()
+            .unwrap_or_default();
+        let is_style = name.rsplit(':').next() == Some("style");
+        let index = elements.len();
+        if index >= MAX_SVG_NODES {
+            return Err(format!("the SVG has more than {MAX_SVG_NODES} nodes"));
+        }
+        let mut element = Element::default();
+        for (name, value) in attributes(tag.trim_end_matches('/')) {
+            let value = decode_references(value);
+            // A `style` attribute is CSS too: an escape could hide a `url(` from the count.
+            if (name == "style" || name.ends_with(":style")) && value.contains('\\') {
+                return Err("an SVG style attribute may not use CSS escapes".to_string());
+            }
+            if name == "id" {
+                ids.insert(value.clone(), index);
+            }
+            if (name == "href" || name.ends_with(":href"))
+                && let Some(id) = value.trim().strip_prefix('#')
+            {
+                element.references.push(id.to_string());
+            }
+            element.references.extend(url_references(&value));
+        }
+        elements.push(element);
+        match open.last() {
+            Some(&(parent, _)) => elements[parent].children.push(index),
+            None => roots.push(index),
+        }
+        if !self_closing {
+            open.push((index, is_style));
+            if open.len() > MAX_SVG_NESTING {
+                return Err(format!(
+                    "the SVG nests more than {MAX_SVG_NESTING} elements deep"
+                ));
+            }
+        }
+        at = start + end + 1;
+    }
+
+    /// (nodes it expands to, longest chain of references below it). `depth` is the references
+    /// followed to get here: past [`MAX_SVG_USE_DEPTH`] it is refused before recursing, so the
+    /// recursion is at most [`MAX_SVG_NESTING`] times that deep, however long a flat chain of
+    /// references the SVG has (which would otherwise recurse once per element and overflow the
+    /// stack).
+    fn expand(
+        index: usize,
+        depth: usize,
+        elements: &[Element],
+        ids: &HashMap<String, usize>,
+        memo: &mut [Option<(usize, usize)>],
+        visiting: &mut [bool],
+    ) -> Result<(usize, usize), String> {
+        if let Some(known) = memo[index] {
+            return Ok(known);
+        }
+        if visiting[index] {
+            return Err("the SVG has a reference cycle".to_string());
+        }
+        visiting[index] = true;
+        let mut nodes = 1usize;
+        let mut chain = 0;
+        for &child in &elements[index].children {
+            let (child_nodes, child_chain) = expand(child, depth, elements, ids, memo, visiting)?;
+            nodes = nodes.saturating_add(child_nodes);
+            chain = chain.max(child_chain);
+            if nodes > MAX_SVG_NODES {
+                return Err(format!(
+                    "the SVG has more than {MAX_SVG_NODES} nodes once its references expand"
+                ));
+            }
+        }
+        for reference in &elements[index].references {
+            let Some(&target) = ids.get(reference) else {
+                continue;
+            };
+            if depth + 1 > MAX_SVG_USE_DEPTH {
+                return Err(format!(
+                    "the SVG nests references more than {MAX_SVG_USE_DEPTH} deep"
+                ));
+            }
+            let (target_nodes, target_chain) =
+                expand(target, depth + 1, elements, ids, memo, visiting)?;
+            nodes = nodes.saturating_add(target_nodes);
+            chain = chain.max(target_chain + 1);
+            if chain > MAX_SVG_USE_DEPTH {
+                return Err(format!(
+                    "the SVG nests references more than {MAX_SVG_USE_DEPTH} deep"
+                ));
+            }
+            if nodes > MAX_SVG_NODES {
+                return Err(format!(
+                    "the SVG has more than {MAX_SVG_NODES} nodes once its references expand"
+                ));
+            }
+        }
+        visiting[index] = false;
+        memo[index] = Some((nodes, chain));
+        Ok((nodes, chain))
+    }
+    let mut memo = vec![None; elements.len()];
+    let mut visiting = vec![false; elements.len()];
+    let mut total = 0usize;
+    for root in roots {
+        let (nodes, _) = expand(root, 0, &elements, &ids, &mut memo, &mut visiting)?;
+        total = total.saturating_add(nodes);
+        if total > MAX_SVG_NODES {
+            return Err(format!(
+                "the SVG has more than {MAX_SVG_NODES} nodes once its references expand"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Where a start tag ends: the first `>` outside a quoted attribute value.
+fn tag_end(tag: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, character) in tag.char_indices() {
+        match (quote, character) {
+            (None, '"' | '\'') => quote = Some(character),
+            (Some(open), _) if character == open => quote = None,
+            (None, '>') => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A start tag's attributes (the text between `<` and `>`, the name first), as written.
+fn attributes(tag: &str) -> Vec<(&str, &str)> {
+    let mut found = Vec::new();
+    let mut rest = tag
+        .trim_start()
+        .split_once(|character: char| character.is_whitespace())
+        .map_or("", |(_, attributes)| attributes);
+    loop {
+        rest = rest.trim_start();
+        let Some(equals) = rest.find('=') else {
+            break;
+        };
+        let name = rest[..equals].trim();
+        let value_start = rest[equals + 1..].trim_start();
+        let Some(quote) = value_start
+            .chars()
+            .next()
+            .filter(|c| *c == '"' || *c == '\'')
+        else {
+            break;
+        };
+        let value_text = &value_start[1..];
+        let Some(close) = value_text.find(quote) else {
+            break;
+        };
+        found.push((name, &value_text[..close]));
+        rest = &value_text[close + 1..];
+    }
+    found
+}
+
+/// Character references decoded the way the XML parser will, so `&#35;a` is the reference `#a`.
+fn decode_references(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(amp) = rest.find('&') {
+        decoded.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let Some(semicolon) = after.find(';').filter(|end| *end <= 10) else {
+            decoded.push('&');
+            rest = after;
+            continue;
+        };
+        let name = &after[..semicolon];
+        let character = match name {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => name
+                .strip_prefix("#x")
+                .or_else(|| name.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| name.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match character {
+            Some(character) => {
+                decoded.push(character);
+                rest = &after[semicolon + 1..];
+            }
+            None => {
+                decoded.push('&');
+                rest = after;
+            }
+        }
+    }
+    decoded.push_str(rest);
+    decoded
+}
+
+/// The ids of every `url(#id)` in `text`, `url` in any case (quotes and spaces allowed, as CSS
+/// allows them).
+fn url_references(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    // ASCII lowercasing keeps every byte offset, so the ids are sliced from the original.
+    let lower = text.to_ascii_lowercase();
+    let mut rest = text;
+    while let Some(start) = lower[text.len() - rest.len()..].find("url(") {
+        let after = &rest[start + 4..];
+        let Some(end) = after.find(')') else {
+            break;
+        };
+        let inner = after[..end]
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim();
+        if let Some(id) = inner.strip_prefix('#') {
+            found.push(id.to_string());
+        }
+        rest = &after[end..];
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// integration-5 S3: the scan before `usvg` refuses what would expand past the caps, and a
+    /// long flat chain of references fails on depth without recursing once per element.
+    #[test]
+    fn prescan_svg_bounds_expansion_and_recursion() {
+        let svg = |body: &str| format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{body}</svg>");
+        prescan_svg(&svg("<rect id=\"a\"/><use href=\"#a\"/>")).expect("small");
+
+        // Ten levels of ten <use>s: 10^10 nodes once expanded.
+        let mut body = String::from("<g id=\"l0\"><rect/></g>");
+        for level in 1..10 {
+            body.push_str(&format!("<g id=\"l{level}\">"));
+            for _ in 0..10 {
+                body.push_str(&format!("<use href=\"#l{}\"/>", level - 1));
+            }
+            body.push_str("</g>");
+        }
+        let error = prescan_svg(&svg(&body)).unwrap_err();
+        assert!(error.contains("nodes"), "{error}");
+
+        let error = prescan_svg(&svg("<g id=\"a\"><use href=\"#b\"/></g><g id=\"b\"><use \
+             xlink:href=\"&#35;a\"/></g>"))
+        .unwrap_err();
+        assert!(error.contains("cycle"), "{error}");
+
+        for style in [
+            "url(#p)",
+            "URL(#p)",
+            "Url( #p )",
+            "u\\72l(#p)",
+            "&#85;RL(#p)",
+        ] {
+            let error = prescan_svg(&svg(&format!(
+                "<style>rect {{ fill: {style} }}</style><rect/>"
+            )))
+            .unwrap_err();
+            assert!(error.contains("<style>"), "{style}: {error}");
+        }
+        let error = prescan_svg(&svg("<rect style=\"fill: u\\72l(#p)\"/>")).unwrap_err();
+        assert!(error.contains("escapes"), "{error}");
+
+        // `URL(` in an attribute counts like `url(`: a cycle through it is found.
+        for function in ["url", "URL", "Url"] {
+            let error = prescan_svg(&svg(&format!(
+                "<g id=\"a\" fill=\"{function}(#b)\"/><g id=\"b\" style=\"fill: {function}('#a')\"/>"
+            )))
+            .unwrap_err();
+            assert!(error.contains("cycle"), "{function}: {error}");
+        }
+
+        // 40000 elements, each referring to the next: refused on depth, on this thread's stack.
+        let mut chain = String::new();
+        for index in 0..40_000 {
+            chain.push_str(&format!(
+                "<g id=\"c{index}\" fill=\"URL(#c{})\"/>",
+                index + 1
+            ));
+        }
+        let error = prescan_svg(&svg(&chain)).unwrap_err();
+        assert!(error.contains("references more than"), "{error}");
+
+        let error = prescan_svg(&svg(&"<g>".repeat(MAX_SVG_NESTING + 1))).unwrap_err();
+        assert!(error.contains("nests more than"), "{error}");
+    }
     use crate::v0_2::{
         DockPosition, Icon, IconRef, ModalDescriptor, ModalWidth, PanelDescriptor, StatusBarSide,
         StatusItemDescriptor,

@@ -135,6 +135,13 @@ pub struct Release {
     pub network_domains: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub processes: BTreeSet<String>,
+    /// The package has a Zed `extension.wasm` ([`crate::runs_zed_extension`]): it also runs as a
+    /// Zed extension, with unrestricted network and process access. Such a release is T2
+    /// whatever it declares (owner's Q1), and the host shows
+    /// [`crate::RUNS_ZED_EXTENSION_WARNING`]. [`Release::verify_package`] checks it against the
+    /// package. A client older than this field reads such a release as malformed and skips it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zed_extension: bool,
 }
 
 /// Where the registry CI built the package from (decision 15).
@@ -181,6 +188,10 @@ impl Canonical for Release {
         writer.strings(self.capabilities.iter().map(String::as_str));
         writer.strings(self.network_domains.iter().map(String::as_str));
         writer.strings(self.processes.iter().map(String::as_str));
+        // Written only when set, so every release signed before the field keeps its signature.
+        if self.zed_extension {
+            writer.bool(true);
+        }
         writer.finish()
     }
 }
@@ -251,6 +262,11 @@ impl Release {
                 )));
             }
         }
+        if self.zed_extension && self.tier != Tier::T2 {
+            return Err(invalid(
+                "a release that runs a Zed extension is T2, whatever it declares".into(),
+            ));
+        }
         if !self.network_domains.is_empty() && !self.capabilities.contains("network:fetch") {
             return Err(invalid(
                 "network_domains need the network:fetch capability".into(),
@@ -280,7 +296,8 @@ impl Release {
         Ok(())
     }
 
-    /// Checks downloaded package bytes against the signed size and hash.
+    /// Checks downloaded package bytes against the signed size and hash, and that a package with
+    /// a Zed `extension.wasm` has a release with `zed_extension` set.
     pub fn verify_package(&self, package: &[u8]) -> Result<(), Error> {
         let size = package.len() as u64;
         if size != self.package.size {
@@ -294,6 +311,14 @@ impl Release {
             return Err(Error::PackageMismatch(format!(
                 "{}@{} has sha256 {digest}, the index says {}",
                 self.id, self.version, self.package.sha256
+            )));
+        }
+        // The signature must not hide a Zed component: a package that has one needs a release
+        // that says so (owner's Q1). A flag without one only over-warns.
+        if crate::runs_zed_extension(package) && !self.zed_extension {
+            return Err(Error::PackageMismatch(format!(
+                "{}@{} has a Zed extension.wasm, and the release does not say zed_extension",
+                self.id, self.version
             )));
         }
         Ok(())
@@ -636,6 +661,7 @@ pub(crate) mod test_support {
             capabilities: ["ui:panel".to_string()].into(),
             network_domains: BTreeSet::new(),
             processes: BTreeSet::new(),
+            zed_extension: false,
         }
     }
 
@@ -669,6 +695,14 @@ pub(crate) mod test_support {
             capabilities: reader.strings()?.into_iter().collect(),
             network_domains: reader.strings()?.into_iter().collect(),
             processes: reader.strings()?.into_iter().collect(),
+            // Only ever written as `true`; a written `false` is not canonical.
+            zed_extension: if reader.is_empty() {
+                false
+            } else if reader.bool()? {
+                true
+            } else {
+                return None;
+            },
         };
         reader.finish()?;
         Some(release)
@@ -1022,6 +1056,53 @@ mod tests {
         );
     }
 
+    /// Owner's Q1 (revised): a package with a Zed `extension.wasm` is accepted, but its release
+    /// must say so, and is T2.
+    #[test]
+    fn a_zed_extension_release_is_declared_and_t2() {
+        let mut release = release("todo", "1.0.0");
+        let plain = release.canonical_bytes();
+        release.zed_extension = true;
+        assert_ne!(release.canonical_bytes(), plain, "the flag is signed");
+        release.zed_extension = false;
+        assert_eq!(
+            release.canonical_bytes(),
+            plain,
+            "old signatures still verify"
+        );
+
+        release.zed_extension = true;
+        assert!(
+            matches!(release.validate(), Err(Error::Invalid(message)) if message.contains("T2"))
+        );
+        release.tier = Tier::T2;
+        release.validate().expect("T2 with the flag");
+        let json = serde_json::to_value(&release).expect("json");
+        assert_eq!(json["zed_extension"], true);
+        release.zed_extension = false;
+        let json = serde_json::to_value(&release).expect("json");
+        assert!(json.get("zed_extension").is_none(), "omitted when false");
+    }
+
+    /// A package with a Zed `extension.wasm` needs `zed_extension` in its signed release.
+    #[test]
+    fn a_hidden_zed_extension_is_a_mismatch() {
+        // One central directory header naming `extension.wasm`: all `entry_names` reads.
+        let mut package = b"PK".to_vec();
+        package.resize(46, 0);
+        package[28] = 14;
+        package.extend_from_slice(b"extension.wasm");
+        let mut release = release("todo", "1.0.0");
+        release.package.size = package.len() as u64;
+        release.package.sha256 = Sha256Digest::of(&package);
+        assert!(matches!(
+            release.verify_package(&package),
+            Err(Error::PackageMismatch(message)) if message.contains("zed_extension")
+        ));
+        release.zed_extension = true;
+        assert_eq!(release.verify_package(&package), Ok(()));
+    }
+
     #[test]
     fn package_bytes_are_checked() {
         let release = release("todo", "1.0.0");
@@ -1059,12 +1140,22 @@ mod tests {
                 proptest::collection::btree_set("[a-z]{1,8}:[a-z]{1,8}", 0..4),
                 proptest::collection::btree_set("[a-z]{1,8}\\.[a-z]{2,4}", 0..3),
                 proptest::collection::btree_set("[a-z]{1,8}", 0..3),
+                any::<bool>(),
             ),
         )
             .prop_map(
                 |(
                     (id, (major, minor, patch), name, description, owners, sha256),
-                    (size, published_at, urgent, tier, capabilities, network_domains, processes),
+                    (
+                        size,
+                        published_at,
+                        urgent,
+                        tier,
+                        capabilities,
+                        network_domains,
+                        processes,
+                        zed_extension,
+                    ),
                 )| {
                     let mut release = release(&id, "0.0.0");
                     release.version = Version::new(major, minor, patch);
@@ -1079,6 +1170,7 @@ mod tests {
                     release.capabilities = capabilities;
                     release.network_domains = network_domains;
                     release.processes = processes;
+                    release.zed_extension = zed_extension;
                     release
                 },
             )

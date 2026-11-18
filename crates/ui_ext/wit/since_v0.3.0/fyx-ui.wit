@@ -177,6 +177,10 @@ interface types {
         disabled: bool,
         /// Shown on hover. At most 1024 bytes; the host truncates longer text.
         tooltip: option<string>,
+        /// The accessible name, read by screen readers; without it, `label` when it is not empty,
+        /// then the tooltip, then the icon's name. Set it for an icon-only button. At most 256
+        /// bytes; the host truncates longer text.
+        accessible-label: option<string>,
     }
 
     record input-props {
@@ -224,7 +228,8 @@ interface types {
     /// 0.3. Where an image comes from (design.md §12). `ui:images`.
     variant image-source {
         /// A PNG or SVG file in the extension package's `assets/` folder: a relative path with
-        /// `/` separators and no `..`, such as `assets/logo.svg`. At most 2 MiB on disk.
+        /// `/` separators and no `..`, such as `assets/logo.svg`, at most 1024 bytes and ending in
+        /// `.png` or `.svg`. At most 2 MiB on disk.
         asset(string),
         /// An image the extension made at run time, from `images.add-image`.
         generated(u32),
@@ -238,7 +243,7 @@ interface types {
     }
 
     /// 0.3. A raster or vector image, drawn inside its own box and clipped to it. Panels only:
-    /// an `image` in a status item, modal, picker or decoration tree rejects the update. Not
+    /// an `image` in a status item, modal or decoration tree rejects the update. Not
     /// interactive: a click on it is not an event.
     record image-props {
         source: image-source,
@@ -440,8 +445,9 @@ interface types {
 
     /// Caps: at most 2048 patches in one `patches`; at most 16384 nodes in a surface tree, which
     /// is also the cap for a `replace` and for `mount`, so a whole surface can always be resent;
-    /// at most 2048 nodes in one list row. An update that breaks a cap or does not fit the tree is
-    /// rejected whole, and the host mounts the surface again.
+    /// at most 2048 nodes in one list row; at most 64 levels from a root to its deepest node; at
+    /// most 8 MiB of text in a surface tree's props. An update that breaks a cap or does not fit
+    /// the tree is rejected whole, and the host mounts the surface again.
     variant update {
         unchanged,
         replace(list<node>),
@@ -481,9 +487,6 @@ interface types {
         row-selected(tuple<node-id, u32>),
         /// The host closed a modal surface; its tree is gone. The reply must be `unchanged`.
         dismissed(dismiss-reason),
-        /// 0.3, block decorations only: the line the decoration was anchored to was deleted. The
-        /// block stays where the anchor collapsed to until the extension moves or removes it.
-        orphaned,
         /// 0.3. A click on a `clickable` canvas, in canvas coordinates (after `scale-down`, so
         /// they match the draw list). Grants the click-or-Enter activation like `click`.
         canvas-click(canvas-click),
@@ -547,80 +550,53 @@ interface types {
     }
 
 
-    /// 0.3. A picker is a modal whose body the host draws: a query input and a fuzzy-filtered list
-    /// of items that sources supply (design.md, "Picker protocol"). It has the modal lifecycle:
-    /// `show-surface` after a click or Enter, one modal per window, `dismissed` when the user
-    /// closes it. The host never calls `mount` for a picker.
-    record picker-descriptor {
-        width: modal-width,
-        /// Shown in the empty query input.
-        placeholder: string,
-        /// Tab marks or unmarks the highlighted item; Enter accepts the marked items, or the
-        /// highlighted one when none is marked.
-        multi-select: bool,
-        /// Sources get every query change (debounced 100 ms) and answer with new items, instead of
-        /// the host filtering the items they gave when the picker opened.
-        dynamic: bool,
-        /// Other extensions may contribute sources to this picker (manifest
-        /// `[[fyx_ui.picker_sources]]`). Their items are shown by the host and never reach the owner.
-        open-to-sources: bool,
-        /// At most 2 extra ways to accept, one per key.
-        actions: list<picker-action>,
-    }
-
-    enum picker-action-key {
-        /// alt-Enter.
-        alt-enter,
-        /// ctrl-Enter, cmd-Enter on macOS.
-        secondary-enter,
-    }
-
-    record picker-action {
-        /// 1 to 64 bytes of `a-z`, `0-9`, `-`, `_`, `.`.
-        id: string,
-        /// At most 64 bytes; shown in the picker footer next to its key.
-        label: string,
-        key: picker-action-key,
-    }
-
     /// Panels and status items are mounted when they are added and live until removed. A modal
-    /// is mounted each time it is shown and its tree is dropped when it closes. A picker is never
-    /// mounted (0.3).
+    /// is mounted each time it is shown and its tree is dropped when it closes.
     variant surface-kind {
         panel(panel-descriptor),
         status-item(status-item-descriptor),
         modal(modal-descriptor),
-        picker(picker-descriptor),
     }
-
-    /// 0.3. An open document (an editor buffer), as the host names it to this extension. Stable
-    /// while the document is open; never reused for another document during the session.
-    type document-id = u64;
 
     enum decoration-placement { above, below }
 
-    /// 0.3. What a decoration is anchored in.
-    variant decoration-target {
-        /// Relative to a worktree root, `/`-separated, without `..` (`src/main.rs`), as in 0.2:
-        /// matched against every worktree of every open workspace, anchored in buffers that are
-        /// open now or opened later.
-        path(string),
-        /// One open document. The decoration is removed when that document closes.
-        document(document-id),
-    }
-
-    /// Where a block decoration goes. Only checked for syntax when `place-decoration` is called.
+    /// Where an editor decoration goes. Only checked for syntax when `place-decoration` is
+    /// called; the host anchors it in every open buffer of that file, and in buffers opened later.
     record decoration-location {
-        /// 0.3: replaces 0.2's `path: string`; `target: path(...)` behaves exactly like it.
-        target: decoration-target,
+        /// Relative to a worktree root, `/`-separated, without `..` (`src/main.rs`). Matched
+        /// against every worktree of every open workspace.
+        path: string,
         /// Zero-based row when the decoration is anchored. The host turns it into a CRDT anchor
         /// per buffer, so from then on the block moves with the line; rows past the end clamp to
         /// the last row. If the anchored line is deleted, the block stays where the anchor
-        /// collapses to and the extension gets `orphaned` (0.3).
+        /// collapses to.
         line: u32,
         placement: decoration-placement,
         /// Block height in editor lines; `none` lets the host estimate it from the tree.
         height-lines: option<u16>,
+    }
+
+    /// Zero-based line, and a column in UTF-8 bytes from the start of the line. A column that is
+    /// not on a character boundary is rejected with `invalid-argument`; one past the end of the
+    /// line clamps to the end.
+    record position {
+        line: u32,
+        column: u32,
+    }
+
+    /// Half-open: `start` is included, `end` is not.
+    record text-range {
+        start: position,
+        end: position,
+    }
+
+    /// A file in a worktree of an open workspace.
+    record file-ref {
+        /// Opaque id of the worktree, stable for the session. `none` in a request means "the one
+        /// worktree that has this path"; a path found in more than one is `invalid-argument`.
+        worktree: option<u64>,
+        /// Relative to the worktree root, `/`-separated, without empty, `.` or `..` components.
+        path: string,
     }
 
     record surface {
@@ -655,9 +631,14 @@ interface host {
         not-permitted,
         /// The host cannot do it now (no workspace window to show a modal in).
         unavailable,
-        /// 0.3. The user refused or revoked the capability, or the worktree is not trusted. The
-        /// manifest does declare it; `permissions.query` says which case it is.
+        /// 0.3. The user refused or revoked the capability. The manifest does declare it;
+        /// `permissions.query` says whether it is denied or unavailable.
         denied,
+        /// 0.3. The worktree the call works in is not trusted (Zed's restricted mode): T2 work
+        /// there is refused without a prompt until the user trusts it. Not a permission state.
+        untrusted-worktree,
+        /// 0.3. The call needs an open worktree and the window has none.
+        no-worktree,
     }
 
     record host-error {
@@ -669,15 +650,16 @@ interface host {
     /// effects). `ok` means the update passed the checks the host can make at once (the surface
     /// exists, the caps); it can still fail to fit the tree when it is applied, which remounts
     /// the surface. On `err` nothing was queued: the extension's mirror of that surface is now
-    /// ahead of the host and must be resent whole. At most 64 pushes per export call.
+    /// ahead of the host and must be resent whole. At most 64 pushes per export call, carrying at
+    /// most 32768 patches plus nodes together (two whole trees); past that, `limit-exceeded`.
     push-update: func(surface-id: string, update: update) -> result<_, host-error>;
 
     /// Asks for one `tick(surface-id)` call at least `delay-ms` after the current call returns.
     /// One pending tick per surface: a new request replaces the earlier one. The host clamps
     /// the delay up to 100 ms, and to 1000 ms while Fyx is in the background. A tick that falls
     /// due while its panel is hidden waits until the panel is shown and is then delivered once:
-    /// a panel opened hours later gets one tick, not a backlog (design.md, "Ticks"). Decorations
-    /// cannot request ticks.
+    /// a panel opened hours later gets one tick, not a backlog (design.md, "Ticks"). A delay over
+    /// 24 hours is `invalid-argument`. Decorations cannot request ticks.
     request-tick: func(surface-id: string, delay-ms: u32) -> result<_, host-error>;
 
     /// Drops the pending tick of a surface, if any.
@@ -695,12 +677,13 @@ interface host {
 
     /// Opens a modal in the active workspace window and focuses it, or reveals a panel there
     /// (opens its dock and activates it, without moving focus). Showing a modal needs a click or
-    /// Enter: it is allowed during `handle-event` for `click`, `row-click` or `input-submitted`,
-    /// or within 5 s after one, once. Typing (`input-changed`), `row-selected` and `dismissed`
-    /// do not count. Showing a surface that is already shown does nothing.
+    /// Enter: it is allowed during `handle-event` for `click`, `row-click`, `input-submitted` or
+    /// a clicked `notification-action`, or within 5 s after one, once. Typing (`input-changed`),
+    /// `row-selected` and `dismissed` do not count. Showing a surface that is already shown does
+    /// nothing.
     ///
-    /// 0.3: a picker is a modal for this rule. `handle-command` and an accepted picker item also
-    /// grant the click-or-Enter activation (design.md, "Gestures in 0.3").
+    /// 0.3: a `canvas-click` also grants the click-or-Enter activation (design.md, "Gestures in
+    /// 0.3").
     show-surface: func(surface-id: string) -> result<_, host-error>;
 
     /// Closes a modal (no `dismissed` event) or hides a panel's dock if that panel is active.
@@ -711,264 +694,28 @@ interface host {
     log: func(level: log-level, message: string);
 }
 
-/// 0.3. Positions, ranges and what the host tells an extension about a document.
-interface documents {
-    use types.{document-id};
-
-    /// Zero-based line, and a column in UTF-8 bytes from the start of the line. A column that is
-    /// not on a character boundary is rejected with `invalid-argument`; one past the end of the
-    /// line clamps to the end.
-    record position {
-        line: u32,
-        column: u32,
-    }
-
-    /// Half-open: `start` is included, `end` is not.
-    record text-range {
-        start: position,
-        end: position,
-    }
-
-    /// `count` lines from `start`.
-    record line-range {
-        start: u32,
-        count: u32,
-    }
-
-    /// A file in a worktree of an open workspace.
-    record file-ref {
-        /// Opaque id of the worktree, stable for the session. `none` in a request means "the one
-        /// worktree that has this path"; a path found in more than one is `invalid-argument`.
-        worktree: option<u64>,
-        /// Relative to the worktree root, `/`-separated, without empty, `.` or `..` components.
-        path: string,
-    }
-
-    variant document-origin {
-        file(file-ref),
-        /// One of this extension's own virtual documents (`fyx-ext://<id>/<path>`), by its path.
-        virtual(string),
-        /// Neither: an untitled buffer, or a file outside every worktree. The host never names it.
-        other,
-    }
-
-    record document-info {
-        id: document-id,
-        origin: document-origin,
-        /// The language name as the host knows it (`Rust`, `Markdown`), if any.
-        language: option<string>,
-        /// Grows with every change to the buffer; an edit can name the version it was computed
-        /// against.
-        version: u64,
-        line-count: u32,
-    }
-
-    /// Lines of a document, joined with `\n`, starting at `start-line`.
-    record text-slice {
-        start-line: u32,
-        text: string,
-    }
-
-    enum diagnostic-severity { error, warning, information, hint }
-
-    record diagnostic {
-        range: text-range,
-        severity: diagnostic-severity,
-        /// At most 4 KiB; longer messages are truncated.
-        message: string,
-        /// The language server or tool that reported it.
-        source: option<string>,
-    }
-
-    /// What a request tells the extension about a document. `text` and `selections` are filled
-    /// only for an extension granted `workspace:read-buffers`, `diagnostics` only for one granted
-    /// `workspace:diagnostics` (T1, design.md "N"); otherwise they are `none`.
-    record document-context {
-        info: document-info,
-        /// The lines the request is about (the visible range, the hovered line), plus up to 200
-        /// lines around them; at most 1 MiB.
-        text: option<text-slice>,
-        selections: option<list<text-range>>,
-        /// Diagnostics inside the lines of `text`, or of the requested range when `text` is
-        /// `none`; at most 1000.
-        diagnostics: option<list<diagnostic>>,
-    }
-
-    /// Which documents a provider or a decoration namespace wants requests for. A document
-    /// matches when its language is in `languages` or its worktree path matches one of `globs`
-    /// (globset syntax). Both empty matches every document of origin `file`.
-    record document-selector {
-        languages: list<string>,
-        globs: list<string>,
-    }
-}
-
 /// Editor decorations: retained `fyx:ui` trees drawn as blocks above or below a buffer line
-/// (0.2, design.md "L"), and 0.3's styled decorations in namespaces. Needs the
-/// `ui:editor-decorations` capability; without it every call returns `not-permitted`. Every
-/// function follows the effect rule of `host`.
+/// (design.md, "L"). Needs the `ui:editor-decorations` capability; without it every call returns
+/// `not-permitted`. Both functions follow the effect rule of `host`.
 ///
-/// A block decoration id lives in the same namespace as the extension's surface ids and follows
-/// the same id rule, so it must not equal a live surface id. Once placed, the id works like a
-/// surface id for `push-update`, `handle-event` (clicks, input, 0.3 `orphaned`), `list-rows` and
-/// `mount` (the host calls `mount(id)` to resync a decoration whose update did not fit), but not
-/// for `request-tick`, `show-surface` or `remove-surface`. At most 512 live block decorations per
-/// extension, not counted against the 32 surfaces.
+/// A decoration id lives in the same namespace as the extension's surface ids and follows the
+/// same id rule, so it must not equal a live surface id. Once placed, the id works like a surface
+/// id for `push-update`, `handle-event` (clicks, input), `list-rows` and `mount` (the host calls
+/// `mount(id)` to resync a decoration whose update did not fit), but not for `request-tick`,
+/// `show-surface` or `remove-surface`. At most 512 live decorations per extension, not counted
+/// against the 32 surfaces.
 interface decorations {
-    use types.{node, decoration-location, color-token, icon, document-id};
+    use types.{node, decoration-location};
     use host.{host-error};
-    use documents.{position, text-range, line-range, document-selector};
 
     /// Places a decoration with the initial tree `nodes` (at most 16384 nodes, parents first).
     /// Placing an id that is already a live decoration moves it and replaces its tree, like a
-    /// fresh mount.
+    /// fresh mount. At most 512 `place-decoration` and `remove-decoration` calls per export call;
+    /// past that, `limit-exceeded`.
     place-decoration: func(id: string, location: decoration-location, nodes: list<node>) -> result<_, host-error>;
 
     /// Removes a live decoration in every editor; no event is sent. The id may be placed again.
     remove-decoration: func(id: string) -> result<_, host-error>;
-
-    // ---- 0.3: styled decorations ----
-
-    /// A colour for decorations: a theme token, or one of the theme's accent colours (the ones
-    /// bracket colouring and indent guides use), taken modulo however many the theme has.
-    variant decoration-color {
-        token(color-token),
-        accent(u8),
-    }
-
-    enum underline-style { straight, wavy }
-
-    record underline {
-        style: underline-style,
-        color: option<decoration-color>,
-    }
-
-    /// Styles a range of text. Several styles on the same text merge; the extension that
-    /// defined its namespace later wins a conflict.
-    record inline-style {
-        range: text-range,
-        foreground: option<decoration-color>,
-        background: option<decoration-color>,
-        underline: option<underline>,
-        strikethrough: bool,
-        bold: bool,
-        italic: bool,
-    }
-
-    /// Muted text after the end of a line (inline blame, inline diagnostics). At most 256 bytes.
-    record eol-text {
-        line: u32,
-        text: string,
-        color: option<decoration-color>,
-    }
-
-    enum inline-side { before, after }
-
-    /// Text drawn between characters, which the cursor skips (an inlay). At most 64 bytes.
-    record inline-text {
-        position: position,
-        side: inline-side,
-        text: string,
-        color: option<decoration-color>,
-    }
-
-    /// What clicking a gutter sign or a code lens runs: one of the extension's own manifest
-    /// commands, called as `handle-command(command, argument, ...)`.
-    record command-invocation {
-        command: string,
-        /// Opaque to the host. At most 4 KiB.
-        argument: option<string>,
-    }
-
-    /// An icon in the gutter. One sign per line per extension: the last one given wins.
-    record gutter-sign {
-        line: u32,
-        icon: icon,
-        color: option<decoration-color>,
-        /// Shown on hover. At most 1024 bytes.
-        tooltip: option<string>,
-        on-click: option<command-invocation>,
-    }
-
-    /// Paints whole lines.
-    record line-background {
-        lines: line-range,
-        color: decoration-color,
-    }
-
-    /// A small square of a raw colour, drawn before or after `position` with a border, so it is
-    /// legible on any theme. The only place where a raw colour is accepted (`0xRRGGBBAA`).
-    record color-swatch {
-        position: position,
-        side: inline-side,
-        rgba: u32,
-    }
-
-    variant decoration {
-        inline-style(inline-style),
-        eol-text(eol-text),
-        inline-text(inline-text),
-        gutter-sign(gutter-sign),
-        line-background(line-background),
-        color-swatch(color-swatch),
-    }
-
-    record namespace-options {
-        /// When set, the host calls `provide-decorations` for matching documents as their visible
-        /// range changes (debounced 50 ms). When `none`, the namespace is filled with
-        /// `set-decorations` only.
-        pull: option<document-selector>,
-    }
-
-    /// Declares a namespace: 1 to 64 bytes of `a-z`, `0-9`, `-`, `_`, `.`, owned by this
-    /// extension. Defining it again replaces its options and keeps its decorations. At most 16
-    /// namespaces per extension.
-    define-namespace: func(namespace: string, options: namespace-options) -> result<_, host-error>;
-
-    /// Replaces the namespace's decorations in one open document: within `lines` only, or in
-    /// the whole document when `lines` is `none`. The host anchors every decoration, so it
-    /// follows edits until it is replaced. At most 10000 decorations per call, per namespace and
-    /// document, and 50000 per extension.
-    set-decorations: func(namespace: string, document: document-id, lines: option<line-range>, decorations: list<decoration>) -> result<_, host-error>;
-
-    /// Removes the namespace's decorations from every document. The namespace stays defined.
-    clear-namespace: func(namespace: string) -> result<_, host-error>;
-}
-
-/// 0.3. Hover and code lens contributions, drawn by the editor's own hover popover and code lens
-/// lines. `ui:hover` and `ui:code-lens` respectively.
-interface language {
-    use host.{host-error};
-    use documents.{document-selector};
-
-    enum provider-kind { hover, code-lens }
-
-    /// The host calls `provide-hover` or `provide-code-lenses` with the returned id for documents
-    /// that match. At most 16 providers per extension.
-    register-provider: func(kind: provider-kind, selector: document-selector) -> result<u32, host-error>;
-
-    unregister-provider: func(provider: u32);
-
-    /// Answers a hover that `provide-hover` left `pending`. Ignored after 3 s, or once the hover
-    /// popover has closed. `none` shows nothing.
-    resolve-hover: func(request: u64, markdown: option<string>) -> result<_, host-error>;
-}
-
-/// 0.3. Read-only editor tabs whose text the extension supplies, at `fyx-ext://<id>/<path>`.
-/// `ui:virtual-documents`. The host pulls the text with `provide-virtual-document`.
-interface virtual-documents {
-    use host.{host-error};
-
-    /// Opens the document in a tab of the active workspace window, or focuses its tab. Needs the
-    /// click-or-Enter activation, like `show-surface` on a modal. `path` follows the
-    /// worktree-path rule, at most 256 bytes.
-    open-virtual-document: func(path: string) -> result<_, host-error>;
-
-    /// The text changed: the host calls `provide-virtual-document` again if the document is open.
-    invalidate-virtual-document: func(path: string) -> result<_, host-error>;
-
-    /// Closes every tab of the document.
-    close-virtual-document: func(path: string) -> result<_, host-error>;
 }
 
 /// 0.3. The state of the T2 capabilities this extension declares, and a way to ask for one ahead
@@ -1058,7 +805,7 @@ interface network {
 /// 0.3. `process:spawn`: runs programs the manifest names (spec decision 24).
 interface process {
     use host.{host-error};
-    use documents.{file-ref};
+    use types.{file-ref};
 
     record spawn-request {
         /// A name from the manifest's `[[fyx_ui.processes]]`, never a path.
@@ -1097,6 +844,8 @@ interface process {
         not-found(string),
         limit-exceeded,
         io(string),
+        /// Anything else; the text says what.
+        other(string),
     }
 
     /// Starts the program after the current call returns and returns its id. Output arrives as
@@ -1116,23 +865,15 @@ interface process {
 /// 0.3. `workspace:edit`: text edits to files in the worktrees, as one undoable step each.
 interface workspace-edit {
     use host.{host-error};
-    use types.{document-id};
-    use documents.{text-range, file-ref};
+    use types.{text-range, file-ref};
 
     record text-edit {
         range: text-range,
         new-text: string,
     }
 
-    variant edit-target {
-        document(document-id),
-        file(file-ref),
-    }
-
     record file-edit {
-        target: edit-target,
-        /// Fails the whole edit with `conflict` if the document has changed since this version.
-        expected-version: option<u64>,
+        file: file-ref,
         /// Create the file if it does not exist (its parent directory must exist).
         create: bool,
         /// Non-overlapping, at most 4096 per edit in total.
@@ -1149,14 +890,22 @@ interface workspace-edit {
 
     variant edit-error {
         denied,
-        /// A file changed since `expected-version`.
+        /// A file changed while the edit was being applied.
         conflict(string),
         /// The path is outside every worktree, leaves it through a symlink, or names a protected
-        /// path (`.git/`, `.fyx/`, `.zed/`, `.vscode/`, the `private_files` setting).
+        /// path, at any depth and whatever the security mode: `.git/`, `.fyx/`, `.zed/`,
+        /// `.vscode/`, `.idea/`, agent configs (`.claude/`, `.codex/`, `.gemini/`, `.agents/`,
+        /// `.cursor/`, `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules`,
+        /// `.cursorrules`), the repository's `.fyx/security.toml` `read_only` patterns, or the
+        /// `private_files` setting.
         not-allowed(string),
         not-found(string),
         invalid(string),
         cancelled,
+        /// A file is in a worktree that is not trusted (Zed's restricted mode).
+        untrusted-worktree,
+        /// Anything else; the text says what.
+        other(string),
     }
 
     /// Applies the edit after the current call returns, all or nothing, and returns its id. The
@@ -1169,7 +918,7 @@ interface workspace-edit {
 /// accept, reject, comment on or submit a review.
 interface agent-observe {
     use host.{host-error};
-    use documents.{file-ref};
+    use types.{file-ref};
 
     enum hunk-decision { pending, accepted, rejected }
 
@@ -1218,7 +967,18 @@ interface agent-observe {
         submitted: bool,
         /// Empty when `file` is `none`. Cut after 256 KiB of hunk text, with `truncated` set.
         hunks: list<hunk-info>,
+        /// The hunks were cut (or dropped with `file`), and only that.
         truncated: bool,
+    }
+
+    /// Every open review. It replaces whatever the extension knew: it comes first after `start`,
+    /// and again whenever the host resyncs a feed that fell behind (more than 1024 events
+    /// queued), in which case the events in between are not sent.
+    record review-snapshot {
+        /// At most 1000, oldest first.
+        reviews: list<review-info>,
+        /// Older reviews were left out to stay within 1000.
+        older-dropped: bool,
     }
 
     record turn-file {
@@ -1228,8 +988,8 @@ interface agent-observe {
     }
 
     variant agent-event {
-        /// First event after `start`: every open review.
-        snapshot(list<review-info>),
+        /// First event after `start`, and after a resync.
+        snapshot(review-snapshot),
         opened(review-info),
         updated(review-info),
         resolved(review-info),
@@ -1270,97 +1030,6 @@ interface io {
     }
 }
 
-/// 0.3. What the host passes along with a request to an extension's provider exports.
-interface requests {
-    use documents.{document-context, position, line-range};
-    use decorations.{command-invocation};
-
-    enum decoration-reason {
-        /// The document was opened in an editor, or the namespace was defined.
-        opened,
-        /// The visible range moved.
-        scrolled,
-        /// The text changed.
-        edited,
-        /// The host asks again on its own: the theme changed, the extension reloaded, or a new
-        /// editor opened on the same document.
-        refresh,
-    }
-
-    record decoration-request {
-        namespace: string,
-        document: document-context,
-        /// The lines in view, plus one screen above and below.
-        lines: line-range,
-        reason: decoration-reason,
-    }
-
-    record hover-request {
-        provider: u32,
-        /// For `resolve-hover`.
-        request: u64,
-        document: document-context,
-        position: position,
-    }
-
-    variant hover-reply {
-        none,
-        /// Markdown, at most 64 KiB. Links open only when they are `https:`.
-        ready(string),
-        /// The answer comes later through `resolve-hover`.
-        pending,
-    }
-
-    record code-lens-request {
-        provider: u32,
-        document: document-context,
-        lines: line-range,
-    }
-
-    enum command-source { palette, keymap, code-lens, gutter-sign }
-
-    record command-context {
-        source: command-source,
-        /// The focused editor's document, if any.
-        document: option<document-context>,
-    }
-
-    enum picker-accept { enter, alt-enter, secondary-enter }
-
-    variant picker-source-event {
-        /// The picker opened; send items with `picker.set-items`. Carries the initial query.
-        opened(string),
-        /// Dynamic pickers only: the query changed (debounced 100 ms).
-        query-changed(string),
-        /// The highlighted item of this source changed, for a live preview. Coalesced; at most
-        /// every 50 ms.
-        highlighted(string),
-        /// The user accepted these items of this source, with that key.
-        accepted(tuple<list<string>, picker-accept>),
-        /// The picker closed, accepted or dismissed. No more events for this session.
-        closed,
-    }
-
-    /// One code lens line item, drawn like a language server's lens above `line`.
-    record code-lens {
-        line: u32,
-        /// At most 256 bytes.
-        title: string,
-        tooltip: option<string>,
-        on-click: option<command-invocation>,
-    }
-
-    record virtual-document {
-        /// At most 8 MiB.
-        text: string,
-        /// A language name the host knows (`JSON`, `Markdown`); plain text otherwise.
-        language: option<string>,
-        /// The tab title after the extension's name; the last path component when `none`. At
-        /// most 128 bytes.
-        title: option<string>,
-    }
-}
-
 /// 0.3. Images the extension makes at run time, for `image-source::generated` (design.md §12).
 /// `ui:images`. Package assets need no call.
 interface images {
@@ -1377,31 +1046,6 @@ interface images {
     /// Frees a generated image. Nodes that still show it show their alt text. Unknown handles
     /// are ignored. A reload or a disable frees all of them.
     remove-image: func(image: u32);
-}
-
-/// 0.3. Items for pickers: the owner's own picker surfaces and the sources this extension
-/// contributes to other pickers (manifest `[[fyx_ui.picker_sources]]`). `ui:picker`.
-interface picker {
-    use types.{icon};
-    use host.{host-error};
-
-    record picker-item {
-        /// Unique within the source; 1 to 128 bytes.
-        key: string,
-        /// What the host matches the query against, unless `filter-text` is set. At most 512 bytes.
-        label: string,
-        /// Muted text right of the label (a path, a branch). At most 512 bytes.
-        detail: option<string>,
-        icon: option<icon>,
-        filter-text: option<string>,
-    }
-
-    /// Sets the items of `source` for one showing of a picker (`session` from
-    /// `picker-source-event`). `source` is the picker's surface id for the owner, or the source id
-    /// from the manifest for a contributor. Replaces the items given before for this session
-    /// unless `append` is set. Items for a session that has closed are dropped without error.
-    /// At most 10000 items per source and session, and 2000 per call.
-    set-items: func(source: string, session: u64, items: list<picker-item>, append: bool) -> result<_, host-error>;
 }
 
 /// Notifications and progress (design.md, "M"). Needs the `ui:notifications` capability (tier
@@ -1443,8 +1087,9 @@ interface notifications {
     }
 
     /// Shows a notification in the active workspace window, without moving focus, and returns its
-    /// id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension;
-    /// past either, `limit-exceeded`, and the title is written to the log instead.
+    /// id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension, and
+    /// 4 `notify` and `dismiss-notification` calls together per export call; past any,
+    /// `limit-exceeded`, and the title is written to the log instead.
     notify: func(notification: notification) -> result<u64, host-error>;
 
     /// Closes a notification of this extension; no event is sent. Unknown or closed ids are
@@ -1492,16 +1137,10 @@ interface notifications {
 world ui-extension {
     use types.{surface, node, node-id, ui-event, update, list-row};
     use io.{io-event};
-    use decorations.{decoration};
-    use requests.{decoration-request, hover-request, hover-reply, code-lens-request, code-lens, command-context, picker-source-event, virtual-document};
 
     import host;
     import decorations;
     import notifications;
-    import documents;
-    import language;
-    import virtual-documents;
-    import picker;
     import images;
     import permissions;
     import network;
@@ -1517,7 +1156,7 @@ world ui-extension {
 
     /// The whole tree of a surface (at most 16384 nodes): when a panel or status item is added,
     /// each time a modal is shown, and again whenever the host resyncs after an update that did
-    /// not fit, which for a decoration replaces the tree it was placed with. Never for a picker.
+    /// not fit, which for a decoration replaces the tree it was placed with.
     export mount: func(surface-id: string) -> result<list<node>, string>;
 
     /// At most one call per input event; the host debounces scroll, hover and typing.
@@ -1534,25 +1173,4 @@ world ui-extension {
     /// The outcome of a fetch, a process, an edit, an agent-review event or a permission change.
     /// Not tied to a surface: push to surfaces with `push-update`.
     export handle-io: func(event: io-event) -> result<_, string>;
-
-    /// One of the manifest's `[[fyx_ui.commands]]` ran (palette, keymap, code lens, gutter
-    /// sign). The call has the click-or-Enter activation.
-    export handle-command: func(command: string, argument: option<string>, context: command-context) -> result<_, string>;
-
-    /// Decorations of a pull namespace for `request.lines`; they replace the namespace's
-    /// decorations in those lines. At most 10000.
-    export provide-decorations: func(request: decoration-request) -> result<list<decoration>, string>;
-
-    export provide-hover: func(request: hover-request) -> result<hover-reply, string>;
-
-    /// At most 256 lenses, 8 per line.
-    export provide-code-lenses: func(request: code-lens-request) -> result<list<code-lens>, string>;
-
-    /// The text of one of this extension's virtual documents, when its tab opens, after
-    /// `invalidate-virtual-document`, and after a reload of the extension.
-    export provide-virtual-document: func(path: string) -> result<virtual-document, string>;
-
-    /// Events of a picker session for one source of this extension (`source` as in
-    /// `picker.set-items`). The owner gets `dismissed` through `handle-event` as for any modal.
-    export picker-source-event: func(source: string, session: u64, event: picker-source-event) -> result<_, string>;
 }

@@ -390,3 +390,86 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   refused, a reply fails). `Tree::text_bytes()` for the Inspector.
 - 0.1's tree is unchanged. Not counted: list-row trees, each built and dropped per fetch and
   bounded by `max_nodes_per_update` and the per-call text cap.
+
+## integration-5 B items (2026-11-18)
+
+- **R2** (`011d142682`, `0e60df0e1d`): a snapshot is verified against the keyset without the
+  keys the previous one revoked; every revocation carries over; only a rotation-key snapshot
+  lifts one. Old `state.json` (`protected_revocations`) still restores.
+- **S2**: `ui_ext::protected` holds the agent-config rule list (moved from fyx_guard, which now
+  uses it). `workspace:edit` refuses `.git`, `.fyx`, `.zed`, `.vscode`, `.idea` at any depth and
+  every agent config (`.claude/`, `.codex/`, `.mcp.json`, `AGENTS.md`, ...) in every mode.
+  `fyx_guard::extension_write_denial` (mode-independent) for W3's host side.
+- **S1**: `fyx_guard::extension_read_denial` (private_files + `.fyx/security.toml`,
+  mode-independent; repo policies now load in every mode) for W3's observe feed; as a floor,
+  `ui_ext::observe::cut_review` drops the path and hunks of Zed's default private files.
+- **S4**: with Fyx's proxy set, `network:fetch` to a declared domain is refused (`other`,
+  "does not go through proxies yet"): reqwest cannot CONNECT to the checked address and keep
+  the name for SNI, so the proxy would resolve again. Proxy URLs with credentials are never used.
+  `localhost` still goes direct. Revisit with a hand-made CONNECT tunnel if proxied fetches matter.
+- **S6**: more forbidden names (git's programs and dirs, pagers and editors, Java/.NET/Perl/Node/
+  Lua/PowerShell module paths, `RUSTC*`, `NPM_CONFIG_*`, `YARN_*`, `CARGO_*`, `COR_*`, `PATH`,
+  `PATHEXT`, `ComSpec`); the program's PATH drops empty, relative and worktree entries; no
+  `args` patterns now means no arguments (`["**"]` for any).
+- **S7**: `authorization`, `cookie`, `proxy-authorization` are dropped on a cross-origin
+  redirect.
+- **M2** (host side): `UiExtension::decoration_closed(id)`: a decoration the renderer dropped
+  stops counting toward the 512 and loses its notifications, like `modal_closed`. W3 calls it.
+- Drift: `ALL_UI_CAPABILITIES` should gain `ui:canvas`; held until W4 adds it to the harness's
+  `ALL_CAPABILITIES` (the conformance test compares them).
+
+## integration-5 A items (2026-11-18)
+
+- **A2** (`cd9c665a92`): `MAX_FROZEN_VERSION` is an explicit 0.2.0; 0.2 loads in Stable and
+  Preview, 0.3 stays staged. The comment says never to use `MAX_VERSION` for it.
+- **A4**: `UiManifest::read` reads `api_version` first (a 0.4 manifest says "targets 0.4.0", not
+  "unknown field"), then the world's manifest. `UiManifest::check_world` applies
+  migration.md §2's table: per-version capabilities (error, not warning), and the 0.3 tables
+  (`network`, `processes`, `process`, `commands`, `picker_sources`) only from 0.3.
+  `[[fyx_ui.commands]]` (`id`, `title` ≤ 128, ≤ 64) and `[[fyx_ui.picker_sources]]` (`id`,
+  `picker = "<extension>/<surface>"`, ≤ 64) are accepted and checked; nothing uses them yet.
+  If the scope decision moves them to 0.4, only the version gate changes.
+- **A6**: doc comments only, in both WIT files where the text is copied forward (so 0.2 and 0.3
+  stay identical there): depth 64 and 8 MiB of tree text (`update`), 32768 pushed items
+  (`push-update`), 24 h tick delay (`request-tick`), 512 decoration calls (`place-decoration`),
+  4 notify/dismiss calls (`notify`), `notification-action` as a gesture (`show-surface`); 0.3
+  only: `canvas-click` as a gesture, the protected paths of `edit-error.not-allowed`, the asset
+  path rule. `docs/fyx/api/*.md` regenerated.
+
+## R8 (integration-5): age gate from first sight
+
+The 24 h gate counts from the later of `published_at` and when this client first saw the release (`FirstSeen`, kept in the snapshot state, carried across snapshots). The first index a client ever accepts records `published_at`. A backdated release from a leaked release key still waits 24 h.
+
+## Owner decisions 2026-11-19 (A3, A5, Q1, Q2; Q5/Q8/Q10 checked)
+
+- A3 (a8c2fee176): the smaller 0.3. The staged WIT has no documents, language, virtual-documents, picker or requests interface, no decoration extras or document targets, and no provider, command or picker exports. position, text-range and file-ref are in types; workspace-edit edits files only. 0.3 links 0.2's decorations. The 0.3 manifest refuses the 0.4 capabilities ("planned for a later version"), and commands and picker_sources are unknown fields.
+- A5 (8b1c611f44): host-error-code gains untrusted-worktree and no-worktree; edit-error gains untrusted-worktree and other; spawn-error gains other; snapshot is review-snapshot {reviews, older-dropped}, and truncated means hunks only.
+- Q1, revised (047e0ac8da replaces 17acb5ed05): a package with a Zed extension.wasm is accepted. The signed Release has zed_extension (in the canonical bytes only when true; was runs_zed_extension in 047e0ac8da), such a release must be T2, and verify_package checks the flag against the package. The template derives the flag and the T2 tier. W3 owns the warning text (RUNS_ZED_EXTENSION_WARNING).
+- Q2 (eac5325c40): ui_ext::process::RUNS_ANY_CODE, runs_any_code and RUNS_ANY_CODE_PROMPT. Not done: registry review needs args patterns or a written reason. The template refuses T2 today, and a release lists process names only, without args, so this waits until T2 opens in the registry.
+- Q5: apply-edit needs no gesture (only permissions.request takes the activation); showing edits is W3's. Q8: cut_review keeps whole hunks up to 256 KiB for worktree files and nothing outside them. Q10: the prompt is W3's UI; the host side needs no change.
+
+## Handoff (2026-11-19, before a context clear)
+
+- **Branch:** claude/fyx-w2c-host-0-2-cbde2c, pushed. fyx/main is merged in (b1c9047ebf), and so is the R8 WIP branch.
+- **Ready, not merged yet:** the gatekeeper must merge after W3's and W4's break-list fixes. These commits break their crates until then:
+  - 550990dfe8: button accessible-label.
+  - 8abde04072: A2, 0.2 frozen at an explicit 0.2.0.
+  - 7c4ee5b5d8: ui:notifications at 0.1 says it needs 0.2.
+  - da05f68c1b: R8.
+  - 6c8af501ac: R6.
+  - 107cae0d51 and 1a0941361f: prescan_svg.
+  - a8c2fee176: A3.
+  - 8b1c611f44: A5.
+  - eac5325c40: Q2.
+  - 047e0ac8da: Q1, revised.
+- **Pending on others:**
+  - W4: SDK, harness and gallery for accessible-label, A3 and A5; the harness must link 0.3 decorations, and api_state's no-worktree must use HostErrorCode::NoWorktree; sdk-reference.md names handle-command and picker-source-event.
+  - W3: primitive_tests.rs:41 accessible_label; the renderer's accessible name; agent_observe Snapshot is a struct variant; workspace_edit untrusted becomes EditError::UntrustedWorktree; registry_service_tests.rs:139 needs zed_extension; the Q1 warning and the Q2 prompt text.
+- **Open items:**
+  - Q2's registry review rule (args patterns or a written reason): wait until T2 opens in the registry template (the coordinator agreed). Releases list process names only, so the args must be added to the release first.
+  - Q9: 0.1 and 0.2 loading is removed at the 1.0 cut, after the 0.3 freeze. Nothing is removed yet.
+- **Gotchas:**
+  - fyx-build-demos and the ui_ext_wasm suite need W4's crates. To test before W4 lands, patch them locally with the scratchpad scripts tmp_w4.py, tmp_w4_a3.py and tmp_w4_a5.py, then `git checkout -- crates/fyx_ext_harness crates/ui_ext_sdk` before committing.
+  - ui_ext's t2 modules (process, network, edit, observe) are tested only with `--all-features`.
+  - Working copies are CRLF, so edit scripts must read in text mode.
+  - Run `bash script/fyx-prune-target <target>` after tests.

@@ -8,6 +8,11 @@ on:
     branches: [main]
     paths: ["blocklist/**"]
   workflow_dispatch:
+    inputs:
+      first_run:
+        description: "Nothing is published yet: start at sequence 1 (integration-5 R6)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,12 +35,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          FIRST_RUN: ${{ inputs.first_run }}
         run: |
           image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
           echo "IMAGE=$image" >> "$GITHUB_ENV"
           mkdir -p published
+          # Any download error fails the job; sequence 1 only with first_run (R6).
+          first_run=()
+          if [ "$FIRST_RUN" = "true" ]; then first_run=(--first-run); fi
+          python3 scripts/published.py --repo "$REPO" --dir published "${first_run[@]}" blocklist.json
           sequence=1
-          if gh release download index --repo "$REPO" --pattern blocklist.json --dir published; then
+          if [ -f published/blocklist.json ]; then
             sequence=$(( $(jq -r .signed.sequence published/blocklist.json) + 1 ))
           fi
           python3 scripts/registry.py blocklist blocklist/blocklist.toml --sequence "$sequence" \

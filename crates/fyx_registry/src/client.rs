@@ -18,7 +18,7 @@ use std::future::Future;
 
 use crate::update::Additions;
 use crate::{
-    BlocklistCache, CacheUpdate, Error, ExtensionId, Freshness, Index, InstallRefusal,
+    BlocklistCache, CacheUpdate, Error, ExtensionId, FirstSeen, Freshness, Index, InstallRefusal,
     InstalledExtension, Keyset, MAX_BLOCKLIST_SIZE, Permissions, PlannedAction, Release, Timestamp,
     VerifiedBlocklist, VerifiedIndex, VerifiedSnapshot, plan_install, plan_updates,
     snapshot::MAX_SNAPSHOT_SIZE,
@@ -250,6 +250,12 @@ impl RegistryClient {
                 previous.sequence() == snapshot.sequence()
                     && previous.revoked_keys() == snapshot.revoked_keys()
             });
+        // When this client first saw each release: the age gate counts from it (R8).
+        let mut snapshot = snapshot;
+        let first_index = self.snapshot.is_none() && snapshot.first_seen().is_empty();
+        snapshot
+            .first_seen_mut()
+            .record(&verified, now, first_index);
         self.snapshot = Some(snapshot);
         self.index = Some(AcceptedIndex {
             bytes: index_bytes,
@@ -339,6 +345,13 @@ impl RegistryClient {
         self.blocklist.as_ref()
     }
 
+    fn first_seen(&self) -> &FirstSeen {
+        static NONE: std::sync::LazyLock<FirstSeen> = std::sync::LazyLock::new(FirstSeen::default);
+        self.snapshot
+            .as_ref()
+            .map_or(&NONE, VerifiedSnapshot::first_seen)
+    }
+
     /// For the "Block list is N days old" warning.
     pub fn blocklist_freshness(&self, now: Timestamp) -> Freshness {
         BlocklistCache::freshness(self.blocklist.as_ref(), now)
@@ -352,8 +365,8 @@ impl RegistryClient {
         now: Timestamp,
     ) -> Result<InstallPlan<'_>, InstallError> {
         let index = self.index(now).map_err(InstallError::Unavailable)?;
-        let release =
-            plan_install(id, index, self.blocklist(), now).map_err(InstallError::Refused)?;
+        let release = plan_install(id, index, self.blocklist(), self.first_seen(), now)
+            .map_err(InstallError::Refused)?;
         Ok(InstallPlan {
             release,
             consent: Permissions::default().additions(release),
@@ -369,7 +382,7 @@ impl RegistryClient {
         now: Timestamp,
     ) -> Vec<PlannedAction> {
         let index = self.index(now).unwrap_or(&self.empty);
-        plan_updates(installed, index, self.blocklist(), now)
+        plan_updates(installed, index, self.blocklist(), self.first_seen(), now)
     }
 
     /// Downloads a release's package and checks it against the signed size and SHA-256 before

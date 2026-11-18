@@ -9,6 +9,7 @@ mod blocklist;
 mod canonical;
 mod client;
 mod index;
+mod package;
 mod signing;
 mod snapshot;
 mod text;
@@ -32,13 +33,17 @@ pub use index::{
     INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
     RejectedRelease, Release, Source, VerifiedIndex,
 };
+pub use package::{
+    RUNS_ZED_EXTENSION_WARNING, ZED_EXTENSION_WASM, entry_names, is_zed_extension_wasm,
+    runs_zed_extension,
+};
 pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
 pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};
 pub use text::is_public_suffix;
 pub use update::{
-    AGE_GATE, Action, Additions, AgeGate, HoldReason, InstallRefusal, InstalledExtension,
-    InstalledVersion, Origin, Permissions, PlanChanges, PlannedAction, UpdateReason, age_gate,
-    check_local_version, plan_install, plan_updates,
+    AGE_GATE, Action, Additions, AgeGate, FirstSeen, HoldReason, InstallRefusal,
+    InstalledExtension, InstalledVersion, Origin, Permissions, PlanChanges, PlannedAction,
+    UpdateReason, age_gate, age_gate_seen, check_local_version, plan_install, plan_updates,
 };
 
 /// The documents this crate reads, for error messages.

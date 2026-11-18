@@ -379,9 +379,10 @@ Fyx does.
 (0.3). A file over 2 MiB is an error. These are warnings, because Fyx draws the image's alt text
 instead and does not fail the update:
 
-- a file that is not a valid PNG or SVG;
+- a file that is not a valid PNG or SVG (a compressed `.svgz` is not one);
 - a PNG over 2048 px on a side;
 - an SVG that declares XML entities;
+- an SVG whose `<style>` uses `url(…)`;
 - a name an image node cannot use.
 
 An SVG with `<image>`, `<script>` or `<foreignObject>` is also a warning, since Fyx drops those
@@ -1015,6 +1016,14 @@ remove_image(old_chart);
 - **A bad image is not an update error:** a missing or broken asset, or a freed handle, draws the
   alt text and logs a warning. `fyx-ext check` reports assets over 2 MiB, invalid files, and SVGs
   whose parts Fyx drops.
+- **SVGs that Fyx refuses** (it draws the alt text instead):
+  - `url(…)` inside `<style>`: set `fill` or `style` on the element instead;
+  - compressed `.svgz` files;
+  - XML entity declarations;
+  - `<use>` and `url(#…)` references that expand past 100 000 nodes or 16 levels, or form a cycle;
+  - elements nested over 256 deep.
+
+  Fyx checks these before it parses, for assets and for `add_image` bytes alike.
 - **The demo:** `extensions/fyx_demo_images`.
 
 ### Canvases (0.3)
@@ -1101,7 +1110,7 @@ name = "git"
 args = ["status", "**"]
 
 [fyx_ui.process]
-env = ["GIT_DIR"]
+env = ["NO_COLOR"]
 ```
 
 ```rust
@@ -1121,9 +1130,13 @@ fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
 - **Permissions:** the first spawn asks the user, and it needs an open, trusted worktree.
 - **Limits:**
   - at most 4 processes;
-  - the arguments must fit the declared patterns;
-  - only the declared environment names, and never names that load code into a program (such
-    as `LD_*` or `NODE_OPTIONS`).
+  - the arguments must fit the declared patterns: one per position, a literal, `*` inside one
+    for any text, or `**` last for any rest;
+  - a program without `args` runs with no arguments only. Any arguments need `args = ["**"]`,
+    which the consent prompt shows. `fyx-ext check` warns about a program without `args`;
+  - only the declared environment names. Fyx never passes names that load code into a program
+    or redirect it, such as `LD_*`, `NODE_OPTIONS`, git's `GIT_DIR` and editors, `CARGO_*` or
+    `PATH`; the manifest check refuses them (`ui_ext::process::is_forbidden_env`).
 - **Stdin:** `.stdin()` keeps it open for `write_stdin` until `close_stdin`.
 
 ### Editing files and watching agent reviews (0.3)

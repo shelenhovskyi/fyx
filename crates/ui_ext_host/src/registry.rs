@@ -244,6 +244,12 @@ struct Found {
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
 
+/// Tests that need the registry as the global without the whole `init`.
+#[cfg(test)]
+pub(crate) fn set_global_for_tests(registry: Entity<UiExtensionRegistry>, cx: &mut App) {
+    cx.set_global(GlobalRegistry(registry));
+}
+
 impl Global for GlobalRegistry {}
 
 impl UiExtensionRegistry {
@@ -1038,6 +1044,42 @@ Environment it may pass: {}",
         }
         surface.state.update(cx, |state, cx| state.show(cx));
         cx.emit(RegistryEvent::ShowModal { key, workspace });
+    }
+
+    /// The modal layer did not take a modal that `show-surface` opened (the open modal refused to
+    /// close, or the window went): it is closed again and the extension is told, as when there is
+    /// no window, so a later `show-surface` opens it (integration-5 M4).
+    pub(crate) fn modal_not_shown(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(surface) = self.surface(key) else {
+            return;
+        };
+        let (extension_id, surface_id, state) = (
+            surface.extension_id.clone(),
+            surface.surface_id.clone(),
+            surface.state.clone(),
+        );
+        if !state.read(cx).is_open() {
+            return;
+        }
+        log::warn!("fyx:ui: {extension_id}: the modal {surface_id:?} could not be shown");
+        state.update(cx, |state, cx| state.close(None, cx));
+        if let Some(backend) = self.backends.get(&extension_id) {
+            backend.modal_closed(&surface_id);
+        }
+    }
+
+    /// The renderer removed an extension decoration that failed to mount (integration-5 M2): its
+    /// notifications and progresses go, and the instance is told.
+    pub(crate) fn decoration_closed(
+        &mut self,
+        extension_id: &str,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_notifications_of(extension_id, Some(id), cx);
+        if let Some(backend) = self.backends.get(extension_id) {
+            backend.decoration_closed(id);
+        }
     }
 
     /// The extension closed a modal: nothing is sent to it.
@@ -2613,9 +2655,17 @@ fn open_modal(
     };
     let weak = cx.weak_entity();
     workspace.hide_modal(window, cx);
-    workspace.toggle_modal(window, cx, move |window, cx| {
-        ExtensionModal::new(key, state, weak, window, cx)
+    workspace.toggle_modal(window, cx, {
+        let key = key.clone();
+        move |window, cx| ExtensionModal::new(key, state, weak, window, cx)
     });
+    // The open modal can refuse to close, and then the layer builds nothing.
+    let shown = workspace
+        .active_modal::<ExtensionModal>(cx)
+        .is_some_and(|modal| *modal.read(cx).key() == key);
+    if !shown {
+        registry.update(cx, |registry, cx| registry.modal_not_shown(&key, cx));
+    }
 }
 
 /// Brings the workspace's containers in line with the registry: adds the missing panels and

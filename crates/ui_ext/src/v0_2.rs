@@ -227,12 +227,24 @@ pub struct ButtonProps {
     pub disabled: bool,
     /// Kept as the extension sent it; [`ButtonProps::tooltip_text`] is what the host shows.
     pub tooltip: Option<String>,
+    /// The accessible name (integration-5 A5), read by screen readers; without it, a non-empty
+    /// `label`, then the tooltip, then the icon's name. Kept as the extension sent it;
+    /// [`ButtonProps::accessible_label_text`] is what the host uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessible_label: Option<String>,
 }
 
 impl ButtonProps {
     /// The tooltip as drawn: at most [`MAX_TOOLTIP_BYTES`], cut at a character boundary.
     pub fn tooltip_text(&self) -> Option<&str> {
         self.tooltip.as_deref().map(truncate_tooltip)
+    }
+
+    /// The accessible label as used: at most [`MAX_LABEL_BYTES`], cut at a character boundary.
+    pub fn accessible_label_text(&self) -> Option<&str> {
+        self.accessible_label
+            .as_deref()
+            .map(|label| truncate_to(label, MAX_LABEL_BYTES))
     }
 }
 
@@ -266,7 +278,7 @@ pub struct InputProps {
     pub label: Option<String>,
 }
 
-/// The most bytes of an input's accessible label the host uses.
+/// The most bytes of an input's or a button's accessible label the host uses.
 pub const MAX_LABEL_BYTES: usize = 256;
 
 impl InputProps {
@@ -337,6 +349,7 @@ impl Props {
                 props.label.len()
                     + props.icon.as_ref().map_or(0, icon_len)
                     + option_len(&props.tooltip)
+                    + option_len(&props.accessible_label)
             }
             Props::Input(props) => {
                 props.value.len() + props.placeholder.len() + option_len(&props.label)
@@ -600,6 +613,11 @@ pub enum HostErrorCode {
     /// 0.3: the user refused or revoked a T2 capability the manifest declares. A 0.2 component
     /// never gets it; it sees `not-permitted`.
     Denied,
+    /// 0.3 (integration-5 A5): the worktree a T2 call works in is not trusted (restricted mode).
+    /// A 0.2 component never gets it; it sees `not-permitted`.
+    UntrustedWorktree,
+    /// 0.3: the call needs an open worktree and there is none. A 0.2 component sees `unavailable`.
+    NoWorktree,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +644,7 @@ impl From<v0_1::ButtonProps> for ButtonProps {
             style: props.style,
             disabled: props.disabled,
             tooltip: None,
+            accessible_label: None,
         }
     }
 }
@@ -938,6 +957,16 @@ mod tests {
             Some("a".repeat(MAX_LABEL_BYTES - 1).as_str())
         );
         assert_eq!(InputProps::default().label_text(), None);
+
+        let button = ButtonProps {
+            accessible_label: Some(format!("{}é", "a".repeat(MAX_LABEL_BYTES - 1))),
+            ..ButtonProps::default()
+        };
+        assert_eq!(
+            button.accessible_label_text(),
+            Some("a".repeat(MAX_LABEL_BYTES - 1).as_str())
+        );
+        assert_eq!(ButtonProps::default().accessible_label_text(), None);
     }
 
     #[test]
@@ -1005,6 +1034,7 @@ mod tests {
                     style: ButtonStyle::Filled,
                     disabled: false,
                     tooltip: Some("Run it".into()),
+                    accessible_label: None,
                 }),
             ),
         ]);
@@ -1083,6 +1113,7 @@ mod tests {
                 style: ButtonStyle::Subtle,
                 disabled: true,
                 tooltip: None,
+                accessible_label: None,
             })
         );
         let surface = Surface::from(v0_1::Surface {

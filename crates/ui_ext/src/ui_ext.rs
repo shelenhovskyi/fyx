@@ -16,6 +16,7 @@ pub mod network;
 pub mod observe;
 #[cfg(feature = "t2")]
 pub mod process;
+pub mod protected;
 mod tree;
 mod types;
 pub mod v0_2;

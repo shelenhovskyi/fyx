@@ -372,6 +372,8 @@ struct FakeExtension {
     event_effects: RefCell<Vec<HostEffect>>,
     /// The next event fails like a trapped instance (an error without a `ReplyError`).
     trap_next_event: Cell<bool>,
+    /// Decorations the renderer reported as closed.
+    closed: RefCell<Vec<String>>,
 }
 
 impl FakeExtension {
@@ -382,6 +384,7 @@ impl FakeExtension {
             mount_label: RefCell::new(Some("mounted".into())),
             event_effects: RefCell::default(),
             trap_next_event: Cell::new(false),
+            closed: RefCell::default(),
         })
     }
 
@@ -427,6 +430,10 @@ fn todo_tree(text: &str) -> Vec<Node> {
 impl UiBackend for FakeExtension {
     fn extension_id(&self) -> &str {
         self.id
+    }
+
+    fn decoration_closed(&self, id: &str) {
+        self.closed.borrow_mut().push(id.to_string());
     }
 
     fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
@@ -750,6 +757,15 @@ async fn test_extension_decoration_moves_resyncs_and_is_removed_on_failed_mount(
 ) {
     let decorations = init(cx);
     let extension = FakeExtension::new("ext");
+    // The registry hears of a failed decoration's removal (integration-5 M2).
+    let registry = cx.new(|_| UiExtensionRegistry::trusting());
+    cx.update(|cx| {
+        crate::registry::set_global_for_tests(registry.clone(), cx);
+        let backend: Rc<dyn UiBackend> = extension.clone();
+        registry.update(cx, |registry, cx| {
+            registry.register_backend(backend, &[], cx)
+        });
+    });
     let (project, buffer) = scratch_buffer("a\nb\nc\n", cx).await;
     let first = place(
         &decorations,
@@ -827,6 +843,11 @@ async fn test_extension_decoration_moves_resyncs_and_is_removed_on_failed_mount(
             .read_with(vcx, |decorations, _| decorations
                 .blocks_in(editor.entity_id(), resynced))
             .is_empty()
+    );
+    assert_eq!(
+        *extension.closed.borrow(),
+        ["todo"],
+        "the host side is told"
     );
 }
 

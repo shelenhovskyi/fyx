@@ -129,10 +129,11 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
 pub const MAX_VERSION: Version = Version::new(0, 3, 0);
-/// The newest frozen version. Newer ones are staged: they load only where
-/// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). The
-/// commit that declares 0.2 frozen sets this to [`MAX_VERSION`].
-pub const MAX_FROZEN_VERSION: Version = Version::new(0, 1, 0);
+/// The newest frozen version: 0.2 (integration-5 A2). Newer ones are staged: they load only where
+/// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). Freezing a
+/// version names it here explicitly; never set this to [`MAX_VERSION`], which may be a staged
+/// world (0.3 now).
+pub const MAX_FROZEN_VERSION: Version = Version::new(0, 2, 0);
 
 /// Custom section with the `fyx:ui` version a component targets: three big-endian `u16`s, the same
 /// encoding as `zed:api-version`.
@@ -226,12 +227,13 @@ pub fn staged_api_allowed_by_default() -> bool {
 }
 
 /// Every capability a surface or decoration can need, for a load without a manifest.
-const ALL_UI_CAPABILITIES: [&str; 6] = [
+const ALL_UI_CAPABILITIES: [&str; 7] = [
     CAPABILITY_PANEL,
     CAPABILITY_STATUS_BAR,
     CAPABILITY_MODAL,
     CAPABILITY_EDITOR_DECORATIONS,
     ui_ext::image::CAPABILITY_IMAGES,
+    ui_ext::canvas::CAPABILITY_CANVAS,
     ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
 ];
 
@@ -316,6 +318,47 @@ pub struct UiManifest {
     pub network: Option<NetworkManifest>,
 }
 
+/// What each world's manifest may declare (wit-0.3/migration.md §2): a capability a world cannot
+/// use is an error, not a warning, so the install dialog never asks consent for it.
+fn world_capabilities(version: &Version) -> &'static [&'static str] {
+    const V0_1: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        // Accepted, unused: the 0.2 migration declares them before the component moves.
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+    ];
+    const V0_2: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+    ];
+    // The smaller 0.3 (owner, 2026-11-19): pickers, hover, code lenses, virtual documents,
+    // commands and document context are 0.4's, so their capabilities are refused here.
+    const V0_3: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+        ui_ext::image::CAPABILITY_IMAGES,
+        ui_ext::canvas::CAPABILITY_CANVAS,
+        network::CAPABILITY_NETWORK,
+        process::CAPABILITY_PROCESS,
+        edit::CAPABILITY_EDIT,
+        observe::CAPABILITY_OBSERVE,
+    ];
+    if *version >= Version::new(0, 3, 0) {
+        V0_3
+    } else if *version >= Version::new(0, 2, 0) {
+        V0_2
+    } else {
+        V0_1
+    }
+}
+
 /// `[fyx_ui.network]`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,6 +422,53 @@ impl UiManifest {
             .chain(programs)
             .chain(env)
             .collect()
+    }
+
+    /// What the manifest's world may declare (wit-0.3/migration.md §2): its capabilities, and the
+    /// 0.3 tables (`network`, `processes`, `process`) only from 0.3 on.
+    pub fn check_world(&self) -> Result<()> {
+        let version = &self.api_version;
+        let world = world_capabilities(version);
+        for capability in &self.capabilities {
+            if world.contains(&capability.as_str()) {
+                continue;
+            }
+            anyhow::ensure!(
+                permissions::tier_of(capability).is_some(),
+                "unknown capability {capability:?}"
+            );
+            // The first world that has it.
+            let needs = [
+                ("0.2", Version::new(0, 2, 0)),
+                ("0.3", Version::new(0, 3, 0)),
+            ]
+            .into_iter()
+            .find(|(_, world)| world_capabilities(world).contains(&capability.as_str()))
+            .map(|(needs, _)| needs);
+            match needs {
+                Some(needs) => bail!(
+                    "capability {capability:?} needs fyx:ui {needs}; this extension targets \
+                     {version}"
+                ),
+                None => bail!(
+                    "capability {capability:?} is not in fyx:ui {version}; it is planned for a \
+                     later version"
+                ),
+            }
+        }
+        if *version < Version::new(0, 3, 0) {
+            for (present, table) in [
+                (self.network.is_some(), "[fyx_ui.network]"),
+                (!self.processes.is_empty(), "[[fyx_ui.processes]]"),
+                (self.process.is_some(), "[fyx_ui.process]"),
+            ] {
+                anyhow::ensure!(
+                    !present,
+                    "{table} needs fyx:ui 0.3; this extension targets {version}"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// `[fyx_ui.network]` and `network:fetch` go together; the domains follow
@@ -468,6 +558,13 @@ impl UiManifest {
     }
 }
 
+/// Only `[fyx_ui].api_version`, read before anything else so that a manifest for a newer world
+/// fails with its version rather than with an unknown field (wit-0.3/migration.md §2).
+#[derive(Deserialize)]
+struct ApiVersionOnly {
+    api_version: Version,
+}
+
 #[derive(Deserialize)]
 struct ExtensionToml {
     id: Arc<str>,
@@ -475,7 +572,7 @@ struct ExtensionToml {
     name: Option<String>,
     #[serde(default)]
     version: Option<String>,
-    fyx_ui: Option<UiManifest>,
+    fyx_ui: Option<toml::Table>,
 }
 
 impl UiManifest {
@@ -488,38 +585,32 @@ impl UiManifest {
             .with_context(|| format!("reading {path:?}"))?;
         let toml: ExtensionToml =
             toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
-        let Some(mut manifest) = toml.fyx_ui else {
+        let Some(table) = toml.fyx_ui else {
             return Ok(None);
         };
-        manifest.name = toml.name;
-        manifest.version = toml.version;
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
-        let network_capable = manifest.api_version >= Version::new(0, 3, 0);
-        for capability in &manifest.capabilities {
-            // The T2 capabilities this host provides, from 0.3 on.
-            if network_capable
-                && (capability == network::CAPABILITY_NETWORK
-                    || capability == process::CAPABILITY_PROCESS
-                    || capability == edit::CAPABILITY_EDIT
-                    || capability == observe::CAPABILITY_OBSERVE)
-            {
-                continue;
-            }
-            permissions::grantable_tier(capability)
-                .with_context(|| format!("extension {id}, in {path:?}"))?;
-        }
+        // The version first, then the manifest of that world (wit-0.3/migration.md §2).
+        let ApiVersionOnly { api_version } = ApiVersionOnly::deserialize(table.clone())
+            .with_context(|| format!("extension {id}: [fyx_ui].api_version, in {path:?}"))?;
+        anyhow::ensure!(
+            is_supported_api_version(&api_version),
+            "extension {id} targets fyx:ui {api_version}, this build supports 0.1.0, 0.2.0 and \
+             0.3.0 (staged)",
+        );
+        let mut manifest = UiManifest::deserialize(table)
+            .with_context(|| format!("parsing [fyx_ui] of {path:?}"))?;
+        manifest.name = toml.name;
+        manifest.version = toml.version;
+        manifest
+            .check_world()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
         manifest
             .check_network()
             .with_context(|| format!("extension {id}, in {path:?}"))?;
         manifest
             .check_processes()
             .with_context(|| format!("extension {id}, in {path:?}"))?;
-        anyhow::ensure!(
-            is_supported_api_version(&manifest.api_version),
-            "extension {id} targets fyx:ui {}, this build supports 0.1.0, 0.2.0 and 0.3.0 (staged)",
-            manifest.api_version,
-        );
         anyhow::ensure!(
             !manifest.component.is_empty()
                 && Path::new(&manifest.component)
@@ -1311,7 +1402,7 @@ pub struct LoadOptions {
     /// together with the broker. `None` (no manifest: tests and bare components) declares every
     /// UI capability. [`UiExtension::load_from_dir_with_options`] sets it from the manifest.
     pub capabilities: Option<Vec<String>>,
-    /// Whether a staged version (0.2 until it is frozen) may load; `None` means
+    /// Whether a staged version (0.3 until it is frozen) may load; `None` means
     /// [`staged_api_allowed_by_default`].
     pub allow_staged: Option<bool>,
     /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.

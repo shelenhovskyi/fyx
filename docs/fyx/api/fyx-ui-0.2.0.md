@@ -84,6 +84,7 @@ Cases: `default`, `filled`, `subtle`, `danger`.
 | `style` | `button-style` |  |
 | `disabled` | `bool` |  |
 | `tooltip` | `option<string>` | Shown on hover. At most 1024 bytes; the host truncates longer text. |
+| `accessible-label` | `option<string>` | The accessible name, read by screen readers; without it, `label` when it is not empty, then the tooltip, then the icon's name. Set it for an icon-only button. At most 256 bytes; the host truncates longer text. |
 
 ### record `input-props`
 
@@ -188,7 +189,7 @@ WIT types cannot be recursive, so a tree travels as a flat `list<node>` in which
 
 ### variant `update`
 
-Caps: at most 2048 patches in one `patches`; at most 16384 nodes in a surface tree, which is also the cap for a `replace` and for `mount`, so a whole surface can always be resent; at most 2048 nodes in one list row. An update that breaks a cap or does not fit the tree is rejected whole, and the host mounts the surface again.
+Caps: at most 2048 patches in one `patches`; at most 16384 nodes in a surface tree, which is also the cap for a `replace` and for `mount`, so a whole surface can always be resent; at most 2048 nodes in one list row; at most 64 levels from a root to its deepest node; at most 8 MiB of text in a surface tree's props. An update that breaks a cap or does not fit the tree is rejected whole, and the host mounts the surface again.
 
 | Case | Payload | Notes |
 |---|---|---|
@@ -336,11 +337,11 @@ Cases: `trace`, `debug`, `info`, `warn`, `error`.
 
 ### `push-update: func(surface-id: string, update: update) -> result<_, host-error>`
 
-Sends an update the extension initiated (a push to another surface, a tick's side effects). `ok` means the update passed the checks the host can make at once (the surface exists, the caps); it can still fail to fit the tree when it is applied, which remounts the surface. On `err` nothing was queued: the extension's mirror of that surface is now ahead of the host and must be resent whole. At most 64 pushes per export call.
+Sends an update the extension initiated (a push to another surface, a tick's side effects). `ok` means the update passed the checks the host can make at once (the surface exists, the caps); it can still fail to fit the tree when it is applied, which remounts the surface. On `err` nothing was queued: the extension's mirror of that surface is now ahead of the host and must be resent whole. At most 64 pushes per export call, carrying at most 32768 patches plus nodes together (two whole trees); past that, `limit-exceeded`.
 
 ### `request-tick: func(surface-id: string, delay-ms: u32) -> result<_, host-error>`
 
-Asks for one `tick(surface-id)` call at least `delay-ms` after the current call returns. One pending tick per surface: a new request replaces the earlier one. The host clamps the delay up to 100 ms, and to 1000 ms while Fyx is in the background. A tick that falls due while its panel is hidden waits until the panel is shown and is then delivered once: a panel opened hours later gets one tick, not a backlog (design.md, "Ticks"). Decorations cannot request ticks.
+Asks for one `tick(surface-id)` call at least `delay-ms` after the current call returns. One pending tick per surface: a new request replaces the earlier one. The host clamps the delay up to 100 ms, and to 1000 ms while Fyx is in the background. A tick that falls due while its panel is hidden waits until the panel is shown and is then delivered once: a panel opened hours later gets one tick, not a backlog (design.md, "Ticks"). A delay over 24 hours is `invalid-argument`. Decorations cannot request ticks.
 
 ### `cancel-tick: func(surface-id: string)`
 
@@ -356,7 +357,7 @@ Removes a live surface, static or runtime: its containers close in every window,
 
 ### `show-surface: func(surface-id: string) -> result<_, host-error>`
 
-Opens a modal in the active workspace window and focuses it, or reveals a panel there (opens its dock and activates it, without moving focus). Showing a modal needs a click or Enter: it is allowed during `handle-event` for `click`, `row-click` or `input-submitted`, or within 5 s after one, once. Typing (`input-changed`), `row-selected` and `dismissed` do not count. Showing a surface that is already shown does nothing.
+Opens a modal in the active workspace window and focuses it, or reveals a panel there (opens its dock and activates it, without moving focus). Showing a modal needs a click or Enter: it is allowed during `handle-event` for `click`, `row-click`, `input-submitted` or a clicked `notification-action`, or within 5 s after one, once. Typing (`input-changed`), `row-selected` and `dismissed` do not count. Showing a surface that is already shown does nothing.
 
 ### `hide-surface: func(surface-id: string) -> result<_, host-error>`
 
@@ -379,7 +380,7 @@ Editor decorations: retained `fyx:ui` trees drawn as blocks above or below a buf
 
 ### `place-decoration: func(id: string, location: decoration-location, nodes: list<node>) -> result<_, host-error>`
 
-Places a decoration with the initial tree `nodes` (at most 16384 nodes, parents first). Placing an id that is already a live decoration moves it and replaces its tree, like a fresh mount.
+Places a decoration with the initial tree `nodes` (at most 16384 nodes, parents first). Placing an id that is already a live decoration moves it and replaces its tree, like a fresh mount. At most 512 `place-decoration` and `remove-decoration` calls per export call; past that, `limit-exceeded`.
 
 ### `remove-decoration: func(id: string) -> result<_, host-error>`
 
@@ -436,7 +437,7 @@ Cases: `status-bar`, `panel`.
 
 ### `notify: func(notification: notification) -> result<u64, host-error>`
 
-Shows a notification in the active workspace window, without moving focus, and returns its id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension; past either, `limit-exceeded`, and the title is written to the log instead.
+Shows a notification in the active workspace window, without moving focus, and returns its id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension, and 4 `notify` and `dismiss-notification` calls together per export call; past any, `limit-exceeded`, and the title is written to the log instead.
 
 ### `dismiss-notification: func(id: u64)`
 
