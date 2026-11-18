@@ -23,6 +23,7 @@ mod keyboard;
 mod modal;
 pub mod notifications;
 mod panel;
+pub mod progress;
 mod registry;
 mod store_actions;
 mod surface;
@@ -120,4 +121,5 @@ pub fn init(cx: &mut App) {
     registry::init(cx);
     keyboard::intercept_keys(cx);
     decorations::init(cx);
+    progress::init(cx);
 }

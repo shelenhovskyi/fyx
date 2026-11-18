@@ -2586,3 +2586,191 @@ mod notification_tests {
         );
     }
 }
+
+mod progress_tests {
+    use super::*;
+    use crate::progress::{Progresses, panel_bar};
+    use ui_ext::v0_2::{ProgressLocation, ProgressOptions, ProgressValue};
+
+    fn options(owner: &str, title: &str, location: ProgressLocation) -> ProgressOptions {
+        ProgressOptions {
+            owner: owner.into(),
+            title: title.into(),
+            location,
+            cancellable: true,
+        }
+    }
+
+    fn setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        Rc<FakeBackend>,
+        Entity<crate::UiExtensionRegistry>,
+        Entity<Progresses>,
+    ) {
+        init_test(cx);
+        cx.update(crate::progress::init);
+        let backend = Rc::new(FakeBackend::default());
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        registry.update(cx, |registry, cx| {
+            let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+            registry.register_backend(dyn_backend, &[panel_surface("counter", "Counter")], cx);
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        let progresses = cx.update(|cx| Progresses::global(cx).expect("initialized"));
+        (backend, registry, progresses)
+    }
+
+    fn effect(
+        registry: &Entity<crate::UiExtensionRegistry>,
+        effect: HostEffect,
+        cx: &mut TestAppContext,
+    ) {
+        registry.update(cx, |registry, cx| registry.apply_effect("fake", effect, cx));
+        cx.run_until_parked();
+    }
+
+    /// M.2: start, update (no message keeps the last), the status-bar grouping with the newest
+    /// last, and end.
+    #[gpui::test]
+    async fn test_progress_effects(cx: &mut TestAppContext) {
+        let (backend, registry, progresses) = setup(cx);
+        for (id, title) in [(1, "Indexing"), (2, "Building")] {
+            effect(
+                &registry,
+                HostEffect::ProgressStart {
+                    id,
+                    options: options("counter", title, ProgressLocation::StatusBar),
+                },
+                cx,
+            );
+        }
+        effect(
+            &registry,
+            HostEffect::ProgressUpdate {
+                id: 1,
+                value: ProgressValue::Percent(40),
+                message: Some("src/".into()),
+            },
+            cx,
+        );
+        effect(
+            &registry,
+            HostEffect::ProgressUpdate {
+                id: 1,
+                value: ProgressValue::Percent(60),
+                message: None,
+            },
+            cx,
+        );
+        progresses.read_with(cx, |progresses, _| {
+            let groups = progresses.status_bar();
+            assert_eq!(groups.len(), 1, "one chip per extension");
+            let titles: Vec<&str> = groups[0]
+                .1
+                .iter()
+                .map(|running| running.options.title.as_str())
+                .collect();
+            assert_eq!(titles, ["Indexing", "Building"], "the newest last");
+            let first = groups[0].1[0];
+            assert_eq!(first.value, ProgressValue::Percent(60));
+            assert_eq!(first.message.as_deref(), Some("src/"), "kept");
+        });
+        effect(&registry, HostEffect::ProgressEnd { id: 1 }, cx);
+        progresses.read_with(cx, |progresses, _| {
+            assert_eq!(progresses.running().len(), 1)
+        });
+        assert_eq!(backend.events(), [], "progress effects send no events");
+    }
+
+    /// M.2: Cancel sends `progress-cancel-requested` once; the progress stays until the
+    /// extension ends it. The owner's removal ends it without an event.
+    #[gpui::test]
+    async fn test_progress_cancel_and_owner_removal(cx: &mut TestAppContext) {
+        let (backend, registry, progresses) = setup(cx);
+        effect(
+            &registry,
+            HostEffect::ProgressStart {
+                id: 3,
+                options: options("counter", "Sync", ProgressLocation::Panel),
+            },
+            cx,
+        );
+        assert!(cx.update(|cx| panel_bar("fake", "counter", cx).is_some()));
+        assert!(cx.update(|cx| panel_bar("fake", "other", cx).is_none()));
+        for _ in 0..2 {
+            registry.update(cx, |registry, cx| {
+                registry.request_progress_cancel("fake", 3, cx)
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::ProgressCancelRequested(3))],
+            "once"
+        );
+        progresses.read_with(cx, |progresses, _| {
+            assert!(
+                progresses.running()[0].cancel_requested,
+                "it stays, Cancel disabled"
+            );
+        });
+
+        effect(
+            &registry,
+            HostEffect::RemoveSurface {
+                surface_id: "counter".into(),
+            },
+            cx,
+        );
+        progresses.read_with(cx, |progresses, _| assert!(progresses.running().is_empty()));
+        assert_eq!(backend.events(), []);
+    }
+
+    /// M.2: at most 10 redraws a second, whatever the rate of updates; the last value wins.
+    #[gpui::test]
+    async fn test_progress_redraws_are_coalesced(cx: &mut TestAppContext) {
+        let (_, registry, progresses) = setup(cx);
+        effect(
+            &registry,
+            HostEffect::ProgressStart {
+                id: 1,
+                options: options("counter", "Copy", ProgressLocation::StatusBar),
+            },
+            cx,
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let notified = Rc::new(Cell::new(0));
+        let _observe = cx.update(|cx| {
+            let notified = notified.clone();
+            cx.observe(&progresses, move |_, _| notified.set(notified.get() + 1))
+        });
+        for percent in 0..100u8 {
+            registry.update(cx, |registry, cx| {
+                registry.apply_effect(
+                    "fake",
+                    HostEffect::ProgressUpdate {
+                        id: 1,
+                        value: ProgressValue::Percent(percent),
+                        message: None,
+                    },
+                    cx,
+                )
+            });
+            cx.executor().advance_clock(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(
+            (9..=12).contains(&notified.get()),
+            "{} redraws for 1 s of updates",
+            notified.get()
+        );
+        progresses.read_with(cx, |progresses, _| {
+            assert_eq!(progresses.running()[0].value, ProgressValue::Percent(99))
+        });
+    }
+}

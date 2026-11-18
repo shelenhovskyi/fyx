@@ -144,6 +144,10 @@ impl<const SLOT: usize> ExtensionPanel<SLOT> {
         cx: &mut Context<Self>,
     ) -> Self {
         let view = cx.new(|cx| SurfaceView::new(state, false, window, cx));
+        // Its progress bar (design.md M.2) is drawn here, outside the cached surface view.
+        if let Some(progresses) = crate::progress::Progresses::global(cx) {
+            cx.observe(&progresses, |_, _, cx| cx.notify()).detach();
+        }
         // A panel that goes away (its workspace closed) no longer shows the surface; without
         // this its ticks would keep running for a window that is gone (triage-3, ASYNC 8).
         let container = cx.entity_id();
@@ -185,6 +189,10 @@ impl<const SLOT: usize> Render for ExtensionPanel<SLOT> {
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
+            .children({
+                let state = self.view.read(cx).state().read(cx);
+                crate::progress::panel_bar(state.extension_id(), &state.surface().id, cx)
+            })
             // A cached view: a redraw caused by anything else in the window (a caret blinking in
             // another editor) reuses the surface's last frame instead of rendering its whole
             // tree again (triage-3 #5). The surface's root is `size_full`, as the cache needs.

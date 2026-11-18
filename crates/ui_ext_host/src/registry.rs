@@ -63,6 +63,7 @@ use crate::{
         AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
         add_extension_panel,
     },
+    progress::{ExtensionProgressStatus, Progresses},
     surface::{SurfaceLink, SurfaceState},
 };
 
@@ -676,14 +677,66 @@ impl UiExtensionRegistry {
         }
     }
 
-    /// Closes the notifications of an extension (`owner: None`) or of one of its owners, without
-    /// events: the owner is gone, or the instance is.
+    /// The name in the provenance line of an extension's notifications and progress (M.4).
+    pub fn provenance_name(&self, extension_id: &str) -> SharedString {
+        crate::notifications::provenance_name(
+            self.backends
+                .get(extension_id)
+                .and_then(|backend| backend.display_name()),
+            extension_id,
+        )
+    }
+
+    /// Cancel on a progress: `progress-cancel-requested` to its owner, once (M.2).
+    pub(crate) fn request_progress_cancel(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = Progresses::global(cx).and_then(|progresses| {
+            progresses.update(cx, |progresses, cx| {
+                progresses.request_cancel(extension_id, id, cx)
+            })
+        });
+        if let Some(owner) = owner {
+            self.send_to_owner(
+                extension_id,
+                &owner,
+                UiEvent::ProgressCancelRequested(id),
+                cx,
+            );
+        }
+    }
+
+    /// A click on a status-bar progress: the owner, if it is a panel, opens.
+    pub(crate) fn reveal_owner_panel(
+        &mut self,
+        extension_id: &str,
+        owner: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(surface) = self.surface_of(extension_id, owner)
+            && matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_))
+        {
+            let key = surface.info.key.clone();
+            cx.emit(RegistryEvent::RevealPanel(key));
+        }
+    }
+
+    /// Closes the notifications of an extension (`owner: None`) or of one of its owners, and
+    /// ends its progresses, without events: the owner is gone, or the instance is.
     fn close_notifications_of(
         &mut self,
         extension_id: &str,
         owner: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(progresses) = Progresses::global(cx) {
+            progresses.update(cx, |progresses, cx| {
+                progresses.end_of(extension_id, owner, cx)
+            });
+        }
         let closing: Vec<(Arc<str>, u64)> = self
             .notifications
             .iter()
@@ -1371,11 +1424,24 @@ impl UiExtensionRegistry {
             HostEffect::DismissNotification { id } => {
                 self.dismiss_notification(extension_id, id, cx)
             }
-            // §M progress (design.md M.2): drawn by the renderer's progress views (W3).
-            HostEffect::ProgressStart { .. }
-            | HostEffect::ProgressUpdate { .. }
-            | HostEffect::ProgressEnd { .. } => {
-                log::debug!("fyx:ui: {extension_id}: {effect:?} ignored (no notification view yet)")
+            HostEffect::ProgressStart { id, options } => {
+                if let Some(progresses) = Progresses::global(cx) {
+                    progresses.update(cx, |progresses, cx| {
+                        progresses.start(extension_id, id, options, cx)
+                    });
+                }
+            }
+            HostEffect::ProgressUpdate { id, value, message } => {
+                if let Some(progresses) = Progresses::global(cx) {
+                    progresses.update(cx, |progresses, cx| {
+                        progresses.update(extension_id, id, value, message, cx)
+                    });
+                }
+            }
+            HostEffect::ProgressEnd { id } => {
+                if let Some(progresses) = Progresses::global(cx) {
+                    progresses.update(cx, |progresses, cx| progresses.end(extension_id, id, cx));
+                }
             }
         }
     }
@@ -1869,6 +1935,14 @@ fn attach_to_workspace(
             cx,
             move |cx| cx.new(|cx| MessageNotification::new(message, cx)),
         );
+    }
+
+    // Extension progress in the status bar (design.md M.2), one item for all extensions.
+    if let Some(progresses) = Progresses::global(cx) {
+        let item = cx.new(|cx| ExtensionProgressStatus::new(progresses, cx));
+        workspace.status_bar().update(cx, |status_bar, cx| {
+            status_bar.add_left_item(item, window, cx)
+        });
     }
 
     // Modals open in the window the user was in last.
