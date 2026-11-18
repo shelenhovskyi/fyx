@@ -80,6 +80,43 @@ impl ConsentRecord {
             grant,
         })
     }
+
+    /// The record for component bytes already read, so what is checked is exactly what loads
+    /// (triage-3, SEC T1). Returns the bytes back for the load.
+    pub async fn for_bytes(
+        extension_dir: &Path,
+        capabilities: &[String],
+        bytes: Vec<u8>,
+        is_dev: bool,
+        fs: &dyn Fs,
+        executor: &BackgroundExecutor,
+    ) -> Result<(Self, Vec<u8>)> {
+        let mut capabilities = capabilities.to_vec();
+        capabilities.sort();
+        capabilities.dedup();
+        let (grant, bytes) = if is_dev {
+            let path = fs
+                .canonicalize(extension_dir)
+                .await
+                .with_context(|| format!("resolving {}", extension_dir.display()))?;
+            (Grant::DevFolder { path }, bytes)
+        } else {
+            let (sha256, bytes) = executor
+                .spawn(async move {
+                    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+                    (sha256, bytes)
+                })
+                .await;
+            (Grant::Component { sha256 }, bytes)
+        };
+        Ok((
+            Self {
+                capabilities,
+                grant,
+            },
+            bytes,
+        ))
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]

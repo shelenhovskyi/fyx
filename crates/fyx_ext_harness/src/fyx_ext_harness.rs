@@ -1324,7 +1324,8 @@ impl From<Outcome> for EventOutcome {
 
 /// The 0.2 model seen through the 0.1 types, as the host's 0.1 view shows it: lossless for a 0.1
 /// component. For a 0.2 one it drops tooltips, `secret`, `selected`, `indent`, `invalidate-rows`,
-/// modals and every effect but pushes; frozen icons become their snake_case name.
+/// modals and every effect but pushes; frozen icons become their snake_case name; a 0.3 image
+/// becomes its alt text.
 mod shim {
     use super::*;
 
@@ -1360,6 +1361,11 @@ mod shim {
             }),
             model::Props::Markdown(source) => Props::Markdown(source.clone()),
             model::Props::DiffView(diff) => Props::DiffView(diff.clone()),
+            // 0.3 only; 0.1 has no image, so its alt text stands in.
+            model::Props::Image(image) => Props::Text(ui_ext::TextProps {
+                content: image.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
         }
     }
 

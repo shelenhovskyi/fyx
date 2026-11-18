@@ -18,7 +18,10 @@ use std::{
     ops::RangeInclusive,
     path::{Component as PathComponent, Path, PathBuf},
     pin::pin,
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
@@ -434,6 +437,13 @@ impl UiState {
         }
     }
 
+    /// A fresh time budget without dropping the effects made so far: `surfaces` right after
+    /// instantiation, whose effects (and the instantiation's) apply together (triage-3, BUG 32).
+    fn restart_budget(&mut self, budget: Duration) {
+        self.call_started = Instant::now();
+        self.call_budget = budget;
+    }
+
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
@@ -666,11 +676,19 @@ fn build_ui_runtime() -> Result<UiRuntime> {
         .name("fyx-ui-epoch".into())
         .spawn(move || {
             loop {
+                // Nothing to interrupt or time out while no guest call runs: park instead of
+                // waking 100 times a second for the whole process (triage-3, PERF 7).
+                drop(
+                    CALLS_STARTED
+                        .wait_while(lock_active_calls(), |active| *active == 0)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
                 std::thread::sleep(UI_EPOCH_INTERVAL);
                 let Some(engine) = weak_engine.upgrade() else {
                     break;
                 };
                 engine.increment_epoch();
+                EPOCH_TICKS.fetch_add(1, Ordering::Relaxed);
                 wake_deadlines();
             }
         })
@@ -693,6 +711,38 @@ fn build_ui_runtime() -> Result<UiRuntime> {
         linker_v0_2,
         linker_v0_3,
     })
+}
+
+/// Guest calls running now (instantiation included): the epoch thread ticks only while there
+/// are any.
+static ACTIVE_CALLS: Mutex<usize> = Mutex::new(0);
+static CALLS_STARTED: Condvar = Condvar::new();
+/// Epoch ticks so far, for tests.
+static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+
+fn lock_active_calls() -> std::sync::MutexGuard<'static, usize> {
+    ACTIVE_CALLS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One running guest call, counted in [`ACTIVE_CALLS`] while it lives.
+struct ActiveCall;
+
+impl ActiveCall {
+    fn begin() -> Self {
+        let mut active = lock_active_calls();
+        *active += 1;
+        if *active == 1 {
+            CALLS_STARTED.notify_all();
+        }
+        ActiveCall
+    }
+}
+
+impl Drop for ActiveCall {
+    fn drop(&mut self) {
+        let mut active = lock_active_calls();
+        *active = active.saturating_sub(1);
+    }
 }
 
 /// Wakers of calls waiting in [`with_budget`], woken on every epoch tick.
@@ -740,6 +790,8 @@ impl std::task::Wake for RecordingWaker {
 /// a busy tokio worker spends neither, so other work on the shared runtime, or other UI
 /// extensions, cannot get a healthy extension disabled.
 async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
+    // Every guest call runs in here, so this is what keeps the epoch thread ticking.
+    let _active = ActiveCall::begin();
     let limit = budget + UI_DEADLINE_SLACK;
     let mut call = pin!(call);
     let mut blocked = Duration::ZERO;
@@ -1042,7 +1094,7 @@ impl UiExtension {
                     })
                     .await
                     .context("failed to instantiate fyx:ui component")?;
-                    store.data_mut().begin_call(UI_INIT_BUDGET);
+                    store.data_mut().restart_budget(UI_INIT_BUDGET);
                     let surfaces = with_budget(UI_INIT_BUDGET, async {
                         extension
                             .call_surfaces(&mut store)
@@ -1134,6 +1186,22 @@ impl UiExtension {
             .load_bytes(&component_path)
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
+        Self::load_checked(extension_id, manifest, wasm_bytes, options, cx)
+            .await
+            .map(Some)
+    }
+
+    /// Loads `wasm_bytes` as the component `manifest` describes, with the manifest's checks: its
+    /// capabilities apply and its API version must be the component's. For a caller that read
+    /// the manifest and the bytes itself, once, so what it checked (consent) is what loads
+    /// (triage-3, SEC T1).
+    pub async fn load_checked(
+        extension_id: Arc<str>,
+        manifest: UiManifest,
+        wasm_bytes: Vec<u8>,
+        options: LoadOptions,
+        cx: &AsyncApp,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)> {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
             ..options
@@ -1148,7 +1216,7 @@ impl UiExtension {
             manifest.api_version,
             extension.api_version,
         );
-        Ok(Some((extension, pushed)))
+        Ok((extension, pushed))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {

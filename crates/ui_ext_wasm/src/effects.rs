@@ -333,6 +333,7 @@ impl ApiState {
         update
             .check_caps(limits)
             .map_err(|error| host_error(v0_2::HostErrorCode::LimitExceeded, error.to_string()))?;
+        self.check_images(&surface_id, update_props(&update))?;
         let items = match &update {
             v0_2::Update::Unchanged => 0,
             v0_2::Update::Replace(nodes) => nodes.len(),
@@ -539,6 +540,34 @@ impl ApiState {
             bytes: bytes.into(),
         });
         Ok(handle)
+    }
+
+    /// The `image` nodes among `props` (0.3, design.md §12), checked when an update or a reply
+    /// for `surface_id` is applied: the props rules of [`image::check_image_props`], panels only
+    /// ([`image::check_image_placement`]), and a `generated` handle that `add-image` returned
+    /// earlier. A handle removed since is fine: the renderer draws the alt text for it.
+    pub(crate) fn check_images<'a>(
+        &self,
+        surface_id: &str,
+        props: impl IntoIterator<Item = &'a v0_2::Props>,
+    ) -> Result<(), v0_2::HostError> {
+        for props in props {
+            let v0_2::Props::Image(props) = props else {
+                continue;
+            };
+            image::check_image_props(props)
+                .and_then(|()| image::check_image_placement(self.live.surface_kind(surface_id)))
+                .map_err(|error| host_error(error.code(), error.to_string()))?;
+            if let image::ImageSource::Generated(handle) = props.source
+                && (handle == 0 || handle >= self.next_image)
+            {
+                return Err(host_error(
+                    v0_2::HostErrorCode::InvalidArgument,
+                    format!("image handle {handle} was not returned by add-image"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// `images.remove-image`: unknown handles are ignored.
@@ -819,5 +848,21 @@ mod tests {
             effects[image::MAX_GENERATED_IMAGES],
             HostEffect::RemoveImage { handle: first }
         );
+    }
+}
+
+/// The props an update sets: its nodes, or those of its `set-props` and `insert` patches.
+pub(crate) fn update_props(update: &v0_2::Update) -> Vec<&v0_2::Props> {
+    match update {
+        v0_2::Update::Unchanged => Vec::new(),
+        v0_2::Update::Replace(nodes) => nodes.iter().map(|node| &node.props).collect(),
+        v0_2::Update::Patches(patches) => patches
+            .iter()
+            .filter_map(|patch| match patch {
+                v0_2::Patch::SetProps(_, props) => Some(props),
+                v0_2::Patch::Insert(insert) => Some(&insert.node.props),
+                v0_2::Patch::Remove(_) | v0_2::Patch::InvalidateRows(_) => None,
+            })
+            .collect(),
     }
 }

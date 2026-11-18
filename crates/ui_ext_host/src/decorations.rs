@@ -693,7 +693,8 @@ pub(crate) fn estimate_lines(tree: &Tree) -> u32 {
             Props::DiffView(props) => props.new_text.lines().count().max(1) as u32 + 1,
             Props::List(props) => props.row_count.clamp(1, 3) + 1,
             Props::Table(props) => props.row_count.clamp(1, 3) + 1,
-            Props::Button(_) | Props::Input(_) | Props::Icon(_) => 1,
+            // An image is refused in a decoration tree before it gets here.
+            Props::Button(_) | Props::Input(_) | Props::Icon(_) | Props::Image(_) => 1,
         }
     }
     tree.roots()

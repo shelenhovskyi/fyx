@@ -115,6 +115,33 @@ impl SurfaceView {
             _observe_state: observe_state,
         };
         this.sync(window, cx);
+        // Typing still waiting for its pause goes out when the view closes (a panel removed, a
+        // window closed), instead of being lost (triage-3, ASYNC 12).
+        cx.on_release(|this: &mut Self, cx| {
+            let pending: Vec<(NodeId, String)> = this
+                .inputs
+                .iter()
+                .filter(|(_, input)| input.debounce.is_some())
+                .map(|(id, input)| {
+                    (
+                        *id,
+                        input.editor.read(cx).text(cx),
+                        input.last_known.clone(),
+                    )
+                })
+                .filter(|(_, text, last_known)| text != last_known)
+                .map(|(id, text, _)| (id, text))
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            this.state.update(cx, |state, cx| {
+                for (id, text) in pending {
+                    state.dispatch(UiEvent::InputChanged(id, text), cx);
+                }
+            });
+        })
+        .detach();
         this
     }
 
@@ -231,7 +258,7 @@ impl SurfaceView {
                         }
                     }
                     Props::DiffView(props) => diffs.push((id, props.clone())),
-                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) => {}
+                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) | Props::Image(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
             }
@@ -724,6 +751,7 @@ impl Renderer<'_, '_> {
             Props::Icon(props) => self.icon(props),
             Props::Markdown(source) => self.markdown(id, source, scope),
             Props::DiffView(props) => self.diff_view(id, props, scope),
+            Props::Image(props) => self.image_placeholder(props),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -914,11 +942,14 @@ impl Renderer<'_, '_> {
         table_columns: Option<usize>,
         scope: Scope,
     ) -> AnyElement {
-        if let Scope::Row { .. } = scope {
-            return Label::new("Lists inside list rows are not supported")
-                .color(Color::Muted)
-                .size(LabelSize::Small)
-                .into_any_element();
+        if let Scope::Row { list, index } = scope {
+            // An authoring mistake: logged for the author, nothing drawn for the user.
+            log::debug!(
+                "fyx:ui {}: list {id} inside row {index} of list {list} is not drawn (lists \
+                 inside list rows are not supported)",
+                self.state.extension_id()
+            );
+            return div().into_any_element();
         }
         let row_height = if row_height == 0 {
             DEFAULT_ROW_HEIGHT
@@ -1032,6 +1063,32 @@ impl Renderer<'_, '_> {
             }
             _ => row.child(self.node(tree, root, scope)).into_any_element(),
         }
+    }
+
+    /// A 0.3 `image` node as the muted box with its alt text that design.md §12 draws
+    /// while an image loads or when it fails. Decoding comes with plan 4.11.
+    fn image_placeholder(&self, props: &ui_ext::image::ImageProps) -> AnyElement {
+        div()
+            .when_some(props.width, |this, width| this.w(px(width as f32)))
+            .when_some(props.height, |this, height| this.h(px(height as f32)))
+            .max_w_full()
+            .min_h(px(20.))
+            .p_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.cx.theme().colors().border_variant)
+            .bg(self.cx.theme().colors().element_background)
+            .child(
+                Label::new(props.alt.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any_element()
     }
 
     fn icon(&self, props: &IconProps) -> AnyElement {

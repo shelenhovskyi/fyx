@@ -108,6 +108,7 @@ fn describe_props(props: &Props) -> String {
             diff.old_text.len(),
             diff.new_text.len()
         ),
+        Props::Image(image) => format!("{kind} {}", short(&image.alt)),
         Props::Flex(_) => kind.to_string(),
     }
 }

@@ -144,6 +144,14 @@ impl<const SLOT: usize> ExtensionPanel<SLOT> {
         cx: &mut Context<Self>,
     ) -> Self {
         let view = cx.new(|cx| SurfaceView::new(state, false, window, cx));
+        // A panel that goes away (its workspace closed) no longer shows the surface; without
+        // this its ticks would keep running for a window that is gone (triage-3, ASYNC 8).
+        let container = cx.entity_id();
+        cx.on_release(move |this: &mut Self, cx| {
+            let state = this.view.read(cx).state().clone();
+            state.update(cx, |state, cx| state.set_visible(container, false, cx));
+        })
+        .detach();
         Self {
             position: info.position,
             info,

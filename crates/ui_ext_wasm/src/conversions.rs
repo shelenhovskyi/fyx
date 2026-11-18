@@ -50,6 +50,13 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
         model::Props::DiffView(props) => {
             props.old_text.len() + props.new_text.len() + option_len(&props.language)
         }
+        model::Props::Image(props) => {
+            props.alt.len()
+                + match &props.source {
+                    ui_ext::image::ImageSource::Asset(path) => path.len(),
+                    ui_ext::image::ImageSource::Generated(_) => 0,
+                }
+        }
     }
 }
 

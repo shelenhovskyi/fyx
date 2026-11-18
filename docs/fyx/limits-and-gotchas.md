@@ -291,7 +291,9 @@ you that a surface was closed (0.2 items 5–7).
   total 16 MiB; a `log` message is cut at 16 KiB.
 - An installed extension loads only after the user enables it, for the capabilities and the
   component (or linked folder) it has then; see "Installing as a dev extension" in
-  `extension-authoring.md`.
+  `extension-authoring.md`. The consent records (`<data dir>/fyx-ui-consent.json`) are not signed:
+  anything that can write your data folder can grant consent. They guard against extensions
+  appearing on their own, not against a program already running as you.
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
 - Fyx's own host functions: `push-update` and `log`.

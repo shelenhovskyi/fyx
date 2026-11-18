@@ -4,9 +4,10 @@
 //! until its plan task lands (`UiBindings::instantiate`), so a component that never calls them
 //! loads and runs.
 //!
-//! Values the `ui_ext` model cannot hold yet are refused as `invalid-argument` (in a push) or as
-//! the call's error (in a reply): `image` and `canvas` nodes and `picker` surfaces. The image
-//! checks themselves are in `ui_ext::image` and run on `add-image` already.
+//! `image` nodes convert into [`model::Props::Image`]; their checks (`ui_ext::image`) run when the
+//! update or the reply is applied ([`crate::effects::ApiState::check_images`]). Values the
+//! `ui_ext` model cannot hold yet are refused as `invalid-argument` (in a push) or as the call's
+//! error (in a reply): `canvas` nodes and `picker` surfaces.
 
 use ui_ext::{
     image::{self as model_image},
@@ -63,7 +64,20 @@ impl wit_images::Host for UiState {
 
 conversions::conversions! {
     props: {
-        wit::Props::Image(_) => return Err(unsupported("an image node")),
+        wit::Props::Image(props) => Self::Image(model_image::ImageProps {
+            source: match props.source {
+                wit::ImageSource::Asset(path) => model_image::ImageSource::Asset(path),
+                wit::ImageSource::Generated(handle) => model_image::ImageSource::Generated(handle),
+            },
+            alt: props.alt,
+            width: props.width,
+            height: props.height,
+            fit: match props.fit {
+                wit::ImageFit::Contain => model_image::ImageFit::Contain,
+                wit::ImageFit::Cover => model_image::ImageFit::Cover,
+            },
+            tint: props.tint.map(Into::into),
+        }),
         wit::Props::Canvas(_) => return Err(unsupported("a canvas node")),
     }
     kinds: {
