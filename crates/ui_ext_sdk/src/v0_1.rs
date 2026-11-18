@@ -142,6 +142,8 @@ fn node(node: &Node) -> Result<v1::Node, String> {
 pub mod glue {
     use super::*;
 
+    pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION_V0_1;
+
     pub fn nodes(nodes: &[Node]) -> Result<Vec<v1::Node>, String> {
         nodes.iter().map(node).collect()
     }

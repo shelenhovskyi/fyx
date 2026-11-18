@@ -48,6 +48,9 @@ pub enum TreeError {
     UnknownSibling { node: NodeId, before: NodeId },
     #[error("node {node} would be nested deeper than {max} levels")]
     TooDeep { node: NodeId, max: usize },
+    /// 0.2 only: `invalidate-rows` names a node that is not a list or table.
+    #[error("node {node} is a {kind} node, not a list or table")]
+    NotAList { node: NodeId, kind: &'static str },
     #[error("a list row must have exactly one root node, found {0}")]
     RowRootCount(usize),
     #[error("patch {index}: {error}")]

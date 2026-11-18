@@ -15,7 +15,7 @@
 //! reload (which clears every binding registered from code) does not drop them.
 
 use gpui::{Action, App, Context, FocusHandle, Focusable as _, ScrollStrategy, Window, actions};
-use ui_ext::{NodeId, Props, UiEvent};
+use ui_ext::v0_2::{NodeId, Props, UiEvent};
 
 use crate::view::{DEFAULT_ROW_HEIGHT, SurfaceView};
 
