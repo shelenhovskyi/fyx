@@ -37,7 +37,10 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity, Window,
 };
 use settings::Settings as _;
-use ui_ext::v0_2::{StatusBarSide, Surface, SurfaceKind, Update};
+use ui_ext::v0_2::{
+    NotificationActionEvent, NotificationCloseReason, StatusBarSide, Surface, SurfaceKind, UiEvent,
+    Update,
+};
 use ui_ext_wasm::{
     CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, UiExtension,
     UiManifest,
@@ -50,14 +53,17 @@ use workspace::{
 
 use crate::{
     ToggleExtensionPanel,
-    backend::PushedUpdate,
+    backend::HostEffect,
     backend::UiBackend,
     consent::{self, ConsentRecord, ConsentState, ConsentStore},
+    decorations::Decorations,
     install_store::InstallStore,
+    modal::ExtensionModal,
     panel::{
         AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
         add_extension_panel,
     },
+    progress::{ExtensionProgressStatus, Progresses},
     surface::{SurfaceLink, SurfaceState},
 };
 
@@ -118,7 +124,73 @@ pub struct UiExtensionRegistry {
     last_scan: Option<(PathBuf, Arc<dyn Fs>)>,
     /// `fyx.extensions.dev_paths`: folders scanned with the installed ones, as dev extensions.
     dev_paths: Vec<PathBuf>,
+    /// The instance of each registered extension, for surfaces it adds later (`add-surface`).
+    backends: HashMap<Arc<str>, Rc<dyn UiBackend>>,
+    /// Per extension: the token bucket and CPU share of its surfaces' ticks (design.md, B).
+    tick_budgets: HashMap<Arc<str>, ui_ext_wasm::ticks::TickBudget>,
+    /// The workspace whose window was active last: where `show-surface` opens a modal.
+    active_workspace: Option<gpui::EntityId>,
+    /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
+    load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
+    /// The instance whose 0.3 I/O outcomes (`handle-io`) are being delivered, per extension, with
+    /// the epoch its delivery loop was started for. A reload or a stop replaces or removes it,
+    /// which ends the old loop and lets the old instance go.
+    io_instances: HashMap<Arc<str>, (u64, UiExtension)>,
+    next_io_epoch: u64,
+    /// Open extension notifications, by extension and the id its instance gave them.
+    notifications: HashMap<(Arc<str>, u64), OpenNotification>,
+    /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
+    /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
+    dev_reloads: HashMap<PathBuf, Task<()>>,
 }
+
+/// Requests for the workspaces that show a surface (design.md, C and E).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegistryEvent {
+    /// `show-surface` of a panel: open its dock and make it the active panel, without moving
+    /// focus.
+    RevealPanel(SharedString),
+    /// `hide-surface` of a panel: close its dock if it is the dock's active panel.
+    HidePanel(SharedString),
+    /// `show-surface` of a modal: the workspace named opens it (the active window's).
+    ShowModal {
+        key: SharedString,
+        workspace: gpui::EntityId,
+    },
+    /// The extension closed a modal (`hide-surface`, `remove-surface`): no `dismissed`.
+    CloseModal(SharedString),
+    /// A message from Fyx itself (no provenance line) for the workspace named: a block list
+    /// entry rolled back or disabled an installed extension (platform plan 3.4).
+    HostNotice {
+        id: SharedString,
+        title: SharedString,
+        message: SharedString,
+        workspace: gpui::EntityId,
+    },
+    /// A T2 capability's first use (plan 4.5): the workspace named asks the user.
+    PermissionPrompt {
+        extension_id: Arc<str>,
+        capability: SharedString,
+        workspace: gpui::EntityId,
+    },
+    /// `notify` (design.md M.1): the workspace named shows it (the active window's).
+    ShowNotification {
+        extension_id: Arc<str>,
+        id: u64,
+        workspace: gpui::EntityId,
+    },
+}
+
+/// An extension notification from `notify` until it closes (design.md M.1).
+struct OpenNotification {
+    /// The surface or decoration that gets its events.
+    owner: String,
+    /// Until the workspace takes it to draw.
+    pending: Option<ui_ext::v0_2::Notification>,
+    view: Option<WeakEntity<crate::notifications::ExtensionNotification>>,
+}
+
+impl gpui::EventEmitter<RegistryEvent> for UiExtensionRegistry {}
 
 /// An installed extension waiting for the user's "Enable".
 #[derive(Clone, Debug)]
@@ -166,6 +238,8 @@ struct Found {
     source: ExtensionSource,
     /// For store installs: where the precompiled component goes.
     cache: Option<PrecompiledCache>,
+    /// The manifest as read by this scan; the load uses this one, not a second read.
+    manifest: UiManifest,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -416,6 +490,11 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
+        // A new instance (a reload) starts with none of the old one's notifications or images.
+        self.close_notifications_of(backend.extension_id(), None, cx);
+        clear_images(backend.extension_id(), cx);
+        // A reload starts without decorations; the new instance places its own.
+        remove_decorations(backend.extension_id(), cx);
         for loaded in self.surfaces_of(backend.extension_id()) {
             let surface_id = &loaded.surface_id;
             if !surfaces
@@ -431,32 +510,561 @@ impl UiExtensionRegistry {
                     .update(cx, |state, cx| state.fail(message.into(), false, cx));
             }
         }
+        self.backends
+            .insert(backend.extension_id().into(), backend.clone());
         for surface in surfaces {
-            let info = SurfaceInfo::new(
-                backend.extension_id(),
-                surface,
-                FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
-            );
-            if let Some(loaded) = self.surface_of(backend.extension_id(), &surface.id) {
-                log::info!("fyx:ui: reloading surface {}", info.key);
-                loaded.state.update(cx, |state, cx| {
-                    state.replace_backend(backend.clone(), surface.clone(), cx)
-                });
-                continue;
+            self.add_surface(backend.clone(), surface, cx);
+        }
+        cx.notify();
+    }
+
+    /// Adds one surface of a registered extension, or moves an existing one to `backend`.
+    fn add_surface(
+        &mut self,
+        backend: Rc<dyn UiBackend>,
+        surface: &Surface,
+        cx: &mut Context<Self>,
+    ) {
+        let info = SurfaceInfo::new(
+            backend.extension_id(),
+            surface,
+            FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
+        );
+        if let Some(index) = self.surfaces.iter().position(|loaded| {
+            loaded.extension_id.as_ref() == backend.extension_id()
+                && loaded.surface_id.as_ref() == surface.id
+        }) {
+            log::info!("fyx:ui: reloading surface {}", info.key);
+            // The new instance's title and icon (triage-3, BUG 31); containers made from now on
+            // use them.
+            self.surfaces[index].info = Rc::new(info);
+            self.surfaces[index].state.update(cx, |state, cx| {
+                state.replace_backend(backend.clone(), surface.clone(), cx)
+            });
+            return;
+        }
+        self.next_activation_priority += 1;
+        let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
+            registry: cx.weak_entity(),
+            extension_id: backend.extension_id().into(),
+        });
+        let state =
+            cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), Some(link), cx));
+        self.surfaces.push(LoadedSurface {
+            extension_id: backend.extension_id().into(),
+            surface_id: surface.id.as_str().into(),
+            info: Rc::new(info),
+            state,
+        });
+    }
+
+    /// The outcome of the next load of `extension_id`: loaded, or why not. An install command
+    /// awaits it before it says "Installed".
+    pub fn wait_for_load(
+        &mut self,
+        extension_id: &str,
+    ) -> futures::channel::oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.load_waiters
+            .entry(extension_id.into())
+            .or_default()
+            .push(tx);
+        rx
+    }
+
+    fn report_load(&mut self, extension_id: &str, outcome: Result<(), String>) {
+        if let Some(waiters) = self.load_waiters.remove(extension_id) {
+            for waiter in waiters {
+                waiter.send(outcome.clone()).ok();
             }
-            self.next_activation_priority += 1;
-            let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
-                registry: cx.weak_entity(),
-                extension_id: backend.extension_id().into(),
+        }
+    }
+
+    /// `notify`: shown in the active window, or with none dropped and the owner told
+    /// (`notification-closed(window-closed)`, M.1).
+    fn show_notification(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        notification: ui_ext::v0_2::Notification,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = notification.owner.clone();
+        let Some(workspace) = self.active_workspace else {
+            log::info!(
+                "fyx:ui: {extension_id}: no workspace window for the notification {}",
+                ui_ext::sanitize_for_log(&notification.title)
+            );
+            self.send_to_owner(
+                extension_id,
+                &owner,
+                UiEvent::NotificationClosed(id, NotificationCloseReason::WindowClosed),
+                cx,
+            );
+            return;
+        };
+        let extension_id: Arc<str> = extension_id.into();
+        self.notifications.insert(
+            (extension_id.clone(), id),
+            OpenNotification {
+                owner,
+                pending: Some(notification),
+                view: None,
+            },
+        );
+        cx.emit(RegistryEvent::ShowNotification {
+            extension_id,
+            id,
+            workspace,
+        });
+    }
+
+    /// For the workspace drawing a notification: what to draw, and the provenance name.
+    pub(crate) fn take_pending_notification(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+    ) -> Option<(SharedString, ui_ext::v0_2::Notification)> {
+        let notification = self
+            .notifications
+            .get_mut(&(Arc::from(extension_id), id))?
+            .pending
+            .take()?;
+        let name = crate::notifications::provenance_name(
+            self.backends
+                .get(extension_id)
+                .and_then(|backend| backend.display_name()),
+            extension_id,
+        );
+        Some((name, notification))
+    }
+
+    pub(crate) fn set_notification_view(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        view: WeakEntity<crate::notifications::ExtensionNotification>,
+    ) {
+        if let Some(open) = self.notifications.get_mut(&(Arc::from(extension_id), id)) {
+            open.view = Some(view);
+        }
+    }
+
+    /// `dismiss-notification`: closed without an event (D's rule).
+    fn dismiss_notification(&mut self, extension_id: &str, id: u64, cx: &mut Context<Self>) {
+        if let Some(open) = self.notifications.remove(&(Arc::from(extension_id), id)) {
+            close_notification_view(open, cx);
+        }
+    }
+
+    /// The user or the timer closed a notification, or its window went away.
+    pub(crate) fn notification_closed(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        reason: NotificationCloseReason,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(open) = self.notifications.remove(&(Arc::from(extension_id), id)) {
+            self.send_to_owner(
+                extension_id,
+                &open.owner,
+                UiEvent::NotificationClosed(id, reason),
+                cx,
+            );
+        }
+    }
+
+    /// A button of a notification was clicked (after the click guard): it closes, and only
+    /// `notification-action` goes to the owner.
+    pub(crate) fn notification_action(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        action: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(open) = self.notifications.remove(&(Arc::from(extension_id), id)) {
+            self.send_to_owner(
+                extension_id,
+                &open.owner,
+                UiEvent::NotificationAction(NotificationActionEvent {
+                    notification: id,
+                    action,
+                }),
+                cx,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn consent_mut(&mut self) -> &mut ConsentStore {
+        &mut self.consent
+    }
+
+    /// Routes the broker's first-use prompts (plan 4.5) to the active window. Called once when
+    /// the registry is set up; without it a first use stays `Ask`.
+    pub fn start_permission_prompts(&mut self, cx: &mut Context<Self>) {
+        let (sender, mut requests) = futures::channel::mpsc::unbounded();
+        self.consent.set_prompter(sender);
+        cx.spawn(async move |this, cx| {
+            while let Some(request) = requests.next().await {
+                if this
+                    .update(cx, |this, cx| this.show_permission_prompt(request, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn show_permission_prompt(
+        &mut self,
+        request: crate::consent::PromptRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace else {
+            log::info!(
+                "fyx:ui: {} asks for {} with no window to ask in",
+                request.extension_id,
+                request.capability
+            );
+            self.answer_permission(&request.extension_id, &request.capability, None, true, cx);
+            return;
+        };
+        cx.emit(RegistryEvent::PermissionPrompt {
+            extension_id: request.extension_id.into(),
+            capability: request.capability.into(),
+            workspace,
+        });
+    }
+
+    /// The user's answer to a first-use prompt: `Some` is recorded (Allow, Don't Allow); `None`
+    /// (closed, or no window) is not, and the waiting requests get `denied`.
+    pub(crate) fn answer_permission(
+        &mut self,
+        extension_id: &str,
+        capability: &str,
+        answer: Option<bool>,
+        no_window: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((path, text)) =
+            self.consent
+                .answer_prompt(extension_id, capability, answer, no_window)
+        {
+            let fs = <dyn Fs>::global(cx);
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        if let Some(allowed) = answer {
+            log::info!(
+                "fyx:ui: {extension_id}: {capability} {}",
+                if allowed { "allowed" } else { "refused" }
+            );
+        }
+        cx.notify();
+    }
+
+    /// Allows a T2 capability again from the extensions page (after Don't Allow or a revoke).
+    pub fn allow_t2(&mut self, extension_id: &str, capability: &str, cx: &mut Context<Self>) {
+        self.answer_permission(extension_id, capability, Some(true), false, cx);
+    }
+
+    /// The first-use state of a declared T2 capability, for the extensions page.
+    pub fn t2_state(
+        &self,
+        extension_id: &str,
+        capability: &str,
+    ) -> ui_ext_wasm::permissions::PermissionState {
+        self.consent.t2_state(extension_id, capability)
+    }
+
+    /// What a first-use prompt says: the title, and the hosts or programs it would use.
+    pub(crate) fn permission_prompt_text(
+        &self,
+        extension_id: &str,
+        capability: &str,
+    ) -> (String, String) {
+        let name = self.provenance_name(extension_id);
+        let declared = self.consent.declared(extension_id);
+        let listed = |prefix: &str| -> Vec<String> {
+            declared
+                .iter()
+                .filter_map(|item| item.strip_prefix(prefix))
+                .map(str::to_string)
+                .collect()
+        };
+        let (title, detail) = match capability {
+            "network:fetch" => (
+                format!("Allow {name} to connect to the internet?"),
+                format!("Hosts: {}", listed("network:fetch@").join(", ")),
+            ),
+            "process:spawn" => {
+                let env = listed("process:env@");
+                (
+                    format!("Allow {name} to run programs?"),
+                    format!(
+                        "Programs: {}{}",
+                        listed("process:spawn@").join(", "),
+                        if env.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "
+Environment it may pass: {}",
+                                env.join(", ")
+                            )
+                        }
+                    ),
+                )
+            }
+            "workspace:edit" => (
+                format!("Allow {name} to edit files in your projects?"),
+                String::new(),
+            ),
+            "agent:observe" => (
+                format!("Allow {name} to watch agent sessions?"),
+                String::new(),
+            ),
+            other => (format!("Allow {name} to use {other}?"), String::new()),
+        };
+        let detail = format!(
+            "{detail}\n\n{name} · {extension_id}. You can revoke this on the extensions page."
+        );
+        (title, detail.trim_start().to_string())
+    }
+
+    /// Tells the user, in the active window, that a block changed an installed extension. With
+    /// no window it stays in the log (the update check logged it already).
+    pub(crate) fn notify_block(
+        &mut self,
+        name: &str,
+        block: &crate::fyx_extensions_page::BlockNotice,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace else {
+            return;
+        };
+        cx.emit(RegistryEvent::HostNotice {
+            id: format!("fyx-ui-block-{}", block.extension_id).into(),
+            title: format!("{name} was {}", block.what).into(),
+            message: format!(
+                "The Fyx block list says: {}\n({} · {})",
+                block.reason, name, block.extension_id
+            )
+            .into(),
+            workspace,
+        });
+    }
+
+    /// The name in the provenance line of an extension's notifications and progress (M.4).
+    pub fn provenance_name(&self, extension_id: &str) -> SharedString {
+        crate::notifications::provenance_name(
+            self.backends
+                .get(extension_id)
+                .and_then(|backend| backend.display_name()),
+            extension_id,
+        )
+    }
+
+    /// Cancel on a progress: `progress-cancel-requested` to its owner, once (M.2).
+    pub(crate) fn request_progress_cancel(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = Progresses::global(cx).and_then(|progresses| {
+            progresses.update(cx, |progresses, cx| {
+                progresses.request_cancel(extension_id, id, cx)
+            })
+        });
+        if let Some(owner) = owner {
+            self.send_to_owner(
+                extension_id,
+                &owner,
+                UiEvent::ProgressCancelRequested(id),
+                cx,
+            );
+        }
+    }
+
+    /// A click on a status-bar progress: the owner, if it is a panel, opens.
+    pub(crate) fn reveal_owner_panel(
+        &mut self,
+        extension_id: &str,
+        owner: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(surface) = self.surface_of(extension_id, owner)
+            && matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_))
+        {
+            let key = surface.info.key.clone();
+            cx.emit(RegistryEvent::RevealPanel(key));
+        }
+    }
+
+    /// Closes the notifications of an extension (`owner: None`) or of one of its owners, and
+    /// ends its progresses, without events: the owner is gone, or the instance is.
+    fn close_notifications_of(
+        &mut self,
+        extension_id: &str,
+        owner: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(progresses) = Progresses::global(cx) {
+            progresses.update(cx, |progresses, cx| {
+                progresses.end_of(extension_id, owner, cx)
             });
-            let state =
-                cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), Some(link), cx));
-            self.surfaces.push(LoadedSurface {
-                extension_id: backend.extension_id().into(),
-                surface_id: surface.id.as_str().into(),
-                info: Rc::new(info),
-                state,
-            });
+        }
+        let closing: Vec<(Arc<str>, u64)> = self
+            .notifications
+            .iter()
+            .filter(|((id, _), open)| {
+                id.as_ref() == extension_id && owner.is_none_or(|owner| open.owner == owner)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in closing {
+            if let Some(open) = self.notifications.remove(&key) {
+                close_notification_view(open, cx);
+            }
+        }
+    }
+
+    /// The open notifications of an extension, for tests and the Inspector.
+    pub fn open_notifications(&self, extension_id: &str) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .notifications
+            .keys()
+            .filter(|(id, _)| id.as_ref() == extension_id)
+            .map(|(_, id)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// An event for a notification or progress, to its owner surface or decoration.
+    fn send_to_owner(
+        &mut self,
+        extension_id: &str,
+        owner: &str,
+        event: UiEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let state = match self.surface_of(extension_id, owner) {
+            Some(surface) => Some(surface.state.clone()),
+            None => Decorations::global(cx).and_then(|decorations| {
+                let decorations = decorations.read(cx);
+                let id = decorations.extension_decoration(extension_id, owner)?;
+                decorations.state(id).cloned()
+            }),
+        };
+        match state {
+            Some(state) if state.read(cx).tree().is_some() => {
+                state.update(cx, |state, cx| state.dispatch(event, cx))
+            }
+            Some(_) => self.deliver_to_unmounted(extension_id, owner, event, cx),
+            None => log::debug!("fyx:ui: {extension_id}: no owner {owner:?} for {event:?}"),
+        }
+    }
+
+    /// An event for an owner with no tree right now (a closed modal, a remount): the surface
+    /// would drop it, but the extension must still hear it, and the host frees the notification's
+    /// or progress's slot when it passes. Its effects apply; the update has no tree to go to.
+    fn deliver_to_unmounted(
+        &mut self,
+        extension_id: &str,
+        owner: &str,
+        event: UiEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.backends.get(extension_id).cloned() else {
+            return;
+        };
+        log::debug!("fyx:ui: {extension_id}: {owner:?} is not mounted, sending {event:?} anyway");
+        let call = backend.handle_event(owner, event);
+        let extension_id: Arc<str> = extension_id.into();
+        cx.spawn(async move |this, cx| {
+            let effects = match call.await {
+                Ok(reply) => reply.effects,
+                Err(error) => match error.downcast_ref::<crate::backend::ReplyError>() {
+                    Some(rejected) => rejected.effects.clone(),
+                    None => {
+                        log::error!(
+                            "fyx:ui: {extension_id}: event for an unmounted surface failed: {}",
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
+                        );
+                        return;
+                    }
+                },
+            };
+            this.update(cx, |this, cx| {
+                for effect in effects {
+                    this.apply_effect(&extension_id, effect, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The workspace whose window became active; modals open there.
+    pub fn set_active_workspace(&mut self, workspace: gpui::EntityId) {
+        self.active_workspace = Some(workspace);
+    }
+
+    /// `show-surface` of a modal (the host checked the gesture): a fresh mount, shown in the
+    /// active window. With no workspace window the effect is dropped and the host told.
+    fn show_modal(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        let Some(surface) = self.surface_of(extension_id, surface_id) else {
+            return;
+        };
+        let Some(workspace) = self.active_workspace else {
+            log::warn!(
+                "fyx:ui: {extension_id}: no workspace window to show the modal {surface_id:?} in"
+            );
+            if let Some(backend) = self.backends.get(extension_id) {
+                backend.modal_closed(surface_id);
+            }
+            return;
+        };
+        let key = surface.info.key.clone();
+        if surface.state.read(cx).is_open() {
+            return;
+        }
+        surface.state.update(cx, |state, cx| state.show(cx));
+        cx.emit(RegistryEvent::ShowModal { key, workspace });
+    }
+
+    /// The extension closed a modal: nothing is sent to it.
+    fn close_modal(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        let Some(surface) = self.surface_of(extension_id, surface_id) else {
+            return;
+        };
+        if !surface.state.read(cx).is_modal() {
+            return;
+        }
+        let key = surface.info.key.clone();
+        surface.state.update(cx, |state, cx| state.close(None, cx));
+        cx.emit(RegistryEvent::CloseModal(key));
+    }
+
+    /// `remove-surface`: its containers close in every workspace; its tree, queued events and
+    /// tick go with its state. No event reaches the extension.
+    fn remove_surface(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        // Nothing outlives its owner, and its removal sends no events (design.md M).
+        self.close_notifications_of(extension_id, Some(surface_id), cx);
+        let before = self.surfaces.len();
+        self.surfaces.retain(|surface| {
+            !(surface.extension_id.as_ref() == extension_id
+                && surface.surface_id.as_ref() == surface_id)
+        });
+        if self.surfaces.len() == before {
+            log::debug!("fyx:ui: {extension_id} removed unknown surface {surface_id:?}");
         }
         cx.notify();
     }
@@ -471,13 +1079,18 @@ impl UiExtensionRegistry {
         cx: &mut Context<Self>,
     ) {
         let extension_id = extension.extension_id().clone();
-        let surfaces: Vec<Surface> = extension
-            .surfaces()
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect();
+        let surfaces: Vec<Surface> = extension.surfaces_v0_2().to_vec();
+        let initial_effects = extension.initial_effects().to_vec();
+        let io_events = extension.take_io_events();
+        self.io_instances.remove(&extension_id);
+        if let Some(io_events) = io_events {
+            self.start_io_loop(extension.clone(), io_events, cx);
+        }
         self.register_backend(Rc::new(extension), &surfaces, cx);
+        // Effects of instantiation and `surfaces` (0.2), after the static surfaces exist.
+        for effect in initial_effects {
+            self.apply_effect(&extension_id, effect, cx);
+        }
         cx.spawn(async move |this, cx| {
             while let Some(first) = pushed.next().await {
                 let mut batch = vec![first];
@@ -486,11 +1099,90 @@ impl UiExtensionRegistry {
                 }
                 let applied = this.update(cx, |this, cx| {
                     for pushed in batch {
-                        let PushedUpdate { surface_id, update } = pushed.into();
+                        let (surface_id, update) = (pushed.surface_id, pushed.update.into());
                         this.apply_pushed(&extension_id, &surface_id, update, cx);
                     }
                 });
                 if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Delivers an instance's I/O outcomes (a finished fetch) through `handle-io`, one at a time,
+    /// applying each reply's effects like a tick's (W2c, plan 4.6). The loop ends when the
+    /// instance is replaced or stops.
+    fn start_io_loop(
+        &mut self,
+        extension: UiExtension,
+        mut events: futures::channel::mpsc::Receiver<ui_ext_wasm::network::IoEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let extension_id = extension.extension_id().clone();
+        self.next_io_epoch += 1;
+        let epoch = self.next_io_epoch;
+        self.io_instances
+            .insert(extension_id.clone(), (epoch, extension));
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.next().await {
+                let Ok(Some(instance)) = this.update(cx, |this, _| {
+                    this.io_instances
+                        .get(&extension_id)
+                        .filter(|(current, _)| *current == epoch)
+                        .map(|(_, instance)| instance.clone())
+                }) else {
+                    break;
+                };
+                let result = instance.handle_io(event).await;
+                drop(instance);
+                let still_current = this.update(cx, |this, cx| {
+                    let current = this
+                        .io_instances
+                        .get(&extension_id)
+                        .is_some_and(|(current, _)| *current == epoch);
+                    if !current {
+                        return false;
+                    }
+                    match result {
+                        Ok(reply) => {
+                            for effect in reply.effects {
+                                this.apply_effect(&extension_id, effect, cx);
+                            }
+                        }
+                        Err(error) => match error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<ui_ext_wasm::EffectReplyError>())
+                        {
+                            Some(rejected) => {
+                                log::error!(
+                                    "fyx:ui: {extension_id}: handle-io failed: {}",
+                                    ui_ext::sanitize_for_log(&rejected.message)
+                                );
+                                for effect in rejected.effects.clone() {
+                                    this.apply_effect(&extension_id, effect, cx);
+                                }
+                            }
+                            // A trap or the time budget: the instance is dead.
+                            None => {
+                                log::error!(
+                                    "fyx:ui: {extension_id}: handle-io stopped it: {}",
+                                    ui_ext::sanitize_for_log(&format!("{error:#}"))
+                                );
+                                this.fail_extension(
+                                    &extension_id,
+                                    "",
+                                    format!("{extension_id} crashed. Restart the extension to try again.")
+                                        .into(),
+                                    cx,
+                                );
+                            }
+                        },
+                    }
+                    true
+                });
+                if !matches!(still_current, Ok(true)) {
                     break;
                 }
             }
@@ -511,9 +1203,11 @@ impl UiExtensionRegistry {
         let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             loop {
-                let mut found = find_ui_extensions(&dir, fs.as_ref()).await;
+                // Folders that exist but cannot be read: not uninstalls (triage-3 #7).
+                let mut unreadable = Vec::new();
+                let mut found = find_ui_extensions(&dir, fs.as_ref(), &mut unreadable).await;
                 if let Some(store) = &store {
-                    found.extend(find_store_extensions(store, fs.as_ref()).await);
+                    found.extend(find_store_extensions(store, fs.as_ref(), &mut unreadable).await);
                 }
                 // Read again on every round: a change during the scan asks for another round.
                 let dev_paths = this
@@ -521,7 +1215,16 @@ impl UiExtensionRegistry {
                     .unwrap_or_default();
                 for path in dev_paths {
                     let source = ExtensionSource::Directory(path.clone());
-                    match found_at(path.clone(), true, source, None, fs.as_ref()).await {
+                    match found_at(
+                        path.clone(),
+                        true,
+                        source,
+                        None,
+                        fs.as_ref(),
+                        &mut unreadable,
+                    )
+                    .await
+                    {
                         Some(extension) => found.push(extension),
                         None => log::error!(
                             "fyx:ui: fyx.extensions.dev_paths: {} is not a built UI extension",
@@ -530,31 +1233,56 @@ impl UiExtensionRegistry {
                     }
                 }
                 let Ok((to_load, consent_file)) = this.update(cx, |this, cx| {
-                    (this.plan_scan(found, cx), this.consent.path_to_load())
+                    (
+                        this.plan_scan(found, &unreadable, cx),
+                        this.consent.path_to_load(),
+                    )
                 }) else {
                     return;
                 };
                 if let Some(path) = consent_file {
-                    let records = consent::read_records(&path, fs.as_ref()).await;
-                    this.update(cx, |this, _| this.consent.set_loaded(records))
+                    let (records, t2) = consent::read_file(&path, fs.as_ref()).await;
+                    this.update(cx, |this, _| this.consent.set_loaded(records, t2))
                         .ok();
                 }
+                // Check each extension in turn (consent may ask), then load them all at once: each
+                // compiles on the background executor, so the loads overlap (triage-3, PERF 8).
+                let mut ready = Vec::new();
                 for found in to_load {
                     let trusted = this
                         .update(cx, |this, _| this.trust_installed)
                         .unwrap_or(false);
+                    // One read of the component: the consent check and the load use the same
+                    // bytes, as they use the same manifest (triage-3, SEC T1).
+                    let mut bytes = match fs.load_bytes(&found.component).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            log::error!(
+                                "fyx:ui: cannot read {}: {error:#}",
+                                found.component.display()
+                            );
+                            this.update(cx, |this, _| {
+                                this.report_load(&found.extension_id, Err(format!("{error:#}")))
+                            })
+                            .ok();
+                            continue;
+                        }
+                    };
                     if !trusted {
-                        let record = match ConsentRecord::current(
+                        let record = match ConsentRecord::for_bytes(
                             &found.dir,
                             &found.capabilities,
-                            &found.component,
+                            bytes,
                             found.is_dev,
                             fs.as_ref(),
                             &cx.background_executor(),
                         )
                         .await
                         {
-                            Ok(record) => record,
+                            Ok((record, same_bytes)) => {
+                                bytes = same_bytes;
+                                record
+                            }
                             Err(error) => {
                                 log::error!(
                                     "fyx:ui: not loading {}: {error:#}",
@@ -566,21 +1294,50 @@ impl UiExtensionRegistry {
                         let allowed = this
                             .update(cx, |this, cx| this.check_consent(&found, &dir, record, cx));
                         if !matches!(allowed, Ok(true)) {
+                            this.update(cx, |this, _| {
+                                this.report_load(
+                                    &found.extension_id,
+                                    Err("it waits for your approval (see the notification)".into()),
+                                )
+                            })
+                            .ok();
                             continue;
                         }
                     }
                     let checker = this.update(cx, |this, _| this.consent.checker()).ok();
-                    let loaded = UiExtension::load_from_dir_with_options(
-                        &found.dir,
-                        LoadOptions {
-                            cache: found.cache.clone(),
-                            capability_check: checker,
-                            ..LoadOptions::default()
-                        },
-                        fs.clone(),
+                    let options = LoadOptions {
+                        cache: found.cache.clone(),
+                        capability_check: checker,
+                        allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
+                        // The open worktrees, for process:spawn (W2c, plan 4.7).
+                        workspace: Some(cx.update(|cx| {
+                            crate::worktrees::OpenWorktrees::global(cx)
+                                .for_extension(&found.extension_id)
+                        })),
+                        // workspace:edit and agent:observe (plan 4.8).
+                        workspace_edits: Some(cx.update(|cx| {
+                            crate::workspace_edit::for_extension(&found.extension_id, cx)
+                        })),
+                        agent_reviews: cx.update(|cx| {
+                            crate::agent_observe::for_extension(&found.extension_id, cx)
+                        }),
+                        proxy: Some(cx.update(extension_proxy)),
+                        ..LoadOptions::default()
+                    };
+                    ready.push((found, bytes, options));
+                }
+                let loads = ready.into_iter().map(|(found, bytes, options)| {
+                    let load = UiExtension::load_checked(
+                        found.extension_id.clone(),
+                        found.manifest.clone(),
+                        bytes,
+                        options,
                         cx,
-                    )
-                    .await;
+                    );
+                    async move { (found, load.await.map(Some)) }
+                });
+                let results = futures::future::join_all(loads).await;
+                for (found, loaded) in results {
                     match loaded {
                         Ok(Some((extension, pushed))) => {
                             log::info!(
@@ -594,12 +1351,18 @@ impl UiExtensionRegistry {
                                     found.source.clone(),
                                 ) {
                                     log::error!("fyx:ui: {error:#}");
+                                    this.report_load(
+                                        &found.extension_id,
+                                        Err(format!("{error:#}")),
+                                    );
                                     return;
                                 }
+                                this.report_load(&found.extension_id, Ok(()));
                                 this.installed
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
                                 this.consent
                                     .declare(&found.extension_id, found.capabilities.clone());
+                                set_image_dir(&found.extension_id, found.dir.clone(), cx);
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
                                     this.watch_component(
@@ -620,6 +1383,7 @@ impl UiExtensionRegistry {
                                 found.dir.display()
                             );
                             this.update(cx, |this, cx| {
+                                this.report_load(&found.extension_id, Err(format!("{error:#}")));
                                 this.reload_failed(&found.extension_id, &error, cx)
                             })
                             .ok();
@@ -695,7 +1459,8 @@ impl UiExtensionRegistry {
             // The scan compares the component's fingerprint and loads it again if it changed.
             Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
             Reload::DevPath(path) => {
-                cx.spawn(async move |this, cx| {
+                let key = path.clone();
+                let task = cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
                             "fyx:ui: failed to reload dev extension {}: {error:#}",
@@ -716,8 +1481,8 @@ impl UiExtensionRegistry {
                         })
                         .ok();
                     }
-                })
-                .detach();
+                });
+                self.dev_reloads.insert(key, task);
             }
         }
     }
@@ -767,7 +1532,31 @@ impl UiExtensionRegistry {
     }
 
     /// Which found extensions need loading; stops the surfaces of uninstalled ones.
-    fn plan_scan(&mut self, found: Vec<Found>, cx: &mut Context<Self>) -> Vec<Found> {
+    fn plan_scan(
+        &mut self,
+        found: Vec<Found>,
+        unreadable: &[(PathBuf, String)],
+        cx: &mut Context<Self>,
+    ) -> Vec<Found> {
+        // A loaded extension whose folder is there but whose manifest no longer reads is not
+        // uninstalled: it keeps running and its surfaces say what is wrong (triage-3 #7).
+        let broken: Vec<(Arc<str>, String)> = self
+            .installed
+            .iter()
+            .filter_map(|(id, fingerprint)| {
+                unreadable
+                    .iter()
+                    .find(|(dir, _)| *dir == fingerprint.dir)
+                    .map(|(_, error)| (id.clone(), error.clone()))
+            })
+            .collect();
+        for (extension_id, error) in &broken {
+            self.reload_failed(
+                extension_id,
+                &anyhow::anyhow!("its extension.toml cannot be read: {error}"),
+                cx,
+            );
+        }
         self.pending_consent.retain(|pending| {
             found
                 .iter()
@@ -777,6 +1566,7 @@ impl UiExtensionRegistry {
             .installed
             .keys()
             .filter(|id| !found.iter().any(|found| &found.extension_id == *id))
+            .filter(|id| !broken.iter().any(|(broken, _)| broken == *id))
             .cloned()
             .collect();
         for extension_id in gone {
@@ -805,11 +1595,188 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations, its
+        // notifications, and the registry's handle on it (triage-3, ASYNC 7).
+        remove_decorations(extension_id, cx);
+        self.close_notifications_of(extension_id, None, cx);
+        clear_images(extension_id, cx);
+        self.io_instances.remove(extension_id);
+        self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
                     .state
                     .update(cx, |state, cx| state.fail(message.clone(), false, cx));
+            }
+        }
+    }
+
+    /// Applies one effect of a call (or of instantiation) that the surface that made the call did
+    /// not apply itself. Effects come in emission order.
+    pub fn apply_effect(&mut self, extension_id: &str, effect: HostEffect, cx: &mut Context<Self>) {
+        match effect {
+            HostEffect::Push { surface_id, update } => {
+                self.apply_pushed(extension_id, &surface_id, update, cx)
+            }
+            HostEffect::AddSurface(surface) => {
+                let Some(backend) = self.backends.get(extension_id).cloned() else {
+                    log::error!("fyx:ui: {extension_id} added a surface before it was registered");
+                    return;
+                };
+                // A modal is added closed; panels and status items mount at once.
+                self.add_surface(backend, &surface, cx);
+                cx.notify();
+            }
+            HostEffect::RemoveSurface { surface_id } => {
+                self.close_modal(extension_id, &surface_id, cx);
+                self.remove_surface(extension_id, &surface_id, cx)
+            }
+            HostEffect::ShowSurface { surface_id }
+                if self
+                    .surface_of(extension_id, &surface_id)
+                    .is_some_and(|surface| surface.state.read(cx).is_modal()) =>
+            {
+                self.show_modal(extension_id, &surface_id, cx)
+            }
+            HostEffect::HideSurface { surface_id }
+                if self
+                    .surface_of(extension_id, &surface_id)
+                    .is_some_and(|surface| surface.state.read(cx).is_modal()) =>
+            {
+                self.close_modal(extension_id, &surface_id, cx)
+            }
+            HostEffect::ShowSurface { surface_id } => match self
+                .surface_of(extension_id, &surface_id)
+            {
+                Some(surface)
+                    if matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_)) =>
+                {
+                    let key = surface.info.key.clone();
+                    cx.emit(RegistryEvent::RevealPanel(key));
+                }
+                Some(_) => log::debug!(
+                    "fyx:ui: {extension_id}: show-surface({surface_id:?}) of a status item does nothing"
+                ),
+                None => {
+                    log::debug!("fyx:ui: {extension_id}: show-surface of unknown {surface_id:?}")
+                }
+            },
+            HostEffect::RequestTick { surface_id, delay } => {
+                match self.surface_of(extension_id, &surface_id) {
+                    Some(surface) => surface
+                        .state
+                        .update(cx, |state, cx| state.request_tick(delay, cx)),
+                    None => {
+                        log::debug!(
+                            "fyx:ui: {extension_id}: request-tick of unknown {surface_id:?}"
+                        )
+                    }
+                }
+            }
+            HostEffect::CancelTick { surface_id } => {
+                if let Some(surface) = self.surface_of(extension_id, &surface_id) {
+                    surface.state.update(cx, |state, _| state.cancel_tick());
+                }
+            }
+            HostEffect::HideSurface { surface_id } => {
+                if let Some(surface) = self.surface_of(extension_id, &surface_id)
+                    && matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_))
+                {
+                    let key = surface.info.key.clone();
+                    cx.emit(RegistryEvent::HidePanel(key));
+                }
+            }
+            HostEffect::PlaceDecoration {
+                id,
+                location,
+                nodes,
+            } => {
+                let Some(backend) = self.backends.get(extension_id).cloned() else {
+                    log::error!(
+                        "fyx:ui: {extension_id} placed a decoration before it was registered"
+                    );
+                    return;
+                };
+                let Some(decorations) = Decorations::global(cx) else {
+                    log::debug!(
+                        "fyx:ui: {extension_id}: no decorations in this app, dropping {id:?}"
+                    );
+                    return;
+                };
+                let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
+                    registry: cx.weak_entity(),
+                    extension_id: extension_id.into(),
+                });
+                let placed = decorations.update(cx, |decorations, cx| {
+                    decorations.place_extension(
+                        extension_id,
+                        &id,
+                        &location,
+                        nodes,
+                        backend,
+                        Some(link),
+                        cx,
+                    )
+                });
+                if let Err(error) = placed {
+                    log::error!("fyx:ui: {extension_id}: place-decoration({id:?}): {error:#}");
+                }
+            }
+            HostEffect::RemoveDecoration { id } => {
+                let removed = Decorations::global(cx).is_some_and(|decorations| {
+                    decorations.update(cx, |decorations, cx| {
+                        decorations.remove_extension_decoration(extension_id, &id, cx)
+                    })
+                });
+                if removed {
+                    self.close_notifications_of(extension_id, Some(&id), cx);
+                } else {
+                    log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
+                }
+            }
+            // Plan 4.11: generated images, decoded when a node shows them.
+            HostEffect::AddImage {
+                handle,
+                format,
+                bytes,
+            } => {
+                if let Some(images) = crate::images::ImageCache::global(cx) {
+                    images.update(cx, |images, _| {
+                        images.add_generated(extension_id, handle, format, bytes)
+                    });
+                }
+            }
+            HostEffect::RemoveImage { handle } => {
+                if let Some(images) = crate::images::ImageCache::global(cx) {
+                    images.update(cx, |images, cx| {
+                        images.remove_generated(extension_id, handle, cx)
+                    });
+                }
+            }
+            HostEffect::Notify { id, notification } => {
+                self.show_notification(extension_id, id, notification, cx)
+            }
+            HostEffect::DismissNotification { id } => {
+                self.dismiss_notification(extension_id, id, cx)
+            }
+            HostEffect::ProgressStart { id, options } => {
+                if let Some(progresses) = Progresses::global(cx) {
+                    progresses.update(cx, |progresses, cx| {
+                        progresses.start(extension_id, id, options, cx)
+                    });
+                }
+            }
+            HostEffect::ProgressUpdate { id, value, message } => {
+                if let Some(progresses) = Progresses::global(cx) {
+                    progresses.update(cx, |progresses, cx| {
+                        progresses.update(extension_id, id, value, message, cx)
+                    });
+                }
+            }
+            HostEffect::ProgressEnd { id } => {
+                if let Some(progresses) = Progresses::global(cx) {
+                    progresses.update(cx, |progresses, cx| progresses.end(extension_id, id, cx));
+                }
             }
         }
     }
@@ -825,16 +1792,30 @@ impl UiExtensionRegistry {
             Some(surface) => surface.state.update(cx, |state, cx| {
                 state.apply_pushed_update(update, cx);
             }),
-            None => log::error!(
-                "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
-            ),
+            None => {
+                // Decoration ids share the surface namespace (design.md §L).
+                let pushed = Decorations::global(cx).is_some_and(|decorations| {
+                    decorations.update(cx, |decorations, cx| {
+                        decorations.push(extension_id, surface_id, update, cx)
+                    })
+                });
+                if !pushed {
+                    log::error!(
+                        "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
+                    );
+                }
+            }
         }
     }
 }
 
 /// The UI extensions in `dir`: subdirectories (or links to them, as dev installs are) whose
 /// `extension.toml` has a `[fyx_ui]` table. Others are regular Zed extensions and are skipped.
-async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
+async fn find_ui_extensions(
+    dir: &Path,
+    fs: &dyn Fs,
+    unreadable: &mut Vec<(PathBuf, String)>,
+) -> Vec<Found> {
     let mut entries = match fs.read_dir(dir).await {
         Ok(entries) => entries,
         Err(error) => {
@@ -857,7 +1838,8 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
             .flatten()
             .is_some_and(|metadata| metadata.is_symlink);
         let source = ExtensionSource::Directory(extension_dir.clone());
-        if let Some(extension) = found_at(extension_dir, is_dev, source, None, fs).await {
+        if let Some(extension) = found_at(extension_dir, is_dev, source, None, fs, unreadable).await
+        {
             found.push(extension);
         }
     }
@@ -865,7 +1847,11 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
 }
 
 /// The active version of every extension in the install store.
-async fn find_store_extensions(store: &InstallStore, fs: &dyn Fs) -> Vec<Found> {
+async fn find_store_extensions(
+    store: &InstallStore,
+    fs: &dyn Fs,
+    unreadable: &mut Vec<(PathBuf, String)>,
+) -> Vec<Found> {
     let active = match store.active(fs).await {
         Ok(active) => active,
         Err(error) => {
@@ -876,7 +1862,16 @@ async fn find_store_extensions(store: &InstallStore, fs: &dyn Fs) -> Vec<Found> 
     let mut found = Vec::new();
     for (extension_id, version, dir) in active {
         let cache = store.precompiled_cache(&extension_id, &version);
-        match found_at(dir, false, ExtensionSource::Store, Some(cache), fs).await {
+        match found_at(
+            dir,
+            false,
+            ExtensionSource::Store,
+            Some(cache),
+            fs,
+            unreadable,
+        )
+        .await
+        {
             Some(extension) if extension.extension_id == extension_id => found.push(extension),
             Some(extension) => log::error!(
                 "fyx:ui: the install store lists {extension_id}, but its folder holds {}",
@@ -895,12 +1890,15 @@ async fn found_at(
     source: ExtensionSource,
     cache: Option<PrecompiledCache>,
     fs: &dyn Fs,
+    unreadable: &mut Vec<(PathBuf, String)>,
 ) -> Option<Found> {
     let (extension_id, manifest) = match UiManifest::read(fs, &extension_dir).await {
         Ok(Some(manifest)) => manifest,
         Ok(None) => return None,
         Err(error) => {
-            log::debug!("fyx:ui: skipping {}: {error:#}", extension_dir.display());
+            // Also a regular Zed extension with a broken manifest; logged, not shown.
+            log::warn!("fyx:ui: cannot read {}: {error:#}", extension_dir.display());
+            unreadable.push((extension_dir, format!("{error:#}")));
             return None;
         }
     };
@@ -916,9 +1914,11 @@ async fn found_at(
             extension_id,
             component,
             is_dev,
-            capabilities: manifest.capabilities.clone(),
+            // With its domains and programs, so an update that adds one is held (plan 4.5).
+            capabilities: manifest.consent_items(),
             source,
             cache,
+            manifest,
         }),
         Ok(None) | Err(_) => {
             log::error!(
@@ -930,6 +1930,18 @@ async fn found_at(
     }
 }
 
+/// Removes every decoration of an extension (unload, reload, disable).
+fn remove_decorations(extension_id: &str, cx: &mut App) {
+    if let Some(decorations) = Decorations::global(cx) {
+        let removed = decorations.update(cx, |decorations, cx| {
+            decorations.remove_extension(extension_id, cx)
+        });
+        if removed > 0 {
+            log::debug!("fyx:ui: removed {removed} decoration(s) of {extension_id}");
+        }
+    }
+}
+
 /// A surface's way back to the registry, for the other surfaces of its extension.
 struct RegistryLink {
     registry: WeakEntity<UiExtensionRegistry>,
@@ -937,10 +1949,10 @@ struct RegistryLink {
 }
 
 impl SurfaceLink for RegistryLink {
-    fn route_push(&self, push: PushedUpdate, cx: &mut App) {
+    fn route_effect(&self, effect: HostEffect, cx: &mut App) {
         self.registry
             .update(cx, |registry, cx| {
-                registry.apply_pushed(&self.extension_id, &push.surface_id, push.update, cx)
+                registry.apply_effect(&self.extension_id, effect, cx)
             })
             .ok();
     }
@@ -949,6 +1961,57 @@ impl SurfaceLink for RegistryLink {
         self.registry
             .update(cx, |registry, cx| {
                 registry.fail_extension(&self.extension_id, from_surface, message, cx)
+            })
+            .ok();
+    }
+
+    fn reserve_tick(&self, due: std::time::Instant, cx: &mut App) -> std::time::Instant {
+        self.registry
+            .update(cx, |registry, _| {
+                registry
+                    .tick_budgets
+                    .entry(self.extension_id.clone())
+                    .or_default()
+                    .reserve(due)
+            })
+            .unwrap_or(due)
+    }
+
+    fn min_tick_delay(&self, cx: &App) -> std::time::Duration {
+        self.registry
+            .upgrade()
+            .and_then(|registry| {
+                registry
+                    .read(cx)
+                    .tick_budgets
+                    .get(&self.extension_id)
+                    .map(|budget| budget.min_delay(cx.background_executor().now()))
+            })
+            .unwrap_or(ui_ext_wasm::ticks::MIN_TICK_DELAY)
+    }
+
+    fn record_tick(
+        &self,
+        finished_at: std::time::Instant,
+        busy: std::time::Duration,
+        cx: &mut App,
+    ) {
+        self.registry
+            .update(cx, |registry, _| {
+                let throttled = registry
+                    .tick_budgets
+                    .entry(self.extension_id.clone())
+                    .or_default()
+                    .record(finished_at, busy);
+                if throttled {
+                    log::warn!(
+                        "fyx:ui: {} spends more than {}% of its time in ticks; its ticks run at \
+                         most once a second for {:?}",
+                        self.extension_id,
+                        ui_ext_wasm::ticks::TICK_CPU_SHARE_PERCENT,
+                        ui_ext_wasm::ticks::TICK_CPU_WINDOW
+                    );
+                }
             })
             .ok();
     }
@@ -967,6 +2030,7 @@ pub fn init(cx: &mut App) {
         UiExtensionRegistry::new(ConsentStore::default_path())
             .with_store(InstallStore::new(InstallStore::default_root()))
     });
+    registry.update(cx, |registry, cx| registry.start_permission_prompts(cx));
     cx.set_global(GlobalRegistry(registry));
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
@@ -977,12 +2041,79 @@ pub fn init(cx: &mut App) {
     })
     .detach();
 
-    load_dev_extensions(cx);
+    // FYX_UI_DEV_EXTENSIONS loads without consent, so only dev builds honour it (triage-3).
+    if dev_build(cx) {
+        load_dev_extensions(cx);
+    } else if !dev_extension_paths().is_empty() {
+        log::warn!(
+            "fyx:ui: {DEV_EXTENSIONS_ENV} is ignored outside dev builds; use \
+             fyx_ui: install dev UI extension"
+        );
+    }
     follow_dev_paths_setting(cx);
+    follow_proxy_setting(cx);
     watch_installed_extensions(cx);
 }
 
+/// A dev build: the Dev release channel (also when none is set, as in tests).
+fn dev_build(cx: &App) -> bool {
+    release_channel::ReleaseChannel::try_global(cx)
+        .is_none_or(|channel| channel == release_channel::ReleaseChannel::Dev)
+}
+
+/// Whether a staged `fyx:ui` version (0.2 before it is frozen) may load (migration.md §2): on Dev
+/// and Nightly builds, and for dev extensions. `None` before the release channel is set (tests),
+/// which leaves `ui_ext_wasm`'s default.
+fn staged_allowed(dev_extension: bool, cx: &App) -> Option<bool> {
+    let channel = release_channel::ReleaseChannel::try_global(cx)?;
+    let dev_or_nightly = matches!(
+        channel,
+        release_channel::ReleaseChannel::Dev | release_channel::ReleaseChannel::Nightly
+    );
+    Some(ui_ext_wasm::staged_api_allowed(
+        dev_or_nightly,
+        dev_extension,
+    ))
+}
+
 /// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
+/// Fyx's `proxy` setting for `network:fetch`, one cell shared by every load and kept current
+/// (W2c, plan 4.6). The raw setting, never `ProxySettings::proxy_url`, which falls back to
+/// `HTTP_PROXY` and friends: environment proxies never apply (decision 23).
+#[derive(Clone, Default)]
+struct ExtensionProxy(ui_ext_wasm::network::ProxySetting);
+
+impl Global for ExtensionProxy {}
+
+fn proxy_setting(cx: &App) -> Option<String> {
+    cx.try_global::<settings::SettingsStore>()?
+        .merged_settings()
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn follow_proxy_setting(cx: &mut App) {
+    let proxy = cx.default_global::<ExtensionProxy>().0.clone();
+    let apply = move |cx: &mut App| {
+        let setting = proxy_setting(cx);
+        if !proxy.set(setting.as_deref()) && setting.is_some() {
+            log::warn!("fyx:ui: the proxy setting is not a usable proxy URL; fetches go direct");
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
+    }
+}
+
+/// The proxy cell every load gets.
+pub(crate) fn extension_proxy(cx: &mut App) -> ui_ext_wasm::network::ProxySetting {
+    cx.default_global::<ExtensionProxy>().0.clone()
+}
+
 fn follow_dev_paths_setting(cx: &mut App) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
@@ -1030,7 +2161,7 @@ struct WorkspaceSurfaces {
     panels: HashMap<SharedString, Box<dyn AnyExtensionPanel>>,
     /// One status bar entry per side, holding that side's extension status items.
     status_groups: HashMap<bool, Entity<ExtensionStatusGroup>>,
-    status_items: HashSet<SharedString>,
+    status_items: HashMap<SharedString, (bool, Entity<ExtensionStatusItem>)>,
     /// Extensions this workspace has offered "Enable" for.
     consent_prompts: HashSet<Arc<str>>,
 }
@@ -1046,6 +2177,7 @@ fn attach_to_workspace(
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
     crate::store_actions::register(workspace);
+    crate::fyx_extensions_page::register(workspace);
     if crate::inspector::inspector_enabled(cx) {
         let inspector =
             cx.new(|cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
@@ -1099,11 +2231,298 @@ fn attach_to_workspace(
     })
     .detach();
 
+    cx.subscribe_in(&registry, window, {
+        let surfaces = surfaces.clone();
+        move |workspace, registry, event: &RegistryEvent, window, cx| {
+            let (key, open) = match event {
+                RegistryEvent::ShowModal {
+                    key,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        open_modal(workspace, &registry, key.clone(), window, cx);
+                    }
+                    return;
+                }
+                RegistryEvent::ShowNotification {
+                    extension_id,
+                    id,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        show_extension_notification(
+                            workspace,
+                            &registry,
+                            extension_id.clone(),
+                            *id,
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
+                RegistryEvent::PermissionPrompt {
+                    extension_id,
+                    capability,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        ask_permission(
+                            &registry,
+                            extension_id.clone(),
+                            capability.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
+                RegistryEvent::HostNotice {
+                    id,
+                    title,
+                    message,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        let (title, message) = (title.clone(), message.clone());
+                        workspace.show_notification(NotificationId::named(id.clone()), cx, |cx| {
+                            cx.new(|cx| {
+                                MessageNotification::new(message, cx)
+                                    .with_title(title)
+                                    .primary_message("Open Fyx Extensions")
+                                    .primary_on_click(|window, cx| {
+                                        window
+                                            .dispatch_action(Box::new(crate::OpenFyxExtensions), cx)
+                                    })
+                            })
+                        });
+                    }
+                    return;
+                }
+                RegistryEvent::CloseModal(key) => {
+                    if let Some(modal) = workspace.active_modal::<ExtensionModal>(cx)
+                        && modal.read(cx).key() == key
+                    {
+                        modal.update(cx, |modal, cx| modal.close_by_host(cx));
+                    }
+                    return;
+                }
+                RegistryEvent::RevealPanel(key) => (key, true),
+                RegistryEvent::HidePanel(key) => (key, false),
+            };
+            // `show-surface` and `hide-surface` of a panel act in the window the user is in.
+            if !window.is_window_active() && cx.active_window().is_some() {
+                return;
+            }
+            let Some(panel_id) = surfaces
+                .borrow()
+                .panels
+                .get(key)
+                .map(|panel| panel.panel_id())
+            else {
+                return;
+            };
+            for dock in workspace.all_docks() {
+                let Some(index) = dock.read(cx).panel_index_for_id(panel_id) else {
+                    continue;
+                };
+                dock.update(cx, |dock, cx| {
+                    if open {
+                        dock.activate_panel(index, window, cx);
+                        dock.set_open(true, window, cx);
+                    } else if dock.active_panel_index() == Some(index) {
+                        dock.set_open(false, window, cx);
+                    }
+                });
+            }
+        }
+    })
+    .detach();
+
+    // A banner while FYX_UI_DEV_EXTENSIONS is in use: those load without consent (triage-3).
+    if dev_build(cx) && !dev_extension_paths().is_empty() {
+        let message = format!(
+            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent.              Unset it to stop."
+        );
+        workspace.show_notification(
+            NotificationId::named("fyx-ui-dev-extensions-env".into()),
+            cx,
+            move |cx| cx.new(|cx| MessageNotification::new(message, cx)),
+        );
+    }
+
+    // Extension progress in the status bar (design.md M.2), one item for all extensions.
+    if let Some(progresses) = Progresses::global(cx) {
+        let item = cx.new(|cx| ExtensionProgressStatus::new(progresses, cx));
+        workspace.status_bar().update(cx, |status_bar, cx| {
+            status_bar.add_left_item(item, window, cx)
+        });
+    }
+
+    // Modals open in the window the user was in last.
+    let workspace_id = cx.entity_id();
+    registry.update(cx, |registry, _| {
+        if registry.active_workspace.is_none() {
+            registry.set_active_workspace(workspace_id);
+        }
+    });
+    cx.observe_window_activation(window, {
+        let registry = registry.clone();
+        move |_, window, cx| {
+            if window.is_window_active() {
+                let workspace_id = cx.entity_id();
+                registry.update(cx, |registry, _| {
+                    registry.set_active_workspace(workspace_id)
+                });
+            }
+        }
+    })
+    .detach();
+
+    // Its worktrees, and whether each is trusted, for process:spawn (plan 4.7).
+    {
+        let workspace_id = cx.entity_id();
+        let report = move |workspace: &Workspace, cx: &mut App| {
+            let project = workspace.project().clone();
+            let worktrees = crate::worktrees::of_project(workspace_id.as_u64(), &project, cx);
+            crate::worktrees::OpenWorktrees::global(cx).set(workspace_id, worktrees);
+        };
+        report(workspace, cx);
+        crate::workspace_edit::register_workspace(
+            workspace_id,
+            Some(cx.weak_entity()),
+            workspace.project().downgrade(),
+            cx,
+        );
+        let project = workspace.project().clone();
+        cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
+            .detach();
+        if let Some(trust) = project::trusted_worktrees::TrustedWorktrees::try_get_global(cx) {
+            cx.observe(&trust, move |workspace, _, cx| report(workspace, cx))
+                .detach();
+        }
+        cx.on_release(move |_, cx| {
+            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id);
+            crate::workspace_edit::unregister_workspace(workspace_id, cx);
+        })
+        .detach();
+    }
+
+    // A closed workspace lets its containers go at once: the registry's observers hold
+    // `surfaces` until its next notify (triage-3, ASYNC 8).
+    cx.on_release({
+        let surfaces = surfaces.clone();
+        let registry = registry.downgrade();
+        move |_, cx| {
+            let released = std::mem::take(&mut *surfaces.borrow_mut());
+            drop(released);
+            registry
+                .update(cx, |registry, _| {
+                    if registry.active_workspace == Some(workspace_id) {
+                        registry.active_workspace = None;
+                    }
+                })
+                .ok();
+        }
+    })
+    .detach();
+
     // Not from inside `observe_new`: the workspace is still being set up there.
     cx.defer_in(window, move |workspace, window, cx| {
         add_missing_surfaces(workspace, &registry, &surfaces, window, cx);
         offer_consent(workspace, &registry, &surfaces, cx);
     });
+}
+
+/// Draws an extension notification in this workspace's notification stack (design.md M.1).
+fn show_extension_notification(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: Arc<str>,
+    id: u64,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some((name, notification)) = registry.update(cx, |registry, _| {
+        registry.take_pending_notification(&extension_id, id)
+    }) else {
+        return;
+    };
+    let view = cx.new(|cx| {
+        crate::notifications::ExtensionNotification::new(
+            id,
+            extension_id.clone(),
+            name,
+            notification,
+            registry.downgrade(),
+            window,
+            cx,
+        )
+    });
+    registry.update(cx, |registry, _| {
+        registry.set_notification_view(&extension_id, id, view.downgrade())
+    });
+    workspace.show_notification(
+        NotificationId::composite::<crate::notifications::ExtensionNotification>(
+            SharedString::from(format!("{extension_id}/{id}")),
+        ),
+        cx,
+        |_| view,
+    );
+}
+
+/// The first-use prompt of a T2 capability (plan 4.5): Allow or Don't Allow; closing it answers
+/// nothing.
+fn ask_permission(
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: Arc<str>,
+    capability: SharedString,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let (title, detail) = registry
+        .read(cx)
+        .permission_prompt_text(&extension_id, &capability);
+    let answer = window.prompt(
+        gpui::PromptLevel::Warning,
+        &title,
+        Some(&detail),
+        &["Allow", "Don't Allow"],
+        cx,
+    );
+    let registry = registry.downgrade();
+    cx.spawn(async move |_, cx| {
+        let answer = match answer.await {
+            Ok(0) => Some(true),
+            Ok(1) => Some(false),
+            _ => None,
+        };
+        registry
+            .update(cx, |registry, cx| {
+                registry.answer_permission(&extension_id, &capability, answer, false, cx)
+            })
+            .ok();
+    })
+    .detach();
+}
+
+/// Where an extension's image assets are (plan 4.11).
+fn set_image_dir(extension_id: &str, dir: PathBuf, cx: &mut App) {
+    if let Some(images) = crate::images::ImageCache::global(cx) {
+        images.update(cx, |images, _| images.set_dir(extension_id, dir));
+    }
+}
+
+fn clear_images(extension_id: &str, cx: &mut App) {
+    if let Some(images) = crate::images::ImageCache::global(cx) {
+        images.update(cx, |images, cx| images.clear(extension_id, cx));
+    }
+}
+
+fn close_notification_view(open: OpenNotification, cx: &mut App) {
+    if let Some(view) = open.view.and_then(|view| view.upgrade()) {
+        view.update(cx, |view, cx| view.close_by_host(cx));
+    }
 }
 
 /// One notification per installed extension waiting for consent, once per workspace: what it
@@ -1169,6 +2588,38 @@ fn offer_consent(
     }
 }
 
+/// Opens a modal surface in this workspace. The modal layer holds one modal, and toggling one of
+/// the same type only closes it (design.md, C, "Same-type trap"), so the active modal is hidden
+/// first; it gets `dismissed(replaced)`. Showing the modal already shown does nothing.
+fn open_modal(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    key: SharedString,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if workspace
+        .active_modal::<ExtensionModal>(cx)
+        .is_some_and(|modal| *modal.read(cx).key() == key)
+    {
+        return;
+    }
+    let Some(state) = registry
+        .read(cx)
+        .surface(&key)
+        .map(|surface| surface.state.clone())
+    else {
+        return;
+    };
+    let weak = cx.weak_entity();
+    workspace.hide_modal(window, cx);
+    workspace.toggle_modal(window, cx, move |window, cx| {
+        ExtensionModal::new(key, state, weak, window, cx)
+    });
+}
+
+/// Brings the workspace's containers in line with the registry: adds the missing panels and
+/// status items, and takes out those whose surface is gone (`remove-surface`).
 fn add_missing_surfaces(
     workspace: &mut Workspace,
     registry: &Entity<UiExtensionRegistry>,
@@ -1176,6 +2627,42 @@ fn add_missing_surfaces(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    let live: HashSet<SharedString> = registry
+        .read(cx)
+        .surfaces()
+        .iter()
+        .map(|surface| surface.info.key.clone())
+        .collect();
+    let gone_panels: Vec<SharedString> = surfaces
+        .borrow()
+        .panels
+        .keys()
+        .filter(|key| !live.contains(*key))
+        .cloned()
+        .collect();
+    for key in gone_panels {
+        if let Some(panel) = surfaces.borrow_mut().panels.remove(&key) {
+            panel.remove_from(workspace, window, cx);
+        }
+    }
+    let gone_items: Vec<(bool, Entity<ExtensionStatusItem>)> = {
+        let mut surfaces = surfaces.borrow_mut();
+        let keys: Vec<SharedString> = surfaces
+            .status_items
+            .keys()
+            .filter(|key| !live.contains(*key))
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| surfaces.status_items.remove(&key))
+            .collect()
+    };
+    for (left, item) in gone_items {
+        let group = surfaces.borrow().status_groups.get(&left).cloned();
+        if let Some(group) = group {
+            group.update(cx, |group, cx| group.remove(&item, cx));
+        }
+    }
     let loaded: Vec<(Rc<SurfaceInfo>, Entity<SurfaceState>, SurfaceKind)> = registry
         .read(cx)
         .surfaces()
@@ -1201,11 +2688,15 @@ fn add_missing_surfaces(
                 surfaces.borrow_mut().panels.insert(key, panel);
             }
             SurfaceKind::StatusItem(descriptor) => {
-                if !surfaces.borrow_mut().status_items.insert(info.key.clone()) {
+                if surfaces.borrow().status_items.contains_key(&info.key) {
                     continue;
                 }
                 let item = cx.new(|cx| ExtensionStatusItem::new(state, window, cx));
                 let left = descriptor.side == StatusBarSide::Left;
+                surfaces
+                    .borrow_mut()
+                    .status_items
+                    .insert(info.key.clone(), (left, item.clone()));
                 let existing = surfaces.borrow().status_groups.get(&left).cloned();
                 let group = match existing {
                     Some(group) => group,
@@ -1307,13 +2798,25 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     });
     let options = LoadOptions {
         capability_check: checker,
+        // A `FYX_UI_DEV_EXTENSIONS` entry is a dev extension.
+        allow_staged: cx.update(|cx| staged_allowed(true, cx)),
+        // Its id is known only after the load: the path keys its worktree ids.
+        workspace: Some(cx.update(|cx| {
+            crate::worktrees::OpenWorktrees::global(cx).for_extension(&path.to_string_lossy())
+        })),
+        workspace_edits: Some(
+            cx.update(|cx| crate::workspace_edit::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        agent_reviews: cx
+            .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
+        proxy: Some(cx.update(extension_proxy)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
         if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
-            declared = manifest.capabilities;
+            declared = manifest.consent_items();
         }
         UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?
@@ -1352,6 +2855,9 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             };
             registry.claim_extension_id(&extension_id, source)?;
             registry.consent.declare(&extension_id, declared);
+            if reload_path.is_dir() {
+                set_image_dir(&extension_id, reload_path.clone(), cx);
+            }
             registry.register_extension(extension, pushed, cx);
             if let Some(component) = component {
                 registry.watch_component(

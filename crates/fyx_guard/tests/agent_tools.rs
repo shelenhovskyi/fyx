@@ -41,7 +41,7 @@ async fn tools(mode: FyxSecurityMode, cx: &mut TestAppContext) -> Tools {
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
-        fyx_guard::init(cx);
+        fyx_guard::init_without_persistence(cx);
     });
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(

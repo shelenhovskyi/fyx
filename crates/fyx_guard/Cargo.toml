@@ -24,7 +24,7 @@ paths.workspace = true
 project.workspace = true
 serde.workspace = true
 settings.workspace = true
-toml.workspace = true
+toml = { workspace = true, features = ["display"] }
 util.workspace = true
 
 [dev-dependencies]

@@ -56,16 +56,23 @@ the process cannot open its own sockets; the numbering of the modes follows stre
 
 ### Cross-cutting items
 
-- **Read-only agent configs** (step 1). Agents may not write any of:
+- **Read-only agent configs** (step 1). Agents may not write any of these, at any depth:
   - the directories `.claude/`, `.codex/`, `.gemini/`, `.agents/`, `.cursor/`, `.zed/`, `.fyx/`
     and `.git/`;
-  - the files `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules` and `.cursorrules`;
+  - `.mcp.json` and the agent rules files `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules` and
+    `.cursorrules` (decided 2026-11-18);
   - `.vscode/tasks.json` and `.vscode/launch.json`.
 
-  The list is `ui_ext::protected` (W2c, e740fd00d5). It matches anywhere in the absolute path, so
-  also `~/.claude/` for the built-in agent, which can edit files outside the project. Agents may
-  not write Fyx's own config directory either
-  (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings file, `tasks.json`, `keymap.json`). All of
+  The list is one shared rule list, `ui_ext::protected` (W2c, e740fd00d5), which UI extensions get
+  too (below).
+  - **Inside a worktree** the names are matched in the worktree-relative path only, so a project
+    that itself lives under a `.claude/` folder (an agent's worktree) is not read-only as a whole.
+  - **Outside every worktree** the absolute path counts, so also `~/.claude/` for the built-in
+    agent, which can edit files outside the project.
+  - **Fyx's own config directory** (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings file,
+    `tasks.json`, `keymap.json`) and its confirmed-mode file are read-only too.
+
+  All of
   `.git/` is protected, not only `hooks/`: `config` (`core.hooksPath`, `core.fsmonitor`), `info/`,
   a submodule's `modules/*/config` and a linked worktree's `commondir` each make the next `git` run
   start a program, and a `.git` file redirects git to another directory. Matching is by path
@@ -116,9 +123,12 @@ Rules:
   by itself. Lowering means a lower mode (`shield` → `audit` → `off`), or `allow_env` entries the
   current mode does not have. Fyx keeps the stricter settings, logs the request at `warn` and asks in
   a window prompt ("Lower Protection" / "Keep Current Mode"). The lower value applies only once the
-  user confirms, or at the next start, when the file is read as it is. A declined value is not asked
-  about again until the file asks for something else. Raising applies at once. Every change is
-  logged at `warn`. Under shield, agent write tools cannot reach the file at all (read-only agent
+  user confirms. The settings in force are kept in `fyx_security_confirmed.toml` in Fyx's data
+  folder, so after a restart a lowering the user declined or never saw is still held back and asked
+  about again once a project window opens (security-2 T3); a damaged file counts as `shield`. A
+  declined value is not asked about again in the same session until the file asks for something
+  else. Raising applies at once. Every change is logged at `warn`. Not done yet: a status-bar mark
+  while the mode is lower than the user confirmed. Under shield, agent write tools cannot reach the file at all (read-only agent
   configs, below).
 - **A repository may only tighten.** `.fyx/security.toml` at a worktree root can add patterns,
   never remove protections, set the mode or allow a variable (below). It has no effect with the mode
@@ -158,13 +168,30 @@ of Fyx's own process environment are therefore checked as well. Tools treat an e
 | `*_KEY` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_KEY`, `STRIPE_KEY` |
 | `*_SECRET*` | `CLIENT_SECRET`, `DJANGO_SECRET_KEY` |
 | `*_TOKEN` | `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` |
-| `*_PASSWORD`, `*_PASSWD` | `DB_PASSWORD` |
+| `*PASSWORD*`, `*_PASSWD`, `*_PWD` | `DB_PASSWORD`, `PGPASSWORD`, `MYSQL_PASSWORD_FILE`, `REDIS_PWD` (not `PWD`, `OLDPWD`) |
+| `*APIKEY*`, `TOKEN`, `SECRET` | `MAPS_APIKEY` |
+| `BW_SESSION`, `OP_SESSION_*`, `DOCKER_AUTH_CONFIG` | password manager sessions, registry logins |
 | `*_PAT`, `*_CREDENTIALS` | `GITLAB_PAT`, `GOOGLE_APPLICATION_CREDENTIALS` |
 | `DATABASE_URL`, `*_DSN` | URLs that usually embed a password, `SENTRY_DSN` |
 | `SSH_AUTH_SOCK` | the SSH agent: in shield, `git push` over SSH from an agent terminal stops working; allow it with `allow_env` if you want that |
 
-`allow_env` entries are names or `*` patterns and win over the list. Variable names only are
-logged, never values.
+A variable whose value is a URL with a user and a password (`https://user:token@host`,
+`postgres://u:p@db/x`) is stripped whatever its name. `allow_env` entries are names or `*` patterns
+and win over the list. Variable names only are logged, never values.
+
+Denials name the one pattern that matched, and log lines escape control characters in paths and
+patterns, so an agent or a repository cannot forge log entries. An invalid `.fyx/security.toml` is
+reported by location only (`.fyx/security.toml:2:1`, or "pattern number 2 in `private_files`"),
+never by quoting it, since the message reaches the agent. The built-in agent's `read_file` and
+`grep` tools honour the repository's `private_files` too.
+
+**The real file, not the typed path** (triage-3 top-7 #1). Every check runs on each spelling of
+the path (`fyx_guard::paths`, shared with agent review): the typed path with `..` and the `\\?\` prefix
+resolved, Windows' silent renames undone (`.env.`, `.env `, `.env::$DATA` open `.env`), the real
+file behind links (the deepest existing ancestor canonicalized), and on Windows and macOS the
+lower-case form; a protection applies when any of them matches. Under shield an agent may not
+write a path whose name uses a Windows rewrite at all, nor a path inside the project that a link
+takes outside it.
 
 ## Known limits of step 1
 

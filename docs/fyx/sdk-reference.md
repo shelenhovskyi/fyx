@@ -1,7 +1,8 @@
 # `ui_ext_sdk` reference
 
 `ui_ext_sdk` is the Rust guest SDK for Fyx UI extensions, built on `wit-bindgen` 0.41 over the
-`fyx:ui@0.1.0` world. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
+`fyx:ui@0.2.0` world, or the staged `fyx:ui@0.3.0` world (Dev and Nightly builds of Fyx run it)
+with its `fyx-ui-0-3` feature; one source also exports the older worlds. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
 outside the GPL. It is not on crates.io yet, so depend on it by path (see
 [Project layout](extension-authoring.md#project-layout)).
 
@@ -71,9 +72,10 @@ Patch::Remove(id)
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `API_VERSION: (u16, u16, u16)` | `(0, 1, 0)` | The `fyx:ui` version the SDK is generated from. A test checks it against the `package fyx:ui@…` line of the WIT. |
+| `API_VERSION: (u16, u16, u16)` | `(0, 2, 0)`, or `(0, 3, 0)` with `fyx-ui-0-3` | The `fyx:ui` version the SDK is generated from, and what `register_extension!(T)` exports. A test checks it against the `package fyx:ui@…` line of the WIT. |
+| `API_VERSION_V0_2`, `API_VERSION_V0_1` | `(0, 2, 0)`, `(0, 1, 0)` | What `register_extension!(T, v0_2)` and `(T, v0_1)` export. |
 | `API_VERSION_SECTION: &str` | `"fyx:ui-api-version"` | Name of the custom section `register_extension!` embeds. |
-| `API_VERSION_SECTION_BYTES: [u8; 6]` | `[0, 0, 0, 1, 0, 0]` | `API_VERSION` as three big-endian `u16`s, the same layout as Zed's `zed:api-version`. |
+| `API_VERSION_SECTION_BYTES: [u8; 6]` | `[0, 0, 0, 2, 0, 0]` (or `3`) | `API_VERSION` as three big-endian `u16`s, the same layout as Zed's `zed:api-version`; `API_VERSION_V0_2_SECTION_BYTES` and `API_VERSION_V0_1_SECTION_BYTES` likewise. |
 | `ROW_NODE_ID_BASE: NodeId` | `0x8000_0000` | First id inside a list row, so row ids can never be mistaken for main-tree ids (which start at 1). |
 
 <!-- sdk:74-98, 1520-1526 -->
@@ -95,6 +97,11 @@ pub trait Extension: 'static {
     /// fyx:ui 0.2: the tick `request_tick` asked for.
     fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
         Ok(Update::Unchanged)
+    }
+    /// fyx:ui 0.3 (`fyx-ui-0-3` feature): the outcome of work that ran outside a call, such as
+    /// `IoEvent::FetchDone((id, result))`. Tied to no surface: push updates yourself.
+    fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+        Ok(())
     }
 }
 ```
@@ -121,29 +128,44 @@ traps or panics disables the extension for the session.
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
 
 ```rust
-register_extension!(MyExtension);        // exports fyx:ui 0.2
+register_extension!(MyExtension);        // exports the SDK's world: 0.2, or 0.3 with fyx-ui-0-3
+register_extension!(MyExtension, v0_2);  // exports fyx:ui 0.2
 register_extension!(MyExtension, v0_1);  // exports fyx:ui 0.1, for hosts that only run 0.1
 ```
 
-The SDK's types and functions are those of `fyx:ui@0.2.0` (`API_VERSION`); one extension source
-exports either world. Call the macro once, at the root of your `cdylib` crate. It:
+The SDK's types and functions are those of its world (`API_VERSION`): `fyx:ui@0.2.0`, or the
+staged `fyx:ui@0.3.0` with the SDK's `fyx-ui-0-3` cargo feature. The feature is off by default,
+so that only a 0.3 build links the 0.3 world description; a 0.1 or 0.2 component then imports
+`fyx:ui` interfaces of its own version only. One extension source exports any world up to the
+SDK's. Code that must build both ways uses `DecorationLocation::at(path, line, placement)` and
+`HostErrorCode::name()`, which hide the two shapes 0.3 changed, and a wildcard arm for the
+events 0.3 adds. Call the macro once, at the root of your `cdylib` crate. It:
 
-- implements the chosen world's `Guest` trait by forwarding each export to your type. With
-  `v0_1`, values are converted at the boundary. Icons become upstream `IconName`s, and
-  tooltips, list selection and row indents are dropped. What 0.1 cannot express is an error that
-  names 0.2: modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank`
-  icon node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
+- implements the chosen world's `Guest` trait by forwarding each export to your type. The 0.3
+  exports the SDK has no API for yet (`handle-io`, `handle-command`, the providers and
+  `picker-source-event`) answer as an extension that provides nothing.
+- With `v0_2` and the `fyx-ui-0-3` feature, values are converted at the boundary: what 0.2
+  cannot express is an error that names 0.3. Image and canvas nodes make the call return `Err`,
+  picker surfaces are left out of `surfaces` (logged), and `add_image` and a decoration anchored
+  to a document return `unavailable`. Without the feature, `v0_2` is the same as no argument.
+- With `v0_1`, as with `v0_2`, and further: icons become upstream `IconName`s, and tooltips, list
+  selection and row indents are dropped. What 0.1 cannot express is an error that names 0.2 (or
+  0.3): modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank` icon
+  node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
 - defines `extern "Rust"` shims through which the SDK's host functions reach that world's
-  imports, so a 0.1 component imports only `fyx:ui/*@0.1.0`. A 0.2 component always imports
-  `fyx:ui/decorations`; the host checks `ui:editor-decorations` per call, not at import.
+  imports, so a 0.1 component imports only `fyx:ui/*@0.1.0` and a 0.2 component only `@0.2.0`. A
+  0.2 or 0.3 component always imports `fyx:ui/decorations` and `fyx:ui/notifications`, and a
+  0.3 one `fyx:ui/images`; the host checks `ui:editor-decorations`, `ui:notifications` and
+  `ui:images` per call, not at import.
 - on `wasm32` only, adds a `#[used]` static in the `fyx:ui-api-version` link section holding
-  `API_VERSION_SECTION_BYTES` (0.2) or `API_VERSION_V0_1_SECTION_BYTES` (0.1). The static lives in
-  your crate, so the linker cannot drop it as an unused member of the SDK's rlib;
-- calls the export macro wit-bindgen generates for the world. The 0.1 bindings live in the crate `ui_ext_sdk_v0_1`,
-  because wit-bindgen names the export macro after the world, and both worlds are called
-  `ui-extension`.
+  `API_VERSION_SECTION_BYTES` (0.3), `API_VERSION_V0_2_SECTION_BYTES` or
+  `API_VERSION_V0_1_SECTION_BYTES`. The static lives in your crate, so the linker cannot drop it
+  as an unused member of the SDK's rlib;
+- calls the export macro wit-bindgen generates for the world. The 0.2 and 0.1 bindings live in
+  the crates `ui_ext_sdk_v0_2` and `ui_ext_sdk_v0_1`, because wit-bindgen names the export macro
+  after the world, and every version calls its world `ui-extension`.
 
-<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs (register_extension!, __fyx_host_shims!), crates/ui_ext_sdk/src/v0_1.rs, crates/ui_ext_sdk/src/host.rs -->
+<!-- crates/ui_ext_sdk/src/ui_ext_sdk.rs (register_extension!, __fyx_host_shims!), crates/ui_ext_sdk/src/v0_2.rs, crates/ui_ext_sdk/src/v0_1.rs, crates/ui_ext_sdk/src/host.rs -->
 
 <!-- sdk:163-219 -->
 
@@ -164,15 +186,21 @@ checks nothing: the rules apply when a node goes into a tree.
 | `FlexProps` | `FlexProps::column()`, `FlexProps::row()`: gap 0, padding 0, no grow, `Align::Start`, no background | `.gap(u16)`, `.padding(u16)`, `.grow()`, `.align(Align)`, `.background(ColorToken)` |
 | `TextProps` | `TextProps::new(content)`: no colour, not bold, not monospace; also `From<&str>` and `From<String>` | `.color(ColorToken)`, `.bold()`, `.monospace()` |
 | `ButtonProps` | `ButtonProps::new(label)`: no icon, `ButtonStyle::Default`, enabled, no tooltip; also `From<&str>` and `From<String>` | `.icon(Icon)`, `.style(ButtonStyle)`, `.disabled(bool)`, `.tooltip(text)` |
-| `InputProps` | `InputProps::new(value)`: empty placeholder, not secret | `.placeholder(text)`, `.secret()` |
+| `InputProps` | `InputProps::new(value)`: empty placeholder, not secret, no label | `.placeholder(text)`, `.secret()`, `.label(text)`: the accessible name, at most 256 bytes (0.2) |
 | `ListProps` | `ListProps::new(row_count: u32, row_height: u16)`: no selected row | `.selected(Option<u32>)` |
 | `TableProps` | `TableProps::new(columns: impl IntoIterator<Item = impl Into<String>>, row_count: u32)` | — |
 | `IconProps` | `IconProps::new(Icon)`: no colour; also `From<Icon>` | `.color(ColorToken)` |
 | `ListRow` | `list_row(index, build)` (below): indent 0 | `.with_indent(u8)`: nesting depth, at most 32 levels drawn |
 | `DiffViewProps` | `DiffViewProps::new(old_text, new_text)`: no language | `.language(name)` |
+| `ImageProps` (`fyx-ui-0-3`) | `ImageProps::asset(path, alt)`: a file of the package's `assets/` folder<br>`ImageProps::generated(GeneratedImage, alt)`: from `add_image`<br>both `ImageFit::Contain`, the image's own size, no tint | `.size(width, height)`, `.width(u32)`, `.height(u32)`, `.fit(ImageFit)`, `.tint(ColorToken)` (SVG only) |
 
-`From<XProps> for Props` exists for all eight records, so any function that takes
-`impl Into<Props>` accepts them directly.
+`From<XProps> for Props` exists for all eight records (nine with `ImageProps`), so any function
+that takes `impl Into<Props>` accepts them directly.
+
+An `image` node is for panels only. The host checks the path syntax, `alt` (1 to 256 bytes), the
+box (1 to 2048 per side) and that a generated handle came from `add_image`, when it applies the
+update. A missing or broken asset, a freed handle, or `tint` on a PNG is not an update error: the
+renderer draws the alt text (or the PNG untinted) and logs a warning.
 
 `Icon` is the frozen icon set of `fyx:ui` 0.2: `Icon::all()` lists all 101 in WIT order, and
 `icon.name()` is the WIT name, such as `arrow-up`. An extension exported as 0.1 sends the upstream
@@ -236,6 +264,8 @@ impl<'a> TreeBuilder<'a> {
     pub fn icon(&mut self, props: impl Into<IconProps>) -> NodeId;
     pub fn markdown(&mut self, source: impl Into<String>) -> NodeId;
     pub fn diff_view(&mut self, props: DiffViewProps) -> NodeId;
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn image(&mut self, props: ImageProps) -> NodeId;
     pub fn nodes(&self) -> &[Node];
     pub fn finish(self) -> Vec<Node>;
 }
@@ -306,7 +336,7 @@ The rules come from `ui_ext` itself, not from a copy: `ui_ext::Props::is_contain
 
 | Method | Returns | Checks, and errors |
 |---|---|---|
-| `mount(build)` | `Result<Vec<Node>, TreeError>`: the tree to return from `Extension::mount` | Node count ≤ `max_nodes_per_update` (**2048**, stricter than the host's 16384 for a mount) → `UpdateTooLarge`. Node count ≤ `max_nodes` → `TreeTooLarge`. On success, the previous mirror **and any queued patches are dropped**. On error, the previous tree is kept. |
+| `mount(build)` | `Result<Vec<Node>, TreeError>`: the tree to return from `Extension::mount` | Node count ≤ `max_nodes` (16384, the host's cap for a mount) → `TreeTooLarge`. On success, the previous mirror **and any queued patches are dropped**. On error, the previous tree is kept. |
 | `replace(build)` | `Result<Update, TreeError>`: `Update::Replace(nodes)` | Same as `mount`. For a `handle_event` answer where patching would be more work than rebuilding. |
 
 <!-- sdk:601-624 -->
@@ -504,8 +534,224 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError>;
 pub fn take_host_effects() -> Vec<HostEffect>;
 ```
 
-In an extension exported with `v0_1` they return `HostError` with code `unavailable`
-("needs fyx:ui 0.2"), and `cancel_tick` does nothing. `push_update` converts the update to 0.1 and
+Notifications and progress (`fyx:ui` 0.2, design.md section M; `ui:notifications`):
+
+```rust
+pub fn notify(notification: &Notification) -> Result<u64, HostError>;
+pub fn dismiss_notification(id: u64);
+pub fn progress_start(options: &ProgressOptions) -> Result<u64, HostError>;
+pub fn progress_update(id: u64, value: ProgressValue, message: Option<&str>)
+    -> Result<(), HostError>;
+pub fn progress_end(id: u64);
+```
+
+- **Building the values:** `Notification::new(owner, level, title)` (no body, no buttons,
+  auto-dismissed) with `.body(text)`, `.action(id, label)` (at most 2) and `.sticky()`.
+  `ProgressOptions::new(owner, title, ProgressLocation)` with `.cancellable()`.
+- **Events:** they come to the owner's `handle_event` as `UiEvent::NotificationAction`,
+  `NotificationClosed` and `ProgressCancelRequested`.
+- **Caps:**
+  - notifications: 5 accepted `notify` calls per rolling 60 s and 3 open per extension;
+  - progress: 4 running, 30 starts per 60 s, and 64 updates per export call.
+
+  Past a cap the call returns `limit-exceeded`.
+- **Off WASM:** ids are 1, 2, …, and the calls record `HostEffect::Notify`, `DismissNotification`,
+  `ProgressStart`, `ProgressUpdate` and `ProgressEnd`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds generated images (design 0.3, section 12), for
+`ImageSource::Generated`:
+
+```rust
+pub fn add_image(format: ImageFormat, bytes: &[u8]) -> Result<GeneratedImage, HostError>;
+pub fn remove_image(image: GeneratedImage);
+```
+
+`GeneratedImage` is a `Copy` handle with no `Drop`: freeing it is the extension's decision.
+`add_image` needs `ui:images`, takes at most 1 MiB and at most 32 live images; off WASM it hands
+out handles 1, 2, … and records `HostEffect::AddImage { image, format, len }`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `network:fetch` (design 0.3, section 8; plan
+4.6):
+
+```rust
+pub fn fetch(request: &HttpRequest) -> Result<u64, HostError>;
+pub fn cancel_fetch(request: u64);
+```
+
+- **Building a request:** `HttpRequest::get(url)`, `HttpRequest::post(url, body)` or
+  `HttpRequest::new(HttpMethod, url)`, with `.header(name, value)`, `.body(bytes)`,
+  `.json(text)` (which also sets the JSON content type) and `.timeout_ms(ms)` (at most 30000, the
+  default).
+- **The outcome:** it comes to `Extension::handle_io` as `IoEvent::FetchDone((id, result))`.
+  `HttpResponse` has `is_success()`, `header(name)` (ignoring case) and `text()`. `FetchError`
+  implements `Display`.
+- **The manifest** declares `network:fetch`, `api_version = "0.3.0"` and the hosts:
+
+  ```toml
+  [fyx_ui.network]
+  domains = ["api.example.com", "*.example.org", "localhost:8080"]
+  ```
+
+  Only `https://` URLs on those hosts are allowed; `http://` only for a listed `localhost` or
+  `127.0.0.1` with its port.
+- **Consent:** `network:fetch` is a T2 capability. The first fetch asks the user, and the request
+  waits for the answer. Until they allow it, and if they refuse, the outcome is
+  `FetchError::Denied`.
+- **Caps:**
+  - at most 8 requests in flight and 120 started per minute;
+  - request headers: 64 and 16 KiB;
+  - request body: 4 MiB;
+  - response: 16 MiB decoded.
+- **Off WASM:** `fetch` hands out ids and records `HostEffect::Fetch { id, request }`;
+  `cancel_fetch` records `HostEffect::CancelFetch`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `process:spawn` (design 0.3, section 9; plan
+4.7):
+
+```rust
+pub fn spawn(request: &SpawnRequest) -> Result<u64, HostError>;
+pub fn write_stdin(process: u64, data: &[u8]) -> Result<(), HostError>;
+pub fn close_stdin(process: u64) -> Result<(), HostError>;
+pub fn kill(process: u64) -> Result<(), HostError>;
+```
+
+- **Building a request:** `SpawnRequest::new(program)` (a name the manifest declares, never a
+  path), with `.arg(a)`, `.args(..)`, `.cwd(path)` (relative to the worktree root), `.env(name,
+  value)` (only names in `[fyx_ui.process] env`) and `.stdin()` (keep stdin open).
+- **Outcomes:** they come to `Extension::handle_io`.
+  - Output arrives as `IoEvent::ProcessOutput` (`ProcessOutput::text()` gives it as lossy text).
+  - Then exactly one `IoEvent::ProcessExited` follows (`code`, and `killed` for a kill).
+  - A process that cannot start gets one `IoEvent::SpawnFailed` instead (`SpawnError`
+    implements `Display`). A program the manifest does not name gets an id, then
+    `SpawnError::NotFound`.
+- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with optional
+  argument patterns, and the environment names:
+
+  ```toml
+  [[fyx_ui.processes]]
+  name = "git"
+  args = ["status", "**"]
+
+  [fyx_ui.process]
+  env = ["GIT_DIR"]
+  ```
+
+- **Consent and limits:**
+  - `process:spawn` is T2: the first spawn asks the user, and a refusal ends
+    `SpawnError::Denied`;
+  - a spawn needs an open, trusted worktree;
+  - at most 4 processes, 256 arguments (128 KiB), 32 environment pairs;
+  - stdin: 1 MiB per write and 4 MiB queued.
+- **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `workspace:edit` and `agent:observe` (design
+0.3, sections 10 and 11; plan 4.8):
+
+```rust
+pub fn apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError>;
+pub fn start_observing() -> Result<(), HostError>;
+pub fn stop_observing();
+```
+
+- **Building an edit:** `WorkspaceEdit::new(label).file(FileEdit::path("src/main.rs")
+  .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), text).insert(at, text))`.
+  - `FileEdit::document(id)` targets an open document instead of a path.
+  - `.expected_version(v)` makes the edit fail with `EditError::Conflict` if the file changed.
+  - `.create()` creates a missing file.
+- **How an edit applies:**
+  - all its files or none, as one undo step per buffer;
+  - nothing is saved: edited buffers stay dirty;
+  - the outcome arrives in `handle_io` as `IoEvent::EditDone((id, result))`, and `EditError`
+    implements `Display`;
+  - protected paths (`.git/`, `.fyx/`, `.zed/`, `.vscode/`, `.idea/`) are refused with
+    `NotAllowed`, and overlapping edits with `Invalid`.
+- **Limits:**
+  - at most 4 edits in flight;
+  - 64 files and 4096 text edits each;
+  - 4 MiB of new text;
+  - a label of 1 to 128 bytes.
+- **The agent feed:** after `start_observing`, `handle_io` gets `IoEvent::Agent`. A `Snapshot`
+  of the open reviews comes first, then `Opened`, `Updated`, `Resolved`, `Closed`, `TurnEnded`,
+  `UnreviewedChanges` and `ReviewMode`.
+  - The ids are opaque to the extension, and long hunks are cut (`truncated`).
+  - The feed is read-only: nothing in the API can accept, reject or comment.
+- **Consent:** both capabilities are T2. The first use asks the user.
+- **Off WASM:** the calls record `HostEffect::ApplyEdit`, `StartObserving` and `StopObserving`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `permissions` for the T2 capabilities
+(`network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe`; design 0.3, section 7):
+
+```rust
+pub fn query_permission(capability: T2Capability) -> PermissionState;
+pub fn request_permission(capability: T2Capability) -> Result<(), HostError>;
+```
+
+- **`query_permission`:** the state as of the start of the current call. The first query of a
+  capability fixes the answer for the rest of the call.
+  - `Granted` or `Denied`: the user answered.
+  - `Ask`: not asked yet; the first use, or a request, shows the prompt.
+  - `Unavailable`: not declared in the manifest, or the worktree is not trusted.
+- **`request_permission`:** shows the prompt after the call, and only in the `Ask` state. In any
+  other state it is `Ok` and nothing happens.
+  - It needs the click-or-Enter activation, so call it from a button click; it uses the
+    activation up. Without one, or for an undeclared capability, it is `not-permitted`.
+  - The answer arrives in `handle_io` as `IoEvent::PermissionChanged((capability, state))`, as
+    does every later change on the extensions page.
+- **Off WASM:** `query_permission` answers `Ask` unless a test called
+  `set_permission_state(capability, state)`, and `request_permission` records
+  `HostEffect::RequestPermission`.
+
+## Canvases (`fyx-ui-0-3`)
+
+A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
+generated records: `Point`, `Rect`, `Paint`, `Stroke`, `DrawOp` and the rest. The SDK adds
+builders on top:
+
+```rust
+let mut draw = DrawList::new();
+for (day, value) in values.iter().enumerate() {
+    draw.rect(bar(day, *value), Some(Paint::data(DataColor::cycle(day))), None);
+}
+draw.path(Path::polyline(points).stroke(Stroke::new(Paint::token(ColorToken::TextAccent), 1.5)));
+draw.text_with(pt(140.0, 132.0), "Week", Paint::token(ColorToken::TextMuted),
+    TextStyle::default().anchor(TextAnchor::Middle));
+let canvas = CanvasProps::new(280, 140, "Commits per day").draw(draw).clickable()
+    .fit(CanvasFit::ScaleDown);
+tree.canvas(canvas);
+```
+
+- **Values:**
+  - `pt(x, y)`, `Rect::new(x, y, w, h)` and `rect.contains(x, y)`;
+  - `Paint::token(ColorToken)` and `Paint::data(DataColor)`, opaque, with `.opacity(percent)`;
+  - `Stroke::new(paint, width)`;
+  - `DataColor::cycle(index)`, the eight series colours repeating.
+- **`DrawList`:** a `&mut` builder with `line`, `rect`, `rounded_rect`, `circle`, `path`,
+  `text` and `text_with(…, TextStyle)`. `len()`, `segments()` and `text_bytes()` show how close
+  it is to the caps. Extensions cannot measure text: place labels with `TextAnchor`.
+- **`Path`:** `move_to`, `line_to`, `quad_to`, `cubic_to`, `close`, then `fill` and/or `stroke`.
+  `Path::polyline(points)` is a polyline.
+- **`CanvasProps::new(width, height, description)`:** not clickable, `CanvasFit::Clip`. Setters:
+  `.draw(list)`, `.clickable()` and `.fit(..)`. Also `TreeBuilder::canvas` and
+  `From<CanvasProps> for Props`.
+- **`CanvasHits<V>`:**
+  - `add(rect, value)` records a region next to the draw list;
+  - `at(x, y)` returns the topmost region's value for a `UiEvent::CanvasClick`, since
+    hit-testing is the extension's job;
+  - a click is a gesture, like a button click.
+- **Checks before the host:** `SurfaceTree` and `list_row` run the host's rules
+  (`ui_ext::canvas`). These are `TreeError::InvalidCanvas` (caps, finite coordinates within
+  ±32768, strokes 0.5 to 16, description 1 to 1024 bytes), `TooManyCanvases` (16 per surface)
+  and `CanvasInRow`. The host also allows canvases in panels only.
+- **The whole draw list is sent in every `set-props`.** A tick-driven chart re-sends it at most
+  every 100 ms.
+
+In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
+`unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
+`progress_end` do nothing; with `v0_1` or `v0_2`,
+`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin`, `kill`, `apply_edit`,
+`start_observing` and `request_permission` return `unavailable`, `query_permission` answers
+`Unavailable`,
+("needs fyx:ui 0.3"), and `remove_image` and `cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.
 
@@ -552,7 +798,7 @@ import stubs abort the test process.
 | Helper | Children only under flex | Patch / row cap (2048) | Tree cap (16384) | Single-root rows | Unknown ids / siblings |
 |---|---|---|---|---|---|
 | `TreeBuilder` | by construction | — | — | — | — |
-| `SurfaceTree` | yes | yes (also caps `mount` at 2048) | yes | — | yes |
+| `SurfaceTree` | yes | yes | yes (also for `mount`) | — | yes |
 | `PatchSet` | — | — | — | — | — |
 | `list_row` / `list_rows` | by construction | yes (per row) | — | yes | — |
 | host (`ui_ext::Tree`) | yes | patches and rows | yes (mount, replace, patches) | yes | yes |

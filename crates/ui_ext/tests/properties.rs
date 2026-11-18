@@ -1427,12 +1427,18 @@ fn arb_v0_2_leaf_props() -> impl Strategy<Value = v0_2::Props> {
                 tooltip,
             })
         });
-    let input =
-        (arb_string(), arb_string(), any::<bool>()).prop_map(|(value, placeholder, secret)| {
+    let input = (
+        arb_string(),
+        arb_string(),
+        any::<bool>(),
+        prop::option::of(arb_string()),
+    )
+        .prop_map(|(value, placeholder, secret, label)| {
             v0_2::Props::Input(v0_2::InputProps {
                 value,
                 placeholder,
                 secret,
+                label,
             })
         });
     let list = (any::<u32>(), any::<u16>(), prop::option::of(any::<u32>())).prop_map(
@@ -1622,7 +1628,7 @@ fn props_to_v0_1(props: v0_2::Props) -> Option<Props> {
             })
         }
         v0_2::Props::Input(props) => {
-            if props.secret {
+            if props.secret || props.label.is_some() {
                 return None;
             }
             Props::Input(InputProps {
@@ -1646,6 +1652,7 @@ fn props_to_v0_1(props: v0_2::Props) -> Option<Props> {
         }),
         v0_2::Props::Markdown(text) => Props::Markdown(text),
         v0_2::Props::DiffView(props) => Props::DiffView(props),
+        v0_2::Props::Image(_) | v0_2::Props::Canvas(_) => return None,
     })
 }
 

@@ -4,22 +4,39 @@
 //! invalidation.
 //!
 //! Every update is validated and applied atomically: a bad update leaves the previous tree as it
-//! was.
+//! was. Patches apply in place with an undo log (perf-1 #6), and props are shared behind an
+//! [`Arc`], so neither an update nor a clone copies text (perf-1 #12).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use super::{InsertOp, InvalidateRowsOp, Node, NodeId, Patch, Props, RowRange, Update};
+use crate::canvas::MAX_CANVASES_PER_SURFACE;
 use crate::tree::{TreeError, TreeLimits};
+
+/// String bytes one surface's retained tree may hold, across all its props (triage-3 #7): each
+/// call's lifted text is capped, but many calls could otherwise grow a tree without bound. An
+/// update that would pass it is refused with [`TreeError::TreeTextTooLarge`] and changes nothing.
+pub const MAX_TREE_TEXT_BYTES: usize = 8 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
-    props: Props,
+    props: Arc<Props>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
 
 impl TreeNode {
     pub fn props(&self) -> &Props {
+        &self.props
+    }
+
+    /// The shared props. Every `set-props`, insert and replace makes a new `Arc`, so
+    /// `Arc::ptr_eq` between two revisions is true exactly when the node's props were not
+    /// replaced in between: a renderer can keep these and compare by pointer.
+    pub fn props_arc(&self) -> &Arc<Props> {
         &self.props
     }
 
@@ -106,12 +123,36 @@ fn rows_changed(old: &Props, new: &Props) -> bool {
     }
 }
 
+/// How to take back one applied patch, for [`Tree::apply_patches`].
+enum Undo {
+    /// `set-props`: the props it replaced.
+    Props(NodeId, Arc<Props>),
+    /// `insert`: the node it added (with no children yet when undone, since later patches are
+    /// undone first).
+    Inserted(NodeId),
+    /// `remove`: the removed subtree, and where its root was among its siblings.
+    Removed {
+        id: NodeId,
+        parent: Option<NodeId>,
+        index: usize,
+        nodes: Vec<(NodeId, TreeNode)>,
+    },
+}
+
 /// A forest: nodes with `parent: None` are roots, kept in insertion order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tree {
     nodes: HashMap<NodeId, TreeNode>,
     roots: Vec<NodeId>,
     limits: TreeLimits,
+    /// Canvas nodes in the tree, at most [`MAX_CANVASES_PER_SURFACE`] (design.md §13).
+    canvases: usize,
+    /// [`Props::text_len`] of every node, at most [`MAX_TREE_TEXT_BYTES`].
+    text_bytes: usize,
+}
+
+fn is_canvas(props: &Props) -> bool {
+    matches!(props, Props::Canvas(_))
 }
 
 impl Tree {
@@ -120,7 +161,23 @@ impl Tree {
             nodes: HashMap::default(),
             roots: Vec::new(),
             limits,
+            canvases: 0,
+            text_bytes: 0,
         }
+    }
+
+    /// The string bytes the tree retains (for the Extension Inspector).
+    pub fn text_bytes(&self) -> usize {
+        self.text_bytes
+    }
+
+    fn check_text(&self, removed: usize, added: usize) -> Result<(), TreeError> {
+        if self.text_bytes - removed + added > MAX_TREE_TEXT_BYTES {
+            return Err(TreeError::TreeTextTooLarge {
+                max: MAX_TREE_TEXT_BYTES,
+            });
+        }
+        Ok(())
     }
 
     pub fn from_nodes(nodes: Vec<Node>, limits: TreeLimits) -> Result<Self, TreeError> {
@@ -133,6 +190,9 @@ impl Tree {
     pub fn from_row(nodes: Vec<Node>, limits: TreeLimits) -> Result<Self, TreeError> {
         let mut tree = Self::new(limits);
         tree.check_update_size(nodes.len())?;
+        if let Some(canvas) = nodes.iter().find(|node| is_canvas(&node.props)) {
+            return Err(TreeError::CanvasInRow(canvas.id));
+        }
         tree.replace(nodes)?;
         if tree.roots.len() != 1 {
             return Err(TreeError::RowRootCount(tree.roots.len()));
@@ -183,7 +243,7 @@ impl Tree {
             nodes.push(Node {
                 id,
                 parent: node.parent,
-                props: node.props.clone(),
+                props: Props::clone(&node.props),
             });
             stack.extend(node.children.iter().rev().copied());
         }
@@ -229,26 +289,77 @@ impl Tree {
         Ok(touched)
     }
 
-    /// Applies patches in order, atomically: on error the tree is left as it was.
+    /// Applies patches in order, atomically: on error the tree is left as it was. They apply in
+    /// place; each applied patch logs its inverse, and an error replays the log backwards. A
+    /// failing patch itself changes nothing, as every check comes before its first change.
     pub fn apply_patches(&mut self, patches: Vec<Patch>) -> Result<Touched, TreeError> {
         self.check_update_size(patches.len())?;
         let mut touched = Touched::default();
-        if patches.is_empty() {
-            return Ok(touched);
-        }
-        // Patching a copy keeps rollback trivial; updates are per input event, not per frame.
-        let mut next = self.clone();
+        let mut undo = Vec::new();
         for (index, patch) in patches.into_iter().enumerate() {
-            next.apply_patch(patch, &mut touched)
-                .map_err(|error| TreeError::Patch {
+            if let Err(error) = self.apply_patch(patch, &mut touched, &mut undo) {
+                self.undo(undo);
+                return Err(TreeError::Patch {
                     index,
                     error: Box::new(error),
-                })?;
+                });
+            }
         }
         // Rows of lists removed later in the same update need no fetch.
-        touched.rows.retain(|id, _| next.nodes.contains_key(id));
-        *self = next;
+        touched.rows.retain(|id, _| self.nodes.contains_key(id));
         Ok(touched)
+    }
+
+    fn undo(&mut self, log: Vec<Undo>) {
+        for entry in log.into_iter().rev() {
+            match entry {
+                Undo::Props(id, props) => {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        let replaced = std::mem::replace(&mut node.props, props);
+                        self.canvases = self.canvases + usize::from(is_canvas(&node.props))
+                            - usize::from(is_canvas(&replaced));
+                        self.text_bytes =
+                            self.text_bytes + node.props.text_len() - replaced.text_len();
+                    }
+                }
+                Undo::Inserted(id) => {
+                    if let Some(node) = self.nodes.remove(&id) {
+                        self.canvases -= usize::from(is_canvas(&node.props));
+                        self.text_bytes -= node.props.text_len();
+                        self.siblings_mut(node.parent)
+                            .retain(|&sibling| sibling != id);
+                    }
+                }
+                Undo::Removed {
+                    id,
+                    parent,
+                    index,
+                    nodes,
+                } => {
+                    self.canvases += nodes
+                        .iter()
+                        .filter(|(_, node)| is_canvas(&node.props))
+                        .count();
+                    self.text_bytes += nodes
+                        .iter()
+                        .map(|(_, node)| node.props.text_len())
+                        .sum::<usize>();
+                    self.nodes.extend(nodes);
+                    let siblings = self.siblings_mut(parent);
+                    let index = index.min(siblings.len());
+                    siblings.insert(index, id);
+                }
+            }
+        }
+    }
+
+    /// The children of `parent`, or the roots. A missing parent gives the roots' list only in
+    /// [`Tree::undo`], where every parent exists again by the time its children are restored.
+    fn siblings_mut(&mut self, parent: Option<NodeId>) -> &mut Vec<NodeId> {
+        match parent.and_then(|parent| self.nodes.get_mut(&parent)) {
+            Some(parent) => &mut parent.children,
+            None => &mut self.roots,
+        }
     }
 
     fn check_update_size(&self, count: usize) -> Result<(), TreeError> {
@@ -261,7 +372,12 @@ impl Tree {
         Ok(())
     }
 
-    fn apply_patch(&mut self, patch: Patch, touched: &mut Touched) -> Result<(), TreeError> {
+    fn apply_patch(
+        &mut self,
+        patch: Patch,
+        touched: &mut Touched,
+        undo: &mut Vec<Undo>,
+    ) -> Result<(), TreeError> {
         match patch {
             Patch::SetProps(id, props) => {
                 let old = self.set_props(id, props)?;
@@ -270,6 +386,7 @@ impl Tree {
                 if is_rows_node(new) && rows_changed(&old, new) {
                     touched.invalidate(id, RowInvalidation::All);
                 }
+                undo.push(Undo::Props(id, old));
             }
             Patch::Insert(op) => {
                 let id = op.node.id;
@@ -279,8 +396,17 @@ impl Tree {
                 if rows {
                     touched.invalidate(id, RowInvalidation::All);
                 }
+                undo.push(Undo::Inserted(id));
             }
-            Patch::Remove(id) => self.remove(id, &mut touched.nodes)?,
+            Patch::Remove(id) => {
+                let (parent, index, nodes) = self.remove(id, &mut touched.nodes)?;
+                undo.push(Undo::Removed {
+                    id,
+                    parent,
+                    index,
+                    nodes,
+                });
+            }
             Patch::InvalidateRows(InvalidateRowsOp { target, rows }) => {
                 let node = self
                     .nodes
@@ -312,7 +438,7 @@ impl Tree {
     }
 
     /// Returns the props it replaced.
-    fn set_props(&mut self, id: NodeId, props: Props) -> Result<Props, TreeError> {
+    fn set_props(&mut self, id: NodeId, props: Props) -> Result<Arc<Props>, TreeError> {
         let node = self.nodes.get_mut(&id).ok_or(TreeError::UnknownNode(id))?;
         if !node.children.is_empty() && !props.is_container() {
             return Err(TreeError::NotAContainer {
@@ -320,7 +446,20 @@ impl Tree {
                 kind: props.kind_name(),
             });
         }
-        Ok(std::mem::replace(&mut node.props, props))
+        let adds_canvas = is_canvas(&props) && !is_canvas(&node.props);
+        if adds_canvas && self.canvases >= MAX_CANVASES_PER_SURFACE {
+            return Err(TreeError::TooManyCanvases {
+                max: MAX_CANVASES_PER_SURFACE,
+            });
+        }
+        let (removed, added) = (node.props.text_len(), props.text_len());
+        self.check_text(removed, added)?;
+        let node = self.nodes.get_mut(&id).ok_or(TreeError::UnknownNode(id))?;
+        let old = std::mem::replace(&mut node.props, Arc::new(props));
+        self.canvases =
+            self.canvases + usize::from(is_canvas(&node.props)) - usize::from(is_canvas(&old));
+        self.text_bytes = self.text_bytes - removed + added;
+        Ok(old)
     }
 
     /// Levels from `id` up to its root, inclusive (a root is 1). The walk stops at
@@ -350,6 +489,11 @@ impl Tree {
                 max: self.limits.max_nodes,
             });
         }
+        if is_canvas(&node.props) && self.canvases >= MAX_CANVASES_PER_SURFACE {
+            return Err(TreeError::TooManyCanvases {
+                max: MAX_CANVASES_PER_SURFACE,
+            });
+        }
         if let Some(parent_id) = node.parent
             && self.depth_of(parent_id) >= self.limits.max_depth
         {
@@ -358,6 +502,8 @@ impl Tree {
                 max: self.limits.max_depth,
             });
         }
+        let text = node.props.text_len();
+        self.check_text(0, text)?;
         let siblings = match node.parent {
             Some(parent_id) => {
                 let parent = self
@@ -388,10 +534,12 @@ impl Tree {
                 })?,
         };
         siblings.insert(index, node.id);
+        self.canvases += usize::from(is_canvas(&node.props));
+        self.text_bytes += text;
         self.nodes.insert(
             node.id,
             TreeNode {
-                props: node.props,
+                props: Arc::new(node.props),
                 parent: node.parent,
                 children: Vec::new(),
             },
@@ -399,27 +547,37 @@ impl Tree {
         Ok(())
     }
 
-    fn remove(&mut self, id: NodeId, removed: &mut BTreeSet<NodeId>) -> Result<(), TreeError> {
+    /// Removes `id` and its subtree. Returns, for the undo log, its parent, its index among its
+    /// siblings and every removed node.
+    #[allow(clippy::type_complexity)]
+    fn remove(
+        &mut self,
+        id: NodeId,
+        removed: &mut BTreeSet<NodeId>,
+    ) -> Result<(Option<NodeId>, usize, Vec<(NodeId, TreeNode)>), TreeError> {
         let node = self.nodes.remove(&id).ok_or(TreeError::UnknownNode(id))?;
         removed.insert(id);
-        let siblings = match node.parent {
-            Some(parent_id) => self
-                .nodes
-                .get_mut(&parent_id)
-                .map(|parent| &mut parent.children),
-            None => Some(&mut self.roots),
-        };
-        if let Some(siblings) = siblings {
-            siblings.retain(|&sibling| sibling != id);
-        }
-        let mut pending = node.children;
+        let parent = node.parent;
+        let siblings = self.siblings_mut(parent);
+        let index = siblings
+            .iter()
+            .position(|&sibling| sibling == id)
+            .unwrap_or(siblings.len());
+        siblings.retain(|&sibling| sibling != id);
+        let mut pending = node.children.clone();
+        self.canvases -= usize::from(is_canvas(&node.props));
+        self.text_bytes -= node.props.text_len();
+        let mut nodes = vec![(id, node)];
         while let Some(child) = pending.pop() {
             if let Some(node) = self.nodes.remove(&child) {
                 removed.insert(child);
-                pending.extend(node.children);
+                self.canvases -= usize::from(is_canvas(&node.props));
+                self.text_bytes -= node.props.text_len();
+                pending.extend(node.children.iter().copied());
+                nodes.push((child, node));
             }
         }
-        Ok(())
+        Ok((parent, index, nodes))
     }
 }
 
@@ -526,6 +684,233 @@ mod tests {
                 error: Box::new(TreeError::UnknownNode(99))
             }
         );
+    }
+
+    fn text_props(bytes: usize) -> Props {
+        Props::Text(TextProps {
+            content: "x".repeat(bytes),
+            ..TextProps::default()
+        })
+    }
+
+    /// triage-3 #7: a surface's tree holds at most `MAX_TREE_TEXT_BYTES` of text, however many
+    /// updates build it; a refused update changes nothing, and removals and undo keep the count.
+    #[test]
+    fn retained_text_is_capped_per_surface() {
+        let half = MAX_TREE_TEXT_BYTES / 2;
+        let mut tree = Tree::from_nodes(vec![flex(1, None)], TreeLimits::default()).unwrap();
+        tree.apply_patches(vec![Patch::Insert(InsertOp {
+            node: node(2, Some(1), text_props(half)),
+            before: None,
+        })])
+        .unwrap();
+        assert_eq!(tree.text_bytes(), half);
+        let before = tree.clone();
+        // Each update is small enough on its own; the third would pass the cap.
+        tree.apply_patches(vec![Patch::Insert(InsertOp {
+            node: node(3, Some(1), text_props(half)),
+            before: None,
+        })])
+        .unwrap();
+        assert_eq!(tree.text_bytes(), MAX_TREE_TEXT_BYTES);
+        let full = tree.clone();
+        let error = tree
+            .apply_patches(vec![
+                Patch::SetProps(2, text_props(1)),
+                Patch::Insert(InsertOp {
+                    node: node(4, Some(1), text_props(half)),
+                    before: None,
+                }),
+            ])
+            .unwrap_err();
+        assert!(
+            matches!(&error, TreeError::Patch { index: 1, error } if matches!(**error, TreeError::TreeTextTooLarge { .. })),
+            "{error:?}"
+        );
+        assert_eq!(tree, full, "the refused update undid its first patch");
+        assert_eq!(tree.text_bytes(), MAX_TREE_TEXT_BYTES);
+        // Growing a node past the cap is refused; shrinking one makes room.
+        assert!(
+            tree.apply_patches(vec![Patch::SetProps(2, text_props(half + 1))])
+                .is_err()
+        );
+        tree.apply_patches(vec![Patch::SetProps(2, text_props(10))])
+            .unwrap();
+        assert_eq!(tree.text_bytes(), half + 10);
+        // Removing a subtree frees its text; undoing the removal counts it again.
+        tree.apply_patches(vec![Patch::Remove(1)]).unwrap();
+        assert_eq!(tree.text_bytes(), 0);
+        let mut tree = before;
+        assert!(
+            tree.apply_patches(vec![Patch::Remove(1), Patch::SetProps(9, text_props(1))])
+                .is_err()
+        );
+        assert_eq!(tree.text_bytes(), half);
+        // A replace counts its own nodes.
+        assert!(matches!(
+            tree.replace(vec![
+                node(1, None, text_props(half)),
+                node(2, None, text_props(half + 1)),
+            ]),
+            Err(TreeError::TreeTextTooLarge { .. })
+        ));
+        assert_eq!(
+            tree.text_bytes(),
+            half,
+            "a refused replace keeps the old tree"
+        );
+    }
+
+    /// perf-1 #6: patches apply in place, and a failing one undoes every earlier one, sibling
+    /// order and removed subtrees included.
+    #[test]
+    fn a_failing_update_undoes_everything_in_place() {
+        let mut tree = sample();
+        tree.apply_patches(vec![
+            Patch::Insert(InsertOp {
+                node: flex(5, Some(1)),
+                before: Some(3),
+            }),
+            Patch::Insert(InsertOp {
+                node: node(6, Some(5), text("x")),
+                before: None,
+            }),
+        ])
+        .expect("valid");
+        let before = tree.clone();
+        let error = tree
+            .apply_patches(vec![
+                Patch::SetProps(3, text("b")),
+                Patch::Remove(5),
+                Patch::Insert(InsertOp {
+                    node: node(7, Some(1), text("new")),
+                    before: Some(2),
+                }),
+                Patch::Remove(4),
+                Patch::Insert(InsertOp {
+                    node: flex(8, None),
+                    before: None,
+                }),
+                Patch::SetProps(2, list(1, 20, None)),
+                Patch::Remove(99),
+            ])
+            .unwrap_err();
+        assert!(matches!(error, TreeError::Patch { index: 6, .. }));
+        assert_eq!(tree, before);
+        assert_eq!(tree.get(1).expect("root").children(), [2, 5, 3, 4]);
+        assert_eq!(tree.get(5).expect("restored").children(), [6]);
+        assert_eq!(tree.roots(), [1]);
+    }
+
+    fn canvas() -> Props {
+        Props::Canvas(crate::canvas::CanvasProps {
+            width: 10,
+            height: 10,
+            description: "A chart".into(),
+            ops: Vec::new(),
+            clickable: false,
+            fit: crate::canvas::CanvasFit::Clip,
+        })
+    }
+
+    /// Design.md §13: at most 16 canvases per surface, however they arrive, and none in a row.
+    #[test]
+    fn canvases_per_surface_and_rows() {
+        let max = MAX_CANVASES_PER_SURFACE as NodeId;
+        let mut nodes = vec![flex(1, None)];
+        nodes.extend((0..max).map(|i| node(10 + i, Some(1), canvas())));
+        let mut tree = Tree::from_nodes(nodes.clone(), TreeLimits::default()).expect("16 fit");
+        let too_many = TreeError::TooManyCanvases {
+            max: MAX_CANVASES_PER_SURFACE,
+        };
+        let mut seventeen = nodes.clone();
+        seventeen.push(node(99, Some(1), canvas()));
+        assert_eq!(
+            Tree::from_nodes(seventeen, TreeLimits::default()).unwrap_err(),
+            too_many
+        );
+        let insert = |id| {
+            Patch::Insert(InsertOp {
+                node: node(id, Some(1), canvas()),
+                before: None,
+            })
+        };
+        let before = tree.clone();
+        assert!(matches!(
+            tree.apply_patches(vec![insert(99)]).unwrap_err(),
+            TreeError::Patch { error, .. } if *error == too_many
+        ));
+        tree.apply_patches(vec![Patch::Insert(InsertOp {
+            node: node(2, Some(1), text("a")),
+            before: None,
+        })])
+        .expect("not a canvas");
+        assert!(matches!(
+            tree.apply_patches(vec![Patch::SetProps(2, canvas())]).unwrap_err(),
+            TreeError::Patch { error, .. } if *error == too_many
+        ));
+        // Replacing a canvas by a canvas, or removing one first, frees no slot by accident and
+        // uses a freed one.
+        tree.apply_patches(vec![Patch::SetProps(10, canvas())])
+            .expect("still 16");
+        tree.apply_patches(vec![Patch::Remove(10), Patch::SetProps(2, canvas())])
+            .expect("a freed slot");
+        // A rejected update restores the count with the tree.
+        tree.apply_patches(vec![
+            Patch::Remove(11),
+            Patch::Remove(12),
+            insert(98),
+            Patch::Remove(99),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            tree.apply_patches(vec![insert(97)]).unwrap_err(),
+            TreeError::Patch { error, .. } if *error == too_many
+        ));
+        assert_ne!(tree, before);
+
+        assert_eq!(
+            Tree::from_row(
+                vec![flex(1, None), node(2, Some(1), canvas())],
+                TreeLimits::default()
+            )
+            .unwrap_err(),
+            TreeError::CanvasInRow(2)
+        );
+    }
+
+    /// perf-1 #12: a node's props `Arc` changes exactly when its props are replaced.
+    #[test]
+    fn props_are_shared_until_replaced() {
+        let mut tree = sample();
+        let text_props = tree.get(3).expect("text").props_arc().clone();
+        let list_props = tree.get(2).expect("list").props_arc().clone();
+        let copy = tree.clone();
+        assert!(Arc::ptr_eq(
+            copy.get(3).expect("text").props_arc(),
+            &text_props
+        ));
+        tree.apply_patches(vec![Patch::SetProps(3, text("a"))])
+            .expect("valid");
+        assert!(!Arc::ptr_eq(
+            tree.get(3).expect("text").props_arc(),
+            &text_props
+        ));
+        assert_eq!(**tree.get(3).expect("text").props_arc(), *text_props);
+        assert!(Arc::ptr_eq(
+            tree.get(2).expect("list").props_arc(),
+            &list_props
+        ));
+        // A rolled-back update gives back the very same props.
+        tree.apply_patches(vec![
+            Patch::SetProps(2, list(1, 20, None)),
+            Patch::Remove(99),
+        ])
+        .unwrap_err();
+        assert!(Arc::ptr_eq(
+            tree.get(2).expect("list").props_arc(),
+            &list_props
+        ));
     }
 
     /// Design G's refetch rule: `selected` alone fetches nothing; `row-count`, `row-height`,

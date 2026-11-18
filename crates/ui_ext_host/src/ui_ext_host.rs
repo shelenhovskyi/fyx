@@ -12,22 +12,36 @@
 //! For the sprint, extensions are loaded from [`DEV_EXTENSIONS_ENV`] only, and decorations from
 //! [`DEV_DECORATIONS_ENV`].
 
+mod agent_observe;
 mod backend;
+mod canvas;
 mod consent;
 mod decorations;
+pub mod fyx_extensions_page;
 mod icons;
+pub mod images;
 mod inspector;
 mod install;
 pub mod install_store;
 mod keyboard;
+mod modal;
+pub mod notifications;
 mod panel;
+pub mod progress;
 mod registry;
+pub mod registry_service;
+#[cfg(test)]
+mod registry_service_tests;
 mod store_actions;
 mod surface;
 mod view;
+mod workspace_edit;
+mod worktrees;
 
 #[cfg(test)]
 mod decoration_tests;
+#[cfg(test)]
+mod decoration_wasm_tests;
 #[cfg(test)]
 mod primitive_tests;
 #[cfg(test)]
@@ -44,6 +58,7 @@ pub use decorations::{
     DEV_DECORATIONS_ENV, DecorationId, DecorationPath, DecorationPlacement, DecorationTarget,
     Decorations, text_tree,
 };
+pub use fyx_extensions_page::{OpenFyxExtensions, fyx_extensions_button};
 pub use inspector::{ExtensionInspector, InspectorSnapshot, ToggleExtensionInspector};
 pub use install::{
     FyxExtensionsSettings, InstallDevUiExtension, RemoveDevUiExtension, check_dev_folder,
@@ -54,10 +69,12 @@ pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
 };
-pub use registry::{DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, UiExtensionRegistry};
+pub use registry::{
+    DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, UiExtensionRegistry,
+};
 pub use store_actions::{
-    InstallUiExtensionFromFile, RestartUiExtension, RevokeUiExtensionPermission,
-    RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
+    InstallUiExtensionFromFile, OpenExtensionPanel, RestartUiExtension,
+    RevokeUiExtensionPermission, RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
 };
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};
@@ -83,17 +100,20 @@ pub fn capability_chips(extension_id: &str, cx: &App) -> Option<gpui::AnyElement
     let mut labels: Vec<String> = registry
         .declared_capabilities(extension_id)
         .into_iter()
-        .map(|(capability, tier, granted)| match tier {
-            Tier::T0 => format!("{capability} · T0"),
-            _ if granted => format!("{capability} · {tier} granted"),
-            _ => format!("{capability} · {tier} not granted"),
+        .map(|(capability, tier, granted)| {
+            let label = install::capability_chip_label(&capability);
+            match tier {
+                Tier::T0 => label,
+                _ if granted => format!("{label} (approved)"),
+                _ => format!("{label} (not approved)"),
+            }
         })
         .collect();
     if labels.is_empty() {
         labels = registry
             .capabilities(extension_id, cx)
             .into_iter()
-            .map(|capability| format!("{capability} · T0"))
+            .map(install::capability_chip_label)
             .collect();
     }
     if labels.is_empty() {
@@ -111,4 +131,7 @@ pub fn init(cx: &mut App) {
     registry::init(cx);
     keyboard::intercept_keys(cx);
     decorations::init(cx);
+    progress::init(cx);
+    images::init(cx);
+    fyx_extensions_page::init(cx);
 }

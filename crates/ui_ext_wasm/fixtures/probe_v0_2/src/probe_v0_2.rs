@@ -14,7 +14,10 @@
 //! `push <surface> unchanged|remove <id>|patches <n>|replace <n>|invalidate <list>|rich`,
 //! `tick <surface> <ms>`, `cancel <surface>`, `add panel|status|modal <id>`, `remove <id>`,
 //! `show <id>`, `hide <id>`, `place <id> <path> <line> [<nodes>]`, `unplace <id>`, `log <text>`,
-//! `repeat <n> <command>` (`#` in the command becomes the iteration index; results run-length
+//! `busy <ms>` (computes for that long), `notify <owner> <level> <title> [<action-id>=<label>]... [stay]`, `dismiss <id>`,
+//! `pstart <owner> status|panel <title> [cancel]`, `pupdate <id> <percent>|spin [<message>]`,
+//! `pend <id>` (in texts `_` is a space, `\n` a newline, `{rlo}` U+202E and `{long}` 81 bytes;
+//! ids and codes are reported), `repeat <n> <command>` (`#` in the command becomes the iteration index; results run-length
 //! encoded, `ok*64,limit-exceeded*6`), `fail` (answers
 //! `err` with the report so far), `spin`, `sleep <ms>`.
 
@@ -27,6 +30,9 @@ wit_bindgen::generate!({
 
 use fyx::ui::decorations;
 use fyx::ui::host::{self, HostError, HostErrorCode, LogLevel};
+use fyx::ui::notifications::{
+    self, NotificationLevel, ProgressLocation, ProgressOptions, ProgressValue,
+};
 use fyx::ui::types::*;
 
 /// What `register_extension!` emits for 0.1 components: three big-endian `u16`s.
@@ -94,6 +100,7 @@ fn rich_tree() -> Vec<Node> {
                 value: "hunter2".into(),
                 placeholder: "Token".into(),
                 secret: true,
+                label: Some("API token".into()),
             }),
         },
         Node {
@@ -124,6 +131,21 @@ fn code(error: &HostError) -> &'static str {
         HostErrorCode::NotPermitted => "not-permitted",
         HostErrorCode::Unavailable => "unavailable",
     }
+}
+
+fn id_or_code(result: Result<u64, HostError>) -> String {
+    match result {
+        Ok(id) => id.to_string(),
+        Err(error) => code(&error).into(),
+    }
+}
+
+/// Script text: `_` is a space, `\n` a newline, `{rlo}` a bidi override, `{long}` 81 bytes.
+fn text_of(word: &str) -> String {
+    word.replace('_', " ")
+        .replace("\\n", "\n")
+        .replace("{rlo}", "\u{202e}")
+        .replace("{long}", &"a".repeat(81))
 }
 
 fn outcome(result: Result<(), HostError>) -> String {
@@ -217,6 +239,64 @@ fn run_command(words: &[&str]) -> Result<String, String> {
             outcome(decorations::place_decoration(arg(1)?, &location, &nodes))
         }
         "unplace" => outcome(decorations::remove_decoration(arg(1)?)),
+        "notify" => {
+            let level = match arg(2)? {
+                "info" => NotificationLevel::Info,
+                "success" => NotificationLevel::Success,
+                "warning" => NotificationLevel::Warning,
+                _ => NotificationLevel::Error,
+            };
+            let mut actions = Vec::new();
+            let mut auto_dismiss = true;
+            for word in &words[4..] {
+                if *word == "stay" {
+                    auto_dismiss = false;
+                } else if let Some((id, label)) = word.split_once('=') {
+                    actions.push(notifications::NotificationAction {
+                        id: id.into(),
+                        label: text_of(label),
+                    });
+                }
+            }
+            id_or_code(notifications::notify(&notifications::Notification {
+                owner: arg(1)?.into(),
+                level,
+                title: text_of(arg(3)?),
+                body: None,
+                actions,
+                auto_dismiss,
+            }))
+        }
+        "dismiss" => {
+            notifications::dismiss_notification(arg(1)?.parse().map_err(|e| format!("{e}"))?);
+            "done".into()
+        }
+        "pstart" => id_or_code(notifications::progress_start(&ProgressOptions {
+            owner: arg(1)?.into(),
+            title: text_of(arg(3)?),
+            location: if arg(2)? == "panel" {
+                ProgressLocation::Panel
+            } else {
+                ProgressLocation::StatusBar
+            },
+            cancellable: words.get(4) == Some(&"cancel"),
+        })),
+        "pupdate" => {
+            let value = match arg(2)? {
+                "spin" => ProgressValue::Indeterminate,
+                percent => ProgressValue::Percent(percent.parse().map_err(|e| format!("{e}"))?),
+            };
+            let message = words.get(3).map(|message| text_of(message));
+            outcome(notifications::progress_update(
+                arg(1)?.parse().map_err(|e| format!("{e}"))?,
+                value,
+                message.as_deref(),
+            ))
+        }
+        "pend" => {
+            notifications::progress_end(arg(1)?.parse().map_err(|e| format!("{e}"))?);
+            "done".into()
+        }
         "log" => {
             host::log(LogLevel::Info, &words[1..].join(" "));
             "done".into()
@@ -245,6 +325,14 @@ fn run_command(words: &[&str]) -> Result<String, String> {
         },
         "sleep" => {
             std::thread::sleep(std::time::Duration::from_millis(number(1)?.into()));
+            "done".into()
+        }
+        "busy" => {
+            let until =
+                std::time::Instant::now() + std::time::Duration::from_millis(number(1)?.into());
+            while std::time::Instant::now() < until {
+                std::hint::spin_loop();
+            }
             "done".into()
         }
         "fail" => return Err("fail".into()),
@@ -283,6 +371,21 @@ fn describe(event: &UiEvent) -> String {
         UiEvent::InputSubmitted((id, value)) => format!("input-submitted {id} {value}"),
         UiEvent::RowClick((id, row)) => format!("row-click {id} {row}"),
         UiEvent::RowSelected((id, row)) => format!("row-selected {id} {row}"),
+        UiEvent::NotificationAction(event) => {
+            format!(
+                "notification-action {} {}",
+                event.notification, event.action
+            )
+        }
+        UiEvent::NotificationClosed((id, reason)) => format!(
+            "notification-closed {id} {}",
+            match reason {
+                NotificationCloseReason::User => "user",
+                NotificationCloseReason::Expired => "expired",
+                NotificationCloseReason::WindowClosed => "window-closed",
+            }
+        ),
+        UiEvent::ProgressCancelRequested(id) => format!("progress-cancel-requested {id}"),
         UiEvent::Dismissed(reason) => format!(
             "dismissed {}",
             match reason {

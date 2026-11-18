@@ -3,7 +3,7 @@
 
 use ui_ext::v0_2 as model;
 
-use crate::State;
+use crate::{State, props_text_len, update_text_len};
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -16,7 +16,10 @@ pub(crate) mod bindings {
 }
 
 pub(crate) use bindings::UiExtension;
-use bindings::fyx::ui::{decorations as wit_decorations, host as wit_host, types as wit};
+use bindings::fyx::ui::{
+    decorations as wit_decorations, host as wit_host, notifications as wit_notifications,
+    types as wit,
+};
 
 impl wit::Host for State {}
 
@@ -26,10 +29,9 @@ impl wit_host::Host for State {
         surface_id: String,
         update: wit::Update,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self
-            .api
-            .push_update(surface_id, update.into())
-            .map_err(Into::into))
+        let update: model::Update = update.into();
+        self.count_lifted_text(surface_id.len() + update_text_len(&update))?;
+        Ok(self.api.push_update(surface_id, update).map_err(Into::into))
     }
 
     fn request_tick(
@@ -37,6 +39,7 @@ impl wit_host::Host for State {
         surface_id: String,
         delay_ms: u32,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self
             .api
             .request_tick(surface_id, delay_ms)
@@ -44,6 +47,7 @@ impl wit_host::Host for State {
     }
 
     fn cancel_tick(&mut self, surface_id: String) -> wasmtime::Result<()> {
+        self.count_lifted_text(surface_id.len())?;
         self.api.cancel_tick(surface_id);
         Ok(())
     }
@@ -52,6 +56,7 @@ impl wit_host::Host for State {
         &mut self,
         surface: wit::Surface,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface.id.len() + surface.title.len())?;
         Ok(self.api.add_surface(surface.into()).map_err(Into::into))
     }
 
@@ -59,6 +64,7 @@ impl wit_host::Host for State {
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self.api.remove_surface(surface_id).map_err(Into::into))
     }
 
@@ -66,6 +72,7 @@ impl wit_host::Host for State {
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self.api.show_surface(surface_id).map_err(Into::into))
     }
 
@@ -73,6 +80,7 @@ impl wit_host::Host for State {
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self.api.hide_surface(surface_id).map_err(Into::into))
     }
 
@@ -84,10 +92,11 @@ impl wit_host::Host for State {
             wit_host::LogLevel::Warn => ui_ext::LogLevel::Warn,
             wit_host::LogLevel::Error => ui_ext::LogLevel::Error,
         };
-        self.logs.push((level, message));
-        Ok(())
+        self.write_log(level, message)
     }
 }
+
+crate::notifications::notification_imports!();
 
 impl wit_decorations::Host for State {
     fn place_decoration(
@@ -96,7 +105,15 @@ impl wit_decorations::Host for State {
         location: wit::DecorationLocation,
         nodes: Vec<wit::Node>,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        let nodes = nodes.into_iter().map(Into::into).collect();
+        let nodes: Vec<model::Node> = nodes.into_iter().map(Into::into).collect();
+        self.count_lifted_text(
+            id.len()
+                + location.path.len()
+                + nodes
+                    .iter()
+                    .map(|node| props_text_len(&node.props))
+                    .sum::<usize>(),
+        )?;
         Ok(self
             .api
             .place_decoration(id, location.into(), nodes)
@@ -107,6 +124,7 @@ impl wit_decorations::Host for State {
         &mut self,
         id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(id.len())?;
         Ok(self.api.remove_decoration(id).map_err(Into::into))
     }
 }
@@ -121,6 +139,8 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::InvalidArgument => wit_host::HostErrorCode::InvalidArgument,
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
+                // 0.2 has no `denied`; the host maps it to `not-permitted` too.
+                model::HostErrorCode::Denied => wit_host::HostErrorCode::NotPermitted,
             },
             message,
         }
@@ -210,6 +230,7 @@ impl From<wit::Props> for model::Props {
                 value: input.value,
                 placeholder: input.placeholder,
                 secret: input.secret,
+                label: input.label,
             }),
             wit::Props::List(list) => Self::List(model::ListProps {
                 row_count: list.row_count,
@@ -356,6 +377,28 @@ impl From<model::UiEvent> for wit::UiEvent {
                 model::DismissReason::Replaced => wit::DismissReason::Replaced,
                 model::DismissReason::WindowClosed => wit::DismissReason::WindowClosed,
             }),
+            model::UiEvent::NotificationAction(event) => {
+                Self::NotificationAction(wit::NotificationActionEvent {
+                    notification: event.notification,
+                    action: event.action,
+                })
+            }
+            model::UiEvent::NotificationClosed(id, reason) => Self::NotificationClosed((
+                id,
+                match reason {
+                    model::NotificationCloseReason::User => wit::NotificationCloseReason::User,
+                    model::NotificationCloseReason::Expired => {
+                        wit::NotificationCloseReason::Expired
+                    }
+                    model::NotificationCloseReason::WindowClosed => {
+                        wit::NotificationCloseReason::WindowClosed
+                    }
+                },
+            )),
+            model::UiEvent::ProgressCancelRequested(id) => Self::ProgressCancelRequested(id),
+            // 0.2 has no canvas; the host maps the event to a click on the node, but never sends
+            // it, since a 0.2 tree cannot hold a canvas.
+            model::UiEvent::CanvasClick(click) => Self::Click(click.canvas),
         }
     }
 }

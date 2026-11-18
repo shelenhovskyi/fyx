@@ -22,7 +22,7 @@ fn decorations_wasm() -> Vec<u8> {
 
 /// The first text node of the surface that starts with `prefix`.
 fn text_starting(harness: &Harness, surface_id: &str, prefix: &str) -> Option<String> {
-    let id = harness.find(
+    let id = harness.find_v0_1(
         surface_id,
         |props| matches!(props, Props::Text(text) if text.content.starts_with(prefix)),
     )?;
@@ -32,7 +32,7 @@ fn text_starting(harness: &Harness, surface_id: &str, prefix: &str) -> Option<St
 /// The nodes of the surface whose props match, in tree order.
 fn all(harness: &Harness, surface_id: &str, matches: impl Fn(&Props) -> bool) -> Vec<NodeId> {
     harness
-        .tree(surface_id)
+        .tree_v0_1(surface_id)
         .map(|tree| tree.to_nodes())
         .unwrap_or_default()
         .into_iter()
@@ -72,7 +72,7 @@ fn is_clock_text(text: &str) -> bool {
 fn the_gallery_clock_ticks_every_second() {
     let mut harness = Harness::load(&gallery_v0_2_wasm()).expect("load");
     assert_eq!(
-        ids(harness.surfaces_v0_2().iter().map(|s| s.id.as_str())),
+        ids(harness.surfaces().iter().map(|s| s.id.as_str())),
         [
             "gallery",
             "gallery-status",
@@ -111,12 +111,12 @@ fn the_gallery_shows_tooltips_secret_input_indent_and_every_icon() {
         .find_button(gallery::PANEL, "Delete")
         .expect("Delete");
     assert!(matches!(
-        harness.props_v0_2(gallery::PANEL, delete),
+        harness.props(gallery::PANEL, delete),
         Some(model::Props::Button(button))
             if button.tooltip.as_deref() == Some("Delete for good")
                 && button.icon == Some(model::IconRef::Frozen(model::Icon::Trash))
     ));
-    harness.click(gallery::PANEL, "Delete").expect("click");
+    harness.click_v0_1(gallery::PANEL, "Delete").expect("click");
     assert_eq!(
         text_starting(&harness, gallery::PANEL, "Last action").as_deref(),
         Some("Last action: Delete")
@@ -126,11 +126,11 @@ fn the_gallery_shows_tooltips_secret_input_indent_and_every_icon() {
         matches!(props, Props::Input(_))
     })[0];
     assert!(matches!(
-        harness.props_v0_2(gallery::PANEL, token),
+        harness.props(gallery::PANEL, token),
         Some(model::Props::Input(input)) if input.secret
     ));
     harness
-        .event_v0_2(
+        .event(
             gallery::PANEL,
             model::UiEvent::InputChanged(token, "s3cret".into()),
         )
@@ -147,7 +147,7 @@ fn the_gallery_shows_tooltips_secret_input_indent_and_every_icon() {
         panic!("two lists: {lists:?}");
     };
     let rows = harness
-        .rows_v0_2(gallery::PANEL, tree_list, 0, 50)
+        .rows(gallery::PANEL, tree_list, 0, 50)
         .expect("tree rows");
     assert_eq!(
         rows.iter().map(|row| row.indent).collect::<Vec<_>>(),
@@ -155,7 +155,7 @@ fn the_gallery_shows_tooltips_secret_input_indent_and_every_icon() {
     );
 
     let outcome = harness
-        .click_v0_2(gallery::PANEL, "Refresh rows")
+        .click(gallery::PANEL, "Refresh rows")
         .expect("refresh");
     assert_eq!(
         outcome.invalidated,
@@ -165,12 +165,12 @@ fn the_gallery_shows_tooltips_secret_input_indent_and_every_icon() {
         }]
     );
     let rows = harness
-        .rows(gallery::PANEL, tree_list, 0, 1)
+        .rows_v0_1(gallery::PANEL, tree_list, 0, 1)
         .expect("refetched rows");
     assert_eq!(row_texts(&rows[0].1), ["crates", "(scan 1)"]);
 
     let icons = harness
-        .rows(gallery::PANEL, icon_list, 0, 200)
+        .rows_v0_1(gallery::PANEL, icon_list, 0, 200)
         .expect("icon rows");
     assert_eq!(icons.len(), 101);
     assert_eq!(row_texts(&icons[0].1), ["arrow-up"]);
@@ -183,7 +183,7 @@ fn the_gallery_picker_is_driven_by_the_keyboard() {
     harness.mount(gallery::PANEL).expect("mount");
 
     harness
-        .click(gallery::PANEL, "Pick a fruit")
+        .click_v0_1(gallery::PANEL, "Pick a fruit")
         .expect("open the picker");
     assert!(harness.is_shown(gallery::PICKER));
     let filter = all(&harness, gallery::PICKER, |props| {
@@ -193,22 +193,24 @@ fn the_gallery_picker_is_driven_by_the_keyboard() {
         matches!(props, Props::List(_))
     })[0];
     assert!(matches!(
-        harness.props_v0_2(gallery::PICKER, list),
+        harness.props(gallery::PICKER, list),
         Some(model::Props::List(props)) if props.row_count == 12 && props.selected == Some(0)
     ));
 
     let outcome = harness
-        .event_v0_2(
+        .event(
             gallery::PICKER,
             model::UiEvent::InputChanged(filter, "an".into()),
         )
         .expect("filter");
     assert_eq!(outcome.invalidated.len(), 1);
     assert!(matches!(
-        harness.props_v0_2(gallery::PICKER, list),
+        harness.props(gallery::PICKER, list),
         Some(model::Props::List(props)) if props.row_count == 3 && props.selected == Some(0)
     ));
-    let rows = harness.rows(gallery::PICKER, list, 0, 10).expect("rows");
+    let rows = harness
+        .rows_v0_1(gallery::PICKER, list, 0, 10)
+        .expect("rows");
     assert_eq!(
         rows.iter()
             .flat_map(|(_, row)| row_texts(row))
@@ -219,15 +221,15 @@ fn the_gallery_picker_is_driven_by_the_keyboard() {
     // Down twice: the host moves `selected` and sends row-selected each time.
     for row in [1, 2] {
         harness
-            .event_v0_2(gallery::PICKER, model::UiEvent::RowSelected(list, row))
+            .event(gallery::PICKER, model::UiEvent::RowSelected(list, row))
             .expect("select");
     }
     assert!(matches!(
-        harness.props_v0_2(gallery::PICKER, list),
+        harness.props(gallery::PICKER, list),
         Some(model::Props::List(props)) if props.selected == Some(2)
     ));
     let outcome = harness
-        .event_v0_2(
+        .event(
             gallery::PICKER,
             model::UiEvent::InputSubmitted(filter, "an".into()),
         )
@@ -243,19 +245,23 @@ fn the_gallery_picker_is_driven_by_the_keyboard() {
         Some("Picked: Orange")
     );
 
-    harness.click(gallery::PANEL, "Pick a fruit").expect("open");
+    harness
+        .click_v0_1(gallery::PANEL, "Pick a fruit")
+        .expect("open");
     let list = all(&harness, gallery::PICKER, |props| {
         matches!(props, Props::List(_))
     })[0];
     harness
-        .event_v0_2(gallery::PICKER, model::UiEvent::RowClick(list, 1))
+        .event(gallery::PICKER, model::UiEvent::RowClick(list, 1))
         .expect("click a row");
     assert_eq!(
         text_starting(&harness, gallery::PANEL, "Picked").as_deref(),
         Some("Picked: Apricot")
     );
 
-    harness.click(gallery::PANEL, "Pick a fruit").expect("open");
+    harness
+        .click_v0_1(gallery::PANEL, "Pick a fruit")
+        .expect("open");
     harness
         .dismiss(gallery::PICKER, model::DismissReason::Escape)
         .expect("Escape");
@@ -282,7 +288,7 @@ fn the_todo_highlighter_places_and_removes_decorations() {
     );
 
     harness
-        .click(HIGHLIGHTS, "Highlight all")
+        .click_v0_1(HIGHLIGHTS, "Highlight all")
         .expect("highlight");
     assert_eq!(harness.decorations().count(), 6);
     let location = harness.decoration("todo-0").expect("todo-0");
@@ -300,7 +306,7 @@ fn the_todo_highlighter_places_and_removes_decorations() {
     );
 
     harness
-        .click("todo-2", "Done")
+        .click_v0_1("todo-2", "Done")
         .expect("Done in the decoration");
     assert!(harness.decoration("todo-2").is_none());
     assert_eq!(
@@ -313,7 +319,7 @@ fn the_todo_highlighter_places_and_removes_decorations() {
         matches!(props, Props::List(_))
     })[0];
     let outcome = harness
-        .event_v0_2(HIGHLIGHTS, model::UiEvent::RowClick(list, 2))
+        .event(HIGHLIGHTS, model::UiEvent::RowClick(list, 2))
         .expect("row click");
     assert!(harness.decoration("todo-2").is_some());
     assert_eq!(
@@ -324,7 +330,7 @@ fn the_todo_highlighter_places_and_removes_decorations() {
         }]
     );
 
-    harness.click(HIGHLIGHTS, "Clear").expect("clear");
+    harness.click_v0_1(HIGHLIGHTS, "Clear").expect("clear");
     assert_eq!(harness.decorations().count(), 0);
 }
 
@@ -334,7 +340,7 @@ fn the_todo_highlighter_reports_refused_decorations() {
         Harness::load_with_capabilities(&decorations_v0_2_wasm(), &["ui:panel"]).expect("load");
     harness.mount(HIGHLIGHTS).expect("mount");
     harness
-        .click(HIGHLIGHTS, "Highlight all")
+        .click_v0_1(HIGHLIGHTS, "Highlight all")
         .expect("highlight");
     assert_eq!(harness.decorations().count(), 0);
     assert!(text_starting(&harness, HIGHLIGHTS, "not-permitted:").is_some());
@@ -343,8 +349,58 @@ fn the_todo_highlighter_reports_refused_decorations() {
     assert_eq!(harness.ui_api_version(), ApiVersion::V0_1_0);
     harness.mount(HIGHLIGHTS).expect("mount");
     harness
-        .click(HIGHLIGHTS, "Highlight all")
+        .click_v0_1(HIGHLIGHTS, "Highlight all")
         .expect("highlight");
     let status = text_starting(&harness, HIGHLIGHTS, "unavailable:").expect("status");
     assert!(status.contains("0.2"), "{status}");
+}
+
+/// §M.8 in the gallery's 0.2 build: two notifications, a button pressed, and a job that runs on
+/// ticks and can be cancelled.
+#[test]
+fn the_gallery_notifies_and_runs_a_job() {
+    use ui_ext::v0_2::notifications::ProgressLocation;
+    let mut harness = Harness::load(&gallery_v0_2_wasm()).expect("load");
+    harness.mount(gallery::PANEL).expect("mount");
+
+    harness.click(gallery::PANEL, "Notify").expect("notify");
+    assert_eq!(harness.notifications().len(), 2);
+    let (&info, _) = harness
+        .notifications()
+        .iter()
+        .find(|(_, notification)| notification.actions.len() == 2)
+        .expect("the info notification");
+    harness.notification_action(info, "open").expect("open");
+    assert_eq!(
+        text_starting(&harness, gallery::PANEL, "Notifications:").as_deref(),
+        Some(format!("Notifications: #{info} pressed open").as_str())
+    );
+
+    harness.click(gallery::PANEL, "Run job").expect("run");
+    let locations = harness
+        .progresses()
+        .values()
+        .map(|progress| progress.options.location)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        locations,
+        [ProgressLocation::StatusBar, ProgressLocation::Panel]
+    );
+    harness.tick(gallery::PANEL).expect("tick");
+    assert_eq!(
+        text_starting(&harness, gallery::PANEL, "Job:").as_deref(),
+        Some("Job: 10 %")
+    );
+    let (&bar, _) = harness
+        .progresses()
+        .iter()
+        .find(|(_, progress)| progress.options.cancellable)
+        .expect("the status-bar progress");
+    harness.cancel_progress(bar).expect("cancel");
+    assert!(harness.progresses().is_empty());
+    assert_eq!(
+        text_starting(&harness, gallery::PANEL, "Job:").as_deref(),
+        Some("Job: cancelled")
+    );
+    assert_eq!(harness.pending_tick(gallery::PANEL), None);
 }

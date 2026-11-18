@@ -5,7 +5,7 @@
 
 use std::{ops::Range, sync::Arc, time::Duration};
 
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::{
     Editor, EditorEvent, EditorMode, HiddenUnstagedDiffHunkRenderer, MinimapVisibility,
     SizingBehavior,
@@ -22,7 +22,7 @@ use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle as UiButtonStyle, Clickable as _, Color,
     CommonAnimationExt as _, Disableable as _, Icon, IconButton, IconName, IconSize, Label,
-    LabelCommon as _, LabelSize, TintColor, WithScrollbar as _, h_flex, v_flex,
+    LabelCommon as _, LabelSize, TintColor, Tooltip, WithScrollbar as _, h_flex, v_flex,
 };
 use ui_ext::v0_2::{
     Align, ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps,
@@ -57,6 +57,8 @@ pub struct SurfaceView {
     pub(crate) inputs: HashMap<NodeId, InputEditor>,
     markdown: HashMap<NodeId, Entity<Markdown>>,
     pub(crate) scroll_handles: HashMap<NodeId, UniformListScrollHandle>,
+    /// The `selected` row each list was last scrolled to.
+    scrolled_selection: HashMap<NodeId, u32>,
     /// A read-only diff editor per `diff-view` node.
     pub(crate) diffs: HashMap<NodeId, DiffEditor>,
     /// The view's own focus target: the panel focuses it on activation and Tab starts from it.
@@ -68,12 +70,20 @@ pub struct SurfaceView {
     pub(crate) selection: HashMap<NodeId, u32>,
     /// Enabled buttons, inputs, lists and tables in tree order: the Tab order.
     pub(crate) focus_order: Vec<NodeId>,
+    /// The host's own buttons around the surface; they follow `focus_order` in the Tab order.
+    pub(crate) host_focus: HashMap<HostControl, FocusHandle>,
     /// The panel body scrolls when the tree is taller than the panel.
     pub(crate) body_scroll: ScrollHandle,
     synced_revision: Option<u64>,
+    /// The props of each input, markdown and diff node at the last sync. The tree shares them
+    /// (`TreeNode::props_arc`), so an unchanged node is the same pointer and is skipped without
+    /// copying or comparing its text (triage-3, PERF 12).
+    synced_props: HashMap<NodeId, Arc<Props>>,
     /// The state's `mount_count` at the last sync.
     synced_mount: u64,
     _observe_state: Subscription,
+    /// Redraws when an image this view may show finishes decoding (plan 4.11).
+    _observe_images: Option<Subscription>,
 }
 
 impl SurfaceView {
@@ -100,18 +110,53 @@ impl SurfaceView {
             inputs: HashMap::default(),
             markdown: HashMap::default(),
             scroll_handles: HashMap::default(),
+            scrolled_selection: HashMap::default(),
             diffs: HashMap::default(),
             focus_handle: cx.focus_handle(),
             button_focus: HashMap::default(),
             list_focus: HashMap::default(),
             selection: HashMap::default(),
             focus_order: Vec::new(),
+            host_focus: HostControl::ALL
+                .iter()
+                .map(|control| (*control, cx.focus_handle()))
+                .collect(),
             body_scroll: ScrollHandle::new(),
             synced_revision: None,
             synced_mount: 0,
+            synced_props: HashMap::default(),
             _observe_state: observe_state,
+            _observe_images: crate::images::ImageCache::global(cx)
+                .map(|images| cx.observe(&images, |_, _, cx| cx.notify())),
         };
         this.sync(window, cx);
+        // Typing still waiting for its pause goes out when the view closes (a panel removed, a
+        // window closed), instead of being lost (triage-3, ASYNC 12).
+        cx.on_release(|this: &mut Self, cx| {
+            let pending: Vec<(NodeId, String)> = this
+                .inputs
+                .iter()
+                .filter(|(_, input)| input.debounce.is_some())
+                .map(|(id, input)| {
+                    (
+                        *id,
+                        input.editor.read(cx).text(cx),
+                        input.last_known.clone(),
+                    )
+                })
+                .filter(|(_, text, last_known)| text != last_known)
+                .map(|(id, text, _)| (id, text))
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            this.state.update(cx, |state, cx| {
+                for (id, text) in pending {
+                    state.dispatch(UiEvent::InputChanged(id, text), cx);
+                }
+            });
+        })
+        .detach();
         this
     }
 
@@ -161,6 +206,20 @@ impl SurfaceView {
 
     /// Brings the per-window objects (editors, markdown models, scroll handles) in line with the
     /// tree. Runs when the state changes, not per frame.
+    /// Focuses the first input in tree order, or the view itself when there is none (a modal
+    /// opening: Escape must still reach it).
+    pub(crate) fn focus_first_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync(window, cx);
+        let first = self
+            .focus_order
+            .iter()
+            .find_map(|id| self.inputs.get(id).map(|input| input.editor.clone()));
+        match first {
+            Some(editor) => editor.focus_handle(cx).focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.synced_revision == Some(self.state.read(cx).revision()) {
             return;
@@ -173,6 +232,7 @@ impl SurfaceView {
         self.synced_mount = state.mount_count();
 
         let mut inputs = Vec::new();
+        let mut selections: Vec<(NodeId, u32)> = Vec::new();
         let mut markdown = Vec::new();
         let mut diffs = Vec::new();
         let mut lists = Vec::new();
@@ -186,13 +246,23 @@ impl SurfaceView {
                     continue;
                 };
                 match node.props() {
-                    Props::Input(props) => {
-                        inputs.push((id, props.clone()));
+                    Props::Input(_) => {
+                        inputs.push((id, node.props_arc().clone()));
                         focus_order.push(id);
                     }
-                    Props::Markdown(source) => markdown.push((id, source.clone())),
-                    Props::List(ListProps { row_count, .. })
-                    | Props::Table(TableProps { row_count, .. }) => {
+                    Props::Markdown(_) => markdown.push((id, node.props_arc().clone())),
+                    Props::List(ListProps {
+                        row_count,
+                        selected,
+                        ..
+                    }) => {
+                        lists.push((id, *row_count));
+                        if let Some(selected) = selected {
+                            selections.push((id, *selected));
+                        }
+                        focus_order.push(id);
+                    }
+                    Props::Table(TableProps { row_count, .. }) => {
                         lists.push((id, *row_count));
                         focus_order.push(id);
                     }
@@ -202,26 +272,38 @@ impl SurfaceView {
                             focus_order.push(id);
                         }
                     }
-                    Props::DiffView(props) => diffs.push((id, props.clone())),
-                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) => {}
+                    Props::DiffView(_) => diffs.push((id, node.props_arc().clone())),
+                    // A canvas takes focus with plan 4.14, when it is clickable.
+                    Props::Flex(_)
+                    | Props::Text(_)
+                    | Props::Icon(_)
+                    | Props::Image(_)
+                    | Props::Canvas(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
             }
         }
         self.focus_order = focus_order;
 
-        self.button_focus.retain(|id, _| buttons.contains(id));
+        // Sets for the membership checks below: with lists they were quadratic in the number of
+        // nodes (triage-3, PERF 5).
+        let button_ids: HashSet<NodeId> = buttons.iter().copied().collect();
+        let list_ids: HashSet<NodeId> = lists.iter().map(|(id, _)| *id).collect();
+        let input_ids: HashSet<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let markdown_ids: HashSet<NodeId> = markdown.iter().map(|(id, _)| *id).collect();
+        let row_counts: HashMap<NodeId, u32> = lists.iter().copied().collect();
+
+        self.button_focus.retain(|id, _| button_ids.contains(id));
         for id in buttons {
             self.button_focus
                 .entry(id)
                 .or_insert_with(|| cx.focus_handle());
         }
-        self.list_focus
-            .retain(|id, _| lists.iter().any(|(list, _)| list == id));
+        self.list_focus.retain(|id, _| list_ids.contains(id));
         self.selection.retain(|id, selected| {
-            lists
-                .iter()
-                .any(|(list, row_count)| list == id && *selected < *row_count)
+            row_counts
+                .get(id)
+                .is_some_and(|row_count| *selected < *row_count)
         });
         for (id, _) in &lists {
             self.list_focus
@@ -241,11 +323,12 @@ impl SurfaceView {
             .copied()
             .collect();
         let new_inputs: Vec<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let old_input_ids: HashSet<NodeId> = old_inputs.iter().copied().collect();
         let carried: Vec<(usize, String, bool)> = old_inputs
             .iter()
             .enumerate()
             .filter(|_| remounted)
-            .filter(|(_, id)| !new_inputs.contains(id))
+            .filter(|(_, id)| !input_ids.contains(id))
             .filter_map(|(position, id)| {
                 let input = self.inputs.get(id)?;
                 let focused = focused_before == Some(*id);
@@ -254,16 +337,27 @@ impl SurfaceView {
             })
             .collect();
 
-        self.inputs
-            .retain(|id, _| inputs.iter().any(|(input, _)| input == id));
+        self.inputs.retain(|id, _| input_ids.contains(id));
+        let inputs_synced = inputs.clone();
         for (id, props) in inputs {
-            self.sync_input(id, props, window, cx);
+            let sets = self.state.read(cx).input_set_count(id);
+            let unchanged = self
+                .synced_props
+                .get(&id)
+                .is_some_and(|synced| Arc::ptr_eq(synced, &props))
+                && self
+                    .inputs
+                    .get(&id)
+                    .is_some_and(|input| input.sets_seen == sets);
+            if !unchanged && let Props::Input(input_props) = &*props {
+                self.sync_input(id, input_props.clone(), window, cx);
+            }
         }
         for (position, text, focused) in carried {
             let Some(&id) = new_inputs.get(position) else {
                 continue;
             };
-            if old_inputs.contains(&id) {
+            if old_input_ids.contains(&id) {
                 continue;
             }
             let Some(input) = self.inputs.get_mut(&id) else {
@@ -280,20 +374,40 @@ impl SurfaceView {
             }
         }
 
-        self.diffs.retain(|id, diff| {
-            diffs
-                .iter()
-                .any(|(node, props)| node == id && *props == diff.props)
-        });
-        for (id, props) in diffs {
-            if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(id) {
-                entry.insert(DiffEditor::new(props, window, cx));
+        {
+            let diff_props: HashMap<NodeId, &Arc<Props>> =
+                diffs.iter().map(|(id, props)| (*id, props)).collect();
+            let synced = &self.synced_props;
+            self.diffs.retain(|id, diff| {
+                diff_props.get(id).is_some_and(|props| {
+                    synced.get(id).is_some_and(|old| Arc::ptr_eq(old, props))
+                        || matches!(&***props, Props::DiffView(props) if *props == diff.props)
+                })
+            });
+        }
+        for (id, props) in &diffs {
+            if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(*id)
+                && let Props::DiffView(diff_props) = &**props
+            {
+                entry.insert(DiffEditor::new(diff_props.clone(), window, cx));
             }
         }
 
-        self.markdown
-            .retain(|id, _| markdown.iter().any(|(node, _)| node == id));
-        for (id, source) in markdown {
+        self.markdown.retain(|id, _| markdown_ids.contains(id));
+        for (id, props) in &markdown {
+            let id = *id;
+            if self.markdown.contains_key(&id)
+                && self
+                    .synced_props
+                    .get(&id)
+                    .is_some_and(|synced| Arc::ptr_eq(synced, props))
+            {
+                continue;
+            }
+            let Props::Markdown(source) = &**props else {
+                continue;
+            };
+            let source = without_images(source);
             match self.markdown.get(&id) {
                 Some(entity) => {
                     if entity.read(cx).source().as_ref() != source {
@@ -307,9 +421,25 @@ impl SurfaceView {
             }
         }
 
-        self.scroll_handles.retain(|id, _| lists.contains(id));
-        for id in lists {
-            self.scroll_handles.entry(id).or_default();
+        self.synced_props = inputs_synced
+            .into_iter()
+            .chain(markdown)
+            .chain(diffs)
+            .collect();
+
+        self.scroll_handles.retain(|id, _| list_ids.contains(id));
+        for id in &lists {
+            self.scroll_handles.entry(*id).or_default();
+        }
+        // A `selected` the extension (or the keyboard) moved is scrolled into view (design C).
+        self.scrolled_selection
+            .retain(|id, _| list_ids.contains(id));
+        for (id, selected) in selections {
+            if self.scrolled_selection.insert(id, selected) != Some(selected)
+                && let Some(handle) = self.scroll_handles.get(&id)
+            {
+                handle.scroll_to_item(selected as usize, gpui::ScrollStrategy::Nearest);
+            }
         }
         self.restore_focus(focused_before, &old_order, window, cx);
     }
@@ -326,6 +456,10 @@ impl SurfaceView {
                 let mut editor = Editor::single_line(window, cx);
                 editor.set_placeholder_text(&props.placeholder, window, cx);
                 editor.set_text(props.value.as_str(), window, cx);
+                // Design K: a secret input is masked.
+                editor.set_masked(props.secret, cx);
+                // Triage-3 #5: a blinking caret repaints the whole surface twice a second.
+                editor.disable_cursor_blink(cx);
                 editor
             });
             let sets_seen = self.state.read(cx).input_set_count(id);
@@ -352,6 +486,9 @@ impl SurfaceView {
             return;
         };
 
+        input
+            .editor
+            .update(cx, |editor, cx| editor.set_masked(props.secret, cx));
         if input.placeholder != props.placeholder {
             input.editor.update(cx, |editor, cx| {
                 editor.set_placeholder_text(&props.placeholder, window, cx)
@@ -448,6 +585,105 @@ impl SurfaceView {
     }
 }
 
+/// The host's own buttons around a surface: what a failed surface offers and the error footer's.
+/// They come after the surface's nodes in the Tab order, so a keyboard user can reach them
+/// (triage-3, UX F6, F21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HostControl {
+    Retry,
+    Restart,
+    CopyError,
+    ReloadRetry,
+    DismissError,
+}
+
+impl HostControl {
+    const ALL: [Self; 5] = [
+        Self::Retry,
+        Self::Restart,
+        Self::CopyError,
+        Self::ReloadRetry,
+        Self::DismissError,
+    ];
+}
+
+impl SurfaceView {
+    /// The host controls shown now, in the order they are drawn.
+    pub(crate) fn host_controls(&self, cx: &App) -> Vec<HostControl> {
+        let state = self.state.read(cx);
+        let mut controls = Vec::new();
+        if let Phase::Failed { retryable, .. } = state.phase() {
+            if *retryable {
+                controls.push(HostControl::Retry);
+            } else if state.can_restart() {
+                controls.push(HostControl::Restart);
+            }
+            if state.failure_detail().is_some() {
+                controls.push(HostControl::CopyError);
+            }
+        }
+        if !self.compact && state.last_error().is_some() {
+            if state.reload_failed() && state.can_restart() {
+                controls.push(HostControl::ReloadRetry);
+            }
+            controls.push(HostControl::DismissError);
+        }
+        controls
+    }
+
+    pub(crate) fn run_host_control(
+        &mut self,
+        control: HostControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match control {
+            HostControl::Retry => self.state.update(cx, |state, cx| state.retry(cx)),
+            HostControl::Restart | HostControl::ReloadRetry => self
+                .state
+                .update(cx, |state, cx| state.restart_extension(cx)),
+            HostControl::CopyError => {
+                if let Some(detail) = self.state.read(cx).failure_detail() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.to_string()));
+                }
+            }
+            HostControl::DismissError => self.state.update(cx, |state, cx| state.dismiss_error(cx)),
+        }
+        // A control that went away with what it did leaves focus with the surface, so Tab and
+        // Escape keep working.
+        if self.host_focus[&control].is_focused(window)
+            && !self.host_controls(cx).contains(&control)
+        {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
+    /// A host control: focusable, in the button key context (Space and Enter press it), with a
+    /// focus ring.
+    fn host_button(
+        &self,
+        control: HostControl,
+        button: AnyElement,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let focus = &self.host_focus[&control];
+        div()
+            .id(("fyx-ui-host-control", control as usize))
+            .key_context(crate::keyboard::BUTTON_CONTEXT)
+            .track_focus(focus)
+            .rounded_sm()
+            .border_1()
+            .border_color(focus_ring(focus.is_focused(window), cx))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                this.run_host_control(control, window, cx);
+            }))
+            .child(button)
+            .into_any_element()
+    }
+}
+
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
@@ -458,6 +694,7 @@ impl Render for SurfaceView {
             v_flex().size_full().min_h_0()
         };
         let body = match state.phase() {
+            Phase::Closed => div().into_any_element(),
             Phase::Mounting => Label::new("Loading…")
                 .color(Color::Muted)
                 .size(LabelSize::Small)
@@ -473,23 +710,28 @@ impl Render for SurfaceView {
                 // A dead instance refuses every call, so a retry could only fail again: it gets a
                 // fresh instance instead.
                 .when(*retryable, |this| {
-                    this.child(
-                        Button::new("fyx-ui-retry", "Retry")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.state.update(cx, |state, cx| state.retry(cx))
-                            })),
-                    )
+                    this.child(self.host_button(
+                        HostControl::Retry,
+                        Button::new("fyx-ui-retry", "Retry").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
                 .when(!*retryable && state.can_restart(), |this| {
-                    this.child(
-                        Button::new("fyx-ui-restart", "Restart extension")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.state
-                                    .update(cx, |state, cx| state.restart_extension(cx))
-                            })),
-                    )
+                    this.child(self.host_button(
+                        HostControl::Restart,
+                        Button::new("fyx-ui-restart", "Restart extension").into_any_element(),
+                        window,
+                        cx,
+                    ))
+                })
+                .when(state.failure_detail().is_some(), |this| {
+                    this.child(self.host_button(
+                        HostControl::CopyError,
+                        Button::new("fyx-ui-copy-error", "Copy Error Details").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
                 .into_any_element(),
             Phase::Ready(tree) => {
@@ -548,16 +790,24 @@ impl Render for SurfaceView {
                         .truncate(),
                 )
                 .when(reload_failed, |this| {
-                    this.child(
-                        Button::new("fyx-ui-reload-retry", "Retry")
-                            .style(UiButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.state
-                                    .update(cx, |state, cx| state.restart_extension(cx))
-                            })),
-                    )
+                    this.child(self.host_button(
+                        HostControl::ReloadRetry,
+                        Button::new("fyx-ui-reload-retry", "Retry").into_any_element(),
+                        window,
+                        cx,
+                    ))
                 })
+                .child(
+                    self.host_button(
+                        HostControl::DismissError,
+                        IconButton::new("fyx-ui-dismiss-error", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Dismiss"))
+                            .into_any_element(),
+                        window,
+                        cx,
+                    ),
+                )
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.state.update(cx, |state, cx| state.dismiss_error(cx));
@@ -580,6 +830,17 @@ impl Render for SurfaceView {
             .on_action(cx.listener(Self::cancel_input))
             .child(body)
             .when(!compact, |this| this.children(error))
+            .on_children_prepainted({
+                // Images the frame lacked are decoded after it, never inside it (§12).
+                let images = crate::images::ImageCache::global(cx);
+                move |_, _, cx| {
+                    if let Some(images) = &images
+                        && images.read(cx).has_wanted()
+                    {
+                        images.update(cx, |images, cx| images.request_wanted(cx));
+                    }
+                }
+            })
     }
 }
 
@@ -670,6 +931,8 @@ impl Renderer<'_, '_> {
             Props::Icon(props) => self.icon(props),
             Props::Markdown(source) => self.markdown(id, source, scope),
             Props::DiffView(props) => self.diff_view(id, props, scope),
+            Props::Image(props) => self.image(props),
+            Props::Canvas(props) => self.canvas(id, node.props_arc(), props, scope),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -725,6 +988,10 @@ impl Renderer<'_, '_> {
             .as_ref()
             .map(|icon| crate::icons::resolve_icon(icon).static_name());
         let style = button_style(props.style);
+        // Design J: at most 256 bytes, cut at a character boundary by the model.
+        let tooltip: Option<SharedString> = props
+            .tooltip_text()
+            .map(|text| SharedString::from(text.to_string()));
         // Inside a row the whole row is the click target (`row-click`): row-local ids are not
         // surface ids, so a `click` on them would be ambiguous.
         let on_click = match scope {
@@ -740,10 +1007,16 @@ impl Renderer<'_, '_> {
         let button = if props.label.is_empty()
             && let Some(icon) = icon
         {
+            // F16: an icon-only button is named by its tooltip, else by its icon.
+            let name: SharedString = tooltip
+                .clone()
+                .unwrap_or_else(|| format!("{icon:?}").into());
             IconButton::new(element_id, icon)
                 .icon_size(IconSize::Small)
                 .style(style)
                 .disabled(props.disabled)
+                .aria_label(name)
+                .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(focus, |this, focus| this.track_focus(focus))
                 .when_some(on_click, |this, on_click| this.on_click(on_click))
                 .into_any_element()
@@ -751,6 +1024,7 @@ impl Renderer<'_, '_> {
             Button::new(element_id, props.label.clone())
                 .style(style)
                 .disabled(props.disabled)
+                .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(icon, |this, icon| {
                     this.start_icon(Icon::new(icon).size(IconSize::Small))
                 })
@@ -785,8 +1059,15 @@ impl Renderer<'_, '_> {
             return Label::new(text).color(color).into_any_element();
         };
         let colors = self.cx.theme().colors();
+        // F16: the input's accessible name is its `label`, else its placeholder.
+        let name: SharedString = props
+            .label_text()
+            .unwrap_or(&props.placeholder)
+            .to_string()
+            .into();
         div()
             .id(scope.element_id(id))
+            .aria_label(name)
             .w_full()
             .min_w_0()
             .px_2()
@@ -854,11 +1135,14 @@ impl Renderer<'_, '_> {
         table_columns: Option<usize>,
         scope: Scope,
     ) -> AnyElement {
-        if let Scope::Row { .. } = scope {
-            return Label::new("Lists inside list rows are not supported")
-                .color(Color::Muted)
-                .size(LabelSize::Small)
-                .into_any_element();
+        if let Scope::Row { list, index } = scope {
+            // An authoring mistake: logged for the author, nothing drawn for the user.
+            log::debug!(
+                "fyx:ui {}: list {id} inside row {index} of list {list} is not drawn (lists \
+                 inside list rows are not supported)",
+                self.state.extension_id()
+            );
+            return div().into_any_element();
         }
         let row_height = if row_height == 0 {
             DEFAULT_ROW_HEIGHT
@@ -912,6 +1196,20 @@ impl Renderer<'_, '_> {
         table_columns: Option<usize>,
     ) -> AnyElement {
         let scope = Scope::Row { list, index };
+        // `selected` (0.2) is the extension's highlighted row; the view's own keyboard selection
+        // is drawn the same way.
+        let extension_selected =
+            self.state
+                .tree()
+                .and_then(|tree| tree.get(list))
+                .and_then(|node| match node.props() {
+                    Props::List(props) => props.selected,
+                    _ => None,
+                });
+        let selected =
+            extension_selected == Some(index) || self.view.selection.get(&list) == Some(&index);
+        // Design J: nesting depth, clamped by the host; 0 for 0.1 rows.
+        let indent = self.state.row_indent(list, index);
         let row = div()
             .id(ElementId::NamedInteger("fyx-row".into(), index as u64))
             // Tests find rows by `fyx-row-<list>-<index>`; a no-op outside test builds.
@@ -919,12 +1217,15 @@ impl Renderer<'_, '_> {
             .h(px(row_height.into()))
             .w_full()
             .px_1()
+            .when(indent > 0, |this| {
+                this.pl(px(4. + f32::from(indent) * ROW_INDENT_PX))
+            })
             .flex()
             .items_center()
             .overflow_hidden()
             .cursor_pointer()
             .hover(|style| style.bg(self.cx.theme().colors().ghost_element_hover))
-            .when(self.view.selection.get(&list) == Some(&index), |this| {
+            .when(selected, |this| {
                 this.bg(self.cx.theme().colors().element_selected)
             })
             .on_click(self.cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -955,6 +1256,127 @@ impl Renderer<'_, '_> {
             }
             _ => row.child(self.node(tree, root, scope)).into_any_element(),
         }
+    }
+
+    /// A 0.3 `image` node as the muted box with its alt text that design.md §12 draws
+    /// while an image loads or when it fails. Decoding comes with plan 4.11.
+    /// An image node (plan 4.11): the decoded picture clipped to its box, or its alt text while it
+    /// decodes, and with a warning icon when it failed.
+    fn image(&self, props: &ui_ext::image::ImageProps) -> AnyElement {
+        let Some(cache) = crate::images::ImageCache::global(self.cx) else {
+            return self.image_placeholder(props, false);
+        };
+        let extension_id = self.state.extension_id().to_string();
+        let scale = self.window.scale_factor();
+        let side = |logical: Option<u32>| {
+            (logical.unwrap_or(DEFAULT_IMAGE_SIDE) as f32 * scale).round() as u32
+        };
+        let tint = props.tint.map(|token| {
+            let color = text_color(token, self.cx).color(self.cx).to_rgb();
+            let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u32;
+            channel(color.r) << 24
+                | channel(color.g) << 16
+                | channel(color.b) << 8
+                | channel(color.a)
+        });
+        let cache = cache.read(self.cx);
+        let Some(key) = cache.key_for(
+            &extension_id,
+            &props.source,
+            None,
+            (side(props.width), side(props.height)),
+            tint,
+        ) else {
+            // A generated handle that is gone: the alt text.
+            return self.image_placeholder(props, true);
+        };
+        match cache.get(&extension_id, &key) {
+            crate::images::ImageState::Ready(image) => div()
+                .when_some(props.width, |this, width| this.w(px(width as f32)))
+                .when_some(props.height, |this, height| this.h(px(height as f32)))
+                .when(props.width.is_none(), |this| {
+                    this.w(px(DEFAULT_IMAGE_SIDE as f32))
+                })
+                .when(props.height.is_none(), |this| {
+                    this.h(px(DEFAULT_IMAGE_SIDE as f32))
+                })
+                .max_w_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(gpui::ImageSource::Render(image))
+                        .size_full()
+                        .object_fit(match props.fit {
+                            ui_ext::image::ImageFit::Contain => gpui::ObjectFit::Contain,
+                            ui_ext::image::ImageFit::Cover => gpui::ObjectFit::Cover,
+                        }),
+                )
+                .into_any_element(),
+            crate::images::ImageState::Pending => self.image_placeholder(props, false),
+            crate::images::ImageState::Failed => self.image_placeholder(props, true),
+        }
+    }
+
+    fn image_placeholder(&self, props: &ui_ext::image::ImageProps, failed: bool) -> AnyElement {
+        div()
+            .when_some(props.width, |this, width| this.w(px(width as f32)))
+            .when_some(props.height, |this, height| this.h(px(height as f32)))
+            .max_w_full()
+            .min_h(px(20.))
+            .p_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.cx.theme().colors().border_variant)
+            .bg(self.cx.theme().colors().element_background)
+            .gap_1()
+            .when(failed, |this| {
+                this.child(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
+            .child(
+                Label::new(props.alt.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any_element()
+    }
+
+    /// A canvas node (plan 4.14): the host paints its draw list; a click on a clickable one
+    /// sends `canvas-click` in canvas coordinates.
+    fn canvas(
+        &self,
+        id: NodeId,
+        arc: &Arc<Props>,
+        props: &ui_ext::canvas::CanvasProps,
+        scope: Scope,
+    ) -> AnyElement {
+        // The draw list is shared with the tree, not copied, each frame (PERF 12).
+        let shared = arc.clone();
+        let on_click: Option<std::rc::Rc<dyn Fn(f32, f32, &mut Window, &mut App)>> =
+            (props.clickable && matches!(scope, Scope::Surface)).then(|| {
+                let view = self.cx.entity().downgrade();
+                std::rc::Rc::new(move |x: f32, y: f32, _: &mut Window, cx: &mut App| {
+                    view.update(cx, |view, cx| {
+                        view.dispatch(
+                            UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                                canvas: id,
+                                x: ui_ext::canvas::Num(x),
+                                y: ui_ext::canvas::Num(y),
+                            }),
+                            cx,
+                        )
+                    })
+                    .ok();
+                }) as std::rc::Rc<dyn Fn(f32, f32, &mut Window, &mut App)>
+            });
+        crate::canvas::canvas_element(scope.element_id(id), shared, on_click)
     }
 
     fn icon(&self, props: &IconProps) -> AnyElement {
@@ -1204,6 +1626,28 @@ fn focus_ring(focused: bool, cx: &App) -> Hsla {
     }
 }
 
+/// Extension markdown shows no images (triage-3, SEC T8): `markdown` decodes `data:` images
+/// in-process while parsing, before anything is drawn. Every `![` that would open one gets a
+/// backslash, so the parser sees a `!` and, after it, at most a link (which `link_is_allowed`
+/// filters). Inside code the backslash shows; `![` there is rare.
+pub(crate) fn without_images(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut backslashes = 0;
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '!' && chars.peek() == Some(&'[') && backslashes % 2 == 0 {
+            out.push('\\');
+        }
+        backslashes = if character == '\\' {
+            backslashes + 1
+        } else {
+            0
+        };
+        out.push(character);
+    }
+    out
+}
+
 /// Only web links leave an extension's markdown: `http` and `https`. Anything else (`file:`,
 /// `javascript:`, `zed:`, custom schemes, relative paths) would hand the OS URL handler a target
 /// the extension chose.
@@ -1239,6 +1683,9 @@ fn open_extension_link(url: SharedString, window: &mut Window, cx: &mut App) {
 }
 
 /// Icon names are snake_case `IconName`s (`plus`, `list_todo`); unknown names get a neutral icon.
+/// Pixels per indent level of a list row (design J).
+const ROW_INDENT_PX: f32 = 16.;
+
 pub(crate) fn button_style(style: ButtonStyle) -> UiButtonStyle {
     match style {
         ButtonStyle::Default => UiButtonStyle::Outlined,
@@ -1250,6 +1697,9 @@ pub(crate) fn button_style(style: ButtonStyle) -> UiButtonStyle {
 
 /// Text and icon colours: the `ui` crate's semantic colours where one exists, otherwise the
 /// theme's own token. Never a raw colour from the extension.
+/// The side an image without `width` or `height` takes, in logical pixels.
+const DEFAULT_IMAGE_SIDE: u32 = 128;
+
 pub(crate) fn text_color(token: ColorToken, cx: &App) -> Color {
     match token {
         ColorToken::Text => Color::Default,

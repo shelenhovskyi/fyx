@@ -12,15 +12,40 @@ use wasmtime::{Store, component::Component};
 use crate::{
     CallBudget, PushedUpdate, Reply, ReplyError, UiExtension, UiRuntime, UiState,
     bindings as wit_v0_1,
+    conversions::try_collect,
     effects::{EffectReply, EffectReplyError, HostEffect},
-    fyx_ui_v0_2,
+    fyx_ui_v0_2, fyx_ui_v0_3,
 };
 
 /// The bindings of a component, by the world it targets. The newest version comes first, as in
 /// `extension_host`'s `wit::Extension`.
 pub(crate) enum UiBindings {
+    V0_3(fyx_ui_v0_3::UiExtension),
     V0_2(fyx_ui_v0_2::UiExtension),
     V0_1(wit_v0_1::UiExtension),
+}
+
+/// A guest value the model cannot hold yet (a 0.3 `image` or `canvas` node), as the guest's own
+/// error for that call, so it is rejected like a bad reply instead of disabling the extension.
+fn guest_value<T>(value: Result<T, model::HostError>) -> Result<T, String> {
+    value.map_err(|error| error.message)
+}
+
+/// A 0.3 reply update, with its `image` nodes checked against the state after the call
+/// ([`crate::effects::ApiState::check_images`]). A bad one is the guest's error, so the renderer
+/// resyncs instead of applying it.
+fn checked_images(
+    store: &Store<UiState>,
+    surface_id: &str,
+    update: model::Update,
+) -> Result<model::Update, String> {
+    guest_value(
+        store
+            .data()
+            .api
+            .check_images(surface_id, crate::effects::update_props(&update)),
+    )
+    .map(|()| update)
 }
 
 impl UiBindings {
@@ -31,6 +56,16 @@ impl UiBindings {
         runtime: &UiRuntime,
     ) -> wasmtime::Result<Self> {
         Ok(match version {
+            ApiVersion::V0_3_0 => {
+                // The 0.3 interfaces this build does not implement yet trap when called (they are
+                // staged with the WIT, plan 4.x); a component that never calls them works.
+                let mut linker = runtime.linker_v0_3.clone();
+                let engine = store.engine().clone();
+                fyx_ui_v0_3::define_unbuilt_as_traps(&mut linker, component, &engine)?;
+                Self::V0_3(
+                    fyx_ui_v0_3::UiExtension::instantiate_async(store, component, &linker).await?,
+                )
+            }
             ApiVersion::V0_2_0 => Self::V0_2(
                 fyx_ui_v0_2::UiExtension::instantiate_async(store, component, &runtime.linker_v0_2)
                     .await?,
@@ -45,20 +80,22 @@ impl UiBindings {
         &self,
         store: &mut Store<UiState>,
     ) -> wasmtime::Result<Vec<model::Surface>> {
-        Ok(match self {
-            Self::V0_2(extension) => extension
-                .call_surfaces(store)
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            Self::V0_1(extension) => extension
-                .call_surfaces(store)
-                .await?
-                .into_iter()
-                .map(|surface| ui_ext::Surface::from(surface).into())
-                .collect(),
-        })
+        let surfaces = match self {
+            Self::V0_3(extension) => try_collect(extension.call_surfaces(store).await?),
+            Self::V0_2(extension) => try_collect(extension.call_surfaces(store).await?),
+            Self::V0_1(extension) => {
+                return Ok(extension
+                    .call_surfaces(store)
+                    .await?
+                    .into_iter()
+                    .map(|surface| ui_ext::Surface::from(surface).into())
+                    .collect());
+            }
+        };
+        match surfaces {
+            Ok(surfaces) => Ok(surfaces),
+            Err(error) => wasmtime::bail!("{}", error.message),
+        }
     }
 
     async fn call_mount(
@@ -67,10 +104,23 @@ impl UiBindings {
         surface_id: &str,
     ) -> wasmtime::Result<Result<Vec<model::Node>, String>> {
         Ok(match self {
+            Self::V0_3(extension) => extension
+                .call_mount(&mut *store, surface_id)
+                .await?
+                .and_then(|nodes| guest_value(try_collect::<_, model::Node>(nodes)))
+                .and_then(|nodes| {
+                    guest_value(
+                        store
+                            .data()
+                            .api
+                            .check_images(surface_id, nodes.iter().map(|node| &node.props)),
+                    )
+                    .map(|()| nodes)
+                }),
             Self::V0_2(extension) => extension
                 .call_mount(store, surface_id)
                 .await?
-                .map(|nodes| nodes.into_iter().map(Into::into).collect()),
+                .and_then(|nodes| guest_value(try_collect(nodes))),
             Self::V0_1(extension) => extension.call_mount(store, surface_id).await?.map(|nodes| {
                 nodes
                     .into_iter()
@@ -87,10 +137,20 @@ impl UiBindings {
         event: model::UiEvent,
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
+            Self::V0_3(extension) => extension
+                .call_handle_event(&mut *store, surface_id, &event.into())
+                .await?
+                .and_then(|update| guest_value(update.try_into()))
+                .and_then(|update| checked_images(store, surface_id, update)),
+            // A 0.2 surface has no canvas, so the host never sends it `canvas-click`: defence in
+            // depth, like 0.1's below.
+            Self::V0_2(_) if matches!(event, model::UiEvent::CanvasClick(_)) => {
+                Ok(model::Update::Unchanged)
+            }
             Self::V0_2(extension) => extension
                 .call_handle_event(store, surface_id, &event.into())
                 .await?
-                .map(Into::into),
+                .and_then(|update| guest_value(update.try_into())),
             Self::V0_1(extension) => {
                 // The host never produces 0.2-only events for a 0.1 surface (0.1 has no modals),
                 // so this is defence in depth: the event is dropped, not sent.
@@ -118,15 +178,29 @@ impl UiBindings {
         list_node: model::NodeId,
         start: u32,
         count: u32,
-    ) -> wasmtime::Result<Vec<model::ListRow>> {
+    ) -> wasmtime::Result<Result<Vec<model::ListRow>, String>> {
         Ok(match self {
-            Self::V0_2(extension) => extension
-                .call_list_rows(store, surface_id, list_node, start, count)
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            Self::V0_1(extension) => extension
+            Self::V0_3(extension) => guest_value(try_collect::<_, model::ListRow>(
+                extension
+                    .call_list_rows(&mut *store, surface_id, list_node, start, count)
+                    .await?,
+            ))
+            .and_then(|rows| {
+                guest_value(
+                    store.data().api.check_images(
+                        surface_id,
+                        rows.iter()
+                            .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                    ),
+                )
+                .map(|()| rows)
+            }),
+            Self::V0_2(extension) => guest_value(try_collect(
+                extension
+                    .call_list_rows(store, surface_id, list_node, start, count)
+                    .await?,
+            )),
+            Self::V0_1(extension) => Ok(extension
                 .call_list_rows(store, surface_id, list_node, start, count)
                 .await?
                 .into_iter()
@@ -136,7 +210,22 @@ impl UiBindings {
                         nodes: row.nodes.into_iter().map(Into::into).collect(),
                     })
                 })
-                .collect(),
+                .collect()),
+        })
+    }
+
+    /// Only a 0.3 component starts work outside a call, so only it gets `handle-io`.
+    async fn call_handle_io(
+        &self,
+        store: &mut Store<UiState>,
+        event: crate::network::IoEvent,
+    ) -> wasmtime::Result<Result<(), String>> {
+        Ok(match self {
+            Self::V0_3(extension) => match fyx_ui_v0_3::io_event(event) {
+                Some(event) => extension.call_handle_io(store, &event).await?,
+                None => Ok(()),
+            },
+            Self::V0_2(_) | Self::V0_1(_) => Ok(()),
         })
     }
 
@@ -147,10 +236,15 @@ impl UiBindings {
         surface_id: &str,
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
+            Self::V0_3(extension) => extension
+                .call_tick(&mut *store, surface_id)
+                .await?
+                .and_then(|update| guest_value(update.try_into()))
+                .and_then(|update| checked_images(store, surface_id, update)),
             Self::V0_2(extension) => extension
                 .call_tick(store, surface_id)
                 .await?
-                .map(Into::into),
+                .and_then(|update| guest_value(update.try_into())),
             Self::V0_1(_) => Ok(model::Update::Unchanged),
         })
     }
@@ -276,6 +370,63 @@ impl UiExtension {
         })
     }
 
+    /// The outcomes of this instance's work outside a call (0.3 `network.fetch`; design.md §0.3),
+    /// once: the caller hands each to [`UiExtension::handle_io`], in order. At most
+    /// [`crate::network::MAX_QUEUED_IO_EVENTS`] wait; past that, finished requests are held.
+    pub fn take_io_events(
+        &self,
+    ) -> Option<futures::channel::mpsc::Receiver<crate::network::IoEvent>> {
+        self.network.take_events()
+    }
+
+    /// Delivers one outcome through the 0.3 `handle-io` export, queued behind calls already
+    /// queued; its effects come back like any call's. A request whose capability was revoked
+    /// while it ran is delivered as `denied`.
+    pub async fn handle_io(&self, event: crate::network::IoEvent) -> Result<EffectReply<()>> {
+        let network = self.network.clone();
+        let (result, effects) = self
+            .call(
+                "handle-io",
+                "",
+                CallBudget::Regular,
+                move |extension, store| {
+                    async move {
+                        let event = match event {
+                            crate::network::IoEvent::FetchDone(id, result) => {
+                                store.data_mut().network.delivered(id);
+                                let result = if network.granted() {
+                                    result
+                                } else {
+                                    Err(crate::network::FetchError::Denied)
+                                };
+                                crate::network::IoEvent::FetchDone(id, result)
+                            }
+                            crate::network::IoEvent::ProcessExited(exit) => {
+                                store.data_mut().process.delivered(exit.process);
+                                crate::network::IoEvent::ProcessExited(exit)
+                            }
+                            crate::network::IoEvent::SpawnFailed(id, error) => {
+                                store.data_mut().process.delivered(id);
+                                crate::network::IoEvent::SpawnFailed(id, error)
+                            }
+                            // An edit that was applied stays applied, so its outcome is not
+                            // turned into `denied` by a later revocation.
+                            crate::network::IoEvent::EditDone(id, result) => {
+                                store.data_mut().edit.delivered(id);
+                                crate::network::IoEvent::EditDone(id, result)
+                            }
+                            other => other,
+                        };
+                        extension.call_handle_io(store, event).await
+                    }
+                    .boxed()
+                },
+            )
+            .await?;
+        self.guest_result(result, &effects)?;
+        Ok(EffectReply { effects, value: () })
+    }
+
     /// Tells the host that a modal is no longer shown although no `dismissed` event or
     /// `hide-surface` said so: the renderer dropped its `ShowSurface` effect (no workspace window).
     /// Without it, the next `show-surface` of that modal would do nothing.
@@ -359,6 +510,7 @@ impl UiExtension {
                 }
             })
             .await?;
+        let rows = self.guest_result(rows, &effects)?;
         let requested = start..start.saturating_add(count);
         let rows = rows
             .into_iter()
@@ -463,7 +615,7 @@ impl UiExtension {
 /// component, whose data came from the 0.1 types. For a 0.2 component (loaded only in dev builds)
 /// it drops what 0.1 cannot express: tooltips, `secret`, `selected`, `indent`, `invalidate-rows`,
 /// modals and every effect but pushes; frozen icons become their snake_case name, which is
-/// upstream's name for most of them.
+/// upstream's name for most of them; a 0.3 image becomes its alt text.
 pub(crate) mod shim {
     use super::*;
 
@@ -499,6 +651,16 @@ pub(crate) mod shim {
             }),
             model::Props::Markdown(text) => ui_ext::Props::Markdown(text.clone()),
             model::Props::DiffView(props) => ui_ext::Props::DiffView(props.clone()),
+            // 0.3 only; 0.1 has no image, so its alt text stands in.
+            model::Props::Image(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: props.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
+            // 0.3 only; so does a canvas's description.
+            model::Props::Canvas(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: props.description.clone(),
+                ..ui_ext::TextProps::default()
+            }),
         }
     }
 

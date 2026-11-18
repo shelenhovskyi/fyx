@@ -53,7 +53,7 @@ async fn review(
     operation: Operation<'_>,
     cx: &mut AsyncApp,
 ) -> Result<(), String> {
-    if !cx.update(|cx| acp_thread::fyx_review::has_agent_write_gate(cx)) {
+    if !cx.update(|cx| acp_thread::fyx_review::wants_agent_review(cx)) {
         return Ok(());
     }
     // Operations outside a thread (none in the app) have no session to review them in.

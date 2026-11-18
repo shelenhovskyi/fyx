@@ -158,7 +158,7 @@ async fn test_v0_2_probe_loads_as_v0_2(cx: &mut TestAppContext) {
     assert_eq!(extension.ui_api_version(), ApiVersion::V0_2_0);
     assert_eq!(
         extension.capabilities().len(),
-        4,
+        6,
         "no manifest: every capability"
     );
     assert_eq!(extension.surfaces_v0_2(), &[panel(SURFACE, Icon::Box)]);
@@ -316,6 +316,7 @@ async fn test_v0_2_mount_and_rows_carry_the_new_props(cx: &mut TestAppContext) {
             value: "hunter2".into(),
             placeholder: "Token".into(),
             secret: true,
+            label: Some("API token".into()),
         })
     );
     assert_eq!(
@@ -943,4 +944,581 @@ async fn test_v0_2_broker_is_asked_at_every_call(cx: &mut TestAppContext) {
     assert!(effects.is_empty());
     let checks = extension.diagnostics();
     assert!(format!("{checks:?}").contains("revoked"), "{checks:?}");
+}
+
+/// `fyx_ext_harness` against this host, both running the 0.2 probe (plan 2.4). Each test feeds the
+/// same scripts to both and compares what the guest saw (the report) and the effects. The effect
+/// types differ (the harness has its own, Apache-licensed), so they are compared by their `Debug`
+/// form, which the two share variant for variant.
+mod harness_conformance_v0_2 {
+    use fyx_ext_harness::Harness;
+
+    use super::*;
+
+    async fn both(cx: &mut TestAppContext) -> (UiExtension, Harness) {
+        let host = load(cx).await;
+        let harness = Harness::load(&probe_v0_2_wasm()).expect("the harness loads the 0.2 probe");
+        (host, harness)
+    }
+
+    fn debug<T: std::fmt::Debug>(effects: &[T]) -> Vec<String> {
+        effects.iter().map(|effect| format!("{effect:?}")).collect()
+    }
+
+    /// Stores `script` in both, sends `event` to `surface_id`, and checks that the results and
+    /// effects match. Returns the results.
+    async fn compare_on(
+        host: &UiExtension,
+        harness: &mut Harness,
+        surface_id: &str,
+        event: UiEvent,
+        script: &str,
+    ) -> Vec<String> {
+        set_script(host, script).await;
+        let stored = harness
+            .handle_event_raw_v0_2(SURFACE, UiEvent::InputChanged(SET_SCRIPT, script.into()))
+            .expect("the harness stores the script");
+        assert!(stored.effects.is_empty(), "{script}");
+
+        let (host_effects, host_value) =
+            match host.handle_event_v0_2(surface_id, event.clone()).await {
+                Ok(reply) => (reply.effects, Ok(reply.value)),
+                Err(error) => {
+                    let error = error
+                        .downcast_ref::<EffectReplyError>()
+                        .unwrap_or_else(|| panic!("{script}: not a guest error: {error:#}"));
+                    (error.effects.clone(), Err(()))
+                }
+            };
+        let reply = harness
+            .handle_event_raw_v0_2(surface_id, event)
+            .unwrap_or_else(|error| panic!("{script}: the harness trapped: {error:#}"));
+        assert_eq!(debug(&host_effects), debug(&reply.effects), "{script}");
+        assert_eq!(
+            host_value.as_ref().map(report).map_err(|_| ()),
+            reply.value.as_ref().map(report).map_err(|_| ()),
+            "{script}"
+        );
+        host_value
+            .map(|value| results(&report(&value)))
+            .unwrap_or_default()
+    }
+
+    /// From typing, which is no gesture.
+    async fn compare(host: &UiExtension, harness: &mut Harness, script: &str) -> Vec<String> {
+        compare_on(
+            host,
+            harness,
+            SURFACE,
+            UiEvent::InputChanged(RUN, "x".into()),
+            script,
+        )
+        .await
+    }
+
+    async fn compare_click(host: &UiExtension, harness: &mut Harness, script: &str) -> Vec<String> {
+        compare_on(host, harness, SURFACE, UiEvent::Click(RUN), script).await
+    }
+
+    #[gpui::test]
+    async fn test_load_mount_and_rows_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        // The host lists the static surfaces and leaves `add-surface` during `surfaces()` to
+        // its initial effects; the harness applies those and lists every live surface.
+        assert_eq!(debug(host.initial_effects()), debug(harness.effects()));
+        let mut live = host.surfaces_v0_2().to_vec();
+        for effect in host.initial_effects() {
+            if let HostEffect::AddSurface(surface) = effect {
+                live.push(surface.clone());
+            }
+        }
+        assert_eq!(live, harness.surfaces_v0_2());
+
+        let mut host_nodes = host.mount_v0_2(SURFACE).await.expect("mount").value;
+        harness.mount(SURFACE).expect("mount");
+        let mut harness_nodes = harness.nodes_v0_2(SURFACE).expect("mounted");
+        host_nodes.sort_by_key(|node| node.id);
+        harness_nodes.sort_by_key(|node| node.id);
+        assert_eq!(host_nodes, harness_nodes);
+
+        let host_rows = host
+            .list_rows_v0_2(SURFACE, 4, 30, 5)
+            .await
+            .expect("rows")
+            .value;
+        let harness_rows = harness.rows_v0_2(SURFACE, 4, 30, 5).expect("rows");
+        assert_eq!(host_rows, harness_rows);
+    }
+
+    #[gpui::test]
+    async fn test_host_imports_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        for script in [
+            "push probe remove 1; push nope unchanged; push probe patches 2049; \
+             push probe patches 2048; push probe replace 16385; push probe replace 16384; \
+             push probe invalidate 4",
+            "repeat 70 push probe unchanged",
+            "push probe unchanged; remove probe; push probe unchanged; add panel extra; \
+             push extra unchanged; remove probe",
+            "add panel probe; push probe unchanged",
+            "add panel Bad; add panel probe; add panel boot; add modal picker",
+            "repeat 30 add status s#",
+            "tick nope 100; tick probe 86400001; tick probe 86400000; tick probe 10; \
+             tick probe 500; cancel probe; cancel nope; tick picker 100",
+            "place probe src/a.rs 1; place Bad src/a.rs 1; place d1 ../x.rs 1; \
+             place d1 /abs.rs 1; place d1 src\\a.rs 1; place d1 src/a.rs 1 16385; \
+             place d1 src/a.rs 3; place d1 src/b.rs 4; push d1 unchanged; tick d1 100; \
+             show d1; remove d1; add panel d1; unplace d1; unplace d1; push d1 unchanged",
+            "repeat 300 place a# src/a.rs 1; repeat 212 unplace a#; place z src/a.rs 1; \
+             unplace a299",
+            "push probe unchanged; fail",
+        ] {
+            compare(&host, &mut harness, script).await;
+        }
+        assert!(harness.disabled().is_none());
+    }
+
+    /// Section M: the text rules, ids, the open, per-call and rate caps, progress rules and the
+    /// events that free a notification's slot.
+    #[gpui::test]
+    async fn test_notifications_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        for script in [
+            "notify nope info Hi; pstart nope status Job",
+            r"notify probe info a\nb; notify probe info Fyx{rlo}gnp; notify probe info {long};
+              notify probe info Hi a=A b=B c=C; notify probe info Hi a=A a=B;
+              notify probe info Hi Bad=B; notify probe info Hi a={long}",
+            "notify probe warning Build_done open=Open stay; pstart probe status Indexing cancel; \
+             pupdate 1 40 Step_2; pupdate 1 spin; pend 1; pend 1; dismiss 1; dismiss 1",
+            "notify probe info A; notify probe info B; notify probe info C; notify probe info D",
+            "pstart boot panel Job; pstart probe panel Job; pupdate 2 101; pupdate 9 10; \
+             pstart probe status A; pstart probe status B; pstart probe status C; \
+             pstart probe status D",
+            "repeat 70 pupdate 2 50",
+        ] {
+            compare(&host, &mut harness, script).await;
+        }
+        // Closing and acting on a notification free its open slot, alike.
+        compare_on(
+            &host,
+            &mut harness,
+            SURFACE,
+            UiEvent::NotificationClosed(2, ui_ext::v0_2::NotificationCloseReason::User),
+            "notify probe info E",
+        )
+        .await;
+        compare_on(
+            &host,
+            &mut harness,
+            SURFACE,
+            UiEvent::NotificationAction(ui_ext::v0_2::NotificationActionEvent {
+                notification: 3,
+                action: "open".into(),
+            }),
+            "notify probe info F; notify probe info G",
+        )
+        .await;
+        // Removing the owner ends its progresses and closes its notifications.
+        compare(
+            &host,
+            &mut harness,
+            "add panel owner; pstart owner panel Job; remove owner",
+        )
+        .await;
+        compare(
+            &host,
+            &mut harness,
+            "pupdate 7 10; pstart probe status After",
+        )
+        .await;
+        assert!(harness.disabled().is_none());
+    }
+
+    #[gpui::test]
+    async fn test_gestures_and_modals_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        compare(&host, &mut harness, "add modal picker").await;
+        assert_eq!(
+            compare(&host, &mut harness, "show picker").await,
+            ["not-permitted"]
+        );
+        assert_eq!(
+            compare_click(&host, &mut harness, "show picker; show picker").await,
+            ["ok", "ok"]
+        );
+        assert!(harness.is_shown("picker"));
+        assert_eq!(
+            compare(&host, &mut harness, "hide picker; hide picker").await,
+            ["ok", "ok"]
+        );
+        assert!(!harness.is_shown("picker"));
+
+        // A row click and Enter are gestures too.
+        for event in [
+            UiEvent::RowClick(4, 1),
+            UiEvent::InputSubmitted(RUN, "query".into()),
+        ] {
+            assert_eq!(
+                compare_on(&host, &mut harness, SURFACE, event, "show picker").await,
+                ["ok"]
+            );
+            compare(&host, &mut harness, "hide picker").await;
+        }
+
+        // A user dismissal: the host forces the reply to `unchanged`, so compare the effects.
+        compare_click(&host, &mut harness, "show picker").await;
+        set_script(&host, "push probe unchanged").await;
+        harness
+            .handle_event_raw_v0_2(
+                SURFACE,
+                UiEvent::InputChanged(SET_SCRIPT, "push probe unchanged".into()),
+            )
+            .expect("store");
+        let host_reply = host
+            .handle_event_v0_2("picker", UiEvent::Dismissed(DismissReason::Escape))
+            .await
+            .expect("dismissed");
+        let outcome = harness
+            .dismiss("picker", DismissReason::Escape)
+            .expect("dismissed");
+        assert_eq!(debug(&host_reply.effects), debug(&outcome.effects));
+        assert!(!harness.is_shown("picker"));
+        // Closed by the user: showing it needs a new gesture, as on the host.
+        assert_eq!(
+            compare(&host, &mut harness, "show picker").await,
+            ["not-permitted"]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_ticks_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        // The harness ticks mounted surfaces only; mount before a script is stored, since the
+        // probe's mount runs the stored script.
+        harness.mount(SURFACE).expect("mount");
+        compare(&host, &mut harness, "tick probe 100").await;
+        assert_eq!(harness.pending_tick(SURFACE), Some(MIN_TICK_DELAY));
+
+        let host_reply = host.tick(SURFACE).await.expect("tick");
+        let outcome = harness.tick(SURFACE).expect("tick");
+        assert_eq!(debug(&host_reply.effects), debug(&outcome.effects));
+        assert_eq!(report(&host_reply.value), report(&outcome.update));
+        assert_eq!(harness.pending_tick(SURFACE), Some(MIN_TICK_DELAY));
+    }
+}
+
+/// async-1 #5: [`with_budget`] counts only time the call waits on the host. A call that is ready
+/// but not polled (the tokio workers are busy with other work) spends none of its budget.
+#[test]
+fn test_budget_ignores_time_spent_waiting_for_a_worker() {
+    use std::task::{Context, Poll};
+
+    let budget = Duration::from_millis(100);
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let mut call = Box::pin(with_budget(
+        budget,
+        futures::future::poll_fn(|cx| {
+            if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // Ready to run on, as a guest that yields at an epoch is.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }),
+    ));
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(call.as_mut().poll(&mut cx).is_pending());
+    // Not polled for three times the budget, as on a starved worker.
+    std::thread::sleep(budget * 3);
+    assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+
+    // A call that waits on the host and is not woken is cut off once the budget is spent.
+    let mut blocked = Box::pin(with_budget(
+        budget,
+        futures::future::pending::<Result<()>>(),
+    ));
+    let started = Instant::now();
+    let error = loop {
+        if let Poll::Ready(result) = blocked.as_mut().poll(&mut cx) {
+            break result.unwrap_err();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(started.elapsed() >= budget, "{:?}", started.elapsed());
+    assert!(
+        format!("{error:#}").contains("blocked in a host call"),
+        "{error:#}"
+    );
+}
+
+/// §M (design.md M.8, host): notifications and progress.
+mod notifications {
+    use super::*;
+    use ui_ext::v0_2::{
+        NotificationActionEvent, NotificationCloseReason, ProgressLocation, ProgressOptions,
+        ProgressValue,
+    };
+
+    #[gpui::test]
+    async fn test_needs_the_capability_and_a_live_owner(cx: &mut TestAppContext) {
+        let extension = load_with(
+            LoadOptions {
+                capabilities: Some(vec![CAPABILITY_PANEL.into()]),
+                allow_staged: Some(true),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let (results, effects) =
+            run(&extension, "notify probe info Hi; pstart probe status Job").await;
+        assert_eq!(results, ["not-permitted", "not-permitted"]);
+        assert!(effects.is_empty());
+
+        let extension = load(cx).await;
+        let (results, _) = run(&extension, "notify nope info Hi; pstart nope status Job").await;
+        assert_eq!(results, ["unknown-surface", "unknown-surface"]);
+    }
+
+    #[gpui::test]
+    async fn test_text_rules(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, effects) = run(
+            &extension,
+            r"notify probe info a\nb; notify probe info Fyx{rlo}gnp; notify probe info {long};
+              notify probe info Hi a=A b=B c=C; notify probe info Hi a=A a=B;
+              notify probe info Hi Bad=B; notify probe info Hi a={long}",
+        )
+        .await;
+        assert_eq!(results, ["invalid-argument"; 7]);
+        assert!(effects.is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_effects_and_ids(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, effects) = run(
+            &extension,
+            "notify probe warning Build_done open=Open stay; pstart probe status Indexing cancel; \
+             pupdate 1 40 Step_2; pupdate 1 spin; pend 1; pend 1; dismiss 1; dismiss 1",
+        )
+        .await;
+        assert_eq!(
+            results,
+            ["1", "1", "ok", "ok", "done", "done", "done", "done"]
+        );
+        assert_eq!(
+            effects,
+            [
+                HostEffect::Notify {
+                    id: 1,
+                    notification: ui_ext::v0_2::Notification {
+                        owner: SURFACE.into(),
+                        level: ui_ext::v0_2::NotificationLevel::Warning,
+                        title: "Build done".into(),
+                        body: None,
+                        actions: vec![ui_ext::v0_2::NotificationAction {
+                            id: "open".into(),
+                            label: "Open".into(),
+                        }],
+                        auto_dismiss: false,
+                    },
+                },
+                HostEffect::ProgressStart {
+                    id: 1,
+                    options: ProgressOptions {
+                        owner: SURFACE.into(),
+                        title: "Indexing".into(),
+                        location: ProgressLocation::StatusBar,
+                        cancellable: true,
+                    },
+                },
+                HostEffect::ProgressUpdate {
+                    id: 1,
+                    value: ProgressValue::Percent(40),
+                    message: Some("Step 2".into()),
+                },
+                HostEffect::ProgressUpdate {
+                    id: 1,
+                    value: ProgressValue::Indeterminate,
+                    message: None,
+                },
+                HostEffect::ProgressEnd { id: 1 },
+                HostEffect::DismissNotification { id: 1 },
+            ]
+        );
+        // Ids are never reused.
+        let (results, _) = run(
+            &extension,
+            "notify probe info Again; pstart probe status Again",
+        )
+        .await;
+        assert_eq!(results, ["2", "2"]);
+    }
+
+    #[gpui::test]
+    async fn test_notification_caps(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        // 3 open at most; a 4th is refused, and the host closes nothing to make room.
+        let (results, _) = run(
+            &extension,
+            "notify probe info A; notify probe info B; notify probe info C; notify probe info D",
+        )
+        .await;
+        assert_eq!(results, ["1", "2", "3", "limit-exceeded"]);
+        let (results, _) = run(
+            &extension,
+            "dismiss 1; dismiss 2; dismiss 3; notify probe info E; dismiss 4",
+        )
+        .await;
+        assert_eq!(results, ["done", "done", "done", "4", "done"]);
+        // 5 accepted per rolling minute (A, B, C, E, F): the 6th is refused.
+        let (results, _) = run(
+            &extension,
+            "notify probe info F; dismiss 5; notify probe info G",
+        )
+        .await;
+        assert_eq!(results, ["5", "done", "limit-exceeded"]);
+
+        // At most 4 notify effects per call: the 5th is refused although the minute has room,
+        // and the next call may make it.
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "notify probe info A; dismiss 1; notify probe info B; dismiss 2; notify probe info C; \
+             dismiss 3; notify probe info D; dismiss 4; notify probe info E",
+        )
+        .await;
+        assert_eq!(
+            results,
+            [
+                "1",
+                "done",
+                "2",
+                "done",
+                "3",
+                "done",
+                "4",
+                "done",
+                "limit-exceeded"
+            ]
+        );
+        let (results, _) = run(&extension, "notify probe info F").await;
+        assert_eq!(results, ["5"]);
+    }
+
+    #[gpui::test]
+    async fn test_progress_caps_and_owner_rules(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "pstart boot panel Job; pstart probe panel Job; pupdate 1 101; pupdate 9 10; \
+             pstart probe status A; pstart probe status B; pstart probe status C; \
+             pstart probe status D",
+        )
+        .await;
+        assert_eq!(
+            results,
+            [
+                "invalid-argument",
+                "1",
+                "invalid-argument",
+                "invalid-argument",
+                "2",
+                "3",
+                "4",
+                "limit-exceeded"
+            ]
+        );
+        let (results, effects) = run(&extension, "repeat 70 pupdate 1 50").await;
+        assert_eq!(results, ["ok*64,limit-exceeded*6"]);
+        assert_eq!(effects.len(), 64);
+    }
+
+    #[gpui::test]
+    async fn test_events_free_slots_and_actions_are_gestures(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "add modal picker; notify probe info A; notify probe info B; notify probe info C",
+        )
+        .await;
+        assert_eq!(results, ["ok", "1", "2", "3"]);
+
+        // An action click closes the notification, and it is a gesture.
+        let (results, effects) = run_on(
+            &extension,
+            SURFACE,
+            UiEvent::NotificationAction(NotificationActionEvent {
+                notification: 1,
+                action: "open".into(),
+            }),
+            "show picker; notify probe info D",
+        )
+        .await;
+        assert_eq!(results, ["ok", "4"]);
+        assert_eq!(
+            effects[0],
+            HostEffect::ShowSurface {
+                surface_id: "picker".into()
+            }
+        );
+
+        // A closed notification frees its slot; closing and cancelling are not gestures.
+        let (results, _) = run_on(
+            &extension,
+            SURFACE,
+            UiEvent::NotificationClosed(2, NotificationCloseReason::Expired),
+            "hide picker; show picker; notify probe info E",
+        )
+        .await;
+        assert_eq!(results, ["ok", "not-permitted", "5"]);
+        let (results, _) = run_on(
+            &extension,
+            SURFACE,
+            UiEvent::ProgressCancelRequested(1),
+            "show picker",
+        )
+        .await;
+        assert_eq!(results, ["not-permitted"]);
+    }
+
+    #[gpui::test]
+    async fn test_removing_the_owner_closes_and_ends(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        let (results, _) = run(
+            &extension,
+            "add panel extra; notify extra info A; notify extra info B; notify extra info C; \
+             pstart extra panel P; pstart extra status Q; pstart extra status R; \
+             pstart extra status S",
+        )
+        .await;
+        assert_eq!(results, ["ok", "1", "2", "3", "1", "2", "3", "4"]);
+        let (results, effects) = run(
+            &extension,
+            "remove extra; notify probe info D; pstart probe status T",
+        )
+        .await;
+        assert_eq!(results, ["ok", "4", "5"]);
+        // No dismiss or end effects: the renderer closes them with the surface.
+        assert!(matches!(effects[0], HostEffect::RemoveSurface { .. }));
+        assert_eq!(effects.len(), 3);
+    }
+
+    /// A trap after `notify` shows nothing: the effect list is dropped with the call (A).
+    #[gpui::test]
+    async fn test_a_trap_drops_the_notification(cx: &mut TestAppContext) {
+        let extension = load(cx).await;
+        set_script(&extension, "notify probe info Hi; spin").await;
+        let error = extension
+            .handle_event_v0_2(SURFACE, UiEvent::InputChanged(RUN, "x".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_none(),
+            "{error:#}"
+        );
+    }
 }

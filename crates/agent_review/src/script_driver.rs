@@ -33,7 +33,8 @@ use gpui::{Action, AnyWindowHandle, App, AsyncApp, Entity};
 use workspace::MultiWorkspace;
 
 use crate::{
-    AcceptHunk, AcceptTurn, AgentReview, RejectHunk, RejectTurn, ReviewId, ReviewPane, SubmitReview,
+    AcceptHunk, AgentReview, HunkDecision, OpenReviews, RejectHunk, ReviewId, ReviewPane,
+    SubmitReview,
 };
 
 const SCRIPT_VAR: &str = "FYX_AGENT_REVIEW_SCRIPT";
@@ -167,9 +168,19 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
                 dispatch(window, action, cx)?;
             }
             Step::Review => {
-                let found = wait_for(cx, REVIEW_TIMEOUT, |cx| next_pane(window, &seen, cx))
-                    .await
-                    .context("no review pane opened")?;
+                // A new review only shows a toast; the script clicks its Review, as the user would.
+                let found = wait_for(cx, REVIEW_TIMEOUT, |cx| {
+                    next_pane(window, &seen, cx).or_else(|| {
+                        window
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_action(OpenReviews.boxed_clone(), cx)
+                            })
+                            .ok();
+                        None
+                    })
+                })
+                .await
+                .context("no review opened")?;
                 seen.insert(found.0);
                 cx.update(|cx| {
                     if let Some(review) = AgentReview::global(cx)
@@ -190,14 +201,18 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
                 current = Some(found);
             }
             Step::AcceptTurn | Step::RejectTurn => {
+                // As if the user confirmed the pane's "accept/reject all N waiting files?".
                 let (_, pane) = current.as_ref().context("turn decision before review")?;
-                focus_pane(window, pane, cx)?;
-                let action = if matches!(step, Step::AcceptTurn) {
-                    AcceptTurn.boxed_clone()
+                let decision = if matches!(step, Step::AcceptTurn) {
+                    HunkDecision::Accepted
                 } else {
-                    RejectTurn.boxed_clone()
+                    HunkDecision::Rejected
                 };
-                dispatch(window, action, cx)?;
+                cx.update(|cx| -> Result<()> {
+                    let turn = pane.read(cx).turn();
+                    let review = AgentReview::global(cx).context("no review store")?;
+                    review.update(cx, |review, cx| review.decide_turn(turn, decision, cx))
+                })?;
             }
             Step::Accept(hunk) => {
                 let (_, pane) = current.as_ref().context("accept before review")?;

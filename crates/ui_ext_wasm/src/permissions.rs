@@ -17,6 +17,8 @@
 
 use std::{fmt, sync::Arc};
 
+use futures::FutureExt as _;
+
 use anyhow::{Result, bail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,6 +44,8 @@ pub const T0_CAPABILITIES: &[&str] = &[
     "ui:modal",
     "ui:notifications",
     "ui:editor-decorations",
+    "ui:images",
+    "ui:canvas",
     "ui:picker",
     "ui:code-lens",
     "ui:hover",
@@ -107,10 +111,64 @@ impl fmt::Display for CapabilityDenied {
 
 impl std::error::Error for CapabilityDenied {}
 
-/// Answers whether an extension may use a capability right now. Implemented by the host; called
-/// from host imports on the extension's call queue, so it must be cheap and thread-safe.
+/// The state of a T2 capability for one extension (design.md §7); defined in `ui_ext` so the
+/// Apache harness shares it.
+pub use ui_ext::network::PermissionState;
+
+/// Answers whether an extension may use a capability right now. Implemented by the host's
+/// permission broker; called from host imports on the extension's call queue and from tokio,
+/// so it must be cheap and thread-safe.
 pub trait CapabilityCheck: Send + Sync + 'static {
+    /// For T0 and T1, and for T2 only when it is `Granted` (`Ask`, `Denied` and `Unavailable`
+    /// are errors with that reason).
     fn check(&self, extension_id: &str, capability: &str) -> Result<(), CapabilityDenied>;
+
+    /// A T2 capability's state, for `permissions.query` and the T2 imports.
+    fn state(&self, _extension_id: &str, _capability: &str) -> PermissionState {
+        PermissionState::Unavailable
+    }
+
+    /// First use (or `permissions.request`): in state `Ask`, shows the prompt in the active
+    /// window (concurrent requests share one) and resolves with the answer, `Granted` or
+    /// `Denied` (refused or closed). With no window it resolves `Ask` at once and records
+    /// nothing. Any other state resolves at once. Awaited outside any call budget, after the
+    /// call that started the operation returned.
+    fn request(
+        &self,
+        _extension_id: &str,
+        _capability: &str,
+    ) -> futures::future::BoxFuture<'static, PermissionState> {
+        futures::future::ready(PermissionState::Ask).boxed()
+    }
+
+    /// Every state change of this extension's T2 capabilities, as `(capability, state)`: the
+    /// host sends `io-event::permission-changed` for each and cancels in-flight work of a
+    /// revoked one (decision 26).
+    fn changes(
+        &self,
+        _extension_id: &str,
+    ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+        futures::channel::mpsc::unbounded().1
+    }
+}
+
+/// The broker when a T2 operation is applied (design.md §0.3 step 3, §7): `granted` goes
+/// ahead, `ask` waits for the prompt, anything else refuses. Without a broker, T2 is refused.
+pub(crate) async fn consent(
+    broker: Option<&Arc<dyn CapabilityCheck>>,
+    extension_id: &str,
+    capability: &str,
+) -> bool {
+    let Some(broker) = broker else {
+        return false;
+    };
+    match broker.state(extension_id, capability) {
+        PermissionState::Granted => true,
+        PermissionState::Ask => {
+            broker.request(extension_id, capability).await == PermissionState::Granted
+        }
+        PermissionState::Denied | PermissionState::Unavailable => false,
+    }
 }
 
 /// The check when the host gave none: T1 and T2 are denied (T0 needs no grant).

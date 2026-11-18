@@ -37,6 +37,8 @@ actions!(
 pub struct FyxExtensionsSettings {
     pub dev_paths: Vec<PathBuf>,
     pub developer_mode: bool,
+    pub hidden_status_items: Vec<String>,
+    pub registry_url: String,
 }
 
 impl Settings for FyxExtensionsSettings {
@@ -55,6 +57,18 @@ impl Settings for FyxExtensionsSettings {
                 .and_then(|fyx| fyx.extensions.as_ref())
                 .and_then(|extensions| extensions.developer_mode)
                 .unwrap_or(false),
+            hidden_status_items: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.hidden_status_items.clone())
+                .unwrap_or_default(),
+            registry_url: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.registry_url.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -68,6 +82,34 @@ pub fn dev_paths_setting(cx: &App) -> Vec<PathBuf> {
     }
 }
 
+/// Whether `fyx.extensions.hidden_status_items` names this status item (triage-3, UX F22).
+pub fn status_item_hidden(key: &str, cx: &App) -> bool {
+    cx.has_global::<settings::SettingsStore>()
+        && FyxExtensionsSettings::get_global(cx)
+            .hidden_status_items
+            .iter()
+            .any(|hidden| hidden == key)
+}
+
+/// Adds a status item to `fyx.extensions.hidden_status_items`, or with `None` empties it.
+pub fn set_status_item_hidden(key: Option<String>, cx: &App) {
+    let fs = <dyn fs::Fs>::global(cx);
+    settings::update_settings_file(fs, cx, move |settings, _| {
+        let hidden = settings
+            .fyx
+            .get_or_insert_default()
+            .extensions
+            .get_or_insert_default()
+            .hidden_status_items
+            .get_or_insert_default();
+        match &key {
+            Some(key) if !hidden.contains(key) => hidden.push(key.clone()),
+            Some(_) => {}
+            None => hidden.clear(),
+        }
+    });
+}
+
 /// `fyx.extensions.developer_mode`, or false before settings are set up.
 pub fn developer_mode_setting(cx: &App) -> bool {
     cx.has_global::<settings::SettingsStore>()
@@ -79,30 +121,78 @@ pub fn describe_capabilities(manifest: &UiManifest) -> Vec<String> {
     describe_capability_ids(&manifest.capabilities)
 }
 
+/// What a capability lets an extension do, in plain words (triage-3, UX F17). The manifest
+/// name follows in brackets for authors.
 pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
     if capabilities.is_empty() {
-        return vec!["none".into()];
+        return vec!["Nothing beyond its own UI".into()];
     }
     capabilities
         .iter()
         .map(|capability| match capability.as_str() {
-            CAPABILITY_PANEL => format!("{capability}: add dock panels"),
-            CAPABILITY_STATUS_BAR => format!("{capability}: add status bar items"),
+            CAPABILITY_PANEL => format!("Adds panels to your docks ({capability})"),
+            CAPABILITY_STATUS_BAR => format!("Adds items to the status bar ({capability})"),
+            "ui:modal" => format!("Opens dialogs after you click or press Enter ({capability})"),
             "workspace:read-buffers" => {
-                format!("{capability}: read your open buffers (T1: approved here, revocable)")
+                format!("Reads your open files (asks once, here; you can revoke it) ({capability})")
             }
-            "workspace:read-files" => {
-                format!("{capability}: read files in your worktrees (T1: approved here, revocable)")
+            "workspace:read-files" => format!(
+                "Reads files in your projects (asks once, here; you can revoke it) ({capability})"
+            ),
+            "workspace:diagnostics" => format!(
+                "Reads errors and warnings (asks once, here; you can revoke it) ({capability})"
+            ),
+            "network:fetch" => format!(
+                "Connects to the internet, to the hosts below (asks the first time) ({capability})"
+            ),
+            "process:spawn" => {
+                format!("Runs the programs below (asks the first time) ({capability})")
             }
-            "workspace:diagnostics" => {
-                format!("{capability}: read diagnostics (T1: approved here, revocable)")
+            "workspace:edit" => {
+                format!("Edits files in your projects (asks the first time) ({capability})")
+            }
+            "agent:observe" => {
+                format!("Watches agent sessions (asks the first time) ({capability})")
+            }
+            other if other.starts_with("network:fetch@") => {
+                format!("Connects to {}", &other["network:fetch@".len()..])
+            }
+            other if other.starts_with("process:spawn@") => {
+                format!("Runs {}", &other["process:spawn@".len()..])
+            }
+            other if other.starts_with("process:env@") => {
+                format!(
+                    "Passes the environment variable {}",
+                    &other["process:env@".len()..]
+                )
             }
             other => match tier_of(other) {
-                Some(tier) => format!("{other}: {tier}, not used by this version"),
-                None => format!("{other}: unknown to this version"),
+                Some(_) => format!("Not used by this version of Fyx ({other})"),
+                None => format!("Unknown to this version of Fyx ({other})"),
             },
         })
         .collect()
+}
+
+/// A capability as a short chip label.
+pub fn capability_chip_label(capability: &str) -> String {
+    match capability {
+        CAPABILITY_PANEL => "Panels".into(),
+        CAPABILITY_STATUS_BAR => "Status Bar Items".into(),
+        "ui:modal" => "Dialogs".into(),
+        "workspace:read-buffers" => "Reads Open Files".into(),
+        "workspace:read-files" => "Reads Project Files".into(),
+        "workspace:diagnostics" => "Reads Diagnostics".into(),
+        "network:fetch" => "Network".into(),
+        "process:spawn" => "Runs Programs".into(),
+        "workspace:edit" => "Edits Files".into(),
+        "agent:observe" => "Watches Agents".into(),
+        other => match other.split_once('@') {
+            Some(("network:fetch", domain)) => domain.to_string(),
+            Some(("process:spawn", program)) => format!("Runs {program}"),
+            _ => other.to_string(),
+        },
+    }
 }
 
 /// Checks that `source` is a UI extension with a built component: its `extension.toml` has a
@@ -146,7 +236,7 @@ pub(crate) fn prompt_and_install(
         prompt: Some("Install Dev UI Extension".into()),
     });
     cx.spawn_in(window, async move |workspace, cx| {
-        let result: Result<Option<Arc<str>>> = async {
+        let result: Result<Option<crate::store_actions::Outcome>> = async {
             let Some(source) = paths.await??.and_then(|paths| paths.into_iter().next()) else {
                 return Ok(None);
             };
@@ -174,13 +264,14 @@ pub(crate) fn prompt_and_install(
             // The user just confirmed these capabilities for this folder.
             let record = ConsentRecord::current(
                 &source,
-                &manifest.capabilities,
+                &manifest.consent_items(),
                 &source.join(&manifest.component),
                 true,
                 fs.as_ref(),
                 cx.background_executor(),
             )
             .await?;
+            let waiter = cx.update(|_, cx| crate::store_actions::expect_load(&extension_id, cx))?;
             cx.update(|_, cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
                     registry.update(cx, |registry, cx| {
@@ -202,16 +293,26 @@ pub(crate) fn prompt_and_install(
                     }
                 });
             })?;
-            Ok(Some(extension_id))
+            // The settings change starts the load; report after it has an outcome.
+            let loaded = crate::store_actions::load_outcome(waiter, cx).await;
+            Ok(Some(crate::store_actions::installed_outcome(
+                format!("Installed the dev UI extension {extension_id}"),
+                loaded,
+            )))
         }
         .await;
-        let message = match result {
+        let outcome = match result {
             Ok(None) => return,
-            Ok(Some(extension_id)) => format!("Installed the dev UI extension {extension_id}"),
-            Err(error) => format!("Could not install the dev UI extension: {error:#}"),
+            Ok(Some(outcome)) => outcome,
+            Err(error) => crate::store_actions::Outcome {
+                message: format!("Could not install the dev UI extension: {error:#}"),
+                failed: true,
+            },
         };
         workspace
-            .update(cx, |workspace, cx| toast(workspace, message, cx))
+            .update(cx, |workspace, cx| {
+                crate::store_actions::show_outcome(workspace, outcome, cx)
+            })
             .ok();
     })
     .detach();

@@ -23,6 +23,12 @@
 //!   | 14 | button `Open later` | `request-tick(main, 100)`; that tick shows the picker |
 //!   | 15 | button `Place bad note` | places `bad`, whose tree has an orphan; `mount(bad)` fails |
 //!   | 16 | button `Flood` | 70 pushes to `main`; text 3 reads `status: ok*64 limit-exceeded*6` |
+//!   | 17 | button `Notify` | `notify(main, info, Saved, [undo=Undo])`: `status: notified <id>` |
+//!   | 18 | button `Start job` | cancellable `progress-start(main, panel, Indexing)`, then an update to 10 % with `1 of 10`: `status: started <id>` |
+//!
+//!   `notification-action` reads `status: action <id> <action>`, `notification-closed`
+//!   `status: closed <id> <reason>`, and `progress-cancel-requested` ends that progress and reads
+//!   `status: cancelled <id>`.
 //!
 //! - `tick(main)` counts into text 2 and does not re-request.
 //! - `picker`: column 1, secret input 2, list 3 of 5 rows (`item i`), text 4 `selected: …`, button
@@ -53,6 +59,8 @@ const FAILING_TICKS: NodeId = 13;
 const OPEN_LATER: NodeId = 14;
 const PLACE_BAD_NOTE: NodeId = 15;
 const FLOOD: NodeId = 16;
+const NOTIFY: NodeId = 17;
+const START_JOB: NodeId = 18;
 
 const PICKER_INPUT: NodeId = 2;
 const PICKER_LIST: NodeId = 3;
@@ -81,14 +89,7 @@ fn node(id: NodeId, parent: Option<NodeId>, props: impl Into<Props>) -> Node {
 fn outcome(result: Result<(), HostError>) -> String {
     match result {
         Ok(()) => "ok".into(),
-        Err(error) => match error.code {
-            HostErrorCode::UnknownSurface => "unknown-surface",
-            HostErrorCode::LimitExceeded => "limit-exceeded",
-            HostErrorCode::InvalidArgument => "invalid-argument",
-            HostErrorCode::NotPermitted => "not-permitted",
-            HostErrorCode::Unavailable => "unavailable",
-        }
-        .into(),
+        Err(error) => error.code.name().into(),
     }
 }
 
@@ -99,12 +100,7 @@ fn set_status(status: &str) -> Update {
 }
 
 fn note_location() -> DecorationLocation {
-    DecorationLocation {
-        path: "src/lib.rs".into(),
-        line: 3,
-        placement: DecorationPlacement::Below,
-        height_lines: Some(2),
-    }
+    DecorationLocation::at("src/lib.rs", 3, DecorationPlacement::Below).height_lines(2)
 }
 
 fn note_tree() -> Vec<Node> {
@@ -139,6 +135,8 @@ impl Fixture {
             button(OPEN_LATER, "Open later"),
             button(PLACE_BAD_NOTE, "Place bad note"),
             button(FLOOD, "Flood"),
+            button(NOTIFY, "Notify"),
+            button(START_JOB, "Start job"),
         ]
     }
 
@@ -213,6 +211,44 @@ impl Fixture {
                     .map(|(result, count)| format!("{result}*{count}"))
                     .collect::<Vec<_>>()
                     .join(" ")
+            }
+            UiEvent::Click(NOTIFY) => {
+                let notification = Notification::new(MAIN, NotificationLevel::Info, "Saved")
+                    .action("undo", "Undo");
+                match notify(&notification) {
+                    Ok(id) => format!("notified {id}"),
+                    Err(error) => error.code.name().into(),
+                }
+            }
+            UiEvent::Click(START_JOB) => {
+                let options =
+                    ProgressOptions::new(MAIN, "Indexing", ProgressLocation::Panel).cancellable();
+                match progress_start(&options) {
+                    Ok(id) => {
+                        let updated = outcome(progress_update(
+                            id,
+                            ProgressValue::Percent(10),
+                            Some("1 of 10"),
+                        ));
+                        format!("started {id}, update {updated}")
+                    }
+                    Err(error) => error.code.name().into(),
+                }
+            }
+            UiEvent::NotificationAction(event) => {
+                format!("action {} {}", event.notification, event.action)
+            }
+            UiEvent::NotificationClosed((id, reason)) => {
+                let reason = match reason {
+                    NotificationCloseReason::User => "user",
+                    NotificationCloseReason::Expired => "expired",
+                    NotificationCloseReason::WindowClosed => "window-closed",
+                };
+                format!("closed {id} {reason}")
+            }
+            UiEvent::ProgressCancelRequested(id) => {
+                progress_end(id);
+                format!("cancelled {id}")
             }
             _ => return Ok(Update::Unchanged),
         };
@@ -353,4 +389,4 @@ impl Extension for Fixture {
     }
 }
 
-register_extension!(Fixture);
+register_extension!(Fixture, v0_2);

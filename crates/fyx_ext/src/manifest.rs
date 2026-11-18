@@ -13,27 +13,58 @@ pub const MANIFEST_FILE: &str = "extension.toml";
 
 /// The `fyx:ui` versions this `fyx-ext` knows how to check, matching the host's
 /// `MIN_VERSION..=MAX_VERSION`.
-pub const SUPPORTED_API_VERSIONS: &[Version] = &[Version::new(0, 1, 0)];
+pub const SUPPORTED_API_VERSIONS: &[Version] = &[
+    Version::new(0, 1, 0),
+    Version::new(0, 2, 0),
+    Version::new(0, 3, 0),
+];
+
+/// The newest frozen version, the host's `MAX_FROZEN_VERSION`. Newer ones are staged: dev builds
+/// of Fyx load them (debug builds, or a process started with `FYX_UI_DEV_EXTENSIONS`), releases
+/// refuse them until they are frozen.
+pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 1, 0);
+
+/// `[fyx_ui.network] domains` entries per manifest, the host's `network::MAX_DOMAINS`.
+pub const MAX_NETWORK_DOMAINS: usize = 64;
+
+const NETWORK_FETCH: &str = "network:fetch";
+const PROCESS_SPAWN: &str = "process:spawn";
+/// The T2 capabilities the host refuses at load for an `api_version` before they arrive.
+const T2_CAPABILITIES: &[&str] = &[
+    NETWORK_FETCH,
+    PROCESS_SPAWN,
+    "workspace:edit",
+    "agent:observe",
+];
 
 /// Capabilities a manifest may declare (platform spec, decision 21). Ones the current world does
 /// not provide yet are accepted with a warning, so a manifest can be written ahead of the host.
 pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
-    ("ui:panel", CapabilityStatus::Available),
-    ("ui:status-bar", CapabilityStatus::Available),
-    ("ui:modal", CapabilityStatus::Planned("fyx:ui 0.2")),
+    ("ui:panel", CapabilityStatus::Since(Version::new(0, 1, 0))),
+    (
+        "ui:status-bar",
+        CapabilityStatus::Since(Version::new(0, 1, 0)),
+    ),
+    ("ui:modal", CapabilityStatus::Since(Version::new(0, 2, 0))),
     (
         "ui:editor-decorations",
-        CapabilityStatus::Planned("fyx:ui 0.2"),
+        CapabilityStatus::Since(Version::new(0, 2, 0)),
     ),
-    ("ui:notifications", CapabilityStatus::Planned("fyx:ui 0.2")),
-    ("ui:picker", CapabilityStatus::Planned("fyx:ui 0.3")),
-    ("ui:code-lens", CapabilityStatus::Planned("fyx:ui 0.3")),
-    ("ui:hover", CapabilityStatus::Planned("fyx:ui 0.3")),
     (
-        "ui:virtual-documents",
-        CapabilityStatus::Planned("fyx:ui 0.3"),
+        "ui:notifications",
+        CapabilityStatus::Since(Version::new(0, 2, 0)),
     ),
-    ("ui:commands", CapabilityStatus::Planned("fyx:ui 0.3")),
+    ("ui:images", CapabilityStatus::Since(Version::new(0, 3, 0))),
+    (
+        NETWORK_FETCH,
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
+    ),
+    ("ui:canvas", CapabilityStatus::Since(Version::new(0, 3, 0))),
+    ("ui:picker", CapabilityStatus::Planned(NOT_BUILT)),
+    ("ui:code-lens", CapabilityStatus::Planned(NOT_BUILT)),
+    ("ui:hover", CapabilityStatus::Planned(NOT_BUILT)),
+    ("ui:virtual-documents", CapabilityStatus::Planned(NOT_BUILT)),
+    ("ui:commands", CapabilityStatus::Planned(NOT_BUILT)),
     (
         "workspace:read-buffers",
         CapabilityStatus::Planned("a later release"),
@@ -48,19 +79,15 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     ),
     (
         "workspace:edit",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
     (
-        "network:fetch",
-        CapabilityStatus::Planned("a later release"),
-    ),
-    (
-        "process:spawn",
-        CapabilityStatus::Planned("a later release"),
+        PROCESS_SPAWN,
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
     (
         "agent:observe",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
 ];
 
@@ -68,10 +95,23 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
 /// import.
 pub const SURFACE_CAPABILITIES: &[&str] = &["ui:panel", "ui:status-bar", "ui:modal"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// fyx:ui 0.3 parts the host does not run yet: their imports trap and their nodes are refused.
+const NOT_BUILT: &str = "a later build of fyx:ui 0.3";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityStatus {
-    Available,
+    /// Provided by the host from this `fyx:ui` version on.
+    Since(Version),
     Planned(&'static str),
+}
+
+/// Whether the host provides `capability` to an extension that targets `api_version`.
+pub fn capability_available(capability: &str, api_version: Option<&Version>) -> bool {
+    KNOWN_CAPABILITIES.iter().any(|(name, status)| {
+        name == &capability
+            && matches!(status, CapabilityStatus::Since(since)
+                if api_version.is_none_or(|version| version >= since))
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +131,30 @@ pub struct FyxUiTable {
     pub component: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 0.3, with `network:fetch`: the hosts the extension may fetch from.
+    #[serde(default)]
+    pub network: Option<NetworkTable>,
+    /// 0.3, with `process:spawn`: the programs the extension may run.
+    #[serde(default)]
+    pub processes: Vec<ui_ext::process::ProcessSpec>,
+    /// 0.3, with `process:spawn`: the environment names passed through.
+    #[serde(default)]
+    pub process: Option<ProcessTable>,
+}
+
+/// `[fyx_ui.process]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessTable {
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// `[fyx_ui.network]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkTable {
+    pub domains: Vec<String>,
 }
 
 /// A manifest whose required parts parsed; `report` holds what is wrong with the rest.
@@ -105,8 +169,17 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The component inside the extension folder, with `\` read as `/` on every OS.
     pub fn component_path(&self) -> PathBuf {
-        self.dir.join(&self.component)
+        match normalized_relative(&self.component) {
+            Some(normalized) => self.dir.join(normalized),
+            None => self.dir.join(&self.component),
+        }
+    }
+
+    /// The component's name inside a package: `/`-separated.
+    pub fn component_archive_name(&self) -> Option<String> {
+        normalized_relative(&self.component)
     }
 
     pub fn package_file_name(&self) -> String {
@@ -153,7 +226,16 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
     }
 
     let api_version = match Version::parse(&table.api_version) {
-        Ok(version) if SUPPORTED_API_VERSIONS.contains(&version) => Some(version),
+        Ok(version) if SUPPORTED_API_VERSIONS.contains(&version) => {
+            if version > MAX_FROZEN_API_VERSION {
+                report.warning(format!(
+                    "[fyx_ui].api_version {version} is staged: dev builds of Fyx load it (debug \
+                     builds, or with FYX_UI_DEV_EXTENSIONS set), releases refuse it until it is \
+                     frozen; releases run {MAX_FROZEN_API_VERSION}"
+                ));
+            }
+            Some(version)
+        }
         Ok(version) => {
             report.error(format!(
                 "[fyx_ui].api_version {version} is not supported; this fyx-ext and the current host support {}",
@@ -186,13 +268,36 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
             .iter()
             .find(|(name, _)| name == capability)
         {
-            None => report.error(format!("unknown capability {capability:?}")),
+            None => report.error(format!(
+                "unknown capability {capability:?}; known capabilities: {}",
+                KNOWN_CAPABILITIES
+                    .iter()
+                    .map(|(name, _)| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
             Some((_, CapabilityStatus::Planned(release))) => report.warning(format!(
                 "capability {capability:?} arrives with {release}; the current host ignores it"
             )),
-            Some((_, CapabilityStatus::Available)) => {}
+            Some((_, CapabilityStatus::Since(since))) => match &api_version {
+                // The host refuses a T2 capability it cannot grant at that version.
+                Some(version)
+                    if version < since && T2_CAPABILITIES.contains(&capability.as_str()) =>
+                {
+                    report.error(format!(
+                        "capability {capability:?} needs [fyx_ui].api_version {since} or newer"
+                    ))
+                }
+                Some(version) if version < since => report.warning(format!(
+                    "capability {capability:?} needs fyx:ui {since}; an extension that targets \
+                     {version} cannot use it"
+                )),
+                _ => {}
+            },
         }
     }
+    check_network(&table, report);
+    check_processes(&table, report);
 
     Ok(Manifest {
         dir: dir.to_path_buf(),
@@ -202,6 +307,104 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
         component: table.component,
         capabilities: table.capabilities,
     })
+}
+
+/// `[fyx_ui.network]` against `network:fetch`, with the host's count cap and the shape of each
+/// pattern. The host checks the rest when it loads the extension: public-suffix wildcards and
+/// IP literals.
+fn check_network(table: &FyxUiTable, report: &mut Report) {
+    let declares = table.capabilities.iter().any(|name| name == NETWORK_FETCH);
+    let Some(network) = &table.network else {
+        if declares {
+            report.error(format!(
+                "capability {NETWORK_FETCH:?} needs [fyx_ui.network] domains, the hosts it may \
+                 fetch from"
+            ));
+        }
+        return;
+    };
+    if !declares {
+        report.error(format!(
+            "[fyx_ui.network] needs {NETWORK_FETCH:?} in [fyx_ui].capabilities"
+        ));
+    }
+    if network.domains.is_empty() {
+        report.error("[fyx_ui.network] domains is empty, so every fetch would be denied");
+    }
+    if network.domains.len() > MAX_NETWORK_DOMAINS {
+        report.error(format!(
+            "[fyx_ui.network] has {} domains; at most {MAX_NETWORK_DOMAINS}",
+            network.domains.len()
+        ));
+    }
+    for domain in &network.domains {
+        let host = domain
+            .rsplit_once(':')
+            .map_or(domain.as_str(), |(host, _)| host);
+        let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1";
+        if domain.contains("://") || domain.contains('/') || host.is_empty() {
+            report.error(format!(
+                "network domain {domain:?}: write a host, such as api.example.com, \
+                 *.example.com or localhost:8080, without a scheme or path"
+            ));
+        } else if loopback && !domain.contains(':') {
+            report.error(format!(
+                "network domain {domain:?}: localhost needs a port, such as localhost:8080"
+            ));
+        }
+    }
+}
+
+/// `[[fyx_ui.processes]]` and `[fyx_ui.process] env` against `process:spawn`, with the host's
+/// rules for environment names. The host resolves the programs when it loads the extension.
+fn check_processes(table: &FyxUiTable, report: &mut Report) {
+    let declares = table.capabilities.iter().any(|name| name == PROCESS_SPAWN);
+    if declares && table.processes.is_empty() {
+        report.error(format!(
+            "capability {PROCESS_SPAWN:?} needs [[fyx_ui.processes]], the programs it may run"
+        ));
+    }
+    if !declares && (!table.processes.is_empty() || table.process.is_some()) {
+        report.error(format!(
+            "[[fyx_ui.processes]] and [fyx_ui.process] need {PROCESS_SPAWN:?} in \
+             [fyx_ui].capabilities"
+        ));
+    }
+    for (index, spec) in table.processes.iter().enumerate() {
+        if spec.name.trim().is_empty() || spec.name.contains(['/', '\\']) {
+            report.error(format!(
+                "[[fyx_ui.processes]] {index}: name {:?} must be a program name, not a path \
+                 (use `path` for a program in the worktree)",
+                spec.name
+            ));
+        }
+        if table.processes[..index]
+            .iter()
+            .any(|other| other.name == spec.name)
+        {
+            report.error(format!(
+                "[[fyx_ui.processes]] declares {:?} twice",
+                spec.name
+            ));
+        }
+        if spec
+            .args
+            .iter()
+            .rev()
+            .skip(1)
+            .any(|pattern| pattern == "**")
+        {
+            report.error(format!(
+                "[[fyx_ui.processes]] {:?}: `**` may only be the last argument pattern",
+                spec.name
+            ));
+        }
+    }
+    for name in table.process.iter().flat_map(|process| &process.env) {
+        if let Err(error) = ui_ext::process::check_env_name(name) {
+            report.error(format!("[fyx_ui.process] env: {error}"));
+        }
+    }
 }
 
 pub fn supported_versions() -> String {
@@ -226,12 +429,24 @@ pub fn is_valid_id(id: &str) -> bool {
         })
 }
 
-/// The host's rule: non-empty, and every component a normal name.
+/// The rule for paths inside an extension, the same on every OS: `\` counts as `/`, and every
+/// part is a plain name, so there is no root, drive, empty part, `.` or `..`. On Linux `..\x.wasm`
+/// is a single file name to `Path`, but it means `../x.wasm` on Windows and inside a zip.
 pub fn is_relative_inside(path: &str) -> bool {
-    !path.is_empty()
-        && Path::new(path)
-            .components()
-            .all(|component| matches!(component, PathComponent::Normal(_)))
+    normalized_relative(path).is_some()
+}
+
+/// `path` with `/` separators, if it follows [`is_relative_inside`].
+pub fn normalized_relative(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let plain_parts = !normalized.is_empty()
+        && normalized.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".." && !part.contains([':', '\0'])
+        });
+    let plain_components = Path::new(&normalized)
+        .components()
+        .all(|component| matches!(component, PathComponent::Normal(_)));
+    (plain_parts && plain_components).then_some(normalized)
 }
 
 #[cfg(test)]
@@ -254,6 +469,29 @@ capabilities = ["ui:panel"]
         let mut report = Report::default();
         let manifest = parse(Path::new("ext"), text, &mut report);
         (manifest, report)
+    }
+
+    #[test]
+    fn paths_inside_an_extension_follow_one_rule_on_every_os() {
+        for (path, normalized) in [
+            ("fyx_ui.wasm", Some("fyx_ui.wasm")),
+            ("bin/fyx_ui.wasm", Some("bin/fyx_ui.wasm")),
+            (r"bin\fyx_ui.wasm", Some("bin/fyx_ui.wasm")),
+            (r"..\fyx_ui.wasm", None),
+            ("../fyx_ui.wasm", None),
+            (r"bin\..\..\x.wasm", None),
+            ("./fyx_ui.wasm", None),
+            ("bin//fyx_ui.wasm", None),
+            ("/fyx_ui.wasm", None),
+            (r"\fyx_ui.wasm", None),
+            (r"C:\fyx_ui.wasm", None),
+            ("C:fyx_ui.wasm", None),
+            ("fyx_ui.wasm:stream", None),
+            ("", None),
+        ] {
+            assert_eq!(normalized_relative(path).as_deref(), normalized, "{path:?}");
+            assert_eq!(is_relative_inside(path), normalized.is_some(), "{path:?}");
+        }
     }
 
     #[test]
@@ -331,11 +569,107 @@ capabilities = ["ui:panel"]
     fn planned_and_duplicate_capabilities_are_warnings() {
         let text = VALID.replace(
             "[\"ui:panel\"]",
-            "[\"ui:panel\", \"ui:panel\", \"network:fetch\"]",
+            "[\"ui:panel\", \"ui:panel\", \"ui:hover\"]",
         );
         let (_, report) = check(&text);
         assert!(report.errors.is_empty(), "{report:?}");
         assert_eq!(report.warnings.len(), 2, "{report:?}");
+    }
+
+    #[test]
+    fn staged_versions_and_their_capabilities() {
+        let staged = VALID
+            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+            .replace("[\"ui:panel\"]", "[\"ui:panel\", \"ui:images\"]");
+        let (manifest, report) = check(&staged);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        assert!(report.warnings[0].contains("staged"), "{report:?}");
+        assert_eq!(
+            manifest.expect("parses").api_version,
+            Some(Version::new(0, 3, 0))
+        );
+
+        let early = VALID.replace("[\"ui:panel\"]", "[\"ui:panel\", \"ui:notifications\"]");
+        let (_, report) = check(&early);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings[0].contains("needs fyx:ui 0.2.0"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn processes_need_their_table_and_safe_env_names() {
+        let spawn = VALID
+            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+            .replace("[\"ui:panel\"]", "[\"ui:panel\", \"process:spawn\"]");
+        let (_, report) = check(&spawn);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("needs [[fyx_ui.processes]]")),
+            "{report:?}"
+        );
+        let declared = format!(
+            "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"status\", \"**\"]\n\n[fyx_ui.process]\nenv = [\"GIT_DIR\"]\n"
+        );
+        let (_, report) = check(&declared);
+        assert!(report.errors.is_empty(), "{report:?}");
+
+        let bad = format!(
+            "{spawn}\n[[fyx_ui.processes]]\nname = \"bin/tool\"\nargs = [\"**\", \"x\"]\n\n[fyx_ui.process]\nenv = [\"LD_PRELOAD\"]\n"
+        );
+        let (_, report) = check(&bad);
+        assert_eq!(report.errors.len(), 3, "{report:?}");
+    }
+
+    #[test]
+    fn network_needs_its_table_and_0_3() {
+        let fetch = VALID
+            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+            .replace("[\"ui:panel\"]", "[\"ui:panel\", \"network:fetch\"]");
+        let (_, report) = check(&fetch);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("needs [fyx_ui.network]")),
+            "{report:?}"
+        );
+
+        let with_table = format!(
+            "{fetch}\n[fyx_ui.network]\ndomains = [\"api.example.com\", \"localhost:8080\"]\n"
+        );
+        let (_, report) = check(&with_table);
+        assert!(report.errors.is_empty(), "{report:?}");
+
+        let bad = format!(
+            "{fetch}\n[fyx_ui.network]\ndomains = [\"https://api.example.com\", \"localhost\"]\n"
+        );
+        let (_, report) = check(&bad);
+        assert_eq!(report.errors.len(), 2, "{report:?}");
+
+        let old = with_table.replace("api_version = \"0.3.0\"", "api_version = \"0.2.0\"");
+        let (_, report) = check(&old);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("needs [fyx_ui].api_version 0.3.0")),
+            "{report:?}"
+        );
+
+        let orphan = format!("{VALID}\n[fyx_ui.network]\ndomains = [\"api.example.com\"]\n");
+        let (_, report) = check(&orphan);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("needs \"network:fetch\"")),
+            "{report:?}"
+        );
     }
 
     #[test]

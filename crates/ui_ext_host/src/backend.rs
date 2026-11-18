@@ -1,37 +1,36 @@
 //! The calls the renderer makes into an extension, behind a trait so the renderer can be tested
 //! without compiling a WASM component.
 //!
-//! The renderer works on the 0.2 model (`ui_ext::v0_2`) for every extension; a 0.1 component's
-//! results are converted here (`From` impls of the 0.2 model), so the renderer never sees 0.1
-//! types. What differs by version is decided from [`UiBackend::api_version`] (migration.md §3).
+//! The renderer works on the 0.2 model (`ui_ext::v0_2`) for every extension. `ui_ext_wasm` hands
+//! a 0.1 component's results over in that model too (the 2.1 `From` impls), and both versions'
+//! side effects as [`HostEffect`]s, in emission order. What differs by version is decided from
+//! [`UiBackend::api_version`] (migration.md §3).
 
 use anyhow::Result;
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use semver::Version;
-use ui_ext::v0_2::{NodeId, UiEvent, Update, tree::Tree};
-use ui_ext_wasm::UiExtension;
+use ui_ext::{
+    TreeLimits,
+    v0_2::{ListRow, NodeId, UiEvent, Update, tree::Tree},
+};
+use ui_ext_wasm::{EffectReply, EffectReplyError, UiExtension};
 
-/// An update the extension pushed during a call, for any of its surfaces.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PushedUpdate {
-    pub surface_id: String,
-    pub update: Update,
-}
+pub use ui_ext_wasm::HostEffect;
 
-/// The result of a call together with the updates the guest pushed while it ran. Apply `pushed`
+/// The result of a call together with the effects the guest made while it ran: apply `effects`
 /// in order, then `value`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply<T> {
-    pub pushed: Vec<PushedUpdate>,
+    pub effects: Vec<HostEffect>,
     pub value: T,
 }
 
 /// A call that ran but whose result was rejected (the extension's own error, or a reply that
-/// failed validation), with the pushes it made, which still apply. Reach it with
-/// `error.downcast_ref::<ReplyError>()`; other errors (trap, budget, disabled) carry no pushes.
+/// failed validation), with the effects it made, which still apply. Reach it with
+/// `error.downcast_ref::<ReplyError>()`; other errors (trap, budget, disabled) carry none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplyError {
-    pub pushed: Vec<PushedUpdate>,
+    pub effects: Vec<HostEffect>,
     pub message: String,
 }
 
@@ -43,54 +42,103 @@ impl std::fmt::Display for ReplyError {
 
 impl std::error::Error for ReplyError {}
 
-impl From<ui_ext_wasm::PushedUpdate> for PushedUpdate {
-    fn from(pushed: ui_ext_wasm::PushedUpdate) -> Self {
-        Self {
-            surface_id: pushed.surface_id,
-            update: pushed.update.into(),
-        }
-    }
+/// One list or table row, validated, with its indent level as drawn (clamped; 0 for 0.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub index: u32,
+    pub indent: u8,
+    pub tree: Tree,
 }
 
-fn convert_pushes(pushed: Vec<ui_ext_wasm::PushedUpdate>) -> Vec<PushedUpdate> {
-    pushed.into_iter().map(Into::into).collect()
-}
-
-/// A 0.1 host error, with its pushes converted; the context chain is kept.
+/// `ui_ext_wasm`'s rejection, with its context chain, as the renderer's.
 fn convert_error(error: anyhow::Error) -> anyhow::Error {
-    match error.downcast_ref::<ui_ext_wasm::ReplyError>() {
-        Some(reply_error) => anyhow::Error::new(ReplyError {
-            pushed: convert_pushes(reply_error.pushed.clone()),
-            message: reply_error.message.clone(),
-        }),
+    let rejected = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<EffectReplyError>())
+        .cloned();
+    match rejected {
+        Some(EffectReplyError { effects, message }) => {
+            anyhow::Error::new(ReplyError { effects, message })
+        }
         None => error,
     }
 }
 
 fn convert_reply<T, U>(
-    result: Result<ui_ext_wasm::Reply<T>>,
+    result: Result<EffectReply<T>>,
     value: impl FnOnce(T) -> Result<U>,
 ) -> Result<Reply<U>> {
     let reply = result.map_err(convert_error)?;
-    let pushed = convert_pushes(reply.pushed);
     match value(reply.value) {
-        Ok(value) => Ok(Reply { pushed, value }),
+        Ok(value) => Ok(Reply {
+            effects: reply.effects,
+            value,
+        }),
         Err(error) => Err(anyhow::Error::new(ReplyError {
-            pushed,
+            effects: reply.effects,
             message: format!("{error:#}"),
         })),
     }
 }
 
-/// A 0.1 tree in the 0.2 model, revalidated (the rules are the same).
-fn convert_tree(tree: ui_ext::Tree, row: bool) -> Result<Tree> {
-    let limits = tree.limits();
-    let nodes = tree.to_nodes().into_iter().map(Into::into).collect();
-    Ok(if row {
-        Tree::from_row(nodes, limits)?
-    } else {
-        Tree::from_nodes(nodes, limits)?
-    })
+/// What a stopped surface keeps in place of its instance: every call fails, so nothing reaches a
+/// dead instance and its `Store` is freed (triage-3, ASYNC 7). The last diagnostics stay, for
+/// the Extension Inspector.
+pub(crate) struct DeadBackend {
+    extension_id: String,
+    version: Version,
+    diagnostics: Option<ui_ext_wasm::diagnostics::Diagnostics>,
+}
+
+impl DeadBackend {
+    pub(crate) fn of(backend: &dyn UiBackend) -> Self {
+        Self {
+            extension_id: backend.extension_id().to_string(),
+            version: backend.api_version(),
+            diagnostics: backend.diagnostics(),
+        }
+    }
+
+    fn error<T: 'static>(&self) -> LocalBoxFuture<'static, Result<T>> {
+        let error = anyhow::anyhow!("{} is not running", self.extension_id);
+        async move { Err(error) }.boxed_local()
+    }
+}
+
+impl UiBackend for DeadBackend {
+    fn extension_id(&self) -> &str {
+        &self.extension_id
+    }
+
+    fn api_version(&self) -> Version {
+        self.version.clone()
+    }
+
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        self.error()
+    }
+
+    fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.error()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<Row>>>> {
+        self.error()
+    }
+
+    fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.error()
+    }
+
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        self.diagnostics.clone()
+    }
 }
 
 /// One loaded UI extension. Every call is asynchronous and runs off the frame; the renderer never
@@ -107,16 +155,31 @@ pub trait UiBackend: 'static {
         surface_id: &str,
         event: UiEvent,
     ) -> LocalBoxFuture<'static, Result<Reply<Update>>>;
-    /// Rows with their indent level (0.2's `list-row.indent`, clamped; 0 for 0.1).
     fn list_rows(
         &self,
         surface_id: &str,
         list_node: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>>;
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<Row>>>>;
+    /// The tick `request-tick` asked for (0.2). Backends without ticks answer `unchanged`.
+    fn tick(&self, _surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        async {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Update::Unchanged,
+            })
+        }
+        .boxed_local()
+    }
+    /// The renderer dropped a `ShowSurface` (no window to show the modal in).
+    fn modal_closed(&self, _surface_id: &str) {}
     /// Recent calls, `log` output and capability checks, for the Extension Inspector.
     fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        None
+    }
+    /// `extension.toml`'s `name`, unchecked.
+    fn display_name(&self) -> Option<&str> {
         None
     }
 }
@@ -134,12 +197,16 @@ impl UiBackend for UiExtension {
         Some(UiExtension::diagnostics(self))
     }
 
+    fn display_name(&self) -> Option<&str> {
+        UiExtension::display_name(self)
+    }
+
     fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
         let this = self.clone();
         let surface_id = surface_id.to_string();
         async move {
-            convert_reply(UiExtension::mount(&this, &surface_id).await, |tree| {
-                convert_tree(tree, false)
+            convert_reply(this.mount_v0_2(&surface_id).await, |nodes| {
+                Ok(Tree::from_nodes(nodes, TreeLimits::default())?)
             })
         }
         .boxed_local()
@@ -152,20 +219,8 @@ impl UiBackend for UiExtension {
     ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         let this = self.clone();
         let surface_id = surface_id.to_string();
-        async move {
-            // A 0.1 component has no `row-selected` or `dismissed`; nothing to send.
-            let Ok(event) = ui_ext::UiEvent::try_from(event) else {
-                return Ok(Reply {
-                    pushed: Vec::new(),
-                    value: Update::Unchanged,
-                });
-            };
-            convert_reply(
-                UiExtension::handle_event(&this, &surface_id, event).await,
-                |update| Ok(update.into()),
-            )
-        }
-        .boxed_local()
+        async move { convert_reply(this.handle_event_v0_2(&surface_id, event).await, Ok) }
+            .boxed_local()
     }
 
     fn list_rows(
@@ -174,19 +229,37 @@ impl UiBackend for UiExtension {
         list_node: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<Row>>>> {
         let this = self.clone();
         let surface_id = surface_id.to_string();
         async move {
             convert_reply(
-                UiExtension::list_rows(&this, &surface_id, list_node, start, count).await,
-                |rows| {
+                this.list_rows_v0_2(&surface_id, list_node, start, count)
+                    .await,
+                |rows: Vec<ListRow>| {
                     rows.into_iter()
-                        .map(|(index, tree)| Ok((index, convert_tree(tree, true)?)))
+                        .map(|row| {
+                            let indent = row.indent_levels();
+                            Ok(Row {
+                                index: row.index,
+                                indent,
+                                tree: Tree::from_row(row.nodes, TreeLimits::default())?,
+                            })
+                        })
                         .collect()
                 },
             )
         }
         .boxed_local()
+    }
+
+    fn tick(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        let this = self.clone();
+        let surface_id = surface_id.to_string();
+        async move { convert_reply(UiExtension::tick(&this, &surface_id).await, Ok) }.boxed_local()
+    }
+
+    fn modal_closed(&self, surface_id: &str) {
+        UiExtension::modal_closed(self, surface_id)
     }
 }

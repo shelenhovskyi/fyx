@@ -2,6 +2,10 @@
 //! 0.1 data converts into: every 0.1 value has exactly one 0.2 counterpart (`From`), with icons as
 //! [`IconRef::Upstream`] and the 0.2-only fields empty.
 //!
+//! It is the newest model, including the staged 0.3 additions built so far: [`Props::Image`]
+//! (design.md §12), [`Props::Canvas`] and [`UiEvent::CanvasClick`] (§13). A 0.1 or 0.2 component cannot produce those, because its world has no such
+//! case; only a 0.3 component's values convert into them.
+//!
 //! It is a module of its own rather than new fields and cases on the 0.1 types in
 //! [`crate::types`], because the host and the renderer build those with struct literals and match
 //! them exhaustively. Both move to this model when they implement 0.2 (platform plan 2.2, 2.3);
@@ -11,7 +15,13 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod notifications;
 pub mod tree;
+
+pub use notifications::{
+    CAPABILITY_NOTIFICATIONS, Notification, NotificationAction, NotificationActionEvent,
+    NotificationCloseReason, NotificationLevel, ProgressLocation, ProgressOptions, ProgressValue,
+};
 
 use crate::api_version::{ApiError, ApiVersion, MAX_INDENT_LEVELS, MAX_TOOLTIP_BYTES};
 use crate::tree::{TreeError, TreeLimits};
@@ -228,10 +238,15 @@ impl ButtonProps {
 
 /// The longest prefix of `text` that fits in [`MAX_TOOLTIP_BYTES`] without splitting a character.
 pub fn truncate_tooltip(text: &str) -> &str {
-    if text.len() <= MAX_TOOLTIP_BYTES {
+    truncate_to(text, MAX_TOOLTIP_BYTES)
+}
+
+/// The longest prefix of `text` that fits in `max` bytes without splitting a character.
+fn truncate_to(text: &str, max: usize) -> &str {
+    if text.len() <= max {
         return text;
     }
-    let mut end = MAX_TOOLTIP_BYTES;
+    let mut end = max;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -245,6 +260,22 @@ pub struct InputProps {
     pub placeholder: String,
     /// The host masks the text and never logs the value.
     pub secret: bool,
+    /// The accessible name (UX F16), read by screen readers; without it, the placeholder. Kept as
+    /// the extension sent it; [`InputProps::label_text`] is what the host uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The most bytes of an input's accessible label the host uses.
+pub const MAX_LABEL_BYTES: usize = 256;
+
+impl InputProps {
+    /// The accessible label as used: at most [`MAX_LABEL_BYTES`], cut at a character boundary.
+    pub fn label_text(&self) -> Option<&str> {
+        self.label
+            .as_deref()
+            .map(|label| truncate_to(label, MAX_LABEL_BYTES))
+    }
 }
 
 /// Virtualized: rows come from `list-rows`, not from child nodes.
@@ -276,12 +307,55 @@ pub enum Props {
     Icon(IconProps),
     Markdown(String),
     DiffView(DiffViewProps),
+    /// 0.3 (design.md §12): checked by [`crate::image::check_image_props`] and
+    /// [`crate::image::check_image_placement`] when the host applies the update.
+    Image(crate::image::ImageProps),
+    /// 0.3 (design.md §13): checked by [`crate::canvas::check_canvas_props`] and
+    /// [`crate::canvas::check_canvas_placement`] when the host applies the update; the tree
+    /// allows [`crate::canvas::MAX_CANVASES_PER_SURFACE`] and none in a list row.
+    Canvas(crate::canvas::CanvasProps),
 }
 
 impl Props {
     /// Only flex nodes may have child nodes. Lists and tables get their rows from `list-rows`.
     pub fn is_container(&self) -> bool {
         matches!(self, Props::Flex(_))
+    }
+
+    /// The string bytes these props retain: what [`tree::MAX_TREE_TEXT_BYTES`] counts, and
+    /// what the host counts against its per-call cap on lifted text.
+    pub fn text_len(&self) -> usize {
+        let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+        let icon_len = |icon: &IconRef| match icon {
+            IconRef::Frozen(_) => 0,
+            IconRef::Upstream(name) => name.len(),
+        };
+        match self {
+            Props::Flex(_) | Props::List(_) => 0,
+            Props::Text(props) => props.content.len(),
+            Props::Button(props) => {
+                props.label.len()
+                    + props.icon.as_ref().map_or(0, icon_len)
+                    + option_len(&props.tooltip)
+            }
+            Props::Input(props) => {
+                props.value.len() + props.placeholder.len() + option_len(&props.label)
+            }
+            Props::Table(props) => props.columns.iter().map(String::len).sum(),
+            Props::Icon(props) => icon_len(&props.name),
+            Props::Markdown(text) => text.len(),
+            Props::DiffView(props) => {
+                props.old_text.len() + props.new_text.len() + option_len(&props.language)
+            }
+            Props::Canvas(props) => crate::canvas::canvas_text_len(props),
+            Props::Image(props) => {
+                props.alt.len()
+                    + match &props.source {
+                        crate::image::ImageSource::Asset(path) => path.len(),
+                        crate::image::ImageSource::Generated(_) => 0,
+                    }
+            }
+        }
     }
 
     pub fn kind_name(&self) -> &'static str {
@@ -295,6 +369,8 @@ impl Props {
             Props::Icon(_) => "icon",
             Props::Markdown(_) => "markdown",
             Props::DiffView(_) => "diff-view",
+            Props::Image(_) => "image",
+            Props::Canvas(_) => "canvas",
         }
     }
 }
@@ -411,6 +487,15 @@ pub enum UiEvent {
     RowSelected(NodeId, u32),
     /// A modal was closed by the user; it has no tree any more.
     Dismissed(DismissReason),
+    /// §M. An action button of a notification the surface owns was clicked; a gesture, like
+    /// `click`.
+    NotificationAction(NotificationActionEvent),
+    /// §M. A notification the surface owns closed without the extension asking.
+    NotificationClosed(u64, NotificationCloseReason),
+    /// §M. Cancel was pressed on a cancellable progress the surface owns.
+    ProgressCancelRequested(u64),
+    /// 0.3 (§13). A click on a clickable canvas, in canvas coordinates; a gesture, like `click`.
+    CanvasClick(crate::canvas::CanvasClick),
 }
 
 impl UiEvent {
@@ -422,7 +507,11 @@ impl UiEvent {
             | UiEvent::InputSubmitted(id, _)
             | UiEvent::RowClick(id, _)
             | UiEvent::RowSelected(id, _) => Some(*id),
-            UiEvent::Dismissed(_) => None,
+            UiEvent::CanvasClick(click) => Some(click.canvas),
+            UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(..)
+            | UiEvent::ProgressCancelRequested(_) => None,
         }
     }
 }
@@ -508,6 +597,9 @@ pub enum HostErrorCode {
     InvalidArgument,
     NotPermitted,
     Unavailable,
+    /// 0.3: the user refused or revoked a T2 capability the manifest declares. A 0.2 component
+    /// never gets it; it sees `not-permitted`.
+    Denied,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -544,6 +636,7 @@ impl From<v0_1::InputProps> for InputProps {
             value: props.value,
             placeholder: props.placeholder,
             secret: false,
+            label: None,
         }
     }
 }
@@ -665,6 +758,12 @@ impl TryFrom<UiEvent> for v0_1::UiEvent {
             UiEvent::RowClick(id, row) => Ok(v0_1::UiEvent::RowClick(id, row)),
             UiEvent::RowSelected(..) => Err(not_in_v0_1("the row-selected event")),
             UiEvent::Dismissed(_) => Err(not_in_v0_1("the dismissed event")),
+            UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(..)
+            | UiEvent::ProgressCancelRequested(_) => {
+                Err(not_in_v0_1("notification and progress events"))
+            }
+            UiEvent::CanvasClick(_) => Err(not_in_v0_1("the canvas-click event")),
         }
     }
 }
@@ -829,6 +928,16 @@ mod tests {
         assert_eq!(button.tooltip_text(), Some(&long[..MAX_TOOLTIP_BYTES]));
         assert_eq!(button.tooltip.as_deref(), Some(long.as_str()));
         assert_eq!(ButtonProps::default().tooltip_text(), None);
+
+        let input = InputProps {
+            label: Some(format!("{}é", "a".repeat(MAX_LABEL_BYTES - 1))),
+            ..InputProps::default()
+        };
+        assert_eq!(
+            input.label_text(),
+            Some("a".repeat(MAX_LABEL_BYTES - 1).as_str())
+        );
+        assert_eq!(InputProps::default().label_text(), None);
     }
 
     #[test]

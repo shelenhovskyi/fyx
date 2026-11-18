@@ -53,6 +53,16 @@ pub enum TreeError {
     NotAList { node: NodeId, kind: &'static str },
     #[error("a list row must have exactly one root node, found {0}")]
     RowRootCount(usize),
+    /// 0.3: more canvases than [`crate::canvas::MAX_CANVASES_PER_SURFACE`] in one tree.
+    #[error("a surface has at most {max} canvas nodes")]
+    TooManyCanvases { max: usize },
+    /// 0.2 and 0.3: the tree would retain more than
+    /// [`crate::v0_2::tree::MAX_TREE_TEXT_BYTES`] of text.
+    #[error("a surface's tree would hold more than {max} bytes of text")]
+    TreeTextTooLarge { max: usize },
+    /// 0.3: canvases are not allowed in list rows.
+    #[error("node {0} is a canvas, which a list row cannot hold")]
+    CanvasInRow(NodeId),
     #[error("patch {index}: {error}")]
     Patch { index: usize, error: Box<TreeError> },
 }

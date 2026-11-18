@@ -6,8 +6,9 @@
 //! - `<id>/<version>-<key>.cwasm`: that version's precompiled component, written by Fyx on first
 //!   load (`ui_ext_wasm::PrecompiledCache`). It sits beside the version folder, never inside it,
 //!   so nothing from a package can pose as one;
-//! - `state.json`: per id, the active version, the previous one (kept for rollback) and whether
-//!   the id is pinned.
+//! - `state.json`: per id, the active version, the previous one (kept for rollback), whether
+//!   the id is pinned, where each kept version came from (the registry or a file) with its
+//!   package's SHA-256, and the permissions the user approved (platform plan 3.3, 3.5).
 //!
 //! An install keeps the version it replaces as `previous` and deletes every other version. A
 //! pinned id takes no other version until it is unpinned; rollback swaps `active` and `previous`.
@@ -28,6 +29,9 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use fs::{Fs, RemoveOptions, RenameOptions};
 use futures::{AsyncReadExt as _, lock::Mutex};
+use fyx_registry::{
+    ExtensionId, InstalledExtension, InstalledVersion, Origin, Permissions, Sha256Digest,
+};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use ui_ext_wasm::{PrecompiledCache, UiManifest};
@@ -53,6 +57,45 @@ pub struct ExtensionState {
     /// No other version installs while pinned.
     #[serde(default)]
     pub pinned: bool,
+    /// Where each kept version came from, by version. A version without an entry (installed
+    /// before this was recorded) counts as a file install with no known hash.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, VersionSource>,
+    /// What the user approved: a registry release's permissions when it was installed, plus
+    /// those of held updates they approved (`Permissions::approve`).
+    #[serde(default)]
+    pub approved: Permissions,
+    /// Why the active version is not loaded: a block-list entry with nothing to roll back to.
+    /// Cleared when the block lifts or another version installs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<String>,
+}
+
+/// Where one installed version came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionSource {
+    pub origin: Origin,
+    pub package_sha256: Option<Sha256Digest>,
+}
+
+impl VersionSource {
+    pub fn local_file(package: &[u8]) -> Self {
+        Self {
+            origin: Origin::LocalFile,
+            package_sha256: Some(Sha256Digest::of(package)),
+        }
+    }
+}
+
+impl ExtensionState {
+    fn installed_version(&self, version: &Version) -> InstalledVersion {
+        let source = self.sources.get(&version.to_string());
+        InstalledVersion {
+            version: version.clone(),
+            origin: source.map_or(Origin::LocalFile, |source| source.origin),
+            package_sha256: source.and_then(|source| source.package_sha256),
+        }
+    }
 }
 
 /// What a package holds, read without installing it (for the install confirmation).
@@ -141,16 +184,93 @@ impl InstallStore {
         info
     }
 
-    /// Installs a `.fyxext` package and makes it the active version of its id. The version it
-    /// replaces becomes `previous`; every other version of the id is deleted.
+    /// Installs a `.fyxext` package from disk (unsigned) and makes it the active version of its
+    /// id. The version it replaces becomes `previous`; every other version of the id is deleted.
     pub async fn install_package(&self, package: &Path, fs: &dyn Fs) -> Result<Installed> {
-        let staging = self.unpack_to_staging(package, fs).await?;
-        let result = self.install_staged(&staging, fs).await;
-        remove_dir(&staging, fs).await;
-        result.with_context(|| format!("installing {}", package.display()))
+        let bytes = self.load_package(package, fs).await?;
+        let source = VersionSource::local_file(&bytes);
+        self.install_package_bytes(bytes, &package.display().to_string(), source, None, fs)
+            .await
     }
 
-    async fn install_staged(&self, staging: &Path, fs: &dyn Fs) -> Result<Installed> {
+    /// Installs a package already in memory (a verified registry download): `source` says where
+    /// it came from, `approved` what the user accepted for it (`None` keeps what was approved).
+    pub async fn install_package_bytes(
+        &self,
+        bytes: Vec<u8>,
+        label: &str,
+        source: VersionSource,
+        approved: Option<Permissions>,
+        fs: &dyn Fs,
+    ) -> Result<Installed> {
+        let staging = self.unpack_bytes_to_staging(bytes, label, fs).await?;
+        let result = self.install_staged(&staging, source, approved, fs).await;
+        remove_dir(&staging, fs).await;
+        result.with_context(|| format!("installing {label}"))
+    }
+
+    /// Disables the active version of an id (`Some(reason)`), or enables it again.
+    pub async fn set_disabled(
+        &self,
+        extension_id: &str,
+        reason: Option<String>,
+        fs: &dyn Fs,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.state(fs).await?;
+        let Some(entry) = state.extensions.get_mut(extension_id) else {
+            bail!("{extension_id} is not installed");
+        };
+        entry.disabled = reason;
+        self.write_state(&state, fs).await
+    }
+
+    /// Records approved permissions for an installed id (a held update the user approved).
+    pub async fn set_approved(
+        &self,
+        extension_id: &str,
+        approved: Permissions,
+        fs: &dyn Fs,
+    ) -> Result<()> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.state(fs).await?;
+        let Some(entry) = state.extensions.get_mut(extension_id) else {
+            bail!("{extension_id} is not installed");
+        };
+        entry.approved = approved;
+        self.write_state(&state, fs).await
+    }
+
+    /// Every installed id as the registry's update planning sees it (`plan_updates`). An id the
+    /// registry would not accept is left out.
+    pub async fn installed_extensions(&self, fs: &dyn Fs) -> Result<Vec<InstalledExtension>> {
+        let state = self.state(fs).await?;
+        Ok(state
+            .extensions
+            .iter()
+            .filter_map(|(id, entry)| {
+                let id = ExtensionId::new(id.clone()).ok()?;
+                Some(InstalledExtension {
+                    id,
+                    active: entry.installed_version(&entry.active),
+                    previous: entry
+                        .previous
+                        .as_ref()
+                        .map(|previous| entry.installed_version(previous)),
+                    pinned: entry.pinned,
+                    approved: entry.approved.clone(),
+                })
+            })
+            .collect())
+    }
+
+    async fn install_staged(
+        &self,
+        staging: &Path,
+        source: VersionSource,
+        approved: Option<Permissions>,
+        fs: &dyn Fs,
+    ) -> Result<Installed> {
         let info = read_package_dir(staging, fs).await?;
         let _guard = self.lock.lock().await;
         let mut state = self.state(fs).await?;
@@ -187,12 +307,29 @@ impl InstallStore {
             Some(current) => current.previous.clone(),
             None => None,
         };
+        let mut sources = current
+            .as_ref()
+            .map(|current| current.sources.clone())
+            .unwrap_or_default();
+        sources.insert(info.version.to_string(), source);
+        let kept = [Some(&info.version), previous.as_ref()];
+        sources.retain(|version, _| {
+            kept.iter()
+                .flatten()
+                .any(|kept| kept.to_string() == *version)
+        });
+        let approved = approved
+            .or_else(|| current.as_ref().map(|current| current.approved.clone()))
+            .unwrap_or_default();
         state.extensions.insert(
             id.clone(),
             ExtensionState {
                 active: info.version.clone(),
                 previous: previous.clone(),
                 pinned: current.is_some_and(|current| current.pinned),
+                sources,
+                approved,
+                disabled: None,
             },
         );
         self.write_state(&state, fs).await?;
@@ -250,12 +387,13 @@ impl InstallStore {
         remove_dir_checked(&self.root.join(extension_id), fs).await
     }
 
-    /// The active version folder of every installed id.
+    /// The active version folder of every installed id that is not disabled.
     pub async fn active(&self, fs: &dyn Fs) -> Result<Vec<(Arc<str>, Version, PathBuf)>> {
         let state = self.state(fs).await?;
         Ok(state
             .extensions
             .into_iter()
+            .filter(|(_, entry)| entry.disabled.is_none())
             .map(|(id, entry)| {
                 let dir = self.version_dir(&id, &entry.active);
                 (id.into(), entry.active, dir)
@@ -314,7 +452,7 @@ impl InstallStore {
     }
 
     /// Checks and unpacks a package into a fresh staging folder, which the caller removes.
-    async fn unpack_to_staging(&self, package: &Path, fs: &dyn Fs) -> Result<PathBuf> {
+    async fn load_package(&self, package: &Path, fs: &dyn Fs) -> Result<Vec<u8>> {
         let size = fs
             .metadata(package)
             .await?
@@ -326,7 +464,27 @@ impl InstallStore {
                 package.display()
             );
         }
-        let bytes = fs.load_bytes(package).await?;
+        fs.load_bytes(package).await
+    }
+
+    async fn unpack_to_staging(&self, package: &Path, fs: &dyn Fs) -> Result<PathBuf> {
+        let bytes = self.load_package(package, fs).await?;
+        self.unpack_bytes_to_staging(bytes, &package.display().to_string(), fs)
+            .await
+    }
+
+    async fn unpack_bytes_to_staging(
+        &self,
+        bytes: Vec<u8>,
+        label: &str,
+        fs: &dyn Fs,
+    ) -> Result<PathBuf> {
+        if bytes.len() as u64 > MAX_PACKAGE_BYTES {
+            bail!(
+                "{label} is {} bytes; a package may be at most {MAX_PACKAGE_BYTES}",
+                bytes.len()
+            );
+        }
         let staging = self.root.join(STAGING_DIR).join(format!(
             "{}-{}",
             std::process::id(),
@@ -338,7 +496,7 @@ impl InstallStore {
         fs.create_dir(&staging).await?;
         if let Err(error) = unpack(bytes, &staging, fs).await {
             remove_dir(&staging, fs).await;
-            return Err(error.context(format!("unpacking {}", package.display())));
+            return Err(error.context(format!("unpacking {label}")));
         }
         Ok(staging)
     }
@@ -584,14 +742,15 @@ mod tests {
         assert_eq!(installed.dir, setup.store.version_dir("demo", &v("1.0.0")));
         assert!(installed.dir.join("extension.toml").is_file());
         assert!(installed.dir.join("fyx_ui.wasm").is_file());
+        let entry = setup.entry("demo").await.expect("installed");
         assert_eq!(
-            setup.entry("demo").await,
-            Some(ExtensionState {
-                active: v("1.0.0"),
-                previous: None,
-                pinned: false
-            })
+            (entry.active, entry.previous, entry.pinned),
+            (v("1.0.0"), None, false)
         );
+        // Plan 3.5: a file install is recorded as one, with its package's hash.
+        let source = &entry.sources["1.0.0"];
+        assert_eq!(source.origin, fyx_registry::Origin::LocalFile);
+        assert!(source.package_sha256.is_some());
 
         // A precompiled component of 1.0.0, as a load would write it.
         std::fs::write(

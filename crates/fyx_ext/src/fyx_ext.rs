@@ -3,6 +3,7 @@
 //!
 //! Apache-2.0, like the SDK, because extension authors run it on their own code.
 
+pub mod assets;
 pub mod build;
 pub mod inspect;
 pub mod manifest;
@@ -86,13 +87,14 @@ pub fn check_loaded(
 ) -> Result<(Manifest, Report, Option<fyx_ext_harness::Harness>)> {
     let mut report = Report::default();
     let manifest = manifest::read(dir, &mut report)?;
+    assets::check_assets(dir, &mut report);
     let component = manifest.component_path();
     let mut harness = None;
     match std::fs::read(&component) {
         Ok(bytes) => {
             inspect::check_component(&manifest, &bytes, &mut report);
             if depth == CheckDepth::Load && !report.has_errors() {
-                harness = run::load(&bytes, &mut report);
+                harness = run::load(&bytes, dir, &mut report);
                 if let Some(harness) = &harness {
                     run::check_surfaces(&manifest, harness, &mut report);
                 }
