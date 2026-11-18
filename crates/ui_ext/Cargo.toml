@@ -20,9 +20,12 @@ thiserror.workspace = true
 url = { workspace = true, optional = true }
 
 [features]
-# `ui_ext::network`: the pure part of fyx:ui 0.3 `network:fetch` (limits, types, the domain list,
-# the import checks), shared by `ui_ext_wasm`, `fyx_ext_harness` and `fyx_registry`.
-network = ["dep:url"]
+# `ui_ext::network` and `ui_ext::process`: the pure parts of the fyx:ui 0.3 T2 imports
+# (`network:fetch`, `process:spawn`): limits, types, the manifest rules and the import checks,
+# shared by `ui_ext_wasm`, `fyx_ext_harness` and `fyx_registry`. Guests do not need them.
+t2 = ["dep:url"]
+network = ["t2"]
+process = ["t2"]
 
 [dev-dependencies]
 proptest.workspace = true

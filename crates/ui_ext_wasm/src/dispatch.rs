@@ -401,6 +401,14 @@ impl UiExtension {
                                 };
                                 crate::network::IoEvent::FetchDone(id, result)
                             }
+                            crate::network::IoEvent::ProcessExited(exit) => {
+                                store.data_mut().process.delivered(exit.process);
+                                crate::network::IoEvent::ProcessExited(exit)
+                            }
+                            crate::network::IoEvent::SpawnFailed(id, error) => {
+                                store.data_mut().process.delivered(id);
+                                crate::network::IoEvent::SpawnFailed(id, error)
+                            }
                             other => other,
                         };
                         extension.call_handle_io(store, event).await

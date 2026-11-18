@@ -34,6 +34,14 @@
 //!
 //! `handle-io` pushes the outcome to `probe` as one text node (id 1): `fetch-done <id> <status>
 //! <body>` or `fetch-done <id> err <error>`.
+//!
+//! `process:spawn`, by the same `input-changed` commands:
+//! - `spawn [stdin] [env NAME=VALUE]... -- <program> [<arg>...]`: its id or error code (`_` in an
+//!   argument is a space);
+//! - `write <id> <text>` (with a newline), `close <id>`, `kill <id>`: `done` or the error code.
+//!
+//! Outcomes: `output <id> <stdout|stderr> <text>`, `exited <id> <code|none> <killed>`,
+//! `spawn-failed <id> <denied|not-found|limit-exceeded|io>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.3.0",
@@ -44,6 +52,7 @@ use fyx::ui::host::{self, HostError, HostErrorCode};
 use fyx::ui::images::{self, ImageFormat};
 use fyx::ui::network;
 use fyx::ui::permissions;
+use fyx::ui::process;
 use fyx::ui::types::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -84,6 +93,13 @@ fn logo() -> ImageProps {
         height: None,
         fit: ImageFit::Contain,
         tint: None,
+    }
+}
+
+fn outcome(result: Result<(), HostError>) -> String {
+    match result {
+        Ok(()) => "done".into(),
+        Err(error) => code(&error).into(),
     }
 }
 
@@ -426,6 +442,50 @@ impl Guest for Probe {
                         network::cancel_fetch(id.parse().map_err(|e| format!("{e}"))?);
                         vec!["done".to_string()]
                     }
+                    ["spawn", rest @ ..] => {
+                        let split = rest
+                            .iter()
+                            .position(|word| *word == "--")
+                            .ok_or("spawn needs --")?;
+                        let (options, program) = rest.split_at(split);
+                        let program = &program[1..];
+                        let mut env = Vec::new();
+                        let mut stdin = false;
+                        let mut options = options.iter();
+                        while let Some(option) = options.next() {
+                            match *option {
+                                "stdin" => stdin = true,
+                                "env" => {
+                                    let pair = options.next().ok_or("env needs NAME=VALUE")?;
+                                    let (name, value) =
+                                        pair.split_once('=').ok_or("env needs NAME=VALUE")?;
+                                    env.push((name.to_string(), value.to_string()));
+                                }
+                                other => return Err(format!("no spawn option {other}")),
+                            }
+                        }
+                        let (name, args) = program.split_first().ok_or("spawn needs a program")?;
+                        vec![match process::spawn(&process::SpawnRequest {
+                            program: name.to_string(),
+                            args: args.iter().map(|arg| arg.replace('_', " ")).collect(),
+                            cwd: None,
+                            env,
+                            stdin,
+                        }) {
+                            Ok(id) => id.to_string(),
+                            Err(error) => code(&error).to_string(),
+                        }]
+                    }
+                    ["write", id, text] => vec![outcome(process::write_stdin(
+                        id.parse().map_err(|e| format!("{e}"))?,
+                        format!("{text}\n").as_bytes(),
+                    ))],
+                    ["close", id] => vec![outcome(process::close_stdin(
+                        id.parse().map_err(|e| format!("{e}"))?,
+                    ))],
+                    ["kill", id] => vec![outcome(process::kill(
+                        id.parse().map_err(|e| format!("{e}"))?,
+                    ))],
                     _ => return Err(format!("no command {command:?}")),
                 };
                 Ok(Update::Replace(vec![text(1, &report.join(" | "))]))
@@ -484,6 +544,31 @@ impl Guest for Probe {
                 };
                 format!("fetch-done {id} err {error}")
             }
+            fyx::ui::io::IoEvent::ProcessOutput(output) => format!(
+                "output {} {} {}",
+                output.process,
+                match output.stream {
+                    process::OutputStream::Stdout => "stdout",
+                    process::OutputStream::Stderr => "stderr",
+                },
+                String::from_utf8_lossy(&output.data)
+            ),
+            fyx::ui::io::IoEvent::ProcessExited(exit) => format!(
+                "exited {} {} {}",
+                exit.process,
+                exit.code
+                    .map_or("none".to_string(), |code| code.to_string()),
+                exit.killed
+            ),
+            fyx::ui::io::IoEvent::SpawnFailed((id, error)) => format!(
+                "spawn-failed {id} {}",
+                match error {
+                    process::SpawnError::Denied => "denied",
+                    process::SpawnError::NotFound(_) => "not-found",
+                    process::SpawnError::LimitExceeded => "limit-exceeded",
+                    process::SpawnError::Io(_) => "io",
+                }
+            ),
             fyx::ui::io::IoEvent::PermissionChanged((capability, state)) => {
                 format!("permission-changed {capability:?} {state:?}")
             }

@@ -66,6 +66,7 @@ mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 pub mod images;
 pub mod network;
+pub mod process;
 mod stderr;
 pub mod ticks;
 
@@ -312,19 +313,8 @@ pub struct NetworkManifest {
     pub domains: Vec<String>,
 }
 
-/// One `[[fyx_ui.processes]]` entry.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProcessSpec {
-    /// What `request.program` names; without `path`, resolved on `PATH` outside the worktrees.
-    pub name: String,
-    /// Argument patterns the program may be run with (none: any arguments).
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// A worktree-relative program, which needs a trusted worktree.
-    #[serde(default)]
-    pub path: Option<String>,
-}
+/// One `[[fyx_ui.processes]]` entry, shared with the harness.
+pub use ui_ext::process::ProcessSpec;
 
 /// `[fyx_ui.process]`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -452,6 +442,10 @@ impl UiManifest {
             if !valid {
                 bail!("[fyx_ui.process] env {variable:?} is not a variable name");
             }
+            // Names that load code into a program (`LD_PRELOAD`, `NODE_OPTIONS`, …) are refused
+            // even when declared (design.md §9).
+            ui_ext::process::check_env_name(variable)
+                .map_err(|error| anyhow::anyhow!("[fyx_ui.process] env: {error}"))?;
         }
         let has_table = !self.processes.is_empty() || self.process.is_some();
         if has_table && !declares {
@@ -490,8 +484,11 @@ impl UiManifest {
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
         let network_capable = manifest.api_version >= Version::new(0, 3, 0);
         for capability in &manifest.capabilities {
-            // `network:fetch` is the first T2 capability this host provides, from 0.3 on.
-            if capability == network::CAPABILITY_NETWORK && network_capable {
+            // The T2 capabilities this host provides, from 0.3 on.
+            if network_capable
+                && (capability == network::CAPABILITY_NETWORK
+                    || capability == process::CAPABILITY_PROCESS)
+            {
                 continue;
             }
             permissions::grantable_tier(capability)
@@ -582,6 +579,8 @@ pub struct UiState {
     api: effects::ApiState,
     /// The 0.3 `network` import's ids, counters and the requests of the running call.
     network: network::NetworkState,
+    /// The 0.3 `process` import's ids, counters and the spawns of the running call.
+    process: process::ProcessState,
 }
 
 impl UiState {
@@ -627,12 +626,14 @@ impl UiState {
         diagnostics: diagnostics::DiagnosticsBuffer,
         api: effects::ApiState,
         network: network::NetworkState,
+        process: process::ProcessState,
     ) -> Self {
         Self {
             capability_check,
             diagnostics,
             api,
             network,
+            process,
             extension_id,
             table: ResourceTable::new(),
             ctx,
@@ -1072,6 +1073,8 @@ pub struct UiExtension {
     name: Option<Arc<str>>,
     /// Starts `network.fetch` requests after their call and hands back the outcomes.
     network: Arc<network::NetworkHandle>,
+    /// Starts `process.spawn` programs after their call; dropping the last clone kills them.
+    processes: Arc<process::ProcessHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1182,6 +1185,16 @@ pub struct LoadOptions {
     pub network_domains: Option<Vec<String>>,
     /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
     pub resolver: Option<Arc<dyn network::Resolve>>,
+    /// `[[fyx_ui.processes]]`; [`UiExtension::load_checked`] sets it from the manifest. Applies
+    /// only to a 0.3 component that declares `process:spawn`.
+    pub processes: Option<Vec<process::ProcessSpec>>,
+    /// `[fyx_ui.process] env`; set by [`UiExtension::load_checked`].
+    pub process_env: Option<Vec<String>>,
+    /// The host's open worktrees, for `process:spawn` (`cwd`, `path` programs, the `PATH`
+    /// filter). Without it, `spawn` is `unavailable`.
+    pub workspace: Option<Arc<dyn process::Workspace>>,
+    /// Fyx's environment as `process:spawn` sees it; `None` is the real one. For tests.
+    pub process_environment: Option<process::Environment>,
 }
 
 impl UiExtension {
@@ -1232,6 +1245,10 @@ impl UiExtension {
             allow_staged,
             network_domains,
             resolver,
+            processes,
+            process_env,
+            workspace,
+            process_environment,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1256,6 +1273,17 @@ impl UiExtension {
             _ => network::DomainList::default(),
         };
         let fetcher = network::Fetcher::new(&extension_id, resolver);
+        let declares_process = capabilities
+            .iter()
+            .any(|capability| capability == process::CAPABILITY_PROCESS);
+        let process_policy = if declares_process {
+            process::ProcessPolicy {
+                programs: processes.unwrap_or_default(),
+                env: process_env.unwrap_or_default().into_iter().collect(),
+            }
+        } else {
+            process::ProcessPolicy::default()
+        };
         let compile_task = cx.background_executor().spawn({
             let extension_id = extension_id.clone();
             async move {
@@ -1304,16 +1332,33 @@ impl UiExtension {
                 capability_check.clone(),
                 running.clone(),
             ));
+            // Only a 0.3 component has the `process` import.
+            let process_policy = Arc::new(if ui_api_version == ApiVersion::V0_3_0 {
+                process_policy
+            } else {
+                process::ProcessPolicy::default()
+            });
+            let process_set = Arc::new(process::ProcessSet::default());
+            let processes = Arc::new(process::ProcessHandle::new(
+                extension_id.clone(),
+                process_set.clone(),
+                capability_check.clone(),
+                workspace.clone(),
+                process_environment,
+                Arc::new(process_policy.env.clone()),
+                running.clone(),
+            ));
 
             let instantiate = {
                 let extension_id = extension_id.clone();
                 let diagnostics = diagnostics.clone();
                 let capabilities = capabilities.clone();
                 let network = network.clone();
+                let process_set = process_set.clone();
                 async move {
-                    // On tokio: revocations reach in-flight requests and `handle-io`.
+                    // On tokio: revocations reach in-flight requests, processes and `handle-io`.
                     if ui_api_version == ApiVersion::V0_3_0 {
-                        network.watch_permissions();
+                        network.watch_permissions(Arc::downgrade(&process_set));
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -1334,6 +1379,7 @@ impl UiExtension {
                             diagnostics.clone(),
                             effects::ApiState::new(ui_api_version, capabilities),
                             network::NetworkState::new(domains, running),
+                            process::ProcessState::new(process_policy, process_set, workspace),
                         ),
                     );
                     store.limiter(|state| &mut state.limits);
@@ -1419,6 +1465,7 @@ impl UiExtension {
                     diagnostics,
                     name: None,
                     network,
+                    processes,
                 },
                 pushed_rx,
             ))
@@ -1471,6 +1518,8 @@ impl UiExtension {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
             network_domains: manifest.network.as_ref().map(|table| table.domains.clone()),
+            processes: Some(manifest.processes.clone()),
+            process_env: manifest.process.as_ref().map(|table| table.env.clone()),
             ..options
         };
         let (mut extension, pushed) =
@@ -1542,6 +1591,7 @@ impl UiExtension {
         let (return_tx, return_rx) = oneshot::channel();
         let diagnostics = self.diagnostics.clone();
         let network = self.network.clone();
+        let processes = self.processes.clone();
         let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
@@ -1560,6 +1610,11 @@ impl UiExtension {
                         // The call's requests start now, after it returned, or are dropped with
                         // its effects if it failed (design.md §0.3).
                         network.start(store.data_mut().network.finish_call(result.is_ok()));
+                        processes.start(store.data_mut().process.finish_call(result.is_ok()));
+                        // A trap kills the extension's processes with it (design.md §9).
+                        if result.is_err() {
+                            processes.kill_all();
+                        }
                         diagnostics.call(diagnostics::CallRecord {
                             kind,
                             surface_id,

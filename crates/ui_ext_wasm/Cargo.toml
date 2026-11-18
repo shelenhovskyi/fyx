@@ -31,13 +31,24 @@ reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["net", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "process", "time"] }
 toml = { workspace = true, features = ["display"] }
-ui_ext = { workspace = true, features = ["network"] }
+ui_ext = { workspace = true, features = ["network", "process"] }
 url.workspace = true
 wasmparser.workspace = true
 wasmtime-wasi.workspace = true
 wasmtime.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 fyx_ext_harness.workspace = true

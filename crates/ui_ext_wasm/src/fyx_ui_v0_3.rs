@@ -20,6 +20,7 @@ use crate::{
     conversions::{self, unsupported},
     network,
     permissions::PermissionState,
+    process,
 };
 
 pub(crate) mod bindings {
@@ -38,7 +39,7 @@ pub(crate) mod bindings {
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
     host as wit_host, images as wit_images, io as wit_io, network as wit_network,
-    notifications as wit_notifications, types as wit,
+    notifications as wit_notifications, process as wit_process, types as wit,
 };
 
 conversions::host_imports!(denied: wit_host::HostErrorCode::Denied);
@@ -122,10 +123,108 @@ impl wit_network::Host for UiState {
     }
 }
 
+impl UiState {
+    /// The broker for `process:spawn` at every call: `ask` is accepted (the prompt comes when
+    /// the spawn is applied), `denied` and `unavailable` refuse.
+    fn permit_process(&self) -> Result<(), wit_host::HostError> {
+        if !self.api.declares(process::CAPABILITY_PROCESS) {
+            return Err(model::HostError {
+                code: model::HostErrorCode::NotPermitted,
+                message: format!("{:?} is not in the manifest", process::CAPABILITY_PROCESS),
+            }
+            .into());
+        }
+        match self.permission_state(process::CAPABILITY_PROCESS) {
+            PermissionState::Granted | PermissionState::Ask => Ok(()),
+            state => Err(model::HostError {
+                code: model::HostErrorCode::Denied,
+                message: format!("{} is {state:?}", process::CAPABILITY_PROCESS),
+            }
+            .into()),
+        }
+    }
+}
+
+impl wit_process::Host for UiState {
+    fn spawn(
+        &mut self,
+        request: wit_process::SpawnRequest,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        self.count_lifted_text(
+            request.program.len()
+                + request.args.iter().map(String::len).sum::<usize>()
+                + request
+                    .env
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit_process() {
+            return Ok(Err(error));
+        }
+        let request = process::SpawnRequest {
+            program: request.program,
+            args: request.args,
+            cwd: request.cwd.map(|cwd| process::FileRef {
+                worktree: cwd.worktree,
+                path: cwd.path,
+            }),
+            env: request.env,
+            stdin: request.stdin,
+        };
+        Ok(self.process.spawn(request).map_err(Into::into))
+    }
+
+    fn write_stdin(
+        &mut self,
+        process: u64,
+        data: Vec<u8>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        if let Err(error) = self.permit_process() {
+            return Ok(Err(error));
+        }
+        Ok(self.process.write_stdin(process, data).map_err(Into::into))
+    }
+
+    fn close_stdin(&mut self, process: u64) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self.process.close_stdin(process).map_err(Into::into))
+    }
+
+    fn kill(&mut self, process: u64) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self.process.kill(process).map_err(Into::into))
+    }
+}
+
 /// An outcome for the `handle-io` export; `None` for a capability 0.3 has no name for.
 pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
     use bindings::fyx::ui::permissions as wit_permissions;
     Some(match event {
+        network::IoEvent::ProcessOutput(output) => {
+            wit_io::IoEvent::ProcessOutput(wit_process::ProcessOutput {
+                process: output.process,
+                stream: match output.stream {
+                    process::OutputStream::Stdout => wit_process::OutputStream::Stdout,
+                    process::OutputStream::Stderr => wit_process::OutputStream::Stderr,
+                },
+                data: output.data,
+            })
+        }
+        network::IoEvent::ProcessExited(exit) => {
+            wit_io::IoEvent::ProcessExited(wit_process::ProcessExit {
+                process: exit.process,
+                code: exit.code,
+                killed: exit.killed,
+            })
+        }
+        network::IoEvent::SpawnFailed(id, error) => wit_io::IoEvent::SpawnFailed((
+            id,
+            match error {
+                process::SpawnError::Denied => wit_process::SpawnError::Denied,
+                process::SpawnError::NotFound(why) => wit_process::SpawnError::NotFound(why),
+                process::SpawnError::LimitExceeded => wit_process::SpawnError::LimitExceeded,
+                process::SpawnError::Io(why) => wit_process::SpawnError::Io(why),
+            },
+        )),
         network::IoEvent::PermissionChanged(capability, state) => {
             wit_io::IoEvent::PermissionChanged((
                 match capability.as_str() {
@@ -203,7 +302,14 @@ conversions::conversions! {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 5] = ["types", "host", "images", "notifications", "network"];
+const LINKED_INTERFACES: [&str; 6] = [
+    "types",
+    "host",
+    "images",
+    "notifications",
+    "network",
+    "process",
+];
 
 /// Stubs the `fyx:ui` 0.3 interfaces `component` imports that this build does not implement yet,
 /// as functions that trap when called, so a component that never calls them loads and runs.
@@ -390,5 +496,6 @@ pub(crate) fn add_to_linker(
     wit_images::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_notifications::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_network::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_process::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }
