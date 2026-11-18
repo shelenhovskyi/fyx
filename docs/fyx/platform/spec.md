@@ -136,9 +136,17 @@ line decorations, code lenses, read-only documents, network and processes behind
       Extension, and one added to `dev_paths` by hand.
     - **After that, only T1 matters.** An update that adds T0 or changes the component loads
       silently. One that adds T1 is held until **Approve**.
-22. Section M of 0.2, notifications and progress: `notify(level, text, actions)` and
-    `progress-start` / `progress-update` / `progress-end`; at most **5 notifications per minute**
-    per extension, extra ones go to the log.
+22. Section M of 0.2, notifications and progress (design drafted 2026-11-18 in
+    [wit-0.2/design.md §M](../wit-0.2/design.md#m-notifications-and-progress-fyxuinotifications)).
+    `ui:notifications`, tier T0.
+    - **`notify`.** Level, title, body and at most 2 actions, with host-timed auto-dismiss. At most
+      **5 notifications per minute** per extension and 3 open at once; extra ones go to the log.
+    - **Progress.** `progress-start` / `progress-update` / `progress-end`, shown in the status
+      bar or on the owner panel, at most 4 running.
+    - **Events.** Actions, closes and progress cancels come back as `ui-event`s to an owner
+      surface. An action click grants the modal gesture.
+    - **Provenance.** The extension's name and id are always drawn by the host, and the extension
+      cannot style them.
 23. `network:fetch` is a host import, not WASI sockets. The manifest lists domains
     (`example.com` or `*.example.com`); others fail with `denied`. HTTPS only, except
     `localhost`/`127.0.0.1`. Timeout **30 s**, response cap **16 MiB**, at most **8** requests

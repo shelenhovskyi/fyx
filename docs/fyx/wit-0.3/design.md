@@ -60,8 +60,9 @@ can do everything a 0.2 one can, with the same semantics. Three 0.2 types change
   `path(...)` meaning exactly what 0.2's field meant;
 - `ui-event` gains `orphaned` (§1) and `host-error-code` gains `denied` (§7).
 
-0.2 section M (notifications, progress) is not drafted yet. When it is, its interface is copied
-into 0.3 unchanged; nothing in this draft depends on it.
+0.2 section M (notifications, progress) was drafted on 2026-11-18. Its `notifications` interface and
+its three `ui-event` cases are copied into 0.3 unchanged. Nothing else in this draft depends on
+it.
 
 ### 0.2 Version dispatch
 
