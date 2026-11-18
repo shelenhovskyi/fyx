@@ -249,6 +249,15 @@ Things the gate works around on one machine only. CI never takes these paths.
   these three with a `gate: WARNING` line. Fix on the machine (find what filters its DNS) and the
   skip turns itself off.
 
+## Tests and the user's profile
+
+`script/gate.sh` runs nextest with `HOME`, `LOCALAPPDATA`, `APPDATA`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME`
+in a temp folder, and compares the real `Fyx` folders under those locations before and after the
+run (except `logs/` and `db/`). A new or changed file there turns the gate red with its path; if a
+Fyx or Zed process is running, it only warns. Windows resolves `paths::data_dir()` through Known
+Folders, which ignore the variables, so the comparison is the check that matters there: tests must
+use a temp dir or an in-memory store, never the app's data directory.
+
 ## Secrets
 
 None. Both workflows use only the automatic `GITHUB_TOKEN`, with the permissions listed above. The

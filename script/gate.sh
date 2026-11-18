@@ -64,7 +64,46 @@ if [[ "${CI:-}" != "true" && " ${pkgs[*]} " == *" agent "* ]] \
     echo "gate: WARNING: example.com resolves to loopback here; skipping agent's 3 fetch-tool redirect tests (CI runs them)"
     nextest_filter=(-E 'not (test(test_fetch_tool_follows_same_host_redirect) | test(test_fetch_tool_refuses_redirect_to_loopback) | test(test_fetch_tool_reauthorizes_redirect_to_new_host))')
 fi
-cargo nextest run "${pkgs[@]}" --no-tests=pass "${nextest_filter[@]}" 2>&1 | tail -30
+# Tests must never touch the user's real Fyx profile (two leaks on 2026-11-18, docs/fyx/ci.md).
+# 1. nextest gets a throwaway HOME and data/config dirs. Cargo and rustup are pinned first, so
+#    tests that build guests still find the toolchain.
+# 2. On Windows, `paths::data_dir()` asks the OS (Known Folders) and ignores those variables, so
+#    the real profile folders are also compared before and after the run.
+to_unix() { if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
+profile_candidates=()
+for base in "${LOCALAPPDATA:-}" "${APPDATA:-}" "${XDG_DATA_HOME:-${HOME:-}/.local/share}" "${XDG_CONFIG_HOME:-${HOME:-}/.config}"; do
+    [[ -n "$base" ]] || continue
+    for name in Fyx fyx; do profile_candidates+=("$(to_unix "$base")/$name"); done
+done
+profile_snapshot() {
+    for dir in "${profile_candidates[@]}"; do
+        [[ -d "$dir" ]] || continue
+        find "$dir" -type f -not -path '*/logs/*' -not -path '*/db/*' -printf '%p %s %T@\n' 2>/dev/null
+    done | sort -u
+}
+profile_before=$(profile_snapshot)
+test_home=$(mktemp -d)
+mkdir -p "$test_home/LocalAppData" "$test_home/AppData" "$test_home/xdg-data" "$test_home/xdg-config"
+cargo_home="${CARGO_HOME:-$(to_unix "${USERPROFILE:-${HOME:-}}")/.cargo}"
+rustup_home="${RUSTUP_HOME:-$(to_unix "${USERPROFILE:-${HOME:-}}")/.rustup}"
+win_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
+    LOCALAPPDATA="$(win_path "$test_home/LocalAppData")" APPDATA="$(win_path "$test_home/AppData")" \
+    XDG_DATA_HOME="$test_home/xdg-data" XDG_CONFIG_HOME="$test_home/xdg-config" \
+    cargo nextest run "${pkgs[@]}" --no-tests=pass "${nextest_filter[@]}" 2>&1 | tail -30
+rm -rf "$test_home"
+profile_after=$(profile_snapshot)
+if [[ "$profile_before" != "$profile_after" ]]; then
+    touched=$(comm -13 <(printf '%s\n' "$profile_before") <(printf '%s\n' "$profile_after") | sed 's/ [0-9]* [0-9.]*$//')
+    if tasklist 2>/dev/null | grep -qiE '^(fyx|zed)(-dev)?\.exe'; then
+        echo "gate: WARNING: files changed in the real Fyx profile during the tests, but a Fyx/Zed process is running, so they may be its own:"
+        printf '  %s\n' $touched
+    else
+        echo "gate: RED: the tests wrote into the user's real Fyx profile (use a temp dir or an in-memory store):"
+        printf '  %s\n' $touched
+        exit 1
+    fi
+fi
 if [[ "$(git config --bool core.symlinks || echo true)" == "false" ]]; then
     script/fyx-check-licenses-index # symlinks checked out as text files (Windows without Developer Mode)
 else
