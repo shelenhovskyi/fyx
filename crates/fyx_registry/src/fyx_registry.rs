@@ -33,7 +33,10 @@ pub use index::{
     INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
     RejectedRelease, Release, Source, VerifiedIndex,
 };
-pub use package::{ZED_EXTENSION_WASM, check_package_contents, entry_names, is_zed_extension_wasm};
+pub use package::{
+    RUNS_ZED_EXTENSION_WARNING, ZED_EXTENSION_WASM, entry_names, is_zed_extension_wasm,
+    runs_zed_extension,
+};
 pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
 pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};
 pub use text::is_public_suffix;
@@ -89,9 +92,6 @@ pub enum Error {
     BadSignature { key_id: String },
     #[error("package does not match the index: {0}")]
     PackageMismatch(String),
-    /// The package has something the registry does not accept (a Zed `extension.wasm`, Q1).
-    #[error("package refused: {0}")]
-    PackageRefused(String),
     /// A signed document past its `expires_at`: a mirror may be replaying an old copy.
     #[error("{document} expired at {expires_at:?}")]
     Expired {

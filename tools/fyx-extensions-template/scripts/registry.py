@@ -184,6 +184,21 @@ def tier_of(capability: str, tiers: dict) -> str:
     return tiers.get(capability, "t2")
 
 
+def runs_zed_extension(package: bytes) -> bool:
+    """Whether the package has a Zed `extension.wasm` at any depth, in any case (owner's Q1, as
+    `fyx_registry::runs_zed_extension`). Such a package also runs as a Zed extension, with
+    unrestricted network and process access."""
+    import io
+
+    try:
+        names = zipfile.ZipFile(io.BytesIO(package)).namelist()
+    except zipfile.BadZipFile:
+        return False
+    return any(
+        re.split(r"[/\\]", name)[-1].rstrip(". ").lower() == "extension.wasm" for name in names
+    )
+
+
 def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict) -> dict:
     """The `signed` part of a release, without `published_at` (registry-repo.md, the entry)."""
     manifest = tomllib.loads(manifest_text)
@@ -202,7 +217,12 @@ def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict
         # them, a T2 entry cannot be described completely.
         raise Refused("T2 capabilities are not accepted yet: " + ", ".join(capabilities))
     name = entry["id"] + "-" + version
-    return {
+    # A package that also runs a Zed extension is T2 whatever it declares, so it always needs
+    # the owner's approval and never auto-merges (owner's Q1, 2026-11-19).
+    zed = runs_zed_extension(package)
+    if zed:
+        tier = "t2"
+    release = {
         "id": entry["id"],
         "version": version,
         "name": manifest.get("name", ""),
@@ -218,6 +238,9 @@ def derive_release(entry: dict, manifest_text: str, package: bytes, policy: dict
         "tier": tier,
         "capabilities": capabilities,
     }
+    if zed:
+        release["runs_zed_extension"] = True
+    return release
 
 
 def package_dir(directory: Path, out: Path) -> None:

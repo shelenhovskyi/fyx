@@ -1,8 +1,10 @@
 //! What a `.fyxext` package may contain (owner's decision Q1, 2026-11-19).
 //!
-//! A package with a Zed `extension.wasm` would also run as a Zed extension, with unrestricted
-//! network and process access, outside every Fyx check. The registry refuses one: the CI when it
-//! signs or verifies a release, and the client when it downloads it. A local install only warns.
+//! A package with a Zed `extension.wasm` also runs as a Zed extension, with unrestricted network
+//! and process access, outside every Fyx check. The registry accepts it (owner's Q1, revised
+//! 2026-11-19), but its signed release says so (`Release::runs_zed_extension`), it always counts
+//! as T2, so it needs the registry owner's approval, and the host shows
+//! [`RUNS_ZED_EXTENSION_WARNING`].
 
 /// The file name a Zed extension's component has.
 pub const ZED_EXTENSION_WASM: &str = "extension.wasm";
@@ -48,19 +50,17 @@ pub fn is_zed_extension_wasm(name: &str) -> bool {
         .eq_ignore_ascii_case(ZED_EXTENSION_WASM)
 }
 
-/// The package refused, if it contains a Zed `extension.wasm`.
-pub fn check_package_contents(package: &[u8]) -> Result<(), String> {
-    match entry_names(package)
-        .into_iter()
-        .find(|name| is_zed_extension_wasm(name))
-    {
-        Some(name) => Err(format!(
-            "the package contains {name:?}, a Zed extension component: it would run with \
-             unrestricted network and process access, so the registry does not accept it"
-        )),
-        None => Ok(()),
-    }
+/// Whether the package has a Zed `extension.wasm` anywhere: then it also runs as a Zed
+/// extension, with unrestricted network and process access (owner's Q1, 2026-11-19).
+pub fn runs_zed_extension(package: &[u8]) -> bool {
+    entry_names(package)
+        .iter()
+        .any(|name| is_zed_extension_wasm(name))
 }
+
+/// What the install dialog and the extension page say about such a package (owner's Q1).
+pub const RUNS_ZED_EXTENSION_WARNING: &str =
+    "Also runs a Zed extension with unrestricted network and process access.";
 
 #[cfg(test)]
 mod tests {
@@ -131,13 +131,13 @@ mod tests {
                 "assets/logo.svg"
             ]
         );
-        assert_eq!(check_package_contents(&package), Ok(()));
+        assert!(!runs_zed_extension(&package));
         // Not a zip: names nothing (the download's hash check is what fails it).
-        assert_eq!(check_package_contents(b"package"), Ok(()));
+        assert!(!runs_zed_extension(b"package"));
     }
 
     #[test]
-    fn a_zed_extension_component_is_refused_at_any_depth_and_case() {
+    fn a_zed_extension_component_is_found_at_any_depth_and_case() {
         for name in [
             "extension.wasm",
             "EXTENSION.WASM",
@@ -146,8 +146,7 @@ mod tests {
             "lib\\Extension.Wasm",
         ] {
             let package = zip(&[("extension.toml", b""), (name, b"\0asm")]);
-            let error = check_package_contents(&package).unwrap_err();
-            assert!(error.contains("Zed extension component"), "{name}: {error}");
+            assert!(runs_zed_extension(&package), "{name}");
         }
         assert!(!is_zed_extension_wasm("extension.wasm.map"));
         assert!(!is_zed_extension_wasm("my-extension.wasm"));
@@ -164,7 +163,7 @@ mod tests {
             .expect("a central entry");
         // Rename the central directory's entry: only the local header still says it.
         package[central + 46..central + 46 + 14].copy_from_slice(b"harmless.bin\0\0");
-        assert!(check_package_contents(&package).is_err());
+        assert!(runs_zed_extension(&package));
 
         let mut package = zip(&[("extension.toml", b""), ("extension.wasm", b"\0asm")]);
         let local = package
@@ -172,6 +171,6 @@ mod tests {
             .rposition(|window| window == b"PK\x03\x04")
             .expect("a local header");
         package[local + 30..local + 30 + 14].copy_from_slice(b"harmless.bin\0\0");
-        assert!(check_package_contents(&package).is_err());
+        assert!(runs_zed_extension(&package));
     }
 }
