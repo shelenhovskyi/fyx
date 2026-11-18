@@ -1243,6 +1243,28 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
 [open-questions.md](open-questions.md) has each question with its options, the recommended answer
 and its kind (product or technical), for the full 0.3 and for the smaller 0.3 of integration-5.
 
+**Decided by the owner, 2026-11-19:**
+
+- **Scope: the smaller 0.3, version (b).** 0.3 is images, canvas, the T2 imports and
+  notifications. The picker, code lens, hover, virtual documents, commands and the decoration
+  extras (design §1–§5) go to 0.4, and document context (§6) with them. Q3, Q6, Q11 and Q12 go to
+  0.4 with their features.
+- **Q9: no support for pre-1.0 versions.** The frozen 0.3 becomes `fyx:ui@1.0.0`. Loading 0.1 and
+  0.2 components is removed at the 1.0 cut (`MIN_VERSION` becomes 1.0.0 then). This replaces spec
+  decision 29's two-version rule for the 0.x worlds.
+- **Q1 → (1):** the registry refuses packages with an `extension.wasm`, and a local or unsigned
+  install that has one warns in its install dialog.
+- **Q2 → (3):** interpreters and shells are allowed, with `args` patterns and a host list of
+  "runs any code" programs.
+- **Q5 → (2):** `workspace:edit` needs no gesture, and the edits are visible: undo per buffer, a
+  notification for multi-file or unopened files, the host never saves, fixed protected paths.
+- **Q8 → (1):** `agent:observe` sees full hunk text and comments for files inside the worktrees.
+- **Q10 → (1):** the T2 consent prompt is non-modal, with a 1 s guard and no keyboard answer.
+
+Still open, all technical (the coordinator decides): Q4, Q7 and Q14.
+
+So §1–§6 below describe 0.4 work, and the questions that remain for 0.3 are Q4, Q7 and Q14.
+
 1. **Close the `zed:extension` side door before T2 ships?** A Fyx package may also contain an
    `extension.wasm` (`zed:extension`), whose `fetch`/`fetch_stream` have no capability check and
    whose `process:exec` is granted for `*` by default (§8 threat 1, §9 threat 8). With it, §8's
@@ -1283,10 +1305,8 @@ and its kind (product or technical), for the full 0.3 and for the smaller 0.3 of
    for files inside the worktrees, nothing for files outside, opaque ids (§11); the alternative,
    metadata only (paths and counts), makes review dashboards possible but not review-aware linters.
 9. **Version lifetime once 1.0 follows 0.3.** Decision 29 removes 0.1 "in 0.4", which never ships.
-   **Open, the owner's decision.** The owner's rule, applied as written, removes 0.1 in 1.0 and 0.2
-   in 1.1. Integration-5 (decision 4) recommends keeping both through all of 1.x. 0.3 stays as long
-   as 1.0, since it is the same world under another package version. The options are in
-   [open-questions.md](open-questions.md#q9-version-lifetime-open-the-owners-decision).
+   **Decided 2026-11-19 (owner):** no support for pre-1.0 versions. The frozen 0.3 becomes
+   `fyx:ui@1.0.0`, and loading 0.1 and 0.2 is removed at the 1.0 cut.
 10. **Consent prompt form.** *Recommended:* the non-modal notification of §7 with the 1 s guard and
     no keyboard answer; a modal dialog would interrupt typing and be answered by reflex.
 11. **Picker contributions across extensions.** *Recommended:* only into pickers that opt in
