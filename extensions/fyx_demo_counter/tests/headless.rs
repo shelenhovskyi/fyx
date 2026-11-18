@@ -7,7 +7,7 @@ use fyx_ext_harness::Harness;
 fn harness() -> Option<Harness> {
     match Harness::from_env() {
         Ok(harness) => Some(harness),
-        Err(error) if std::env::var_os(fyx_ext_harness::COMPONENT_VARIABLE).is_none() => {
+        Err(error) if !fyx_ext_harness::variables_set() => {
             eprintln!("skipped, run `fyx-ext test`: {error}");
             None
         }

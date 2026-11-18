@@ -142,14 +142,14 @@ fn counter_follows_its_contract() {
     assert_eq!(harness.api_version(), &Version::new(0, 1, 0));
     assert_eq!(
         harness
-            .surfaces()
+            .surfaces_v0_1()
             .iter()
             .map(|surface| surface.id.as_str())
             .collect::<Vec<_>>(),
         ["counter"]
     );
     assert!(
-        harness.event("counter", UiEvent::Click(5)).is_err(),
+        harness.event_v0_1("counter", UiEvent::Click(5)).is_err(),
         "not mounted yet"
     );
     assert!(harness.mount("nope").is_err());
@@ -157,14 +157,13 @@ fn counter_follows_its_contract() {
     let ids = harness
         .mount("counter")
         .expect("mount")
-        .to_nodes()
         .iter()
         .map(|node| node.id)
         .collect::<Vec<_>>();
     assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(harness.text("counter", 2), Some("Count: 0"));
 
-    let outcome = harness.click("counter", "Increment").expect("click");
+    let outcome = harness.click_v0_1("counter", "Increment").expect("click");
     assert!(outcome.pushed.is_empty());
     assert!(
         outcome.touched.contains(&2) && outcome.touched.contains(&7),
@@ -173,7 +172,7 @@ fn counter_follows_its_contract() {
     assert_eq!(harness.text("counter", 2), Some("Count: 1"));
     assert_eq!(harness.find_text("counter", "Count: 1"), Some(2));
 
-    let rows = harness.rows("counter", 7, 0, 10).expect("rows");
+    let rows = harness.rows_v0_1("counter", 7, 0, 10).expect("rows");
     assert_eq!(rows.len(), 1);
     let (index, row) = &rows[0];
     assert_eq!(*index, 0);
@@ -185,7 +184,7 @@ fn counter_follows_its_contract() {
         "{row:?}"
     );
 
-    let remounted = harness.mount("counter").expect("remount");
+    let remounted = harness.mount_v0_1("counter").expect("remount");
     assert_eq!(remounted.roots(), [8]);
     assert!(harness.disabled().is_none());
 }
@@ -195,13 +194,13 @@ fn typed_text_is_written_before_the_event() {
     let mut harness = Harness::load(&todo_wasm()).expect("load");
     harness.mount("todos").expect("mount");
     let input = harness
-        .find("todos", |props| matches!(props, Props::Input(_)))
+        .find_v0_1("todos", |props| matches!(props, Props::Input(_)))
         .expect("the filter input");
     harness
-        .event("todos", UiEvent::InputChanged(input, "main".into()))
+        .event_v0_1("todos", UiEvent::InputChanged(input, "main".into()))
         .expect("typing");
     match harness
-        .tree("todos")
+        .tree_v0_1("todos")
         .and_then(|tree| tree.get(input))
         .map(TreeNode::props)
     {
@@ -210,7 +209,7 @@ fn typed_text_is_written_before_the_event() {
     }
     assert!(
         harness
-            .find("todos", |props| matches!(
+            .find_v0_1("todos", |props| matches!(
                 props,
                 Props::Text(text) if text.content.starts_with("2 of")
             ))
@@ -222,10 +221,10 @@ fn typed_text_is_written_before_the_event() {
 #[test]
 fn pushes_come_before_the_reply_and_failures_keep_them() {
     let mut harness = Harness::load(&probe_wasm()).expect("load");
-    assert!(harness.surfaces().is_empty());
+    assert!(harness.surfaces_v0_1().is_empty());
 
     let reply = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_PATCH))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_PATCH))
         .expect("call");
     assert_eq!(reply.pushed.len(), 1);
     assert!(matches!(
@@ -238,7 +237,7 @@ fn pushes_come_before_the_reply_and_failures_keep_them() {
     ));
 
     let reply = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH))
         .expect("call");
     assert_eq!(reply.value, Ok(Update::Unchanged));
     assert!(
@@ -250,11 +249,11 @@ fn pushes_come_before_the_reply_and_failures_keep_them() {
     );
 
     let reply = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_FAIL))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH_THEN_FAIL))
         .expect("call");
     assert_eq!(reply.value, Err("failed after pushing".to_string()));
     assert_eq!(reply.pushed.len(), 1);
-    assert_eq!(harness.pushed().len(), 3);
+    assert_eq!(harness.pushed_v0_1().len(), 3);
     assert!(
         harness.disabled().is_none(),
         "a guest error does not disable"
@@ -265,7 +264,7 @@ fn pushes_come_before_the_reply_and_failures_keep_them() {
 fn a_push_flood_traps_and_disables() {
     let mut harness = Harness::load(&probe_wasm()).expect("load");
     let error = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_FLOOD))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH_FLOOD))
         .expect_err("the 65th push traps");
     assert!(
         format!("{error:#}").contains("pushed more than 64"),
@@ -273,7 +272,7 @@ fn a_push_flood_traps_and_disables() {
     );
     assert!(harness.disabled().is_some());
     let error = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH))
         .expect_err("disabled");
     assert!(error.to_string().contains("disabled"), "{error}");
 }
@@ -284,7 +283,7 @@ fn a_push_flood_traps_and_disables() {
 fn growing_past_the_memory_cap_traps_and_disables() {
     let mut harness = Harness::load(&probe_wasm()).expect("load");
     harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
         .expect_err("300 MiB is over the 256 MiB cap");
     assert!(harness.disabled().is_some());
 }
@@ -294,7 +293,7 @@ fn growing_past_the_memory_cap_traps_and_disables() {
 fn per_call_item_and_text_caps_trap_as_in_the_host() {
     let mut harness = Harness::load(&probe_wasm()).expect("load");
     let error = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_BULK))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH_BULK))
         .expect_err("40 pushes of 200 patches are over 4096 items");
     assert!(
         format!("{error:#}").contains("patches and nodes in one call"),
@@ -303,14 +302,14 @@ fn per_call_item_and_text_caps_trap_as_in_the_host() {
 
     let mut harness = Harness::load(&probe_wasm()).expect("load");
     let error = harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::PUSH_TEXT))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::PUSH_TEXT))
         .expect_err("20 MiB of text is over 16 MiB");
     assert!(format!("{error:#}").contains("bytes of text"), "{error:#}");
 
     // A 1 MiB log line is under the text cap, and kept cut to 16 KiB.
     let mut harness = Harness::load(&probe_wasm()).expect("load");
     harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::LOG_LONG))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::LOG_LONG))
         .expect("under the cap");
     let (_, message) = harness.logs().last().expect("logged");
     assert!(
@@ -326,7 +325,7 @@ fn a_runaway_call_is_stopped_by_the_budget() {
     let mut harness = Harness::load(&probe_wasm()).expect("load");
     let started = Instant::now();
     harness
-        .handle_event_raw(probe::SURFACE, UiEvent::Click(probe::SPIN))
+        .handle_event_raw_v0_1(probe::SURFACE, UiEvent::Click(probe::SPIN))
         .expect_err("over budget");
     assert!(started.elapsed() < INIT_BUDGET, "{:?}", started.elapsed());
     assert!(harness.disabled().is_some());
@@ -373,11 +372,11 @@ fn v0_2_loads_with_static_and_added_surfaces() {
     assert_eq!(harness.api_version(), &Version::new(0, 2, 0));
     assert_eq!(harness.ui_api_version(), ApiVersion::V0_2_0);
     assert_eq!(
-        ids(harness.surfaces_v0_2().iter().map(|s| s.id.as_str())),
+        ids(harness.surfaces().iter().map(|s| s.id.as_str())),
         ["main", "picker", "boot"]
     );
     assert_eq!(
-        ids(harness.surfaces().iter().map(|s| s.id.as_str())),
+        ids(harness.surfaces_v0_1().iter().map(|s| s.id.as_str())),
         ["main", "boot"],
         "the 0.1 view leaves the modal out"
     );
@@ -386,16 +385,13 @@ fn v0_2_loads_with_static_and_added_surfaces() {
         [HostEffect::AddSurface(surface)] if surface.id == "boot"
     ));
     assert!(matches!(
-        &harness.surfaces_v0_2()[0].kind,
+        &harness.surfaces()[0].kind,
         model::SurfaceKind::Panel(panel) if panel.icon == model::IconRef::Frozen(model::Icon::Sparkle)
     ));
 
     let error = harness.mount(fixture::PICKER).expect_err("not shown");
     assert!(error.to_string().contains("not shown"), "{error}");
-    assert_eq!(
-        harness.mount("boot").expect("mount boot").to_nodes().len(),
-        1
-    );
+    assert_eq!(harness.mount("boot").expect("mount boot").len(), 1);
 
     let error = Harness::load_with_capabilities(&fixture_v0_2_wasm(), &["ui:panel"])
         .err()
@@ -408,7 +404,7 @@ fn ticks_are_requested_clamped_and_run_on_demand() {
     let mut harness = loaded_fixture();
     assert!(harness.tick(fixture::MAIN).is_err(), "nothing requested");
 
-    let outcome = harness.click_v0_2(fixture::MAIN, "Tick").expect("click");
+    let outcome = harness.click(fixture::MAIN, "Tick").expect("click");
     assert_eq!(
         outcome.effects,
         [HostEffect::RequestTick {
@@ -431,7 +427,7 @@ fn ticks_are_requested_clamped_and_run_on_demand() {
     assert_eq!(harness.pending_tick(fixture::MAIN), None, "one-shot");
 
     harness
-        .click_v0_2(fixture::MAIN, "Failing ticks")
+        .click(fixture::MAIN, "Failing ticks")
         .expect("click");
     for _ in 0..MAX_CONSECUTIVE_TICK_ERRORS {
         let error = harness.tick(fixture::MAIN).expect_err("fails");
@@ -444,7 +440,7 @@ fn ticks_are_requested_clamped_and_run_on_demand() {
     let error = harness.tick(fixture::MAIN).expect_err("stopped");
     assert!(error.to_string().contains("stopped"), "{error}");
     harness
-        .event_v0_2(fixture::MAIN, model::UiEvent::Click(fixture::TICKS))
+        .event(fixture::MAIN, model::UiEvent::Click(fixture::TICKS))
         .expect("an event resumes ticks");
     let error = harness.tick(fixture::MAIN).expect_err("still failing");
     assert!(format!("{error:#}").contains("tick failed"), "{error:#}");
@@ -455,7 +451,7 @@ fn ticks_are_requested_clamped_and_run_on_demand() {
 fn a_modal_needs_a_gesture_mounts_when_shown_and_closes() {
     let mut harness = loaded_fixture();
     harness
-        .event_v0_2(
+        .event(
             fixture::MAIN,
             model::UiEvent::InputChanged(fixture::INPUT, "open".into()),
         )
@@ -467,31 +463,29 @@ fn a_modal_needs_a_gesture_mounts_when_shown_and_closes() {
     );
     assert!(!harness.is_shown(fixture::PICKER));
 
-    harness
-        .click_v0_2(fixture::MAIN, "Open picker")
-        .expect("click");
+    harness.click(fixture::MAIN, "Open picker").expect("click");
     assert_eq!(
         harness.text(fixture::MAIN, fixture::STATUS),
         Some("status: ok")
     );
     assert!(harness.is_shown(fixture::PICKER));
     assert!(matches!(
-        harness.props_v0_2(fixture::PICKER, fixture::PICKER_INPUT),
+        harness.props(fixture::PICKER, fixture::PICKER_INPUT),
         Some(model::Props::Input(input)) if input.secret
     ));
     assert!(matches!(
-        harness.props_v0_2(fixture::PICKER, fixture::PICKER_CLOSE),
+        harness.props(fixture::PICKER, fixture::PICKER_CLOSE),
         Some(model::Props::Button(button)) if button.tooltip.as_deref() == Some("Close the picker")
     ));
 
     harness
-        .event_v0_2(
+        .event(
             fixture::PICKER,
             model::UiEvent::RowSelected(fixture::PICKER_LIST, 2),
         )
         .expect("select");
     assert!(matches!(
-        harness.props_v0_2(fixture::PICKER, fixture::PICKER_LIST),
+        harness.props(fixture::PICKER, fixture::PICKER_LIST),
         Some(model::Props::List(list)) if list.selected == Some(2)
     ));
     assert_eq!(
@@ -500,7 +494,7 @@ fn a_modal_needs_a_gesture_mounts_when_shown_and_closes() {
     );
 
     let outcome = harness
-        .event_v0_2(
+        .event(
             fixture::PICKER,
             model::UiEvent::InputSubmitted(fixture::PICKER_INPUT, "x".into()),
         )
@@ -510,15 +504,13 @@ fn a_modal_needs_a_gesture_mounts_when_shown_and_closes() {
         [HostEffect::HideSurface { .. }, HostEffect::Push { surface_id, .. }] if surface_id == fixture::MAIN
     ));
     assert!(!harness.is_shown(fixture::PICKER));
-    assert!(harness.tree(fixture::PICKER).is_none());
+    assert!(harness.tree_v0_1(fixture::PICKER).is_none());
     assert_eq!(
         harness.text(fixture::MAIN, fixture::STATUS),
         Some("status: picked 2")
     );
 
-    harness
-        .click_v0_2(fixture::MAIN, "Open picker")
-        .expect("click");
+    harness.click(fixture::MAIN, "Open picker").expect("click");
     assert_eq!(
         harness.text(fixture::PICKER, fixture::PICKER_SELECTED),
         Some("selected: none"),
@@ -542,9 +534,7 @@ fn a_modal_needs_a_gesture_mounts_when_shown_and_closes() {
             .is_err()
     );
 
-    harness
-        .click_v0_2(fixture::MAIN, "Open later")
-        .expect("click");
+    harness.click(fixture::MAIN, "Open later").expect("click");
     harness.tick(fixture::MAIN).expect("tick");
     assert!(
         harness.is_shown(fixture::PICKER),
@@ -559,40 +549,32 @@ fn a_modal_needs_a_gesture_mounts_when_shown_and_closes() {
 #[test]
 fn runtime_surfaces_and_decorations() {
     let mut harness = loaded_fixture();
-    harness
-        .click_v0_2(fixture::MAIN, "Add clock")
-        .expect("click");
-    assert!(harness.surfaces_v0_2().iter().any(|s| s.id == "clock"));
+    harness.click(fixture::MAIN, "Add clock").expect("click");
+    assert!(harness.surfaces().iter().any(|s| s.id == "clock"));
     harness.mount("clock").expect("mount clock");
     assert_eq!(harness.text("clock", 1), Some("clock"));
 
-    harness
-        .click_v0_2(fixture::MAIN, "Remove clock")
-        .expect("click");
+    harness.click(fixture::MAIN, "Remove clock").expect("click");
     assert_eq!(
         harness.text(fixture::MAIN, fixture::STATUS),
         Some("status: ok, push unknown-surface"),
         "checked against the live set as of that point in the call"
     );
-    assert!(!harness.surfaces_v0_2().iter().any(|s| s.id == "clock"));
-    assert!(harness.tree("clock").is_none());
+    assert!(!harness.surfaces().iter().any(|s| s.id == "clock"));
+    assert!(harness.tree_v0_1("clock").is_none());
 
-    harness
-        .click_v0_2(fixture::MAIN, "Place note")
-        .expect("click");
+    harness.click(fixture::MAIN, "Place note").expect("click");
     assert_eq!(harness.decoration("note").map(|l| l.line), Some(3));
     harness
-        .click_v0_2("note", "Ack")
+        .click("note", "Ack")
         .expect("an event on a decoration");
     assert_eq!(harness.text("note", 2), Some("acked"));
-    harness
-        .click_v0_2(fixture::MAIN, "Remove note")
-        .expect("click");
+    harness.click(fixture::MAIN, "Remove note").expect("click");
     assert_eq!(harness.decorations().count(), 0);
-    assert!(harness.tree("note").is_none());
+    assert!(harness.tree_v0_1("note").is_none());
 
     harness
-        .click_v0_2(fixture::MAIN, "Place bad note")
+        .click(fixture::MAIN, "Place bad note")
         .expect("click");
     assert_eq!(
         harness.text(fixture::MAIN, fixture::STATUS),
@@ -615,9 +597,7 @@ fn runtime_surfaces_and_decorations() {
     )
     .expect("load");
     harness.mount(fixture::MAIN).expect("mount");
-    harness
-        .click_v0_2(fixture::MAIN, "Place note")
-        .expect("click");
+    harness.click(fixture::MAIN, "Place note").expect("click");
     assert_eq!(
         harness.text(fixture::MAIN, fixture::STATUS),
         Some("status: not-permitted")
@@ -627,9 +607,7 @@ fn runtime_surfaces_and_decorations() {
 #[test]
 fn invalidate_rows_and_indent() {
     let mut harness = loaded_fixture();
-    let outcome = harness
-        .click_v0_2(fixture::MAIN, "Refresh rows")
-        .expect("click");
+    let outcome = harness.click(fixture::MAIN, "Refresh rows").expect("click");
     assert_eq!(
         outcome.invalidated,
         [model::InvalidateRowsOp {
@@ -638,7 +616,9 @@ fn invalidate_rows_and_indent() {
         }]
     );
     assert!(outcome.touched.contains(&fixture::LIST));
-    let outcome = harness.click(fixture::MAIN, "Refresh rows").expect("click");
+    let outcome = harness
+        .click_v0_1(fixture::MAIN, "Refresh rows")
+        .expect("click");
     assert_eq!(
         outcome.update,
         Update::Patches(Vec::new()),
@@ -646,7 +626,7 @@ fn invalidate_rows_and_indent() {
     );
 
     let rows = harness
-        .rows_v0_2(fixture::MAIN, fixture::LIST, 0, 10)
+        .rows(fixture::MAIN, fixture::LIST, 0, 10)
         .expect("rows");
     assert_eq!(
         rows.iter()
@@ -659,7 +639,7 @@ fn invalidate_rows_and_indent() {
 #[test]
 fn pushes_past_the_cap_return_limit_exceeded() {
     let mut harness = loaded_fixture();
-    let outcome = harness.click_v0_2(fixture::MAIN, "Flood").expect("click");
+    let outcome = harness.click(fixture::MAIN, "Flood").expect("click");
     assert_eq!(
         harness.text(fixture::MAIN, fixture::STATUS),
         Some("status: ok*64 limit-exceeded*6")
@@ -673,10 +653,10 @@ fn the_counter_demo_runs_as_0_2() {
     let mut harness = Harness::load(&counter_v0_2_wasm()).expect("load");
     assert_eq!(harness.ui_api_version(), ApiVersion::V0_2_0);
     harness.mount("counter").expect("mount");
-    harness.click("counter", "Increment").expect("click");
+    harness.click_v0_1("counter", "Increment").expect("click");
     assert_eq!(harness.text("counter", 2), Some("Count: 1"));
     assert!(matches!(
-        harness.props_v0_2("counter", 5),
+        harness.props("counter", 5),
         Some(model::Props::Button(button)) if button.icon == Some(model::IconRef::Frozen(model::Icon::Plus))
     ));
 }

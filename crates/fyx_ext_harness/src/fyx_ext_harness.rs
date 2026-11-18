@@ -5,12 +5,12 @@
 //! Apache-2.0, like the SDK, so extensions can use it as a dev-dependency, and host-only, so the
 //! SDK itself never pulls in wasmtime.
 //!
-//! It runs components of `fyx:ui` 0.1 and 0.2. Internally every value is the 0.2 model
-//! (`ui_ext::v0_2`), into which 0.1 data converts without loss. The `*_v0_2` methods and
-//! [`Outcome`] show the 0.2 model; the older methods show the 0.1 model, which is lossless for a
-//! 0.1 component and drops tooltips, `secret`, input labels, `selected`, `indent`,
-//! `invalidate-rows`, modals and every effect but pushes for a 0.2 one, as the host's 0.1 view
-//! does.
+//! It runs components of `fyx:ui` 0.1, 0.2 and the staged 0.3. Internally every value is the
+//! newest model (`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data
+//! converts without loss. The unsuffixed methods and [`Outcome`] show that model (decision D5);
+//! the `*_v0_1` methods show the 0.1 model, which is lossless for a 0.1 component and drops
+//! tooltips, `secret`, input labels, `selected`, `indent`, `invalidate-rows`, modals, images and
+//! every effect but pushes for a newer one, as the host's 0.1 view does.
 //!
 //! What it shares with Fyx and what it mirrors:
 //! - Trees, patches, id rules, caps and capability checks are `ui_ext`'s, the same model and
@@ -112,6 +112,13 @@ pub const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 3;
 pub const COMPONENT_VARIABLE: &str = "FYX_EXT_COMPONENT";
 /// `fyx-ext test` sets it to the extension folder; [`Harness::from_env`] prefers it.
 pub const PACKAGE_VARIABLE: &str = "FYX_EXT_PACKAGE";
+
+/// Whether [`PACKAGE_VARIABLE`] or [`COMPONENT_VARIABLE`] is set, as under `fyx-ext test`. A
+/// headless test skips when neither is, and fails when [`Harness::from_env`] fails although one
+/// is.
+pub fn variables_set() -> bool {
+    std::env::var_os(PACKAGE_VARIABLE).is_some() || std::env::var_os(COMPONENT_VARIABLE).is_some()
+}
 /// What [`Harness::load`] grants: every `[fyx_ui].capabilities` entry a component can use.
 pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_PANEL,
@@ -937,37 +944,39 @@ impl Harness {
         self.ui_api_version
     }
 
-    /// The live surfaces in the 0.1 model; a 0.2 component's modals are left out.
-    pub fn surfaces(&self) -> &[ui_ext::Surface] {
-        &self.surfaces_v0_1
+    /// The live surfaces: the static ones, then those `add-surface` added, minus removed ones.
+    pub fn surfaces(&self) -> &[model::Surface] {
+        &self.surfaces
     }
 
-    /// The live surfaces: the static ones, then those `add-surface` added, minus removed ones.
-    pub fn surfaces_v0_2(&self) -> &[model::Surface] {
-        &self.surfaces
+    /// [`Harness::surfaces`] in the 0.1 model; a 0.2 component's modals are left out.
+    pub fn surfaces_v0_1(&self) -> &[ui_ext::Surface] {
+        &self.surfaces_v0_1
     }
 
     pub fn limits(&self) -> TreeLimits {
         self.limits
     }
 
-    /// The tree of a mounted surface or decoration, as the host holds it.
-    pub fn tree(&self, surface_id: &str) -> Option<&Tree> {
-        self.mounted.get(surface_id).map(|mounted| &mounted.tree)
-    }
-
-    /// The tree of a mounted surface or decoration in the 0.2 model, parents first.
-    pub fn nodes_v0_2(&self, surface_id: &str) -> Option<Vec<model::Node>> {
+    /// The tree of a mounted surface or decoration, parents first.
+    pub fn nodes(&self, surface_id: &str) -> Option<Vec<model::Node>> {
         self.mounted.get(surface_id).map(Mounted::nodes)
     }
 
-    /// The 0.2 props of one node of a mounted surface or decoration.
-    pub fn props_v0_2(&self, surface_id: &str, id: NodeId) -> Option<&model::Props> {
+    /// The props of one node of a mounted surface or decoration.
+    pub fn props(&self, surface_id: &str, id: NodeId) -> Option<&model::Props> {
         self.mounted.get(surface_id)?.props.get(&id)
     }
 
-    /// Every update pushed so far, in order, in the 0.1 model.
-    pub fn pushed(&self) -> &[Pushed] {
+    /// The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds
+    /// it.
+    pub fn tree_v0_1(&self, surface_id: &str) -> Option<&Tree> {
+        self.mounted.get(surface_id).map(|mounted| &mounted.tree)
+    }
+
+    /// Every update pushed so far, in order, in the 0.1 model; [`Harness::effects`] holds them in
+    /// the newest one.
+    pub fn pushed_v0_1(&self) -> &[Pushed] {
         &self.pushed
     }
 
@@ -986,7 +995,7 @@ impl Harness {
         self.shown_modals.contains(surface_id)
     }
 
-    /// Where a live decoration is placed; its tree is [`Harness::tree`] of its id.
+    /// Where a live decoration is placed; its tree is [`Harness::nodes`] of its id.
     pub fn decoration(&self, id: &str) -> Option<&model::DecorationLocation> {
         self.decorations.get(id)
     }
@@ -1008,8 +1017,19 @@ impl Harness {
     }
 
     /// Mounts a live surface or decoration (again, if it was mounted) and returns its validated
-    /// tree. A modal mounts only while it is shown.
-    pub fn mount(&mut self, surface_id: &str) -> Result<&Tree> {
+    /// tree, parents first. A modal mounts only while it is shown.
+    pub fn mount(&mut self, surface_id: &str) -> Result<Vec<model::Node>> {
+        self.mount_checked(surface_id)?;
+        Ok(self.mounted[surface_id].nodes())
+    }
+
+    /// [`Harness::mount`], returning the tree in the 0.1 model.
+    pub fn mount_v0_1(&mut self, surface_id: &str) -> Result<&Tree> {
+        self.mount_checked(surface_id)?;
+        Ok(&self.mounted[surface_id].tree)
+    }
+
+    fn mount_checked(&mut self, surface_id: &str) -> Result<()> {
         let live = self.store.data().api.live();
         anyhow::ensure!(
             live.surface_kind(surface_id).is_some() || live.is_decoration(surface_id),
@@ -1025,19 +1045,13 @@ impl Harness {
             );
         }
         self.mount_now(surface_id)?;
-        Ok(&self.mounted[surface_id].tree)
-    }
-
-    /// Sends one event to a mounted surface and applies what it pushed and replied (0.1 model).
-    pub fn event(&mut self, surface_id: &str, event: ui_ext::UiEvent) -> Result<EventOutcome> {
-        self.event_v0_2(surface_id, event.into())
-            .map(EventOutcome::from)
+        Ok(())
     }
 
     /// Sends one event to a mounted surface or decoration and applies its effects, then its reply.
     /// Typed text and a `row-selected` selection are written into the tree first. Use
     /// [`Harness::dismiss`] for `dismissed`.
-    pub fn event_v0_2(&mut self, surface_id: &str, event: model::UiEvent) -> Result<Outcome> {
+    pub fn event(&mut self, surface_id: &str, event: model::UiEvent) -> Result<Outcome> {
         anyhow::ensure!(
             !matches!(event, model::UiEvent::Dismissed(_)),
             "send dismissed with Harness::dismiss, which closes the modal first"
@@ -1051,23 +1065,15 @@ impl Harness {
         self.finish(surface_id, "handle-event", result, effects)
     }
 
-    /// Calls `handle-event` without a mounted surface or applying the reply: what the host
-    /// runtime does before the renderer applies anything. Pushes are applied and recorded as
-    /// usual. `Err` means the call trapped or overran its budget, which disables the extension.
-    pub fn handle_event_raw(
-        &mut self,
-        surface_id: &str,
-        event: ui_ext::UiEvent,
-    ) -> Result<RawReply<ui_ext::Update>> {
-        let raw = self.handle_event_raw_v0_2(surface_id, event.into())?;
-        Ok(RawReply {
-            pushed: shim::pushes(&raw.effects),
-            value: raw.value.map(shim::update),
-        })
+    /// [`Harness::event`] in the 0.1 model: the pushes and the reply only.
+    pub fn event_v0_1(&mut self, surface_id: &str, event: ui_ext::UiEvent) -> Result<EventOutcome> {
+        self.event(surface_id, event.into()).map(EventOutcome::from)
     }
 
-    /// [`Harness::handle_event_raw`] in the 0.2 model, with every effect.
-    pub fn handle_event_raw_v0_2(
+    /// Calls `handle-event` without a mounted surface or applying the reply: what the host
+    /// runtime does before the renderer applies anything. Effects are applied and recorded as
+    /// usual. `Err` means the call trapped or overran its budget, which disables the extension.
+    pub fn handle_event_raw(
         &mut self,
         surface_id: &str,
         event: model::UiEvent,
@@ -1076,6 +1082,19 @@ impl Harness {
         let follow_ups = self.apply_effects(&effects);
         self.run_follow_ups(follow_ups);
         Ok(RawEffects { effects, value })
+    }
+
+    /// [`Harness::handle_event_raw`] in the 0.1 model: the pushes and the reply only.
+    pub fn handle_event_raw_v0_1(
+        &mut self,
+        surface_id: &str,
+        event: ui_ext::UiEvent,
+    ) -> Result<RawReply<ui_ext::Update>> {
+        let raw = self.handle_event_raw(surface_id, event.into())?;
+        Ok(RawReply {
+            pushed: shim::pushes(&raw.effects),
+            value: raw.value.map(shim::update),
+        })
     }
 
     /// Closes a shown modal as the user would: its tree and pending tick go first, then
@@ -1136,24 +1155,9 @@ impl Harness {
         self.finish(surface_id, "tick", result, effects)
     }
 
-    /// Rows `start..start + count` of a list, each validated as a single-root tree (0.1 model).
-    pub fn rows(
-        &mut self,
-        surface_id: &str,
-        list: NodeId,
-        start: u32,
-        count: u32,
-    ) -> Result<Vec<(u32, Tree)>> {
-        Ok(self
-            .rows_checked(surface_id, list, start, count)?
-            .into_iter()
-            .map(|(row, tree)| (row.index, tree))
-            .collect())
-    }
-
     /// Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as
     /// the extension sent it.
-    pub fn rows_v0_2(
+    pub fn rows(
         &mut self,
         surface_id: &str,
         list: NodeId,
@@ -1167,17 +1171,44 @@ impl Harness {
             .collect())
     }
 
+    /// [`Harness::rows`] in the 0.1 model: each row's index and tree.
+    pub fn rows_v0_1(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<(u32, Tree)>> {
+        Ok(self
+            .rows_checked(surface_id, list, start, count)?
+            .into_iter()
+            .map(|(row, tree)| (row.index, tree))
+            .collect())
+    }
+
     /// The content of a text node.
     pub fn text(&self, surface_id: &str, id: NodeId) -> Option<&str> {
-        match self.tree(surface_id)?.get(id).map(TreeNode::props) {
-            Some(Props::Text(text)) => Some(&text.content),
+        match self.props(surface_id, id)? {
+            model::Props::Text(text) => Some(&text.content),
             _ => None,
         }
     }
 
     /// The first node in tree order whose props match.
-    pub fn find(&self, surface_id: &str, matches: impl Fn(&Props) -> bool) -> Option<NodeId> {
-        self.tree(surface_id)?
+    pub fn find(
+        &self,
+        surface_id: &str,
+        matches: impl Fn(&model::Props) -> bool,
+    ) -> Option<NodeId> {
+        self.nodes(surface_id)?
+            .into_iter()
+            .find(|node| matches(&node.props))
+            .map(|node| node.id)
+    }
+
+    /// [`Harness::find`] over the 0.1 model of the tree.
+    pub fn find_v0_1(&self, surface_id: &str, matches: impl Fn(&Props) -> bool) -> Option<NodeId> {
+        self.tree_v0_1(surface_id)?
             .to_nodes()
             .into_iter()
             .find(|node| matches(&node.props))
@@ -1187,28 +1218,76 @@ impl Harness {
     pub fn find_text(&self, surface_id: &str, content: &str) -> Option<NodeId> {
         self.find(
             surface_id,
-            |props| matches!(props, Props::Text(text) if text.content == content),
+            |props| matches!(props, model::Props::Text(text) if text.content == content),
         )
     }
 
     pub fn find_button(&self, surface_id: &str, label: &str) -> Option<NodeId> {
         self.find(
             surface_id,
-            |props| matches!(props, Props::Button(button) if button.label == label),
+            |props| matches!(props, model::Props::Button(button) if button.label == label),
         )
     }
 
-    /// Clicks the first button with this label (0.1 model).
-    pub fn click(&mut self, surface_id: &str, label: &str) -> Result<EventOutcome> {
-        self.click_v0_2(surface_id, label).map(EventOutcome::from)
-    }
-
     /// Clicks the first button with this label.
-    pub fn click_v0_2(&mut self, surface_id: &str, label: &str) -> Result<Outcome> {
+    pub fn click(&mut self, surface_id: &str, label: &str) -> Result<Outcome> {
         let button = self
             .find_button(surface_id, label)
             .with_context(|| format!("no button {label:?} on {surface_id:?}"))?;
-        self.event_v0_2(surface_id, model::UiEvent::Click(button))
+        self.event(surface_id, model::UiEvent::Click(button))
+    }
+
+    /// [`Harness::click`] in the 0.1 model.
+    pub fn click_v0_1(&mut self, surface_id: &str, label: &str) -> Result<EventOutcome> {
+        self.click(surface_id, label).map(EventOutcome::from)
+    }
+
+    // The names before decision D5, for callers outside this crate until they move to the
+    // unsuffixed ones (the newest model). Not part of the documented API; removed later.
+
+    #[doc(hidden)]
+    pub fn surfaces_v0_2(&self) -> &[model::Surface] {
+        self.surfaces()
+    }
+
+    #[doc(hidden)]
+    pub fn nodes_v0_2(&self, surface_id: &str) -> Option<Vec<model::Node>> {
+        self.nodes(surface_id)
+    }
+
+    #[doc(hidden)]
+    pub fn props_v0_2(&self, surface_id: &str, id: NodeId) -> Option<&model::Props> {
+        self.props(surface_id, id)
+    }
+
+    #[doc(hidden)]
+    pub fn event_v0_2(&mut self, surface_id: &str, event: model::UiEvent) -> Result<Outcome> {
+        self.event(surface_id, event)
+    }
+
+    #[doc(hidden)]
+    pub fn handle_event_raw_v0_2(
+        &mut self,
+        surface_id: &str,
+        event: model::UiEvent,
+    ) -> Result<RawEffects<model::Update>> {
+        self.handle_event_raw(surface_id, event)
+    }
+
+    #[doc(hidden)]
+    pub fn rows_v0_2(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<model::ListRow>> {
+        self.rows(surface_id, list, start, count)
+    }
+
+    #[doc(hidden)]
+    pub fn click_v0_2(&mut self, surface_id: &str, label: &str) -> Result<Outcome> {
+        self.click(surface_id, label)
     }
 
     fn call_handle_event(
