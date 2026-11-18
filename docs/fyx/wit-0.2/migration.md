@@ -12,7 +12,7 @@ still build and run against 0.1 exactly as before.
 
 | What | Where | Notes |
 |---|---|---|
-| The 0.2 world, next to 0.1 | `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` | The design's WIT with a "STAGED" header and a `TODO` for section M. Parses with `wasm-tools component wit` 1.263.0; a dummy component embeds, builds and validates. The docs copy is gone, so there is one source. |
+| The 0.2 world, next to 0.1 | `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` | The design's WIT with a "STAGED" header and a `TODO` for section M. (Since 2026-11-18 section M is in it, W2c `700077009f`, and the host treats 0.2 as frozen: `MAX_FROZEN_VERSION = 0.2.0`, W2c `8abde04072`.) Parses with `wasm-tools component wit` 1.263.0; a dummy component embeds, builds and validates. The docs copy is gone, so there is one source. |
 | 0.1 world | `crates/ui_ext/wit/fyx-ui.wit` | Not moved and not edited (section 1). |
 | WIT paths | `ui_ext::WIT_DIR` (still 0.1), `WIT_DIR_V0_1_0`, `WIT_DIR_V0_2_0`, `ApiVersion::wit_dir` | |
 | 0.2 data model | `ui_ext::v0_2` (`crates/ui_ext/src/v0_2.rs`) | Every type of the 0.2 `types` interface plus `host-error`; the frozen `Icon` enum (101 cases, checked against the WIT by a test) and `IconRef { Frozen, Upstream }`; `From` every 0.1 type, `TryFrom<v0_2::UiEvent>` back to 0.1 (section 2, "Conversions"); `SurfaceKind::capability`; `Update::check_caps` (F's checks at the call); `ButtonProps::tooltip_text` (1024 bytes, cut at a character boundary); `ListRow::indent_levels` (clamped to 32). |
@@ -40,8 +40,9 @@ Design points this step had to settle (flag them in review):
 - **0.1 static surfaces** in `LiveIds::new(V0_1_0, …)` are checked only for the capability of
   their kind, as `check_surfaces` does today: any id, duplicates and any count are accepted. A
   modal is refused, since 0.1 cannot declare one.
-- **Section M** is not in the WIT: design.md has only a placeholder row, with no types for actions
-  or progress, no capability and no error codes. The WIT has a `TODO` where the interface goes.
+- **Section M** was not in the WIT at this point: design.md had only a placeholder row. It was
+  drafted on 2026-11-18 (design.md §M) and added to the WIT, in place of the `TODO`, with the host
+  side the same day (W2c `700077009f`).
 - **Not done here, because they change `Tree` under the renderer:** design G (`Patch::InvalidateRows`
   applied by `Tree`, `TreeError::NotAList`, the `Touched` result). They move to plan 2.3. The
   `replace` / `mount` cap of 16384 needed no change: `Tree` already checks `max_nodes` for both

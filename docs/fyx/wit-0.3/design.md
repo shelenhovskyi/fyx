@@ -1,10 +1,19 @@
 # `fyx:ui@0.3.0`: design draft
 
-Status: **draft for review** (platform plan 4.1). Nothing is decided and no code has changed. The
-world is in [`fyx-ui-0.3.wit`](fyx-ui-0.3.wit), next to this file. It parses with
-`wasm-tools component wit` (1.263.0), and a dummy component embedded from it validates with
-`wasm-tools component embed --dummy` + `component new` + `validate`. How 0.1, 0.2 and 0.3
-components coexist is in [`migration.md`](migration.md).
+Status (2026-11-19): **decided, staged, not frozen** (platform plan 4.1).
+- **Decided.** The owner chose the smaller 0.3 on 2026-11-19: images (§12), canvas (§13), T2 and
+  0.2's notifications. Plan 4.2–4.4 (decoration extras §1, the picker §2 and their parts of §0)
+  move to 0.4; those sections stay below as the 0.4 draft. Every question is answered in
+  [`open-questions.md`](open-questions.md): the product ones by the owner, Q4, Q7 and Q14 by the
+  coordinator.
+- **Staged and built.** The world is [`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`](../../../crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit), its one source: this folder's draft copy was
+  removed (integration-6 F2). The host links every interface it declares (integration-6 §2).
+- **Not frozen.** The freeze waits for the canvas benches (plan 4.13, 4.14) and W0's freeze
+  commit (integration-6).
+
+The sections below are the design as drafted, before those decisions. The staged WIT parses with
+`wasm-tools component wit` (1.263.0). How 0.1, 0.2 and 0.3 components coexist is in
+[`migration.md`](migration.md).
 
 Sources:
 - [Platform 1 spec](../platform/spec.md) decisions 21–30 and [plan](../platform/plan.md) tasks
@@ -630,8 +639,7 @@ result<http-response, fetch-error>)`. A host import, not WASI sockets (spec deci
   fails. Any other `content-encoding` gives `other`. A `content-length` above 16 MiB fails before
   the body is read.
 - **The WIT comment** on `headers` names `accept-encoding` among the host-set headers (W0,
-  e1da7d5e3f, in `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`; also in this folder's
-  `fyx-ui-0.3.wit`).
+  e1da7d5e3f, in `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`).
 - **Timeout.** 30 s for the whole request, redirects included; the guest may ask for less.
 
 **Limits.** 8 in flight (decision 23), 120 started per minute (token bucket), request body 4 MiB,
@@ -1267,9 +1275,11 @@ and its kind (product or technical), for the full 0.3 and for the smaller 0.3 of
 - **Q8 → (1):** `agent:observe` sees full hunk text and comments for files inside the worktrees.
 - **Q10 → (1):** the T2 consent prompt is non-modal, with a 1 s guard and no keyboard answer.
 
-Still open, all technical (the coordinator decides): Q4, Q7 and Q14.
+Q4 → (2), Q7 → (3) and Q14 → (1): decided by the coordinator on 2026-11-19
+([open-questions.md](open-questions.md)). The freeze waits for the canvas benches (plan 4.13,
+4.14).
 
-So §1–§6 below describe 0.4 work, and the questions that remain for 0.3 are Q4, Q7 and Q14.
+So §1–§6 below describe 0.4 work, and no question remains open for 0.3.
 
 1. **Decided 2026-11-19 (owner): accept, warn, always T2** (above). The original question and
    recommendation follow. **Close the `zed:extension` side door before T2 ships?** A Fyx package may also contain an

@@ -37,7 +37,7 @@ Cargo features (finding 3, migration.md §4), and the small points of finding 5.
 | J | `list-row.indent`, `button-props.tooltip` | backlog #8, W8 | **accepted**: indent on the row, not on flex |
 | K | `input-props.secret` | integration-2 W8-5 | **accepted** |
 | L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **accepted**, in 0.2 (decided 2026-11-17) |
-| M | Notifications and progress: `fyx:ui/notifications` with `notify` / `dismiss-notification`, `progress-start` / `-update` / `-end`, three owner events | [platform spec](../platform/spec.md) decision 22 | **drafted 2026-11-18, for review**; WIT diff in M.6, not yet in the landed WIT, which still has its `TODO` |
+| M | Notifications and progress: `fyx:ui/notifications` with `notify` / `dismiss-notification`, `progress-start` / `-update` / `-end`, three owner events | [platform spec](../platform/spec.md) decision 22 | **in the WIT**: drafted 2026-11-18, added to the WIT (M.6, in place of its `TODO`) with the host side the same day (W2c `700077009f`); copied unchanged into 0.3 |
 | — | Panel visibility events, surface rename, commands, raw colours, in-row node clicks, `ignoreFocusOut` | various | **rejected or deferred**; see [Rejected and deferred](#rejected-and-deferred) |
 
 Not changed: the flat tree, theme tokens only, the `mount` / `handle-event` / `list-rows`

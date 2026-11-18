@@ -478,9 +478,10 @@ package"), from Zed's installed-extensions directory, and from the environment v
   directory** (a folder copied there, or linked by upstream's "Install Dev Extension") waits for
   consent: Fyx shows a notification with the
   capabilities it asks for and loads it only after **Enable**. The answer is kept in
-  `<data dir>/fyx-ui-consent.json`, for those capabilities and that component (for a linked
-  folder, that folder). Asking for more capabilities, or a different component, asks again on the
-  next start.
+  `<data dir>/fyx-ui-consent.json`, for those capabilities (for a linked folder, for that
+  folder). Asking for more T1 or T2 capabilities asks again on the next start. A new build of the
+  component, or more T0 capabilities, does not: the consent is not tied to the component's hash
+  (decided, integration-6 R9).
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
   It works in dev builds only (ignored, with a log line, in Preview and Stable), and every window
   shows a banner while it is set.
