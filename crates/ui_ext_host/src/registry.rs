@@ -216,7 +216,9 @@ pub struct PendingConsent {
     /// Not empty for a held update: an extension enabled before that now asks for these T1
     /// capabilities as well (its old version keeps running, if loaded).
     pub new_capabilities: Vec<String>,
-    record: ConsentRecord,
+    /// Its folder also holds a Zed extension (`extension.wasm`, decision Q1).
+    pub zed_extension: bool,
+    pub(crate) record: ConsentRecord,
 }
 
 /// How a watched dev extension is loaded again.
@@ -251,6 +253,8 @@ struct Found {
     cache: Option<PrecompiledCache>,
     /// The manifest as read by this scan; the load uses this one, not a second read.
     manifest: UiManifest,
+    /// The folder also holds a Zed extension (`extension.wasm`).
+    zed_extension: bool,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -1683,6 +1687,7 @@ Environment it may pass: {}",
             capabilities: found.capabilities.clone(),
             is_dev: found.is_dev,
             new_capabilities,
+            zed_extension: found.zed_extension,
             record,
         });
         cx.notify();
@@ -2071,6 +2076,7 @@ async fn found_at(
         }
     };
     let component = extension_dir.join(&manifest.component);
+    let zed_extension = crate::install::has_zed_extension(&extension_dir, fs).await;
     match fs.metadata(&component).await {
         Ok(Some(metadata)) => Some(Found {
             fingerprint: Fingerprint {
@@ -2087,6 +2093,7 @@ async fn found_at(
             source,
             cache,
             manifest,
+            zed_extension,
         }),
         Ok(None) | Err(_) => {
             log::error!(
@@ -2693,6 +2700,34 @@ fn close_notification_view(open: OpenNotification, cx: &mut App) {
     }
 }
 
+/// The consent card's text: what it asks for, the Zed-extension warning when its folder has one
+/// (decision Q1), and a dev folder's path.
+pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
+    let folder = if pending.is_dev {
+        format!(" Folder: {}", pending.dir.display())
+    } else {
+        String::new()
+    };
+    let zed = if pending.zed_extension {
+        format!(" {}", crate::install::ZED_EXTENSION_WARNING)
+    } else {
+        String::new()
+    };
+    if pending.new_capabilities.is_empty() {
+        format!(
+            "The UI extension {} is installed but not enabled. It asks for: {}.{zed}{folder}",
+            pending.extension_id,
+            crate::install::describe_capability_ids(&pending.capabilities).join("; "),
+        )
+    } else {
+        format!(
+            "An update of the UI extension {} needs approval. It now also asks for: {}.{zed}{folder}",
+            pending.extension_id,
+            crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
+        )
+    }
+}
+
 /// One notification per installed extension waiting for consent, once per workspace: what it
 /// asks for, with "Enable" and "Not now". "Not now" leaves it unloaded until the next start.
 fn offer_consent(
@@ -2713,24 +2748,7 @@ fn offer_consent(
         {
             continue;
         }
-        let folder = if pending.is_dev {
-            format!(" Folder: {}", pending.dir.display())
-        } else {
-            String::new()
-        };
-        let message = if pending.new_capabilities.is_empty() {
-            format!(
-                "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
-                pending.extension_id,
-                crate::install::describe_capability_ids(&pending.capabilities).join("; "),
-            )
-        } else {
-            format!(
-                "An update of the UI extension {} needs approval. It now also asks for: {}.{folder}",
-                pending.extension_id,
-                crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
-            )
-        };
+        let message = consent_card_text(&pending);
         let update = !pending.new_capabilities.is_empty();
         let extension_id = pending.extension_id.clone();
         let registry = registry.downgrade();
