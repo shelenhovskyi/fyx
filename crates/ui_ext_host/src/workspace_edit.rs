@@ -73,6 +73,38 @@ pub(crate) fn unregister_workspace(id: EntityId, cx: &mut App) {
     }
 }
 
+/// Whether an extension may not see `abs_path`'s contents (integration-5 S1): it matches
+/// `file_scan_exclusions` or `private_files` (always, not only in shield mode), or `fyx_guard`
+/// refuses an agent read of it, in any open project that has it.
+pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
+    let Some(workspaces) = cx.try_global::<EditWorkspaces>() else {
+        return false;
+    };
+    workspaces.0.values().any(|registered| {
+        let Some(project) = registered.project.upgrade() else {
+            return false;
+        };
+        let project = project.read(cx);
+        let Some(project_path) = project.find_project_path(abs_path, cx) else {
+            return false;
+        };
+        let path = project_path.path.as_ref();
+        let settings = WorktreeSettings::get(
+            Some(SettingsLocation {
+                worktree_id: project_path.worktree_id,
+                path,
+            }),
+            cx,
+        );
+        let global = WorktreeSettings::get_global(cx);
+        settings.is_path_excluded(path)
+            || global.is_path_excluded(path)
+            || settings.is_path_private(path)
+            || global.is_path_private(path)
+            || fyx_guard::check_agent_read(project, &project_path, cx).is_err()
+    })
+}
+
 fn registered(
     worktree: &OpenWorktree,
     cx: &App,
@@ -441,10 +473,23 @@ fn check_target(
 }
 
 /// The file on disk (or the directory a new one goes into), links resolved, is inside its
-/// worktree's root.
+/// worktree's root. A file that is on disk though the worktree has no entry for it (an unscanned
+/// directory) is checked itself, links and size included, before it is loaded (integration-5 S8).
 async fn stays_inside(target: &Target) -> Result<(), EditError> {
     let root = target.fs.canonicalize(&target.root).await;
-    let on_disk = if target.exists {
+    let metadata = target.fs.metadata(&target.abs_path).await.ok().flatten();
+    if let Some(metadata) = &metadata {
+        if metadata.is_dir {
+            return Err(EditError::Invalid(format!(
+                "{} is a directory",
+                target.display
+            )));
+        }
+        if metadata.len > MAX_FILE_BYTES {
+            return Err(not_allowed(&target.display, "it is larger than 16 MiB"));
+        }
+    }
+    let on_disk = if target.exists || metadata.is_some() {
         target.abs_path.as_path()
     } else {
         target.abs_path.parent().unwrap_or(&target.root)

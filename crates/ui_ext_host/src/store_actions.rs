@@ -508,7 +508,10 @@ fn run(
                     store.uninstall(id, fs.as_ref()).await?;
                     cx.update(|_, cx| {
                         if let Some(registry) = UiExtensionRegistry::global(cx) {
-                            registry.update(cx, |registry, cx| registry.rescan(cx));
+                            registry.update(cx, |registry, cx| {
+                                registry.forget_consent(id, fs.clone(), cx);
+                                registry.rescan(cx)
+                            });
                         }
                     })?;
                     format!("Uninstalled {id}")
