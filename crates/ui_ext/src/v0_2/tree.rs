@@ -575,7 +575,6 @@ mod tests {
             max_nodes_per_update: 1,
             max_nodes: 3,
             max_depth: 2,
-            ..TreeLimits::default()
         };
         assert_eq!(
             Tree::from_nodes(
