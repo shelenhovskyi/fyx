@@ -316,38 +316,7 @@ pub struct UiManifest {
     /// 0.3, with `network:fetch`: the hosts the extension may fetch from (design.md §8).
     #[serde(default)]
     pub network: Option<NetworkManifest>,
-    /// 0.3: `[[fyx_ui.commands]]`, the commands the extension adds (design.md §5). Accepted and
-    /// checked; nothing runs them in this build yet.
-    #[serde(default)]
-    pub commands: Vec<CommandSpec>,
-    /// 0.3: `[[fyx_ui.picker_sources]]`, sources this extension adds to another's picker
-    /// (design.md §2). Accepted and checked; nothing calls them in this build yet.
-    #[serde(default)]
-    pub picker_sources: Vec<PickerSourceSpec>,
 }
-
-/// One `[[fyx_ui.commands]]` entry.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommandSpec {
-    pub id: String,
-    pub title: String,
-}
-
-/// One `[[fyx_ui.picker_sources]]` entry: `picker` is `"<extension>/<picker surface>"`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PickerSourceSpec {
-    pub id: String,
-    pub picker: String,
-}
-
-/// Commands one extension may declare (design.md §5).
-pub const MAX_COMMANDS: usize = 64;
-/// Bytes of a command title (design.md §5).
-pub const MAX_COMMAND_TITLE_BYTES: usize = 128;
-/// Picker sources one extension may declare.
-pub const MAX_PICKER_SOURCES: usize = 64;
 
 /// What each world's manifest may declare (wit-0.3/migration.md §2): a capability a world cannot
 /// use is an error, not a warning, so the install dialog never asks consent for it.
@@ -366,8 +335,23 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         CAPABILITY_EDITOR_DECORATIONS,
         ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
     ];
+    // The smaller 0.3 (owner, 2026-11-19): pickers, hover, code lenses, virtual documents,
+    // commands and document context are 0.4's, so their capabilities are refused here.
+    const V0_3: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+        ui_ext::image::CAPABILITY_IMAGES,
+        ui_ext::canvas::CAPABILITY_CANVAS,
+        network::CAPABILITY_NETWORK,
+        process::CAPABILITY_PROCESS,
+        edit::CAPABILITY_EDIT,
+        observe::CAPABILITY_OBSERVE,
+    ];
     if *version >= Version::new(0, 3, 0) {
-        &[]
+        V0_3
     } else if *version >= Version::new(0, 2, 0) {
         V0_2
     } else {
@@ -441,34 +425,35 @@ impl UiManifest {
     }
 
     /// What the manifest's world may declare (wit-0.3/migration.md §2): its capabilities, and the
-    /// 0.3 tables (`network`, `processes`, `process`, `commands`, `picker_sources`) only from 0.3
-    /// on. Also the `commands` and `picker_sources` rules (design.md §2, §5).
+    /// 0.3 tables (`network`, `processes`, `process`) only from 0.3 on.
     pub fn check_world(&self) -> Result<()> {
         let version = &self.api_version;
         let world = world_capabilities(version);
         for capability in &self.capabilities {
-            if world.is_empty() {
-                // 0.3: every capability this build knows, T2 included.
-                anyhow::ensure!(
-                    permissions::tier_of(capability).is_some(),
-                    "unknown capability {capability:?}"
-                );
-            } else if !world.contains(&capability.as_str()) {
-                // The first world that has it: 0.2 for `ui:notifications`, else 0.3.
-                let needs = if world_capabilities(&Version::new(0, 2, 0))
-                    .contains(&capability.as_str())
-                {
-                    "0.2"
-                } else {
-                    "0.3"
-                };
-                match permissions::tier_of(capability) {
-                    Some(_) => bail!(
-                        "capability {capability:?} needs fyx:ui {needs}; this extension targets \
-                         {version}"
-                    ),
-                    None => bail!("unknown capability {capability:?}"),
-                }
+            if world.contains(&capability.as_str()) {
+                continue;
+            }
+            anyhow::ensure!(
+                permissions::tier_of(capability).is_some(),
+                "unknown capability {capability:?}"
+            );
+            // The first world that has it.
+            let needs = [
+                ("0.2", Version::new(0, 2, 0)),
+                ("0.3", Version::new(0, 3, 0)),
+            ]
+            .into_iter()
+            .find(|(_, world)| world_capabilities(world).contains(&capability.as_str()))
+            .map(|(needs, _)| needs);
+            match needs {
+                Some(needs) => bail!(
+                    "capability {capability:?} needs fyx:ui {needs}; this extension targets \
+                     {version}"
+                ),
+                None => bail!(
+                    "capability {capability:?} is not in fyx:ui {version}; it is planned for a \
+                     later version"
+                ),
             }
         }
         if *version < Version::new(0, 3, 0) {
@@ -476,61 +461,12 @@ impl UiManifest {
                 (self.network.is_some(), "[fyx_ui.network]"),
                 (!self.processes.is_empty(), "[[fyx_ui.processes]]"),
                 (self.process.is_some(), "[fyx_ui.process]"),
-                (!self.commands.is_empty(), "[[fyx_ui.commands]]"),
-                (!self.picker_sources.is_empty(), "[[fyx_ui.picker_sources]]"),
             ] {
                 anyhow::ensure!(
                     !present,
                     "{table} needs fyx:ui 0.3; this extension targets {version}"
                 );
             }
-        }
-        anyhow::ensure!(
-            self.commands.len() <= MAX_COMMANDS,
-            "at most {MAX_COMMANDS} [[fyx_ui.commands]]"
-        );
-        let mut ids = std::collections::BTreeSet::new();
-        for command in &self.commands {
-            ApiVersion::V0_3_0
-                .check_surface_id(&command.id)
-                .map_err(|error| anyhow!("command id: {error}"))?;
-            anyhow::ensure!(
-                ids.insert(command.id.as_str()),
-                "[[fyx_ui.commands]] names {:?} twice",
-                command.id
-            );
-            anyhow::ensure!(
-                !command.title.trim().is_empty()
-                    && command.title.len() <= MAX_COMMAND_TITLE_BYTES
-                    && !command.title.chars().any(char::is_control),
-                "command {:?}: the title must be one line of 1 to {MAX_COMMAND_TITLE_BYTES} bytes",
-                command.id
-            );
-        }
-        anyhow::ensure!(
-            self.picker_sources.len() <= MAX_PICKER_SOURCES,
-            "at most {MAX_PICKER_SOURCES} [[fyx_ui.picker_sources]]"
-        );
-        let mut ids = std::collections::BTreeSet::new();
-        for source in &self.picker_sources {
-            ApiVersion::V0_3_0
-                .check_surface_id(&source.id)
-                .map_err(|error| anyhow!("picker source id: {error}"))?;
-            anyhow::ensure!(
-                ids.insert(source.id.as_str()),
-                "[[fyx_ui.picker_sources]] names {:?} twice",
-                source.id
-            );
-            let (extension, picker) = source.picker.split_once('/').with_context(|| {
-                format!(
-                    "picker source {:?}: picker must be \"<extension>/<picker surface>\", got {:?}",
-                    source.id, source.picker
-                )
-            })?;
-            validate_id("extension", extension)?;
-            ApiVersion::V0_3_0
-                .check_surface_id(picker)
-                .map_err(|error| anyhow!("picker source {:?}: {error}", source.id))?;
         }
         Ok(())
     }

@@ -14,7 +14,7 @@
 //!    and the asset to the status item `status` and the modal `modal` (invalid-argument); then
 //!    `add-image`, a push of that handle, `remove-image`, and the push again: all their results;
 //! 5. answers with an `image` node instead of the report, on whatever surface it came from;
-//! 6. calls `language.unregister-provider`, which this build links as a trap;
+//! 6. `decorations.place-decoration`, 0.2's, which 0.3 keeps: its result;
 //! 7. (reserved)
 //! 8. `push-update`s with `canvas` nodes (design.md §13): a valid one to `probe` (ok), one with a
 //!    NaN coordinate, one without a description, one of 16385 ops, and the valid one to `status`
@@ -77,7 +77,7 @@ use fyx::ui::network;
 use fyx::ui::permissions;
 use fyx::ui::process;
 use fyx::ui::types::*;
-use fyx::ui::{agent_observe, documents, workspace_edit};
+use fyx::ui::{agent_observe, decorations, workspace_edit};
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(link_section = "fyx:ui-api-version")]
@@ -391,10 +391,16 @@ fn run(case: NodeId) -> Result<Vec<String>, String> {
             results.push(push_canvas("modal", chart()));
             results
         }
-        6 => {
-            fyx::ui::language::unregister_provider(0);
-            vec!["returned".to_string()]
-        }
+        6 => vec![outcome(decorations::place_decoration(
+            "probe-decoration",
+            &DecorationLocation {
+                path: "src/main.rs".into(),
+                line: 0,
+                placement: DecorationPlacement::Below,
+                height_lines: None,
+            },
+            &[text(1, "decoration")],
+        ))],
         10 => vec![
             outcome(permissions::request(
                 permissions::T2Capability::NetworkFetch,
@@ -653,46 +659,6 @@ impl Guest for Probe {
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))
             .map_err(|error| code(&error).to_string())
     }
-
-    fn handle_command(
-        _command: String,
-        _argument: Option<String>,
-        _context: fyx::ui::requests::CommandContext,
-    ) -> Result<(), String> {
-        Err("unsupported".into())
-    }
-
-    fn provide_decorations(
-        _request: fyx::ui::requests::DecorationRequest,
-    ) -> Result<Vec<fyx::ui::decorations::Decoration>, String> {
-        Err("unsupported".into())
-    }
-
-    fn provide_hover(
-        _request: fyx::ui::requests::HoverRequest,
-    ) -> Result<fyx::ui::requests::HoverReply, String> {
-        Err("unsupported".into())
-    }
-
-    fn provide_code_lenses(
-        _request: fyx::ui::requests::CodeLensRequest,
-    ) -> Result<Vec<fyx::ui::requests::CodeLens>, String> {
-        Err("unsupported".into())
-    }
-
-    fn provide_virtual_document(
-        _path: String,
-    ) -> Result<fyx::ui::requests::VirtualDocument, String> {
-        Err("unsupported".into())
-    }
-
-    fn picker_source_event(
-        _source: String,
-        _session: u64,
-        _event: fyx::ui::requests::PickerSourceEvent,
-    ) -> Result<(), String> {
-        Err("unsupported".into())
-    }
 }
 
 fn t2_capability(name: &str) -> Result<permissions::T2Capability, String> {
@@ -714,11 +680,11 @@ fn state_name(state: permissions::PermissionState) -> &'static str {
     }
 }
 
-fn position(text: &str) -> Result<documents::Position, String> {
+fn position(text: &str) -> Result<Position, String> {
     let (line, column) = text
         .split_once('.')
         .ok_or("a position is <line>.<column>")?;
-    Ok(documents::Position {
+    Ok(Position {
         line: line.parse().map_err(|e| format!("{e}"))?,
         column: column.parse().map_err(|e| format!("{e}"))?,
     })
@@ -727,16 +693,11 @@ fn position(text: &str) -> Result<documents::Position, String> {
 /// The `edit` command: see the module doc.
 fn apply_edit(words: &[&str]) -> Result<String, String> {
     let mut label = "Probe edit".to_string();
-    let mut expected_version = None;
     let mut create = false;
     let mut files: Vec<(String, workspace_edit::FileEdit)> = Vec::new();
     for word in words {
         if let Some(value) = word.strip_prefix("label=") {
             label = value.replace('_', " ");
-            continue;
-        }
-        if let Some(value) = word.strip_prefix("expect=") {
-            expected_version = Some(value.parse().map_err(|e| format!("{e}"))?);
             continue;
         }
         if *word == "create" {
@@ -751,7 +712,7 @@ fn apply_edit(words: &[&str]) -> Result<String, String> {
             .ok_or("an edit is <target>@<range>=<text>")?;
         let (start, end) = range.split_once('-').ok_or("a range is <start>-<end>")?;
         let text_edit = workspace_edit::TextEdit {
-            range: documents::TextRange {
+            range: TextRange {
                 start: position(start)?,
                 end: position(end)?,
             },
@@ -762,16 +723,10 @@ fn apply_edit(words: &[&str]) -> Result<String, String> {
             _ => files.push((
                 target.to_string(),
                 workspace_edit::FileEdit {
-                    target: match target.strip_prefix('#') {
-                        Some(id) => workspace_edit::EditTarget::Document(
-                            id.parse().map_err(|e| format!("{e}"))?,
-                        ),
-                        None => workspace_edit::EditTarget::File(documents::FileRef {
-                            worktree: None,
-                            path: target.to_string(),
-                        }),
+                    file: FileRef {
+                        worktree: None,
+                        path: target.to_string(),
                     },
-                    expected_version: None,
                     create: false,
                     edits: vec![text_edit],
                 },
@@ -781,7 +736,6 @@ fn apply_edit(words: &[&str]) -> Result<String, String> {
     let files = files
         .into_iter()
         .map(|(_, mut file)| {
-            file.expected_version = expected_version;
             file.create = create;
             file
         })
