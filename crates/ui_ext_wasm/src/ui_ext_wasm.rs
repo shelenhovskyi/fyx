@@ -337,6 +337,7 @@ pub struct UiState {
     mounted: std::collections::HashSet<String>,
     disabled: Option<String>,
     capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+    diagnostics: diagnostics::DiagnosticsBuffer,
 }
 
 impl UiState {
@@ -344,20 +345,27 @@ impl UiState {
     /// now. Answers from the host's permission broker each time, so a revocation applies to the
     /// next call. Without a broker, T1 and T2 are denied.
     pub fn check_capability(&self, capability: &str) -> Result<(), permissions::CapabilityDenied> {
-        permissions::check_without_broker(
+        let result = permissions::check_without_broker(
             self.capability_check.as_ref(),
             &self.extension_id,
             capability,
-        )
+        );
+        self.diagnostics.capability_check(
+            capability,
+            result.as_ref().err().map(|denied| denied.reason.clone()),
+        );
+        result
     }
 
     fn new(
         extension_id: Arc<str>,
         ctx: WasiCtx,
         capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+        diagnostics: diagnostics::DiagnosticsBuffer,
     ) -> Self {
         Self {
             capability_check,
+            diagnostics,
             extension_id,
             table: ResourceTable::new(),
             ctx,
@@ -500,6 +508,7 @@ impl wit_host::Host for UiState {
             wit_host::LogLevel::Error => log::Level::Error,
         };
         log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        self.diagnostics.log(level, &message);
         Ok(())
     }
 }
@@ -665,6 +674,7 @@ pub struct UiExtension {
     tx: mpsc::UnboundedSender<UiCall>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
     from_precompiled: bool,
+    diagnostics: diagnostics::DiagnosticsBuffer,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -808,6 +818,7 @@ impl UiExtension {
             cache,
             capability_check,
         } = options;
+        let diagnostics = diagnostics::DiagnosticsBuffer::default();
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
@@ -842,6 +853,7 @@ impl UiExtension {
 
             let instantiate = {
                 let extension_id = extension_id.clone();
+                let diagnostics = diagnostics.clone();
                 async move {
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -851,7 +863,12 @@ impl UiExtension {
                     // builder starts empty and only stderr is inherited.
                     let mut store = Store::new(
                         &runtime.engine,
-                        UiState::new(extension_id, wasi.build(), capability_check),
+                        UiState::new(
+                            extension_id,
+                            wasi.build(),
+                            capability_check,
+                            diagnostics.clone(),
+                        ),
                     );
                     store.limiter(|state| &mut state.limits);
                     store.epoch_deadline_callback(|context| {
@@ -916,6 +933,7 @@ impl UiExtension {
                     tx,
                     _task: Arc::new(task),
                     from_precompiled,
+                    diagnostics,
                 },
                 pushed_rx,
             ))
@@ -970,6 +988,11 @@ impl UiExtension {
         &self.api_version
     }
 
+    /// What the Extension Inspector shows: recent calls, `log` output and capability checks.
+    pub fn diagnostics(&self) -> diagnostics::Diagnostics {
+        self.diagnostics.snapshot()
+    }
+
     /// Whether the component came from a precompiled cache rather than a fresh compile.
     pub fn from_precompiled(&self) -> bool {
         self.from_precompiled
@@ -987,12 +1010,17 @@ impl UiExtension {
     /// The initial tree of a surface, validated.
     pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
         let (result, pushed) = self
-            .call(CallBudget::Mount(surface_id.to_string()), {
-                let surface_id = surface_id.to_string();
-                move |extension, store| {
-                    async move { extension.call_mount(store, &surface_id).await }.boxed()
-                }
-            })
+            .call(
+                "mount",
+                surface_id,
+                CallBudget::Mount(surface_id.to_string()),
+                {
+                    let surface_id = surface_id.to_string();
+                    move |extension, store| {
+                        async move { extension.call_mount(store, &surface_id).await }.boxed()
+                    }
+                },
+            )
             .await?;
         let nodes = self.guest_result(result, &pushed)?;
         let tree = Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
@@ -1008,7 +1036,7 @@ impl UiExtension {
         event: ui_ext::UiEvent,
     ) -> Result<Reply<ui_ext::Update>> {
         let (result, pushed) = self
-            .call(CallBudget::Regular, {
+            .call("handle-event", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 let event = wit::UiEvent::from(event);
                 move |extension, store| {
@@ -1034,7 +1062,7 @@ impl UiExtension {
         count: u32,
     ) -> Result<Reply<Vec<(u32, Tree)>>> {
         let (rows, pushed) = self
-            .call(CallBudget::Regular, {
+            .call("list-rows", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move {
@@ -1099,7 +1127,13 @@ impl UiExtension {
 
     /// Runs one guest call on the extension's queue and returns its result with the updates the
     /// guest pushed during it. A failed call (trap, budget) disables the extension and drops them.
-    async fn call<T, F>(&self, budget: CallBudget, f: F) -> Result<(T, Vec<PushedUpdate>)>
+    async fn call<T, F>(
+        &self,
+        kind: &'static str,
+        surface_id: &str,
+        budget: CallBudget,
+        f: F,
+    ) -> Result<(T, Vec<PushedUpdate>)>
     where
         T: 'static + Send,
         F: 'static
@@ -1110,6 +1144,8 @@ impl UiExtension {
             ) -> BoxFuture<'a, wasmtime::Result<T>>,
     {
         let (return_tx, return_rx) = oneshot::channel();
+        let diagnostics = self.diagnostics.clone();
+        let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
                 async move {
@@ -1124,6 +1160,15 @@ impl UiExtension {
                         })
                         .await;
                         let pushes = std::mem::take(&mut store.data_mut().pushes);
+                        diagnostics.call(diagnostics::CallRecord {
+                            kind,
+                            surface_id,
+                            at: std::time::SystemTime::now(),
+                            duration: store.data().call_started.elapsed(),
+                            budget,
+                            pushes: pushes.len(),
+                            error: result.as_ref().err().map(|error| format!("{error:#}")),
+                        });
                         // A trap or a dropped call, the time budget included, leaves the instance
                         // unusable.
                         if let Err(error) = &result {
@@ -1301,6 +1346,7 @@ impl From<ui_ext::UiEvent> for wit::UiEvent {
     }
 }
 
+pub mod diagnostics;
 pub mod permissions;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

@@ -342,6 +342,15 @@ package"), from Zed's installed-extensions directory, and from the environment v
   next start.
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
 
+### Extension Inspector
+
+Dev builds, and release builds with `"fyx": { "extensions": { "developer_mode": true } }` (new
+windows), have an **Extension Inspector** panel (`fyx_ui: toggle extension inspector`). For the
+surface you pick it shows the live tree, the recent events and updates (a rejected update is
+marked), every call with its duration against its budget and its push count, the capability
+checks and denials, and your `log` output. It reads what Fyx records anyway and never calls the
+extension.
+
 ### Capabilities and permissions
 
 Every capability in `[fyx_ui].capabilities` has a tier:

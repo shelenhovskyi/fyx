@@ -1,11 +1,11 @@
 # W3: ручна перевірка plan 1.1–1.3 і згоди (consent)
 
 Одна перевірка на все: встановлення з `.fyxext`, оновлення, відкат (rollback), закріплення (pin),
-dev-встановлення, hot reload і **Restart extension**, а також запит згоди. Назви команд, кнопок і
+dev-встановлення, hot reload і **Restart extension**, запит згоди та Extension Inspector. Назви команд, кнопок і
 повідомлень англійською, як у Fyx.
 
 Потрібна збірка `fyx.exe` з гілки, де вже є коміти W3 `d74c8bb2ac` (1.1), `db6619b9f8` (1.2) і
-коміт 1.3 (Restart extension).
+`0004efba01` (1.3), а для кроку 11 ще `4d867e7232` (1.7).
 
 ## Підготовка
 
@@ -145,7 +145,26 @@ dev-встановлення, hot reload і **Restart extension**, а також
 4. Команда `fyx_ui: restart UI extension`, виберіть **fyx-demo-todo**. **Очікується**: панель Todo
    перемонтувалась.
 
-## 11. Прибирання
+## 11. Extension Inspector
+
+1. У налаштуваннях (**Ctrl+,**) увімкніть режим розробника і збережіть:
+
+   ```json
+   "fyx": { "extensions": { "developer_mode": true } }
+   ```
+
+   (У debug-збірці інспектор є й без цього.) Відкрийте **нове** вікно (**Ctrl+Shift+N**):
+   налаштування діє на нові вікна.
+2. Команда `fyx_ui: toggle extension inspector`. **Очікується** панель **Extension Inspector**
+   праворуч, угорі кнопки з ключами поверхонь, зокрема `fyx-demo-counter/counter`.
+3. Натисніть `fyx-demo-counter/counter`, тоді в панелі Counter натисніть **Increment**.
+4. **Очікується** в інспекторі:
+   - **Tree**: рядки дерева, серед них `#2 text "Count: 1"`;
+   - **Events and updates**: `event Click(5)` і під ним `patches: set-props 2 (text)`;
+   - **Calls (this extension)**: `mount counter: … ms of 2000 ms` і
+     `handle-event counter: … ms of 200 ms`, час значно менший за бюджет.
+
+## 12. Прибирання
 
 1. Команда `fyx_ui: remove dev UI extension`, виберіть **dev-todo**, потім так само **crash-item**.
    **Очікується**: їхня панель і елемент рядка стану показують `… was uninstalled`, записи зникли з
@@ -168,4 +187,5 @@ dev-встановлення, hot reload і **Restart extension**, а також
 | 8 | `Reload failed` зі старою версією, самовідновлення | |
 | 9 | запит Enable для доданої вручну папки | |
 | 10 | Crash → Restart extension; команда restart | |
-| 11 | remove dev, uninstall | |
+| 11 | інспектор: дерево, події, патчі, час викликів | |
+| 12 | remove dev, uninstall | |

@@ -1038,6 +1038,16 @@ fn attach_to_workspace(
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
     crate::store_actions::register(workspace);
+    if crate::inspector::inspector_enabled(cx) {
+        let inspector =
+            cx.new(|cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
+        workspace.add_panel(inspector, window, cx);
+        workspace.register_action(
+            |workspace, _: &crate::ToggleExtensionInspector, window, cx| {
+                workspace.toggle_panel_focus::<crate::inspector::ExtensionInspector>(window, cx);
+            },
+        );
+    }
     workspace.register_action(|workspace, _: &crate::InstallDevUiExtension, window, cx| {
         crate::install::prompt_and_install(workspace, window, cx)
     });

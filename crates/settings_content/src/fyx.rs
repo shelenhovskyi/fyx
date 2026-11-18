@@ -81,4 +81,9 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: []
     pub dev_paths: Option<Vec<String>>,
+    /// Show the Extension Inspector panel (live tree, events, calls and timings of UI
+    /// extensions) in release builds too; dev builds always have it. New windows pick it up.
+    ///
+    /// Default: false
+    pub developer_mode: Option<bool>,
 }

@@ -28,11 +28,19 @@ pub trait UiBackend: 'static {
         start: u32,
         count: u32,
     ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>>;
+    /// Recent calls, `log` output and capability checks, for the Extension Inspector.
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        None
+    }
 }
 
 impl UiBackend for UiExtension {
     fn extension_id(&self) -> &str {
         UiExtension::extension_id(self)
+    }
+
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        Some(UiExtension::diagnostics(self))
     }
 
     fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
