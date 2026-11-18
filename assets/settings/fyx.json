@@ -44,6 +44,22 @@
   "agent_review": {
     "enabled": false,
   },
+  // No avatar lookups: they send commit author emails to GitHub and repository SHAs to other
+  // forges.
+  "git": {
+    "blame": {
+      "show_avatar": false,
+    },
+  },
+  // Prettier for JSON-with-comments (settings and keymap files) would `npm install` on first
+  // open; the JSON language server formats them instead.
+  "languages": {
+    "JSONC": {
+      "prettier": {
+        "allowed": false,
+      },
+    },
+  },
   // The agent's default model is a bring-your-own-key provider, not Zed's hosted models
   // (zed.dev). Set an Anthropic API key, or pick any other configured provider.
   "agent": {
@@ -55,7 +71,8 @@
   // Security modes for agents (`crates/fyx_guard`, docs/fyx/security-modes.md).
   // "off" behaves like Zed; "audit" logs what "shield" would block; "shield"
   // keeps private files, secret environment variables and agent configs out of
-  // agents' reach. Only user settings can change it.
+  // agents' reach. Only user settings set it; while Fyx runs, a change that
+  // lowers it asks for confirmation.
   "fyx_security": {
     "mode": "off",
     "allow_env": [],

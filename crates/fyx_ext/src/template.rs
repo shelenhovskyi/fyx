@@ -108,33 +108,16 @@ pub fn create(new: &NewExtension) -> Result<PathBuf> {
         anyhow::bail!("{} already exists and is not empty", crate_dir.display());
     }
 
-    let (sdk_note, sdk_dependency) = match &new.sdk {
-        SdkSource::Checkout(checkout) => {
-            let sdk = checkout.join("crates").join("ui_ext_sdk");
-            anyhow::ensure!(
-                sdk.join("Cargo.toml").is_file(),
-                "{} is not a Fyx checkout (no crates/ui_ext_sdk/Cargo.toml)",
-                checkout.display()
-            );
-            let sdk = sdk
-                .canonicalize()
-                .with_context(|| format!("resolving {sdk:?}"))?;
-            (
-                "# The SDK is not on crates.io yet, and it inherits settings from the Fyx workspace, so this\n# path must point into a full Fyx checkout.",
-                format!("ui_ext_sdk = {{ path = \"{}\" }}", toml_path(&sdk)),
-            )
+    let sdk_note = match &new.sdk {
+        SdkSource::Checkout(_) => {
+            "# The SDK is not on crates.io yet, and it inherits settings from the Fyx workspace, so this\n# path must point into a full Fyx checkout."
         }
-        SdkSource::Git { url, reference } => {
-            let reference = match reference {
-                GitReference::Branch(branch) => format!("branch = \"{branch}\""),
-                GitReference::Rev(rev) => format!("rev = \"{rev}\""),
-            };
-            (
-                "# The SDK is not on crates.io yet. Cargo clones the Fyx repository to build it.",
-                format!("ui_ext_sdk = {{ git = \"{url}\", {reference} }}"),
-            )
+        SdkSource::Git { .. } => {
+            "# The SDK is not on crates.io yet. Cargo clones the Fyx repository to build it."
         }
     };
+    let sdk_dependency = dependency("ui_ext_sdk", &new.sdk)?;
+    let harness_dependency = dependency("fyx_ext_harness", &new.sdk)?;
 
     let fill = |template: &str| {
         template
@@ -143,23 +126,52 @@ pub fn create(new: &NewExtension) -> Result<PathBuf> {
             .replace("__TITLE__", &names.title)
             .replace("__SDK_NOTE__", sdk_note)
             .replace("__SDK_DEPENDENCY__", &sdk_dependency)
+            .replace("__HARNESS_DEPENDENCY__", &harness_dependency)
     };
     let toolchain = RUST_TOOLCHAIN_TEMPLATE.replace("__TOOLCHAIN__", toolchain_channel()?);
 
-    std::fs::create_dir_all(crate_dir.join("src"))
-        .with_context(|| format!("creating {crate_dir:?}"))?;
+    for dir in ["src", "tests"] {
+        std::fs::create_dir_all(crate_dir.join(dir))
+            .with_context(|| format!("creating {crate_dir:?}"))?;
+    }
     for (path, content) in [
         ("Cargo.toml".to_string(), fill(CARGO_TOML)),
         ("extension.toml".to_string(), fill(EXTENSION_TOML)),
         ("rust-toolchain.toml".to_string(), toolchain),
         (".gitignore".to_string(), GITIGNORE.to_string()),
         (format!("src/{}.rs", names.crate_name), fill(SOURCE)),
+        ("tests/headless.rs".to_string(), fill(HEADLESS_TEST)),
         ("README.md".to_string(), fill(README)),
     ] {
         let path = crate_dir.join(path);
         std::fs::write(&path, content).with_context(|| format!("writing {path:?}"))?;
     }
     Ok(crate_dir)
+}
+
+/// `<crate> = { ... }` for a crate of the Fyx repository, from the same source as the SDK.
+fn dependency(crate_name: &str, source: &SdkSource) -> Result<String> {
+    Ok(match source {
+        SdkSource::Checkout(checkout) => {
+            let path = checkout.join("crates").join(crate_name);
+            anyhow::ensure!(
+                path.join("Cargo.toml").is_file(),
+                "{} is not a Fyx checkout (no crates/{crate_name}/Cargo.toml)",
+                checkout.display()
+            );
+            let path = path
+                .canonicalize()
+                .with_context(|| format!("resolving {path:?}"))?;
+            format!("{crate_name} = {{ path = \"{}\" }}", toml_path(&path))
+        }
+        SdkSource::Git { url, reference } => {
+            let reference = match reference {
+                GitReference::Branch(branch) => format!("branch = \"{branch}\""),
+                GitReference::Rev(rev) => format!("rev = \"{rev}\""),
+            };
+            format!("{crate_name} = {{ git = \"{url}\", {reference} }}")
+        }
+    })
 }
 
 const CARGO_TOML: &str = r#"[package]
@@ -180,6 +192,17 @@ doctest = false
 [dependencies]
 __SDK_NOTE__
 __SDK_DEPENDENCY__
+
+[dev-dependencies]
+# Runs the built component in wasmtime for tests/headless.rs; `fyx-ext test` builds it first.
+__HARNESS_DEPENDENCY__
+
+# The harness compiles components with wasmtime, which is much faster optimized.
+[profile.dev.package]
+wasmtime = { opt-level = 3 }
+wasmtime-environ = { opt-level = 3 }
+wasmtime-internal-cranelift = { opt-level = 3 }
+cranelift-codegen = { opt-level = 3 }
 "#;
 
 const EXTENSION_TOML: &str = r#"id = "__ID__"
@@ -202,6 +225,35 @@ channel = "__TOOLCHAIN__"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-wasip2"]
+"#;
+
+const HEADLESS_TEST: &str = r#"//! Runs the built component the way Fyx does, without the editor. `fyx-ext test` builds it and
+//! sets `FYX_EXT_COMPONENT`; a plain `cargo test` skips these tests.
+
+use fyx_ext_harness::Harness;
+
+fn harness() -> Option<Harness> {
+    match Harness::from_env() {
+        Ok(harness) => Some(harness),
+        Err(error) if std::env::var_os(fyx_ext_harness::COMPONENT_VARIABLE).is_none() => {
+            eprintln!("skipped, run `fyx-ext test`: {error}");
+            None
+        }
+        Err(error) => panic!("{error:#}"),
+    }
+}
+
+#[test]
+fn clicking_updates_the_label() {
+    let Some(mut harness) = harness() else {
+        return;
+    };
+    harness.mount("__ID__").expect("mount");
+    assert!(harness.find_text("__ID__", "Clicked 0 times").is_some());
+
+    harness.click("__ID__", "Click me").expect("click");
+    assert!(harness.find_text("__ID__", "Clicked 1 times").is_some());
+}
 "#;
 
 const GITIGNORE: &str = "/target\n/fyx_ui.wasm\n/*.fyxext\n";
@@ -242,7 +294,7 @@ impl Extension for Panel {
             SURFACE_ID,
             "__TITLE__",
             DockPosition::Right,
-            "sparkle",
+            Icon::Sparkle,
             280,
         )]
     }
@@ -255,7 +307,7 @@ impl Extension for Panel {
             tree.flex(FlexProps::column().gap(8).padding(8), |tree| {
                 tree.text(TextProps::new("__TITLE__").bold());
                 ids.0 = tree.text(label);
-                ids.1 = tree.button(ButtonProps::new("Click me").icon("plus"));
+                ids.1 = tree.button(ButtonProps::new("Click me").icon(Icon::Plus));
             });
         })?;
         // A remount builds new nodes with new ids, so they are stored on every mount.
@@ -277,7 +329,9 @@ impl Extension for Panel {
     }
 }
 
-register_extension!(Panel);
+// Exports fyx:ui 0.1, which is what Fyx runs today. Once your Fyx runs 0.2, use
+// `register_extension!(Panel)` and set `api_version = "0.2.0"` in extension.toml.
+register_extension!(Panel, v0_1);
 
 #[cfg(test)]
 mod tests {
@@ -329,8 +383,9 @@ rebuilds when a source file changes. Open the right dock and click the sparkle b
 |---|---|
 | `fyx-ext build [--release]` | builds for `wasm32-wasip2` and copies the component to `fyx_ui.wasm` |
 | `fyx-ext check` | checks `extension.toml` and the component the way Fyx does when it loads them |
+| `fyx-ext test` | builds, mounts every surface headless, then runs `cargo test` with the component, so `tests/headless.rs` runs too |
 | `fyx-ext package` | writes `__ID__-<version>.fyxext` after a release build and a check |
-| `cargo test` | runs the unit tests on your machine, not in WASM |
+| `cargo test` | runs the unit tests on your machine, not in WASM; the headless tests skip |
 
 If the crate sits inside a Fyx checkout, that checkout's `.cargo/config.toml` asks for `sccache`.
 Without sccache installed, build with `RUSTC_WRAPPER=` set to empty.
@@ -368,6 +423,7 @@ mod tests {
             "rust-toolchain.toml",
             ".gitignore",
             "src/hello_panel.rs",
+            "tests/headless.rs",
             "README.md",
         ] {
             assert!(crate_dir.join(file).is_file(), "{file}");
@@ -381,6 +437,10 @@ mod tests {
         let cargo_toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("read");
         assert!(cargo_toml.contains("name = \"hello_panel\""));
         assert!(cargo_toml.contains("crates/ui_ext_sdk\" }"), "{cargo_toml}");
+        assert!(
+            cargo_toml.contains("crates/fyx_ext_harness\" }"),
+            "{cargo_toml}"
+        );
         assert!(!cargo_toml.contains('\\'), "{cargo_toml}");
         let source = std::fs::read_to_string(crate_dir.join("src/hello_panel.rs")).expect("read");
         assert!(source.contains("const SURFACE_ID: &str = \"hello-panel\";"));
@@ -413,6 +473,12 @@ mod tests {
         assert!(
             cargo_toml.contains(
                 "ui_ext_sdk = { git = \"https://example.com/fyx.git\", rev = \"abc123\" }"
+            ),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains(
+                "fyx_ext_harness = { git = \"https://example.com/fyx.git\", rev = \"abc123\" }"
             ),
             "{cargo_toml}"
         );

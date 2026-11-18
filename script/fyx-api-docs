@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Regenerates the extension API reference:
+# - docs/fyx/api/*.md from the fyx:ui WIT and the public items of ui_ext_sdk and fyx_ext_harness
+#   (crates/fyx_api_docs; a test in that crate fails when these pages are out of date);
+# - the rustdoc HTML of both crates, for full signatures.
+#
+# Usage: script/fyx-api-docs            regenerate the pages and build rustdoc
+#        script/fyx-api-docs --check    only report drift; exit 1 when a page is out of date or
+#                                       docs/fyx/sdk-reference.md names an item that is gone
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [[ "${1:-}" == "--check" ]]; then
+    exec cargo run --quiet -p fyx_api_docs -- --check
+fi
+
+cargo run --quiet -p fyx_api_docs
+cargo doc --quiet --no-deps -p ui_ext_sdk -p fyx_ext_harness "$@"
+
+target_dir=$(
+    cargo metadata --format-version 1 --no-deps \
+        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' \
+        | sed 's#\\\\#/#g'
+)
+echo "fyx-api-docs: pages in docs/fyx/api/, rustdoc in $target_dir/doc/ui_ext_sdk/index.html"

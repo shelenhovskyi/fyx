@@ -217,6 +217,179 @@ interface types {
         language: option<string>,
     }
 
+    /// 0.3. Where an image comes from (design.md §12). `ui:images`.
+    variant image-source {
+        /// A PNG or SVG file in the extension package's `assets/` folder: a relative path with
+        /// `/` separators and no `..`, such as `assets/logo.svg`. At most 2 MiB on disk.
+        ///
+        /// The path's syntax is checked when the update is applied; a bad path rejects the whole
+        /// update. Whether the file exists, its size and its dimensions are checked when it is
+        /// decoded; a failure there shows the alt text and logs one line, and the update stands.
+        asset(string),
+        /// An image the extension made at run time, from `images.add-image`.
+        ///
+        /// Effects apply in call order, so a handle that `add-image` returned earlier in the same
+        /// call can be used. A handle that was never returned, or is only returned later in the
+        /// call, is a reference error: the update is rejected. A handle that was removed shows the
+        /// alt text and logs one line, with no trap.
+        generated(u32),
+    }
+
+    enum image-fit {
+        /// Scaled to fit inside the box, keeping its aspect ratio.
+        contain,
+        /// Scaled to cover the box, keeping its aspect ratio; the overflow is clipped.
+        cover,
+    }
+
+    /// 0.3. A raster or vector image, drawn inside its own box and clipped to it. Panels only:
+    /// an `image` in a status item, modal, picker or decoration tree rejects the update. Not
+    /// interactive: a click on it is not an event.
+    record image-props {
+        source: image-source,
+        /// Required, 1 to 256 bytes. Shown while the image loads, when it fails, and to screen
+        /// readers.
+        alt: string,
+        /// The box in logical pixels, each 1 to 2048. With both `none` the image's own size is
+        /// used (PNG pixels, or the SVG's `viewBox`); with one set the other follows the aspect
+        /// ratio. The box never grows wider than its parent.
+        width: option<u32>,
+        height: option<u32>,
+        fit: image-fit,
+        /// SVG only: draw the image as a one-colour mask in this theme colour, like the host's
+        /// own icons. `none` keeps the SVG's colours. On a PNG it is ignored and logged, and
+        /// `fyx-ext check` warns.
+        tint: option<color-token>,
+    }
+
+    /// 0.3. Eight colours for charts and data, chosen by the host to stay distinct and readable
+    /// on the active theme (and for common colour-vision deficiencies). Never raw values.
+    enum data-color { series1, series2, series3, series4, series5, series6, series7, series8 }
+
+    variant canvas-color {
+        token(color-token),
+        data(data-color),
+    }
+
+    record paint {
+        color: canvas-color,
+        /// Percent, 0 to 100; 100 is opaque.
+        opacity: u8,
+    }
+
+    record stroke {
+        paint: paint,
+        /// Logical pixels, 0.5 to 16.
+        width: f32,
+    }
+
+    /// Canvas coordinates: logical pixels from the canvas's top-left corner. Every number must
+    /// be finite and within -32768 to 32768.
+    record point {
+        x: f32,
+        y: f32,
+    }
+
+    record rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    }
+
+    record line-op {
+        %from: point,
+        to: point,
+        stroke: stroke,
+    }
+
+    record rect-op {
+        bounds: rect,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    record rounded-rect-op {
+        bounds: rect,
+        /// Logical pixels, clamped to half the shorter side.
+        radius: f32,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    record circle-op {
+        center: point,
+        radius: f32,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    variant path-segment {
+        move-to(point),
+        line-to(point),
+        /// Control point, end point.
+        quad-to(tuple<point, point>),
+        /// Two control points, end point.
+        cubic-to(tuple<point, point, point>),
+        close,
+    }
+
+    /// At least one of `fill` and `stroke`. A fill uses the non-zero rule.
+    record path-op {
+        segments: list<path-segment>,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    /// The host's UI font sizes, not points.
+    enum canvas-text-size { small, medium, large }
+
+    enum text-anchor { start, middle, end }
+
+    /// One line of text, at most 256 bytes; `at` is the baseline at the anchor.
+    record text-op {
+        at: point,
+        text: string,
+        paint: paint,
+        size: canvas-text-size,
+        anchor: text-anchor,
+        monospace: bool,
+    }
+
+    /// Drawn in list order, later ops over earlier ones.
+    variant draw-op {
+        line(line-op),
+        rect(rect-op),
+        rounded-rect(rounded-rect-op),
+        circle(circle-op),
+        path(path-op),
+        text(text-op),
+    }
+
+    enum canvas-fit {
+        /// Drawn at its size; what does not fit the parent is clipped.
+        clip,
+        /// Scaled down, keeping the aspect ratio, when the parent is narrower; never up.
+        scale-down,
+    }
+
+    /// 0.3. A static vector drawing (design.md §13). `ui:canvas`. Panels only, like `image`, and
+    /// not inside list rows. The whole draw list travels in every `set-props`: there are no
+    /// per-op patches. Caps: 16384 ops, 65536 path segments, 256 KiB of text per canvas; 16
+    /// canvases per surface.
+    record canvas-props {
+        /// The drawing's own size in logical pixels, each 1 to 4096. Nothing is drawn outside it.
+        width: u32,
+        height: u32,
+        /// Required, 1 to 1024 bytes: what the drawing shows, for screen readers and as the
+        /// tooltip.
+        description: string,
+        ops: list<draw-op>,
+        /// Sends `canvas-click` with canvas coordinates. No hover, pointer-move or drag in 0.3.
+        clickable: bool,
+        fit: canvas-fit,
+    }
+
     variant props {
         flex(flex-props),
         text(text-props),
@@ -227,6 +400,10 @@ interface types {
         icon(icon-props),
         markdown(string),
         diff-view(diff-view-props),
+        /// 0.3.
+        image(image-props),
+        /// 0.3.
+        canvas(canvas-props),
     }
 
     /// WIT types cannot be recursive, so a tree travels as a flat `list<node>` in which every
@@ -313,6 +490,15 @@ interface types {
         /// 0.3, block decorations only: the line the decoration was anchored to was deleted. The
         /// block stays where the anchor collapsed to until the extension moves or removes it.
         orphaned,
+        /// 0.3. A click on a `clickable` canvas, in canvas coordinates (after `scale-down`, so
+        /// they match the draw list). Grants the click-or-Enter activation like `click`.
+        canvas-click(canvas-click),
+    }
+
+    record canvas-click {
+        canvas: node-id,
+        x: f32,
+        y: f32,
     }
 
     enum dock-position { left, right, bottom }
@@ -1155,6 +1341,24 @@ interface requests {
     }
 }
 
+/// 0.3. Images the extension makes at run time, for `image-source::generated` (design.md §12).
+/// `ui:images`. Package assets need no call.
+interface images {
+    use host.{host-error};
+
+    enum image-format { png, svg }
+
+    /// Registers an image and returns its handle. The bytes are checked and decoded off the
+    /// main thread after the call returns; until then, and if decoding fails, nodes show the alt
+    /// text. At most 1 MiB of bytes, the same size limits as assets, at most 32 live generated
+    /// images, and all images of the extension count against its 64 MiB of decoded pixels.
+    add-image: func(format: image-format, bytes: list<u8>) -> result<u32, host-error>;
+
+    /// Frees a generated image. Nodes that still show it show their alt text. Unknown handles
+    /// are ignored. A reload or a disable frees all of them.
+    remove-image: func(image: u32);
+}
+
 /// 0.3. Items for pickers: the owner's own picker surfaces and the sources this extension
 /// contributes to other pickers (manifest `[[fyx_ui.picker_sources]]`). `ui:picker`.
 interface picker {
@@ -1192,6 +1396,7 @@ world ui-extension {
     import language;
     import virtual-documents;
     import picker;
+    import images;
     import permissions;
     import network;
     import process;

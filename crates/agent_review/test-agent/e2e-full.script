@@ -1,11 +1,29 @@
-# W5 check of the deep-review fixes, one turn (see REVIEW_STUB_SCENARIO=full).
+# W5 end-to-end check (REVIEW_STUB_SCENARIO=full). Scratch project: demo.txt, demo2.txt, demo3.txt,
+# demo4.txt (five lines each), Cargo.lock, docs/guide.md, .fyx/review.toml with deny = ["*.lock"];
+# user setting agent_review.auto_accept = ["docs/**"].
 wait 10
 action agent::NewExternalAgentThread {"agent": "Review Stub"}
+# The permission preview of demo3.txt: partly accepted, with a comment (M1 note).
 review
 accept 1
 reject 2
+comment 2 keep the fifth line lowercase
 submit
+# demo.txt and demo2.txt, proposed together.
 review
 accept-turn
-wait 8
+wait 6
+# The next message carries the review note (the agent logs what it receives); its turn ends.
+prompt status
+wait 4
+# The built-in agent's file operations, in a new turn: delete rejected, move accepted.
+operation delete demo4.txt
+review
+reject 1
+submit
+operation move demo4.txt moved.txt
+review
+accept 1
+submit
+wait 3
 quit

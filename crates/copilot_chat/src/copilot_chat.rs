@@ -540,6 +540,7 @@ pub struct CopilotChat {
     credentials_provider: Arc<dyn CredentialsProvider>,
     load_task: Option<Task<Result<()>>>,
     sign_in_task: Option<Task<()>>,
+    fyx_models_requested: bool, // fyx: models load on first use (`ensure_models`)
 }
 
 pub fn init(
@@ -620,7 +621,11 @@ impl CopilotChat {
                 true
             })?;
 
-            if configuration_is_current && token.is_some() {
+            // fyx: models are fetched only after first use (`ensure_models`).
+            if configuration_is_current
+                && token.is_some()
+                && this.read_with(cx, |this, _| this.fyx_models_requested)?
+            {
                 Self::update_models(&this, cx).await?;
             }
             anyhow::Ok(())
@@ -636,6 +641,7 @@ impl CopilotChat {
             credentials_provider,
             load_task: Some(load_task),
             sign_in_task: None,
+            fyx_models_requested: false,
         }
     }
 
@@ -757,6 +763,20 @@ impl CopilotChat {
 
     pub fn is_authenticated(&self) -> bool {
         self.oauth_token.is_some()
+    }
+
+    /// fyx: fetches the model list the first time Copilot Chat is used, not at startup. If the
+    /// token is still loading, the load task fetches once it has it.
+    pub fn ensure_models(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.fyx_models_requested, true) || self.models.is_some() {
+            return;
+        }
+        if matches!(self.status, CopilotChatStatus::Authorized) {
+            cx.spawn(async move |this, cx| {
+                util::ResultExt::log_err(Self::update_models(&this, cx).await);
+            })
+            .detach();
+        }
     }
 
     pub fn models(&self) -> Option<&[Model]> {
@@ -923,7 +943,11 @@ impl CopilotChat {
                     true
                 })?;
 
-                if configuration_is_current && token.is_some() {
+                // fyx: models are fetched only after first use (`ensure_models`).
+                if configuration_is_current
+                    && token.is_some()
+                    && this.read_with(cx, |this, _| this.fyx_models_requested)?
+                {
                     if let Err(error) = Self::update_models(&this, cx).await {
                         this.update(cx, |this, cx| {
                             this.status = CopilotChatStatus::Error(error.to_string().into());

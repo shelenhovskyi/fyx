@@ -34,6 +34,7 @@ wasmtime-wasi.workspace = true
 wasmtime.workspace = true
 
 [dev-dependencies]
+fyx_ext_harness.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

@@ -73,7 +73,9 @@ impl AnthropicEventReporter {
                 .provider_for_model(model)
                 .ok()
                 .and_then(|provider| provider.api_key(model, cx)),
-            is_anthropic: model.provider_id == ANTHROPIC_PROVIDER_ID,
+            // fyx: usage events to Anthropic honour `telemetry.metrics` (off in Fyx).
+            is_anthropic: model.provider_id == ANTHROPIC_PROVIDER_ID
+                && <client::TelemetrySettings as settings::Settings>::get_global(cx).metrics,
         }
     }
 

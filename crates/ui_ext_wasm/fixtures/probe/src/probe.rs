@@ -132,4 +132,5 @@ impl Extension for Probe {
     }
 }
 
-register_extension!(Probe);
+// The host runs fyx:ui 0.1; the SDK's default world is 0.2.
+register_extension!(Probe, v0_1);

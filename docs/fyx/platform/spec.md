@@ -75,20 +75,43 @@ line decorations, code lenses, read-only documents, network and processes behind
 15. Registry CI builds every entry **from source** in a pinned toolchain image, runs
     `fyx-ext check` and `fyx-ext test`, signs the package (Ed25519) and publishes package plus
     `index.json` to GitHub Releases. Authors never upload binaries.
-16. A maintainer review of the PR is required for: a new extension, a new T1 or T2 capability, a
-    new network domain or process name, an owner change. A version bump with none of these merges
-    after green CI and one owner approval.
+16. Review by tier (owner, 2026-11-18). An entry whose release is **T0 or T1** merges by itself on
+    green CI. A new T0–T1 extension needs no review. A new version of one needs one of the entry's
+    own owners, as the PR's author or by an approving review. Any release that is **T2** needs the
+    owner of the registry, for every version. So does anything that adds a T2 capability, a network
+    domain or a process name. The owner also approves every `urgent` flag. An owner change needs
+    an existing owner of the entry. Design:
+    [registry-repo.md](registry-repo.md#review-rules).
 17. Client: the Extensions page gets a Fyx tab with search, install, update, uninstall,
     enable/disable, **pin version**, **roll back**, capability list in plain language, publisher,
     source link. Auto-update is on, but a new version installs only when it is **at least 24 h
     old** in the index (security fixes flagged `urgent` skip the wait).
-18. Signatures: the registry public key and one rotation key are compiled in. A package from the
-    registry with a bad signature is refused. A `.fyxext` file installed from disk is allowed
-    with an "Unsigned, not from the registry" badge and never auto-updates.
-19. Block list: signed `blocklist.json` (id, version range, reason, `urgent`), fetched at startup
+18. Signatures: releases, the snapshot and the block list are signed by **separate keys**, one role
+    each (`release`, `snapshot`, `blocklist`). Separate release and block-list keys were decided by
+    the owner on 2026-11-18; the snapshot role came with the format hardening of triage-3.
+    - **Three keysets.** The client compiles in three keysets, one per role, each with a current
+      key and one rotation key. It verifies each document only against the keys of its role, so a
+      stolen release key cannot forge a block list.
+    - **Where the keys live.** The release and snapshot keys are in the release-signing
+      environment, and the block-list key is in its own environment.
+    - **The snapshot.** `snapshot.json` pins `index.json` by size and SHA-256, has a `sequence`
+      that never goes down and an `expires_at` at most 7 days out, and can revoke keys. CI
+      re-signs it on every publish and every 12 h, for 48 h, so it never lapses. An expired or
+      rolled-back snapshot stops installs and updates from the index, and installed extensions
+      keep running.
+    - **Bad signatures.** A package from the registry with a bad signature is refused.
+    - **Files from disk.** A `.fyxext` file installed from disk is allowed with an "Unsigned, not
+      from the registry" badge and never auto-updates.
+    - Formats are in [registry-format.md](registry-format.md), keys and CI in
+      [registry-repo.md](registry-repo.md#keys).
+19. Block list: `blocklist.json` (id, version range or package hash, reason, `urgent`), signed with
+    the block-list key (decision 18) for 48 h at a time (`expires_at`, at most 7 days) and
+    re-signed every 12 h. It is fetched at startup
     and every **6 h**. A matching installed version is **disabled at once**, the user gets a
     notification, and if the kept previous version is not blocked the host rolls back to it. The
-    last good block list is cached; a fetch failure never disables anything.
+    last good block list is cached; a fetch failure never disables anything. A list whose signed
+    `generated_at` is 7 days old, or whose `expires_at` has passed, is shown as stale and still
+    applies.
 20. Zed's extension registry API is not called by Fyx code added in this milestone.
 
 ### Permissions and isolation (security)
@@ -97,13 +120,22 @@ line decorations, code lenses, read-only documents, network and processes behind
 
     | Tier | Prompt | Capabilities |
     |---|---|---|
-    | T0 | none, shown on the extension page | `ui:panel`, `ui:status-bar`, `ui:modal`, `ui:notifications`, `ui:editor-decorations`, `ui:picker`, `ui:code-lens`, `ui:hover`, `ui:virtual-documents`, `ui:commands` |
+    | T0 | none, shown on the extension page | `ui:panel`, `ui:status-bar`, `ui:modal`, `ui:notifications`, `ui:editor-decorations`, `ui:picker`, `ui:code-lens`, `ui:hover`, `ui:virtual-documents`, `ui:commands`, `ui:images`, `ui:canvas` |
     | T1 | one dialog at install | `workspace:read-buffers`, `workspace:read-files`, `workspace:diagnostics` |
     | T2 | at first use, per extension, revocable | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` |
 
     An update that adds a T1 or T2 capability, a network domain or a process name is **held**: the
     old version keeps running and the page shows "Update needs approval". T0 additions install
     silently.
+
+    How this meets the interim consent guard of integration-4 #3 (agreed with W3 for plan 1.5):
+    - **T0-only extensions load without a prompt** when a Fyx install dialog showed their
+      capabilities: install from file, or install dev UI extension.
+    - **A folder that appears without a Fyx install action keeps the one-time Enable.** That
+      covers a folder copied into the installed directory, one linked by upstream's Install Dev
+      Extension, and one added to `dev_paths` by hand.
+    - **After that, only T1 matters.** An update that adds T0 or changes the component loads
+      silently. One that adds T1 is held until **Approve**.
 22. Section M of 0.2, notifications and progress: `notify(level, text, actions)` and
     `progress-start` / `progress-update` / `progress-end`; at most **5 notifications per minute**
     per extension, extra ones go to the log.
@@ -144,6 +176,26 @@ line decorations, code lenses, read-only documents, network and processes behind
       language name from the extension.
     - **Commands**: `[[fyx_ui.commands]]` in the manifest appear in the command palette and can be
       bound in the keymap; running one calls `handle-command(id)`.
+    - **Images** (owner, 2026-11-18): an `image` node, design in
+      [wit-0.3/design.md §12](../wit-0.3/design.md#12-images-plan-410412). `ui:images`, T0.
+      - PNG and SVG from the package's `assets/`, or generated by the guest (at most 1 MiB).
+      - At most 2 MiB per file and 2048 × 2048 pixels; 64 MiB of decoded pixels per extension.
+      - Decoded off the main thread.
+      - SVG through usvg/resvg with no external references, no scripts and no network.
+      - Clipped to its box, in panels only (not status items, modals, pickers or decorations).
+      - Alt text required.
+    - **Canvas** (owner, 2026-11-18): a static vector draw list, design in
+      [§13](../wit-0.3/design.md#13-canvas-plan-413415). `ui:canvas`, T0.
+      - Ops: line, rect, rounded-rect, circle, path, text.
+      - Colours from theme tokens and a fixed eight-colour data palette only.
+      - At most 16384 ops per canvas; the whole list is re-sent on every update.
+      - `canvas-click` with local coordinates. Pointer-move and drag come in 0.4, at most 30 per
+        second.
+      - Animation only through ticks (100 ms floor).
+      - Clipped to its box; a description is required.
+
+    Priority (owner's rule): P4 is the first candidate to cut, and images and canvas rank below the
+    rest of P4. If P4 slips, images stay in 0.3 and the canvas moves to 0.4.
 29. Version support: every world version keeps working until **two** later minor versions have
     shipped (0.1 until 0.3 inclusive, removed in 0.4). The host runs each component against the
     world it declares.

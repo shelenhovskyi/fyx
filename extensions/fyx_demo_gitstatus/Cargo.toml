@@ -14,6 +14,10 @@ crate-type = ["cdylib"]
 test = true
 doctest = false
 
+[features]
+# Export the fyx:ui 0.2 world instead of 0.1 (see the end of the crate root).
+fyx-ui-0-2 = []
+
 [dependencies]
 ui_ext_sdk.workspace = true
 

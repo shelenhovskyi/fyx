@@ -518,8 +518,11 @@ impl LlamaCppLanguageModelProvider {
             }),
         };
         // Discover eagerly so a running server is picked up without opening settings.
-        this.state
-            .update(cx, |state, cx| state.restart_fetch_models_task(cx));
+        if !cx.has_global::<crate::DeferStartupProbes>() {
+            // fyx: Fyx sets the marker; then `authenticate` fetches on first use.
+            this.state
+                .update(cx, |state, cx| state.restart_fetch_models_task(cx));
+        }
         this
     }
 
@@ -1210,7 +1213,7 @@ impl ConfigurationView {
                     )
                     .child(
                         ListBulletItem::new(
-                            "Click 'Connect' below to start using llama.cpp in Fyx", // fyx: product name
+                            "Click 'Connect' below to start using llama.cpp in Zed",
                         )
                         .label_color(Color::Muted),
                     ),
@@ -1254,7 +1257,7 @@ impl ConfigurationView {
             .mb_2()
             .child(
                 Label::new(format!(
-                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Fyx." // fyx: product name
+                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),

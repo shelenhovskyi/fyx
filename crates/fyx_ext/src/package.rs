@@ -15,8 +15,8 @@ pub const MAX_PACKAGE_BYTES: u64 = 50 * 1024 * 1024;
 pub const ASSETS_DIR: &str = "assets";
 
 /// Packs the extension in `dir` into `out_dir`, after `check` passes. Returns the package path.
-pub fn package(dir: &Path, out_dir: &Path) -> Result<PathBuf> {
-    let (manifest, report) = crate::check(dir)?;
+pub fn package(dir: &Path, out_dir: &Path, depth: crate::CheckDepth) -> Result<PathBuf> {
+    let (manifest, report) = crate::check(dir, depth)?;
     report.print();
     anyhow::ensure!(
         !report.has_errors(),
@@ -128,7 +128,7 @@ mod tests {
         std::fs::write(root.join("README.md"), "not packed").expect("readme");
 
         let out = root.join("dist");
-        let package_path = package(root, &out).expect("package");
+        let package_path = package(root, &out, crate::CheckDepth::Static).expect("package");
         assert_eq!(package_path, out.join("my-panel-1.2.3.fyxext"));
         assert_eq!(
             entry_names(&package_path),
@@ -144,7 +144,12 @@ mod tests {
             "id = \"x\"\nversion = \"0.1.0\"\n\n[fyx_ui]\napi_version = \"0.1.0\"\ncomponent = \"missing.wasm\"\n",
         )
         .expect("manifest");
-        let error = package(dir.path(), &dir.path().join("dist")).expect_err("no component");
+        let error = package(
+            dir.path(),
+            &dir.path().join("dist"),
+            crate::CheckDepth::Static,
+        )
+        .expect_err("no component");
         assert!(
             error.to_string().contains("fails `fyx-ext check`"),
             "{error}"

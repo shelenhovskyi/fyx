@@ -88,7 +88,9 @@ members = [
     "crates/fs_benchmarks",
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
+    "crates/fyx_api_docs", # fyx
     "crates/fyx_ext", # fyx
+    "crates/fyx_ext_harness", # fyx
     "crates/fyx_guard", # fyx
     "crates/fyx_registry", # fyx
     "crates/git",
@@ -234,6 +236,7 @@ members = [
     "crates/ui_ext", # fyx
     "crates/ui_ext_host", # fyx
     "crates/ui_ext_sdk", # fyx
+    "crates/ui_ext_sdk_v0_1", # fyx
     "crates/ui_ext_wasm", # fyx
     "crates/ui_input",
     "crates/ui_macros",
@@ -272,6 +275,7 @@ members = [
     "extensions/fyx_demo_markdown", # fyx
     "extensions/fyx_demo_gitstatus", # fyx
     "extensions/fyx_demo_form", # fyx
+    "extensions/fyx_demo_decorations", # fyx
     "extensions/glsl",
     "extensions/html",
     "extensions/proto",
@@ -377,6 +381,7 @@ file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
+fyx_ext_harness = { path = "crates/fyx_ext_harness" } # fyx
 fyx_guard = { path = "crates/fyx_guard" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 git = { path = "crates/git" }
@@ -520,6 +525,7 @@ ui = { path = "crates/ui" }
 ui_ext = { path = "crates/ui_ext" } # fyx
 ui_ext_host = { path = "crates/ui_ext_host" } # fyx
 ui_ext_sdk = { path = "crates/ui_ext_sdk" } # fyx
+ui_ext_sdk_v0_1 = { path = "crates/ui_ext_sdk_v0_1" } # fyx
 ui_ext_wasm = { path = "crates/ui_ext_wasm" } # fyx
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
