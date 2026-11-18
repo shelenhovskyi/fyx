@@ -245,6 +245,7 @@ impl AgentTool for GrepTool {
                     let worktree_settings = WorktreeSettings::get(Some((&project_path).into()), cx);
                     worktree_settings.is_path_excluded(&project_path.path)
                         || worktree_settings.is_path_private(&project_path.path)
+                        || fyx_guard::agent_read_blocked(&project_path, cx) // fyx: security shield
                 }) {
                     continue;
                 }

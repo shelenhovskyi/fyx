@@ -380,6 +380,8 @@ impl AgentTool for ReadFileTool {
                     );
                 }
 
+                fyx_guard::check_agent_read(&project_path, cx).map_err(|message| anyhow!(message))?; // fyx: security shield
+
                 anyhow::Ok(())
             }).map_err(tool_content_err)?;
 
