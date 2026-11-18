@@ -473,3 +473,58 @@ The 24 h gate counts from the later of `published_at` and when this client first
   - ui_ext's t2 modules (process, network, edit, observe) are tested only with `--all-features`.
   - Working copies are CRLF, so edit scripts must read in text mode.
   - Run `bash script/fyx-prune-target <target>` after tests.
+
+## integration-6 (2026-11-19)
+
+- **Plan 4.13 lift bench** (`test_canvas_lift_bench` in `ui_ext_wasm/src/tests_v0_3.rs`, probe
+  commands `canvas <n>` and `canvas-push <n>`): `cargo test -p ui_ext_wasm --profile release-fast
+  --lib canvas_lift_bench -- --ignored --nocapture`. A `#[ignore]` test, not `cargo bench`: a
+  bench target would need a `Cargo.toml` entry (integrator-only). Results (release-fast, probe at
+  opt-level s, mixed ops, median of 30, two quiet runs):
+  - round trip (guest clone and lowering, lift, convert, checks, effects, one dispatch): 10 000
+    ops 1.13–1.27 ms, 16384 ops 1.9–2.0 ms (3.0 ms in a noisy run);
+  - inside the push call: 10 000 ops ≈ 1.0 ms, of which the host's convert and checks are
+    0.16 ms (`check_canvas_props` alone 0.09 ms); the rest is wasmtime's canonical-ABI lift and
+    the guest's lowering, which the host cannot tune without an ABI change;
+  - the cost per op is flat, so a lower cap would not change the per-10k figure. Recommended to
+    the coordinator: the 16384 cap stays (a full canvas is about 2–3 ms of the 200 ms budget).
+    The test asserts ≤ 2 ms per 10 000 as a regression guard.
+- **N1:** `[fyx_ui.process] env` is an allowlist (`ui_ext::process::ALLOWED_ENV_NAMES`: locale,
+  terminal and output, `CI`, `RUST_LOG`/`RUST_BACKTRACE`, `NODE_ENV`, `PYTHONUNBUFFERED`/
+  `PYTHONIOENCODING`/`PYTHONUTF8`, and `LC_*`). `HOME`, `USERPROFILE`, `XDG_*`, `ZDOTDIR`, ... and
+  Fyx's own `FYX_*`/`ZED_*` (Fyx reads `FYX_UI_DEV_EXTENSIONS`) are refused at load and at the
+  call. The denylist stays for its clearer message. Additions go through W2c.
+- **N4 (registry half) and R9:**
+  - the highest block-list sequence ever accepted is kept in the snapshot state
+    (`blocklist_floor`), so dropping the cache (a revoked block-list key) does not forget it; a
+    list below it is `KeepReason::BelowFloor`;
+  - with no cache, an expired list is `KeepReason::Expired`;
+  - `RegistryClient::blocks_can_lift(now)`: a block lifts only while a list is held and not
+    expired. W3's `apply_plan` must re-enable only when it is true;
+  - a hash-only block entry also matches an install whose hash was never recorded;
+  - "daily" in `blocklist.rs` is now "every 12 h" (spec 19);
+  - **role separation, decision:** clients do not check it per document (they check each
+    signature's role); the compiled-in keyset is fixed at build time, so the build checks it
+    once: W3's `release_keyset()` should refuse a keyset that fails
+    `check_role_separation(None)`. Its two error texts had lost a line break (fixed).
+- **R8 `urgent`:** it no longer skips the age gate on its own. It skips it only to replace an
+  installed version the block list blocks (so the block-list key, held apart from the release
+  key, must agree). `AgeGate::Urgent` is gone. Spec decision 17's text needs the same narrowing
+  (W10).
+- **F3:** `permissions.request`'s error lists click, row-click, input-submitted, canvas-click and
+  notification-action; the `fyx_ui_v0_3` module doc describes the smaller 0.3.
+  `define_unbuilt_as_traps` stubs nothing for 0.3 and stays for the next staged world.
+- **Q2:** `runs_any_code` ignores a version suffix (`python3.12`, `node22`, `lua-5.4`), lists more
+  runners (`wsl`, `ssh`, `rundll32`, `regsvr32`, `msiexec`, `schtasks`, `docker`, `podman`, npm/
+  pnpm/yarn, cargo/rustup/go, make/cmake/ninja/just, rake/bundle/gem/composer, gradle/mvn/ant,
+  uv/uvx/pip/pipx/poetry/conda/mamba), and for `git` sees `--git-dir`, skips the values of `-C`,
+  `--work-tree` and `--namespace`, and treats the subcommands config, bisect, submodule, rebase,
+  filter-branch, difftool, mergetool and daemon as "any program".
+- **Decisions recorded (coordinator, 2026-11-19):** Q4 = (2): loopback only with a declared port
+  (built), other private addresses only from a user setting (`private_hosts`, not built; it is
+  additive). Q7 = (3): 256 MiB for every world, as the code does. Q14 = (1): paint each frame,
+  a per-update texture only if W3's paint bench misses 4 ms.
+- **W3 dfdb6b0023 follow-ups:** `Permissions.zed_extension` (serde default, so old `state.json`
+  has not accepted it) and `Additions.zed_extension`: an approved T2 install whose update newly
+  runs as a Zed extension is held for approval. `BUTTON_CLICK_GUARD`'s doc says the host applies
+  at least 1 s to every card (the value stays 750 ms, the renderer's floor).
