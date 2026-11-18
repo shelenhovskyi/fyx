@@ -978,7 +978,7 @@ Cases: `get`, `head`, `post`, `put`, `patch`, `delete`, `options`.
 |---|---|---|
 | `method` | `http-method` |  |
 | `url` | `string` | `https://` and a host the manifest allows; `http://` only for a declared `localhost` or `127.0.0.1` with a port. No user info. At most 8 KiB. |
-| `headers` | `list<tuple<string, string>>` | At most 64 headers, 16 KiB in total. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `expect`, `keep-alive` and every `proxy-*` header are set by the host and rejected here. |
+| `headers` | `list<tuple<string, string>>` | At most 64 headers, 16 KiB in total. `host`, `content-length`, `transfer-encoding`, `connection`, `upgrade`, `te`, `trailer`, `expect`, `keep-alive` and every `proxy-*` header, and `accept-encoding`, are set by the host and rejected here. |
 | `body` | `option<list<u8>>` | At most 4 MiB. |
 | `timeout-ms` | `option<u32>` | At most 30000, the default. |
 
