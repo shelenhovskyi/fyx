@@ -198,7 +198,7 @@ impl UiBackend for StaticBackend {
         let tree = Tree::from_nodes(nodes(), TreeLimits::default()).map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -213,7 +213,7 @@ impl UiBackend for StaticBackend {
         self.events.borrow_mut().push(event);
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -226,17 +226,21 @@ impl UiBackend for StaticBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         let rows = if list == TABLE {
             (start..(start + count).min(TABLE_ROWS))
-                .map(|index| (index, table_row(index)))
+                .map(|index| crate::backend::Row {
+                    index,
+                    indent: 0,
+                    tree: table_row(index),
+                })
                 .collect()
         } else {
             Vec::new()
         };
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: rows,
             })
         }

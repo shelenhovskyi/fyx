@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -18,7 +19,7 @@ use ui_ext::v0_2::{
 
 use crate::{
     SurfaceState, SurfaceView, TYPING_DEBOUNCE,
-    backend::{PushedUpdate, Reply, ReplyError, UiBackend},
+    backend::{HostEffect, Reply, ReplyError, UiBackend},
     icons::upstream_icon as icon_name,
     surface::fetch_range,
     view::{DiffLine, diff_lines},
@@ -52,6 +53,7 @@ enum Call {
         start: u32,
         count: u32,
     },
+    Tick,
 }
 
 /// A counter-like extension: a label, an increment button, a list with one row per count and a
@@ -73,13 +75,21 @@ struct FakeBackend {
     renumbered_input: Cell<Option<NodeId>>,
     /// Restart requests that reached the link.
     restarts: Cell<u32>,
+    /// Ticks answered so far; each sets the label to `Tick {n}`.
+    ticks: Cell<u32>,
+    /// Each tick asks for the next one, this long after.
+    tick_again: Cell<Option<Duration>>,
+    /// Each tick fails with the extension's own error.
+    fail_ticks: Cell<bool>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
 
 impl crate::surface::SurfaceLink for FakeLink {
-    fn route_push(&self, push: PushedUpdate, _: &mut App) {
-        self.0.routed.borrow_mut().push(push.surface_id);
+    fn route_effect(&self, effect: HostEffect, _: &mut App) {
+        if let HostEffect::Push { surface_id, .. } = effect {
+            self.0.routed.borrow_mut().push(surface_id);
+        }
     }
 
     fn extension_failed(&self, from_surface: &str, _: gpui::SharedString, _: &mut App) {
@@ -94,8 +104,8 @@ impl crate::surface::SurfaceLink for FakeLink {
     }
 }
 
-fn unfit_push() -> PushedUpdate {
-    PushedUpdate {
+fn unfit_push() -> HostEffect {
+    HostEffect::Push {
         surface_id: "counter".into(),
         update: Update::Patches(vec![Patch::SetProps(99, text("no such node"))]),
     }
@@ -115,7 +125,7 @@ impl FakeBackend {
             .into_iter()
             .filter_map(|call| match call {
                 Call::Event(event) => Some(event),
-                Call::Mount | Call::Rows { .. } => None,
+                Call::Mount | Call::Rows { .. } | Call::Tick => None,
             })
             .collect()
     }
@@ -198,7 +208,7 @@ impl UiBackend for FakeBackend {
         let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -213,9 +223,9 @@ impl UiBackend for FakeBackend {
         self.calls.borrow_mut().push(Call::Event(event.clone()));
         if event == UiEvent::Click(BAD_OWN_THEN_OTHER) {
             let reply = Reply {
-                pushed: vec![
+                effects: vec![
                     unfit_push(),
-                    PushedUpdate {
+                    HostEffect::Push {
                         surface_id: "other".into(),
                         update: Update::Unchanged,
                     },
@@ -229,14 +239,14 @@ impl UiBackend for FakeBackend {
         }
         if event == UiEvent::Click(REMOVER) {
             let reply = Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Patches(vec![Patch::Remove(REMOVER)]),
             };
             return async move { Ok(reply) }.boxed_local();
         }
         if event == UiEvent::Click(PUSH_THEN_FAIL) {
             let error = anyhow::Error::new(ReplyError {
-                pushed: vec![PushedUpdate {
+                effects: vec![HostEffect::Push {
                     surface_id: "counter".into(),
                     update: Update::Patches(vec![Patch::SetProps(
                         LABEL,
@@ -250,12 +260,12 @@ impl UiBackend for FakeBackend {
         }
         if event == UiEvent::Click(PUSHER) {
             let reply = Reply {
-                pushed: vec![
-                    PushedUpdate {
+                effects: vec![
+                    HostEffect::Push {
                         surface_id: "counter".into(),
                         update: Update::Patches(vec![Patch::SetProps(LABEL, text("pushed"))]),
                     },
-                    PushedUpdate {
+                    HostEffect::Push {
                         surface_id: "other".into(),
                         update: Update::Unchanged,
                     },
@@ -284,11 +294,38 @@ impl UiBackend for FakeBackend {
         };
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: update,
             })
         }
         .boxed_local()
+    }
+
+    fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.calls.borrow_mut().push(Call::Tick);
+        if self.fail_ticks.get() {
+            let error = anyhow::Error::new(ReplyError {
+                effects: Vec::new(),
+                message: "tick failed".into(),
+            });
+            return async move { Err(error) }.boxed_local();
+        }
+        let n = self.ticks.get() + 1;
+        self.ticks.set(n);
+        let effects = self
+            .tick_again
+            .get()
+            .map(|delay| HostEffect::RequestTick {
+                surface_id: "counter".into(),
+                delay,
+            })
+            .into_iter()
+            .collect();
+        let reply = Reply {
+            effects,
+            value: Update::Patches(vec![Patch::SetProps(LABEL, text(format!("Tick {n}")))]),
+        };
+        async move { Ok(reply) }.boxed_local()
     }
 
     fn list_rows(
@@ -297,14 +334,14 @@ impl UiBackend for FakeBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         self.calls
             .borrow_mut()
             .push(Call::Rows { list, start, count });
         let result = if self.fail_rows.get() {
             // An extension-reported error: the instance lives on.
             Err(anyhow::Error::new(ReplyError {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 message: "rows unavailable".into(),
             }))
         } else {
@@ -322,19 +359,20 @@ impl UiBackend for FakeBackend {
                         None,
                         text(format!("Row {} of {total}", index + 1)),
                     )];
-                    (
+                    crate::backend::Row {
                         index,
-                        Tree::from_row(row, TreeLimits::default()).expect("valid row"),
-                    )
+                        indent: 0,
+                        tree: Tree::from_row(row, TreeLimits::default()).expect("valid row"),
+                    }
                 })
                 .collect())
         };
-        let pushed = if self.bad_rows_push.get() {
+        let effects = if self.bad_rows_push.get() {
             vec![unfit_push()]
         } else {
             Vec::new()
         };
-        async move { result.map(|value| Reply { pushed, value }) }.boxed_local()
+        async move { result.map(|value| Reply { effects, value }) }.boxed_local()
     }
 }
 
@@ -824,7 +862,7 @@ fn retryable(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> bool {
 fn failure(state: &Entity<SurfaceState>, cx: &mut TestAppContext) -> Option<String> {
     state.read_with(cx, |state, _| match state.phase() {
         crate::Phase::Failed { message, .. } => Some(message.to_string()),
-        crate::Phase::Mounting | crate::Phase::Ready(_) => None,
+        crate::Phase::Closed | crate::Phase::Mounting | crate::Phase::Ready(_) => None,
     })
 }
 
@@ -1252,14 +1290,15 @@ async fn test_a_stale_row_answer_after_a_remount_is_dropped(cx: &mut TestAppCont
         let rows = (0..5)
             .map(|index| {
                 let row = vec![node(ROW_ROOT, None, text("stale"))];
-                (
+                crate::backend::Row {
                     index,
-                    Tree::from_row(row, TreeLimits::default()).expect("valid row"),
-                )
+                    indent: 0,
+                    tree: Tree::from_row(row, TreeLimits::default()).expect("valid row"),
+                }
             })
             .collect();
         let reply = Reply {
-            pushed: Vec::new(),
+            effects: Vec::new(),
             value: rows,
         };
         state.receive_rows(LIST, old_generation, 0..5, Ok(reply), cx);
@@ -1319,7 +1358,13 @@ async fn test_applied_pushes_reset_the_remount_bound(cx: &mut TestAppContext) {
 
     for round in 0..6 {
         state.update(cx, |state, cx| {
-            state.apply_pushed_update(unfit_push().update, cx)
+            state.apply_pushed_update(
+                match unfit_push() {
+                    HostEffect::Push { update, .. } => update,
+                    _ => unreachable!(),
+                },
+                cx,
+            )
         });
         cx.run_until_parked();
         state.update(cx, |state, cx| {
@@ -1606,6 +1651,304 @@ async fn test_extension_ids_belong_to_their_source(cx: &mut TestAppContext) {
         assert!(registry.surface_of("fak", "e/main").is_none());
         assert_eq!(registry.surfaces_of("fake").count(), 1);
     });
+}
+
+/// Plan 2.3, design E: `add-surface` adds and mounts a surface at runtime, `remove-surface` takes
+/// it away, and `show-surface` / `hide-surface` of a panel reach the workspaces as events.
+#[gpui::test]
+async fn test_runtime_surfaces(cx: &mut TestAppContext) {
+    use crate::backend::HostEffect;
+    use crate::registry::RegistryEvent;
+    init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let backend = Rc::new(FakeBackend::default());
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel_surface("main", "Main")], cx)
+    });
+    let events = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        let events = events.clone();
+        cx.subscribe(&registry, move |_, event: &RegistryEvent, _| {
+            events.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "fake",
+            HostEffect::AddSurface(panel_surface("added", "Added")),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let added = registry.read_with(cx, |registry, _| {
+        registry
+            .surface_of("fake", "added")
+            .map(|s| s.state.clone())
+    });
+    let added = added.expect("added at runtime");
+    assert!(
+        added.read_with(cx, |state, _| state.tree().is_some()),
+        "and mounted"
+    );
+
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "fake",
+            HostEffect::ShowSurface {
+                surface_id: "added".into(),
+            },
+            cx,
+        );
+        registry.apply_effect(
+            "fake",
+            HostEffect::HideSurface {
+                surface_id: "added".into(),
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *events.borrow(),
+        [
+            RegistryEvent::RevealPanel("fake/added".into()),
+            RegistryEvent::HidePanel("fake/added".into()),
+        ]
+    );
+
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "fake",
+            HostEffect::RemoveSurface {
+                surface_id: "added".into(),
+            },
+            cx,
+        )
+    });
+    registry.read_with(cx, |registry, _| {
+        assert!(registry.surface_of("fake", "added").is_none());
+        assert!(registry.surface_of("fake", "main").is_some());
+    });
+}
+
+/// Plan 2.3, design B: a requested tick fires once after its delay (at least 1 s while no window
+/// is active, as in tests), replaces an earlier one, repeats when the tick asks again, waits while
+/// the panel is hidden, stops after 3 errors in a row until a user event, and goes when cancelled.
+#[gpui::test]
+async fn test_ticks(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let panel = cx.update(|cx| cx.new(|_| ()).entity_id());
+    let ticks = |backend: &FakeBackend| {
+        backend
+            .calls()
+            .iter()
+            .filter(|call| **call == Call::Tick)
+            .count()
+    };
+    let advance = |cx: &mut TestAppContext, ms: u64| {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    };
+
+    // Hidden: nothing, however long; shown: the due tick goes out at once.
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 5000);
+    assert_eq!(ticks(&backend), 0, "a hidden panel is not ticked");
+    state.update(cx, |state, cx| state.set_visible(panel, true, cx));
+    advance(cx, 0);
+    assert_eq!(ticks(&backend), 1);
+    assert_eq!(props_of(&state, LABEL, cx), text("Tick 1"));
+
+    // Visible, app in the background: not before 1 s.
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 900);
+    assert_eq!(ticks(&backend), 1);
+    advance(cx, 150);
+    assert_eq!(ticks(&backend), 2);
+
+    // A tick that asks again keeps going; cancelling stops it.
+    backend.tick_again.set(Some(Duration::from_millis(100)));
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 1050);
+    advance(cx, 1050);
+    assert_eq!(ticks(&backend), 4);
+    assert!(state.read_with(cx, |state, _| state.has_pending_tick()));
+    state.update(cx, |state, _| state.cancel_tick());
+    advance(cx, 3000);
+    assert_eq!(ticks(&backend), 4);
+
+    // Three errors in a row stop the ticks until a user event.
+    backend.fail_ticks.set(true);
+    for _ in 0..3 {
+        state.update(cx, |state, cx| {
+            state.request_tick(Duration::from_millis(100), cx)
+        });
+        advance(cx, 1050);
+    }
+    assert_eq!(ticks(&backend), 7);
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 3000);
+    assert_eq!(ticks(&backend), 7, "stopped");
+    backend.fail_ticks.set(false);
+    backend.tick_again.set(None);
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(INCREMENT), cx)
+    });
+    advance(cx, 0);
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 1050);
+    assert_eq!(ticks(&backend), 8, "resumed after a user event");
+}
+
+/// Plan 2.3, design C and D: a modal starts closed (no mount), mounts afresh at each show,
+/// echoes keyboard selection into its own tree and coalesces `row-selected`, sends exactly one
+/// `dismissed(reason)` when the user closes it and nothing when the extension does, and drops
+/// its tick on close.
+#[gpui::test]
+async fn test_modal_lifecycle(cx: &mut TestAppContext) {
+    use ui_ext::v0_2::{DismissReason, ModalDescriptor, ModalWidth, SurfaceKind};
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let surface = ui_ext::v0_2::Surface {
+        id: "counter".into(),
+        title: "Pick".into(),
+        kind: SurfaceKind::Modal(ModalDescriptor {
+            width: ModalWidth::Medium,
+        }),
+    };
+    let link: Rc<dyn crate::surface::SurfaceLink> = Rc::new(FakeLink(backend.clone()));
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| SurfaceState::new(dyn_backend, surface, Some(link), cx));
+    cx.run_until_parked();
+    assert!(state.read_with(cx, |state, _| !state.is_open()));
+    assert!(backend.calls().is_empty(), "nothing mounted while closed");
+
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    assert!(state.read_with(cx, |state, _| state.tree().is_some()));
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+
+    // Two rows, then keyboard selection: echoed locally, sent once.
+    for _ in 0..2 {
+        state.update(cx, |state, cx| {
+            state.dispatch(UiEvent::Click(INCREMENT), cx)
+        });
+        cx.run_until_parked();
+    }
+    backend.take_calls();
+    assert_eq!(
+        state.read_with(cx, |state, _| state.first_list()),
+        Some((LIST, None, 2))
+    );
+    state.update(cx, |state, cx| {
+        state.select_row(LIST, 0, cx);
+        state.select_row(LIST, 1, cx);
+    });
+    assert_eq!(
+        state.read_with(cx, |state, _| state.first_list()),
+        Some((LIST, Some(1), 2))
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [UiEvent::RowSelected(LIST, 1)],
+        "consecutive selections are coalesced"
+    );
+
+    // The user closes it: the tree goes, one dismissed goes out, the tick is dropped.
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_secs(1), cx);
+        state.close(Some(DismissReason::Escape), cx);
+    });
+    cx.run_until_parked();
+    state.read_with(cx, |state, _| {
+        assert!(!state.is_open());
+        assert!(state.tree().is_none());
+        assert!(!state.has_pending_tick());
+    });
+    assert_eq!(
+        backend.events(),
+        [UiEvent::Dismissed(DismissReason::Escape)]
+    );
+
+    // Shown again: a fresh mount; closed by the extension: nothing sent.
+    backend.take_calls();
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+    state.update(cx, |state, cx| state.close(None, cx));
+    cx.run_until_parked();
+    assert!(backend.calls().is_empty(), "{:?}", backend.calls());
+}
+
+/// Design K: the text of a secret input reaches the extension, but never the history the
+/// Extension Inspector shows (nor the logs, which use the same redaction).
+#[gpui::test]
+async fn test_secret_input_is_redacted(cx: &mut TestAppContext) {
+    init_test(cx);
+    const SECRET: NodeId = 41;
+    let backend = Rc::new(FakeBackend::default());
+    let tree = Tree::from_nodes(
+        vec![node(
+            SECRET,
+            None,
+            Props::Input(InputProps {
+                value: String::new(),
+                placeholder: "Token".into(),
+                secret: true,
+            }),
+        )],
+        TreeLimits::default(),
+    )
+    .expect("valid tree");
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state =
+        cx.new(|cx| SurfaceState::with_tree(dyn_backend, panel_surface("p", "P"), None, tree, cx));
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::InputSubmitted(SECRET, "hunter2".into()), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [UiEvent::InputSubmitted(SECRET, "hunter2".into())]
+    );
+    let history = state.read_with(cx, |state, _| format!("{:?}", state.history()));
+    assert!(!history.contains("hunter2"), "{history}");
+    assert!(history.contains("<secret>"), "{history}");
+}
+
+/// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).
+#[gpui::test]
+async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let tree = Tree::from_nodes(vec![node(1, None, text("given"))], TreeLimits::default())
+        .expect("valid tree");
+    let surface = panel_surface("decoration", "Decoration");
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| SurfaceState::with_tree(dyn_backend, surface, None, tree, cx));
+    cx.run_until_parked();
+    assert_eq!(props_of(&state, 1, cx), text("given"));
+    assert!(
+        !backend.calls().contains(&Call::Mount),
+        "no mount: {:?}",
+        backend.calls()
+    );
 }
 
 /// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
