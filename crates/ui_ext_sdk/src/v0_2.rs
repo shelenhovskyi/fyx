@@ -206,6 +206,53 @@ fn host_error(error: crate::bindings_v0_2::fyx::ui::host::HostError) -> HostErro
     }
 }
 
+mod v2n {
+    pub use crate::bindings_v0_2::fyx::ui::notifications::*;
+}
+
+/// Section M is the same in 0.2 and 0.3; only the generated types differ.
+pub(crate) fn notification(notification: &crate::Notification) -> v2n::Notification {
+    v2n::Notification {
+        owner: notification.owner.clone(),
+        level: match notification.level {
+            crate::NotificationLevel::Info => v2n::NotificationLevel::Info,
+            crate::NotificationLevel::Success => v2n::NotificationLevel::Success,
+            crate::NotificationLevel::Warning => v2n::NotificationLevel::Warning,
+            crate::NotificationLevel::Error => v2n::NotificationLevel::Error,
+        },
+        title: notification.title.clone(),
+        body: notification.body.clone(),
+        actions: notification
+            .actions
+            .iter()
+            .map(|action| v2n::NotificationAction {
+                id: action.id.clone(),
+                label: action.label.clone(),
+            })
+            .collect(),
+        auto_dismiss: notification.auto_dismiss,
+    }
+}
+
+pub(crate) fn progress_options(options: &crate::ProgressOptions) -> v2n::ProgressOptions {
+    v2n::ProgressOptions {
+        owner: options.owner.clone(),
+        title: options.title.clone(),
+        location: match options.location {
+            crate::ProgressLocation::StatusBar => v2n::ProgressLocation::StatusBar,
+            crate::ProgressLocation::Panel => v2n::ProgressLocation::Panel,
+        },
+        cancellable: options.cancellable,
+    }
+}
+
+pub(crate) fn progress_value(value: crate::ProgressValue) -> v2n::ProgressValue {
+    match value {
+        crate::ProgressValue::Indeterminate => v2n::ProgressValue::Indeterminate,
+        crate::ProgressValue::Percent(percent) => v2n::ProgressValue::Percent(percent),
+    }
+}
+
 fn invalid_argument(message: String) -> HostError {
     HostError {
         code: HostErrorCode::InvalidArgument,
@@ -399,6 +446,37 @@ pub mod glue {
         crate::bindings_v0_2::fyx::ui::decorations::remove_decoration(id).map_err(host_error)
     }
 
+    pub fn notify(new_notification: &crate::Notification) -> Result<u64, HostError> {
+        crate::bindings_v0_2::fyx::ui::notifications::notify(&notification(new_notification))
+            .map_err(host_error)
+    }
+
+    pub fn dismiss_notification(id: u64) {
+        crate::bindings_v0_2::fyx::ui::notifications::dismiss_notification(id);
+    }
+
+    pub fn progress_start(options: &crate::ProgressOptions) -> Result<u64, HostError> {
+        crate::bindings_v0_2::fyx::ui::notifications::progress_start(&progress_options(options))
+            .map_err(host_error)
+    }
+
+    pub fn progress_update(
+        id: u64,
+        value: crate::ProgressValue,
+        message: Option<&str>,
+    ) -> Result<(), HostError> {
+        crate::bindings_v0_2::fyx::ui::notifications::progress_update(
+            id,
+            progress_value(value),
+            message,
+        )
+        .map_err(host_error)
+    }
+
+    pub fn progress_end(id: u64) {
+        crate::bindings_v0_2::fyx::ui::notifications::progress_end(id);
+    }
+
     pub fn add_image(_format: crate::ImageFormat, _bytes: &[u8]) -> Result<u32, HostError> {
         Err(HostError {
             code: HostErrorCode::Unavailable,
@@ -465,6 +543,40 @@ mod tests {
         assert_eq!(
             event(v2::UiEvent::Dismissed(v2::DismissReason::Escape)),
             UiEvent::Dismissed(DismissReason::Escape)
+        );
+    }
+
+    #[test]
+    fn section_m_carries_over() {
+        let converted = notification(
+            &crate::Notification::new("panel", crate::NotificationLevel::Error, "Failed")
+                .body("details")
+                .action("retry", "Retry")
+                .sticky(),
+        );
+        assert_eq!(
+            converted,
+            v2n::Notification {
+                owner: "panel".into(),
+                level: v2n::NotificationLevel::Error,
+                title: "Failed".into(),
+                body: Some("details".into()),
+                actions: vec![v2n::NotificationAction {
+                    id: "retry".into(),
+                    label: "Retry".into(),
+                }],
+                auto_dismiss: false,
+            }
+        );
+        let options = progress_options(
+            &crate::ProgressOptions::new("panel", "Indexing", crate::ProgressLocation::Panel)
+                .cancellable(),
+        );
+        assert_eq!(options.location, v2n::ProgressLocation::Panel);
+        assert!(options.cancellable);
+        assert_eq!(
+            progress_value(crate::ProgressValue::Percent(7)),
+            v2n::ProgressValue::Percent(7)
         );
     }
 

@@ -14,7 +14,10 @@ use std::cell::RefCell;
 
 #[cfg(feature = "fyx-ui-0-3")]
 use crate::ImageFormat;
-use crate::{DecorationLocation, HostError, LogLevel, Node, Surface, Update};
+use crate::{
+    DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions, ProgressValue,
+    Surface, Update,
+};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
@@ -33,6 +36,15 @@ unsafe extern "Rust" {
         nodes: &[Node],
     ) -> Result<(), HostError>;
     safe fn __fyx_ui_remove_decoration(id: &str) -> Result<(), HostError>;
+    safe fn __fyx_ui_notify(notification: &Notification) -> Result<u64, HostError>;
+    safe fn __fyx_ui_dismiss_notification(id: u64);
+    safe fn __fyx_ui_progress_start(options: &ProgressOptions) -> Result<u64, HostError>;
+    safe fn __fyx_ui_progress_update(
+        id: u64,
+        value: ProgressValue,
+        message: Option<&str>,
+    ) -> Result<(), HostError>;
+    safe fn __fyx_ui_progress_end(id: u64);
     #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_add_image(format: ImageFormat, bytes: &[u8]) -> Result<u32, HostError>;
     #[cfg(feature = "fyx-ui-0-3")]
@@ -63,6 +75,22 @@ pub enum HostEffect {
         nodes: Vec<Node>,
     },
     RemoveDecoration(String),
+    /// [`notify`]; off WASM the ids are 1, 2, … shared with [`progress_start`].
+    Notify {
+        id: u64,
+        notification: Notification,
+    },
+    DismissNotification(u64),
+    ProgressStart {
+        id: u64,
+        options: ProgressOptions,
+    },
+    ProgressUpdate {
+        id: u64,
+        value: ProgressValue,
+        message: Option<String>,
+    },
+    ProgressEnd(u64),
     /// `add_image`; the bytes are left out of the record, only their length is kept.
     #[cfg(feature = "fyx-ui-0-3")]
     AddImage {
@@ -94,6 +122,16 @@ thread_local! {
     static EFFECTS: RefCell<Vec<HostEffect>> = const { RefCell::new(Vec::new()) };
     #[cfg(feature = "fyx-ui-0-3")]
     static NEXT_IMAGE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static NEXT_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn next_id() -> u64 {
+    NEXT_ID.replace(NEXT_ID.get() + 1)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -251,6 +289,76 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError> {
     record(HostEffect::RemoveDecoration(id.to_string()))
 }
 
+/// Shows a notification in the active workspace window without moving focus, and returns its
+/// id (design.md, M.1). Needs `ui:notifications`. Its button clicks and its closing come back to
+/// `notification.owner` as [`UiEvent::NotificationAction`](crate::UiEvent) and
+/// `NotificationClosed`. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per
+/// extension, past which it returns `limit-exceeded`. `fyx:ui` 0.2; `unavailable` for 0.1.
+pub fn notify(notification: &Notification) -> Result<u64, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_notify(notification);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let id = next_id();
+        record(HostEffect::Notify {
+            id,
+            notification: notification.clone(),
+        })?;
+        Ok(id)
+    }
+}
+
+/// Closes a notification of this extension without an event. Unknown or closed ids are ignored.
+pub fn dismiss_notification(id: u64) {
+    #[cfg(target_arch = "wasm32")]
+    __fyx_ui_dismiss_notification(id);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::DismissNotification(id)).ok();
+}
+
+/// Starts a progress, indeterminate until the first [`progress_update`], and returns its id
+/// (design.md, M.2). Needs `ui:notifications`. At most 4 running per extension and 30 starts per
+/// rolling 60 s. A cancellable one sends `UiEvent::ProgressCancelRequested` to `options.owner`.
+/// `fyx:ui` 0.2; `unavailable` for 0.1.
+pub fn progress_start(options: &ProgressOptions) -> Result<u64, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_progress_start(options);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let id = next_id();
+        record(HostEffect::ProgressStart {
+            id,
+            options: options.clone(),
+        })?;
+        Ok(id)
+    }
+}
+
+/// Sets a running progress's value and, when given, a one-line message of at most 120 bytes. At
+/// most 64 updates per export call; the host redraws at most 10 times a second.
+pub fn progress_update(
+    id: u64,
+    value: ProgressValue,
+    message: Option<&str>,
+) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_progress_update(id, value, message);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::ProgressUpdate {
+        id,
+        value,
+        message: message.map(str::to_string),
+    })
+}
+
+/// Ends a progress. Unknown or ended ids are ignored; removing its owner ends it too.
+pub fn progress_end(id: u64) {
+    #[cfg(target_arch = "wasm32")]
+    __fyx_ui_progress_end(id);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::ProgressEnd(id)).ok();
+}
+
 /// `fyx:ui` 0.3: registers a PNG or SVG made at run time, for `ImageProps::generated`. Needs
 /// `ui:images`; at most 1 MiB, at most 32 live images per extension. The host checks the bytes
 /// at once (the PNG header, or that an SVG is plain text) and decodes them after the call; until
@@ -290,8 +398,11 @@ pub mod newest {
     use crate::ImageFormat;
     #[cfg(feature = "fyx-ui-0-3")]
     use crate::bindings::fyx::ui::images;
-    use crate::bindings::fyx::ui::{decorations, host};
-    use crate::{DecorationLocation, HostError, LogLevel, Node, Surface, Update};
+    use crate::bindings::fyx::ui::{decorations, host, notifications};
+    use crate::{
+        DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions,
+        ProgressValue, Surface, Update,
+    };
 
     pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION;
 
@@ -337,6 +448,30 @@ pub mod newest {
 
     pub fn remove_decoration(id: &str) -> Result<(), HostError> {
         decorations::remove_decoration(id)
+    }
+
+    pub fn notify(notification: &Notification) -> Result<u64, HostError> {
+        notifications::notify(notification)
+    }
+
+    pub fn dismiss_notification(id: u64) {
+        notifications::dismiss_notification(id);
+    }
+
+    pub fn progress_start(options: &ProgressOptions) -> Result<u64, HostError> {
+        notifications::progress_start(options)
+    }
+
+    pub fn progress_update(
+        id: u64,
+        value: ProgressValue,
+        message: Option<&str>,
+    ) -> Result<(), HostError> {
+        notifications::progress_update(id, value, message)
+    }
+
+    pub fn progress_end(id: u64) {
+        notifications::progress_end(id);
     }
 
     #[cfg(feature = "fyx-ui-0-3")]
