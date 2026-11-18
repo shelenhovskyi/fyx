@@ -576,7 +576,13 @@ impl UiState {
             message.truncate(end);
             message.push_str(&format!("… ({total} bytes, cut)"));
         }
-        log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        log::log!(
+            target: "fyx_ui",
+            level,
+            "{}: {}",
+            self.extension_id,
+            ui_ext::sanitize_for_log(&message)
+        );
         self.diagnostics.log(level, &message);
         Ok(())
     }

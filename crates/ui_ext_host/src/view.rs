@@ -349,6 +349,7 @@ impl SurfaceView {
         self.markdown
             .retain(|id, _| markdown.iter().any(|(node, _)| node == id));
         for (id, source) in markdown {
+            let source = without_images(&source);
             match self.markdown.get(&id) {
                 Some(entity) => {
                     if entity.read(cx).source().as_ref() != source {
@@ -1309,6 +1310,28 @@ fn focus_ring(focused: bool, cx: &App) -> Hsla {
     } else {
         colors.border_transparent
     }
+}
+
+/// Extension markdown shows no images (triage-3, SEC T8): `markdown` decodes `data:` images
+/// in-process while parsing, before anything is drawn. Every `![` that would open one gets a
+/// backslash, so the parser sees a `!` and, after it, at most a link (which `link_is_allowed`
+/// filters). Inside code the backslash shows; `![` there is rare.
+pub(crate) fn without_images(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut backslashes = 0;
+    let mut chars = source.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '!' && chars.peek() == Some(&'[') && backslashes % 2 == 0 {
+            out.push('\\');
+        }
+        backslashes = if character == '\\' {
+            backslashes + 1
+        } else {
+            0
+        };
+        out.push(character);
+    }
+    out
 }
 
 /// Only web links leave an extension's markdown: `http` and `https`. Anything else (`file:`,

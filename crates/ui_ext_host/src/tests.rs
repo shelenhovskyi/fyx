@@ -2175,6 +2175,25 @@ async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {
     );
 }
 
+/// Triage-3, SEC T8: extension markdown never forms an image, so `data:` images are not decoded.
+#[test]
+fn test_markdown_images_are_not_parsed() {
+    use crate::view::without_images;
+    assert_eq!(
+        without_images("a ![x](data:image/png;base64,AAAA) b"),
+        r"a \![x](data:image/png;base64,AAAA) b"
+    );
+    assert_eq!(without_images("![r][ref]"), r"\![r][ref]");
+    // Already escaped: left alone. Two backslashes are an escaped backslash: escaped again.
+    assert_eq!(without_images(r"\![x](y)"), r"\![x](y)");
+    assert_eq!(without_images(r"\\![x](y)"), r"\\\![x](y)");
+    assert_eq!(
+        without_images("Hi! [link](https://zed.dev)"),
+        "Hi! [link](https://zed.dev)"
+    );
+    assert_eq!(without_images("!!["), r"!\![");
+}
+
 /// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
 #[test]
 fn test_markdown_links_are_filtered() {
