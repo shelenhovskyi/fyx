@@ -61,11 +61,13 @@ use bindings::fyx::ui::{host as wit_host, types as wit};
 
 mod conversions;
 mod dispatch;
+pub mod edit;
 mod effects;
 mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 pub mod images;
 pub mod network;
+pub mod observe;
 pub mod process;
 mod stderr;
 pub mod ticks;
@@ -491,7 +493,9 @@ impl UiManifest {
             // The T2 capabilities this host provides, from 0.3 on.
             if network_capable
                 && (capability == network::CAPABILITY_NETWORK
-                    || capability == process::CAPABILITY_PROCESS)
+                    || capability == process::CAPABILITY_PROCESS
+                    || capability == edit::CAPABILITY_EDIT
+                    || capability == observe::CAPABILITY_OBSERVE)
             {
                 continue;
             }
@@ -585,6 +589,18 @@ pub struct UiState {
     network: network::NetworkState,
     /// The 0.3 `process` import's ids, counters and the spawns of the running call.
     process: process::ProcessState,
+    /// The 0.3 `workspace-edit` import's ids, counters and the edits of the running call.
+    edit: edit::EditState,
+    /// What the running call asked of the 0.3 `agent-observe` feed.
+    observe: observe::ObserveState,
+}
+
+/// The 0.3 T2 state of a new [`UiState`].
+struct IoStates {
+    network: network::NetworkState,
+    process: process::ProcessState,
+    edit: edit::EditState,
+    observe: observe::ObserveState,
 }
 
 impl UiState {
@@ -629,10 +645,17 @@ impl UiState {
         capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
         diagnostics: diagnostics::DiagnosticsBuffer,
         api: effects::ApiState,
-        network: network::NetworkState,
-        process: process::ProcessState,
+        io: IoStates,
     ) -> Self {
+        let IoStates {
+            network,
+            process,
+            edit,
+            observe,
+        } = io;
         Self {
+            edit,
+            observe,
             capability_check,
             diagnostics,
             api,
@@ -1152,6 +1175,10 @@ pub struct UiExtension {
     network: Arc<network::NetworkHandle>,
     /// Starts `process.spawn` programs after their call; dropping the last clone kills them.
     processes: Arc<process::ProcessHandle>,
+    /// Starts `workspace-edit.apply-edit` edits after their call.
+    edits: Arc<edit::EditHandle>,
+    /// The `agent-observe` feed; dropping the last clone stops it.
+    observer: Arc<observe::ObserveHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1272,6 +1299,10 @@ pub struct LoadOptions {
     pub workspace: Option<Arc<dyn process::Workspace>>,
     /// Fyx's environment as `process:spawn` sees it; `None` is the real one. For tests.
     pub process_environment: Option<process::Environment>,
+    /// The editor side of `workspace:edit`. Without it, `apply-edit` is `unavailable`.
+    pub workspace_edits: Option<Arc<dyn edit::WorkspaceEdits>>,
+    /// The agent reviews for `agent:observe`. Without them, `start` is `unavailable`.
+    pub agent_reviews: Option<Arc<dyn observe::AgentReviews>>,
 }
 
 impl UiExtension {
@@ -1326,6 +1357,8 @@ impl UiExtension {
             process_env,
             workspace,
             process_environment,
+            workspace_edits,
+            agent_reviews,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1425,6 +1458,24 @@ impl UiExtension {
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
             ));
+            // Only a 0.3 component has the `workspace-edit` and `agent-observe` imports.
+            let is_v0_3 = ui_api_version == ApiVersion::V0_3_0;
+            let edit_set = Arc::new(edit::EditSet::default());
+            let edits = Arc::new(edit::EditHandle::new(
+                extension_id.clone(),
+                capability_check.clone(),
+                workspace_edits.filter(|_| is_v0_3),
+                edit_set.clone(),
+                running.clone(),
+            ));
+            let observer = Arc::new(observe::ObserveHandle::new(
+                extension_id.clone(),
+                capability_check.clone(),
+                agent_reviews.filter(|_| is_v0_3),
+                running.clone(),
+            ));
+            let edits_available = edits.available();
+            let reviews_available = observer.available();
 
             let instantiate = {
                 let extension_id = extension_id.clone();
@@ -1432,10 +1483,15 @@ impl UiExtension {
                 let capabilities = capabilities.clone();
                 let network = network.clone();
                 let process_set = process_set.clone();
+                let revocable = network::Revocable {
+                    processes: Arc::downgrade(&process_set),
+                    edits: Arc::downgrade(&edit_set),
+                    observer: Arc::downgrade(&observer),
+                };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
                     if ui_api_version == ApiVersion::V0_3_0 {
-                        network.watch_permissions(Arc::downgrade(&process_set));
+                        network.watch_permissions(revocable);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -1455,8 +1511,16 @@ impl UiExtension {
                             capability_check,
                             diagnostics.clone(),
                             effects::ApiState::new(ui_api_version, capabilities),
-                            network::NetworkState::new(domains, running),
-                            process::ProcessState::new(process_policy, process_set, workspace),
+                            IoStates {
+                                network: network::NetworkState::new(domains, running),
+                                process: process::ProcessState::new(
+                                    process_policy,
+                                    process_set,
+                                    workspace,
+                                ),
+                                edit: edit::EditState::new(edits_available),
+                                observe: observe::ObserveState::new(reviews_available),
+                            },
                         ),
                     );
                     store.limiter(|state| &mut state.limits);
@@ -1543,6 +1607,8 @@ impl UiExtension {
                     name: None,
                     network,
                     processes,
+                    edits,
+                    observer,
                 },
                 pushed_rx,
             ))
@@ -1669,6 +1735,8 @@ impl UiExtension {
         let diagnostics = self.diagnostics.clone();
         let network = self.network.clone();
         let processes = self.processes.clone();
+        let edits = self.edits.clone();
+        let observer = self.observer.clone();
         let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
@@ -1688,9 +1756,13 @@ impl UiExtension {
                         // its effects if it failed (design.md §0.3).
                         network.start(store.data_mut().network.finish_call(result.is_ok()));
                         processes.start(store.data_mut().process.finish_call(result.is_ok()));
-                        // A trap kills the extension's processes with it (design.md §9).
+                        edits.start(store.data_mut().edit.finish_call(result.is_ok()));
+                        observer.apply(store.data_mut().observe.finish_call(result.is_ok()));
+                        // A trap kills the extension's processes with it (design.md §9) and ends
+                        // its agent feed.
                         if result.is_err() {
                             processes.kill_all();
+                            observer.stop();
                         }
                         diagnostics.call(diagnostics::CallRecord {
                             kind,

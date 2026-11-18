@@ -7,9 +7,13 @@
 
 mod api_version;
 pub mod canvas;
+#[cfg(feature = "t2")]
+pub mod edit;
 pub mod image;
 #[cfg(feature = "t2")]
 pub mod network;
+#[cfg(feature = "t2")]
+pub mod observe;
 #[cfg(feature = "t2")]
 pub mod process;
 mod tree;

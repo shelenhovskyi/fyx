@@ -409,6 +409,12 @@ impl UiExtension {
                                 store.data_mut().process.delivered(id);
                                 crate::network::IoEvent::SpawnFailed(id, error)
                             }
+                            // An edit that was applied stays applied, so its outcome is not
+                            // turned into `denied` by a later revocation.
+                            crate::network::IoEvent::EditDone(id, result) => {
+                                store.data_mut().edit.delivered(id);
+                                crate::network::IoEvent::EditDone(id, result)
+                            }
                             other => other,
                         };
                         extension.call_handle_io(store, event).await

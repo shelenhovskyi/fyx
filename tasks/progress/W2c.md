@@ -293,3 +293,33 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   - Linux `PR_SET_CHILD_SUBREAPER`;
   - the Inspector line;
   - the Unix variants of the tests have not been run (no Linux runner for the full crate).
+
+## Plan 4.8: `workspace:edit` and `agent:observe`, host side (2026-11-18)
+
+- **Pure model** (`ui_ext::edit`, `ui_ext::observe`, feature `t2`; features `edit`/`observe`
+  alias it):
+  - edit types, the import checks `check_edit`: label 1..=128 bytes on one line, 1..=64 files,
+    ≤ 4096 text edits, ≤ 4 MiB new text, the `file-ref` path rule, ranges in order;
+  - `check_targets` when applied: overlapping ranges, two inserts at one point and a target named
+    twice → `invalid`; `.git`, `.fyx`, `.zed`, `.vscode`, `.idea` as the first component (ASCII
+    case-insensitive) → `not-allowed`; `EditCounters` (4 in flight);
+  - review types, `cut_review` (256 KiB of hunk text, whole hunks; no hunks outside the
+    worktrees), `cut_snapshot` (newest 1000), `OpaqueIds` (one map per extension).
+  - `IoEvent::EditDone` and `IoEvent::Agent`.
+- **Engine** (`ui_ext_wasm::edit`, `ui_ext_wasm::observe`):
+  - `apply-edit` checks the manifest, the broker (Ask accepted), `check_edit` and the cap, and
+    returns an id; after the call: `check_targets`, consent, then the host's `WorkspaceEdits`.
+    A trap drops it; a revocation ends unapplied edits with `denied`; a reload stops them with no
+    outcome. An applied edit's `ok` is not turned into `denied` at delivery.
+  - `start`/`stop` (the last wins, applied after the call): consent, then the host's
+    `AgentReviews::subscribe`; snapshot first, opaque ids, cuts; under backpressure a newer
+    `updated` replaces a queued one, and past 1024 queued events it resubscribes for a fresh
+    snapshot. `stop`, revocation, a trap and a reload end the feed (the host stream is dropped).
+  - `LoadOptions.workspace_edits` / `agent_reviews`; without them the imports are `unavailable`.
+  - `UiManifest::read` accepts both capabilities from 0.3.
+- **Tests:** 11 end to end through the probe with fake editor and review sides (apply, import
+  checks, protected/overlap never reach the editor, editor errors, trap, consent, revocation of
+  each, feed and ids, stop/trap/reload, coalescing), a WIT test that no `agent-observe` function
+  takes an argument, and unit tests of the rules and the queue.
+- **For W3:** implement both traits in ui_ext_host (contract in their doc comments).
+- **Not done:** the real implementations (W3 with W5's read API), the Inspector line.
