@@ -596,6 +596,11 @@ pub struct UiState {
     edit: edit::EditState,
     /// What the running call asked of the 0.3 `agent-observe` feed.
     observe: observe::ObserveState,
+    /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
+    /// sees one answer (design.md §7).
+    permission_mirror: std::collections::HashMap<&'static str, permissions::PermissionState>,
+    /// 0.3 `permissions.request` in the running call: the prompts to ask for once it returns.
+    permission_requests: Vec<&'static str>,
 }
 
 /// The 0.3 T2 state of a new [`UiState`].
@@ -676,6 +681,8 @@ impl UiState {
             executed: Duration::ZERO,
             mounted: Default::default(),
             disabled: None,
+            permission_mirror: Default::default(),
+            permission_requests: Vec::new(),
         }
     }
 
@@ -693,7 +700,23 @@ impl UiState {
         self.pushes.clear();
         self.pushed_items = 0;
         self.lifted_text = 0;
+        self.permission_mirror.clear();
+        self.permission_requests.clear();
         self.api.begin_call();
+    }
+
+    /// `permissions.query`: `unavailable` unless the manifest declares it, else the broker's
+    /// state as of this call's first query of it.
+    fn query_permission(&mut self, capability: &'static str) -> permissions::PermissionState {
+        if !self.api.declares(capability) {
+            return permissions::PermissionState::Unavailable;
+        }
+        if let Some(state) = self.permission_mirror.get(capability) {
+            return *state;
+        }
+        let state = self.permission_state(capability);
+        self.permission_mirror.insert(capability, state);
+        state
     }
 
     fn count_lifted_text(&mut self, bytes: usize) -> wasmtime::Result<()> {
@@ -1697,6 +1720,20 @@ impl UiExtension {
                         })
                         .await;
                         let effects = store.data_mut().finish_call();
+                        // `permissions.request` prompts, after the call and only if it returned;
+                        // the answer reaches the guest as `permission-changed`.
+                        let prompts = std::mem::take(&mut store.data_mut().permission_requests);
+                        if result.is_ok()
+                            && let Some(broker) = store.data().capability_check.clone()
+                        {
+                            for capability in prompts {
+                                let extension_id = store.data().extension_id.clone();
+                                let broker = broker.clone();
+                                tokio::spawn(async move {
+                                    broker.request(&extension_id, capability).await;
+                                });
+                            }
+                        }
                         // The call's requests start now, after it returned, or are dropped with
                         // its effects if it failed (design.md §0.3).
                         network.start(store.data_mut().network.finish_call(result.is_ok()));

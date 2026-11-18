@@ -368,3 +368,15 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   proxied. Tests: the CONNECT reaches the proxy, a private answer is refused before it,
   `localhost` goes direct, clearing applies to the next request, the scheme rule.
 - For W3: set it in ui_ext_host from `ProxySettings::get_global(cx).proxy` and on each change.
+
+## 0.3 `permissions` interface, host side (2026-11-18, W4's gap)
+
+- `query(capability)`: `unavailable` unless the manifest declares it, else the broker's state,
+  mirrored per call (one call sees one answer per capability).
+- `request(capability)`: not declared → `not-permitted`; needs the click-or-Enter activation
+  and uses it up (§0.4), else `not-permitted`; in state `ask` the prompt (`broker.request`) is
+  asked once the call returns (a trap drops it); other states change nothing. The answer
+  reaches the guest as `permission-changed` through the broker's `changes()`.
+- Probe: case 6 now traps on `language.unregister-provider`; cases 10 and 11 and the
+  `perm query|request` commands. 3 tests.
+- `AgentReviews::subscribe` is async (85a7d3c2ed) for W5's `agent_review::observe(&mut App)`.

@@ -1,13 +1,15 @@
 //! Host side of the staged `fyx:ui@0.3.0` world (`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`),
-//! as far as it is built: what 0.3 copies forward from 0.2 (`types`, `host`, `notifications`), and the `images`
-//! interface of design.md section 12 (plan 4.10). Every other 0.3 interface is linked as a trap
-//! until its plan task lands (`define_unbuilt_as_traps`), so a component that never calls them
-//! loads and runs.
+//! as far as it is built: what 0.3 copies forward from 0.2 (`types`, `host`, `notifications`),
+//! `images` (design.md §12), canvas nodes (§13), and the T2 interfaces `network` (§8), `process`
+//! (§9), `workspace-edit` (§10), `agent-observe` (§11) and `permissions` (§7), whose operations
+//! start after their call and report through `handle-io`. Every other 0.3 interface is linked as a
+//! trap until its plan task lands (`define_unbuilt_as_traps`), so a component that never calls
+//! them loads and runs.
 //!
-//! `image` nodes convert into [`model::Props::Image`]; their checks (`ui_ext::image`) run when the
-//! update or the reply is applied ([`crate::effects::ApiState::check_images`]). Values the
-//! `ui_ext` model cannot hold yet are refused as `invalid-argument` (in a push) or as the call's
-//! error (in a reply): `canvas` nodes and `picker` surfaces.
+//! `image` and `canvas` nodes convert into the model; their checks run when the update or the
+//! reply is applied ([`crate::effects::ApiState::check_images`]). `picker` surfaces, which the
+//! `ui_ext` model cannot hold yet, are refused as `invalid-argument` (in a push) or as the call's
+//! error (in a reply).
 
 use ui_ext::{
     canvas as model_canvas,
@@ -40,7 +42,8 @@ pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
     agent_observe as wit_observe, documents as wit_documents, host as wit_host,
     images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
-    process as wit_process, types as wit, workspace_edit as wit_edit,
+    permissions as wit_permissions, process as wit_process, types as wit,
+    workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(denied: wit_host::HostErrorCode::Denied);
@@ -200,6 +203,67 @@ impl UiState {
             }
             .into()),
         }
+    }
+}
+
+fn t2_capability(capability: wit_permissions::T2Capability) -> &'static str {
+    match capability {
+        wit_permissions::T2Capability::NetworkFetch => network::CAPABILITY_NETWORK,
+        wit_permissions::T2Capability::ProcessSpawn => process::CAPABILITY_PROCESS,
+        wit_permissions::T2Capability::WorkspaceEdit => edit::CAPABILITY_EDIT,
+        wit_permissions::T2Capability::AgentObserve => observe::CAPABILITY_OBSERVE,
+    }
+}
+
+fn wit_permission_state(state: PermissionState) -> wit_permissions::PermissionState {
+    match state {
+        PermissionState::Granted => wit_permissions::PermissionState::Granted,
+        PermissionState::Denied => wit_permissions::PermissionState::Denied,
+        PermissionState::Ask => wit_permissions::PermissionState::Ask,
+        PermissionState::Unavailable => wit_permissions::PermissionState::Unavailable,
+    }
+}
+
+/// `permissions` (design.md §7): the state, and the prompt on a gesture.
+impl wit_permissions::Host for UiState {
+    fn query(
+        &mut self,
+        capability: wit_permissions::T2Capability,
+    ) -> wasmtime::Result<wit_permissions::PermissionState> {
+        Ok(wit_permission_state(
+            self.query_permission(t2_capability(capability)),
+        ))
+    }
+
+    fn request(
+        &mut self,
+        capability: wit_permissions::T2Capability,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        let capability = t2_capability(capability);
+        if !self.api.declares(capability) {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            }
+            .into()));
+        }
+        if !self.api.take_activation() {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::NotPermitted,
+                message: "permissions.request needs a click or Enter: during handle-event for \
+                          click, row-click or input-submitted, a command or an accepted picker \
+                          item, or shortly after it, once"
+                    .into(),
+            }
+            .into()));
+        }
+        // Only `ask` has a prompt to show; any other state stays as it is.
+        if self.query_permission(capability) == PermissionState::Ask
+            && !self.permission_requests.contains(&capability)
+        {
+            self.permission_requests.push(capability);
+        }
+        Ok(Ok(()))
     }
 }
 
@@ -381,7 +445,6 @@ fn agent_event(event: observe::AgentEvent) -> wit_observe::AgentEvent {
 
 /// An outcome for the `handle-io` export; `None` for a capability 0.3 has no name for.
 pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
-    use bindings::fyx::ui::permissions as wit_permissions;
     Some(match event {
         network::IoEvent::ProcessOutput(output) => {
             wit_io::IoEvent::ProcessOutput(wit_process::ProcessOutput {
@@ -418,12 +481,7 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
                     "agent:observe" => wit_permissions::T2Capability::AgentObserve,
                     _ => return None,
                 },
-                match state {
-                    PermissionState::Granted => wit_permissions::PermissionState::Granted,
-                    PermissionState::Denied => wit_permissions::PermissionState::Denied,
-                    PermissionState::Ask => wit_permissions::PermissionState::Ask,
-                    PermissionState::Unavailable => wit_permissions::PermissionState::Unavailable,
-                },
+                wit_permission_state(state),
             ))
         }
         network::IoEvent::EditDone(id, result) => wit_io::IoEvent::EditDone((
@@ -498,7 +556,7 @@ conversions::conversions! {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 8] = [
+const LINKED_INTERFACES: [&str; 9] = [
     "types",
     "host",
     "images",
@@ -507,6 +565,7 @@ const LINKED_INTERFACES: [&str; 8] = [
     "process",
     "workspace-edit",
     "agent-observe",
+    "permissions",
 ];
 
 /// Stubs the `fyx:ui` 0.3 interfaces `component` imports that this build does not implement yet,
@@ -697,5 +756,6 @@ pub(crate) fn add_to_linker(
     wit_process::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_edit::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_observe::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_permissions::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }
