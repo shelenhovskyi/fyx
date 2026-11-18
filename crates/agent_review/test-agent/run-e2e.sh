@@ -7,7 +7,8 @@
 # It creates a scratch profile and project under SCRATCH_DIR (default D:/scratch/fyx-w5-e2e), starts the
 # app with the review script `e2e-full.script` and the scripted agent `review_stub_agent.js`
 # (REVIEW_STUB_SCENARIO=full), waits for it to quit (at most 4 minutes), then prints the agent's log,
-# the review log lines and the files. Never point SCRATCH_DIR at a real profile or project: it is
+# the review log lines and the files, and fails if anything under %LOCALAPPDATA%\Fyx or %APPDATA%\Fyx
+# changed meanwhile. Never point SCRATCH_DIR at a real profile or project: it is
 # deleted first.
 set -euo pipefail
 
@@ -44,9 +45,24 @@ cat > "$data/config/settings.json" <<EOF
 }
 EOF
 
+# The real profile must stay untouched: `--user-data-dir` moves every Fyx directory into the scratch
+# profile. Its files are listed before and after the run (LMDB lock files excepted: opening a
+# database rewrites them). Another Fyx, or a test run, writing there at the same time shows up too.
+real_profiles=("${LOCALAPPDATA:-}/Fyx" "${APPDATA:-}/Fyx")
+profile_state() {
+    for dir in "${real_profiles[@]}"; do
+        if [ -d "$dir" ]; then
+            find "$dir" -type f ! -name 'lock.mdb' -printf '%p %s %T@\n'
+        fi
+    done | sort
+}
+profile_state > "$scratch/real-profile.before"
+
 FYX_AGENT_REVIEW_SCRIPT="$here/e2e-full.script" RUST_LOG=info \
     timeout 240 "$exe" --foreground --user-data-dir "$data" "$project" > "$scratch/stdout.log" 2>&1 \
     || echo "exit status $?"
+
+profile_state > "$scratch/real-profile.after"
 
 echo "--- agent"
 cat "$stub_log" 2>/dev/null || echo "(no agent log)"
@@ -61,3 +77,10 @@ for name in demo4.txt moved.txt Cargo.lock docs/guide.md outside.txt .fyx/review
     echo "== $name"
     cat "$project/$name" 2>/dev/null || echo "(absent)"
 done
+echo "--- real profile"
+if diff "$scratch/real-profile.before" "$scratch/real-profile.after"; then
+    echo "unchanged: ${real_profiles[*]}"
+else
+    echo "CHANGED during the run (< before, > after)"
+    exit 1
+fi
