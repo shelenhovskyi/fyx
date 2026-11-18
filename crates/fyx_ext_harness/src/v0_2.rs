@@ -96,47 +96,7 @@ impl wit_host::Host for State {
     }
 }
 
-/// §M is not in the harness yet (W4 adds the caps and the events): every call is refused, so an
-/// extension that uses notifications still loads and runs in tests.
-impl wit_notifications::Host for State {
-    fn notify(
-        &mut self,
-        _: wit_notifications::Notification,
-    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(notifications_not_in_harness().into()))
-    }
-
-    fn dismiss_notification(&mut self, _: u64) -> wasmtime::Result<()> {
-        Ok(())
-    }
-
-    fn progress_start(
-        &mut self,
-        _: wit_notifications::ProgressOptions,
-    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(notifications_not_in_harness().into()))
-    }
-
-    fn progress_update(
-        &mut self,
-        _: u64,
-        _: wit_notifications::ProgressValue,
-        _: Option<String>,
-    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(Err(notifications_not_in_harness().into()))
-    }
-
-    fn progress_end(&mut self, _: u64) -> wasmtime::Result<()> {
-        Ok(())
-    }
-}
-
-pub(crate) fn notifications_not_in_harness() -> model::HostError {
-    model::HostError {
-        code: model::HostErrorCode::NotPermitted,
-        message: "the test harness does not run notifications and progress yet".into(),
-    }
-}
+crate::notifications::notification_imports!();
 
 impl wit_decorations::Host for State {
     fn place_decoration(

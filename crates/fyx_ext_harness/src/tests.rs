@@ -367,6 +367,70 @@ fn ids<'a>(surfaces: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
 }
 
 #[test]
+fn notifications_and_progress_run_with_their_gestures() {
+    use ui_ext::v0_2::notifications::{NotificationCloseReason, ProgressValue};
+    let mut harness = loaded_fixture();
+    let status = |harness: &Harness| {
+        harness
+            .text(fixture::MAIN, fixture::STATUS)
+            .map(str::to_string)
+    };
+
+    let outcome = harness.click(fixture::MAIN, "Notify").expect("notify");
+    assert!(
+        matches!(&outcome.effects[..], [HostEffect::Notify { id: 1, .. }]),
+        "{outcome:?}"
+    );
+    assert_eq!(status(&harness).as_deref(), Some("status: notified 1"));
+    assert_eq!(harness.notifications()[&1].title, "Saved");
+
+    harness.notification_action(1, "undo").expect("undo");
+    assert_eq!(status(&harness).as_deref(), Some("status: action 1 undo"));
+    assert!(harness.notifications().is_empty(), "acting closes it");
+    assert!(harness.notification_action(1, "undo").is_err());
+
+    harness.click(fixture::MAIN, "Notify").expect("notify");
+    assert!(harness.notification_action(2, "nope").is_err());
+    harness
+        .close_notification(2, NotificationCloseReason::Expired)
+        .expect("expire");
+    assert_eq!(
+        status(&harness).as_deref(),
+        Some("status: closed 2 expired")
+    );
+
+    // Three open at most; the fourth is logged instead.
+    for _ in 0..4 {
+        harness.click(fixture::MAIN, "Notify").expect("notify");
+    }
+    assert_eq!(status(&harness).as_deref(), Some("status: limit-exceeded"));
+    assert_eq!(harness.notifications().len(), 3);
+    assert!(
+        harness
+            .logs()
+            .iter()
+            .any(|(_, line)| line.contains("notification not shown"))
+    );
+
+    harness.click(fixture::MAIN, "Start job").expect("start");
+    assert_eq!(
+        status(&harness).as_deref(),
+        Some("status: started 1, update ok")
+    );
+    let progress = &harness.progresses()[&1];
+    assert_eq!(progress.value, ProgressValue::Percent(10));
+    assert_eq!(progress.message.as_deref(), Some("1 of 10"));
+    let outcome = harness.cancel_progress(1).expect("cancel");
+    assert!(
+        matches!(&outcome.effects[..], [HostEffect::ProgressEnd { id: 1 }]),
+        "{outcome:?}"
+    );
+    assert_eq!(status(&harness).as_deref(), Some("status: cancelled 1"));
+    assert!(harness.progresses().is_empty());
+    assert!(harness.cancel_progress(1).is_err());
+}
+
+#[test]
 fn v0_2_loads_with_static_and_added_surfaces() {
     let mut harness = Harness::load(&fixture_v0_2_wasm()).expect("load");
     assert_eq!(harness.api_version(), &Version::new(0, 2, 0));
