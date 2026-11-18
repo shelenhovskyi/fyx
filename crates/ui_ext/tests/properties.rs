@@ -1419,16 +1419,18 @@ fn arb_v0_2_leaf_props() -> impl Strategy<Value = v0_2::Props> {
         prop::option::of(arb_string()),
         prop::option::of(arb_string()),
     )
-        .prop_map(|(label, icon, style, disabled, tooltip, accessible_label)| {
-            v0_2::Props::Button(v0_2::ButtonProps {
-                label,
-                icon,
-                style,
-                disabled,
-                tooltip,
-                accessible_label,
-            })
-        });
+        .prop_map(
+            |(label, icon, style, disabled, tooltip, accessible_label)| {
+                v0_2::Props::Button(v0_2::ButtonProps {
+                    label,
+                    icon,
+                    style,
+                    disabled,
+                    tooltip,
+                    accessible_label,
+                })
+            },
+        );
     let input = (
         arb_string(),
         arb_string(),
