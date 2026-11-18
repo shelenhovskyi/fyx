@@ -175,8 +175,26 @@ struct SecurityFile {
 /// One matcher per pattern, so a denial names the pattern that matched rather than every pattern
 /// of the file (bugs-1 #28).
 pub struct RepoPolicy {
-    private_files: Vec<(String, PathMatcher)>,
-    read_only: Vec<(String, PathMatcher)>,
+    private_files: Vec<PatternMatcher>,
+    read_only: Vec<PatternMatcher>,
+}
+
+/// One pattern. On case-insensitive file systems (Windows, macOS) it also matches in lower case,
+/// so `Makefile` covers `MAKEFILE` (bugs-1 #16).
+struct PatternMatcher {
+    pattern: String,
+    matcher: PathMatcher,
+    lower: Option<PathMatcher>,
+}
+
+impl PatternMatcher {
+    fn is_match(&self, path: &RelPath) -> bool {
+        self.matcher.is_match(path)
+            || self.lower.as_ref().is_some_and(|lower| {
+                RelPath::from_unix_str(&path.as_unix_str().to_lowercase())
+                    .is_ok_and(|path| lower.is_match(path))
+            })
+    }
 }
 
 impl RepoPolicy {
@@ -216,25 +234,38 @@ impl RepoPolicy {
     }
 }
 
-fn matchers(key: &str, patterns: Vec<String>) -> Result<Vec<(String, PathMatcher)>> {
+fn matchers(key: &str, patterns: Vec<String>) -> Result<Vec<PatternMatcher>> {
     patterns
         .into_iter()
         .enumerate()
         .map(|(index, pattern)| {
+            let invalid = || format!("invalid pattern number {} in `{key}`", index + 1);
             let matcher = PathMatcher::new(std::slice::from_ref(&pattern), PathStyle::Unix)
-                .with_context(|| format!("invalid pattern number {} in `{key}`", index + 1))?;
-            Ok((pattern, matcher))
+                .with_context(invalid)?;
+            let lower = if cfg!(any(windows, target_os = "macos")) {
+                Some(
+                    PathMatcher::new([pattern.to_lowercase()], PathStyle::Unix)
+                        .with_context(invalid)?,
+                )
+            } else {
+                None
+            };
+            Ok(PatternMatcher {
+                pattern,
+                matcher,
+                lower,
+            })
         })
         .collect()
 }
 
 // Same ancestor walk as `WorktreeSettings::is_path_private`, so `secrets/**` and `secrets` both
 // cover `secrets/a/b`.
-fn first_match(matchers: &[(String, PathMatcher)], path: &RelPath) -> Option<String> {
+fn first_match(matchers: &[PatternMatcher], path: &RelPath) -> Option<String> {
     matchers
         .iter()
-        .find(|(_, matcher)| path.ancestors().any(|ancestor| matcher.is_match(ancestor)))
-        .map(|(pattern, _)| sanitize_for_log(pattern))
+        .find(|matcher| path.ancestors().any(|ancestor| matcher.is_match(ancestor)))
+        .map(|matcher| sanitize_for_log(&matcher.pattern))
 }
 
 /// Where a worktree's repository policy stands.

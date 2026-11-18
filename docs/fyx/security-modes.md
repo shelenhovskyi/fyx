@@ -167,6 +167,14 @@ reported by location only (`.fyx/security.toml:2:1`, or "pattern number 2 in `pr
 never by quoting it, since the message reaches the agent. The built-in agent's `read_file` and
 `grep` tools honour the repository's `private_files` too.
 
+**The real file, not the typed path** (triage-3 top-7 #1). Every check runs on each spelling of
+the path (`fyx_guard::paths`, shared with agent review): the typed path with `..` and `\?\`
+resolved, Windows' silent renames undone (`.env.`, `.env `, `.env::$DATA` open `.env`), the real
+file behind links (the deepest existing ancestor canonicalized), and on Windows and macOS the
+lower-case form; a protection applies when any of them matches. Under shield an agent may not
+write a path whose name uses a Windows rewrite at all, nor a path inside the project that a link
+takes outside it.
+
 ## Known limits of step 1
 
 Shield covers what passes through Fyx; it is not a sandbox. Until step 2:

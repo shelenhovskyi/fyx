@@ -7,6 +7,7 @@
 //! protection waits for the user's confirmation, while Fyx runs and across restarts (see
 //! [`init`]).
 
+pub mod paths;
 mod policy;
 
 use std::{
@@ -185,33 +186,84 @@ pub fn check_private_path(
             display_project_path(project, path, cx)
         )
     };
-    enforce(mode, action, private_denial(path, cx)).map_err(|message| {
+    enforce(mode, action, private_denial(path, project, cx)).map_err(|message| {
         acp_v1::Error::new(ErrorCode::INVALID_PARAMS.value(), message.clone()).data(message)
     })
 }
 
 /// Hook for the built-in agent's `read_file` tool, beside its own `private_files` checks: the
-/// worktree's `.fyx/security.toml` (w9-step1 F7). The tool reports the error to the model.
-pub fn check_agent_read(path: &ProjectPath, cx: &App) -> Result<(), String> {
+/// worktree's `.fyx/security.toml` (w9-step1 F7), and every spelling of the path, so a link or a
+/// Windows alias does not get around Zed's `private_files` either. The tool reports the error to
+/// the model.
+pub fn check_agent_read(project: &Project, path: &ProjectPath, cx: &App) -> Result<(), String> {
     let mode = mode(cx);
     if mode == SecurityMode::Off {
         return Ok(());
     }
     let action = || format!("an agent read of {}", path.path.as_unix_str());
-    enforce(
-        mode,
-        action,
-        repo_denial(path.worktree_id, cx, |state| state.read_denial(&path.path)),
-    )
+    enforce(mode, action, private_denial(path, project, cx))
 }
 
-/// Hook for the built-in agent's `grep` tool: whether to skip a file `.fyx/security.toml` makes
-/// private. Audit mode logs and skips nothing.
-pub fn agent_read_blocked(path: &ProjectPath, cx: &App) -> bool {
-    check_agent_read(path, cx).is_err()
+/// Hook for the built-in agent's `grep` tool: whether to skip a file the shield makes private.
+/// Audit mode logs and skips nothing.
+pub fn agent_read_blocked(project: &Project, path: &ProjectPath, cx: &App) -> bool {
+    check_agent_read(project, path, cx).is_err()
 }
 
-fn private_denial(path: &ProjectPath, cx: &App) -> Option<String> {
+/// Every spelling of the file `path` names, as project paths: the typed one, Windows' rewrites
+/// of it, the real file behind links, and on case-insensitive file systems the lower-case form
+/// (triage-3 top-7 #1, security-2 S1 and T4, bugs-1 #14 and #16). A protection applies when any
+/// of them matches.
+fn project_path_spellings(project: &Project, path: &ProjectPath, cx: &App) -> Vec<ProjectPath> {
+    let mut spellings = vec![path.clone()];
+    if let Some(abs_path) = project.absolute_path(path, cx) {
+        for candidate in resolve_path(project, &abs_path).candidates() {
+            if let Some(found) = project.find_project_path(candidate, cx)
+                && !spellings.contains(&found)
+            {
+                spellings.push(found);
+            }
+        }
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+        let lower: Vec<ProjectPath> = spellings
+            .iter()
+            .filter_map(|spelling| {
+                let lower = spelling.path.as_unix_str().to_lowercase();
+                let lower = RelPath::from_unix_str(&lower).ok()?;
+                Some(ProjectPath {
+                    worktree_id: spelling.worktree_id,
+                    path: lower.into(),
+                })
+            })
+            .collect();
+        for lower in lower {
+            if !spellings.contains(&lower) {
+                spellings.push(lower);
+            }
+        }
+    }
+    spellings
+}
+
+/// [`paths::resolve_blocking`] on a real file system: hooks are synchronous, and resolving costs
+/// one `canonicalize` of the deepest existing ancestor. A fake file system (tests) gets the
+/// spellings without the real file.
+fn resolve_path(project: &Project, abs_path: &Path) -> paths::ResolvedPath {
+    if project.fs().is_fake() {
+        paths::unresolved(abs_path)
+    } else {
+        paths::resolve_blocking(abs_path)
+    }
+}
+
+fn private_denial(path: &ProjectPath, project: &Project, cx: &App) -> Option<String> {
+    project_path_spellings(project, path, cx)
+        .iter()
+        .find_map(|spelling| private_denial_of(spelling, cx))
+}
+
+fn private_denial_of(path: &ProjectPath, cx: &App) -> Option<String> {
     if WorktreeSettings::get_global(cx).is_path_private(&path.path) {
         return Some("it matches the global `private_files` setting".into());
     }
@@ -355,6 +407,50 @@ fn write_check(project: &Project, path: &Path, cx: &App) -> Result<(), String> {
 /// a project that itself lives under a `.claude/` or `.codex/` folder (an agent's worktree) is
 /// not read-only as a whole (bugs-1 #15). Outside every worktree the absolute path is matched.
 fn write_denial(project: &Project, path: &Path, cx: &App) -> Option<String> {
+    let resolved = resolve_path(project, path);
+    if resolved.has_windows_alias() {
+        return Some(
+            "its name uses a spelling Windows rewrites (a trailing dot or space, or ':'), so it \
+             could name a protected file"
+                .into(),
+        );
+    }
+    if let Some(canonical) = &resolved.canonical
+        && project.find_project_path(&resolved.lexical, cx).is_some()
+        && !inside_worktrees(project, canonical, cx)
+    {
+        return Some("it resolves outside the project through a link".into());
+    }
+    let mut spellings: Vec<PathBuf> = resolved
+        .candidates()
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect();
+    if cfg!(any(windows, target_os = "macos")) {
+        let lower: Vec<PathBuf> = spellings
+            .iter()
+            .filter_map(|path| path.to_str().map(|text| PathBuf::from(text.to_lowercase())))
+            .collect();
+        spellings.extend(lower);
+    }
+    spellings
+        .iter()
+        .find_map(|spelling| write_denial_of(project, spelling, cx))
+}
+
+/// Whether `path` (a real, canonical path) is inside one of the project's worktrees, whose roots
+/// are resolved too.
+fn inside_worktrees(project: &Project, path: &Path, cx: &App) -> bool {
+    project.find_project_path(path, cx).is_some()
+        || project.worktrees(cx).any(|worktree| {
+            let root = worktree.read(cx).abs_path();
+            resolve_path(project, &root)
+                .canonical
+                .is_some_and(|root| path.starts_with(root))
+        })
+}
+
+fn write_denial_of(project: &Project, path: &Path, cx: &App) -> Option<String> {
     let project_path = project.find_project_path(path, cx);
     let read_only_config =
         |rule: String| format!("agent configs ({rule}) are read-only for agents");
@@ -380,11 +476,11 @@ fn user_config(path: &Path) -> Option<String> {
         Ok(rest) => util::paths::home_dir().join(rest),
         Err(_) => path.to_path_buf(),
     };
-    let config_dir = paths::config_dir();
+    let config_dir = ::paths::config_dir();
     if policy::is_within(&path, config_dir) {
         return Some(format!("{}/", config_dir.display()));
     }
-    let confirmed = paths::data_dir().join(CONFIRMED_FILE);
+    let confirmed = ::paths::data_dir().join(CONFIRMED_FILE);
     policy::is_within(&path, &confirmed).then(|| confirmed.display().to_string())
 }
 
@@ -507,7 +603,7 @@ fn repo_denial(
 /// kept in [`CONFIRMED_FILE`], so at the next start a lowering the user never confirmed is still
 /// held back and asked about again (security-2 T3).
 pub fn init(cx: &mut App) {
-    init_with_confirmed_file(Some(paths::data_dir().join(CONFIRMED_FILE)), cx);
+    init_with_confirmed_file(Some(::paths::data_dir().join(CONFIRMED_FILE)), cx);
 }
 
 /// [`init`] without [`CONFIRMED_FILE`], for tests: they must not read or write the user's data
@@ -643,15 +739,16 @@ fn apply(settings: SecuritySettings, cx: &mut App) {
     if let Some(path) = guard.confirmed_file.clone()
         && let Some(bytes) = settings.to_confirmed_toml()
     {
-        cx.background_executor().spawn(async move {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).ok();
-            }
-            if let Err(error) = std::fs::write(&path, bytes) {
-                log::error!("fyx_guard: cannot save {}: {error}", path.display());
-            }
-        })
-        .detach();
+        cx.background_executor()
+            .spawn(async move {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).ok();
+                }
+                if let Err(error) = std::fs::write(&path, bytes) {
+                    log::error!("fyx_guard: cannot save {}: {error}", path.display());
+                }
+            })
+            .detach();
     }
     let guard = cx.global_mut::<Guard>();
     guard.effective = Some(settings);
@@ -1185,7 +1282,7 @@ mod tests {
         assert!(read(".env", cx));
         assert!(read("keys/prod.json", cx));
         assert!(write(path!("/p/.claude/settings.json"), cx));
-        assert!(write(&paths::settings_file().to_string_lossy(), cx));
+        assert!(write(&::paths::settings_file().to_string_lossy(), cx));
         assert!(cx.update(|cx| cx.global::<Guard>().worktrees.is_empty()));
 
         // Audit: logged only.
@@ -1203,9 +1300,9 @@ mod tests {
         assert!(!write(path!("/p/.claude/settings.json"), cx));
         assert!(!write(path!("/p/.git/hooks/pre-commit"), cx));
         assert!(!write(path!("/p/.git/config"), cx));
-        assert!(!write(&paths::settings_file().to_string_lossy(), cx));
+        assert!(!write(&::paths::settings_file().to_string_lossy(), cx));
         assert!(!write(
-            &paths::config_dir().join("tasks.json").to_string_lossy(),
+            &::paths::config_dir().join("tasks.json").to_string_lossy(),
             cx
         ));
         assert!(!write("~/.claude/settings.json", cx));
@@ -1214,16 +1311,34 @@ mod tests {
         assert!(!write(path!("/p/AGENTS.md"), cx));
         assert!(!write(path!("/p/.vscode/tasks.json"), cx));
         assert!(!write(
-            &paths::data_dir().join(CONFIRMED_FILE).to_string_lossy(),
+            &::paths::data_dir().join(CONFIRMED_FILE).to_string_lossy(),
             cx
         ));
 
         // The built-in agent's read tool sees the repository's private files too (F7).
         let agent_read = |path: &str, cx: &mut TestAppContext| {
-            cx.update(|cx| check_agent_read(&project_path(path), cx).is_ok())
+            project.read_with(cx, |project, cx| {
+                check_agent_read(project, &project_path(path), cx).is_ok()
+            })
         };
         assert!(!agent_read("keys/prod.json", cx));
         assert!(agent_read("src/main.rs", cx));
+
+        // Windows aliases (triage-3 top-7 #1): `.env.` and `.env::$DATA` open `.env`; a trailing
+        // dot or a stream on a protected name cannot be written either.
+        assert!(!read(".env.", cx));
+        assert!(!read(".env::$DATA", cx));
+        assert!(!agent_read("keys./prod.json", cx));
+        assert!(!write(path!("/p/.claude./settings.json"), cx));
+        assert!(!write(path!("/p/src/main.rs "), cx));
+        assert!(!write(path!("/p/AGENTS.md::$DATA"), cx));
+        assert!(write(path!("/p/src/main.rs"), cx));
+        // Case: on Windows and macOS `.ENV` is `.env`.
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(!read(".ENV", cx));
+            assert!(!read("Keys/Prod.json", cx));
+            assert!(!write(path!("/p/MAKEFILE"), cx));
+        }
 
         // A file that does not parse fails closed for the whole worktree.
         fs.save(
@@ -1298,5 +1413,54 @@ mod tests {
         ));
         // Outside the project, the absolute path still counts.
         assert!(!write(path!("/repo/.claude/settings.json"), cx));
+    }
+
+    /// security-2 S1: a committed link to a protected or outside file does not get around the
+    /// shield. Real files: links need the real file system.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn links_are_followed(cx: &mut TestAppContext) {
+        init_test(cx);
+        let temp_dir = std::env::temp_dir().join(format!("fyx-guard-links-{}", std::process::id()));
+        std::fs::remove_dir_all(&temp_dir).ok();
+        let temp = temp_dir.as_path();
+        let root = temp.join("p");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(temp.join("outside.txt"), "").unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join(".claude"), root.join("config")).unwrap();
+        std::os::unix::fs::symlink(temp.join("outside.txt"), root.join("out.txt")).unwrap();
+        let fs = fs::RealFs::new(None, cx.executor());
+        let project = Project::test(std::sync::Arc::new(fs), [root.as_path()], cx).await;
+        set_mode(FyxSecurityMode::Shield, cx);
+        cx.run_until_parked();
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        let read = |path: &str, cx: &mut TestAppContext| {
+            let path = ProjectPath {
+                worktree_id,
+                path: rel_path(path).into(),
+            };
+            project.read_with(cx, |project, cx| {
+                check_private_path(project, &path, cx).is_ok()
+            })
+        };
+        let write = |path: &Path, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_config_write(project, path, cx).is_ok()
+            })
+        };
+        assert!(!read("notes.txt", cx), "the link opens .env");
+        assert!(
+            !write(&root.join("config/settings.json"), cx),
+            "through a link into .claude/"
+        );
+        assert!(!write(&root.join("out.txt"), cx), "out of the project");
+        assert!(write(&root.join("new.txt"), cx));
+        drop(project);
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }
