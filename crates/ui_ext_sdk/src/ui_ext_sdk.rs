@@ -744,6 +744,18 @@ macro_rules! __fyx_image_shims {
         fn __fyx_ui_observe_stop() {
             $crate::__private::$world::observe_stop()
         }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_query_permission(capability: $crate::T2Capability) -> $crate::PermissionState {
+            $crate::__private::$world::query_permission(capability)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_request_permission(
+            capability: $crate::T2Capability,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::request_permission(capability)
+        }
     };
 }
 

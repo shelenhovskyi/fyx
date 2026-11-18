@@ -126,7 +126,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TestBroker::answer` | field | How the user answers the prompt of an `Ask` state. |
 | `TestBroker::asking` | method | Not asked yet: the first delivered request prompts, and the user answers `answer`. |
 | `TestBroker::denied` | method | Refused: `fetch` returns `denied` at the import. |
-| `TestBroker::granted` | method | Granted: every request reaches `respond`. |
+| `TestBroker::granted` | method | Granted already: `query` says `granted`, nothing prompts, and every request reaches `respond`. |
 | `TestBroker::prompts` | method | How many times the prompt was shown. |
 | `TestBroker::state` | field | The state at the import. `Ask` accepts the request and asks when it is delivered. |
 | `api_version_section` | fn | The version in the component's `fyx:ui-api-version` section, if it has one. |

@@ -190,9 +190,13 @@ pub struct TestBroker {
 }
 
 impl TestBroker {
-    /// Granted: every request reaches `respond`.
+    /// Granted already: `query` says `granted`, nothing prompts, and every request reaches
+    /// `respond`.
     pub fn granted(respond: FetchResponder) -> Self {
-        Self::asking(ui_ext::network::PermissionState::Granted, respond)
+        Self {
+            state: ui_ext::network::PermissionState::Granted,
+            ..Self::asking(ui_ext::network::PermissionState::Granted, respond)
+        }
     }
 
     /// Not asked yet: the first delivered request prompts, and the user answers `answer`.
@@ -902,6 +906,8 @@ pub struct Harness {
     observing: bool,
     agent_events: Vec<ui_ext::observe::AgentEvent>,
     opaque_ids: ui_ext::observe::OpaqueIds,
+    /// `permission-changed` events for `deliver_io`: the answers of prompts `request` showed.
+    permission_events: Vec<ui_ext::network::IoEvent>,
     /// What the renderer shows of §M: open notifications and running progresses, by id.
     notifications: BTreeMap<u64, model::notifications::Notification>,
     progresses: BTreeMap<u64, Progress>,
@@ -1036,6 +1042,7 @@ impl Harness {
             observing: false,
             agent_events: Vec::new(),
             opaque_ids: ui_ext::observe::OpaqueIds::default(),
+            permission_events: Vec::new(),
             notifications: BTreeMap::new(),
             progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
@@ -1404,6 +1411,16 @@ impl Harness {
             self.run_follow_ups(follow_ups);
             delivered.push(RawEffects { effects, value });
         }
+        for event in std::mem::take(&mut self.permission_events) {
+            let Some(event) = v0_3::io_event(event) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
         for event in self.run_edits() {
             let Some(event) = v0_3::io_event(event) else {
                 continue;
@@ -1480,6 +1497,26 @@ impl Harness {
             events.push(ui_ext::network::IoEvent::EditDone(id, result));
         }
         events
+    }
+
+    /// After a call: the prompts `permissions.request` asked for. The broker answers each; the
+    /// answer is a `permission-changed` for `deliver_io`. Without a broker nothing is asked.
+    fn apply_permission_requests(&mut self) {
+        use ui_ext::network::{IoEvent, PermissionState};
+        for capability in self.store.data_mut().api.take_permission_requests() {
+            let Some(broker) = self.broker.as_mut() else {
+                continue;
+            };
+            if broker.state != PermissionState::Ask {
+                continue;
+            }
+            broker.prompts += 1;
+            broker.state = broker.answer;
+            let state = broker.state;
+            self.store.data_mut().api.set_network_permission(state);
+            self.permission_events
+                .push(IoEvent::PermissionChanged(capability.to_string(), state));
+        }
     }
 
     /// After a call: `agent-observe.start` asks for consent and sends the snapshot first;
@@ -2174,6 +2211,7 @@ impl Harness {
             Ok(value) => {
                 self.record(&effects);
                 self.apply_observe();
+                self.apply_permission_requests();
                 Ok((value, effects))
             }
             Err(error) => {

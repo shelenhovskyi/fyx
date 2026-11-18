@@ -1449,6 +1449,17 @@ mod harness_conformance_v0_3 {
         assert!(harness.disabled().is_none());
     }
 
+    /// `permissions` (probe cases 10 and 11): undeclared capabilities query `unavailable` and
+    /// refuse `request`, alike.
+    #[gpui::test]
+    async fn test_permissions_match_the_harness(cx: &mut TestAppContext) {
+        let host = load(cx).await;
+        let mut harness = harness();
+        for case in [10, 11] {
+            compare(&host, &mut harness, SURFACE, UiEvent::Click(case)).await;
+        }
+    }
+
     #[gpui::test]
     async fn test_image_replies_match_the_harness(cx: &mut TestAppContext) {
         let host = load(cx).await;
@@ -1684,6 +1695,14 @@ mod harness_conformance_fetch {
         .await;
         assert!(report.contains("1 | 2"), "{report}");
         assert_eq!(harness.pending_fetches().len(), 2);
+
+        // permissions: the declared capability's state, and a request without a gesture.
+        let report = command(&host, &mut harness, "perm query network-fetch").await;
+        assert!(report.contains("granted"), "{report}");
+        let report = command(&host, &mut harness, "perm query process-spawn").await;
+        assert!(report.contains("unavailable"), "{report}");
+        let report = command(&host, &mut harness, "perm request network-fetch").await;
+        assert!(report.contains("not-permitted"), "{report}");
 
         // The same two outcomes through handle-io, with the same pushes. The host's requests
         // run concurrently, so its order may differ from the harness's, which is by id.

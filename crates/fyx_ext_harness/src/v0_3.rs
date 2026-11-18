@@ -24,7 +24,8 @@ pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
     agent_observe as wit_observe, documents as wit_documents, host as wit_host,
     images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
-    process as wit_process, types as wit, workspace_edit as wit_edit,
+    permissions as wit_permissions, process as wit_process, types as wit,
+    workspace_edit as wit_edit,
 };
 
 /// What the host says for a value its model cannot hold yet.
@@ -60,7 +61,51 @@ pub(crate) fn add_to_linker(
     wit_process::add_to_linker::<_, State>(linker, |state| state)?;
     wit_edit::add_to_linker::<_, State>(linker, |state| state)?;
     wit_observe::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_permissions::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
+}
+
+/// The manifest name of a WIT `t2-capability`.
+fn t2_capability(capability: wit_permissions::T2Capability) -> &'static str {
+    match capability {
+        wit_permissions::T2Capability::NetworkFetch => "network:fetch",
+        wit_permissions::T2Capability::ProcessSpawn => "process:spawn",
+        wit_permissions::T2Capability::WorkspaceEdit => "workspace:edit",
+        wit_permissions::T2Capability::AgentObserve => "agent:observe",
+    }
+}
+
+fn wit_permission_state(
+    state: ui_ext::network::PermissionState,
+) -> wit_permissions::PermissionState {
+    use ui_ext::network::PermissionState;
+    match state {
+        PermissionState::Granted => wit_permissions::PermissionState::Granted,
+        PermissionState::Denied => wit_permissions::PermissionState::Denied,
+        PermissionState::Ask => wit_permissions::PermissionState::Ask,
+        PermissionState::Unavailable => wit_permissions::PermissionState::Unavailable,
+    }
+}
+
+impl wit_permissions::Host for State {
+    fn query(
+        &mut self,
+        capability: wit_permissions::T2Capability,
+    ) -> wasmtime::Result<wit_permissions::PermissionState> {
+        Ok(wit_permission_state(
+            self.api.query_permission(t2_capability(capability)),
+        ))
+    }
+
+    fn request(
+        &mut self,
+        capability: wit_permissions::T2Capability,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self
+            .api
+            .request_permission(t2_capability(capability))
+            .map_err(Into::into))
+    }
 }
 
 impl wit_edit::Host for State {
@@ -294,8 +339,18 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
             }),
         ))),
         net::IoEvent::Agent(event) => Some(wit_io::IoEvent::Agent(agent_event(event))),
-        // The harness changes no permission on its own.
-        net::IoEvent::PermissionChanged(..) => None,
+        net::IoEvent::PermissionChanged(capability, state) => {
+            Some(wit_io::IoEvent::PermissionChanged((
+                match capability.as_str() {
+                    "network:fetch" => wit_permissions::T2Capability::NetworkFetch,
+                    "process:spawn" => wit_permissions::T2Capability::ProcessSpawn,
+                    "workspace:edit" => wit_permissions::T2Capability::WorkspaceEdit,
+                    "agent:observe" => wit_permissions::T2Capability::AgentObserve,
+                    _ => return None,
+                },
+                wit_permission_state(state),
+            )))
+        }
     }
 }
 
@@ -395,7 +450,8 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 8] = [
+const LINKED_INTERFACES: [&str; 9] = [
+    "permissions",
     "types",
     "host",
     "images",

@@ -541,6 +541,18 @@ pub mod glue {
 
     /// Nothing to stop: this world has no agent feed.
     pub fn observe_stop() {}
+
+    /// This world has no T2 capabilities.
+    pub fn query_permission(_capability: crate::T2Capability) -> crate::PermissionState {
+        crate::PermissionState::Unavailable
+    }
+
+    pub fn request_permission(_capability: crate::T2Capability) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("request_permission"),
+        })
+    }
 }
 
 #[cfg(test)]

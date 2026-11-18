@@ -678,6 +678,29 @@ pub fn stop_observing();
 - **Consent:** both capabilities are T2. The first use asks the user.
 - **Off WASM:** the calls record `HostEffect::ApplyEdit`, `StartObserving` and `StopObserving`.
 
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `permissions` for the T2 capabilities
+(`network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe`; design 0.3, section 7):
+
+```rust
+pub fn query_permission(capability: T2Capability) -> PermissionState;
+pub fn request_permission(capability: T2Capability) -> Result<(), HostError>;
+```
+
+- **`query_permission`:** the state as of the start of the current call. The first query of a
+  capability fixes the answer for the rest of the call.
+  - `Granted` or `Denied`: the user answered.
+  - `Ask`: not asked yet; the first use, or a request, shows the prompt.
+  - `Unavailable`: not declared in the manifest, or the worktree is not trusted.
+- **`request_permission`:** shows the prompt after the call, and only in the `Ask` state. In any
+  other state it is `Ok` and nothing happens.
+  - It needs the click-or-Enter activation, so call it from a button click; it uses the
+    activation up. Without one, or for an undeclared capability, it is `not-permitted`.
+  - The answer arrives in `handle_io` as `IoEvent::PermissionChanged((capability, state))`, as
+    does every later change on the extensions page.
+- **Off WASM:** `query_permission` answers `Ask` unless a test called
+  `set_permission_state(capability, state)`, and `request_permission` records
+  `HostEffect::RequestPermission`.
+
 ## Canvases (`fyx-ui-0-3`)
 
 A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
@@ -725,8 +748,9 @@ tree.canvas(canvas);
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,
-`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin`, `kill`, `apply_edit` and
-`start_observing` return `unavailable`
+`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin`, `kill`, `apply_edit`,
+`start_observing` and `request_permission` return `unavailable`, `query_permission` answers
+`Unavailable`,
 ("needs fyx:ui 0.3"), and `remove_image` and `cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.

@@ -254,6 +254,14 @@ On top of these:
   - `agent_event(event)` feeds a running feed with the host's ids, and the harness maps them to
     opaque ones as the host does.
   - `deliver_io()` delivers `edit-done` and the agent events.
+- `permissions` (0.3) follows the host:
+  - `query` answers `unavailable` for an undeclared capability, otherwise the broker's state,
+    fixed for the call by its first query;
+  - `request` needs a click and uses it up, and prompts only from `ask`, once per capability per
+    call. The broker answers after the call, and `deliver_io()` delivers the answer as
+    `permission-changed`;
+  - `TestBroker::granted` starts granted, and `TestBroker::asking(answer, …)` starts at `ask`.
+    The broker's state is the state of every T2 capability.
 - In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
   not implement yet (`decorations` included) trap when called.
 

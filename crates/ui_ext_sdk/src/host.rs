@@ -17,7 +17,7 @@ use crate::{
     Surface, Update,
 };
 #[cfg(feature = "fyx-ui-0-3")]
-use crate::{HttpRequest, ImageFormat, SpawnRequest, WorkspaceEdit};
+use crate::{HttpRequest, ImageFormat, PermissionState, SpawnRequest, T2Capability, WorkspaceEdit};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
@@ -67,6 +67,10 @@ unsafe extern "Rust" {
     safe fn __fyx_ui_observe_start() -> Result<(), HostError>;
     #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_observe_stop();
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_query_permission(capability: T2Capability) -> PermissionState;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_request_permission(capability: T2Capability) -> Result<(), HostError>;
 }
 
 /// What a host function did, recorded off WASM for unit tests.
@@ -152,6 +156,25 @@ pub enum HostEffect {
     StartObserving,
     #[cfg(feature = "fyx-ui-0-3")]
     StopObserving,
+    /// [`request_permission`].
+    #[cfg(feature = "fyx-ui-0-3")]
+    RequestPermission(T2Capability),
+}
+
+#[cfg(all(feature = "fyx-ui-0-3", not(target_arch = "wasm32")))]
+thread_local! {
+    static PERMISSIONS: RefCell<Vec<(T2Capability, PermissionState)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Off WASM, what [`query_permission`] answers for `capability` on this thread (`Ask` until set),
+/// for unit tests of an extension.
+#[cfg(all(feature = "fyx-ui-0-3", not(target_arch = "wasm32")))]
+pub fn set_permission_state(capability: T2Capability, state: PermissionState) {
+    PERMISSIONS.with_borrow_mut(|states| {
+        states.retain(|(known, _)| *known != capability);
+        states.push((capability, state));
+    });
 }
 
 /// A generated image from [`add_image`], for `ImageProps::generated`. `Copy` and without `Drop`:
@@ -570,6 +593,35 @@ pub fn stop_observing() {
     record(HostEffect::StopObserving).ok();
 }
 
+/// `fyx:ui` 0.3, `permissions.query` (design.md §7): the state of a T2 capability as of the start
+/// of the current call. `Unavailable` when the manifest does not declare it (or, for
+/// `process:spawn` and `workspace:edit`, the worktree is not trusted); `Ask` until the user is
+/// asked. Off WASM it answers what [`set_permission_state`] set, `Ask` by default.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn query_permission(capability: T2Capability) -> PermissionState {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_query_permission(capability);
+    #[cfg(not(target_arch = "wasm32"))]
+    PERMISSIONS.with_borrow(|states| {
+        states
+            .iter()
+            .find(|(known, _)| *known == capability)
+            .map_or(PermissionState::Ask, |(_, state)| *state)
+    })
+}
+
+/// `fyx:ui` 0.3, `permissions.request`: shows the consent prompt after the current call, if the
+/// state is `Ask`; any other state stays as it is. It needs the click-or-Enter activation (call
+/// it from a button click) and uses it up; without one, or for an undeclared capability, it is
+/// `not-permitted`. The answer arrives in `handle_io` as `IoEvent::PermissionChanged`.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn request_permission(capability: T2Capability) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_request_permission(capability);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::RequestPermission(capability))
+}
+
 /// The implementations behind the shims of `register_extension!(T)`: the SDK's own world, 0.2
 /// or (with `fyx-ui-0-3`) 0.3.
 #[doc(hidden)]
@@ -577,14 +629,16 @@ pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
     use crate::ImageFormat;
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::bindings::fyx::ui::{agent_observe, images, network, process, workspace_edit};
+    use crate::bindings::fyx::ui::{
+        agent_observe, images, network, permissions, process, workspace_edit,
+    };
     use crate::bindings::fyx::ui::{decorations, host, notifications};
     use crate::{
         DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions,
         ProgressValue, Surface, Update,
     };
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::{HttpRequest, SpawnRequest, WorkspaceEdit};
+    use crate::{HttpRequest, PermissionState, SpawnRequest, T2Capability, WorkspaceEdit};
 
     pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION;
 
@@ -709,5 +763,15 @@ pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn observe_stop() {
         agent_observe::stop();
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn query_permission(capability: T2Capability) -> PermissionState {
+        permissions::query(capability)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn request_permission(capability: T2Capability) -> Result<(), HostError> {
+        permissions::request(capability)
     }
 }

@@ -3,7 +3,9 @@
 //! shows a panel that says so.
 //!
 //! One panel `"t2"` (right dock, title "T2 capabilities", icon `lock`), with four sections. Each
-//! shows its permission state and has a button whose first use shows Fyx's consent prompt:
+//! shows its permission state (`permissions.query`), a `Request …` button that shows Fyx's
+//! consent prompt (`permissions.request`, enabled while the state is `ask`), and an action, whose
+//! first use shows the prompt too:
 //!
 //! - **Fetch** (`network:fetch`, domain `api.github.com`): `GET https://api.github.com/zen`, and
 //!   the text it returns, or the error;
@@ -14,10 +16,9 @@
 //! - **Agent reviews** (`agent:observe`): `Start` shows the open agent reviews live, as list
 //!   rows of file and state; `Stop` ends the feed.
 //!
-//! The 0.3 `permissions` interface (`query`, `request`) is not built in the host yet, and calling
-//! it traps. So the demo shows the state it has learned: `not asked yet` at first, then
-//! `waiting for an answer…` while a request waits for the prompt, `allowed` or `denied` from the
-//! outcome, and any `permission-changed` the host sends.
+//! The state comes from `query_permission` when the panel mounts and with every event, from the
+//! `permission-changed` the host sends when the user answers, and from outcomes: `waiting for an
+//! answer…` while an action waits for its prompt.
 
 use ui_ext_sdk::*;
 
@@ -117,8 +118,18 @@ mod t2 {
         }
     }
 
+    /// The capability of each section, in order.
+    pub const SECTIONS: [(T2Capability, &str); 4] = [
+        (T2Capability::NetworkFetch, "Request fetch"),
+        (T2Capability::ProcessSpawn, "Request process"),
+        (T2Capability::WorkspaceEdit, "Request edit"),
+        (T2Capability::AgentObserve, "Request agent"),
+    ];
+
     #[derive(Default)]
     struct Nodes {
+        /// The `Request …` buttons, in [`SECTIONS`] order.
+        requests: [NodeId; 4],
         fetch_state: NodeId,
         fetch_result: NodeId,
         fetch: NodeId,
@@ -181,9 +192,62 @@ mod t2 {
             let nodes = self.nodes.as_ref()?;
             [nodes.fetch, nodes.run, nodes.insert, nodes.agent_toggle]
                 .into_iter()
+                .chain(nodes.requests)
                 .find(|id| {
                     matches!(self.panel.props(*id), Some(Props::Button(button)) if button.label == label)
                 })
+        }
+
+        fn state(&self, capability: T2Capability) -> Known {
+            match capability {
+                T2Capability::NetworkFetch => self.fetch_state,
+                T2Capability::ProcessSpawn => self.process_state,
+                T2Capability::WorkspaceEdit => self.edit_state,
+                T2Capability::AgentObserve => self.agent_state,
+            }
+        }
+
+        fn set_state(&mut self, capability: T2Capability, known: Known) {
+            match capability {
+                T2Capability::NetworkFetch => self.fetch_state = known,
+                T2Capability::ProcessSpawn => self.process_state = known,
+                T2Capability::WorkspaceEdit => self.edit_state = known,
+                T2Capability::AgentObserve => self.agent_state = known,
+            }
+        }
+
+        /// The host's states as of this call. A section waiting for its prompt keeps `waiting`
+        /// until the answer comes.
+        fn query_states(&mut self) {
+            for (capability, _) in SECTIONS {
+                let known = Known::from_state(query_permission(capability));
+                let waiting = self.state(capability) == Known::Waiting;
+                if !(waiting && known == Known::NotAsked) {
+                    self.set_state(capability, known);
+                }
+            }
+        }
+
+        fn request_button(label: &str, known: Known) -> ButtonProps {
+            ButtonProps::new(label)
+                .icon(Icon::Lock)
+                .style(ButtonStyle::Subtle)
+                .disabled(known != Known::NotAsked)
+                .tooltip("Shows Fyx's permission prompt now")
+        }
+
+        fn request(&mut self, capability: T2Capability) {
+            match request_permission(capability) {
+                Ok(()) => {
+                    if self.state(capability) == Known::NotAsked {
+                        self.set_state(capability, Known::Waiting);
+                    }
+                }
+                Err(error) => {
+                    let known = Known::from_error(&error, self.state(capability));
+                    self.set_state(capability, known);
+                }
+            }
         }
 
         fn nodes(&self) -> Result<&Nodes, String> {
@@ -236,7 +300,12 @@ mod t2 {
                 ),
             ];
             let reviews = nodes.reviews;
+            let requests = nodes.requests;
             for (id, props) in ids {
+                self.panel.set_props(id, props)?;
+            }
+            for ((capability, label), id) in SECTIONS.into_iter().zip(requests) {
+                let props = Self::request_button(label, self.state(capability));
                 self.panel.set_props(id, props)?;
             }
             if rows {
@@ -336,6 +405,9 @@ mod t2 {
         }
 
         fn mount_panel(&mut self) -> Result<Vec<Node>, String> {
+            self.query_states();
+            let request_props = SECTIONS
+                .map(|(capability, label)| Self::request_button(label, self.state(capability)));
             let mut tree = std::mem::take(&mut self.panel);
             let mut nodes = Nodes::default();
             let path = self.edit_path.clone();
@@ -356,8 +428,11 @@ mod t2 {
                 tree.flex(
                     FlexProps::column().gap(6).padding(8).grow().align(Align::Stretch),
                     |tree| {
+                        let [fetch_request, process_request, edit_request, agent_request] =
+                            request_props;
                         section_title(tree, "Fetch: api.github.com/zen");
                         nodes.fetch_state = tree.text(state_text(fetch_state));
+                        nodes.requests[0] = tree.button(fetch_request);
                         nodes.fetch = tree.button(
                             ButtonProps::new("Fetch zen")
                                 .icon(Icon::Globe)
@@ -367,6 +442,7 @@ mod t2 {
 
                         section_title(tree, "Process: git status --short");
                         nodes.process_state = tree.text(state_text(process_state));
+                        nodes.requests[1] = tree.button(process_request);
                         nodes.run = tree.button(
                             ButtonProps::new("Run git status")
                                 .icon(Icon::Terminal)
@@ -376,6 +452,7 @@ mod t2 {
 
                         section_title(tree, "Edit: insert a header comment");
                         nodes.edit_state = tree.text(state_text(edit_state));
+                        nodes.requests[2] = tree.button(edit_request);
                         nodes.edit_path = tree.input(
                             InputProps::new(path)
                                 .placeholder("A file in the worktree")
@@ -390,6 +467,7 @@ mod t2 {
 
                         section_title(tree, "Agent reviews");
                         nodes.agent_state = tree.text(state_text(agent_state));
+                        nodes.requests[3] = tree.button(agent_request);
                         nodes.agent_toggle = tree.button(agent_button(observing));
                         nodes.agent_summary = tree.text(
                             TextProps::new(format!("{review_count} open reviews"))
@@ -447,7 +525,9 @@ mod t2 {
                 return Err(format!("unknown surface {surface_id:?}"));
             }
             self.panel.apply_event(&event);
+            self.query_states();
             let nodes = self.nodes()?;
+            let requests = nodes.requests;
             let (fetch, run, insert, path, toggle) = (
                 nodes.fetch,
                 nodes.run,
@@ -456,6 +536,12 @@ mod t2 {
                 nodes.agent_toggle,
             );
             match event {
+                UiEvent::Click(id) if requests.contains(&id) => {
+                    let index = requests.iter().position(|request| *request == id);
+                    if let Some((capability, _)) = index.map(|index| SECTIONS[index]) {
+                        self.request(capability);
+                    }
+                }
                 UiEvent::Click(id) if id == fetch => self.fetch_zen(),
                 UiEvent::Click(id) if id == run => self.run_git(),
                 UiEvent::Click(id) if id == insert => self.insert_header(),
@@ -670,6 +756,28 @@ mod tests {
         );
         assert_eq!(t2.fetch_state, Known::Waiting);
         assert_eq!(t2.agent_state, Known::Waiting);
+    }
+
+    #[test]
+    fn the_state_shows_up_front_and_request_asks() {
+        set_permission_state(T2Capability::NetworkFetch, PermissionState::Granted);
+        set_permission_state(T2Capability::AgentObserve, PermissionState::Denied);
+        let mut t2 = mounted();
+        assert_eq!(t2.fetch_state, Known::Allowed);
+        assert_eq!(t2.agent_state, Known::Denied);
+        assert_eq!(t2.process_state, Known::NotAsked);
+        click(&mut t2, "Request process");
+        assert_eq!(
+            take_host_effects(),
+            [HostEffect::RequestPermission(T2Capability::ProcessSpawn)]
+        );
+        assert_eq!(t2.process_state, Known::Waiting);
+        t2.handle_io(IoEvent::PermissionChanged((
+            T2Capability::ProcessSpawn,
+            PermissionState::Granted,
+        )))
+        .expect("io");
+        assert_eq!(t2.process_state, Known::Allowed);
     }
 
     #[test]

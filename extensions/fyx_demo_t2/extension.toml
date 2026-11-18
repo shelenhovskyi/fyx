@@ -1,6 +1,6 @@
 id = "fyx-demo-t2"
 name = "T2 capabilities demo"
-description = "Fyx UI demo: network:fetch, process:spawn, workspace:edit and agent:observe with their consent prompts (fyx:ui 0.3 only)."
+description = "Fyx UI demo: network:fetch, process:spawn, workspace:edit and agent:observe with their permission states and consent prompts (fyx:ui 0.3 only)."
 version = "0.1.0"
 schema_version = 1
 authors = ["Fyx"]
