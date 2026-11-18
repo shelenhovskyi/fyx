@@ -207,6 +207,7 @@ async fn test_v0_2_capabilities_come_from_the_manifest(cx: &mut TestAppContext) 
         LoadOptions {
             capabilities: Some(Vec::new()),
             allow_staged: Some(true),
+            ..LoadOptions::default()
         },
         cx,
     )
@@ -222,6 +223,7 @@ async fn test_v0_2_capabilities_come_from_the_manifest(cx: &mut TestAppContext) 
         LoadOptions {
             capabilities: Some(vec![CAPABILITY_PANEL.into()]),
             allow_staged: Some(true),
+            ..LoadOptions::default()
         },
         cx,
     )
@@ -270,8 +272,8 @@ async fn test_v0_2_load_from_dir(cx: &mut TestAppContext) {
                 UiExtension::load_from_dir_with_options(
                     Path::new("/ext/probe"),
                     LoadOptions {
-                        capabilities: None,
                         allow_staged: Some(true),
+                        ..LoadOptions::default()
                     },
                     fs,
                     &cx,
@@ -670,7 +672,10 @@ async fn test_v0_2_dismissed_and_closed_modals(cx: &mut TestAppContext) {
     let show = HostEffect::ShowSurface {
         surface_id: "picker".into(),
     };
-    assert_eq!(click(&extension, "show picker").await.1, std::slice::from_ref(&show));
+    assert_eq!(
+        click(&extension, "show picker").await.1,
+        std::slice::from_ref(&show)
+    );
     extension.modal_closed("picker");
     assert_eq!(click(&extension, "show picker").await.1, [show]);
 
@@ -879,4 +884,63 @@ fn test_frozen_icons_match_the_wit() {
         .collect();
     assert_eq!(mapped, Icon::ALL);
     assert_eq!(mapped.len(), 101);
+}
+
+/// The broker is asked at every gated call, so a revocation applies to the next one.
+#[gpui::test]
+async fn test_v0_2_broker_is_asked_at_every_call(cx: &mut TestAppContext) {
+    struct Broker(std::sync::Mutex<Vec<String>>);
+    impl permissions::CapabilityCheck for Broker {
+        fn check(
+            &self,
+            extension_id: &str,
+            capability: &str,
+        ) -> std::result::Result<(), permissions::CapabilityDenied> {
+            if self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|revoked| revoked == capability)
+            {
+                Err(permissions::CapabilityDenied {
+                    extension_id: extension_id.into(),
+                    capability: capability.into(),
+                    reason: "revoked".into(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let broker = Arc::new(Broker(Default::default()));
+    let extension = load_with(
+        LoadOptions {
+            capability_check: Some(broker.clone()),
+            allow_staged: Some(true),
+            ..LoadOptions::default()
+        },
+        cx,
+    )
+    .await
+    .expect("loads");
+
+    let script = "place d src/a.rs 1; add modal picker; show picker";
+    let (results, _) = click(&extension, script).await;
+    assert_eq!(results, ["ok", "ok", "ok"]);
+    run(&extension, "hide picker; unplace d; remove picker").await;
+
+    broker
+        .0
+        .lock()
+        .unwrap()
+        .extend(["ui:editor-decorations".into(), "ui:modal".into()]);
+    let (results, effects) = click(&extension, script).await;
+    assert_eq!(
+        results,
+        ["not-permitted", "not-permitted", "unknown-surface"]
+    );
+    assert!(effects.is_empty());
+    let checks = extension.diagnostics();
+    assert!(format!("{checks:?}").contains("revoked"), "{checks:?}");
 }

@@ -568,6 +568,7 @@ impl UiExtensionRegistry {
                         LoadOptions {
                             cache: found.cache.clone(),
                             capability_check: checker,
+                            ..LoadOptions::default()
                         },
                         fs.clone(),
                         cx,

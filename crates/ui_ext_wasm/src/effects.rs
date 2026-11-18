@@ -161,6 +161,11 @@ impl ApiState {
         Ok(())
     }
 
+    /// The kind of a live surface (not a decoration).
+    pub(crate) fn live_surface_kind(&self, surface_id: &str) -> Option<&v0_2::SurfaceKind> {
+        self.live.surface_kind(surface_id)
+    }
+
     pub(crate) fn begin_call(&mut self) {
         self.effects.clear();
         self.pushes = 0;

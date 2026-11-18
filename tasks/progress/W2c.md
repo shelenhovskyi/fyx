@@ -1,17 +1,28 @@
 # W2c progress: host side of `fyx:ui@0.2.0` (platform plan 2.2)
 
-Branch `claude/fyx-w2c-host-0-2-cbde2c`, on `integration` plus `claude/fyx-p2-wit` (plan 2.1, merged
-into this branch because it was not on `integration` yet).
+Branch `claude/fyx-w2c-host-0-2-cbde2c`, on `integration` (with p2-wit) plus W3's
+`claude/fyx-w3-renderer-e20d2b` at `4ca0073db1` (cache, `CallBudget`, lifted-text cap, broker,
+Inspector diagnostics), as the coordinator asked.
 
 ## Done (2026-11-18)
 
-All in `crates/ui_ext_wasm`; `ui_ext_host` is unchanged and still builds against the 0.1 API.
+All in `crates/ui_ext_wasm`; `ui_ext_host` only gained `..LoadOptions::default()` in one literal
+(`registry.rs`) and still builds against the 0.1 API.
 
 - **Version dispatch** (`dispatch.rs`): `UiBindings { V0_2, V0_1 }`, one linker per world, the
   world picked from the `fyx:ui-api-version` section (or the imports) before instantiation.
   `MAX_VERSION = 0.2.0`, `MAX_FROZEN_VERSION = 0.1.0`; a 0.2 component loads only with
   `LoadOptions::allow_staged` (default: debug builds or `FYX_UI_DEV_EXTENSIONS` set;
   `staged_api_allowed(dev_or_nightly, dev_extension)` for callers that know the channel).
+- **Capabilities, two checks**: declared (`LoadOptions::capabilities`, from the manifest in
+  `load_from_dir_with_options`; `None` declares every UI capability) via `ui_ext::LiveIds`, and the
+  broker via `UiState::check_capability` at every gated call (`add-surface` by kind,
+  `show-surface` by kind, both decoration imports), so a revocation applies to the next call and
+  the Inspector sees each check. A denial is `not-permitted`. `ui:modal` and
+  `ui:editor-decorations` are T0 in `permissions.rs` already.
+- 0.2 `push-update`, `add-surface`, `place-decoration` and `log` count toward
+  `MAX_LIFTED_TEXT_PER_CALL` (a trap, as in 0.1); `log` is shared (`UiState::write_log`).
+  `mount_v0_2` gets the first-mount budget; every call is in `diagnostics()`.
 - **0.2 imports** (`fyx_ui_v0_2.rs`, checks in `effects.rs`), each checked at the call against
   `ui_ext::LiveIds` and recorded as a `HostEffect`, in call order:
   - `push-update -> result`: unknown id, 64 pushes per call, `check_caps` (2048 patches, 16384
@@ -41,8 +52,9 @@ All in `crates/ui_ext_wasm`; `ui_ext_host` is unchanged and still builds against
 0.1-typed shims (lossless for 0.1 components; for 0.2 ones they drop what 0.1 cannot express).
 The 0.2-typed API, for both versions:
 
-- `load_with_options(id, bytes, LoadOptions { capabilities, allow_staged }, cx)`,
-  `load_from_dir_with_options(dir, options, fs, cx)` (capabilities from the manifest).
+- `load_with_options(id, bytes, LoadOptions { cache, capability_check, capabilities,
+  allow_staged }, cx)`, `load_from_dir_with_options(dir, options, fs, cx)` (capabilities from the
+  manifest). Pass `allow_staged: Some(staged_api_allowed(dev_or_nightly, is_dev_extension))`.
 - `ui_api_version() -> ui_ext::ApiVersion`, `capabilities()`, `surfaces_v0_2()`,
   `initial_effects()` (effects of instantiation and `surfaces()`: apply after the static surfaces).
 - `mount_v0_2`, `handle_event_v0_2`, `list_rows_v0_2`, `tick`, all `-> Result<EffectReply<T>>`;
@@ -59,6 +71,5 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 ## Left
 
 - Section M (notifications, progress): not in the WIT yet.
-- After W3's branch (`PrecompiledCache`, `CallBudget`, lifted-text cap) merges: fold the cache
-  into `LoadOptions`, give `mount_v0_2` the first-mount budget, and count 0.2 push and log text
-  against `MAX_LIFTED_TEXT_PER_CALL` too.
+- W3 (2.3): pass `allow_staged` from the release channel and dev-extension flag; rename
+  `EffectReply`/`EffectReplyError` to `Reply`/`ReplyError` when the 0.1 shims go.

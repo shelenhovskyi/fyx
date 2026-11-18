@@ -10,7 +10,8 @@ use ui_ext::{ApiVersion, Tree, v0_2 as model};
 use wasmtime::{Store, component::Component};
 
 use crate::{
-    PushedUpdate, Reply, ReplyError, UiExtension, UiRuntime, UiState, bindings as wit_v0_1,
+    CallBudget, PushedUpdate, Reply, ReplyError, UiExtension, UiRuntime, UiState,
+    bindings as wit_v0_1,
     effects::{EffectReply, EffectReplyError, HostEffect},
     fyx_ui_v0_2,
 };
@@ -213,7 +214,7 @@ impl UiExtension {
     ) -> Result<EffectReply<model::Update>> {
         let dismissed = matches!(event, model::UiEvent::Dismissed(_));
         let (result, effects) = self
-            .call({
+            .call("handle-event", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move {
@@ -261,7 +262,7 @@ impl UiExtension {
     /// A 0.1 component is never ticked: it answers `unchanged` without a call into it.
     pub async fn tick(&self, surface_id: &str) -> Result<EffectReply<model::Update>> {
         let (result, effects) = self
-            .call({
+            .call("tick", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move { extension.call_tick(store, &surface_id).await }.boxed()
@@ -309,12 +310,17 @@ impl UiExtension {
         surface_id: &str,
     ) -> Result<(Vec<model::Node>, Tree, Vec<HostEffect>)> {
         let (result, effects) = self
-            .call({
-                let surface_id = surface_id.to_string();
-                move |extension, store| {
-                    async move { extension.call_mount(store, &surface_id).await }.boxed()
-                }
-            })
+            .call(
+                "mount",
+                surface_id,
+                CallBudget::Mount(surface_id.to_string()),
+                {
+                    let surface_id = surface_id.to_string();
+                    move |extension, store| {
+                        async move { extension.call_mount(store, &surface_id).await }.boxed()
+                    }
+                },
+            )
             .await?;
         let nodes = self.guest_result(result, &effects)?;
         let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), self.limits)
@@ -333,7 +339,7 @@ impl UiExtension {
         count: u32,
     ) -> Result<(Vec<(model::ListRow, Tree)>, Vec<HostEffect>)> {
         let (rows, effects) = self
-            .call({
+            .call("list-rows", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move {

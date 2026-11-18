@@ -25,16 +25,34 @@ use bindings::fyx::ui::{decorations as wit_decorations, host as wit_host, types 
 
 impl wit::Host for UiState {}
 
+impl UiState {
+    /// The permission broker's answer for `capability` ([`UiState::check_capability`]), asked at
+    /// every call so a revocation applies at once, as a 0.2 `not-permitted`. The capability must
+    /// also be declared in the manifest, which [`crate::effects::ApiState`] checks.
+    fn permit(&self, capability: &str) -> Result<(), model::HostError> {
+        self.check_capability(capability)
+            .map_err(|denied| model::HostError {
+                code: model::HostErrorCode::NotPermitted,
+                message: denied.to_string(),
+            })
+    }
+}
+
+fn result(
+    result: Result<(), model::HostError>,
+) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+    Ok(result.map_err(Into::into))
+}
+
 impl wit_host::Host for UiState {
     fn push_update(
         &mut self,
         surface_id: String,
         update: wit::Update,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self
-            .api
-            .push_update(surface_id, update.into())
-            .map_err(Into::into))
+        let update = model::Update::from(update);
+        self.count_lifted_text(surface_id.len() + update_text_len(&update))?;
+        result(self.api.push_update(surface_id, update))
     }
 
     fn request_tick(
@@ -42,13 +60,12 @@ impl wit_host::Host for UiState {
         surface_id: String,
         delay_ms: u32,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self
-            .api
-            .request_tick(surface_id, delay_ms)
-            .map_err(Into::into))
+        self.count_lifted_text(surface_id.len())?;
+        result(self.api.request_tick(surface_id, delay_ms))
     }
 
     fn cancel_tick(&mut self, surface_id: String) -> wasmtime::Result<()> {
+        self.count_lifted_text(surface_id.len())?;
         self.api.cancel_tick(surface_id);
         Ok(())
     }
@@ -57,28 +74,44 @@ impl wit_host::Host for UiState {
         &mut self,
         surface: wit::Surface,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self.api.add_surface(surface.into()).map_err(Into::into))
+        let surface = model::Surface::from(surface);
+        self.count_lifted_text(surface.id.len() + surface.title.len())?;
+        if let Err(error) = self.permit(surface.kind.capability()) {
+            return result(Err(error));
+        }
+        result(self.api.add_surface(surface))
     }
 
     fn remove_surface(
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self.api.remove_surface(surface_id).map_err(Into::into))
+        self.count_lifted_text(surface_id.len())?;
+        result(self.api.remove_surface(surface_id))
     }
 
     fn show_surface(
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self.api.show_surface(surface_id).map_err(Into::into))
+        self.count_lifted_text(surface_id.len())?;
+        if let Some(capability) = self
+            .api
+            .live_surface_kind(&surface_id)
+            .map(model::SurfaceKind::capability)
+            && let Err(error) = self.permit(capability)
+        {
+            return result(Err(error));
+        }
+        result(self.api.show_surface(surface_id))
     }
 
     fn hide_surface(
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self.api.hide_surface(surface_id).map_err(Into::into))
+        self.count_lifted_text(surface_id.len())?;
+        result(self.api.hide_surface(surface_id))
     }
 
     fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
@@ -89,8 +122,7 @@ impl wit_host::Host for UiState {
             wit_host::LogLevel::Warn => log::Level::Warn,
             wit_host::LogLevel::Error => log::Level::Error,
         };
-        log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
-        Ok(())
+        self.write_log(level, message)
     }
 }
 
@@ -101,18 +133,68 @@ impl wit_decorations::Host for UiState {
         location: wit::DecorationLocation,
         nodes: Vec<wit::Node>,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        let nodes = nodes.into_iter().map(Into::into).collect();
-        Ok(self
-            .api
-            .place_decoration(id, location.into(), nodes)
-            .map_err(Into::into))
+        let nodes: Vec<model::Node> = nodes.into_iter().map(Into::into).collect();
+        self.count_lifted_text(
+            id.len()
+                + location.path.len()
+                + nodes
+                    .iter()
+                    .map(|node| props_text_len(&node.props))
+                    .sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit(model::CAPABILITY_EDITOR_DECORATIONS) {
+            return result(Err(error));
+        }
+        result(self.api.place_decoration(id, location.into(), nodes))
     }
 
     fn remove_decoration(
         &mut self,
         id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self.api.remove_decoration(id).map_err(Into::into))
+        self.count_lifted_text(id.len())?;
+        if let Err(error) = self.permit(model::CAPABILITY_EDITOR_DECORATIONS) {
+            return result(Err(error));
+        }
+        result(self.api.remove_decoration(id))
+    }
+}
+
+/// String bytes of a node's props, for [`crate::MAX_LIFTED_TEXT_PER_CALL`].
+fn props_text_len(props: &model::Props) -> usize {
+    let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+    let icon_len = |icon: &model::IconRef| match icon {
+        model::IconRef::Frozen(_) => 0,
+        model::IconRef::Upstream(name) => name.len(),
+    };
+    match props {
+        model::Props::Flex(_) | model::Props::List(_) => 0,
+        model::Props::Text(props) => props.content.len(),
+        model::Props::Button(props) => {
+            props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
+        }
+        model::Props::Input(props) => props.value.len() + props.placeholder.len(),
+        model::Props::Table(props) => props.columns.iter().map(String::len).sum(),
+        model::Props::Icon(props) => icon_len(&props.name),
+        model::Props::Markdown(text) => text.len(),
+        model::Props::DiffView(props) => {
+            props.old_text.len() + props.new_text.len() + option_len(&props.language)
+        }
+    }
+}
+
+fn update_text_len(update: &model::Update) -> usize {
+    match update {
+        model::Update::Unchanged => 0,
+        model::Update::Replace(nodes) => nodes.iter().map(|node| props_text_len(&node.props)).sum(),
+        model::Update::Patches(patches) => patches
+            .iter()
+            .map(|patch| match patch {
+                model::Patch::SetProps(_, props) => props_text_len(props),
+                model::Patch::Insert(insert) => props_text_len(&insert.node.props),
+                model::Patch::Remove(_) | model::Patch::InvalidateRows(_) => 0,
+            })
+            .sum(),
     }
 }
 
