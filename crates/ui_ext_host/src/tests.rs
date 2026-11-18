@@ -2808,3 +2808,134 @@ mod progress_tests {
         });
     }
 }
+
+/// Plan 4.14: a clickable canvas sends `canvas-click` in canvas coordinates; one that is not
+/// clickable sends nothing.
+#[gpui::test]
+async fn test_canvas_click_in_canvas_coordinates(cx: &mut TestAppContext) {
+    use ui_ext::canvas::{CanvasClick, CanvasFit, CanvasProps, Num};
+    init_test(cx);
+    let canvas = |clickable: bool| {
+        Props::Canvas(CanvasProps {
+            width: 200,
+            height: 100,
+            description: "A chart".into(),
+            ops: Vec::new(),
+            clickable,
+            fit: CanvasFit::Clip,
+        })
+    };
+    for clickable in [true, false] {
+        let backend = Rc::new(FakeBackend::default());
+        let tree = Tree::from_nodes(
+            vec![node(1, None, canvas(clickable))],
+            TreeLimits::default(),
+        )
+        .expect("valid tree");
+        let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+        let state = cx.new(|cx| {
+            SurfaceState::with_tree(dyn_backend, panel_surface("chart", "Chart"), None, tree, cx)
+        });
+        let (_view, vcx) = open_view(&state, cx);
+        let bounds = vcx.debug_bounds("fyx-node-1").expect("the canvas is drawn");
+        vcx.simulate_click(
+            bounds.origin + gpui::point(gpui::px(50.), gpui::px(20.)),
+            Modifiers::none(),
+        );
+        vcx.run_until_parked();
+        let expected: Vec<UiEvent> = if clickable {
+            vec![UiEvent::CanvasClick(CanvasClick {
+                canvas: 1,
+                x: Num(50.),
+                y: Num(20.),
+            })]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(backend.events(), expected, "clickable: {clickable}");
+    }
+}
+
+/// Plan 4.14: every op kind paints (tokens and data colours, both fits) without a panic.
+#[gpui::test]
+async fn test_canvas_paints_every_op(cx: &mut TestAppContext) {
+    use ui_ext::canvas::*;
+    init_test(cx);
+    let p = |x: f32, y: f32| Point {
+        x: Num(x),
+        y: Num(y),
+    };
+    let paint = |color| Paint { color, opacity: 80 };
+    let stroke = Stroke {
+        paint: paint(CanvasColor::Data(DataColor::Series2)),
+        width: Num(2.),
+    };
+    let rect = Rect {
+        x: Num(10.),
+        y: Num(10.),
+        width: Num(40.),
+        height: Num(-20.),
+    };
+    let ops = vec![
+        DrawOp::Line {
+            from: p(0., 0.),
+            to: p(100., 50.),
+            stroke,
+        },
+        DrawOp::Rect {
+            bounds: rect,
+            fill: Some(paint(CanvasColor::Token(ui_ext::v0_2::ColorToken::TextMuted))),
+            stroke: Some(stroke),
+        },
+        DrawOp::RoundedRect {
+            bounds: rect,
+            radius: Num(99.),
+            fill: None,
+            stroke: Some(stroke),
+        },
+        DrawOp::Circle {
+            center: p(60., 40.),
+            radius: Num(10.),
+            fill: Some(paint(CanvasColor::Data(DataColor::Series8))),
+            stroke: None,
+        },
+        DrawOp::Path {
+            segments: vec![
+                PathSegment::MoveTo(p(0., 0.)),
+                PathSegment::QuadTo(p(10., 30.), p(20., 0.)),
+                PathSegment::CubicTo(p(25., 10.), p(30., 10.), p(40., 0.)),
+                PathSegment::LineTo(p(40., 20.)),
+                PathSegment::Close,
+            ],
+            fill: Some(paint(CanvasColor::Data(DataColor::Series1))),
+            stroke: Some(stroke),
+        },
+        DrawOp::Text {
+            at: p(100., 50.),
+            text: "42 %".into(),
+            paint: paint(CanvasColor::Token(ui_ext::v0_2::ColorToken::Text)),
+            size: CanvasTextSize::Large,
+            anchor: TextAnchor::Middle,
+            monospace: true,
+        },
+    ];
+    for fit in [CanvasFit::Clip, CanvasFit::ScaleDown] {
+        let props = Props::Canvas(CanvasProps {
+            width: 4000,
+            height: 100,
+            description: "Every op".into(),
+            ops: ops.clone(),
+            clickable: false,
+            fit,
+        });
+        let backend = Rc::new(FakeBackend::default());
+        let tree =
+            Tree::from_nodes(vec![node(1, None, props)], TreeLimits::default()).expect("valid");
+        let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+        let state = cx.new(|cx| {
+            SurfaceState::with_tree(dyn_backend, panel_surface("chart", "Chart"), None, tree, cx)
+        });
+        let (_view, vcx) = open_view(&state, cx);
+        assert!(vcx.debug_bounds("fyx-node-1").is_some(), "{fit:?} drawn");
+    }
+}

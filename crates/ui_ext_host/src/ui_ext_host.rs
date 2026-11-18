@@ -13,6 +13,7 @@
 //! [`DEV_DECORATIONS_ENV`].
 
 mod backend;
+mod canvas;
 mod consent;
 mod decorations;
 pub mod fyx_extensions_page;
