@@ -75,6 +75,10 @@ pub struct SurfaceView {
     /// The panel body scrolls when the tree is taller than the panel.
     pub(crate) body_scroll: ScrollHandle,
     synced_revision: Option<u64>,
+    /// The props of each input, markdown and diff node at the last sync. The tree shares them
+    /// (`TreeNode::props_arc`), so an unchanged node is the same pointer and is skipped without
+    /// copying or comparing its text (triage-3, PERF 12).
+    synced_props: HashMap<NodeId, Arc<Props>>,
     /// The state's `mount_count` at the last sync.
     synced_mount: u64,
     _observe_state: Subscription,
@@ -118,6 +122,7 @@ impl SurfaceView {
             body_scroll: ScrollHandle::new(),
             synced_revision: None,
             synced_mount: 0,
+            synced_props: HashMap::default(),
             _observe_state: observe_state,
         };
         this.sync(window, cx);
@@ -237,11 +242,11 @@ impl SurfaceView {
                     continue;
                 };
                 match node.props() {
-                    Props::Input(props) => {
-                        inputs.push((id, props.clone()));
+                    Props::Input(_) => {
+                        inputs.push((id, node.props_arc().clone()));
                         focus_order.push(id);
                     }
-                    Props::Markdown(source) => markdown.push((id, source.clone())),
+                    Props::Markdown(_) => markdown.push((id, node.props_arc().clone())),
                     Props::List(ListProps {
                         row_count,
                         selected,
@@ -263,7 +268,7 @@ impl SurfaceView {
                             focus_order.push(id);
                         }
                     }
-                    Props::DiffView(props) => diffs.push((id, props.clone())),
+                    Props::DiffView(_) => diffs.push((id, node.props_arc().clone())),
                     Props::Flex(_) | Props::Text(_) | Props::Icon(_) | Props::Image(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
@@ -324,8 +329,20 @@ impl SurfaceView {
             .collect();
 
         self.inputs.retain(|id, _| input_ids.contains(id));
+        let inputs_synced = inputs.clone();
         for (id, props) in inputs {
-            self.sync_input(id, props, window, cx);
+            let sets = self.state.read(cx).input_set_count(id);
+            let unchanged = self
+                .synced_props
+                .get(&id)
+                .is_some_and(|synced| Arc::ptr_eq(synced, &props))
+                && self
+                    .inputs
+                    .get(&id)
+                    .is_some_and(|input| input.sets_seen == sets);
+            if !unchanged && let Props::Input(input_props) = &*props {
+                self.sync_input(id, input_props.clone(), window, cx);
+            }
         }
         for (position, text, focused) in carried {
             let Some(&id) = new_inputs.get(position) else {
@@ -349,23 +366,39 @@ impl SurfaceView {
         }
 
         {
-            let diff_props: HashMap<NodeId, &DiffViewProps> =
+            let diff_props: HashMap<NodeId, &Arc<Props>> =
                 diffs.iter().map(|(id, props)| (*id, props)).collect();
+            let synced = &self.synced_props;
             self.diffs.retain(|id, diff| {
-                diff_props
-                    .get(id)
-                    .is_some_and(|props| **props == diff.props)
+                diff_props.get(id).is_some_and(|props| {
+                    synced.get(id).is_some_and(|old| Arc::ptr_eq(old, props))
+                        || matches!(&***props, Props::DiffView(props) if *props == diff.props)
+                })
             });
         }
-        for (id, props) in diffs {
-            if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(id) {
-                entry.insert(DiffEditor::new(props, window, cx));
+        for (id, props) in &diffs {
+            if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(*id)
+                && let Props::DiffView(diff_props) = &**props
+            {
+                entry.insert(DiffEditor::new(diff_props.clone(), window, cx));
             }
         }
 
         self.markdown.retain(|id, _| markdown_ids.contains(id));
-        for (id, source) in markdown {
-            let source = without_images(&source);
+        for (id, props) in &markdown {
+            let id = *id;
+            if self.markdown.contains_key(&id)
+                && self
+                    .synced_props
+                    .get(&id)
+                    .is_some_and(|synced| Arc::ptr_eq(synced, props))
+            {
+                continue;
+            }
+            let Props::Markdown(source) = &**props else {
+                continue;
+            };
+            let source = without_images(source);
             match self.markdown.get(&id) {
                 Some(entity) => {
                     if entity.read(cx).source().as_ref() != source {
@@ -378,6 +411,12 @@ impl SurfaceView {
                 }
             }
         }
+
+        self.synced_props = inputs_synced
+            .into_iter()
+            .chain(markdown)
+            .chain(diffs)
+            .collect();
 
         self.scroll_handles.retain(|id, _| list_ids.contains(id));
         for id in &lists {
