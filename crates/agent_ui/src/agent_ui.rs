@@ -3,6 +3,7 @@ pub mod agent_connection_store;
 mod agent_diff;
 mod agent_model_selector;
 mod agent_panel;
+pub use agent_panel::OnboardingUpsell; // fyx: zed::fyx skips its zed.dev card
 mod agent_registry_ui;
 mod buffer_codegen;
 mod completion_provider;
