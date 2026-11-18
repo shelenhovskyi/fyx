@@ -47,9 +47,10 @@ use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 use fyx_guard::paths::ResolvedPath;
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
-    AcceptAllHunks, AcceptHunk, AcceptTurn, ApplyReviewRules, ClearTurnDecision, CommentHunk,
-    NextHunk, OpenReviews, PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk, RejectTurn,
-    ReviewPane, ShowReviewRules, SubmitReview, ToggleReviewMode, permission_card_notice,
+    AcceptAllHunks, AcceptHunk, AcceptTurn, AgentReviewEditor, ApplyReviewRules, ClearTurnDecision,
+    CommentHunk, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk,
+    RejectTurn, ReviewPane, ShowReviewRules, SubmitReview, ToggleReviewMode,
+    permission_card_notice,
 };
 use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
@@ -302,9 +303,23 @@ impl Global for GlobalAgentReview {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReviewId(u64);
 
+impl ReviewId {
+    /// Stable for the app's run; never reused.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 /// One agent turn of one session: every edit the agent proposes until its turn stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TurnId(u64);
+
+impl TurnId {
+    /// Stable for the app's run; never reused.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 /// A file already decided in a turn, for the turn's summary.
 #[derive(Clone, Debug, PartialEq)]
@@ -349,6 +364,8 @@ pub enum AgentReviewEvent {
         turn: TurnId,
         entry: usize,
     },
+    /// Review mode was turned on or off ([`AgentReview::is_enabled`]).
+    ModeChanged(bool),
 }
 
 /// Answers a permission request. For [`PermissionVerdict::ApplyAcceptedAndDeny`] it first writes the
@@ -492,7 +509,10 @@ impl AgentReview {
     /// Turning review mode off leaves open reviews in place; writes already held still wait for a
     /// decision, so nothing lands without one.
     pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.enabled = enabled;
+        if self.enabled != enabled {
+            self.enabled = enabled;
+            cx.emit(AgentReviewEvent::ModeChanged(enabled));
+        }
         cx.notify();
     }
 
@@ -2392,8 +2412,8 @@ mod tests {
         assert!(feedback.contains("applied 1 of 2 hunks"), "{feedback}");
         assert!(feedback.contains("leave five alone"), "{feedback}");
         assert_eq!(
-            events.borrow().first().copied(),
-            Some(AgentReviewEvent::Opened(id))
+            events.borrow()[..2],
+            [AgentReviewEvent::ModeChanged(true), AgentReviewEvent::Opened(id)]
         );
         assert_eq!(
             events.borrow()[events.borrow().len() - 2..],
