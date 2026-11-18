@@ -84,16 +84,28 @@ pub enum KeyRole {
     Blocklist,
     /// `snapshot.json`: the index as a whole, and key revocations.
     Snapshot,
+    /// Not a document: a snapshot signed by a key with this role may revoke `blocklist` keys,
+    /// and keys with this role. Only the offline snapshot rotation key has it (registry-repo.md,
+    /// open question 3), so the online snapshot key, which sits next to the release key in CI,
+    /// cannot turn the block list off.
+    #[serde(rename = "blocklist-revocation")]
+    BlocklistRevocation,
 }
 
 impl KeyRole {
-    pub const ALL: [KeyRole; 3] = [KeyRole::Release, KeyRole::Blocklist, KeyRole::Snapshot];
+    pub const ALL: [KeyRole; 4] = [
+        KeyRole::Release,
+        KeyRole::Blocklist,
+        KeyRole::Snapshot,
+        KeyRole::BlocklistRevocation,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             KeyRole::Release => "release",
             KeyRole::Blocklist => "blocklist",
             KeyRole::Snapshot => "snapshot",
+            KeyRole::BlocklistRevocation => "blocklist-revocation",
         }
     }
 }
@@ -156,6 +168,10 @@ impl Keyset {
 
     pub fn keys(&self) -> &[PublicKey] {
         &self.keys
+    }
+
+    pub fn key(&self, key_id: &KeyId) -> Option<&PublicKey> {
+        self.keys.iter().find(|key| &key.key_id == key_id)
     }
 
     /// This keyset without the revoked keys; `None` if no key would be left.

@@ -48,7 +48,7 @@ fyx-extensions/
 ├── blocklist/
 │   └── blocklist.toml         # the block list source; CI signs it into blocklist.json
 ├── keys/
-│   └── keyset.json            # public keys only, one role each: release, snapshot, block-list
+│   └── keyset.json            # public keys only: one signing role each (+ blocklist-revocation)
 ├── policy/
 │   ├── builder.toml           # pinned builder image digest and fyx-ext version
 │   └── reserved-ids.txt       # ids nobody may register (fyx, fyx-*, zed, …)
@@ -320,8 +320,10 @@ race.
       `fyx-registry index add --index index.json --release signed.json --keyset keys/keyset.json`.
    5. **Sign the snapshot**, with the snapshot key in `FYX_REGISTRY_SIGNING_KEY` for this step only:
       `fyx-registry sign snapshot --index index.json --sequence <published + 1> --out snapshot.json`.
-      The default validity is 48 h. Revoked keys are carried over from the published snapshot
-      with `--revoke`.
+      The default validity is 48 h. Revocations of **release and snapshot keys** are carried
+      over from the published snapshot with `--revoke`. Revocations of block-list keys are not
+      passed: the online snapshot key cannot make them. Clients keep the ones from the last
+      rotation-key snapshot by themselves (registry-format.md, `snapshot.json`).
    6. **Verify both.** Run
       `fyx-registry verify index index.json --keyset keys/keyset.json --snapshot snapshot.json`.
    7. **Upload** `index.json`, then `snapshot.json`, to the release `index`, replacing them
@@ -334,8 +336,9 @@ for 48 h and refreshes them on a schedule, so neither ever lapses while the regi
 
 - **Trigger:** `schedule` every 12 h (`cron: "17 */12 * * *"`), and `workflow_dispatch`.
 - **Snapshot job**, in `release-signing`. Re-sign the snapshot of the **unchanged** published
-  index: same `index_sha256`, `sequence` + 1, new `generated_at` and `expires_at`, the same
-  `revoked_keys`. Verify it with `verify index --snapshot`, then upload it.
+  index: same `index_sha256`, `sequence` + 1, new `generated_at` and `expires_at`, and the same
+  release and snapshot revocations (`--revoke`). Block-list revocations carry over in the client
+  without being repeated. Verify it with `verify index --snapshot`, then upload it.
 - **Block-list job**, in `blocklist-signing`. Re-sign the published list's entries with
   `sequence` + 1 and new `generated_at` and `expires_at` (48 h). Verify, then upload. It never
   changes an entry: entries change only through `blocklist.yml`.
@@ -403,7 +406,7 @@ tests is a placeholder or is generated per test run.
 | `release` | current | `fyx-rel-2026-a` | Secret `RELEASE_KEY` in the Environment `release-signing`, plus an offline backup | Every release |
 | `release` | rotation | `fyx-rel-2026-b` | Offline only | Nothing, until it replaces the current key |
 | `snapshot` | current | `fyx-snap-2026-a` | Secret `SNAPSHOT_KEY` in `release-signing`, plus an offline backup | Every snapshot |
-| `snapshot` | rotation | `fyx-snap-2026-b` | Offline only | Nothing, until it replaces the current key, or for an emergency snapshot (Compromise) |
+| `snapshot`, `blocklist-revocation` | rotation | `fyx-snap-2026-b` | Offline only | Nothing, until it replaces the current key, or for an emergency snapshot (Compromise). It is the only key whose snapshots may revoke block-list keys |
 | `blocklist` | current | `fyx-bl-2026-a` | Secret `BLOCKLIST_KEY` in the Environment `blocklist-signing`, plus an offline backup | Every block list |
 | `blocklist` | rotation | `fyx-bl-2026-b` | Offline only | Nothing, until it replaces the current key |
 
@@ -413,14 +416,24 @@ tests is a placeholder or is generated per test run.
   after `index add`, and so must the 12 h refresh. A separate environment would add a second
   place to protect, and protect nothing: whoever can publish a release can already change what the
   index says.
-- **The public keys.** All six are in `keys/keyset.json`, each with exactly one role
-  (registry-format.md, "Keys"). A CI check refuses a key with two roles. The client compiles in
-  the whole keyset, and every verify call checks the role of its document (`WrongRole` otherwise):
-  a release key cannot sign a block list or a snapshot, and the other way round.
+- **The public keys.** All six are in `keys/keyset.json` (registry-format.md, "Keys").
+  - Each key has exactly one signing role: `release`, `snapshot` or `blocklist`.
+  - The offline snapshot rotation key also has `blocklist-revocation`. That role signs no
+    document; it lets the key's snapshots revoke block-list keys.
+  - A CI check refuses a key with two signing roles, and `blocklist-revocation` on any other key.
+  - The client compiles in the whole keyset, and every verify call checks the role of its
+    document (`WrongRole` otherwise): a release key cannot sign a block list or a snapshot, and the
+    other way round.
 - **Revocation.** A snapshot's `revoked_keys` removes keys from the keyset for releases and block
-  lists without a client release (registry-format.md). Only a snapshot signed by the offline
-  snapshot rotation key may revoke block-list keys; the regular snapshot key cannot (decided,
-  open question 3). See Compromise.
+  lists, without a client release (registry-format.md).
+  - **The online snapshot key** may revoke release and snapshot keys. It cannot revoke block-list
+    keys, nor the `blocklist-revocation` key (the offline rotation key) itself. In its snapshots
+    such entries are ignored, and the client reports them (`ignored_revocations`). So a leaked
+    `release-signing` environment cannot take the block list or the rotation key out of play.
+  - **Snapshots signed by the offline rotation key** may revoke block-list keys. Those revocations
+    carry over to every later snapshot, including the online key's daily ones, until another
+    rotation-key snapshot lists different ones. Clients keep them across restarts. See
+    Compromise.
 - **The client decides.** Only a client release decides which keys are trusted. Changing
   `keys/keyset.json` in this repository changes only what CI checks against.
 
@@ -459,6 +472,13 @@ documents are always signed with a key that both old and new clients accept.
    - For releases, re-sign every published release with it and publish a new `index.json` and
      snapshot.
    - For the snapshot and the block list, the next refresh signs with it.
+   - **Snapshot role only:** the promoted snapshot rotation key carries `blocklist-revocation`,
+     which must not stay online.
+     - Ship the step 2 client first. Its keyset gives the promoted key `snapshot` only, and the new
+       offline rotation key `snapshot` and `blocklist-revocation`.
+     - Then put the promoted key into `SNAPSHOT_KEY` once that client is current.
+     - In an emergency (Compromise), promote at once and accept the window until the client
+       ships.
 2. **Make a new rotation key** offline. Ship a client whose keyset holds the promoted key and the
    new rotation key.
 3. **Drop the old key.** Once that client is current, remove the old key from `keys/keyset.json`.
@@ -475,7 +495,9 @@ documents are always signed with a key that both old and new clients accept.
   1. Delete both secrets. This stops publishing.
   2. With the **snapshot rotation key**, offline, sign an emergency snapshot. It has a
      `sequence` higher than any published one and `revoked_keys` = the leaked keys. Clients then
-     stop trusting the leaked keys without a client update.
+     stop trusting the leaked keys without a client update. The leaked online snapshot key could
+     not have revoked the rotation key, so this step always works. Later online snapshots must
+     carry these release and snapshot revocations with `--revoke`.
   3. Promote the release and snapshot rotation keys. Re-sign the index with the new release key,
      and publish it with a snapshot from the new snapshot key.
   4. Ship a client release whose keyset drops the leaked keys. This is required if the attacker
@@ -559,10 +581,14 @@ Task 3.2:
    show misleading text. Is a review after publishing, plus the block list, enough?
 3. **May a snapshot revoke block-list keys?** **Decided 2026-11-18** (coordinator, for the owner):
    only a snapshot signed by the offline **snapshot rotation key** may revoke `blocklist` keys.
-   The client ignores such entries in any other snapshot. W2c is implementing it in
-   `fyx_registry`, with a test. Why: in the format, `revoked_keys` covers every role. Without this
-   rule, a leaked `release-signing` environment (its snapshot key) could revoke both block-list
-   keys. Clients would then discard their cached block list and accept none until a client
-   update, which unblocks every blocked extension.
+   - **How it works:** the client ignores such entries in any other snapshot, and reports them.
+     Implemented by W2c in `fyx_registry` (e1b404d5a0, with tests), through the `blocklist-revocation`
+     role on the rotation key. The rotation-key revocations carry over to later snapshots.
+   - **Also accepted:** W2c's addition that the online snapshot key cannot revoke the rotation key
+     itself either.
+   - **Why:** in the format, `revoked_keys` covers every role. Without this rule, a leaked
+     `release-signing` environment (its snapshot key) could revoke both block-list keys. Clients
+     would then discard their cached block list and accept none until a client update, which
+     unblocks every blocked extension.
 4. **Where T2 manifest fields live.** `network_domains` and `processes` need `[fyx_ui]` keys and
    `fyx-ext check` support before any T2 entry can pass `build`.
