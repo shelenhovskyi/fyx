@@ -19480,6 +19480,7 @@ dependencies = [
  "libc",
  "log",
  "moka",
+ "release_channel",
  "semver",
  "serde",
  "sha2",
