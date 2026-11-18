@@ -316,6 +316,7 @@ async fn test_v0_2_mount_and_rows_carry_the_new_props(cx: &mut TestAppContext) {
             value: "hunter2".into(),
             placeholder: "Token".into(),
             secret: true,
+            label: Some("API token".into()),
         })
     );
     assert_eq!(
