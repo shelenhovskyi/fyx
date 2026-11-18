@@ -261,8 +261,9 @@ Tests that exist but no gate runs, because both the dev machine and CI are Windo
 
 - `fyx_guard`'s `cfg(unix)` real-symlink test. The Windows box has no symlink privilege, and
   there is no Linux job (building `gpui` and `project` there costs 20–30 minutes per push).
-  Junction-based variants cover the directory cases on Windows. Add a Linux `fyx_guard` job when a
-  second OS is in scope.
+  Windows junction tests (`junctions_are_followed`) cover the directory cases in every gate; the
+  unix test now compiles but still never runs. Add a Linux `fyx_guard` job when a second OS is in
+  scope.
 
 ## Tests and the user's profile
 
