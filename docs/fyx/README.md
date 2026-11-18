@@ -28,6 +28,8 @@ branch are listed under [Coming](#coming).
 - [wit-0.2/migration.md](wit-0.2/migration.md): 0.1 → 0.2 coexistence, version gating, SDK and test plan. The 0.2 WIT itself is in `crates/ui_ext/wit/since_v0.2.0/`.
 - [wit-0.3/design.md](wit-0.3/design.md): `fyx:ui@0.3.0` design draft, for review.
 - [wit-0.3/fyx-ui-0.3.wit](wit-0.3/fyx-ui-0.3.wit): the draft 0.3 WIT world.
+- [wit-0.3/open-questions.md](wit-0.3/open-questions.md): Q1–Q14 with options, recommended answers
+  and kind, for the full and the smaller 0.3; Q13 decided, Q9 (version lifetime) open.
 - [wit-0.3/migration.md](wit-0.3/migration.md): 0.2 → 0.3 coexistence, version gating, SDK and test plan.
 
 ## Development
