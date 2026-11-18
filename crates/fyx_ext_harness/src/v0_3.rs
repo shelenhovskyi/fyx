@@ -490,6 +490,11 @@ impl From<model::UiEvent> for wit::UiEvent {
                 },
             )),
             model::UiEvent::ProgressCancelRequested(id) => Self::ProgressCancelRequested(id),
+            model::UiEvent::CanvasClick(click) => Self::CanvasClick(wit::CanvasClick {
+                canvas: click.canvas,
+                x: click.x.0,
+                y: click.y.0,
+            }),
         }
     }
 }
