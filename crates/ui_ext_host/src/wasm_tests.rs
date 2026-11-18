@@ -981,7 +981,7 @@ async fn test_dev_paths_load_and_survive_restart(cx: &mut TestAppContext) {
     // The capabilities shown in the confirmation.
     assert_eq!(
         crate::describe_capabilities(&manifest),
-        ["ui:status-bar: add status bar items"]
+        ["Adds items to the status bar (ui:status-bar)"]
     );
 
     // The setting, from the user's settings.

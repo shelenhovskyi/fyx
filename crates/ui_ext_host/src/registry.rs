@@ -195,6 +195,8 @@ struct Found {
     source: ExtensionSource,
     /// For store installs: where the precompiled component goes.
     cache: Option<PrecompiledCache>,
+    /// The manifest as read by this scan; the load uses this one, not a second read.
+    manifest: UiManifest,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -679,22 +681,44 @@ impl UiExtensionRegistry {
                     this.update(cx, |this, _| this.consent.set_loaded(records))
                         .ok();
                 }
+                // Check each extension in turn (consent may ask), then load them all at once: each
+                // compiles on the background executor, so the loads overlap (triage-3, PERF 8).
+                let mut ready = Vec::new();
                 for found in to_load {
                     let trusted = this
                         .update(cx, |this, _| this.trust_installed)
                         .unwrap_or(false);
+                    // One read of the component: the consent check and the load use the same
+                    // bytes, as they use the same manifest (triage-3, SEC T1).
+                    let mut bytes = match fs.load_bytes(&found.component).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            log::error!(
+                                "fyx:ui: cannot read {}: {error:#}",
+                                found.component.display()
+                            );
+                            this.update(cx, |this, _| {
+                                this.report_load(&found.extension_id, Err(format!("{error:#}")))
+                            })
+                            .ok();
+                            continue;
+                        }
+                    };
                     if !trusted {
-                        let record = match ConsentRecord::current(
+                        let record = match ConsentRecord::for_bytes(
                             &found.dir,
                             &found.capabilities,
-                            &found.component,
+                            bytes,
                             found.is_dev,
                             fs.as_ref(),
                             &cx.background_executor(),
                         )
                         .await
                         {
-                            Ok(record) => record,
+                            Ok((record, same_bytes)) => {
+                                bytes = same_bytes;
+                                record
+                            }
                             Err(error) => {
                                 log::error!(
                                     "fyx:ui: not loading {}: {error:#}",
@@ -717,18 +741,26 @@ impl UiExtensionRegistry {
                         }
                     }
                     let checker = this.update(cx, |this, _| this.consent.checker()).ok();
-                    let loaded = UiExtension::load_from_dir_with_options(
-                        &found.dir,
-                        LoadOptions {
-                            cache: found.cache.clone(),
-                            capability_check: checker,
-                            allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
-                            ..LoadOptions::default()
-                        },
-                        fs.clone(),
+                    let options = LoadOptions {
+                        cache: found.cache.clone(),
+                        capability_check: checker,
+                        allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
+                        ..LoadOptions::default()
+                    };
+                    ready.push((found, bytes, options));
+                }
+                let loads = ready.into_iter().map(|(found, bytes, options)| {
+                    let load = UiExtension::load_checked(
+                        found.extension_id.clone(),
+                        found.manifest.clone(),
+                        bytes,
+                        options,
                         cx,
-                    )
-                    .await;
+                    );
+                    async move { (found, load.await.map(Some)) }
+                });
+                let results = futures::future::join_all(loads).await;
+                for (found, loaded) in results {
                     match loaded {
                         Ok(Some((extension, pushed))) => {
                             log::info!(
@@ -984,8 +1016,10 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
-        // The instance is gone (trap, disabled, uninstalled): so are its decorations.
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations, and the
+        // registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
+        self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
@@ -1262,6 +1296,7 @@ async fn found_at(
             capabilities: manifest.capabilities.clone(),
             source,
             cache,
+            manifest,
         }),
         Ok(None) | Err(_) => {
             log::error!(

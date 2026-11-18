@@ -61,8 +61,8 @@ pub use registry::{
     DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, UiExtensionRegistry,
 };
 pub use store_actions::{
-    InstallUiExtensionFromFile, RestartUiExtension, RevokeUiExtensionPermission,
-    RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
+    InstallUiExtensionFromFile, OpenExtensionPanel, RestartUiExtension,
+    RevokeUiExtensionPermission, RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
 };
 pub use surface::{Phase, SurfaceState};
 pub use view::{SurfaceView, TYPING_DEBOUNCE};
@@ -88,17 +88,20 @@ pub fn capability_chips(extension_id: &str, cx: &App) -> Option<gpui::AnyElement
     let mut labels: Vec<String> = registry
         .declared_capabilities(extension_id)
         .into_iter()
-        .map(|(capability, tier, granted)| match tier {
-            Tier::T0 => format!("{capability} · T0"),
-            _ if granted => format!("{capability} · {tier} granted"),
-            _ => format!("{capability} · {tier} not granted"),
+        .map(|(capability, tier, granted)| {
+            let label = install::capability_chip_label(&capability);
+            match tier {
+                Tier::T0 => label,
+                _ if granted => format!("{label} (approved)"),
+                _ => format!("{label} (not approved)"),
+            }
         })
         .collect();
     if labels.is_empty() {
         labels = registry
             .capabilities(extension_id, cx)
             .into_iter()
-            .map(|capability| format!("{capability} · T0"))
+            .map(install::capability_chip_label)
             .collect();
     }
     if labels.is_empty() {

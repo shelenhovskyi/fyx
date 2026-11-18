@@ -115,6 +115,33 @@ impl SurfaceView {
             _observe_state: observe_state,
         };
         this.sync(window, cx);
+        // Typing still waiting for its pause goes out when the view closes (a panel removed, a
+        // window closed), instead of being lost (triage-3, ASYNC 12).
+        cx.on_release(|this: &mut Self, cx| {
+            let pending: Vec<(NodeId, String)> = this
+                .inputs
+                .iter()
+                .filter(|(_, input)| input.debounce.is_some())
+                .map(|(id, input)| {
+                    (
+                        *id,
+                        input.editor.read(cx).text(cx),
+                        input.last_known.clone(),
+                    )
+                })
+                .filter(|(_, text, last_known)| text != last_known)
+                .map(|(id, text, _)| (id, text))
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            this.state.update(cx, |state, cx| {
+                for (id, text) in pending {
+                    state.dispatch(UiEvent::InputChanged(id, text), cx);
+                }
+            });
+        })
+        .detach();
         this
     }
 
