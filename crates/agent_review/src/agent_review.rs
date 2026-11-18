@@ -47,9 +47,9 @@ use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 use fyx_guard::paths::ResolvedPath;
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
-    AcceptAllHunks, AcceptHunk, AcceptTurn, ClearTurnDecision, CommentHunk, NextHunk, OpenReviews,
-    PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk, RejectTurn, ReviewPane, SubmitReview,
-    ToggleReviewMode, permission_card_notice,
+    AcceptAllHunks, AcceptHunk, AcceptTurn, ApplyReviewRules, ClearTurnDecision, CommentHunk,
+    NextHunk, OpenReviews, PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk, RejectTurn,
+    ReviewPane, ShowReviewRules, SubmitReview, ToggleReviewMode, permission_card_notice,
 };
 use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
@@ -325,6 +325,12 @@ pub enum AgentReviewEvent {
     /// Files changed on disk during the turn without going through review (see
     /// [`AgentReview::unreviewed_changes`]).
     UnreviewedChanges(TurnId),
+    /// A rule refused an edit or let it land without review, the first time in the turn for that
+    /// rule: `entry` indexes [`AgentReview::turn_history`].
+    DecidedByRule {
+        turn: TurnId,
+        entry: usize,
+    },
 }
 
 /// Answers a permission request. For [`PermissionVerdict::ApplyAcceptedAndDeny`] it first writes the
@@ -434,6 +440,8 @@ pub struct AgentReview {
     /// What the agent should learn about reviews answered through a permission (which carries no
     /// message): sent in front of the user's next prompt in the session.
     prompt_notes: HashMap<acp_v2::SessionId, Vec<String>>,
+    /// Rules already announced per turn ([`AgentReviewEvent::DecidedByRule`]).
+    announced_rules: HashSet<(TurnId, String)>,
     /// Resolves the paths rules are matched against (symlinks, 8.3 names). Without it (tests that
     /// set none), only the typed spellings are matched.
     fs: Option<Arc<dyn Fs>>,
@@ -515,6 +523,7 @@ impl AgentReview {
                 if let Some(old) = self.ended_turns.pop_front() {
                     self.turn_history.remove(&old);
                     self.turn_unreviewed.remove(&old);
+                    self.announced_rules.retain(|(turn, _)| *turn != old);
                 }
             }
             cx.emit(AgentReviewEvent::TurnEnded(turn));
@@ -530,6 +539,17 @@ impl AgentReview {
 
     /// Records files that changed on disk while the session's turn runs. Files the turn reviewed are
     /// skipped: their writes are the reviewed ones.
+    /// Whether `path` went through the turn's review (decided, or waiting).
+    fn reviewed_in_turn(&self, turn: TurnId, path: &Path) -> bool {
+        self.turn_history(turn)
+            .iter()
+            .any(|entry| entry.path == path)
+            || self
+                .reviews
+                .iter()
+                .any(|review| review.turn == turn && review.edit.abs_path() == path)
+    }
+
     pub fn note_changed_paths(
         &mut self,
         session_id: &acp_v2::SessionId,
@@ -542,34 +562,24 @@ impl AgentReview {
         let Some(turn) = self.turns.get(session_id).copied() else {
             return;
         };
-        let reviewed = self
-            .turn_history(turn)
-            .iter()
-            .map(|entry| entry.path.clone())
-            .chain(
-                self.reviews
-                    .iter()
-                    .filter(|review| review.turn == turn)
-                    .map(|review| review.edit.abs_path().to_path_buf()),
-            )
-            .collect::<HashSet<_>>();
+        let new_paths = paths
+            .into_iter()
+            .filter(|path| !self.reviewed_in_turn(turn, path))
+            .collect::<Vec<_>>();
         let unreviewed = self.turn_unreviewed.entry(turn).or_default();
-        let mut added = false;
-        for path in paths {
-            if !reviewed.contains(&path) {
-                added |= unreviewed.insert(path);
-            }
+        let mut added = 0;
+        for path in new_paths {
+            log::debug!(
+                "fyx: agent review: changed without review in {turn:?}: {}",
+                path.display()
+            );
+            added += usize::from(unreviewed.insert(path));
         }
-        if added {
+        if added > 0 {
+            // The count only: a turn that rewrites thousands of files must not log each again per change.
             log::info!(
-                "fyx: agent review: {} {} changed without review in {turn:?}: {:?}",
-                unreviewed.len(),
-                if unreviewed.len() == 1 {
-                    "file"
-                } else {
-                    "files"
-                },
-                unreviewed
+                "fyx: agent review: {} files changed without review in {turn:?} ({added} new)",
+                unreviewed.len()
             );
             cx.emit(AgentReviewEvent::UnreviewedChanges(turn));
             cx.notify();
@@ -693,6 +703,7 @@ impl AgentReview {
         turn: TurnId,
         edit: &ProposedEdit,
         rule: Option<RuleMatch>,
+        cx: &mut Context<Self>,
     ) {
         if let Some(history) = self.turn_history.get_mut(&turn)
             && let Some(index) = history
@@ -701,10 +712,21 @@ impl AgentReview {
         {
             history.remove(index);
         }
-        self.record(turn, edit, rule);
+        self.record(turn, edit, rule, cx);
     }
 
-    fn record(&mut self, turn: TurnId, edit: &ProposedEdit, rule: Option<RuleMatch>) {
+    fn record(
+        &mut self,
+        turn: TurnId,
+        edit: &ProposedEdit,
+        rule: Option<RuleMatch>,
+        cx: &mut Context<Self>,
+    ) {
+        let announce = rule.as_ref().filter(|rule| {
+            matches!(rule.kind, RuleKind::Deny | RuleKind::AutoAccept)
+                && self.announced_rules.insert((turn, rule.describe()))
+        });
+        let announce = announce.is_some();
         log::info!(
             "fyx: agent review: {} {:?} in {turn:?}{}",
             edit.abs_path().display(),
@@ -713,11 +735,16 @@ impl AgentReview {
                 .map(|rule| format!(" by rule {}", rule.describe()))
                 .unwrap_or_default()
         );
-        self.turn_history.entry(turn).or_default().push(TurnEntry {
+        let history = self.turn_history.entry(turn).or_default();
+        history.push(TurnEntry {
             path: edit.abs_path().to_path_buf(),
             resolution: edit.resolution(),
             rule,
         });
+        if announce {
+            let entry = history.len() - 1;
+            cx.emit(AgentReviewEvent::DecidedByRule { turn, entry });
+        }
     }
 
     /// The project rule for `abs_path`, from the innermost worktree with rules.
@@ -775,7 +802,7 @@ impl AgentReview {
                 let rule = this.rule_for_resolved(&resolved);
                 let strict = rule
                     .as_ref()
-                    .is_some_and(|rule| matches!(rule.kind, RuleKind::Deny | RuleKind::AlwaysAsk));
+                    .is_some_and(RuleMatch::applies_with_review_off);
                 if !this.enabled && !strict {
                     RulesVerdict::PassThrough
                 } else {
@@ -938,7 +965,7 @@ impl AgentReview {
                 };
                 let (turn, rule) = (review.turn, review.rule.clone());
                 if sender.send(outcome).is_ok() {
-                    self.record(turn, &edit, rule);
+                    self.record(turn, &edit, rule, cx);
                 } else {
                     log::info!(
                         "fyx: agent review: the write was dropped before its review was submitted"
@@ -998,7 +1025,7 @@ impl AgentReview {
         review.responder = None;
         let (turn, edit, rule) = (review.turn, review.edit.clone(), review.rule.clone());
         let session_id = review.session_id.clone();
-        self.record(turn, &edit, rule);
+        self.record(turn, &edit, rule, cx);
         if let Some(note) = permission_note(&edit, verdict) {
             self.prompt_notes.entry(session_id).or_default().push(note);
         }
@@ -1112,8 +1139,11 @@ impl AgentReview {
         cx: &mut Context<Self>,
     ) -> Option<ReviewId> {
         let rule_kind = rule.as_ref().map(|rule| rule.kind);
-        // `deny` and `always_ask` only make review stricter, so they apply in review mode or not.
-        let strict_rule = matches!(rule_kind, Some(RuleKind::Deny | RuleKind::AlwaysAsk));
+        // A project's `deny` and `always_ask` only make review stricter, so they apply in review mode
+        // or not.
+        let strict_rule = rule
+            .as_ref()
+            .is_some_and(RuleMatch::applies_with_review_off);
         if (!self.enabled && !strict_rule) || edit.hunks().is_empty() {
             return None;
         }
@@ -1142,7 +1172,7 @@ impl AgentReview {
         if let Some(decision) = decision {
             let mut edit = edit;
             edit.decide_pending(decision);
-            self.record(turn, &edit, rule);
+            self.record(turn, &edit, rule, cx);
             let verdict = permission_verdict(edit.resolution());
             cx.spawn(async move |_, cx| {
                 if let Err(error) = cx.update(|cx| respond(verdict, edit, cx)).await {
@@ -1270,7 +1300,7 @@ impl AgentReview {
                 edit.abs_path().display(),
                 rule.describe()
             );
-            self.record(turn, &edit, Some(rule));
+            self.record(turn, &edit, Some(rule), cx);
             cx.notify();
             return Task::ready(Ok(AgentWriteOutcome {
                 content: None,
@@ -1294,9 +1324,9 @@ impl AgentReview {
         }
         if !edit.resolution().is_pending() {
             if took_over_preview {
-                self.record_replacing_preview(turn, &edit, rule);
+                self.record_replacing_preview(turn, &edit, rule, cx);
             } else {
-                self.record(turn, &edit, rule);
+                self.record(turn, &edit, rule, cx);
             }
             cx.notify();
             return Task::ready(write_outcome(&edit));
@@ -1413,7 +1443,7 @@ impl AgentReview {
         let turn = self.turn_for(&session_id);
         if let Some(rule) = rule.clone().filter(|rule| rule.kind == RuleKind::Deny) {
             edit.decide_all(HunkDecision::Rejected);
-            self.record(turn, &edit, Some(rule.clone()));
+            self.record(turn, &edit, Some(rule.clone()), cx);
             cx.notify();
             return Task::ready(Err(anyhow!(
                 "The project's review rules deny this ({}): {description} did not happen. Do not \
@@ -1428,7 +1458,7 @@ impl AgentReview {
         };
         if let Some(decision) = decision {
             edit.decide_pending(decision);
-            self.record(turn, &edit, rule);
+            self.record(turn, &edit, rule, cx);
             cx.notify();
             return Task::ready(operation_outcome(&edit, &description));
         }
@@ -2039,7 +2069,7 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
                         Ok(rules) => rules,
                         Err(error) => {
                             let message = format!(
-                                "Agent review: {} could not be used ({error:#}); the previous \
+                                "Agent review: {} has an error ({error:#}); the previous \
                                  review rules stay in force.",
                                 rules_path.display()
                             );
@@ -2091,8 +2121,9 @@ fn reload_rules(project: &Entity<Project>, cx: &mut App) {
                     return;
                 };
                 let message = format!(
-                    "Agent review: {} changed and would remove these restrictions: {}. An agent may \
-                     have changed it, so the new rules apply only when you apply them.",
+                    "Agent review: {} changed and removes these restrictions: {}. A change that \
+                     loosens review applies only when you apply it (also: agent review: apply \
+                     review rules).",
                     rules_path.display(),
                     loosened.join(", ")
                 );
@@ -3536,6 +3567,55 @@ mod tests {
         assert_eq!(outcome.content.as_deref(), Some(NEW));
         assert_eq!(
             review.read_with(cx, |review, _| review.turn_history(turn).len()),
+            1
+        );
+    }
+
+    #[gpui::test]
+    async fn a_rule_decision_is_announced_once_per_turn(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        set_test_rules(&review, r#"deny = ["*.env"]"#, cx);
+        for _ in 0..2 {
+            let outcome = gate_write(&review, agent_write("/p/.env", cx), cx)
+                .await
+                .unwrap();
+            assert_eq!(outcome.content, None);
+        }
+        let announced = events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, AgentReviewEvent::DecidedByRule { .. }))
+            .count();
+        assert_eq!(announced, 1);
+    }
+
+    #[gpui::test]
+    async fn agent_instruction_files_wait_for_review(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| {
+            review.set_rules(
+                PathBuf::from("/p"),
+                Some(ReviewRules::none("/p".into())),
+                cx,
+            )
+        });
+        // Review mode off: as upstream.
+        let outcome = gate_write(&review, agent_write("/p/AGENTS.md", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.content.as_deref(), Some(NEW));
+
+        // Review mode on: held, even while the turn is being accepted.
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let turn = review.update(cx, |review, _| review.begin_turn(&session()));
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap()
+        });
+        let _held = gate_write(&review, agent_write("/p/docs/CLAUDE.md", cx), cx);
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
             1
         );
     }

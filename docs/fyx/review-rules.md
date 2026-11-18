@@ -39,9 +39,14 @@ the file is an error.
 
 The `deny` and `always_ask` rules apply even with review mode off, because they only make review stricter.
 
-Each decision is listed in the turn's review pane with the rule that made it, for example
-"by rule `deny = "*.env"` in …/.fyx/review.toml". A review opened by `always_ask` says so above
-the diff.
+In review mode, Fyx also always asks for agent instruction files, wherever they are: `AGENTS.md`,
+`CLAUDE.md`, `GEMINI.md` and `.rules`. An edit to one changes what every later agent run does, so
+"Accept all in turn" and `auto_accept` patterns do not cover them.
+
+When a rule refuses an edit or lets one land without review, a notification says so, once per
+turn and rule, with **Show Review Rules**. Each decision is also listed in the turn's review pane
+with the rule that made it, for example "by rule `deny = "*.env"` in …/.fyx/review.toml". A
+review opened by `always_ask` says so above the diff.
 
 <!-- crates/agent_review/src/agent_review.rs: review_write, open_permission_preview -->
 
@@ -85,13 +90,15 @@ the diff.
 - A change that only adds restrictions applies at once.
 - A change that removes any restriction waits until you confirm it. Removing a `deny` pattern,
   dropping an `always_ask` pattern, or deleting the file all count.
-  - A notification lists what would be removed and offers **Apply new review rules**. Until you
-    click it, the previous rules stay in force.
+  - A notification lists what would be removed and offers **Apply new review rules**; the
+    command `agent review: apply review rules` does the same later. Until you apply them, the
+    previous rules stay in force.
   - This also holds when a new thread starts, including a subagent the agent opens itself: an
     agent cannot get looser rules applied by starting a thread.
 - A file that cannot be read or parsed (bad TOML, an unknown key, an invalid pattern) keeps the
-  previous rules in force. A notification shows the error. Fyx never applies half a file and never
-  drops rules silently.
+  previous rules in force. A notification says where the error is (line and column, or which
+  pattern), without quoting the file. Fyx never applies half a file and never drops rules
+  silently.
 - Fyx remembers, per worktree, the rules you last agreed to (in `agent_review/confirmed_rules.json`
   in its data directory). Until you agree to a change, every remembered restriction stays in force
   together with anything stricter in the file, across restarts too: an agent that deletes a `deny`

@@ -68,6 +68,10 @@ actions!(
         OpenReviews,
         /// Turns review of agent edits on or off.
         ToggleReviewMode,
+        /// Applies a changed `.fyx/review.toml` that removes restrictions, once you checked it.
+        ApplyReviewRules,
+        /// Opens the project's `.fyx/review.toml`.
+        ShowReviewRules,
     ]
 );
 
@@ -84,6 +88,20 @@ pub(crate) fn init(cx: &mut App) {
         workspace.register_action(|_, _: &ToggleReviewMode, _, cx| {
             crate::set_review_mode_setting(!crate::review_mode(cx), cx);
         });
+        workspace.register_action(|workspace, _: &ApplyReviewRules, _, cx| {
+            apply_review_rules(workspace, cx);
+        });
+        workspace.register_action(|workspace, _: &ShowReviewRules, window, cx| {
+            let roots = worktree_roots(workspace, cx);
+            if let Some(root) = roots.first() {
+                show_rules_file(
+                    workspace,
+                    crate::review_rules::rules_file_path(root),
+                    window,
+                    cx,
+                );
+            }
+        });
         let Some(review) = AgentReview::global(cx) else {
             return;
         };
@@ -95,6 +113,9 @@ pub(crate) fn init(cx: &mut App) {
             AgentReviewEvent::Opened(id) => notify_review_waiting(workspace, *id, cx),
             AgentReviewEvent::UnreviewedChanges(turn) => {
                 show_unreviewed_changes(workspace, *turn, cx)
+            }
+            AgentReviewEvent::DecidedByRule { turn, entry } => {
+                show_rule_decision(workspace, *turn, *entry, cx)
             }
             _ => {}
         })
@@ -174,6 +195,111 @@ fn in_project(project: &Entity<Project>, path: &Path, cx: &App) -> bool {
 }
 
 struct ReviewWaiting;
+struct RuleDecided;
+struct NoPendingRules;
+
+fn worktree_roots(workspace: &Workspace, cx: &App) -> Vec<std::path::PathBuf> {
+    workspace
+        .project()
+        .read(cx)
+        .visible_worktrees(cx)
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        .collect()
+}
+
+fn show_rules_file(
+    workspace: &mut Workspace,
+    path: std::path::PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace
+        .open_abs_path(path, OpenOptions::default(), window, cx)
+        .detach_and_log_err(cx);
+}
+
+/// `agent_review: apply review rules`: the changed rules files of this project that wait for the
+/// user, applied.
+fn apply_review_rules(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let mut applied = 0;
+    for root in worktree_roots(workspace, cx) {
+        if review.read(cx).has_pending_rules(&root) {
+            review.update(cx, |review, cx| review.apply_pending_rules(&root, cx));
+            applied += 1;
+        }
+    }
+    if applied == 0 {
+        workspace.show_toast(
+            Toast::new(
+                NotificationId::unique::<NoPendingRules>(),
+                "Agent review: no changed review rules are waiting to be applied.",
+            )
+            .autohide(),
+            cx,
+        );
+    }
+}
+
+/// A rule refused an edit, or let it land without review: say so once per turn and rule, with a
+/// way to the rule.
+fn show_rule_decision(
+    workspace: &mut Workspace,
+    turn: TurnId,
+    entry: usize,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(review) = AgentReview::global(cx) else {
+        return;
+    };
+    let project = workspace.project().clone();
+    let Some(entry) = review.read(cx).turn_history(turn).get(entry).cloned() else {
+        return;
+    };
+    let Some(rule) = entry.rule.clone() else {
+        return;
+    };
+    if !in_project(&project, &entry.path, cx) {
+        return;
+    }
+    let path = display_path(&project, &entry.path, cx);
+    let (message, rules_file) = match rule.kind {
+        crate::RuleKind::AutoAccept => (
+            format!(
+                "Agent review: the agent's edit to {path} landed without review, by rule {}. Later \
+                 edits matching it in this turn are not announced.",
+                rule.describe()
+            ),
+            paths::settings_file().clone(),
+        ),
+        _ => (
+            format!(
+                "Agent review: the agent's edit to {path} was refused, by rule {}.",
+                rule.describe()
+            ),
+            std::path::PathBuf::from(&rule.source),
+        ),
+    };
+    let handle = cx.weak_entity();
+    let id = NotificationId::composite::<RuleDecided>(SharedString::from(format!(
+        "{turn:?} {}",
+        rule.describe()
+    )));
+    let mut toast = Toast::new(id, message).on_click("Show Review Rules", move |window, cx| {
+        let rules_file = rules_file.clone();
+        handle
+            .update(cx, |workspace, cx| {
+                show_rules_file(workspace, rules_file, window, cx)
+            })
+            .ok();
+    });
+    if rule.kind == crate::RuleKind::AutoAccept {
+        toast = toast.autohide();
+    }
+    workspace.show_toast(toast, cx);
+}
 
 pub(crate) fn review_toast_id(turn: TurnId) -> NotificationId {
     NotificationId::composite::<ReviewWaiting>(SharedString::from(format!("{turn:?}")))

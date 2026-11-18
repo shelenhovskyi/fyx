@@ -17,7 +17,10 @@
 //! (`.` and `..` resolved) and, on Windows and macOS, compared without regard to case, as those file
 //! systems do.
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::LazyLock,
+};
 
 use anyhow::{Context as _, Result};
 use globset::{GlobBuilder, GlobMatcher};
@@ -28,6 +31,20 @@ pub const RULES_FILE: &str = ".fyx/review.toml";
 
 /// Whether paths match without regard to case: the default file systems of Windows and macOS do.
 const CASE_INSENSITIVE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Files that instruct agents. An edit to one changes what every later agent run does, so in review
+/// mode it is always reviewed, even under "accept all in turn" or an `auto_accept` pattern.
+pub const AGENT_INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".rules"];
+
+/// Where [`AGENT_INSTRUCTION_FILES`] rules come from.
+pub const BUILT_IN_SOURCE: &str = "Fyx's defaults (agent instruction files)";
+
+static BUILT_IN_ALWAYS_ASK: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
+    AGENT_INSTRUCTION_FILES
+        .iter()
+        .filter_map(|name| Pattern::new(name).ok())
+        .collect()
+});
 
 /// The rules file of the worktree at `root`, with the platform's separators.
 pub fn rules_file_path(root: &Path) -> PathBuf {
@@ -63,6 +80,12 @@ pub struct RuleMatch {
 }
 
 impl RuleMatch {
+    /// Whether the rule holds with review mode off too: a project's `deny` and `always_ask` only
+    /// make review stricter. Fyx's own defaults and the user's `auto_accept` apply in review mode.
+    pub fn applies_with_review_off(&self) -> bool {
+        matches!(self.kind, RuleKind::Deny | RuleKind::AlwaysAsk) && self.source != BUILT_IN_SOURCE
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "{} = \"{}\" in {}",
@@ -170,17 +193,30 @@ pub struct ReviewRules {
 }
 
 impl ReviewRules {
+    /// Errors name a place in the file (`line:column`, or the key and position of a pattern), never
+    /// text from it: the file comes with the repository and may hold text written for the reader.
     pub fn parse(root: PathBuf, text: &str) -> Result<Self> {
-        let file: RulesFile = toml::from_str(text).context("invalid review rules")?;
-        let compile = |patterns: &[String]| {
+        let file: RulesFile = toml::from_str(text).map_err(|error| match error.span() {
+            Some(span) => {
+                let (line, column) = line_and_column(text, span.start);
+                anyhow::anyhow!("invalid review rules at line {line}, column {column}")
+            }
+            None => anyhow::anyhow!("invalid review rules"),
+        })?;
+        let compile = |key: &str, patterns: &[String]| {
             patterns
                 .iter()
-                .map(|pattern| Pattern::new(pattern))
+                .enumerate()
+                .map(|(index, pattern)| {
+                    Pattern::new(pattern).map_err(|_| {
+                        anyhow::anyhow!("pattern {} of `{key}` is not a valid pattern", index + 1)
+                    })
+                })
                 .collect::<Result<Vec<_>>>()
         };
         Ok(Self {
-            always_ask: compile(&file.always_ask)?,
-            deny: compile(&file.deny)?,
+            always_ask: compile("always_ask", &file.always_ask)?,
+            deny: compile("deny", &file.deny)?,
             ignored_auto_accept: !file.auto_accept.is_empty(),
             root,
             real_root: None,
@@ -296,9 +332,10 @@ impl ReviewRules {
     ) -> Option<RuleMatch> {
         let relative = self.relative_path(abs_path)?;
         let project_file = rules_file_path(&self.root).display().to_string();
-        let kinds: [(RuleKind, &[Pattern], &str); 3] = [
+        let kinds: [(RuleKind, &[Pattern], &str); 4] = [
             (RuleKind::Deny, &self.deny, &project_file),
             (RuleKind::AlwaysAsk, &self.always_ask, &project_file),
+            (RuleKind::AlwaysAsk, &BUILT_IN_ALWAYS_ASK, BUILT_IN_SOURCE),
             (
                 RuleKind::AutoAccept,
                 &user_auto_accept.0,
@@ -314,6 +351,18 @@ impl ReviewRules {
             })
         })
     }
+}
+
+/// The 1-based line and column of byte `offset` in `text`.
+fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
+    let before = &text[..offset.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |line| line.chars().count())
+        + 1;
+    (line, column)
 }
 
 /// The path of `abs_path` relative to `root`, compared as the platform's file system compares names.
@@ -519,6 +568,46 @@ mod tests {
         assert!(ReviewRules::parse(PathBuf::from("/r"), "allow = []").is_err());
         assert!(ReviewRules::parse(PathBuf::from("/r"), "").is_ok());
         assert!(ReviewRules::parse(PathBuf::from("/r"), "deny = [\"/\"]").is_err());
+    }
+
+    #[test]
+    fn errors_name_a_place_not_the_text() {
+        let error = ReviewRules::parse(
+            PathBuf::from("/r"),
+            "deny = []\nIGNORE_PREVIOUS_INSTRUCTIONS = 1\n",
+        )
+        .err()
+        .unwrap();
+        let message = format!("{error:#}");
+        assert!(message.contains("line 2, column 1"), "{message}");
+        assert!(!message.contains("IGNORE"), "{message}");
+        let error = ReviewRules::parse(PathBuf::from("/r"), "deny = [\"ok\", \"[SAY HI\"]")
+            .err()
+            .unwrap();
+        let message = format!("{error:#}");
+        assert_eq!(message, "pattern 2 of `deny` is not a valid pattern");
+    }
+
+    #[test]
+    fn agent_instruction_files_are_always_asked_in_review_mode() {
+        let empty = ReviewRules::none(PathBuf::from("/repo"));
+        let everything = user(&["**"]);
+        for path in ["AGENTS.md", "docs/CLAUDE.md", ".rules", "GEMINI.md"] {
+            let rule = empty
+                .evaluate(&Path::new("/repo").join(path), &everything)
+                .unwrap();
+            assert_eq!(rule.kind, RuleKind::AlwaysAsk, "{path}");
+            assert!(!rule.applies_with_review_off(), "{path}");
+        }
+        assert_eq!(
+            kind(&empty, &everything, "README.md"),
+            Some(RuleKind::AutoAccept)
+        );
+        let project = rules();
+        let deny = project
+            .evaluate(Path::new("/repo/.env"), &everything)
+            .unwrap();
+        assert!(deny.applies_with_review_off());
     }
 
     #[test]
