@@ -918,9 +918,10 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
 | `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
 | `extensions/fyx_demo_charts` | canvases (0.3): a clickable bar chart with click-to-select through `CanvasHits`, and a tick-driven sparkline with Pause and Resume |
+| `extensions/fyx_demo_t2` | the T2 capabilities (0.3 only): fetch `api.github.com/zen`, run `git status --short`, insert a header as one undoable edit, and list agent reviews live, each with its permission state and first-use prompt |
 | `extensions/fyx_demo_images` | images (0.3): SVG and PNG assets, `tint`, `contain` and `cover`, a chart made at run time with `add_image` and swapped on Shuffle, a missing asset's alt text, thumbnails in list rows |
 
-`script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a
+`script/fyx-build-demos` builds all of them; `fyx_demo_t2` only with `--fyx-ui-0-3`. `extensions/fyx_demo_counter/tests/headless.rs` is a
 headless test of the counter's contract; run it with
 `fyx-ext test --path extensions/fyx_demo_counter`.
 

@@ -126,6 +126,9 @@ pub use bindings::fyx::ui::notifications::{
     Notification, NotificationAction, NotificationLevel, ProgressLocation, ProgressOptions,
     ProgressValue,
 };
+/// The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them.
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::permissions::{PermissionState, T2Capability};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::process::{
     OutputStream, ProcessExit, ProcessOutput, SpawnError, SpawnRequest,

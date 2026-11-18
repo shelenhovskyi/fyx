@@ -113,6 +113,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `PatchSet::patches` | method |  |
 | `PatchSet::remove` | method | Removes the node and its whole subtree. |
 | `PatchSet::set_props` | method |  |
+| `PermissionState` | re-export | The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them. |
 | `Position` | re-export | `bindings::fyx::ui::documents::Position` |
 | `Position::new` | method | Zero-based line, and a column in UTF-8 bytes from the start of the line. |
 | `ProcessExit` | re-export | `bindings::fyx::ui::process::ProcessExit` |
@@ -166,6 +167,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SurfaceTree::take_update` | method | Patches queued since the last call, as an update for `handle-event` or `push_update`. After a failed `SurfaceTree::push` it is the whole tree as a `replace` instead. |
 | `SurfaceTree::to_nodes` | method | The whole live tree as a flat, parents-first node list, as the host holds it. |
 | `SurfaceTree::with_limits` | method | A tree checked against `limits` instead of the host's defaults. |
+| `T2Capability` | re-export | The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them. |
 | `TableProps::new` | method |  |
 | `TextEdit` | re-export | `bindings::fyx::ui::workspace_edit::TextEdit` |
 | `TextProps::bold` | method |  |
