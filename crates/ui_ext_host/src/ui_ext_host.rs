@@ -24,6 +24,7 @@ mod inspector;
 mod install;
 pub mod install_store;
 mod keyboard;
+mod choice;
 mod modal;
 pub mod notifications;
 mod panel;

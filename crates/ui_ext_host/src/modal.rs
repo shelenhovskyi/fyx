@@ -141,6 +141,39 @@ impl ExtensionModal {
         self.move_selection(-1, cx);
     }
 
+    fn select_page(&mut self, down: bool, cx: &mut Context<Self>) {
+        let Some((list, _, _)) = self.state.read(cx).first_list() else {
+            return;
+        };
+        let row_height = match self.state.read(cx).tree().and_then(|tree| tree.get(list)) {
+            Some(node) => match node.props() {
+                ui_ext::v0_2::Props::List(props) => props.row_height,
+                _ => return,
+            },
+            None => return,
+        };
+        let page = i64::from(self.view.read(cx).page_rows(list, row_height));
+        self.move_selection(if down { page } else { -page }, cx);
+    }
+
+    fn select_page_up(
+        &mut self,
+        _: &crate::keyboard::SelectPageUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(false, cx);
+    }
+
+    fn select_page_down(
+        &mut self,
+        _: &crate::keyboard::SelectPageDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(true, cx);
+    }
+
     fn select_last(&mut self, _: &menu::SelectLast, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(i64::MAX / 2, cx);
     }
@@ -199,7 +232,7 @@ impl Render for ExtensionModal {
         };
         let max_height = window.viewport_size().height * 0.6;
         v_flex()
-            .key_context("ExtensionModal")
+            .key_context(crate::keyboard::MODAL_CONTEXT)
             .elevation_3(cx)
             .w(width)
             .max_h(max_height)
@@ -210,6 +243,8 @@ impl Render for ExtensionModal {
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_page_up))
+            .on_action(cx.listener(Self::select_page_down))
             .when(!self.title.is_empty(), |this| {
                 this.child(
                     v_flex()

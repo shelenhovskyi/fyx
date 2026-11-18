@@ -365,7 +365,10 @@ impl UiExtensionRegistry {
                     extension_id: pending.extension_id.to_string(),
                     path: pending.dir.clone(),
                     is_dev: pending.is_dev
-                        || self.dev_paths.iter().any(|dev| pending.dir.starts_with(dev)),
+                        || self
+                            .dev_paths
+                            .iter()
+                            .any(|dev| pending.dir.starts_with(dev)),
                     pending: Some(new),
                 }),
             }
@@ -427,7 +430,10 @@ impl UiExtensionRegistry {
                         .set_approved(&extension_id, approved, fs.as_ref())
                         .await
                     {
-                        log::error!("fyx:ui: cannot record the revoke of {capability}: {error:#}");
+                        log::error!(
+                            "fyx:ui: cannot record the revoke of {capability}: {}",
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
+                        );
                     }
                 }
             })
@@ -1403,8 +1409,9 @@ Environment it may pass: {}",
                         Ok(bytes) => bytes,
                         Err(error) => {
                             log::error!(
-                                "fyx:ui: cannot read {}: {error:#}",
-                                found.component.display()
+                                "fyx:ui: cannot read {}: {}",
+                                found.component.display(),
+                                ui_ext::sanitize_for_log(&format!("{error:#}"))
                             );
                             this.update(cx, |this, _| {
                                 this.report_load(&found.extension_id, Err(format!("{error:#}")))
@@ -1430,8 +1437,9 @@ Environment it may pass: {}",
                             }
                             Err(error) => {
                                 log::error!(
-                                    "fyx:ui: not loading {}: {error:#}",
-                                    found.dir.display()
+                                    "fyx:ui: not loading {}: {}",
+                                    found.dir.display(),
+                                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                                 );
                                 continue;
                             }
@@ -1495,7 +1503,10 @@ Environment it may pass: {}",
                                     extension.extension_id(),
                                     found.source.clone(),
                                 ) {
-                                    log::error!("fyx:ui: {error:#}");
+                                    log::error!(
+                                        "fyx:ui: {}",
+                                        ui_ext::sanitize_for_log(&format!("{error:#}"))
+                                    );
                                     this.report_load(
                                         &found.extension_id,
                                         Err(format!("{error:#}")),
@@ -1524,8 +1535,9 @@ Environment it may pass: {}",
                         Ok(None) => {}
                         Err(error) => {
                             log::error!(
-                                "fyx:ui: failed to load installed extension {}: {error:#}",
-                                found.dir.display()
+                                "fyx:ui: failed to load installed extension {}: {}",
+                                found.dir.display(),
+                                ui_ext::sanitize_for_log(&format!("{error:#}"))
                             );
                             this.update(cx, |this, cx| {
                                 this.report_load(&found.extension_id, Err(format!("{error:#}")));
@@ -1608,8 +1620,9 @@ Environment it may pass: {}",
                 let task = cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
-                            "fyx:ui: failed to reload dev extension {}: {error:#}",
-                            path.display()
+                            "fyx:ui: failed to reload dev extension {}: {}",
+                            path.display(),
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
                         );
                         this.update(cx, |this, cx| {
                             let extension_id = this.sources.iter().find_map(|(id, source)| {
@@ -1864,7 +1877,10 @@ Environment it may pass: {}",
                     )
                 });
                 if let Err(error) = placed {
-                    log::error!("fyx:ui: {extension_id}: place-decoration({id:?}): {error:#}");
+                    log::error!(
+                        "fyx:ui: {extension_id}: place-decoration({id:?}): {}",
+                        ui_ext::sanitize_for_log(&format!("{error:#}"))
+                    );
                 }
             }
             HostEffect::RemoveDecoration { id } => {
@@ -2000,7 +2016,10 @@ async fn find_store_extensions(
     let active = match store.active(fs).await {
         Ok(active) => active,
         Err(error) => {
-            log::error!("fyx:ui: cannot read the install store: {error:#}");
+            log::error!(
+                "fyx:ui: cannot read the install store: {}",
+                ui_ext::sanitize_for_log(&format!("{error:#}"))
+            );
             return Vec::new();
         }
     };
@@ -2042,7 +2061,11 @@ async fn found_at(
         Ok(None) => return None,
         Err(error) => {
             // Also a regular Zed extension with a broken manifest; logged, not shown.
-            log::warn!("fyx:ui: cannot read {}: {error:#}", extension_dir.display());
+            log::warn!(
+                "fyx:ui: cannot read {}: {}",
+                extension_dir.display(),
+                ui_ext::sanitize_for_log(&format!("{error:#}"))
+            );
             unreadable.push((extension_dir, format!("{error:#}")));
             return None;
         }
@@ -2924,8 +2947,9 @@ fn load_dev_extensions(cx: &mut App) {
         cx.spawn(async move |cx| {
             if let Err(error) = load_dev_extension(path.clone(), cx).await {
                 log::error!(
-                    "fyx:ui: failed to load dev extension {}: {error:#}",
-                    path.display()
+                    "fyx:ui: failed to load dev extension {}: {}",
+                    path.display(),
+                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                 );
             }
         })

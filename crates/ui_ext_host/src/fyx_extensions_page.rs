@@ -27,7 +27,7 @@ use fyx_registry::{
 };
 use gpui::{
     App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
-    PromptLevel, SharedString, Task, WeakEntity, Window, actions, div, prelude::*,
+    SharedString, Task, WeakEntity, Window, actions, div, prelude::*,
 };
 use settings::Settings as _;
 use theme::ActiveTheme as _;
@@ -649,12 +649,13 @@ fn install_release(
                         release.source.repository,
                         &release.source.commit[..release.source.commit.len().min(12)],
                     );
-                    let answer = cx.update(|window, cx| {
-                        window.prompt(
-                            PromptLevel::Info,
+                    let answer = workspace.update_in(cx, |workspace, window, cx| {
+                        crate::choice::confirm(
+                            workspace,
                             &format!("Install {} {}?", release.name, release.version),
                             Some(&detail),
                             &["Install", "Cancel"],
+                            window,
                             cx,
                         )
                     })?;
