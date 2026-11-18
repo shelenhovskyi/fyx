@@ -216,11 +216,10 @@ impl UiBindings {
         event: crate::network::IoEvent,
     ) -> wasmtime::Result<Result<(), String>> {
         Ok(match self {
-            Self::V0_3(extension) => {
-                extension
-                    .call_handle_io(store, &fyx_ui_v0_3::io_event(event))
-                    .await?
-            }
+            Self::V0_3(extension) => match fyx_ui_v0_3::io_event(event) {
+                Some(event) => extension.call_handle_io(store, &event).await?,
+                None => Ok(()),
+            },
             Self::V0_2(_) | Self::V0_1(_) => Ok(()),
         })
     }
@@ -387,17 +386,19 @@ impl UiExtension {
                 CallBudget::Regular,
                 move |extension, store| {
                     async move {
-                        let crate::network::IoEvent::FetchDone(id, result) = event;
-                        store.data_mut().network.delivered(id);
-                        let result = match result {
-                            Ok(_) | Err(_) if !network.granted() => {
-                                Err(crate::network::FetchError::Denied)
+                        let event = match event {
+                            crate::network::IoEvent::FetchDone(id, result) => {
+                                store.data_mut().network.delivered(id);
+                                let result = if network.granted() {
+                                    result
+                                } else {
+                                    Err(crate::network::FetchError::Denied)
+                                };
+                                crate::network::IoEvent::FetchDone(id, result)
                             }
-                            result => result,
+                            other => other,
                         };
-                        extension
-                            .call_handle_io(store, crate::network::IoEvent::FetchDone(id, result))
-                            .await
+                        extension.call_handle_io(store, event).await
                     }
                     .boxed()
                 },
