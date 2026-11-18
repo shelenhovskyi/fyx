@@ -98,6 +98,11 @@ pub trait Extension: 'static {
     fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
         Ok(Update::Unchanged)
     }
+    /// fyx:ui 0.3 (`fyx-ui-0-3` feature): the outcome of work that ran outside a call, such as
+    /// `IoEvent::FetchDone((id, result))`. Tied to no surface: push updates yourself.
+    fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+        Ok(())
+    }
 }
 ```
 
@@ -565,10 +570,46 @@ pub fn remove_image(image: GeneratedImage);
 `add_image` needs `ui:images`, takes at most 1 MiB and at most 32 live images; off WASM it hands
 out handles 1, 2, … and records `HostEffect::AddImage { image, format, len }`.
 
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `network:fetch` (design 0.3, section 8; plan
+4.6):
+
+```rust
+pub fn fetch(request: &HttpRequest) -> Result<u64, HostError>;
+pub fn cancel_fetch(request: u64);
+```
+
+- **Building a request:** `HttpRequest::get(url)`, `HttpRequest::post(url, body)` or
+  `HttpRequest::new(HttpMethod, url)`, with `.header(name, value)`, `.body(bytes)`,
+  `.json(text)` (which also sets the JSON content type) and `.timeout_ms(ms)` (at most 30000, the
+  default).
+- **The outcome:** it comes to `Extension::handle_io` as `IoEvent::FetchDone((id, result))`.
+  `HttpResponse` has `is_success()`, `header(name)` (ignoring case) and `text()`. `FetchError`
+  implements `Display`.
+- **The manifest** declares `network:fetch`, `api_version = "0.3.0"` and the hosts:
+
+  ```toml
+  [fyx_ui.network]
+  domains = ["api.example.com", "*.example.org", "localhost:8080"]
+  ```
+
+  Only `https://` URLs on those hosts are allowed; `http://` only for a listed `localhost` or
+  `127.0.0.1` with its port.
+- **Consent:** `network:fetch` is a T2 capability. The first fetch asks the user, and the request
+  waits for the answer. Until they allow it, and if they refuse, the outcome is
+  `FetchError::Denied`.
+- **Caps:**
+  - at most 8 requests in flight and 120 started per minute;
+  - request headers: 64 and 16 KiB;
+  - request body: 4 MiB;
+  - response: 16 MiB decoded.
+- **Off WASM:** `fetch` hands out ids and records `HostEffect::Fetch { id, request }`;
+  `cancel_fetch` records `HostEffect::CancelFetch`.
+
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,
-`add_image` returns `unavailable` ("needs fyx:ui 0.3") and `remove_image` does nothing. `push_update` converts the update to 0.1 and
+`add_image` and `fetch` return `unavailable` ("needs fyx:ui 0.3"), and `remove_image` and
+`cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.
 

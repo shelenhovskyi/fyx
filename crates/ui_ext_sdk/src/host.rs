@@ -12,12 +12,12 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 
-#[cfg(feature = "fyx-ui-0-3")]
-use crate::ImageFormat;
 use crate::{
     DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions, ProgressValue,
     Surface, Update,
 };
+#[cfg(feature = "fyx-ui-0-3")]
+use crate::{HttpRequest, ImageFormat};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
@@ -49,6 +49,10 @@ unsafe extern "Rust" {
     safe fn __fyx_ui_add_image(format: ImageFormat, bytes: &[u8]) -> Result<u32, HostError>;
     #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_remove_image(image: u32);
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_fetch(request: &HttpRequest) -> Result<u64, HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_cancel_fetch(request: u64);
 }
 
 /// What a host function did, recorded off WASM for unit tests.
@@ -100,6 +104,14 @@ pub enum HostEffect {
     },
     #[cfg(feature = "fyx-ui-0-3")]
     RemoveImage(GeneratedImage),
+    /// [`fetch`]; off WASM the ids are the shared 1, 2, … of [`notify`].
+    #[cfg(feature = "fyx-ui-0-3")]
+    Fetch {
+        id: u64,
+        request: HttpRequest,
+    },
+    #[cfg(feature = "fyx-ui-0-3")]
+    CancelFetch(u64),
 }
 
 /// A generated image from [`add_image`], for `ImageProps::generated`. `Copy` and without `Drop`:
@@ -390,15 +402,49 @@ pub fn remove_image(image: GeneratedImage) {
     record(HostEffect::RemoveImage(image)).ok();
 }
 
+/// `fyx:ui` 0.3, `network:fetch` (design.md §8): starts `request` after the current call returns
+/// and returns its id. The outcome arrives in [`Extension::handle_io`](crate::Extension) as
+/// `IoEvent::FetchDone((id, result))`. The URL must be `https://` and a host of the manifest's
+/// `[fyx_ui.network] domains` (`http://` only for a declared `localhost` with a port). The first
+/// fetch asks the user; until they allow it, and if they refuse, the result is
+/// `FetchError::Denied`. At most 8 requests in flight and 120 started per minute. Off WASM it
+/// records [`HostEffect::Fetch`] and hands out ids.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn fetch(request: &HttpRequest) -> Result<u64, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_fetch(request);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let id = next_id();
+        record(HostEffect::Fetch {
+            id,
+            request: request.clone(),
+        })?;
+        Ok(id)
+    }
+}
+
+/// `fyx:ui` 0.3: cancels a request; `FetchDone` follows with `FetchError::Cancelled` unless it
+/// already completed. Unknown ids are ignored.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn cancel_fetch(request: u64) {
+    #[cfg(target_arch = "wasm32")]
+    __fyx_ui_cancel_fetch(request);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::CancelFetch(request)).ok();
+}
+
 /// The implementations behind the shims of `register_extension!(T)`: the SDK's own world, 0.2
 /// or (with `fyx-ui-0-3`) 0.3.
 #[doc(hidden)]
 pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::ImageFormat;
+    use crate::HttpRequest;
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::bindings::fyx::ui::images;
+    use crate::ImageFormat;
     use crate::bindings::fyx::ui::{decorations, host, notifications};
+    #[cfg(feature = "fyx-ui-0-3")]
+    use crate::bindings::fyx::ui::{images, network};
     use crate::{
         DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions,
         ProgressValue, Surface, Update,
@@ -482,5 +528,15 @@ pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn remove_image(image: u32) {
         images::remove_image(image);
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn fetch(request: &HttpRequest) -> Result<u64, HostError> {
+        network::fetch(request)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn cancel_fetch(request: u64) {
+        network::cancel_fetch(request);
     }
 }

@@ -25,11 +25,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `DiffViewProps::new` | method |  |
 | `Extension` | trait | A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it from a single thread, one call at a time. |
 | `Extension::handle_event` | method |  |
+| `Extension::handle_io` | method | `fyx:ui` 0.3: the outcome of work that ran outside a call, such as `IoEvent::FetchDone((id, result))` for `fetch`. It belongs to no surface: update surfaces with `push_update` or `SurfaceTree::push`. An `Err` is logged by the host. |
 | `Extension::list_rows` | method | Rows `start..start + count` of the virtualized list `list_node`. `list_rows` clamps the range to the list's length and builds each row. |
 | `Extension::mount` | method | The whole tree of `surface_id`, parents first. `SurfaceTree::mount` builds one. |
 | `Extension::new` | method |  |
 | `Extension::surfaces` | method | The static surfaces, called once after instantiation. `add_surface` adds more later. |
 | `Extension::tick` | method | The tick `request_tick` asked for. The update applies to `surface_id`, like an event's reply. `fyx:ui` 0.1 has no ticks, so a `v0_1` extension never gets this call. |
+| `FetchError` | re-export | `bindings::fyx::ui::network::FetchError` |
 | `FlexProps::align` | method |  |
 | `FlexProps::background` | method |  |
 | `FlexProps::column` | method | A column with no gap, no padding and children aligned to the start. |
@@ -40,6 +42,19 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostError` | re-export | `bindings::fyx::ui::host::HostError` |
 | `HostErrorCode` | re-export | `bindings::fyx::ui::host::HostErrorCode` |
 | `HostErrorCode::name` | method | The WIT case name, such as `not-permitted`. |
+| `HttpMethod` | re-export | `bindings::fyx::ui::network::HttpMethod` |
+| `HttpRequest` | re-export | `bindings::fyx::ui::network::HttpRequest` |
+| `HttpRequest::body` | method | At most 4 MiB. |
+| `HttpRequest::get` | method |  |
+| `HttpRequest::header` | method | At most 64 headers, 16 KiB in total. The host sets `host`, `content-length`, `accept-encoding` and the other framing headers itself and refuses them here. |
+| `HttpRequest::json` | method | A JSON body with its `content-type`. |
+| `HttpRequest::new` | method | A request with no headers, no body and the host's 30 s timeout. |
+| `HttpRequest::post` | method |  |
+| `HttpRequest::timeout_ms` | method | At most 30000 ms, the default. |
+| `HttpResponse` | re-export | `bindings::fyx::ui::network::HttpResponse` |
+| `HttpResponse::header` | method | The first header with this name, ignoring ASCII case. |
+| `HttpResponse::is_success` | method | A 2xx status. |
+| `HttpResponse::text` | method | The body as UTF-8 text. |
 | `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3). |
 | `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
@@ -61,6 +76,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `InputProps::new` | method |  |
 | `InputProps::placeholder` | method |  |
 | `InputProps::secret` | method | Masks the text on screen (passwords, tokens). The value still reaches the extension. |
+| `IoEvent` | re-export | `bindings::fyx::ui::io::IoEvent` |
 | `ListProps::new` | method |  |
 | `ListProps::selected` | method | The highlighted row, scrolled into view. |
 | `ListRow::with_indent` | method | Nesting depth, drawn by the host as indentation (tree views); at most 32 levels. |

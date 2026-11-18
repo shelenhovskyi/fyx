@@ -363,6 +363,18 @@ pub mod glue {
     /// Nothing to free: 0.1 has no generated images.
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn remove_image(_image: u32) {}
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn fetch(_request: &crate::HttpRequest) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("fetch"),
+        })
+    }
+
+    /// Nothing to cancel: 0.1 has no network.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn cancel_fetch(_request: u64) {}
 }
 
 #[cfg(test)]

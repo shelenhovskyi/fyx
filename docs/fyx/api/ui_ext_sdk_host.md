@@ -11,8 +11,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect` | enum | What a host function did, recorded off WASM for unit tests. |
 | `HostEffect::AddImage` | variant | `add_image`; the bytes are left out of the record, only their length is kept. |
 | `HostEffect::AddSurface` | variant |  |
+| `HostEffect::CancelFetch` | variant |  |
 | `HostEffect::CancelTick` | variant |  |
 | `HostEffect::DismissNotification` | variant |  |
+| `HostEffect::Fetch` | variant | `fetch`; off WASM the ids are the shared 1, 2, … of `notify`. |
 | `HostEffect::HideSurface` | variant |  |
 | `HostEffect::Notify` | variant | `notify`; off WASM the ids are 1, 2, … shared with `progress_start`. |
 | `HostEffect::PlaceDecoration` | variant |  |
@@ -27,9 +29,11 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::ShowSurface` | variant |  |
 | `add_image` | fn | `fyx:ui` 0.3: registers a PNG or SVG made at run time, for `ImageProps::generated`. Needs `ui:images`; at most 1 MiB, at most 32 live images per extension. The host checks the bytes at once (the PNG header, or that an SVG is plain text) and decodes them after the call; until then, and if decoding fails, image nodes show their alt text. Off WASM it hands out handles 1, 2, … and records `HostEffect::AddImage`. |
 | `add_surface` | fn | Adds a surface at runtime. The manifest must declare the capability of its kind; at most 32 live surfaces per extension. Panels and status items are mounted at once; a modal waits for `show_surface`. |
+| `cancel_fetch` | fn | `fyx:ui` 0.3: cancels a request; `FetchDone` follows with `FetchError::Cancelled` unless it already completed. Unknown ids are ignored. |
 | `cancel_tick` | fn | Drops the pending tick of a surface, if any. |
 | `dismiss_notification` | fn | Closes a notification of this extension without an event. Unknown or closed ids are ignored. |
 | `exported_api_version` | fn | The `fyx:ui` version the component exports: `crate::API_VERSION` for `register_extension!(T)`, `crate::API_VERSION_V0_2` for `register_extension!(T, v0_2)` and `crate::API_VERSION_V0_1` for `register_extension!(T, v0_1)`. Off WASM it is `crate::API_VERSION`. |
+| `fetch` | fn | `fyx:ui` 0.3, `network:fetch` (design.md §8): starts `request` after the current call returns and returns its id. The outcome arrives in `Extension::handle_io`(crate::Extension) as `IoEvent::FetchDone((id, result))`. The URL must be `https://` and a host of the manifest's `[fyx_ui.network] domains` (`http://` only for a declared `localhost` with a port). The first fetch asks the user; until they allow it, and if they refuse, the result is `FetchError::Denied`. At most 8 requests in flight and 120 started per minute. Off WASM it records `HostEffect::Fetch` and hands out ids. |
 | `hide_surface` | fn | Closes a modal (no `dismissed` event) or hides a panel's dock if that panel is active. |
 | `log` | fn | Writes a message to the host's log. Off WASM it goes to stderr. |
 | `notify` | fn | Shows a notification in the active workspace window without moving focus, and returns its id (design.md, M.1). Needs `ui:notifications`. Its button clicks and its closing come back to `notification.owner` as `UiEvent::NotificationAction`(crate::UiEvent) and `NotificationClosed`. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension, past which it returns `limit-exceeded`. `fyx:ui` 0.2; `unavailable` for 0.1. |
