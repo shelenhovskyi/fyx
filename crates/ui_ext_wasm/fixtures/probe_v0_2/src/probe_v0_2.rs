@@ -91,6 +91,7 @@ fn rich_tree() -> Vec<Node> {
                 style: ButtonStyle::Filled,
                 disabled: false,
                 tooltip: Some("Accept every hunk".into()),
+                accessible_label: Some("Accept all hunks".into()),
             }),
         },
         Node {

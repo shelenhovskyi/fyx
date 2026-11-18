@@ -308,6 +308,7 @@ async fn test_v0_2_mount_and_rows_carry_the_new_props(cx: &mut TestAppContext) {
             style: ui_ext::ButtonStyle::Filled,
             disabled: false,
             tooltip: Some("Accept every hunk".into()),
+            accessible_label: Some("Accept all hunks".into()),
         })
     );
     assert_eq!(

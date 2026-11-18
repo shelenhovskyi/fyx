@@ -84,6 +84,7 @@ Cases: `default`, `filled`, `subtle`, `danger`.
 | `style` | `button-style` |  |
 | `disabled` | `bool` |  |
 | `tooltip` | `option<string>` | Shown on hover. At most 1024 bytes; the host truncates longer text. |
+| `accessible-label` | `option<string>` | The accessible name, read by screen readers; without it, `label` when it is not empty, then the tooltip, then the icon's name. Set it for an icon-only button. At most 256 bytes; the host truncates longer text. |
 
 ### record `input-props`
 
