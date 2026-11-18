@@ -244,6 +244,11 @@ for the PR's head commit as data, plus text it fetches with `git` (never execute
      the harness uses to call the model. The model never sees the key.
    - No signing key and no write token: `permissions: contents: read`, `pull-requests: read`.
    - The agent has no tools: no shell, no network, no file access beyond the inputs it is given.
+   - **The model key is the owner's decision** (accepted 2026-11-18). Providing it means paying a
+     model provider for every review, so the owner decides when P3 starts whether to provide it.
+     The alternative is a local model on a self-hosted runner, with the same isolation, no paid
+     key and no secret at all. Until either exists, `agent-review` reports `concern` ("no
+     reviewer configured"), so every PR needs the owner. It fails closed.
 
    **Untrusted input.**
    - Everything from the PR is data, never instructions: the entry, the source, comments, commit
