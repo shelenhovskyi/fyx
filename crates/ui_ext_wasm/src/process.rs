@@ -34,7 +34,7 @@ pub use ui_ext::process::{
     CAPABILITY_PROCESS, FileRef, KILL_GRACE, MAX_ARG_BYTES, MAX_ARGS, MAX_ENV_PAIRS,
     MAX_OUTPUT_CHUNK_BYTES, MAX_PROCESSES, MAX_STDIN_QUEUED_BYTES, MAX_STDIN_WRITE_BYTES,
     OutputStream, ProcessCounters, ProcessExit, ProcessOutput, ProcessPolicy, ProcessSpec,
-    SpawnCheck, SpawnError, SpawnRequest, args_match, check_env_name, check_spawn,
+    SpawnCheck, SpawnError, SpawnRequest, args_match, check_env_name, check_spawn, is_allowed_env,
     is_forbidden_env,
 };
 use ui_ext::v0_2::{HostError, HostErrorCode};
@@ -232,7 +232,7 @@ pub fn filtered_path(path: &OsStr, worktree_roots: &[PathBuf]) -> OsString {
 
 /// The environment of a spawned program (design.md §9, "Environment"): a few of Fyx's own
 /// variables (with `PATH` as [`filtered_path`] makes it), the declared ones, and the guest's
-/// values for declared names. A forbidden name ([`is_forbidden_env`]) is never declared or set.
+/// values for declared names. Only [`is_allowed_env`] names are declared or set.
 pub fn program_environment(
     fyx: &[(OsString, OsString)],
     declared: &BTreeSet<String>,
@@ -258,13 +258,13 @@ pub fn program_environment(
         };
         let base = base.iter().any(|base| same_name(base, text)) || text.starts_with("LC_");
         let declared =
-            !is_forbidden_env(text) && declared.iter().any(|declared| same_name(declared, text));
+            is_allowed_env(text) && declared.iter().any(|declared| same_name(declared, text));
         if base || declared {
             env.push((name.clone(), value.clone()));
         }
     }
     for (name, value) in guest {
-        if declared.contains(name) && !is_forbidden_env(name) {
+        if declared.contains(name) && is_allowed_env(name) {
             env.retain(|(existing, _)| {
                 !existing
                     .to_str()

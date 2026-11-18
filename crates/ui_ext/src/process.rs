@@ -27,9 +27,41 @@ pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 /// A kill sends the polite signal first, then the hard one after this (Unix).
 pub const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// The only environment names `[fyx_ui.process] env` may declare (integration-6 N1): locale,
+/// terminal and output, logging, and a few runtime switches that load nothing. Everything else is
+/// refused, because the names that load code or move a program's configuration (`HOME`,
+/// `XDG_CONFIG_HOME`, `ZDOTDIR`, `GOFLAGS`, `CLASSPATH`, `GCONV_PATH`, ...) have no end, and
+/// Fyx's own `FYX_*` and `ZED_*` names change what Fyx loads. Matched in ASCII upper case; `LC_*`
+/// is allowed too. Ask for an addition rather than widening it per extension.
+pub const ALLOWED_ENV_NAMES: &[&str] = &[
+    // Locale and time.
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    // Terminal and output.
+    "TERM",
+    "COLORTERM",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "COLUMNS",
+    "LINES",
+    "CI",
+    // Logging and runtime switches.
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+    "NODE_ENV",
+    "PYTHONUNBUFFERED",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+];
+const ALLOWED_ENV_PREFIXES: &[&str] = &["LC_"];
+
 /// Environment names never passed to a program, even when the manifest declares them: they load
 /// code into it, name another program for it to run, or choose where it finds programs and
 /// configuration (design.md §9, "Environment"; integration-5 S6). Matched in ASCII upper case.
+/// [`ALLOWED_ENV_NAMES`] already leaves them out; this list gives them a clearer error.
 const FORBIDDEN_ENV_NAMES: &[&str] = &[
     // Interpreters and runtimes.
     "NODE_OPTIONS",
@@ -126,8 +158,19 @@ pub fn is_forbidden_env(name: &str) -> bool {
             .any(|prefix| upper.starts_with(prefix))
 }
 
-/// A name for `[fyx_ui.process] env`: `[A-Za-z0-9_]+`, and not [`is_forbidden_env`]. The loader
-/// refuses a manifest that declares a forbidden one.
+/// Whether the environment name `name` may be declared and passed: in [`ALLOWED_ENV_NAMES`] (or
+/// `LC_*`) and not [`is_forbidden_env`].
+pub fn is_allowed_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    (ALLOWED_ENV_NAMES.contains(&upper.as_str())
+        || ALLOWED_ENV_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix)))
+        && !is_forbidden_env(name)
+}
+
+/// A name for `[fyx_ui.process] env`: `[A-Za-z0-9_]+` and [`is_allowed_env`]. The loader refuses
+/// a manifest that declares any other.
 pub fn check_env_name(name: &str) -> Result<(), String> {
     if name.is_empty()
         || !name
@@ -139,6 +182,12 @@ pub fn check_env_name(name: &str) -> Result<(), String> {
     if is_forbidden_env(name) {
         return Err(format!(
             "environment name {name} loads code into the program and is never passed"
+        ));
+    }
+    if !is_allowed_env(name) {
+        return Err(format!(
+            "environment name {name} is not one Fyx passes to programs: only {} and LC_*",
+            ALLOWED_ENV_NAMES.join(", ")
         ));
     }
     Ok(())
@@ -175,7 +224,8 @@ fn glob(pattern: &[u8], text: &[u8]) -> bool {
 /// Programs that run whatever code they are given: shells, interpreters and launchers (owner's
 /// Q2, 2026-11-19). The manifest may name them, with `args` patterns like any program, but a grant
 /// of one means "any program", and the consent prompt says so ([`RUNS_ANY_CODE_PROMPT`]). Names
-/// are compared case-insensitively, without a Windows executable extension.
+/// are compared case-insensitively, without a Windows executable extension and without a version
+/// suffix (`python3.12`, `node22`, `lua-5.4`; integration-6 Q2).
 pub const RUNS_ANY_CODE: &[&str] = &[
     // Shells.
     "sh",
@@ -240,14 +290,65 @@ pub const RUNS_ANY_CODE: &[&str] = &[
     "watch",
     "busybox",
     "start",
+    "wsl",
+    "ssh",
+    "rundll32",
+    "regsvr32",
+    "msiexec",
+    "schtasks",
+    "docker",
+    "podman",
+    // Package managers and build or task runners: they run the scripts a project names.
+    "npm",
+    "pnpm",
+    "yarn",
+    "cargo",
+    "rustup",
+    "go",
+    "make",
+    "gmake",
+    "nmake",
+    "cmake",
+    "ninja",
+    "just",
+    "rake",
+    "bundle",
+    "gem",
+    "composer",
+    "gradle",
+    "gradlew",
+    "mvn",
+    "mvnw",
+    "ant",
+    "uv",
+    "uvx",
+    "pip",
+    "pipx",
+    "poetry",
+    "conda",
+    "mamba",
+];
+
+/// Git subcommands that run a command they are given or that configuration names (integration-6
+/// Q2). Any arguments after them count, so `["config", "**"]` is "any program".
+const GIT_RUNS_ANY_CODE: &[&str] = &[
+    "config",
+    "bisect",
+    "submodule",
+    "rebase",
+    "filter-branch",
+    "difftool",
+    "mergetool",
+    "daemon",
 ];
 
 /// What the consent prompt says about a program in [`RUNS_ANY_CODE`] (owner's Q2).
 pub const RUNS_ANY_CODE_PROMPT: &str = "can run any program on your computer";
 
 /// Whether granting `spec` means "any program" (owner's Q2): a program in [`RUNS_ANY_CODE`], or
-/// `git` with options before the subcommand that can set its configuration (`-c`,
-/// `--config-env`, `--exec-path`, or a wildcard), since a config value can name a command git runs.
+/// `git` with options before the subcommand that can set its configuration or repository (`-c`,
+/// `--config-env`, `--exec-path`, `--git-dir`, or a wildcard), since a config value can name a
+/// command git runs, or with a subcommand in `GIT_RUNS_ANY_CODE` (or a wildcard for it).
 pub fn runs_any_code(spec: &ProcessSpec) -> bool {
     let base = spec
         .path
@@ -261,22 +362,49 @@ pub fn runs_any_code(spec: &ProcessSpec) -> bool {
         .iter()
         .find_map(|extension| base.strip_suffix(extension))
         .unwrap_or(&base);
-    if RUNS_ANY_CODE.contains(&program) {
+    let unversioned = without_version(program);
+    if RUNS_ANY_CODE.contains(&program) || RUNS_ANY_CODE.contains(&unversioned) {
         return true;
     }
-    // Git's own options come before the subcommand: one of them that sets configuration, or a
-    // wildcard there (which could be one), makes a config value name a command git runs.
-    program == "git"
-        && spec
-            .args
-            .iter()
-            .take_while(|pattern| pattern.starts_with('-') || pattern.contains('*'))
-            .any(|pattern| {
-                pattern.contains('*')
-                    || pattern.starts_with("-c")
-                    || pattern.starts_with("--config-env")
-                    || pattern.starts_with("--exec-path")
-            })
+    if program != "git" {
+        return false;
+    }
+    // Git's own options come before the subcommand: one of them that sets configuration or the
+    // repository, or a wildcard there (which could be one), makes a config value name a command
+    // git runs. `-C` and `--work-tree` take a value; repository discovery inside it finds only a
+    // `.git`, which `workspace:edit` never writes.
+    let mut patterns = spec.args.iter();
+    while let Some(pattern) = patterns.next() {
+        if pattern.contains('*') {
+            return true;
+        }
+        if !pattern.starts_with('-') {
+            return GIT_RUNS_ANY_CODE.contains(&pattern.as_str());
+        }
+        if pattern.starts_with("-c")
+            || pattern.starts_with("--config-env")
+            || pattern.starts_with("--exec-path")
+            || pattern.starts_with("--git-dir")
+        {
+            return true;
+        }
+        if pattern == "-C" || pattern == "--work-tree" || pattern == "--namespace" {
+            patterns.next();
+        }
+    }
+    false
+}
+
+/// `program` without a trailing version: `python3.12` and `python-3.12` are `python`, `node22`
+/// is `node`. A name that is only digits stays as it is.
+fn without_version(program: &str) -> &str {
+    let trimmed = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let trimmed = trimmed.trim_end_matches(['-', '_']);
+    if trimmed.is_empty() || trimmed.len() == program.len() {
+        program
+    } else {
+        trimmed
+    }
 }
 
 /// A file or directory in a worktree: the WIT `file-ref`.
@@ -396,7 +524,7 @@ pub fn check_spawn<'a>(
         )));
     }
     for (name, value) in &request.env {
-        if !policy.env.contains(name) || is_forbidden_env(name) {
+        if !policy.env.contains(name) || !is_allowed_env(name) {
             return Err(invalid(format!(
                 "environment name {name} is not in [fyx_ui.process] env"
             )));
@@ -483,6 +611,41 @@ mod tests {
         assert!(runs_any_code(&spec("git", &["**"])));
         assert!(runs_any_code(&spec("git", &["-c", "*", "**"])));
         assert!(runs_any_code(&spec("git", &["*"])));
+        // integration-6 Q2: versioned names, more runners, and git subcommands that run commands.
+        for name in [
+            "python3.12",
+            "python3.12.exe",
+            "node22",
+            "lua-5.4",
+            "ruby3.2",
+            "wsl.exe",
+            "npm.cmd",
+            "pnpm",
+            "yarn",
+            "cargo",
+            "make",
+            "uv",
+            "uvx",
+            "ssh",
+            "rundll32",
+        ] {
+            assert!(runs_any_code(&spec(name, &["**"])), "{name}");
+        }
+        for name in ["rustfmt2", "tsc", "clang-format-18", "7z"] {
+            assert!(!runs_any_code(&spec(name, &["**"])), "{name}");
+        }
+        for args in [
+            &["config", "**"][..],
+            &["bisect", "run", "**"],
+            &["submodule", "foreach", "**"],
+            &["-C", "sub", "rebase", "**"],
+            &["--git-dir=tmp/x", "status"],
+            &["--no-pager", "*"],
+        ] {
+            assert!(runs_any_code(&spec("git", args)), "{args:?}");
+        }
+        assert!(!runs_any_code(&spec("git", &["-C", "sub", "status", "**"])));
+        assert!(!runs_any_code(&spec("git", &["--no-pager", "diff", "**"])));
         assert_eq!(RUNS_ANY_CODE_PROMPT, "can run any program on your computer");
     }
 
@@ -556,8 +719,23 @@ mod tests {
             "GIT_CONFIG_COUNT",
             "GIT_SSH_COMMAND",
             "BASH_ENV",
+            // integration-6 N1: homes, config dirs and other loaders are not allowed.
+            "HOME",
+            "USERPROFILE",
+            "XDG_CONFIG_HOME",
+            "APPDATA",
+            "ZDOTDIR",
+            "GOFLAGS",
+            "CLASSPATH",
+            "GCONV_PATH",
+            "FYX_UI_DEV_EXTENSIONS",
+            "ZED_STATELESS",
+            "MY_TOOL_SETTING",
         ] {
             assert!(check_env_name(forbidden).is_err(), "{forbidden}");
+        }
+        for allowed in ["NO_COLOR", "lc_all", "LC_MESSAGES", "RUST_LOG", "TZ"] {
+            assert_eq!(check_env_name(allowed), Ok(()), "{allowed}");
         }
         for bad in ["", "A-B", "A B"] {
             assert!(check_env_name(bad).is_err(), "{bad:?}");

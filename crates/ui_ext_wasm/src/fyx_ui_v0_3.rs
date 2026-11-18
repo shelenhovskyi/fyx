@@ -1,15 +1,14 @@
-//! Host side of the staged `fyx:ui@0.3.0` world (`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`),
-//! as far as it is built: what 0.3 copies forward from 0.2 (`types`, `host`, `notifications`),
-//! `images` (design.md §12), canvas nodes (§13), and the T2 interfaces `network` (§8), `process`
-//! (§9), `workspace-edit` (§10), `agent-observe` (§11) and `permissions` (§7), whose operations
-//! start after their call and report through `handle-io`. Every other 0.3 interface is linked as a
-//! trap until its plan task lands (`define_unbuilt_as_traps`), so a component that never calls
-//! them loads and runs.
+//! Host side of the `fyx:ui@0.3.0` world (`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`), the
+//! smaller 0.3 (integration-5 A3): what 0.3 copies forward from 0.2 (`types`, `host`,
+//! `notifications`, `decorations`), `images` (design.md §12), canvas nodes (§13), and the T2
+//! interfaces `network` (§8), `process` (§9), `workspace-edit` (§10), `agent-observe` (§11) and
+//! `permissions` (§7), whose operations start after their call and report through `handle-io`.
+//! Every interface of the world is linked (`LINKED_INTERFACES`), so `define_unbuilt_as_traps`
+//! stubs nothing for 0.3; it stays for the next staged world, whose interfaces land one plan task
+//! at a time.
 //!
 //! `image` and `canvas` nodes convert into the model; their checks run when the update or the
-//! reply is applied ([`crate::effects::ApiState::check_images`]). `picker` surfaces, which the
-//! `ui_ext` model cannot hold yet, are refused as `invalid-argument` (in a push) or as the call's
-//! error (in a reply).
+//! reply is applied ([`crate::effects::ApiState::check_images`]).
 
 use ui_ext::{
     canvas as model_canvas,
@@ -250,8 +249,8 @@ impl wit_permissions::Host for UiState {
             return Ok(Err(model::HostError {
                 code: model::HostErrorCode::NotPermitted,
                 message: "permissions.request needs a click or Enter: during handle-event for \
-                          click, row-click or input-submitted, a command or an accepted picker \
-                          item, or shortly after it, once"
+                          click, row-click, input-submitted, canvas-click or notification-action, \
+                          or shortly after it, once"
                     .into(),
             }
             .into()));
