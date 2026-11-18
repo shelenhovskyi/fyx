@@ -8,8 +8,16 @@
 //! session and turn ids stay the host's, which `ui_ext_wasm` maps per extension. Review mode off
 //! means no reviews and no events, only `review-mode(false)`; turning it on sends a fresh
 //! snapshot. Nothing here can decide a review.
+//!
+//! A file an extension may not read (`private_files`, `file_scan_exclusions`, `fyx_guard`'s read
+//! rules) reaches it as `none` with no hunks, like a file outside the worktrees (integration-5
+//! S1, the same paths `workspace:edit` refuses). That is decided on the main thread, as each
+//! change arrives.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use agent_review::observe::{
     ObservedEvent, ObservedHunk, ObservedReview, ObservedSource, ObservedTurnFile,
@@ -73,6 +81,41 @@ impl Feed {
     }
 }
 
+/// A private file's review keeps its ids and decision state but loses its path and hunks.
+fn redact_review(mut review: ObservedReview, cx: &App) -> ObservedReview {
+    if crate::workspace_edit::is_private_path(&review.abs_path, cx) {
+        review.abs_path = PathBuf::new();
+        review.hunks.clear();
+    }
+    review
+}
+
+fn redact_event(event: ObservedEvent, cx: &App) -> ObservedEvent {
+    let private = |path: &PathBuf| crate::workspace_edit::is_private_path(path, cx);
+    match event {
+        ObservedEvent::Opened(review) => ObservedEvent::Opened(redact_review(review, cx)),
+        ObservedEvent::Updated(review) => ObservedEvent::Updated(redact_review(review, cx)),
+        ObservedEvent::Resolved(review) => ObservedEvent::Resolved(redact_review(review, cx)),
+        ObservedEvent::TurnEnded(turn, files) => ObservedEvent::TurnEnded(
+            turn,
+            files
+                .into_iter()
+                .map(|mut file| {
+                    if private(&file.abs_path) {
+                        file.abs_path = PathBuf::new();
+                    }
+                    file
+                })
+                .collect(),
+        ),
+        ObservedEvent::UnreviewedChanges(turn, paths) => ObservedEvent::UnreviewedChanges(
+            turn,
+            paths.into_iter().filter(|path| !private(path)).collect(),
+        ),
+        event => event,
+    }
+}
+
 #[derive(Clone, Default)]
 struct AgentFeed(Arc<Mutex<Feed>>);
 
@@ -94,12 +137,16 @@ impl AgentFeed {
         {
             let mut state = feed.lock();
             state.review_mode = observation.review_mode;
-            state.reviews = std::mem::take(&mut observation.snapshot);
+            state.reviews = std::mem::take(&mut observation.snapshot)
+                .into_iter()
+                .map(|review| redact_review(review, cx))
+                .collect();
         }
         cx.spawn({
             let feed = feed.clone();
-            async move |_| {
+            async move |cx| {
                 while let Some(event) = observation.events.next().await {
+                    let event = cx.update(|cx| redact_event(event, cx));
                     feed.lock().apply(event);
                 }
             }
@@ -164,9 +211,10 @@ struct Files {
 impl Files {
     fn event(&self, event: FeedEvent) -> AgentEvent {
         match event {
-            FeedEvent::Snapshot(reviews) => {
-                AgentEvent::Snapshot(reviews.iter().map(|review| self.review(review)).collect())
-            }
+            FeedEvent::Snapshot(reviews) => AgentEvent::Snapshot {
+                reviews: reviews.iter().map(|review| self.review(review)).collect(),
+                older_dropped: false,
+            },
             FeedEvent::Observed(event) => match event {
                 ObservedEvent::Opened(review) => AgentEvent::Opened(self.review(&review)),
                 ObservedEvent::Updated(review) => AgentEvent::Updated(self.review(&review)),
@@ -388,7 +436,10 @@ mod tests {
         });
         assert_eq!(received[0], AgentEvent::ReviewMode(false));
         assert_eq!(received[1], AgentEvent::ReviewMode(true));
-        let AgentEvent::Snapshot(snapshot) = &received[2] else {
+        let AgentEvent::Snapshot {
+            reviews: snapshot, ..
+        } = &received[2]
+        else {
             panic!("{:?}", received[2]);
         };
         assert_eq!(

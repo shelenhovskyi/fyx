@@ -30,7 +30,7 @@ use anyhow::{Context as _, Result, bail};
 use fs::{Fs, RemoveOptions, RenameOptions};
 use futures::{AsyncReadExt as _, lock::Mutex};
 use fyx_registry::{
-    ExtensionId, InstalledExtension, InstalledVersion, Origin, Permissions, Sha256Digest,
+    ExtensionId, InstalledExtension, InstalledVersion, Origin, Permissions, Release, Sha256Digest,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,8 @@ pub struct PackageInfo {
     pub extension_id: Arc<str>,
     pub version: Version,
     pub manifest: UiManifest,
+    /// The package also holds a Zed extension (`extension.wasm`).
+    pub zed_extension: bool,
 }
 
 /// The result of an install.
@@ -182,6 +184,56 @@ impl InstallStore {
         let info = read_package_dir(&staging, fs).await;
         remove_dir(&staging, fs).await;
         info
+    }
+
+    /// A package file's bytes, read once, so what the install dialog showed is what installs
+    /// (integration-5 R5).
+    pub async fn read_package_file(&self, package: &Path, fs: &dyn Fs) -> Result<Vec<u8>> {
+        self.load_package(package, fs).await
+    }
+
+    /// [`Self::inspect_package`] of bytes already read.
+    pub async fn inspect_package_bytes(
+        &self,
+        bytes: Vec<u8>,
+        label: &str,
+        fs: &dyn Fs,
+    ) -> Result<PackageInfo> {
+        // Any `extension.wasm` in the archive, at any depth or case (owner's Q1).
+        let zed_extension = fyx_registry::runs_zed_extension(&bytes);
+        let staging = self.unpack_bytes_to_staging(bytes, label, fs).await?;
+        let info = read_package_dir(&staging, fs).await;
+        remove_dir(&staging, fs).await;
+        info.map(|mut info| {
+            info.zed_extension |= zed_extension;
+            info
+        })
+    }
+
+    /// Installs a verified registry download of `release`. The package must be that release
+    /// (integration-5 R7): the same id and version, and no capability, domain or program beyond
+    /// what the index entry, which the install dialog showed, declares.
+    pub async fn install_registry_package(
+        &self,
+        bytes: Vec<u8>,
+        release: &Release,
+        approved: Option<Permissions>,
+        fs: &dyn Fs,
+    ) -> Result<Installed> {
+        let label = format!("{} {}", release.id, release.version);
+        let staging = self.unpack_bytes_to_staging(bytes, &label, fs).await?;
+        let result = async {
+            let info = read_package_dir(&staging, fs).await?;
+            check_matches_release(&info, release)?;
+            let source = VersionSource {
+                origin: Origin::Registry,
+                package_sha256: Some(release.package.sha256),
+            };
+            self.install_staged(&staging, source, approved, fs).await
+        }
+        .await;
+        remove_dir(&staging, fs).await;
+        result.with_context(|| format!("installing {label}"))
     }
 
     /// Installs a `.fyxext` package from disk (unsigned) and makes it the active version of its
@@ -362,6 +414,9 @@ impl InstallStore {
             );
         }
         entry.previous = Some(std::mem::replace(&mut entry.active, previous.clone()));
+        // The reason was for the version that is no longer active; the next check disables
+        // this one again if it is blocked too (integration-5 R9).
+        entry.disabled = None;
         self.write_state(&state, fs).await?;
         Ok(previous)
     }
@@ -376,8 +431,12 @@ impl InstallStore {
         self.write_state(&state, fs).await
     }
 
-    /// Removes every version of the id and its entry.
+    /// Removes every version of the id and its entry. The id must be a valid extension id, so a
+    /// tampered `state.json` cannot name a folder outside the store (integration-5 R9).
     pub async fn uninstall(&self, extension_id: &str, fs: &dyn Fs) -> Result<()> {
+        if ExtensionId::new(extension_id).is_err() {
+            bail!("{extension_id:?} is not an extension id");
+        }
         let _guard = self.lock.lock().await;
         let mut state = self.state(fs).await?;
         if state.extensions.remove(extension_id).is_none() {
@@ -506,6 +565,48 @@ static STAGING_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 /// Whether a zip entry name is a plain relative path: normal components only, no drive, root,
 /// `..`, backslash or `:` (an NTFS stream).
+/// A registry package against its index entry (integration-5 R7).
+fn check_matches_release(info: &PackageInfo, release: &Release) -> Result<()> {
+    if info.extension_id.as_ref() != release.id.as_str() || info.version != release.version {
+        bail!(
+            "the package is {} {}, not the release {} {} the registry names",
+            info.extension_id,
+            info.version,
+            release.id,
+            release.version
+        );
+    }
+    let manifest = &info.manifest;
+    let mut beyond: Vec<String> = manifest
+        .capabilities
+        .iter()
+        .filter(|capability| !release.capabilities.contains(*capability))
+        .cloned()
+        .collect();
+    beyond.extend(
+        manifest
+            .network
+            .iter()
+            .flat_map(|network| network.domains.iter())
+            .filter(|domain| !release.network_domains.contains(*domain))
+            .map(|domain| format!("network:fetch@{domain}")),
+    );
+    beyond.extend(
+        manifest
+            .processes
+            .iter()
+            .filter(|process| !release.processes.contains(&process.name))
+            .map(|process| format!("process:spawn@{}", process.name)),
+    );
+    if !beyond.is_empty() {
+        bail!(
+            "the package asks for more than its registry entry declares: {}",
+            beyond.join(", ")
+        );
+    }
+    Ok(())
+}
+
 pub fn is_plain_entry_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains('\\')
@@ -513,6 +614,24 @@ pub fn is_plain_entry_name(name: &str) -> bool {
         && Path::new(name.trim_end_matches('/'))
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+        && name
+            .trim_end_matches('/')
+            .split('/')
+            .all(|part| !is_windows_alias(part))
+}
+
+/// A name Windows rewrites or reserves (integration-5 R9, SEC T10): a trailing dot or space, or
+/// a device name (`CON`, `NUL`, `COM1`, …) with or without an extension.
+fn is_windows_alias(part: &str) -> bool {
+    if part.ends_with('.') || part.ends_with(' ') {
+        return true;
+    }
+    let stem = part.split('.').next().unwrap_or_default().trim_end();
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && upper[3..].chars().all(|c| c.is_ascii_digit() && c != '0'))
 }
 
 async fn unpack(bytes: Vec<u8>, destination: &Path, fs: &dyn Fs) -> Result<()> {
@@ -524,6 +643,8 @@ async fn unpack(bytes: Vec<u8>, destination: &Path, fs: &dyn Fs) -> Result<()> {
         bail!("{entries} entries; a package may have at most {MAX_PACKAGE_ENTRIES}");
     }
     let mut unpacked: u64 = 0;
+    // Names that differ only in case are the same file on Windows and macOS.
+    let mut seen = std::collections::HashSet::new();
     for index in 0..entries {
         let entry = &reader.file().entries()[index];
         let name = entry
@@ -533,6 +654,9 @@ async fn unpack(bytes: Vec<u8>, destination: &Path, fs: &dyn Fs) -> Result<()> {
             .to_string();
         if !is_plain_entry_name(&name) {
             bail!("entry {name:?} is not a plain relative path");
+        }
+        if !seen.insert(name.trim_end_matches('/').to_lowercase()) {
+            bail!("entry {name:?} appears twice (names that differ only in case count as one)");
         }
         let path = destination.join(name.trim_end_matches('/'));
         if entry
@@ -605,6 +729,7 @@ async fn read_package_dir(dir: &Path, fs: &dyn Fs) -> Result<PackageInfo> {
         extension_id,
         version,
         manifest,
+        zed_extension: crate::install::has_zed_extension(dir, fs).await,
     })
 }
 
@@ -689,6 +814,127 @@ mod tests {
             dir,
             _root: root,
         }
+    }
+
+    /// Decision Q1: a package or a dev folder that also holds a Zed extension says so in the
+    /// install dialog and on the consent card; one without says nothing.
+    #[gpui::test]
+    async fn test_a_zed_extension_inside_is_announced(cx: &mut TestAppContext) {
+        use crate::install::ZED_EXTENSION_WARNING;
+        let setup = setup(cx);
+        let fs = setup.fs.as_ref();
+        let toml = manifest("both", "1.0.0", "\"ui:panel\"");
+        let with = zip(&[
+            ("extension.toml", toml.as_bytes()),
+            ("fyx_ui.wasm", b"component"),
+            ("extension.wasm", b"zed"),
+        ])
+        .await;
+        let without = zip(&[
+            ("extension.toml", toml.as_bytes()),
+            ("fyx_ui.wasm", b"component"),
+        ])
+        .await;
+        let package = Path::new("both.fyxext");
+        let info = setup
+            .store
+            .inspect_package_bytes(with, "with", fs)
+            .await
+            .expect("inspects");
+        assert!(info.zed_extension);
+        assert!(
+            crate::store_actions::file_install_detail(&info, package, "")
+                .contains(ZED_EXTENSION_WARNING)
+        );
+        let info = setup
+            .store
+            .inspect_package_bytes(without, "without", fs)
+            .await
+            .expect("inspects");
+        assert!(!info.zed_extension);
+        assert!(
+            !crate::store_actions::file_install_detail(&info, package, "")
+                .contains(ZED_EXTENSION_WARNING)
+        );
+
+        // Any depth or case in a package counts (owner's Q1, `fyx_registry::runs_zed_extension`).
+        let nested = zip(&[
+            ("extension.toml", toml.as_bytes()),
+            ("fyx_ui.wasm", b"component"),
+            ("sub/Extension.WASM", b"zed"),
+        ])
+        .await;
+        let info = setup
+            .store
+            .inspect_package_bytes(nested, "nested", fs)
+            .await
+            .expect("inspects");
+        assert!(info.zed_extension);
+
+        // A dev folder: the install dialog and the consent card of `dev_paths`.
+        let folder = setup.dir.join("dev");
+        std::fs::create_dir_all(&folder).expect("folder");
+        assert!(!crate::install::has_zed_extension(&folder, fs).await);
+        std::fs::write(folder.join("EXTENSION.wasm"), b"zed").expect("zed extension");
+        assert!(crate::install::has_zed_extension(&folder, fs).await);
+        assert!(
+            crate::install::dev_install_detail(&info.manifest, &folder, true)
+                .contains(ZED_EXTENSION_WARNING)
+        );
+        assert!(
+            !crate::install::dev_install_detail(&info.manifest, &folder, false)
+                .contains(ZED_EXTENSION_WARNING)
+        );
+        let pending = |zed_extension| crate::registry::PendingConsent {
+            extension_id: "both".into(),
+            dir: folder.clone(),
+            installed_dir: setup.dir.clone(),
+            capabilities: vec!["ui:panel".into()],
+            is_dev: true,
+            new_capabilities: Vec::new(),
+            zed_extension,
+            record: crate::consent::ConsentRecord {
+                capabilities: vec!["ui:panel".into()],
+                grant: crate::consent::Grant::DevFolder {
+                    path: folder.clone(),
+                },
+            },
+        };
+        assert!(crate::registry::consent_card_text(&pending(true)).contains(ZED_EXTENSION_WARNING));
+        assert!(
+            !crate::registry::consent_card_text(&pending(false)).contains(ZED_EXTENSION_WARNING)
+        );
+    }
+
+    /// Owner's Q2: a program that can run anything says so wherever it is listed.
+    #[test]
+    fn test_programs_that_run_any_code_are_named() {
+        let items: Vec<String> = [
+            "process:args@git status",
+            "process:spawn",
+            "process:spawn@bash",
+            "process:spawn@git",
+            "process:spawn@lint (node_modules/.bin/eslint)",
+        ]
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+        assert_eq!(crate::install::programs_running_any_code(&items), ["bash"]);
+        let lines = crate::install::describe_capability_ids(&items);
+        assert!(lines.contains(&format!(
+            "Runs bash, which {}",
+            ui_ext::process::RUNS_ANY_CODE_PROMPT
+        )));
+        assert!(lines.contains(&"Runs git".to_string()));
+        // Git with an option that sets its configuration can run anything too.
+        let configured: Vec<String> = ["process:args@git -c", "process:spawn@git"]
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+        assert_eq!(
+            crate::install::programs_running_any_code(&configured),
+            ["git"]
+        );
     }
 
     impl Setup {
@@ -849,6 +1095,51 @@ mod tests {
         assert!(format!("{error:#}").contains("not installed"));
     }
 
+    /// integration-5 R9: a rollback clears `disabled` (it was for the other version); uninstall
+    /// takes only a valid id; a package with names that differ only in case is refused.
+    #[gpui::test]
+    async fn test_rollback_uninstall_and_case_duplicates(cx: &mut TestAppContext) {
+        let setup = setup(cx);
+        setup.install("demo", "1.0.0").await.unwrap();
+        setup.install("demo", "2.0.0").await.unwrap();
+        setup
+            .store
+            .set_disabled("demo", Some("blocked: bad".into()), setup.fs.as_ref())
+            .await
+            .unwrap();
+        setup
+            .store
+            .rollback("demo", setup.fs.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(setup.entry("demo").await.unwrap().disabled, None);
+
+        for bad in ["..", "../outside", "a/b", ""] {
+            assert!(
+                setup.store.uninstall(bad, setup.fs.as_ref()).await.is_err(),
+                "{bad:?}"
+            );
+        }
+
+        let bytes = zip(&[
+            (
+                "extension.toml",
+                manifest("dup", "1.0.0", "\"ui:status-bar\"").as_bytes(),
+            ),
+            ("fyx_ui.wasm", b"component"),
+            ("assets/Icon.svg", b"<svg/>"),
+            ("assets/icon.svg", b"<svg/>"),
+        ])
+        .await;
+        let path = setup.write_package("dup.fyxext", &bytes);
+        let error = setup
+            .store
+            .install_package(&path, setup.fs.as_ref())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("twice"), "{error:#}");
+    }
+
     #[test]
     fn test_entry_names() {
         for name in ["extension.toml", "assets/icon.svg", "assets/", "a/b/c.txt"] {
@@ -864,8 +1155,18 @@ mod tests {
             r"a\..\..\evil",
             "file.txt:stream",
             "./x/../../y",
+            "CON",
+            "assets/nul.txt",
+            "assets/Com1.svg",
+            "lpt9",
+            "trailing.",
+            "assets/space ",
+            "dir./x",
         ] {
             assert!(!is_plain_entry_name(name), "{name}");
+        }
+        for name in ["console.txt", "assets/com10.svg", "COM0", "nullable"] {
+            assert!(is_plain_entry_name(name), "{name}");
         }
     }
 

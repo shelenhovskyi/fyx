@@ -178,7 +178,7 @@ async fn test_untrusted_worktree_is_denied(cx: &mut TestAppContext) {
         cx,
     )
     .await;
-    assert_eq!(result.err(), Some(EditError::Denied));
+    assert_eq!(result.err(), Some(EditError::UntrustedWorktree));
     let a = buffer(&project, "a.txt", cx).await;
     assert_eq!(text(&a, cx), "one\ntwo\n");
 }
@@ -360,4 +360,49 @@ async fn test_through_the_service(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(outcome.await, Ok(()));
     assert_eq!(text(&a, cx), "ONE\ntwo\n");
+}
+
+/// integration-5 S1: the paths `agent:observe` hides are the ones an extension may not read:
+/// `private_files` (here `.env`, Zed's default) whatever the shield mode.
+#[gpui::test]
+async fn test_private_paths_for_observe(cx: &mut TestAppContext) {
+    let (_, _project) = setup(true, cx).await;
+    cx.update(|cx| {
+        assert!(is_private_path(Path::new(path!("/work/.env")), cx));
+        assert!(!is_private_path(Path::new(path!("/work/a.txt")), cx));
+        assert!(!is_private_path(Path::new(path!("/elsewhere/x")), cx));
+    });
+}
+
+/// integration-5 S8: a file on disk the worktree has no entry for (an ignored, unscanned
+/// directory) is checked itself: a link out of the worktree is refused, also with `create`.
+#[gpui::test]
+async fn test_a_link_in_an_unscanned_directory_is_refused(cx: &mut TestAppContext) {
+    let (fs, _project) = setup(true, cx).await;
+    fs.insert_tree(path!("/outside"), json!({ "secret.txt": "s\n" }))
+        .await;
+    fs.insert_tree(path!("/work/ignored"), json!({})).await;
+    fs.insert_file(path!("/work/.gitignore"), b"ignored/\n".to_vec())
+        .await;
+    fs.create_symlink(
+        Path::new(path!("/work/ignored/link.txt")),
+        PathBuf::from(path!("/outside/secret.txt")),
+    )
+    .await
+    .unwrap();
+    cx.run_until_parked();
+    let mut create = file("ignored/link.txt", &[(at(0, 0), at(0, 1), "S")]);
+    create.create = true;
+    let result = run(edit(vec![create]), cx).await;
+    assert!(
+        matches!(result, Err(EditError::NotAllowed(_))),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(
+        fs.load(Path::new(path!("/outside/secret.txt")))
+            .await
+            .unwrap(),
+        "s\n"
+    );
 }

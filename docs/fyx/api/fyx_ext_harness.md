@@ -26,6 +26,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FakeRun::stdout` | field |  |
 | `FetchResponder` | type | What a test broker answers for one request it lets through. |
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
+| `Harness::accessible_name` | method | The name a screen reader announces for a button node, by the renderer's rule: its `accessible-label` (at most 256 bytes), else a non-empty label, else the tooltip, else the icon's name. `None` for a node that is not a button. |
 | `Harness::agent_event` | method | Queues an event of the host's agent review, with the host's ids, for `Harness::deliver_io`. Only a running feed delivers it; otherwise it is dropped. |
 | `Harness::api_version` | method |  |
 | `Harness::applied_edits` | method | The edits the editor applied, oldest first. |

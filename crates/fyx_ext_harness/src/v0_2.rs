@@ -139,8 +139,12 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::InvalidArgument => wit_host::HostErrorCode::InvalidArgument,
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
-                // 0.2 has no `denied`; the host maps it to `not-permitted` too.
-                model::HostErrorCode::Denied => wit_host::HostErrorCode::NotPermitted,
+                // 0.2 has no `denied` or `untrusted-worktree`: the host maps them to
+                // `not-permitted`, and `no-worktree` to `unavailable`.
+                model::HostErrorCode::Denied | model::HostErrorCode::UntrustedWorktree => {
+                    wit_host::HostErrorCode::NotPermitted
+                }
+                model::HostErrorCode::NoWorktree => wit_host::HostErrorCode::Unavailable,
             },
             message,
         }
@@ -225,6 +229,7 @@ impl From<wit::Props> for model::Props {
                 },
                 disabled: button.disabled,
                 tooltip: button.tooltip,
+                accessible_label: button.accessible_label,
             }),
             wit::Props::Input(input) => Self::Input(model::InputProps {
                 value: input.value,

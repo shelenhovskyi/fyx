@@ -15,17 +15,17 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `API_VERSION_V0_2` | const | The version `register_extension!(T, v0_2)` exports. |
 | `API_VERSION_V0_2_SECTION_BYTES` | const | `API_VERSION_V0_2` as stored in the section. |
 | `AgentEvent` | re-export | `bindings::fyx::ui::agent_observe::AgentEvent` |
+| `ButtonProps::accessible_label` | method | The name screen readers announce, for a button whose label does not say what it does (an icon-only button, or a `+`). Without one, the host announces the label, else the tooltip, else the icon's name. At most 256 bytes are used. A 0.1 host drops it. |
 | `ButtonProps::disabled` | method |  |
 | `ButtonProps::icon` | method |  |
 | `ButtonProps::new` | method |  |
 | `ButtonProps::style` | method |  |
 | `ButtonProps::tooltip` | method | Shown on hover; the host truncates text over 1024 bytes. |
-| `DecorationLocation::at` | method | A block above or below `line` (zero-based) of the worktree-relative `path`, with the height left to the host. The same code builds 0.2's `path` and 0.3's `target`. |
+| `DecorationLocation::at` | method | A block above or below `line` (zero-based) of the worktree-relative `path`, with the height left to the host. |
 | `DecorationLocation::height_lines` | method | The block's height in editor lines. |
 | `DiffViewProps::language` | method |  |
 | `DiffViewProps::new` | method |  |
 | `EditError` | re-export | `bindings::fyx::ui::workspace_edit::EditError` |
-| `EditTarget` | re-export | `bindings::fyx::ui::workspace_edit::EditTarget` |
 | `Extension` | trait | A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it from a single thread, one call at a time. |
 | `Extension::handle_event` | method |  |
 | `Extension::handle_io` | method | `fyx:ui` 0.3: the outcome of work that ran outside a call, such as `IoEvent::FetchDone((id, result))` for `fetch`. It belongs to no surface: update surfaces with `push_update` or `SurfaceTree::push`. An `Err` is logged by the host. |
@@ -37,12 +37,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FetchError` | re-export | `bindings::fyx::ui::network::FetchError` |
 | `FileEdit` | re-export | `bindings::fyx::ui::workspace_edit::FileEdit` |
 | `FileEdit::create` | method | Creates the file (empty) first if it does not exist; its directory must. |
-| `FileEdit::document` | method | Edits of an open document, by its `documents` id. |
-| `FileEdit::expected_version` | method | Fails the whole edit with `EditError::Conflict` if the document changed since `version`. |
+| `FileEdit::file` | method | Edits of `file`, in the worktree it names. |
 | `FileEdit::insert` | method | Inserts `text` at `at`. |
 | `FileEdit::path` | method | Edits of the file at `path`, relative to the root of the one worktree that has it. |
 | `FileEdit::replace` | method | Replaces `range` with `new_text`. Ranges are half-open and must not overlap. |
-| `FileRef` | re-export | `bindings::fyx::ui::documents::FileRef` |
 | `FlexProps::align` | method |  |
 | `FlexProps::background` | method |  |
 | `FlexProps::column` | method | A column with no gap, no padding and children aligned to the start. |
@@ -114,7 +112,6 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `PatchSet::remove` | method | Removes the node and its whole subtree. |
 | `PatchSet::set_props` | method |  |
 | `PermissionState` | re-export | The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them. |
-| `Position` | re-export | `bindings::fyx::ui::documents::Position` |
 | `Position::new` | method | Zero-based line, and a column in UTF-8 bytes from the start of the line. |
 | `ProcessExit` | re-export | `bindings::fyx::ui::process::ProcessExit` |
 | `ProcessOutput` | re-export | `bindings::fyx::ui::process::ProcessOutput` |
@@ -174,7 +171,6 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TextProps::color` | method |  |
 | `TextProps::monospace` | method |  |
 | `TextProps::new` | method |  |
-| `TextRange` | re-export | `bindings::fyx::ui::documents::TextRange` |
 | `TextRange::new` | method |  |
 | `TreeBuilder` | struct | Builds a flat node list from nested code. Flex nodes take a closure that builds their children; every node gets a fresh id and its parent's id, and parents precede children. |
 | `TreeBuilder::button` | method |  |

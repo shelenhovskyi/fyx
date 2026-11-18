@@ -1,5 +1,6 @@
 //! The gallery's `fyx:ui` 0.2 part, built only with `--features fyx-ui-0-2`. It adds three
-//! surfaces and leaves the 0.1 ones exactly as they are:
+//! surfaces and leaves the 0.1 ones exactly as they are. (TODO(0.4): commands, hover, code lenses
+//! and picker surfaces left the smaller 0.3 (A3); show them here when 0.4 brings them.)
 //!
 //! - Panel `"gallery-next"` (right dock, title "Gallery 0.2", icon `bolt`, default size 420):
 //!   - a `Pick a fruit` button (icon `search`, tooltip) that shows the picker, and the text

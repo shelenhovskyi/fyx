@@ -192,6 +192,17 @@ struct OpenNotification {
 
 impl gpui::EventEmitter<RegistryEvent> for UiExtensionRegistry {}
 
+/// An extension from outside the install store, for the Fyx tab's Installed list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalExtension {
+    pub extension_id: String,
+    pub path: PathBuf,
+    /// A `dev_paths` folder, a dev link or a bare component, not an installed folder.
+    pub is_dev: bool,
+    /// Waits for "Enable" (with the new capabilities of a held update).
+    pub pending: Option<Vec<String>>,
+}
+
 /// An installed extension waiting for the user's "Enable".
 #[derive(Clone, Debug)]
 pub struct PendingConsent {
@@ -205,7 +216,9 @@ pub struct PendingConsent {
     /// Not empty for a held update: an extension enabled before that now asks for these T1
     /// capabilities as well (its old version keeps running, if loaded).
     pub new_capabilities: Vec<String>,
-    record: ConsentRecord,
+    /// Its folder also holds a Zed extension (`extension.wasm`, decision Q1).
+    pub zed_extension: bool,
+    pub(crate) record: ConsentRecord,
 }
 
 /// How a watched dev extension is loaded again.
@@ -240,6 +253,8 @@ struct Found {
     cache: Option<PrecompiledCache>,
     /// The manifest as read by this scan; the load uses this one, not a second read.
     manifest: UiManifest,
+    /// The folder also holds a Zed extension (`extension.wasm`).
+    zed_extension: bool,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -314,6 +329,58 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// Extensions loaded or waiting for "Enable" that the install store does not hold: dev paths,
+    /// dev links, bare components and the installed-extensions folder, by id.
+    pub fn local_extensions(&self) -> Vec<LocalExtension> {
+        let mut local: Vec<LocalExtension> = self
+            .sources
+            .iter()
+            .filter_map(|(id, source)| {
+                let (path, is_file) = match source {
+                    ExtensionSource::Directory(path) => (path, false),
+                    ExtensionSource::File(path) => (path, true),
+                    ExtensionSource::Store => return None,
+                };
+                Some(LocalExtension {
+                    extension_id: id.to_string(),
+                    path: path.clone(),
+                    is_dev: is_file
+                        || self.watches.contains_key(id)
+                        || self.dev_paths.iter().any(|dev| path.starts_with(dev)),
+                    pending: None,
+                })
+            })
+            .collect();
+        let store_dir = self.store.as_ref().map(|store| store.root().to_path_buf());
+        for pending in &self.pending_consent {
+            if store_dir
+                .as_ref()
+                .is_some_and(|root| pending.dir.starts_with(root))
+            {
+                continue;
+            }
+            let new = pending.new_capabilities.clone();
+            match local
+                .iter_mut()
+                .find(|local| local.extension_id == pending.extension_id.as_ref())
+            {
+                Some(local) => local.pending = Some(new),
+                None => local.push(LocalExtension {
+                    extension_id: pending.extension_id.to_string(),
+                    path: pending.dir.clone(),
+                    is_dev: pending.is_dev
+                        || self
+                            .dev_paths
+                            .iter()
+                            .any(|dev| pending.dir.starts_with(dev)),
+                    pending: Some(new),
+                }),
+            }
+        }
+        local.sort_by(|a, b| a.extension_id.cmp(&b.extension_id));
+        local
+    }
+
     /// The capabilities a loaded extension declared, with their tier and whether each is granted
     /// (T0 always is), for the chips and the revoke command.
     pub fn declared_capabilities(&self, extension_id: &str) -> Vec<(String, Tier, bool)> {
@@ -343,12 +410,52 @@ impl UiExtensionRegistry {
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
         if let Some((path, text)) = self.consent.revoke(extension_id, capability)? {
+            let fs = fs.clone();
             cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
                 .detach();
+        }
+        // A registry install's approval goes too, so the next update's dialog asks for it again
+        // instead of it coming back silently (integration-5 R4).
+        if let Some(store) = self.install_store().cloned() {
+            let (extension_id, capability) = (extension_id.to_string(), capability.to_string());
+            cx.background_spawn(async move {
+                let Ok(installed) = store.installed_extensions(fs.as_ref()).await else {
+                    return;
+                };
+                let Some(mut approved) = installed
+                    .into_iter()
+                    .find(|installed| installed.id.as_str() == extension_id)
+                    .map(|installed| installed.approved)
+                else {
+                    return;
+                };
+                if approved.capabilities.remove(&capability) {
+                    if let Err(error) = store
+                        .set_approved(&extension_id, approved, fs.as_ref())
+                        .await
+                    {
+                        log::error!(
+                            "fyx:ui: cannot record the revoke of {capability}: {}",
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
+                        );
+                    }
+                }
+            })
+            .detach();
         }
         log::info!("fyx:ui: revoked {capability} from {extension_id}");
         cx.notify();
         Ok(())
+    }
+
+    /// After an uninstall: the consent record and first-use answers go (integration-5 S5).
+    pub fn forget_consent(&mut self, extension_id: &str, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        if let Some((path, text)) = self.consent.forget(extension_id) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        log::info!("fyx:ui: forgot the permissions of {extension_id}");
+        cx.notify();
     }
 
     /// The broker's check, as host imports get it.
@@ -810,11 +917,22 @@ impl UiExtensionRegistry {
             ),
             "process:spawn" => {
                 let env = listed("process:env@");
+                let args = listed("process:args@");
+                // Owner's Q2: a shell, an interpreter or a launcher means any program.
+                let any_code: String = crate::install::programs_running_any_code(&declared)
+                    .iter()
+                    .map(|program| format!("\n{program} {}", ui_ext::process::RUNS_ANY_CODE_PROMPT))
+                    .collect();
                 (
                     format!("Allow {name} to run programs?"),
                     format!(
-                        "Programs: {}{}",
+                        "Programs: {}{any_code}{}{}",
                         listed("process:spawn@").join(", "),
+                        if args.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\nArguments: {}", args.join(", "))
+                        },
                         if env.is_empty() {
                             String::new()
                         } else {
@@ -1300,8 +1418,9 @@ Environment it may pass: {}",
                         Ok(bytes) => bytes,
                         Err(error) => {
                             log::error!(
-                                "fyx:ui: cannot read {}: {error:#}",
-                                found.component.display()
+                                "fyx:ui: cannot read {}: {}",
+                                found.component.display(),
+                                ui_ext::sanitize_for_log(&format!("{error:#}"))
                             );
                             this.update(cx, |this, _| {
                                 this.report_load(&found.extension_id, Err(format!("{error:#}")))
@@ -1327,8 +1446,9 @@ Environment it may pass: {}",
                             }
                             Err(error) => {
                                 log::error!(
-                                    "fyx:ui: not loading {}: {error:#}",
-                                    found.dir.display()
+                                    "fyx:ui: not loading {}: {}",
+                                    found.dir.display(),
+                                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                                 );
                                 continue;
                             }
@@ -1392,7 +1512,10 @@ Environment it may pass: {}",
                                     extension.extension_id(),
                                     found.source.clone(),
                                 ) {
-                                    log::error!("fyx:ui: {error:#}");
+                                    log::error!(
+                                        "fyx:ui: {}",
+                                        ui_ext::sanitize_for_log(&format!("{error:#}"))
+                                    );
                                     this.report_load(
                                         &found.extension_id,
                                         Err(format!("{error:#}")),
@@ -1421,8 +1544,9 @@ Environment it may pass: {}",
                         Ok(None) => {}
                         Err(error) => {
                             log::error!(
-                                "fyx:ui: failed to load installed extension {}: {error:#}",
-                                found.dir.display()
+                                "fyx:ui: failed to load installed extension {}: {}",
+                                found.dir.display(),
+                                ui_ext::sanitize_for_log(&format!("{error:#}"))
                             );
                             this.update(cx, |this, cx| {
                                 this.report_load(&found.extension_id, Err(format!("{error:#}")));
@@ -1505,8 +1629,9 @@ Environment it may pass: {}",
                 let task = cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
-                            "fyx:ui: failed to reload dev extension {}: {error:#}",
-                            path.display()
+                            "fyx:ui: failed to reload dev extension {}: {}",
+                            path.display(),
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
                         );
                         this.update(cx, |this, cx| {
                             let extension_id = this.sources.iter().find_map(|(id, source)| {
@@ -1567,6 +1692,7 @@ Environment it may pass: {}",
             capabilities: found.capabilities.clone(),
             is_dev: found.is_dev,
             new_capabilities,
+            zed_extension: found.zed_extension,
             record,
         });
         cx.notify();
@@ -1761,7 +1887,10 @@ Environment it may pass: {}",
                     )
                 });
                 if let Err(error) = placed {
-                    log::error!("fyx:ui: {extension_id}: place-decoration({id:?}): {error:#}");
+                    log::error!(
+                        "fyx:ui: {extension_id}: place-decoration({id:?}): {}",
+                        ui_ext::sanitize_for_log(&format!("{error:#}"))
+                    );
                 }
             }
             HostEffect::RemoveDecoration { id } => {
@@ -1897,7 +2026,10 @@ async fn find_store_extensions(
     let active = match store.active(fs).await {
         Ok(active) => active,
         Err(error) => {
-            log::error!("fyx:ui: cannot read the install store: {error:#}");
+            log::error!(
+                "fyx:ui: cannot read the install store: {}",
+                ui_ext::sanitize_for_log(&format!("{error:#}"))
+            );
             return Vec::new();
         }
     };
@@ -1939,12 +2071,17 @@ async fn found_at(
         Ok(None) => return None,
         Err(error) => {
             // Also a regular Zed extension with a broken manifest; logged, not shown.
-            log::warn!("fyx:ui: cannot read {}: {error:#}", extension_dir.display());
+            log::warn!(
+                "fyx:ui: cannot read {}: {}",
+                extension_dir.display(),
+                ui_ext::sanitize_for_log(&format!("{error:#}"))
+            );
             unreadable.push((extension_dir, format!("{error:#}")));
             return None;
         }
     };
     let component = extension_dir.join(&manifest.component);
+    let zed_extension = crate::install::has_zed_extension(&extension_dir, fs).await;
     match fs.metadata(&component).await {
         Ok(Some(metadata)) => Some(Found {
             fingerprint: Fingerprint {
@@ -1961,6 +2098,7 @@ async fn found_at(
             source,
             cache,
             manifest,
+            zed_extension,
         }),
         Ok(None) | Err(_) => {
             log::error!(
@@ -2567,6 +2705,34 @@ fn close_notification_view(open: OpenNotification, cx: &mut App) {
     }
 }
 
+/// The consent card's text: what it asks for, the Zed-extension warning when its folder has one
+/// (decision Q1), and a dev folder's path.
+pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
+    let folder = if pending.is_dev {
+        format!(" Folder: {}", pending.dir.display())
+    } else {
+        String::new()
+    };
+    let zed = if pending.zed_extension {
+        format!(" {}", crate::install::ZED_EXTENSION_WARNING)
+    } else {
+        String::new()
+    };
+    if pending.new_capabilities.is_empty() {
+        format!(
+            "The UI extension {} is installed but not enabled. It asks for: {}.{zed}{folder}",
+            pending.extension_id,
+            crate::install::describe_capability_ids(&pending.capabilities).join("; "),
+        )
+    } else {
+        format!(
+            "An update of the UI extension {} needs approval. It now also asks for: {}.{zed}{folder}",
+            pending.extension_id,
+            crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
+        )
+    }
+}
+
 /// One notification per installed extension waiting for consent, once per workspace: what it
 /// asks for, with "Enable" and "Not now". "Not now" leaves it unloaded until the next start.
 fn offer_consent(
@@ -2587,24 +2753,7 @@ fn offer_consent(
         {
             continue;
         }
-        let folder = if pending.is_dev {
-            format!(" Folder: {}", pending.dir.display())
-        } else {
-            String::new()
-        };
-        let message = if pending.new_capabilities.is_empty() {
-            format!(
-                "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
-                pending.extension_id,
-                crate::install::describe_capability_ids(&pending.capabilities).join("; "),
-            )
-        } else {
-            format!(
-                "An update of the UI extension {} needs approval. It now also asks for: {}.{folder}",
-                pending.extension_id,
-                crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
-            )
-        };
+        let message = consent_card_text(&pending);
         let update = !pending.new_capabilities.is_empty();
         let extension_id = pending.extension_id.clone();
         let registry = registry.downgrade();
@@ -2821,8 +2970,9 @@ fn load_dev_extensions(cx: &mut App) {
         cx.spawn(async move |cx| {
             if let Err(error) = load_dev_extension(path.clone(), cx).await {
                 log::error!(
-                    "fyx:ui: failed to load dev extension {}: {error:#}",
-                    path.display()
+                    "fyx:ui: failed to load dev extension {}: {}",
+                    path.display(),
+                    ui_ext::sanitize_for_log(&format!("{error:#}"))
                 );
             }
         })

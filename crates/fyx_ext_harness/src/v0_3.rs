@@ -22,19 +22,11 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    agent_observe as wit_observe, documents as wit_documents, host as wit_host,
+    agent_observe as wit_observe, decorations as wit_decorations, host as wit_host,
     images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
     permissions as wit_permissions, process as wit_process, types as wit,
     workspace_edit as wit_edit,
 };
-
-/// What the host says for a value its model cannot hold yet.
-pub(crate) fn unsupported(what: &str) -> model::HostError {
-    model::HostError {
-        code: model::HostErrorCode::InvalidArgument,
-        message: format!("{what} is not supported by this build of Fyx yet"),
-    }
-}
 
 fn result(
     result: Result<(), model::HostError>,
@@ -62,7 +54,52 @@ pub(crate) fn add_to_linker(
     wit_edit::add_to_linker::<_, State>(linker, |state| state)?;
     wit_observe::add_to_linker::<_, State>(linker, |state| state)?;
     wit_permissions::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_decorations::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
+}
+
+/// `decorations`, exactly 0.2's (A3): place and remove.
+impl wit_decorations::Host for State {
+    fn place_decoration(
+        &mut self,
+        id: String,
+        location: wit::DecorationLocation,
+        nodes: Vec<wit::Node>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        let nodes: Vec<model::Node> = match try_collect(nodes) {
+            Ok(nodes) => nodes,
+            Err(error) => return result(Err(error)),
+        };
+        self.count_lifted_text(
+            id.len()
+                + location.path.len()
+                + nodes
+                    .iter()
+                    .map(|node| crate::props_text_len(&node.props))
+                    .sum::<usize>(),
+        )?;
+        let location = model::DecorationLocation {
+            path: location.path,
+            line: location.line,
+            placement: match location.placement {
+                wit::DecorationPlacement::Above => model::DecorationPlacement::Above,
+                wit::DecorationPlacement::Below => model::DecorationPlacement::Below,
+            },
+            height_lines: location.height_lines,
+        };
+        Ok(self
+            .api
+            .place_decoration(id, location, nodes)
+            .map_err(Into::into))
+    }
+
+    fn remove_decoration(
+        &mut self,
+        id: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(id.len())?;
+        Ok(self.api.remove_decoration(id).map_err(Into::into))
+    }
 }
 
 /// The manifest name of a WIT `t2-capability`.
@@ -120,19 +157,16 @@ impl wit_edit::Host for State {
                     .files
                     .iter()
                     .map(|file| {
-                        let path = match &file.target {
-                            wit_edit::EditTarget::File(file) => file.path.len(),
-                            wit_edit::EditTarget::Document(_) => 0,
-                        };
-                        path + file
-                            .edits
-                            .iter()
-                            .map(|edit| edit.new_text.len())
-                            .sum::<usize>()
+                        file.file.path.len()
+                            + file
+                                .edits
+                                .iter()
+                                .map(|edit| edit.new_text.len())
+                                .sum::<usize>()
                     })
                     .sum::<usize>(),
         )?;
-        let position = |position: wit_documents::Position| edit::Position {
+        let position = |position: wit::Position| edit::Position {
             line: position.line,
             column: position.column,
         };
@@ -142,16 +176,11 @@ impl wit_edit::Host for State {
                 .files
                 .into_iter()
                 .map(|file| edit::FileEdit {
-                    target: match file.target {
-                        wit_edit::EditTarget::Document(id) => edit::EditTarget::Document(id),
-                        wit_edit::EditTarget::File(file) => {
-                            edit::EditTarget::File(ui_ext::process::FileRef {
-                                worktree: file.worktree,
-                                path: file.path,
-                            })
-                        }
-                    },
-                    expected_version: file.expected_version,
+                    target: edit::EditTarget::File(ui_ext::process::FileRef {
+                        worktree: file.file.worktree,
+                        path: file.file.path,
+                    }),
+                    expected_version: None,
                     create: file.create,
                     edits: file
                         .edits
@@ -322,6 +351,7 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                     wit_process::SpawnError::LimitExceeded
                 }
                 ui_ext::process::SpawnError::Io(error) => wit_process::SpawnError::Io(error),
+                ui_ext::process::SpawnError::Other(why) => wit_process::SpawnError::Other(why),
             },
         ))),
         net::IoEvent::EditDone(id, result) => Some(wit_io::IoEvent::EditDone((
@@ -335,6 +365,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                     EditError::NotFound(why) => wit_edit::EditError::NotFound(why),
                     EditError::Invalid(why) => wit_edit::EditError::Invalid(why),
                     EditError::Cancelled => wit_edit::EditError::Cancelled,
+                    EditError::UntrustedWorktree => wit_edit::EditError::UntrustedWorktree,
+                    EditError::Other(why) => wit_edit::EditError::Other(why),
                 }
             }),
         ))),
@@ -354,8 +386,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
     }
 }
 
-fn wit_file_ref(file: ui_ext::process::FileRef) -> wit_documents::FileRef {
-    wit_documents::FileRef {
+fn wit_file_ref(file: ui_ext::process::FileRef) -> wit::FileRef {
+    wit::FileRef {
         worktree: file.worktree,
         path: file.path,
     }
@@ -423,9 +455,13 @@ fn review_info(info: ui_ext::observe::ReviewInfo) -> wit_observe::ReviewInfo {
 fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
     use ui_ext::observe::AgentEvent;
     match event {
-        AgentEvent::Snapshot(reviews) => {
-            wit_observe::AgentEvent::Snapshot(reviews.into_iter().map(review_info).collect())
-        }
+        AgentEvent::Snapshot {
+            reviews,
+            older_dropped,
+        } => wit_observe::AgentEvent::Snapshot(wit_observe::ReviewSnapshot {
+            reviews: reviews.into_iter().map(review_info).collect(),
+            older_dropped,
+        }),
         AgentEvent::Opened(info) => wit_observe::AgentEvent::Opened(review_info(info)),
         AgentEvent::Updated(info) => wit_observe::AgentEvent::Updated(review_info(info)),
         AgentEvent::Resolved(info) => wit_observe::AgentEvent::Resolved(review_info(info)),
@@ -450,7 +486,8 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 9] = [
+const LINKED_INTERFACES: [&str; 10] = [
+    "decorations",
     "permissions",
     "types",
     "host",
@@ -625,6 +662,10 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
                 model::HostErrorCode::Denied => wit_host::HostErrorCode::Denied,
+                model::HostErrorCode::UntrustedWorktree => {
+                    wit_host::HostErrorCode::UntrustedWorktree
+                }
+                model::HostErrorCode::NoWorktree => wit_host::HostErrorCode::NoWorktree,
             },
             message,
         }
@@ -711,6 +752,7 @@ impl TryFrom<wit::Props> for model::Props {
                 },
                 disabled: button.disabled,
                 tooltip: button.tooltip,
+                accessible_label: button.accessible_label,
             }),
             wit::Props::Input(input) => Self::Input(model::InputProps {
                 value: input.value,
@@ -970,7 +1012,6 @@ impl TryFrom<wit::Surface> for model::Surface {
                         },
                     })
                 }
-                wit::SurfaceKind::Picker(_) => return Err(unsupported("a picker surface")),
             },
         })
     }

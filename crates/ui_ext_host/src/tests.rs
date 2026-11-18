@@ -2217,6 +2217,21 @@ async fn test_modal_lifecycle(cx: &mut TestAppContext) {
     state.update(cx, |state, cx| state.close(None, cx));
     cx.run_until_parked();
     assert!(backend.calls().is_empty(), "{:?}", backend.calls());
+
+    // Integration-5 L2: shown again before its `dismissed` went out, the mount waits for it.
+    state.update(cx, |state, cx| state.show(cx));
+    cx.run_until_parked();
+    backend.take_calls();
+    state.update(cx, |state, cx| {
+        state.close(Some(DismissReason::Escape), cx);
+        state.show(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        backend.take_calls(),
+        [Call::Event(UiEvent::Dismissed(DismissReason::Escape)), Call::Mount]
+    );
+    assert!(state.read_with(cx, |state, _| state.tree().is_some()));
 }
 
 /// Design K: the text of a secret input reaches the extension, but never the history the

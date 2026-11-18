@@ -338,13 +338,21 @@ impl Registry {
 
     /// The index, then the block list when it is due; the state is stored after anything new.
     pub async fn refresh(&self, now: Timestamp) -> RefreshOutcome {
+        self.refresh_with(now, false).await
+    }
+
+    /// [`Self::refresh`]; with `blocklist_now` the block list is fetched even when not due (the
+    /// "check for extension updates" command).
+    pub async fn refresh_with(&self, now: Timestamp, blocklist_now: bool) -> RefreshOutcome {
         let mut client = self.client.lock().await;
         let index = client.refresh_index(&self.fetch, now).await;
         let last_attempt = *self
             .last_blocklist_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blocklist = if fyx_registry::BlocklistCache::fetch_due(last_attempt, now) {
+        let blocklist = if blocklist_now
+            || fyx_registry::BlocklistCache::fetch_due(last_attempt, now)
+        {
             *self
                 .last_blocklist_attempt
                 .lock()

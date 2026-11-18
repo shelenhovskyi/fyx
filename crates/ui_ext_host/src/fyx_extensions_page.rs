@@ -27,7 +27,7 @@ use fyx_registry::{
 };
 use gpui::{
     App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
-    PromptLevel, SharedString, Task, WeakEntity, Window, actions, div, prelude::*,
+    SharedString, Task, WeakEntity, Window, actions, div, prelude::*,
 };
 use settings::Settings as _;
 use theme::ActiveTheme as _;
@@ -43,7 +43,7 @@ use workspace::{
 use crate::{
     UiExtensionRegistry,
     install::{FyxExtensionsSettings, capability_chip_label, describe_capability_ids},
-    install_store::VersionSource,
+    registry::LocalExtension,
     registry_service::{
         RefreshOutcome, Registry, RegistryLocation, RegistryStateDir, UPDATE_CHECK_INTERVAL,
         compiled_keyset, now,
@@ -58,6 +58,9 @@ actions!(
     [
         /// Opens the Fyx Extensions page: UI extensions from the Fyx registry.
         OpenFyxExtensions,
+        /// Checks the Fyx registry for extension updates now (the block list too) and applies
+        /// them, as the 6 h check does.
+        CheckForExtensionUpdates,
     ]
 );
 
@@ -89,7 +92,10 @@ pub struct RegistryHub {
     pub disabled: Vec<(String, String)>,
     /// What the last update check did, for the page.
     pub applied: Vec<String>,
+    /// The next refresh fetches the block list even when it is not due.
+    blocklist_now: bool,
     _refresh: Option<Task<()>>,
+    _installed: Option<Task<()>>,
 }
 
 /// One extension of the listing.
@@ -258,6 +264,34 @@ impl RegistryHub {
         self.refresh_and_apply(Apply::Blocks, cx)
     }
 
+    /// "Check for extension updates": the index and the block list now, then updates as the
+    /// timer applies them.
+    pub fn check_now(&mut self, cx: &mut Context<Self>) {
+        self.blocklist_now = true;
+        self.refresh_and_apply(Apply::All, cx)
+    }
+
+    /// Without a registry the store's installs are still listed (pin, roll back, uninstall).
+    fn load_installed(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = UiExtensionRegistry::global(cx)
+            .and_then(|registry| registry.read(cx).install_store().cloned())
+        else {
+            return;
+        };
+        let fs = <dyn Fs>::global(cx);
+        self._installed = Some(cx.spawn(async move |this, cx| {
+            let installed = store
+                .installed_extensions(fs.as_ref())
+                .await
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.installed = installed;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Fetches the index (and the block list when due), then carries out the plan's automatic
     /// actions: a rollback of a blocked version, disabling a blocked version with nothing to roll
     /// back to (and enabling it when the block lifts), and with [`Apply::All`] the updates of
@@ -270,9 +304,11 @@ impl RegistryHub {
         self.last_check();
         self.last_check = Some(checked_at);
         let Some(registry) = self.ensure_open(cx) else {
+            self.load_installed(cx);
             cx.notify();
             return;
         };
+        let blocklist_now = std::mem::take(&mut self.blocklist_now);
         if let Err(error) = self.state_dir().set_last_check(checked_at) {
             log::warn!("fyx:ui: cannot store the registry check time: {error:#}");
         }
@@ -283,7 +319,7 @@ impl RegistryHub {
         let fs = <dyn Fs>::global(cx);
         self._refresh = Some(cx.spawn(async move |this, cx| {
             let work = async move {
-                let outcome = registry.refresh(now()).await;
+                let outcome = registry.refresh_with(now(), blocklist_now).await;
                 let installed = match &store {
                     Some(store) => store
                         .installed_extensions(fs.as_ref())
@@ -474,16 +510,7 @@ pub(crate) async fn apply_plan(
                 let result = async {
                     let bytes = registry.download(release).await?;
                     store
-                        .install_package_bytes(
-                            bytes,
-                            &format!("{id} {to}"),
-                            VersionSource {
-                                origin: Origin::Registry,
-                                package_sha256: Some(release.package.sha256),
-                            },
-                            None,
-                            fs,
-                        )
+                        .install_registry_package(bytes, release, None, fs)
                         .await
                 }
                 .await;
@@ -552,12 +579,14 @@ fn describe_additions(additions: &fyx_registry::Additions) -> Vec<String> {
             .iter()
             .map(|domain| format!("Connects to {domain}")),
     );
-    lines.extend(
-        additions
-            .processes
-            .iter()
-            .map(|program| format!("Runs {program}")),
-    );
+    lines.extend(additions.processes.iter().map(|program| {
+        let any_code = ui_ext::process::runs_any_code(&ui_ext::process::ProcessSpec {
+            name: program.clone(),
+            args: Vec::new(),
+            path: None,
+        });
+        crate::install::runs_line(program, any_code)
+    }));
     if let Some(tier) = additions.tier_raised {
         lines.push(format!("Permission tier {tier:?}"));
     }
@@ -616,18 +645,26 @@ fn install_release(
                 let asks = describe_additions(&additions);
                 if !asks.is_empty() {
                     let detail = format!(
-                        "It asks for:\n{}\n\nFrom the Fyx registry, published by {}.\nSource: {} at {}",
+                        "It asks for:\n{}\n{}\nFrom the Fyx registry, published by {}.\nSource: {} at {}",
                         asks.join("\n"),
+                        // The signed release says it also runs a Zed extension (owner's Q1);
+                        // `verify_package` refuses a download that has one it does not declare.
+                        if release.zed_extension {
+                            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
+                        } else {
+                            String::new()
+                        },
                         release.owners.iter().cloned().collect::<Vec<_>>().join(", "),
                         release.source.repository,
                         &release.source.commit[..release.source.commit.len().min(12)],
                     );
-                    let answer = cx.update(|window, cx| {
-                        window.prompt(
-                            PromptLevel::Info,
+                    let answer = workspace.update_in(cx, |workspace, window, cx| {
+                        crate::choice::confirm(
+                            workspace,
                             &format!("Install {} {}?", release.name, release.version),
                             Some(&detail),
                             &["Install", "Cancel"],
+                            window,
                             cx,
                         )
                     })?;
@@ -657,16 +694,7 @@ fn install_release(
                 let mut approved = base;
                 approved.approve(&release);
                 let installed = store
-                    .install_package_bytes(
-                        bytes,
-                        &format!("{} {}", release.id, release.version),
-                        VersionSource {
-                            origin: Origin::Registry,
-                            package_sha256: Some(release.package.sha256),
-                        },
-                        Some(approved),
-                        fs.as_ref(),
-                    )
+                    .install_registry_package(bytes, &release, Some(approved), fs.as_ref())
                     .await?;
                 let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
                 grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
@@ -694,6 +722,36 @@ fn install_release(
 }
 
 /// Pin, roll back or uninstall, then rescan and refresh.
+/// Why the version a rollback would bring back may not run: the block list names it
+/// (integration-5 R9). `None` without a registry or a block list.
+pub(crate) async fn rollback_blocked(
+    store: &crate::install_store::InstallStore,
+    id: &str,
+    fs: &dyn Fs,
+    cx: &mut gpui::AsyncApp,
+) -> Option<String> {
+    let registry = cx.update(|cx| {
+        let hub = RegistryHub::global(cx)?;
+        hub.update(cx, |hub, cx| hub.registry(cx))
+    })?;
+    let installed = store
+        .installed_extensions(fs)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|installed| installed.id.as_str() == id)?;
+    let previous = installed.previous?;
+    let client = registry.client().lock().await;
+    client
+        .blocklist()?
+        .block_for(
+            &installed.id,
+            &previous.version,
+            previous.package_sha256.as_ref(),
+        )
+        .map(|block| format!("{id} {} is blocked: {}", previous.version, block.reason))
+}
+
 fn store_change(
     workspace: WeakEntity<Workspace>,
     id: String,
@@ -720,11 +778,24 @@ fn store_change(
                         }
                     }
                     StoreChange::RollBack => {
+                        if let Some(blocked) = rollback_blocked(&store, &id, fs.as_ref(), cx).await
+                        {
+                            anyhow::bail!("{blocked}");
+                        }
                         let version = store.rollback(&id, fs.as_ref()).await?;
                         format!("Rolled {id} back to {version}")
                     }
                     StoreChange::Uninstall => {
                         store.uninstall(&id, fs.as_ref()).await?;
+                        let fs = fs.clone();
+                        let forgotten = id.clone();
+                        cx.update(|_, cx| {
+                            if let Some(registry) = UiExtensionRegistry::global(cx) {
+                                registry.update(cx, |registry, cx| {
+                                    registry.forget_consent(&forgotten, fs, cx)
+                                });
+                            }
+                        })?;
                         format!("Uninstalled {id}")
                     }
                 })
@@ -782,7 +853,7 @@ impl FyxExtensionsPage {
             editor.set_placeholder_text("Search Fyx extensions…", window, cx);
             editor
         });
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe(&hub, |_, _, cx| cx.notify()),
             cx.subscribe(&query, |_, _, event: &EditorEvent, cx| {
                 if matches!(event, EditorEvent::BufferEdited) {
@@ -790,6 +861,10 @@ impl FyxExtensionsPage {
                 }
             }),
         ];
+        // Dev extensions and permission rows follow the loaded extensions.
+        if let Some(registry) = UiExtensionRegistry::global(cx) {
+            subscriptions.push(cx.observe(&registry, |_, _, cx| cx.notify()));
+        }
         hub.update(cx, |hub, cx| hub.refresh(cx));
         Self {
             workspace,
@@ -952,6 +1027,13 @@ impl FyxExtensionsPage {
             )
             .when_some(note, |this, (note, color)| {
                 this.child(Label::new(note).size(LabelSize::Small).color(color))
+            })
+            .when(release.zed_extension, |this| {
+                this.child(
+                    Label::new(crate::install::ZED_EXTENSION_WARNING)
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                )
             })
             .child(
                 h_flex()
@@ -1154,15 +1236,83 @@ impl FyxExtensionsPage {
                     .into_iter()
                     .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
-            .children(t2_rows(&id, cx))
+            .children(permission_rows(&id, cx))
+    }
+
+    /// A dev extension or an installed folder (not the install store): where it is, "Enable"
+    /// when it waits for it, and its permissions.
+    fn render_local(&self, local: &LocalExtension, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = local.extension_id.clone();
+        let origin = if local.is_dev {
+            "Dev extension, not from the registry"
+        } else {
+            "Installed folder, not from the registry"
+        };
+        let pending = local.pending.clone();
+        v_flex()
+            .p_3()
+            .gap_1()
+            .border_1()
+            .rounded_md()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        h_flex().gap_2().child(Label::new(id.clone())).child(
+                            Label::new(origin)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                        ),
+                    )
+                    .when(pending.is_some(), |this| {
+                        let id = id.clone();
+                        this.child(
+                            Button::new(
+                                SharedString::from(format!("fyx-local-enable-{id}")),
+                                "Enable",
+                            )
+                            .style(ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .on_click(move |_, _, cx| {
+                                let fs = <dyn Fs>::global(cx);
+                                if let Some(registry) = UiExtensionRegistry::global(cx) {
+                                    registry
+                                        .update(cx, |registry, cx| registry.enable(&id, fs, cx));
+                                }
+                            }),
+                        )
+                    }),
+            )
+            .child(
+                Label::new(local.path.display().to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .when_some(pending, |this, new| {
+                let note = if new.is_empty() {
+                    "Not enabled".to_string()
+                } else {
+                    format!(
+                        "Its update waits for Enable: {}",
+                        describe_capability_ids(&new).join(", ")
+                    )
+                };
+                this.child(
+                    Label::new(note)
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                )
+            })
+            .children(permission_rows(&id, cx))
     }
 }
 
-/// The T2 capabilities an installed extension declared, with their first-use state and the one
-/// way to change it: Revoke when allowed, Allow when refused (plan 4.5; only this page changes a
-/// refusal back).
-fn t2_rows(extension_id: &str, cx: &App) -> Vec<gpui::AnyElement> {
-    use ui_ext_wasm::permissions::PermissionState;
+/// The T1 and T2 capabilities an extension declared, with their state and the one way to change
+/// it: Revoke when allowed; for T2, Allow when refused (plan 4.5; only this page changes a
+/// refusal back). A revoked T1 capability comes back with "Enable" on the next load.
+fn permission_rows(extension_id: &str, cx: &App) -> Vec<gpui::AnyElement> {
+    use ui_ext_wasm::permissions::{PermissionState, Tier};
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return Vec::new();
     };
@@ -1170,15 +1320,18 @@ fn t2_rows(extension_id: &str, cx: &App) -> Vec<gpui::AnyElement> {
     registry_read
         .declared_capabilities(extension_id)
         .into_iter()
-        .filter(|(_, tier, _)| *tier == ui_ext_wasm::permissions::Tier::T2)
-        .map(|(capability, _, _)| {
-            let state = registry_read.t2_state(extension_id, &capability);
+        .filter(|(_, tier, _)| *tier != Tier::T0)
+        .map(|(capability, tier, granted)| {
             let label = capability_chip_label(&capability);
-            let (text, action) = match state {
-                PermissionState::Granted => (format!("{label}: allowed"), Some("Revoke")),
-                PermissionState::Denied => (format!("{label}: not allowed"), Some("Allow")),
-                PermissionState::Ask => (format!("{label}: asks the first time"), None),
-                PermissionState::Unavailable => (format!("{label}: not available"), None),
+            let (text, action) = match (tier, granted) {
+                (Tier::T1, true) => (format!("{label}: allowed"), Some("Revoke")),
+                (Tier::T1, false) => (format!("{label}: not allowed until Enable"), None),
+                _ => match registry_read.t2_state(extension_id, &capability) {
+                    PermissionState::Granted => (format!("{label}: allowed"), Some("Revoke")),
+                    PermissionState::Denied => (format!("{label}: not allowed"), Some("Allow")),
+                    PermissionState::Ask => (format!("{label}: asks the first time"), None),
+                    PermissionState::Unavailable => (format!("{label}: not available"), None),
+                },
             };
             let (id, registry) = (extension_id.to_string(), registry.clone());
             h_flex()
@@ -1229,10 +1382,26 @@ impl Render for FyxExtensionsPage {
             .iter()
             .map(|release| self.render_release(release, window, cx).into_any_element())
             .collect();
-        let installed_rows: Vec<_> = installed
+        let mut installed_rows: Vec<_> = installed
             .iter()
             .map(|installed| self.render_installed(installed, cx).into_any_element())
             .collect();
+        let local: Vec<LocalExtension> = UiExtensionRegistry::global(cx)
+            .map(|registry| registry.read(cx).local_extensions())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|local| {
+                !installed
+                    .iter()
+                    .any(|installed| installed.id.as_str() == local.extension_id)
+            })
+            .collect();
+        installed_rows.extend(
+            local
+                .iter()
+                .map(|local| self.render_local(local, cx).into_any_element()),
+        );
+        let nothing_installed = installed_rows.is_empty();
         v_flex()
             .id("fyx-extensions-page")
             .size_full()
@@ -1245,10 +1414,36 @@ impl Render for FyxExtensionsPage {
                     .justify_between()
                     .child(Headline::new("Fyx Extensions").size(HeadlineSize::Large))
                     .child(
-                        Button::new("fyx-reg-refresh", "Refresh")
-                            .style(ButtonStyle::Outlined)
-                            .disabled(refreshing)
-                            .on_click(move |_, _, cx| hub.update(cx, |hub, cx| hub.refresh(cx))),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("fyx-reg-from-file", "Install from File…")
+                                    .style(ButtonStyle::Outlined)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(crate::InstallUiExtensionFromFile),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("fyx-reg-dev", "Install Dev Extension…")
+                                    .style(ButtonStyle::Outlined)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(crate::InstallDevUiExtension),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("fyx-reg-refresh", "Refresh")
+                                    .style(ButtonStyle::Outlined)
+                                    .disabled(refreshing)
+                                    .on_click(move |_, _, cx| {
+                                        hub.update(cx, |hub, cx| hub.refresh(cx))
+                                    }),
+                            ),
                     ),
             )
             .when_some(status, |this, (status, color)| {
@@ -1288,6 +1483,13 @@ impl Render for FyxExtensionsPage {
                     .color(Color::Muted),
             )
             .children(installed_rows)
+            .when(nothing_installed, |this| {
+                this.child(
+                    Label::new("Nothing installed.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+            })
     }
 }
 
@@ -1324,6 +1526,13 @@ pub fn fyx_extensions_button() -> impl IntoElement {
 
 pub(crate) fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &OpenFyxExtensions, window, cx| {
+        FyxExtensionsPage::open(workspace, window, cx)
+    });
+    // The check runs first, so the page that opens shows it (its own refresh waits for it).
+    workspace.register_action(|workspace, _: &CheckForExtensionUpdates, window, cx| {
+        if let Some(hub) = RegistryHub::global(cx) {
+            hub.update(cx, |hub, cx| hub.check_now(cx));
+        }
         FyxExtensionsPage::open(workspace, window, cx)
     });
 }

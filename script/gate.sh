@@ -104,7 +104,7 @@ win_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else p
 CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
     LOCALAPPDATA="$(win_path "$test_home/LocalAppData")" APPDATA="$(win_path "$test_home/AppData")" \
     XDG_DATA_HOME="$test_home/xdg-data" XDG_CONFIG_HOME="$test_home/xdg-config" \
-    cargo nextest run "${pkgs[@]}" --no-tests=pass "${nextest_filter[@]}" 2>&1 | tail -30
+    cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast "${nextest_filter[@]}" 2>&1 | tail -60
 rm -rf "$test_home"
 profile_after=$(profile_snapshot)
 if [[ "$profile_before" != "$profile_after" ]]; then

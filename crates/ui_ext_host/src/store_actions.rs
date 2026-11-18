@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
 use fs::Fs;
-use gpui::{AsyncWindowContext, Context, PathPromptOptions, PromptLevel, Window, actions};
+use gpui::{AsyncWindowContext, Context, PathPromptOptions, Window, actions};
 use workspace::{Toast, Workspace, notifications::NotificationId};
 
 use crate::{
@@ -53,20 +53,23 @@ pub(crate) fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &UninstallUiExtension, window, cx| {
         run(workspace, window, cx, StoreCommand::Uninstall)
     });
-    workspace.register_action(|_, _: &RestartUiExtension, window, cx| prompt_restart(window, cx));
+    workspace.register_action(|workspace, _: &RestartUiExtension, window, cx| {
+        prompt_restart(workspace, window, cx)
+    });
     workspace.register_action(|_, _: &ShowHiddenStatusItems, _, cx| {
         crate::install::set_status_item_hidden(None, cx)
     });
     workspace.register_action(|workspace, _: &RevokeUiExtensionPermission, window, cx| {
         prompt_revoke(workspace, window, cx)
     });
-    workspace
-        .register_action(|_, _: &OpenExtensionPanel, window, cx| prompt_open_panel(window, cx));
+    workspace.register_action(|workspace, _: &OpenExtensionPanel, window, cx| {
+        prompt_open_panel(workspace, window, cx)
+    });
 }
 
 /// Picks an extension panel by its title and opens it (triage-3, UX F15): the command palette
 /// cannot fill `ToggleExtensionPanel`'s key, so this asks.
-fn prompt_open_panel(window: &mut Window, cx: &mut Context<Workspace>) {
+fn prompt_open_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
     };
@@ -81,18 +84,17 @@ fn prompt_open_panel(window: &mut Window, cx: &mut Context<Workspace>) {
             )
         })
         .map(|surface| (surface.info.title.to_string(), surface.info.key.to_string()))
-        .take(MAX_PICKER_CHOICES)
         .collect();
     if panels.is_empty() {
         return;
     }
-    let mut answers: Vec<&str> = panels.iter().map(|(title, _)| title.as_str()).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    // In the window, filterable: any number of panels (W10 item 8).
+    let answer = crate::choice::choose(
+        workspace,
         "Open which extension panel?",
         None,
-        &answers,
+        panels.iter().map(|(title, _)| title.clone()).collect(),
+        window,
         cx,
     );
     cx.spawn_in(window, async move |_, cx| {
@@ -117,12 +119,7 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
     };
-    let grants: Vec<(String, String)> = registry
-        .read(cx)
-        .revocable()
-        .into_iter()
-        .take(MAX_PICKER_CHOICES)
-        .collect();
+    let grants: Vec<(String, String)> = registry.read(cx).revocable().into_iter().collect();
     if grants.is_empty() {
         toast(
             workspace,
@@ -135,13 +132,12 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
         .iter()
         .map(|(id, capability)| format!("{id}: {capability}"))
         .collect();
-    let mut answers: Vec<&str> = labels.iter().map(String::as_str).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    let answer = crate::choice::choose(
+        workspace,
         "Revoke which permission?",
         Some("The extension is denied it from its next call, and asks again on its next load."),
-        &answers,
+        labels,
+        window,
         cx,
     );
     let fs = workspace.app_state().fs.clone();
@@ -167,7 +163,7 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
 }
 
 /// Picks a loaded extension and restarts it.
-fn prompt_restart(window: &mut Window, cx: &mut Context<Workspace>) {
+fn prompt_restart(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
     };
@@ -179,17 +175,15 @@ fn prompt_restart(window: &mut Window, cx: &mut Context<Workspace>) {
         .collect();
     ids.sort();
     ids.dedup();
-    ids.truncate(MAX_PICKER_CHOICES);
     if ids.is_empty() {
         return;
     }
-    let mut answers: Vec<&str> = ids.iter().map(|id| id.as_ref()).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    let answer = crate::choice::choose(
+        workspace,
         "Restart which UI extension?",
         Some("It loads again on a fresh instance and its panels and status items remount."),
-        &answers,
+        ids.iter().map(|id| id.to_string()).collect(),
+        window,
         cx,
     );
     cx.spawn(async move |_, cx| {
@@ -322,48 +316,75 @@ pub(crate) fn installed_outcome(done: String, loaded: Result<(), String>) -> Out
 }
 
 fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some(store) = store(cx) else {
-        return;
-    };
-    let fs = workspace.app_state().fs.clone();
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
         multiple: false,
         prompt: Some("Install UI Extension Package".into()),
     });
+    install_package(
+        workspace,
+        async move { Ok(paths.await??.and_then(|paths| paths.into_iter().next())) },
+        window,
+        cx,
+    )
+}
+
+/// A `.fyxext` file dropped on a pane: the same dialog as "Install from File…".
+pub(crate) fn install_dropped_package(
+    workspace: &mut Workspace,
+    package: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    install_package(workspace, async move { Ok(Some(package)) }, window, cx)
+}
+
+fn install_package(
+    workspace: &mut Workspace,
+    package: impl Future<Output = Result<Option<PathBuf>>> + 'static,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(store) = store(cx) else {
+        return;
+    };
+    let fs = workspace.app_state().fs.clone();
     cx.spawn_in(window, async move |workspace, cx| {
         let result: Result<Option<Outcome>> = async {
-            let Some(package): Option<PathBuf> =
-                paths.await??.and_then(|paths| paths.into_iter().next())
-            else {
+            let Some(package) = package.await? else {
                 return Ok(None);
             };
-            let info = store.inspect_package(&package, fs.as_ref()).await?;
+            // Read once: what the dialog shows is what installs (integration-5 R5).
+            let bytes = store.read_package_file(&package, fs.as_ref()).await?;
+            let label = package.display().to_string();
+            let info = store
+                .inspect_package_bytes(bytes.clone(), &label, fs.as_ref())
+                .await?;
             let state = store.state(fs.as_ref()).await?;
             let current = state
                 .extensions
                 .get(info.extension_id.as_ref())
                 .map(|entry| format!("\nInstalled now: {}", entry.active))
                 .unwrap_or_default();
-            let detail = format!(
-                "It asks for:\n{}\n\nUnsigned, not from the registry.\nPackage: {}{current}",
-                describe_capability_ids(&info.manifest.capabilities).join("\n"),
-                package.display(),
-            );
-            let answer = workspace.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Info,
+            let detail = file_install_detail(&info, &package, &current);
+            let answer = workspace.update_in(cx, |workspace, window, cx| {
+                crate::choice::confirm(
+                    workspace,
                     &format!("Install {} {}?", info.extension_id, info.version),
                     Some(&detail),
                     &["Install", "Cancel"],
+                    window,
                     cx,
                 )
             })?;
             if answer.await != Ok(0) {
                 return Ok(None);
             }
-            let installed = store.install_package(&package, fs.as_ref()).await?;
+            let source = crate::install_store::VersionSource::local_file(&bytes);
+            let installed = store
+                .install_package_bytes(bytes, &label, source, None, fs.as_ref())
+                .await?;
             let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
             grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
             let loaded = load_outcome(waiter, cx).await;
@@ -392,6 +413,25 @@ fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
     .detach();
 }
 
+/// The file-install dialog's text: every item it is granted, hosts and programs included
+/// (integration-5 R9), and the Zed-extension warning when the package has one (decision Q1).
+pub(crate) fn file_install_detail(
+    info: &crate::install_store::PackageInfo,
+    package: &std::path::Path,
+    current: &str,
+) -> String {
+    format!(
+        "It asks for:\n{}\n{}\nUnsigned, not from the registry.\nPackage: {}{current}",
+        describe_capability_ids(&info.manifest.consent_items()).join("\n"),
+        if info.zed_extension {
+            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
+        } else {
+            String::new()
+        },
+        package.display(),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum StoreCommand {
     RollBack,
@@ -416,9 +456,6 @@ impl StoreCommand {
     }
 }
 
-/// Most extensions a picker offers; the prompt is a stopgap until the Extensions page tab.
-const MAX_PICKER_CHOICES: usize = 8;
-
 fn run(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -436,7 +473,6 @@ fn run(
                 .extensions
                 .keys()
                 .filter(|id| command.applies(&state, id))
-                .take(MAX_PICKER_CHOICES)
                 .cloned()
                 .collect();
             if ids.is_empty() {
@@ -465,17 +501,9 @@ fn run(
                     StoreCommand::Uninstall => format!("{id} {}", entry.active),
                 }
             };
-            let detail = ids.iter().map(describe).collect::<Vec<_>>().join("\n");
-            let mut answers: Vec<&str> = ids.iter().map(String::as_str).collect();
-            answers.push("Cancel");
-            let answer = workspace.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Info,
-                    command.title(),
-                    Some(&detail),
-                    &answers,
-                    cx,
-                )
+            let entries = ids.iter().map(describe).collect::<Vec<_>>();
+            let answer = workspace.update_in(cx, |workspace, window, cx| {
+                crate::choice::choose(workspace, command.title(), None, entries, window, cx)
             })?;
             let Ok(choice) = answer.await else {
                 return Ok(None);
@@ -485,9 +513,21 @@ fn run(
             };
             let message = match command {
                 StoreCommand::RollBack => {
+                    if let Some(blocked) =
+                        crate::fyx_extensions_page::rollback_blocked(&store, id, fs.as_ref(), cx)
+                            .await
+                    {
+                        anyhow::bail!("{blocked}");
+                    }
                     let waiter = cx.update(|_, cx| expect_load(id, cx))?;
                     let version = store.rollback(id, fs.as_ref()).await?;
-                    grant_and_rescan(&store, id, fs.clone(), cx).await?;
+                    // No dialog showed the old version's permissions, so nothing is granted: a
+                    // permission it needs that was revoked waits for "Enable" (integration-5 R4).
+                    cx.update(|_, cx| {
+                        if let Some(registry) = UiExtensionRegistry::global(cx) {
+                            registry.update(cx, |registry, cx| registry.rescan(cx));
+                        }
+                    })?;
                     match load_outcome(waiter, cx).await {
                         Ok(()) => format!("Rolled {id} back to {version}"),
                         Err(reason) => {
@@ -508,7 +548,10 @@ fn run(
                     store.uninstall(id, fs.as_ref()).await?;
                     cx.update(|_, cx| {
                         if let Some(registry) = UiExtensionRegistry::global(cx) {
-                            registry.update(cx, |registry, cx| registry.rescan(cx));
+                            registry.update(cx, |registry, cx| {
+                                registry.forget_consent(id, fs.clone(), cx);
+                                registry.rescan(cx)
+                            });
                         }
                     })?;
                     format!("Uninstalled {id}")

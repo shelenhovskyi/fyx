@@ -407,7 +407,8 @@ impl UiManifest {
                 process
                     .args
                     .iter()
-                    .map(move |pattern| format!("process:spawn@{} {pattern}", process.name)),
+                    // Its own prefix, so a pattern is not shown as one more program.
+                    .map(move |pattern| format!("process:args@{} {pattern}", process.name)),
             )
         });
         let env = self

@@ -8,13 +8,13 @@
 //! - a decoration anchored to a document instead of a path, and `add_image`, return
 //!   `unavailable`.
 //!
-//! The host never sends a 0.2 component the 0.3-only events (`orphaned`, `canvas-click`).
+//! The host never sends a 0.2 component the 0.3-only event `canvas-click`.
 
 use crate::bindings_v0_2::fyx::ui::types as v2;
 use crate::{
-    Align, ButtonStyle, ColorToken, DecorationLocation, DecorationPlacement, DecorationTarget,
-    DismissReason, FlexDirection, HostError, HostErrorCode, Icon, ListRow, LogLevel, ModalWidth,
-    Node, Patch, Props, Surface, SurfaceKind, UiEvent, Update,
+    Align, ButtonStyle, ColorToken, DecorationLocation, DecorationPlacement, DismissReason,
+    FlexDirection, HostError, HostErrorCode, Icon, ListRow, LogLevel, ModalWidth, Node, Patch,
+    Props, Surface, SurfaceKind, UiEvent, Update,
 };
 
 fn needs_0_3(what: &str) -> String {
@@ -94,6 +94,7 @@ fn props(props: &Props) -> Result<v2::Props, String> {
             },
             disabled: button.disabled,
             tooltip: button.tooltip.clone(),
+            accessible_label: button.accessible_label.clone(),
         }),
         Props::Input(input) => v2::Props::Input(v2::InputProps {
             value: input.value.clone(),
@@ -163,9 +164,6 @@ fn surface(surface: &Surface) -> Result<v2::Surface, String> {
         SurfaceKind::Modal(modal) => v2::SurfaceKind::Modal(v2::ModalDescriptor {
             width: modal_width(modal.width),
         }),
-        SurfaceKind::Picker(_) => {
-            return Err(needs_0_3(&format!("picker surface {:?}", surface.id)));
-        }
     };
     Ok(v2::Surface {
         id: surface.id.clone(),
@@ -175,14 +173,8 @@ fn surface(surface: &Surface) -> Result<v2::Surface, String> {
 }
 
 fn location(location: &DecorationLocation) -> Result<v2::DecorationLocation, String> {
-    let path = match &location.target {
-        DecorationTarget::Path(path) => path.clone(),
-        DecorationTarget::Document(_) => {
-            return Err(needs_0_3("a decoration anchored to a document"));
-        }
-    };
     Ok(v2::DecorationLocation {
-        path,
+        path: location.path.clone(),
         line: location.line,
         placement: match location.placement {
             DecorationPlacement::Above => v2::DecorationPlacement::Above,
@@ -599,6 +591,7 @@ mod tests {
                 style: v2::ButtonStyle::Default,
                 disabled: false,
                 tooltip: Some("Run it".into()),
+                accessible_label: None,
             })
         );
         assert!(matches!(&converted[1].props, v2::Props::Input(input) if input.secret));
@@ -676,13 +669,6 @@ mod tests {
             tint: None,
         });
         assert!(nodes(&one(image)).unwrap_err().contains("needs fyx:ui 0.3"));
-        let in_document = DecorationLocation {
-            target: DecorationTarget::Document(7),
-            line: 1,
-            placement: DecorationPlacement::Above,
-            height_lines: None,
-        };
-        assert!(location(&in_document).is_err());
         assert!(add_image(crate::ImageFormat::Png, &[]).is_err());
     }
 }

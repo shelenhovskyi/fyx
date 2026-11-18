@@ -22,20 +22,52 @@ pub const SUPPORTED_API_VERSIONS: &[Version] = &[
 /// The newest frozen version, the host's `MAX_FROZEN_VERSION`. Newer ones are staged: dev builds
 /// of Fyx load them (debug builds, or a process started with `FYX_UI_DEV_EXTENSIONS`), releases
 /// refuse them until they are frozen.
-pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 1, 0);
+pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 2, 0);
 
 /// `[fyx_ui.network] domains` entries per manifest, the host's `network::MAX_DOMAINS`.
 pub const MAX_NETWORK_DOMAINS: usize = 64;
 
 const NETWORK_FETCH: &str = "network:fetch";
 const PROCESS_SPAWN: &str = "process:spawn";
-/// The T2 capabilities the host refuses at load for an `api_version` before they arrive.
-const T2_CAPABILITIES: &[&str] = &[
-    NETWORK_FETCH,
-    PROCESS_SPAWN,
-    "workspace:edit",
-    "agent:observe",
-];
+
+/// What each world accepts, the host's `world_capabilities` (`UiManifest::check_world`,
+/// migration.md §2). 0.3 is the smaller 0.3 (A3): what is planned stays out.
+fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
+    const V0_1: &[&str] = &[
+        "ui:panel",
+        "ui:status-bar",
+        // Accepted, unused: a manifest declares them before its component moves to 0.2.
+        "ui:modal",
+        "ui:editor-decorations",
+    ];
+    const V0_2: &[&str] = &[
+        "ui:panel",
+        "ui:status-bar",
+        "ui:modal",
+        "ui:editor-decorations",
+        "ui:notifications",
+    ];
+    const V0_3: &[&str] = &[
+        "ui:panel",
+        "ui:status-bar",
+        "ui:modal",
+        "ui:editor-decorations",
+        "ui:notifications",
+        "ui:images",
+        "ui:canvas",
+        NETWORK_FETCH,
+        PROCESS_SPAWN,
+        "workspace:edit",
+        "agent:observe",
+    ];
+    if *version >= Version::new(0, 3, 0) {
+        Some(V0_3)
+    } else if *version >= Version::new(0, 2, 0) {
+        Some(V0_2)
+    } else {
+        Some(V0_1)
+    }
+}
 
 /// Capabilities a manifest may declare (platform spec, decision 21). Ones the current world does
 /// not provide yet are accepted with a warning, so a manifest can be written ahead of the host.
@@ -96,7 +128,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
 pub const SURFACE_CAPABILITIES: &[&str] = &["ui:panel", "ui:status-bar", "ui:modal"];
 
 /// fyx:ui 0.3 parts the host does not run yet: their imports trap and their nodes are refused.
-const NOT_BUILT: &str = "a later build of fyx:ui 0.3";
+const NOT_BUILT: &str = "fyx:ui 0.4";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilityStatus {
@@ -276,25 +308,43 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
-            Some((_, CapabilityStatus::Planned(release))) => report.warning(format!(
-                "capability {capability:?} arrives with {release}; the current host ignores it"
-            )),
-            Some((_, CapabilityStatus::Since(since))) => match &api_version {
-                // The host refuses a T2 capability it cannot grant at that version.
-                Some(version)
-                    if version < since && T2_CAPABILITIES.contains(&capability.as_str()) =>
-                {
-                    report.error(format!(
-                        "capability {capability:?} needs [fyx_ui].api_version {since} or newer"
-                    ))
+            Some((_, status)) => {
+                let world = api_version
+                    .as_ref()
+                    .map(|version| (version, world_capabilities(version)));
+                match (status, world) {
+                    // The host refuses what the targeted world does not take.
+                    (status, Some((version, Some(world))))
+                        if !world.contains(&capability.as_str()) =>
+                    {
+                        report.error(match status {
+                            CapabilityStatus::Since(since) => format!(
+                                "capability {capability:?} needs fyx:ui {since}; this extension \
+                                 targets {version}"
+                            ),
+                            CapabilityStatus::Planned(release) => format!(
+                                "capability {capability:?} is not in fyx:ui {version}; it is \
+                                 planned for {release}"
+                            ),
+                        });
+                    }
+                    (CapabilityStatus::Planned(release), _) => report.warning(format!(
+                        "capability {capability:?} arrives with {release}; the current host \
+                         ignores it"
+                    )),
+                    (CapabilityStatus::Since(since), Some((version, _))) if version < since => {
+                        report.warning(format!(
+                            "capability {capability:?} is accepted but unused until fyx:ui \
+                             {since}; this extension targets {version}"
+                        ))
+                    }
+                    _ => {}
                 }
-                Some(version) if version < since => report.warning(format!(
-                    "capability {capability:?} needs fyx:ui {since}; an extension that targets \
-                     {version} cannot use it"
-                )),
-                _ => {}
-            },
+            }
         }
+    }
+    if let Some(version) = &api_version {
+        check_world_tables(&table, version, report);
     }
     check_network(&table, report);
     check_processes(&table, report);
@@ -307,6 +357,24 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
         component: table.component,
         capabilities: table.capabilities,
     })
+}
+
+/// The 0.3 tables only from 0.3 on, as the host's `UiManifest::check_world`.
+fn check_world_tables(table: &FyxUiTable, version: &Version, report: &mut Report) {
+    if *version >= Version::new(0, 3, 0) {
+        return;
+    }
+    for (present, name) in [
+        (table.network.is_some(), "[fyx_ui.network]"),
+        (!table.processes.is_empty(), "[[fyx_ui.processes]]"),
+        (table.process.is_some(), "[fyx_ui.process]"),
+    ] {
+        if present {
+            report.error(format!(
+                "{name} needs fyx:ui 0.3.0; this extension targets {version}"
+            ));
+        }
+    }
 }
 
 /// `[fyx_ui.network]` against `network:fetch`, with the host's count cap and the shape of each
@@ -573,14 +641,29 @@ capabilities = ["ui:panel"]
     }
 
     #[test]
-    fn planned_and_duplicate_capabilities_are_warnings() {
+    fn planned_capabilities_are_errors_and_duplicates_warnings() {
         let text = VALID.replace(
             "[\"ui:panel\"]",
             "[\"ui:panel\", \"ui:panel\", \"ui:hover\"]",
         );
-        let (_, report) = check(&text);
-        assert!(report.errors.is_empty(), "{report:?}");
-        assert_eq!(report.warnings.len(), 2, "{report:?}");
+        // Every world refuses what is planned for 0.4, the smaller 0.3 (A3) too.
+        for version in ["0.1.0", "0.3.0"] {
+            let (_, report) = check(&text.replace(
+                "api_version = \"0.1.0\"",
+                &format!("api_version = \"{version}\""),
+            ));
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert!(
+                report.errors[0].contains(&format!(
+                    "\"ui:hover\" is not in fyx:ui {version}; it is planned for fyx:ui 0.4"
+                )),
+                "{report:?}"
+            );
+            assert!(
+                report.warnings.iter().any(|w| w.contains("declared twice")),
+                "{report:?}"
+            );
+        }
     }
 
     #[test]
@@ -597,13 +680,33 @@ capabilities = ["ui:panel"]
             Some(Version::new(0, 3, 0))
         );
 
+        // Each world takes its own capabilities (the host's `UiManifest::check_world`).
         let early = VALID.replace("[\"ui:panel\"]", "[\"ui:panel\", \"ui:notifications\"]");
         let (_, report) = check(&early);
-        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.errors.len(), 1, "{report:?}");
         assert!(
-            report.warnings[0].contains("needs fyx:ui 0.2.0"),
+            report.errors[0].contains("needs fyx:ui 0.2.0; this extension targets 0.1.0"),
             "{report:?}"
         );
+        let frozen = early.replace("api_version = \"0.1.0\"", "api_version = \"0.2.0\"");
+        let (_, report) = check(&frozen);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(report.warnings.is_empty(), "0.2 is frozen: {report:?}");
+        let images = frozen.replace("\"ui:notifications\"", "\"ui:images\"");
+        let (_, report) = check(&images);
+        assert!(
+            report.errors[0].contains("needs fyx:ui 0.3.0; this extension targets 0.2.0"),
+            "{report:?}"
+        );
+        // 0.1 takes the 0.2 surfaces unused, so a manifest can move first.
+        let ahead = VALID.replace(
+            "[\"ui:panel\"]",
+            "[\"ui:panel\", \"ui:modal\", \"ui:editor-decorations\"]",
+        );
+        let (_, report) = check(&ahead);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.warnings.len(), 2, "{report:?}");
+        assert!(report.warnings[0].contains("accepted but unused until fyx:ui 0.2.0"));
     }
 
     #[test]
@@ -685,7 +788,7 @@ capabilities = ["ui:panel"]
             report
                 .errors
                 .iter()
-                .any(|error| error.contains("needs [fyx_ui].api_version 0.3.0")),
+                .any(|error| error.contains("needs fyx:ui 0.3.0; this extension targets 0.2.0")),
             "{report:?}"
         );
 

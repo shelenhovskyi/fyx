@@ -50,6 +50,8 @@ pub(crate) const SURFACE_CONTEXT: &str = "FyxSurface";
 pub(crate) const BUTTON_CONTEXT: &str = "FyxSurfaceButton";
 /// Key context of a focusable list or table.
 pub(crate) const LIST_CONTEXT: &str = "FyxSurfaceList";
+/// Key context of an extension modal.
+pub(crate) const MODAL_CONTEXT: &str = "ExtensionModal";
 
 /// Takes Tab, Shift-Tab, Space and the page keys while focus is inside a surface.
 pub(crate) fn intercept_keys(cx: &mut App) {
@@ -74,6 +76,9 @@ pub(crate) fn intercept_keys(cx: &mut App) {
             ("space", false) if in_context(BUTTON_CONTEXT) => Box::new(Activate),
             ("pageup", false) if in_context(LIST_CONTEXT) => Box::new(SelectPageUp),
             ("pagedown", false) if in_context(LIST_CONTEXT) => Box::new(SelectPageDown),
+            // A modal moves its first list by a page (design C, integration-5 L4).
+            ("pageup", false) if in_context(MODAL_CONTEXT) => Box::new(SelectPageUp),
+            ("pagedown", false) if in_context(MODAL_CONTEXT) => Box::new(SelectPageDown),
             _ => return,
         };
         window.dispatch_action(action, cx);
@@ -195,6 +200,18 @@ impl SurfaceView {
     }
 
     /// The focused list or table, with its row count and row height.
+    /// How many rows of `list` one page shows (at least one).
+    pub(crate) fn page_rows(&self, list: NodeId, row_height: u16) -> u32 {
+        self.scroll_handles
+            .get(&list)
+            .map(|handle| {
+                let height = handle.0.borrow().base_handle.bounds().size.height;
+                (height / gpui::px(row_height.max(1).into())).floor() as u32
+            })
+            .unwrap_or(0)
+            .max(1)
+    }
+
     fn focused_list(&self, window: &Window, cx: &App) -> Option<(NodeId, u32, u16)> {
         let id = self.focused_node(window, cx)?;
         let tree = self.state().read(cx).tree()?;
@@ -241,15 +258,7 @@ impl SurfaceView {
             return;
         }
         let last = row_count - 1;
-        let page = self
-            .scroll_handles
-            .get(&list)
-            .map(|handle| {
-                let height = handle.0.borrow().base_handle.bounds().size.height;
-                (height / gpui::px(row_height.max(1).into())).floor() as u32
-            })
-            .unwrap_or(0)
-            .max(1);
+        let page = self.page_rows(list, row_height);
         let current = self.selection.get(&list).copied();
         let next = match (how, current) {
             (Selection::Next, Some(index)) => (index + 1).min(last),

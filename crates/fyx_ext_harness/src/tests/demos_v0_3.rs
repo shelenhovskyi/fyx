@@ -63,16 +63,35 @@ fn demo_package(crate_name: &str) -> PathBuf {
         copy_dir(&source.join("assets"), &package.join("assets")).expect("assets");
     }
     std::fs::create_dir_all(&package).expect("package dir");
-    for (from, to) in [
-        (
-            source.join("extension.toml"),
-            package.join("extension.toml"),
-        ),
-        (wasm, package.join("fyx_ui.wasm")),
-    ] {
-        std::fs::copy(&from, &to).unwrap_or_else(|error| panic!("copying {from:?}: {error}"));
-    }
+    let manifest = std::fs::read_to_string(source.join("extension.toml")).expect("manifest");
+    std::fs::write(package.join("extension.toml"), v0_3_manifest(&manifest)).expect("manifest");
+    std::fs::copy(&wasm, package.join("fyx_ui.wasm"))
+        .unwrap_or_else(|error| panic!("copying {wasm:?}: {error}"));
     package
+}
+
+/// The 0.3 copy of a demo manifest, as `script/fyx-build-demos --fyx-ui-0-3` writes it: api_version
+/// 0.3.0, and a `# fyx-ui-0-3:` (or `# fyx-ui-0-2:`) capabilities line in place of the 0.1 one.
+fn v0_3_manifest(manifest: &str) -> String {
+    let marked = |marker: &str| {
+        manifest
+            .lines()
+            .find_map(|line| line.strip_prefix(marker))
+            .map(str::to_string)
+    };
+    let capabilities = marked("# fyx-ui-0-3: ").or_else(|| marked("# fyx-ui-0-2: "));
+    manifest
+        .lines()
+        .filter(|line| !line.starts_with("# fyx-ui-0-"))
+        .map(|line| match (&capabilities, line) {
+            (Some(capabilities), line) if line.starts_with("capabilities = ") => {
+                capabilities.clone()
+            }
+            (_, "api_version = \"0.1.0\"") => "api_version = \"0.3.0\"".to_string(),
+            (_, line) => line.to_string(),
+        })
+        .map(|line| line + "\n")
+        .collect()
 }
 
 fn images_package() -> PathBuf {
@@ -435,6 +454,11 @@ mod t2 {
         assert!(
             matches!(harness.props(PANEL, request), Some(model::Props::Button(button)) if button.disabled),
             "a request is only for the ask state"
+        );
+        assert_eq!(
+            harness.accessible_name(PANEL, request).as_deref(),
+            Some("Request fetch"),
+            "without an accessible-label the label is announced"
         );
         for label in ["Fetch zen", "Run git status", "Insert header", "Start"] {
             harness.click(PANEL, label).expect(label);

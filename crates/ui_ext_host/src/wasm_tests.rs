@@ -7,7 +7,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use ui_ext_wasm::permissions::Tier;
+use ui_ext_wasm::permissions::PermissionState;
 
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use ui_ext::v0_2::{NodeId, Props, TextProps, UiEvent};
@@ -621,15 +621,22 @@ async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
     // Plan 1.5: an update that adds only T0 loads silently (and a changed component needs
     // nothing either) ...
     let manifest = std::fs::read_to_string(ui_dir.join("extension.toml")).expect("manifest");
+    // T1 capabilities are 0.3's (W2c A4), so a manifest with one targets 0.3.
     let with = |capabilities: &str| {
-        std::fs::write(
-            ui_dir.join("extension.toml"),
-            manifest.replace(
-                r#"capabilities = ["ui:status-bar"]"#,
-                &format!("capabilities = [{capabilities}]"),
-            ),
-        )
-        .expect("edited manifest");
+        let mut edited = manifest.replace(
+            r#"capabilities = ["ui:status-bar"]"#,
+            &format!("capabilities = [{capabilities}]"),
+        );
+        // With the 0.3 probe as the component: its status item has the same id.
+        if capabilities.contains("workspace:") {
+            edited = edited.replace(r#"api_version = "0.1.0""#, r#"api_version = "0.3.0""#);
+            std::fs::write(
+                ui_dir.join("fyx_ui.wasm"),
+                ui_ext_wasm::test_support::fixture_wasm("fyx_ui_test_probe_v0_3"),
+            )
+            .expect("0.3 component");
+        }
+        std::fs::write(ui_dir.join("extension.toml"), edited).expect("edited manifest");
     };
     with(r#""ui:status-bar", "ui:panel""#);
     let registry = start(cx);
@@ -637,53 +644,54 @@ async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
     assert!(pending(&registry, cx).is_empty());
 
     // ... while one that adds T1 is held for approval, and approving grants it.
-    with(r#""ui:status-bar", "workspace:read-buffers""#);
+    // The probe's panel and modal need their (T0) capabilities.
+    // `allow_t2` saves the answer through the global file system.
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+    // 0.3 has no T1 capabilities (W2c A3), so the held update adds a T2 one.
+    with(r#""ui:status-bar", "ui:panel", "ui:modal", "workspace:edit""#);
     let registry = start(cx);
     run_until(cx, "the held update", |cx| {
         !pending(&registry, cx).is_empty()
     });
     let held = registry.read_with(cx, |registry, _| registry.pending_consent()[0].clone());
-    assert_eq!(held.new_capabilities, ["workspace:read-buffers"]);
+    assert_eq!(held.new_capabilities, ["workspace:edit"]);
     assert!(!loaded(&registry, cx));
     registry.update(cx, |registry, cx| {
         registry.enable("fyx-test-status-item", fs.clone(), cx)
     });
     run_until(cx, "the approved update", |cx| loaded(&registry, cx));
+    // Approved, it still asks at first use; allowing it grants it.
+    assert_eq!(
+        registry.read_with(cx, |registry, _| registry
+            .t2_state("fyx-test-status-item", "workspace:edit")),
+        PermissionState::Ask
+    );
+    registry.update(cx, |registry, cx| {
+        registry.allow_t2("fyx-test-status-item", "workspace:edit", cx)
+    });
     let check = registry.read_with(cx, |registry, _| registry.capability_check());
     assert!(
         check
-            .check("fyx-test-status-item", "workspace:read-buffers")
+            .check("fyx-test-status-item", "workspace:edit")
             .is_ok()
     );
-    assert_eq!(
-        registry.read_with(cx, |registry, _| registry
-            .declared_capabilities("fyx-test-status-item")),
-        [
-            ("ui:status-bar".to_string(), Tier::T0, true),
-            ("workspace:read-buffers".to_string(), Tier::T1, true),
-        ]
-    );
 
-    // Revoking applies to the next check at once, and the next start asks again.
+    // Revoking applies to the next check at once.
     registry
         .update(cx, |registry, cx| {
-            registry.revoke(
-                "fyx-test-status-item",
-                "workspace:read-buffers",
-                fs.clone(),
-                cx,
-            )
+            registry.revoke("fyx-test-status-item", "workspace:edit", fs.clone(), cx)
         })
         .expect("revokes");
-    let denied = check
-        .check("fyx-test-status-item", "workspace:read-buffers")
-        .unwrap_err();
-    assert_eq!(denied.reason, "not granted");
-    cx.run_until_parked();
-    let registry = start(cx);
-    run_until(cx, "the request after revoking", |cx| {
-        !pending(&registry, cx).is_empty()
-    });
+    assert!(
+        check
+            .check("fyx-test-status-item", "workspace:edit")
+            .is_err()
+    );
+    assert_ne!(
+        registry.read_with(cx, |registry, _| registry
+            .t2_state("fyx-test-status-item", "workspace:edit")),
+        PermissionState::Granted
+    );
 }
 
 /// Plan 1.7: the Extension Inspector shows, for the counter demo, its tree, the events and
@@ -780,7 +788,7 @@ async fn test_unknown_and_t2_capabilities_are_refused(cx: &mut TestAppContext) {
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
     for (capability, expected) in [
         ("ui:pannel", "unknown capability \"ui:pannel\""),
-        ("network:fetch", "not available in this version"),
+        ("network:fetch", "needs fyx:ui 0.3"),
     ] {
         let source = root.path().join(capability.replace(':', "-"));
         std::fs::create_dir_all(&source).expect("source");

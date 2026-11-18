@@ -165,6 +165,7 @@ impl TestRegistry {
                 .collect(),
             network_domains: BTreeSet::new(),
             processes: BTreeSet::new(),
+            zed_extension: false,
         };
         self.releases
             .push(Signed::sign(release, &signing_key(RELEASE_KEY)));
@@ -862,4 +863,161 @@ fn test_check_timer_counts_from_the_last_check() {
     let mut overdue = hub(&dir);
     assert!(overdue.check_due());
     assert!(overdue.next_check_in(started) >= Duration::from_secs(14 * 60));
+}
+
+/// integration-5 R7: a registry package must be the release its index entry names, asking for
+/// nothing beyond what the entry (and so the install dialog) declares.
+#[gpui::test]
+async fn test_registry_package_must_match_its_release(cx: &mut gpui::TestAppContext) {
+    use crate::install_store::test_support::{manifest, zip};
+    cx.executor().allow_parking();
+    let mut test_registry = TestRegistry::new();
+    let honest = zip(&[
+        (
+            "extension.toml",
+            manifest("demo", "1.0.0", "\"ui:status-bar\"").as_bytes(),
+        ),
+        ("fyx_ui.wasm", b"component"),
+    ])
+    .await;
+    test_registry.publish("demo", "1.0.0", &honest, &["ui:status-bar"]);
+    let greedy = zip(&[
+        (
+            "extension.toml",
+            manifest(
+                "greedy",
+                "1.0.0",
+                "\"ui:status-bar\", \"workspace:diagnostics\"",
+            )
+            .as_bytes(),
+        ),
+        ("fyx_ui.wasm", b"component"),
+    ])
+    .await;
+    test_registry.publish("greedy", "1.0.0", &greedy, &["ui:status-bar"]);
+    let impostor = zip(&[
+        (
+            "extension.toml",
+            manifest("demo", "1.0.0", "\"ui:status-bar\"").as_bytes(),
+        ),
+        ("fyx_ui.wasm", b"component"),
+    ])
+    .await;
+    test_registry.publish("impostor", "1.0.0", &impostor, &["ui:status-bar"]);
+    let state = tempfile::tempdir().unwrap();
+    let registry = open(&test_registry, state.path());
+    registry.refresh(now()).await;
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = crate::install_store::InstallStore::new(store_dir.path().to_path_buf());
+    let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+
+    for (id, ok, why) in [
+        ("demo", true, ""),
+        ("greedy", false, "workspace:diagnostics"),
+        ("impostor", false, "not the release"),
+    ] {
+        let (release, bytes) = registry
+            .download_for_install(&ExtensionId::new(id).unwrap(), now())
+            .await
+            .expect("verified download");
+        let result = store
+            .install_registry_package(bytes, &release, None, fs.as_ref())
+            .await;
+        assert_eq!(result.is_ok(), ok, "{id}: {result:?}");
+        if let Err(error) = result {
+            assert!(format!("{error:#}").contains(why), "{id}: {error:#}");
+        }
+    }
+}
+
+/// integration-5 R4: revoking a T1 permission takes it out of the registry install's approval
+/// too, so the next update asks for it again instead of granting it silently.
+#[gpui::test]
+async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
+    use crate::consent::{ConsentRecord, Grant};
+    use crate::install_store::test_support::{manifest, zip};
+    use gpui::AppContext as _;
+    cx.executor().allow_parking();
+    crate::tests::init_test(cx);
+    // 0.3 has no T1 capabilities (W2c A3), so the revoked one is T2.
+    let capabilities = ["ui:status-bar", "workspace:edit"];
+    let mut test_registry = TestRegistry::new();
+    let package = zip(&[
+        (
+            "extension.toml",
+            // T1 capabilities are 0.3's (W2c A4).
+            manifest("demo", "1.0.0", "\"ui:status-bar\", \"workspace:edit\"")
+                .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+                .as_bytes(),
+        ),
+        ("fyx_ui.wasm", b"component"),
+    ])
+    .await;
+    test_registry.publish("demo", "1.0.0", &package, &capabilities);
+    let state = tempfile::tempdir().unwrap();
+    let registry_client = open(&test_registry, state.path());
+    registry_client.refresh(now()).await;
+    let (release, bytes) = registry_client
+        .download_for_install(&ExtensionId::new("demo").unwrap(), now())
+        .await
+        .unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = crate::install_store::InstallStore::new(store_dir.path().to_path_buf());
+    let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    store
+        .install_registry_package(
+            bytes,
+            &release,
+            Some(Permissions::of(&release)),
+            fs.as_ref(),
+        )
+        .await
+        .unwrap();
+    let consent_dir = tempfile::tempdir().unwrap();
+    let registry = cx.new(|_| {
+        crate::UiExtensionRegistry::new(consent_dir.path().join("consent.json"))
+            .with_store(store.clone())
+    });
+    registry.update(cx, |registry, cx| {
+        registry.grant_consent(
+            "demo",
+            ConsentRecord {
+                capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+                grant: Grant::Component {
+                    sha256: "abc".into(),
+                },
+            },
+            fs.clone(),
+            cx,
+        );
+        // A T2 capability is granted at first use; allowed, it can be revoked. The answer is
+        // saved through the global file system.
+        <dyn fs::Fs>::set_global(fs.clone(), cx);
+        // As a load declares them.
+        registry
+            .consent_mut()
+            .declare("demo", capabilities.iter().map(|c| c.to_string()).collect());
+        registry.allow_t2("demo", "workspace:edit", cx);
+        registry
+            .revoke("demo", "workspace:edit", fs.clone(), cx)
+            .expect("revoked");
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        let installed = store.installed_extensions(fs.as_ref()).await.unwrap();
+        if !installed[0]
+            .approved
+            .capabilities
+            .contains("workspace:edit")
+        {
+            assert!(installed[0].approved.capabilities.contains("ui:status-bar"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approval was not taken back"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

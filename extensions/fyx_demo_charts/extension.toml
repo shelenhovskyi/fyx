@@ -12,4 +12,6 @@ authors = ["Fyx"]
 [fyx_ui]
 api_version = "0.1.0"
 component = "fyx_ui.wasm"
-capabilities = ["ui:panel", "ui:canvas"]
+# Worlds before 0.3 refuse `ui:canvas`, so only the 0.3 build declares it.
+capabilities = ["ui:panel"]
+# fyx-ui-0-3: capabilities = ["ui:panel", "ui:canvas"]

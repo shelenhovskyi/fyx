@@ -73,6 +73,38 @@ pub(crate) fn unregister_workspace(id: EntityId, cx: &mut App) {
     }
 }
 
+/// Whether an extension may not see `abs_path`'s contents (integration-5 S1): it matches
+/// `file_scan_exclusions` or `private_files` (always, not only in shield mode), or `fyx_guard`
+/// refuses an agent read of it, in any open project that has it.
+pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
+    let Some(workspaces) = cx.try_global::<EditWorkspaces>() else {
+        return false;
+    };
+    workspaces.0.values().any(|registered| {
+        let Some(project) = registered.project.upgrade() else {
+            return false;
+        };
+        let project = project.read(cx);
+        let Some(project_path) = project.find_project_path(abs_path, cx) else {
+            return false;
+        };
+        let path = project_path.path.as_ref();
+        let settings = WorktreeSettings::get(
+            Some(SettingsLocation {
+                worktree_id: project_path.worktree_id,
+                path,
+            }),
+            cx,
+        );
+        let global = WorktreeSettings::get_global(cx);
+        settings.is_path_excluded(path)
+            || global.is_path_excluded(path)
+            || settings.is_path_private(path)
+            || global.is_path_private(path)
+            || fyx_guard::extension_read_denial(project, &project_path, cx).is_some()
+    })
+}
+
 fn registered(
     worktree: &OpenWorktree,
     cx: &App,
@@ -337,8 +369,8 @@ fn resolve(
             return Err(EditError::NotFound(format!("{display} does not exist")));
         };
         if !worktree.trusted {
-            // Decision 26: restricted mode refuses without a prompt.
-            return Err(EditError::Denied);
+            // Decision 26: restricted mode refuses without a prompt, with its own code (W2c A5).
+            return Err(EditError::UntrustedWorktree);
         }
         check_target(&project, &project_path, &abs_path, exists, &display, cx)?;
         if workspace.is_none() {
@@ -410,11 +442,13 @@ fn check_target(
             "it matches the `private_files` setting",
         ));
     }
-    // The shield's extra rules (`.fyx/security.toml`, agent configs), when it is on.
-    fyx_guard::check_agent_read(project, project_path, cx)
-        .map_err(|why| not_allowed(display, &why))?;
-    fyx_guard::check_config_write(project, abs_path, cx)
-        .map_err(|error| not_allowed(display, &error.to_string()))?;
+    // `fyx_guard`'s rules for extensions, in every security mode (integration-5 S1, S2): its
+    // private paths, agent configs at any depth, `read_only` patterns, links out.
+    if let Some(why) = fyx_guard::extension_read_denial(project, project_path, cx)
+        .or_else(|| fyx_guard::extension_write_denial(project, abs_path, cx))
+    {
+        return Err(not_allowed(display, &why));
+    }
     match worktree.entry_for_path(path) {
         Some(entry) if entry.is_dir() => {
             Err(EditError::Invalid(format!("{display} is a directory")))
@@ -441,10 +475,23 @@ fn check_target(
 }
 
 /// The file on disk (or the directory a new one goes into), links resolved, is inside its
-/// worktree's root.
+/// worktree's root. A file that is on disk though the worktree has no entry for it (an unscanned
+/// directory) is checked itself, links and size included, before it is loaded (integration-5 S8).
 async fn stays_inside(target: &Target) -> Result<(), EditError> {
     let root = target.fs.canonicalize(&target.root).await;
-    let on_disk = if target.exists {
+    let metadata = target.fs.metadata(&target.abs_path).await.ok().flatten();
+    if let Some(metadata) = &metadata {
+        if metadata.is_dir {
+            return Err(EditError::Invalid(format!(
+                "{} is a directory",
+                target.display
+            )));
+        }
+        if metadata.len > MAX_FILE_BYTES {
+            return Err(not_allowed(&target.display, "it is larger than 16 MiB"));
+        }
+    }
+    let on_disk = if target.exists || metadata.is_some() {
         target.abs_path.as_path()
     } else {
         target.abs_path.parent().unwrap_or(&target.root)
