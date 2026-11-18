@@ -17,6 +17,7 @@ mod consent;
 mod decorations;
 pub mod fyx_extensions_page;
 mod icons;
+pub mod images;
 mod inspector;
 mod install;
 pub mod install_store;
@@ -127,5 +128,6 @@ pub fn init(cx: &mut App) {
     keyboard::intercept_keys(cx);
     decorations::init(cx);
     progress::init(cx);
+    images::init(cx);
     fyx_extensions_page::init(cx);
 }

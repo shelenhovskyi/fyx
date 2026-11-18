@@ -490,8 +490,9 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
-        // A new instance (a reload) starts with none of the old one's notifications.
+        // A new instance (a reload) starts with none of the old one's notifications or images.
         self.close_notifications_of(backend.extension_id(), None, cx);
+        clear_images(backend.extension_id(), cx);
         // A reload starts without decorations; the new instance places its own.
         remove_decorations(backend.extension_id(), cx);
         for loaded in self.surfaces_of(backend.extension_id()) {
@@ -1333,6 +1334,7 @@ impl UiExtensionRegistry {
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
                                 this.consent
                                     .declare(&found.extension_id, found.capabilities.clone());
+                                set_image_dir(&found.extension_id, found.dir.clone(), cx);
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
                                     this.watch_component(
@@ -1569,6 +1571,7 @@ impl UiExtensionRegistry {
         // notifications, and the registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
         self.close_notifications_of(extension_id, None, cx);
+        clear_images(extension_id, cx);
         self.io_instances.remove(extension_id);
         self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
@@ -1703,12 +1706,24 @@ impl UiExtensionRegistry {
                     log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
                 }
             }
-            // Images are 0.3 (plan 4.10, 4.11): no renderer for them yet, and a 0.2 component
-            // cannot make these effects.
-            HostEffect::AddImage { handle, .. } | HostEffect::RemoveImage { handle } => {
-                log::debug!(
-                    "fyx:ui: {extension_id}: image {handle} ignored (no image renderer yet)"
-                )
+            // Plan 4.11: generated images, decoded when a node shows them.
+            HostEffect::AddImage {
+                handle,
+                format,
+                bytes,
+            } => {
+                if let Some(images) = crate::images::ImageCache::global(cx) {
+                    images.update(cx, |images, _| {
+                        images.add_generated(extension_id, handle, format, bytes)
+                    });
+                }
+            }
+            HostEffect::RemoveImage { handle } => {
+                if let Some(images) = crate::images::ImageCache::global(cx) {
+                    images.update(cx, |images, cx| {
+                        images.remove_generated(extension_id, handle, cx)
+                    });
+                }
             }
             HostEffect::Notify { id, notification } => {
                 self.show_notification(extension_id, id, notification, cx)
@@ -2396,6 +2411,19 @@ fn ask_permission(
     .detach();
 }
 
+/// Where an extension's image assets are (plan 4.11).
+fn set_image_dir(extension_id: &str, dir: PathBuf, cx: &mut App) {
+    if let Some(images) = crate::images::ImageCache::global(cx) {
+        images.update(cx, |images, _| images.set_dir(extension_id, dir));
+    }
+}
+
+fn clear_images(extension_id: &str, cx: &mut App) {
+    if let Some(images) = crate::images::ImageCache::global(cx) {
+        images.update(cx, |images, cx| images.clear(extension_id, cx));
+    }
+}
+
 fn close_notification_view(open: OpenNotification, cx: &mut App) {
     if let Some(view) = open.view.and_then(|view| view.upgrade()) {
         view.update(cx, |view, cx| view.close_by_host(cx));
@@ -2722,6 +2750,9 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             };
             registry.claim_extension_id(&extension_id, source)?;
             registry.consent.declare(&extension_id, declared);
+            if reload_path.is_dir() {
+                set_image_dir(&extension_id, reload_path.clone(), cx);
+            }
             registry.register_extension(extension, pushed, cx);
             if let Some(component) = component {
                 registry.watch_component(
