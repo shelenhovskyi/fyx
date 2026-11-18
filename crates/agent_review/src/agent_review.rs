@@ -5,6 +5,7 @@
 //! observe [`AgentReviewEvent`]s and read reviews, but there is no path for them to decide whether an
 //! edit lands.
 
+pub mod observe;
 mod proposed_edit;
 mod review_pane;
 mod review_rules;
@@ -477,6 +478,9 @@ pub struct AgentReview {
     prompt_notes: HashMap<acp_v2::SessionId, Vec<String>>,
     /// The latest read of each worktree's rules file: an older read that finishes later is dropped.
     rules_loads: HashMap<PathBuf, u64>,
+    /// The last reviews that left (resolved or closed), newest last, so an event handled after the
+    /// update that removed its review still finds it ([`AgentReview::departed_review`]).
+    departed: VecDeque<Review>,
     /// Rules already announced per turn ([`AgentReviewEvent::DecidedByRule`]).
     announced_rules: HashSet<(TurnId, String)>,
     /// Resolves the paths rules are matched against (symlinks, 8.3 names). Without it (tests that
@@ -490,6 +494,9 @@ enum RulesVerdict {
     PassThrough,
     Review(Option<RuleMatch>),
 }
+
+/// How many reviews that left stay readable, for event handlers that run after they left.
+const DEPARTED_KEPT: usize = 16;
 
 /// How many ended turns keep their summary (decided files, unreviewed changes).
 const ENDED_TURNS_KEPT: usize = 16;
@@ -1022,7 +1029,7 @@ impl AgentReview {
                         "fyx: agent review: the write was dropped before its review was submitted"
                     );
                 }
-                self.reviews.retain(|review| review.id != id);
+                self.depart(id);
                 cx.emit(AgentReviewEvent::Resolved(id));
                 cx.emit(AgentReviewEvent::Closed(id));
             }
@@ -1084,7 +1091,7 @@ impl AgentReview {
         // An allowed preview stays until the agent's write adopts its decisions; after a denial no
         // write follows.
         if verdict != PermissionVerdict::Allow || closing {
-            self.reviews.retain(|review| review.id != id);
+            self.depart(id);
             cx.emit(AgentReviewEvent::Closed(id));
         }
         cx.notify();
@@ -1128,12 +1135,30 @@ impl AgentReview {
             review.closing = true;
             return;
         }
-        let count = self.reviews.len();
-        self.reviews.retain(|review| review.id != id);
-        if self.reviews.len() != count {
+        if self.depart(id) {
             cx.emit(AgentReviewEvent::Closed(id));
             cx.notify();
         }
+    }
+
+    /// Removes review `id` (its responder, so a held write fails), keeping it among the last few
+    /// departed. Returns whether it was there.
+    fn depart(&mut self, id: ReviewId) -> bool {
+        let Some(index) = self.reviews.iter().position(|review| review.id == id) else {
+            return false;
+        };
+        let mut review = self.reviews.remove(index);
+        review.responder = None;
+        self.departed.push_back(review);
+        if self.departed.len() > DEPARTED_KEPT {
+            self.departed.pop_front();
+        }
+        true
+    }
+
+    /// A review that left recently (resolved or closed), as it was when it left.
+    pub fn departed_review(&self, id: ReviewId) -> Option<&Review> {
+        self.departed.iter().rev().find(|review| review.id == id)
     }
 
     fn open_review_mut(&mut self, id: ReviewId) -> Result<&mut Review> {
@@ -2413,7 +2438,10 @@ mod tests {
         assert!(feedback.contains("leave five alone"), "{feedback}");
         assert_eq!(
             events.borrow()[..2],
-            [AgentReviewEvent::ModeChanged(true), AgentReviewEvent::Opened(id)]
+            [
+                AgentReviewEvent::ModeChanged(true),
+                AgentReviewEvent::Opened(id)
+            ]
         );
         assert_eq!(
             events.borrow()[events.borrow().len() - 2..],

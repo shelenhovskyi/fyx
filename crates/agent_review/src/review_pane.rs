@@ -1868,7 +1868,13 @@ mod tests {
         // Editors that decorate or annotate other editors can tell the review's apart.
         pane.read_with(cx, |pane, cx| {
             let current = pane.current.as_ref().unwrap();
-            assert!(current.editor.read(cx).addon::<AgentReviewEditor>().is_some());
+            assert!(
+                current
+                    .editor
+                    .read(cx)
+                    .addon::<AgentReviewEditor>()
+                    .is_some()
+            );
             let comment = pane.comment_editor.as_ref().unwrap();
             assert!(comment.read(cx).addon::<AgentReviewEditor>().is_some());
         });
