@@ -2569,6 +2569,38 @@ mod notification_tests {
         );
     }
 
+    /// An owner with no tree (a closed modal) still hears the event, so the host frees the slot.
+    #[gpui::test]
+    async fn test_events_reach_an_unmounted_owner(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let modal = ui_ext::v0_2::Surface {
+            id: "picker".into(),
+            title: "Picker".into(),
+            kind: ui_ext::v0_2::SurfaceKind::Modal(ui_ext::v0_2::ModalDescriptor {
+                width: ui_ext::v0_2::ModalWidth::Medium,
+            }),
+        };
+        registry.update(cx, |registry, cx| {
+            registry.apply_effect("fake", HostEffect::AddSurface(modal), cx)
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        let mut owned_by_modal = notification(false);
+        owned_by_modal.owner = "picker".into();
+        let (view, vcx) = show(&registry, 4, owned_by_modal, cx);
+        view.update(vcx, |view, cx| {
+            view.close(NotificationCloseReason::User, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                4,
+                NotificationCloseReason::User
+            ))]
+        );
+    }
+
     /// M.1: an open notification whose window goes away tells its owner `window-closed`.
     #[gpui::test]
     async fn test_notification_window_closes(cx: &mut TestAppContext) {

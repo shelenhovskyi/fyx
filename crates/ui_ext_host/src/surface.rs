@@ -1376,11 +1376,17 @@ fn reply_error_effects(error: &anyhow::Error) -> Option<Vec<HostEffect>> {
         .map(|reply_error| reply_error.effects.clone())
 }
 
+/// Walks from the roots instead of copying the tree (triage-3, PERF 15).
 fn count_all_inputs(tree: &Tree, input_sets: &mut HashMap<NodeId, u64>) {
-    for node in tree.to_nodes() {
-        if let Props::Input(_) = node.props {
-            *input_sets.entry(node.id).or_default() += 1;
+    let mut stack: Vec<NodeId> = tree.roots().to_vec();
+    while let Some(id) = stack.pop() {
+        let Some(node) = tree.get(id) else {
+            continue;
+        };
+        if let Props::Input(_) = node.props() {
+            *input_sets.entry(id).or_default() += 1;
         }
+        stack.extend_from_slice(node.children());
     }
 }
 

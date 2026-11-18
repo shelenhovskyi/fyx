@@ -772,21 +772,61 @@ impl UiExtensionRegistry {
         event: UiEvent,
         cx: &mut Context<Self>,
     ) {
-        if let Some(surface) = self.surface_of(extension_id, owner) {
-            surface
-                .state
-                .update(cx, |state, cx| state.dispatch(event, cx));
-            return;
-        }
-        let state = Decorations::global(cx).and_then(|decorations| {
-            let decorations = decorations.read(cx);
-            let id = decorations.extension_decoration(extension_id, owner)?;
-            decorations.state(id).cloned()
-        });
+        let state = match self.surface_of(extension_id, owner) {
+            Some(surface) => Some(surface.state.clone()),
+            None => Decorations::global(cx).and_then(|decorations| {
+                let decorations = decorations.read(cx);
+                let id = decorations.extension_decoration(extension_id, owner)?;
+                decorations.state(id).cloned()
+            }),
+        };
         match state {
-            Some(state) => state.update(cx, |state, cx| state.dispatch(event, cx)),
+            Some(state) if state.read(cx).tree().is_some() => {
+                state.update(cx, |state, cx| state.dispatch(event, cx))
+            }
+            Some(_) => self.deliver_to_unmounted(extension_id, owner, event, cx),
             None => log::debug!("fyx:ui: {extension_id}: no owner {owner:?} for {event:?}"),
         }
+    }
+
+    /// An event for an owner with no tree right now (a closed modal, a remount): the surface
+    /// would drop it, but the extension must still hear it, and the host frees the notification's
+    /// or progress's slot when it passes. Its effects apply; the update has no tree to go to.
+    fn deliver_to_unmounted(
+        &mut self,
+        extension_id: &str,
+        owner: &str,
+        event: UiEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(backend) = self.backends.get(extension_id).cloned() else {
+            return;
+        };
+        log::debug!("fyx:ui: {extension_id}: {owner:?} is not mounted, sending {event:?} anyway");
+        let call = backend.handle_event(owner, event);
+        let extension_id: Arc<str> = extension_id.into();
+        cx.spawn(async move |this, cx| {
+            let effects = match call.await {
+                Ok(reply) => reply.effects,
+                Err(error) => match error.downcast_ref::<crate::backend::ReplyError>() {
+                    Some(rejected) => rejected.effects.clone(),
+                    None => {
+                        log::error!(
+                            "fyx:ui: {extension_id}: event for an unmounted surface failed: {}",
+                            ui_ext::sanitize_for_log(&format!("{error:#}"))
+                        );
+                        return;
+                    }
+                },
+            };
+            this.update(cx, |this, cx| {
+                for effect in effects {
+                    this.apply_effect(&extension_id, effect, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The workspace whose window became active; modals open there.
