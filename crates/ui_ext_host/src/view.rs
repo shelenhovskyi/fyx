@@ -791,9 +791,7 @@ impl Renderer<'_, '_> {
                 .icon_size(IconSize::Small)
                 .style(style)
                 .disabled(props.disabled)
-                .when_some(tooltip, |this, text| {
-                    this.tooltip(Tooltip::text(text))
-                })
+                .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(focus, |this, focus| this.track_focus(focus))
                 .when_some(on_click, |this, on_click| this.on_click(on_click))
                 .into_any_element()

@@ -671,6 +671,7 @@ impl UiExtensionRegistry {
                         LoadOptions {
                             cache: found.cache.clone(),
                             capability_check: checker,
+                            allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
                             ..LoadOptions::default()
                         },
                         fs.clone(),
@@ -1033,8 +1034,12 @@ impl UiExtensionRegistry {
                     log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
                 }
             }
-            effect => {
-                log::warn!("fyx:ui: {extension_id}: {effect:?} is not handled by this renderer yet")
+            // Images are 0.3 (plan 4.10, 4.11): no renderer for them yet, and a 0.2 component
+            // cannot make these effects.
+            HostEffect::AddImage { handle, .. } | HostEffect::RemoveImage { handle } => {
+                log::debug!(
+                    "fyx:ui: {extension_id}: image {handle} ignored (no image renderer yet)"
+                )
             }
         }
     }
@@ -1278,6 +1283,21 @@ pub fn init(cx: &mut App) {
     load_dev_extensions(cx);
     follow_dev_paths_setting(cx);
     watch_installed_extensions(cx);
+}
+
+/// Whether a staged `fyx:ui` version (0.2 before it is frozen) may load (migration.md §2): on Dev
+/// and Nightly builds, and for dev extensions. `None` before the release channel is set (tests),
+/// which leaves `ui_ext_wasm`'s default.
+fn staged_allowed(dev_extension: bool, cx: &App) -> Option<bool> {
+    let channel = release_channel::ReleaseChannel::try_global(cx)?;
+    let dev_or_nightly = matches!(
+        channel,
+        release_channel::ReleaseChannel::Dev | release_channel::ReleaseChannel::Nightly
+    );
+    Some(ui_ext_wasm::staged_api_allowed(
+        dev_or_nightly,
+        dev_extension,
+    ))
 }
 
 /// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
@@ -1750,6 +1770,8 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     });
     let options = LoadOptions {
         capability_check: checker,
+        // A `FYX_UI_DEV_EXTENSIONS` entry is a dev extension.
+        allow_staged: cx.update(|cx| staged_allowed(true, cx)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

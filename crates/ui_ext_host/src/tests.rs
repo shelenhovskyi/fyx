@@ -1932,6 +1932,118 @@ async fn test_secret_input_is_redacted(cx: &mut TestAppContext) {
     assert!(history.contains("<secret>"), "{history}");
 }
 
+/// A backend whose calls answer only when the test says so.
+#[derive(Default)]
+struct GatedBackend {
+    mounts: RefCell<Vec<futures::channel::oneshot::Sender<Result<Reply<Tree>>>>>,
+    events: RefCell<Vec<futures::channel::oneshot::Sender<Result<Reply<Update>>>>>,
+}
+
+impl UiBackend for GatedBackend {
+    fn extension_id(&self) -> &str {
+        "gated"
+    }
+
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.mounts.borrow_mut().push(tx);
+        async move { rx.await.unwrap_or_else(|_| Err(anyhow!("dropped"))) }.boxed_local()
+    }
+
+    fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.events.borrow_mut().push(tx);
+        async move { rx.await.unwrap_or_else(|_| Err(anyhow!("dropped"))) }.boxed_local()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
+        async {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Vec::new(),
+            })
+        }
+        .boxed_local()
+    }
+}
+
+fn gated_tree(label: &str) -> Result<Reply<Tree>> {
+    Ok(Reply {
+        effects: Vec::new(),
+        value: Tree::from_nodes(
+            vec![
+                node(1, None, Props::Flex(FlexProps::default())),
+                node(2, Some(1), text(label)),
+                node(3, Some(1), Props::Button(ButtonProps::default())),
+            ],
+            TreeLimits::default(),
+        )
+        .unwrap(),
+    })
+}
+
+/// Triage-3 #4: after a reload (`replace_backend`), a late reply or error of the old instance
+/// is dropped: it neither patches the new tree nor stops the healthy extension. A surface that
+/// failed while its mount was in flight stays failed when that mount answers.
+#[gpui::test]
+async fn test_stale_instance_results_are_dropped(cx: &mut TestAppContext) {
+    init_test(cx);
+    let old = Rc::new(GatedBackend::default());
+    let dyn_old: Rc<dyn UiBackend> = old.clone();
+    let state = cx.new(|cx| SurfaceState::new(dyn_old, panel_surface("p", "P"), None, cx));
+    old.mounts
+        .borrow_mut()
+        .remove(0)
+        .send(gated_tree("old"))
+        .ok();
+    cx.run_until_parked();
+    // A click on the old instance, still unanswered when the reload happens.
+    state.update(cx, |state, cx| state.dispatch(UiEvent::Click(3), cx));
+    cx.run_until_parked();
+    assert_eq!(old.events.borrow().len(), 1);
+
+    let new = Rc::new(GatedBackend::default());
+    let dyn_new: Rc<dyn UiBackend> = new.clone();
+    state.update(cx, |state, cx| {
+        state.replace_backend(dyn_new, panel_surface("p", "P"), cx)
+    });
+    new.mounts
+        .borrow_mut()
+        .remove(0)
+        .send(gated_tree("new"))
+        .ok();
+    cx.run_until_parked();
+    assert_eq!(props_of(&state, 2, cx), text("new"));
+
+    // The old instance's answer arrives: a patch, then (another call) a fatal error.
+    old.events
+        .borrow_mut()
+        .remove(0)
+        .send(Ok(Reply {
+            effects: Vec::new(),
+            value: Update::Patches(vec![Patch::SetProps(2, text("stale"))]),
+        }))
+        .ok();
+    cx.run_until_parked();
+    assert_eq!(props_of(&state, 2, cx), text("new"), "no stale patch");
+    assert_eq!(failure(&state, cx), None);
+
+    // A failure while a mount is in flight: the mount's answer does not revive the surface.
+    state.update(cx, |state, cx| state.retry(cx));
+    state.update(cx, |state, cx| state.fail("stopped".into(), false, cx));
+    if let Some(mount) = new.mounts.borrow_mut().pop() {
+        mount.send(gated_tree("revived")).ok();
+    }
+    cx.run_until_parked();
+    assert_eq!(failure(&state, cx).as_deref(), Some("stopped"));
+}
+
 /// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).
 #[gpui::test]
 async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {
