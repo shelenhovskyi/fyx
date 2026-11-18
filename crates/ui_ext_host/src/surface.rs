@@ -143,6 +143,8 @@ pub struct SurfaceState {
     tick_errors: TickErrors,
     /// A due tick met a surface that was mounting: it goes out after the mount.
     tick_waits_for_mount: bool,
+    /// A modal shown again while its `dismissed` was still queued: mount once the queue is empty.
+    mount_after_queue: bool,
     /// Shown somewhere: a status item always; a panel while it is the active panel of an open
     /// dock in some window (reported by its containers). Ticks wait while hidden.
     visible_in: HashSet<EntityId>,
@@ -282,7 +284,13 @@ impl SurfaceState {
         }
         self.phase = Phase::Mounting;
         self.revision += 1;
-        self.mount(cx);
+        // A `dismissed` from the last showing goes out first (integration-5 L2): the mount waits
+        // for the queue.
+        if self.event_worker_running || !self.events.is_empty() {
+            self.mount_after_queue = true;
+        } else {
+            self.mount(cx);
+        }
         cx.notify();
     }
 
@@ -296,6 +304,7 @@ impl SurfaceState {
         }
         self.phase = Phase::Closed;
         self.events.clear();
+        self.mount_after_queue = false;
         self.lists.clear();
         self.tick = None;
         self._tick_timer = None;
@@ -405,6 +414,7 @@ impl SurfaceState {
             _tick_timer: None,
             tick_errors: TickErrors::default(),
             tick_waits_for_mount: false,
+            mount_after_queue: false,
             visible_in: HashSet::default(),
             input_sets: HashMap::default(),
             revision: 0,
@@ -542,6 +552,11 @@ impl SurfaceState {
         self.backend_epoch += 1;
         self.rules = ApiRules::for_version(&self.backend.api_version());
         self.events.clear();
+        // The old instance's tick goes with it; the new one asks for its own (integration-5 L1).
+        self.tick = None;
+        self._tick_timer = None;
+        self.tick_waits_for_mount = false;
+        self.mount_after_queue = false;
         self.retry(cx);
     }
 
@@ -708,6 +723,9 @@ impl SurfaceState {
                     let next = this.next_item();
                     if next.is_none() {
                         this.event_worker_running = false;
+                        if std::mem::take(&mut this.mount_after_queue) && this.is_open() {
+                            this.mount(cx);
+                        }
                     }
                     next.map(|next| {
                         let call = match &next {
@@ -902,7 +920,21 @@ impl SurfaceState {
     ) {
         let finished = cx.background_executor().now();
         if let Some(link) = self.link.clone() {
-            link.record_tick(finished, finished - started, cx);
+            // The guest's own execution, not the time the call waited behind other calls of the
+            // instance (integration-5 L3); the wall time when the backend keeps no record.
+            let busy = self
+                .backend
+                .diagnostics()
+                .and_then(|diagnostics| {
+                    diagnostics
+                        .calls
+                        .iter()
+                        .rev()
+                        .find(|call| call.kind == "tick" && call.surface_id == self.surface.id)
+                        .map(|call| call.executed)
+                })
+                .unwrap_or(finished - started);
+            link.record_tick(finished, busy, cx);
         }
         match result {
             Ok(Reply { effects, value }) => {

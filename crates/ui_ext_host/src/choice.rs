@@ -295,13 +295,11 @@ impl Render for ConfirmModal {
             .on_action(cx.listener(Self::cancel))
             .child(Label::new(self.title.clone()))
             .when_some(self.detail.clone(), |this, detail| {
-                this.child(
-                    div().children(detail.lines().map(|line| {
-                        Label::new(line.to_string())
-                            .size(LabelSize::Small)
-                            .color(ui::Color::Muted)
-                    })),
-                )
+                this.child(div().children(detail.lines().map(|line| {
+                    Label::new(line.to_string())
+                        .size(LabelSize::Small)
+                        .color(ui::Color::Muted)
+                })))
             })
             .child(h_flex().justify_end().gap_1().children(buttons))
     }
@@ -323,9 +321,20 @@ mod tests {
         let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
         // The workspace focuses its pane first.
         crate::decoration_tests::redraw(cx);
-        let entries = vec!["Counter".to_string(), "TODOs".to_string(), "Charts".to_string()];
+        let entries = vec![
+            "Counter".to_string(),
+            "TODOs".to_string(),
+            "Charts".to_string(),
+        ];
         let mut answer = workspace.update_in(cx, |workspace, window, cx| {
-            choose(workspace, "Open which extension panel?", None, entries, window, cx)
+            choose(
+                workspace,
+                "Open which extension panel?",
+                None,
+                entries,
+                window,
+                cx,
+            )
         });
         cx.run_until_parked();
         assert!(
@@ -345,14 +354,20 @@ mod tests {
         );
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
-        assert_eq!(answer.try_recv(), Ok(Some(1)), "the filter leaves TODOs only");
+        assert_eq!(
+            answer.try_recv(),
+            Ok(Some(1)),
+            "the filter leaves TODOs only"
+        );
 
         let mut answer = workspace.update_in(cx, |workspace, window, cx| {
             confirm(
                 workspace,
                 "Install?",
-                Some("It asks for:
-Nothing"),
+                Some(
+                    "It asks for:
+Nothing",
+                ),
                 &["Install", "Cancel"],
                 window,
                 cx,
@@ -364,7 +379,14 @@ Nothing"),
         assert_eq!(answer.try_recv(), Ok(Some(0)));
 
         let mut answer = workspace.update_in(cx, |workspace, window, cx| {
-            confirm(workspace, "Install?", None, &["Install", "Cancel"], window, cx)
+            confirm(
+                workspace,
+                "Install?",
+                None,
+                &["Install", "Cancel"],
+                window,
+                cx,
+            )
         });
         crate::decoration_tests::redraw(cx);
         cx.dispatch_action(menu::Cancel);
