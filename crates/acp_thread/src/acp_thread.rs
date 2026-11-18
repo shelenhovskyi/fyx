@@ -8019,7 +8019,7 @@ impl AcpThread {
                     .unwrap_or_else(|| buffer.read(cx).snapshot())
             })?;
             // fyx: the host review gate (crates/agent_review) decides which hunks land.
-            let (content, feedback) =
+            let (content, feedback, reviewed) =
                 fyx_review::gate_agent_write(&this, path, &buffer, &snapshot, content, cx).await?;
             let edits = cx
                 .background_executor()
@@ -8049,6 +8049,8 @@ impl AcpThread {
                 });
             }
 
+            // fyx: the reviewed text lands only on the version the review checked (no await between).
+            cx.update(|cx| reviewed.ensure_unchanged(&buffer, cx))?;
             let format_on_save = cx.update(|cx| {
                 action_log.update(cx, |action_log, cx| {
                     action_log.buffer_read(buffer.clone(), cx);

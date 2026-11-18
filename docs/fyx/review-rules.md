@@ -39,9 +39,14 @@ the file is an error.
 
 The `deny` and `always_ask` rules apply even with review mode off, because they only make review stricter.
 
-Each decision is listed in the turn's review pane with the rule that made it, for example
-"by rule `deny = "*.env"` in …/.fyx/review.toml". A review opened by `always_ask` says so above
-the diff.
+In review mode, Fyx also always asks for agent instruction files, wherever they are: `AGENTS.md`,
+`CLAUDE.md`, `GEMINI.md` and `.rules`. An edit to one changes what every later agent run does, so
+"Accept all in turn" and `auto_accept` patterns do not cover them.
+
+When a rule refuses an edit or lets one land without review, a notification says so, once per
+turn and rule, with **Show Review Rules**. Each decision is also listed in the turn's review pane
+with the rule that made it, for example "by rule `deny = "*.env"` in …/.fyx/review.toml". A
+review opened by `always_ask` says so above the diff.
 
 <!-- crates/agent_review/src/agent_review.rs: review_write, open_permission_preview -->
 
@@ -60,8 +65,20 @@ the diff.
   - `auto_accept` patterns from your settings are relative to the root of the worktree that holds
     the file.
 - Patterns use [globset](https://docs.rs/globset) syntax (`?`, `[abc]`, `{a,b}`).
-- Fyx matches the file the edit really goes to: the opened file's path, with `.` and `..`
-  resolved. On Windows and macOS the comparison ignores case, as those file systems do, so
+- The gitignore spellings mean what they mean there:
+  - a leading `/` anchors the pattern at the root: `/Cargo.lock` matches only the root `Cargo.lock`;
+  - a trailing `/` names a directory and everything in it: `secrets/` matches `secrets/key.pem` and
+    `app/secrets/key.pem`, `/config/` only the root `config/`;
+  - a leading `./` is dropped: `./build/**` is `build/**`.
+- Fyx matches every spelling of the file the edit really goes to:
+  - the path the agent sent and the opened file's path, with `.` and `..` resolved and a `\\?\`
+    prefix dropped;
+  - the same path with Windows' silent renames undone: `.env.`, `.env ` and `.env::$DATA` are `.env`;
+  - the real file on disk, with symlinks and Windows 8.3 short names (`PROGRA~1`) resolved. A
+    symlink committed to the repository cannot move a denied file out of reach.
+- A `deny` or `always_ask` pattern applies when any spelling matches it. `auto_accept` applies only
+  when every spelling matches, so a symlink that leads out of the project is never auto-accepted.
+- On Windows and macOS the comparison ignores case, as those file systems do, so
   `Config/PROD.ENV` matches `*.env`.
 - In a project with several worktrees, each worktree's own `.fyx/review.toml` covers its files.
   For nested worktrees, the innermost one wins.
@@ -73,13 +90,15 @@ the diff.
 - A change that only adds restrictions applies at once.
 - A change that removes any restriction waits until you confirm it. Removing a `deny` pattern,
   dropping an `always_ask` pattern, or deleting the file all count.
-  - A notification lists what would be removed and offers **Apply new review rules**. Until you
-    click it, the previous rules stay in force.
+  - A notification lists what would be removed and offers **Apply new review rules**; the
+    command `agent review: apply review rules` does the same later. Until you apply them, the
+    previous rules stay in force.
   - This also holds when a new thread starts, including a subagent the agent opens itself: an
     agent cannot get looser rules applied by starting a thread.
 - A file that cannot be read or parsed (bad TOML, an unknown key, an invalid pattern) keeps the
-  previous rules in force. A notification shows the error. Fyx never applies half a file and never
-  drops rules silently.
+  previous rules in force. A notification says where the error is (line and column, or which
+  pattern), without quoting the file. Fyx never applies half a file and never drops rules
+  silently.
 - Fyx remembers, per worktree, the rules you last agreed to (in `agent_review/confirmed_rules.json`
   in its data directory). Until you agree to a change, every remembered restriction stays in force
   together with anything stricter in the file, across restarts too: an agent that deletes a `deny`

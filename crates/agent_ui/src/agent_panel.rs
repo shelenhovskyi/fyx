@@ -6712,7 +6712,7 @@ impl Render for AgentPanel {
     }
 }
 
-struct OnboardingUpsell;
+pub struct OnboardingUpsell; // fyx: public so `zed::fyx` reads its key
 
 impl Dismissable for OnboardingUpsell {
     const KEY: &'static str = "dismissed-trial-upsell";

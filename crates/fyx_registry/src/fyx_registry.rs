@@ -1,11 +1,13 @@
 //! Client-side core of the Fyx extension registry (Platform 1, decisions 14–21).
 //!
-//! Pure functions only: no network, no file system, no clock. Callers pass in the bytes they
-//! fetched and the current time, and get back verified documents and decisions. The formats are
-//! documented in `docs/fyx/platform/registry-format.md`.
+//! No network, no file system, no clock. Callers pass in the bytes they (or a [`Fetch`] they
+//! supply) fetched and the current time, and get back verified documents and decisions; the
+//! [`RegistryClient`] ties them together in the order of trust. The formats are documented in
+//! `docs/fyx/platform/registry-format.md`.
 
 mod blocklist;
 mod canonical;
+mod client;
 mod index;
 mod signing;
 mod snapshot;
@@ -21,6 +23,10 @@ pub use blocklist::{
     BLOCKLIST_FETCH_INTERVAL, BLOCKLIST_SCHEMA, BLOCKLIST_STALE_AFTER, BlockEntry, Blocklist,
     BlocklistCache, CacheUpdate, Comparator, ComparatorOp, Freshness, KeepReason,
     MAX_BLOCK_ENTRIES, MAX_BLOCKLIST_SIZE, MAX_BLOCKLIST_VALIDITY, VerifiedBlocklist, VersionRange,
+};
+pub use client::{
+    DownloadError, Fetch, FetchRequest, IndexRefresh, InstallError, InstallPlan, RegistryClient,
+    RegistryFile, StoredState, Unavailable,
 };
 pub use index::{
     INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
@@ -182,25 +188,36 @@ impl Tier {
         }
     }
 
+    /// Every capability this version of Fyx knows, with its tier. The registry template's
+    /// `policy/capability-tiers.json` must list exactly these (a test checks it).
+    pub const KNOWN_CAPABILITIES: [(&'static str, Tier); 19] = [
+        ("ui:panel", Tier::T0),
+        ("ui:status-bar", Tier::T0),
+        ("ui:modal", Tier::T0),
+        ("ui:notifications", Tier::T0),
+        ("ui:editor-decorations", Tier::T0),
+        ("ui:picker", Tier::T0),
+        ("ui:code-lens", Tier::T0),
+        ("ui:hover", Tier::T0),
+        ("ui:virtual-documents", Tier::T0),
+        ("ui:commands", Tier::T0),
+        ("ui:images", Tier::T0),
+        ("ui:canvas", Tier::T0),
+        ("workspace:read-buffers", Tier::T1),
+        ("workspace:read-files", Tier::T1),
+        ("workspace:diagnostics", Tier::T1),
+        ("network:fetch", Tier::T2),
+        ("process:spawn", Tier::T2),
+        ("workspace:edit", Tier::T2),
+        ("agent:observe", Tier::T2),
+    ];
+
     /// The tier of a capability this version of Fyx knows, `None` for any other.
     pub fn of_capability(capability: &str) -> Option<Tier> {
-        Some(match capability {
-            "ui:panel"
-            | "ui:status-bar"
-            | "ui:modal"
-            | "ui:notifications"
-            | "ui:editor-decorations"
-            | "ui:picker"
-            | "ui:code-lens"
-            | "ui:hover"
-            | "ui:virtual-documents"
-            | "ui:commands"
-            | "ui:images"
-            | "ui:canvas" => Tier::T0,
-            "workspace:read-buffers" | "workspace:read-files" | "workspace:diagnostics" => Tier::T1,
-            "network:fetch" | "process:spawn" | "workspace:edit" | "agent:observe" => Tier::T2,
-            _ => return None,
-        })
+        Self::KNOWN_CAPABILITIES
+            .iter()
+            .find(|(known, _)| *known == capability)
+            .map(|(_, tier)| *tier)
     }
 
     /// Like [`Tier::of_capability`], but a capability this version does not know counts as T2:
@@ -373,6 +390,23 @@ mod tests {
         assert_eq!(Tier::of_capability("ui:web"), None);
         assert_eq!(Tier::of_capability_or_highest("ui:web"), Tier::T2);
         assert!(Tier::T0 < Tier::T1 && Tier::T1 < Tier::T2);
+    }
+
+    /// The registry template's policy script reads its tiers from this file; it must agree with
+    /// the client, entry for entry.
+    #[test]
+    fn the_registry_template_knows_the_same_tiers() {
+        let file: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tools/fyx-extensions-template/policy/capability-tiers.json"
+        ))
+        .expect("JSON");
+        let listed: std::collections::BTreeMap<String, Tier> =
+            serde_json::from_value(file["capabilities"].clone()).expect("capability -> tier");
+        let known: std::collections::BTreeMap<String, Tier> = Tier::KNOWN_CAPABILITIES
+            .iter()
+            .map(|(capability, tier)| (capability.to_string(), *tier))
+            .collect();
+        assert_eq!(listed, known);
     }
 
     #[test]

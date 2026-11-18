@@ -55,6 +55,11 @@ pub struct ImportCursorSettings {
 
 pub const FIRST_OPEN: &str = "first_open";
 
+/// fyx: set by Fyx, which has no telemetry endpoint; the basics page then hides its telemetry
+/// opt-in.
+pub struct HideTelemetryOptIn;
+impl gpui::Global for HideTelemetryOptIn {}
+
 actions!(
     onboarding,
     [

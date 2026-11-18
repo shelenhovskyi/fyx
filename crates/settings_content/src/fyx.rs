@@ -86,4 +86,9 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: false
     pub developer_mode: Option<bool>,
+    /// Status bar items of UI extensions not to show, as `"<extension id>/<surface id>"`. Right-click
+    /// an item and pick "Hide Button" to add one; "fyx_ui: show hidden status items" empties it.
+    ///
+    /// Default: []
+    pub hidden_status_items: Option<Vec<String>>,
 }

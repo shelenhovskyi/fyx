@@ -37,6 +37,7 @@ actions!(
 pub struct FyxExtensionsSettings {
     pub dev_paths: Vec<PathBuf>,
     pub developer_mode: bool,
+    pub hidden_status_items: Vec<String>,
 }
 
 impl Settings for FyxExtensionsSettings {
@@ -55,6 +56,12 @@ impl Settings for FyxExtensionsSettings {
                 .and_then(|fyx| fyx.extensions.as_ref())
                 .and_then(|extensions| extensions.developer_mode)
                 .unwrap_or(false),
+            hidden_status_items: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.hidden_status_items.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -66,6 +73,34 @@ pub fn dev_paths_setting(cx: &App) -> Vec<PathBuf> {
     } else {
         Vec::new()
     }
+}
+
+/// Whether `fyx.extensions.hidden_status_items` names this status item (triage-3, UX F22).
+pub fn status_item_hidden(key: &str, cx: &App) -> bool {
+    cx.has_global::<settings::SettingsStore>()
+        && FyxExtensionsSettings::get_global(cx)
+            .hidden_status_items
+            .iter()
+            .any(|hidden| hidden == key)
+}
+
+/// Adds a status item to `fyx.extensions.hidden_status_items`, or with `None` empties it.
+pub fn set_status_item_hidden(key: Option<String>, cx: &App) {
+    let fs = <dyn fs::Fs>::global(cx);
+    settings::update_settings_file(fs, cx, move |settings, _| {
+        let hidden = settings
+            .fyx
+            .get_or_insert_default()
+            .extensions
+            .get_or_insert_default()
+            .hidden_status_items
+            .get_or_insert_default();
+        match &key {
+            Some(key) if !hidden.contains(key) => hidden.push(key.clone()),
+            Some(_) => {}
+            None => hidden.clear(),
+        }
+    });
 }
 
 /// `fyx.extensions.developer_mode`, or false before settings are set up.

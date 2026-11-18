@@ -749,6 +749,37 @@ async fn test_invalid_ids_are_refused_at_load(cx: &mut TestAppContext) {
     assert!(message.contains("extension.toml"), "{message}");
 }
 
+/// Triage-3, PERF 7: the epoch thread parks while no guest call runs and ticks during one.
+#[test]
+fn test_epoch_thread_parks_without_calls() {
+    ui_runtime().expect("runtime");
+    std::thread::sleep(UI_EPOCH_INTERVAL * 5);
+    let idle = EPOCH_TICKS.load(Ordering::Relaxed);
+    std::thread::sleep(UI_EPOCH_INTERVAL * 10);
+    assert_eq!(
+        EPOCH_TICKS.load(Ordering::Relaxed),
+        idle,
+        "no ticks while idle"
+    );
+
+    // A call waiting on the epoch thread's clock finishes, so the thread woke for it.
+    futures::executor::block_on(with_budget(Duration::from_secs(5), async {
+        // Ready only after some time, and woken only by the epoch thread.
+        let ready_at = Instant::now() + UI_EPOCH_INTERVAL * 5;
+        futures::future::poll_fn(|_| {
+            if Instant::now() >= ready_at {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        anyhow::Ok(())
+    }))
+    .expect("the call finishes in its budget");
+    assert!(EPOCH_TICKS.load(Ordering::Relaxed) > idle);
+}
+
 /// `fyx_ext_harness` (Apache-2.0) runs guests for extension tests without this GPL runtime, so it
 /// mirrors the runtime's call contract instead of depending on it. These run the same guests
 /// through both and compare every call, so the two cannot drift apart unnoticed.
@@ -801,10 +832,12 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
-        // The harness runs every version up to 0.2; 0.3 comes to it with plan 4.12, which then
-        // makes the two ranges equal again.
+        // The harness runs every version the host runs (plan 4.12): the ranges are equal again.
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
-        assert_eq!(harness_versions, [MIN_VERSION, Version::new(0, 2, 0)]);
+        assert_eq!(
+            harness_versions,
+            [MIN_VERSION, Version::new(0, 2, 0), MAX_VERSION]
+        );
         assert!(harness_versions.iter().all(is_supported_api_version));
         assert!(harness_versions.contains(&MAX_FROZEN_VERSION));
         assert_eq!(MAX_VERSION, Version::new(0, 3, 0));
@@ -889,35 +922,4 @@ mod harness_conformance {
             "disabled"
         );
     }
-}
-
-/// Triage-3, PERF 7: the epoch thread parks while no guest call runs and ticks during one.
-#[test]
-fn test_epoch_thread_parks_without_calls() {
-    ui_runtime().expect("runtime");
-    std::thread::sleep(UI_EPOCH_INTERVAL * 5);
-    let idle = EPOCH_TICKS.load(Ordering::Relaxed);
-    std::thread::sleep(UI_EPOCH_INTERVAL * 10);
-    assert_eq!(
-        EPOCH_TICKS.load(Ordering::Relaxed),
-        idle,
-        "no ticks while idle"
-    );
-
-    // A call waiting on the epoch thread's clock finishes, so the thread woke for it.
-    futures::executor::block_on(with_budget(Duration::from_secs(5), async {
-        // Pending without waking itself: only the epoch thread polls it again.
-        let until = Instant::now() + UI_EPOCH_INTERVAL * 5;
-        futures::future::poll_fn(|_| {
-            if Instant::now() >= until {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-        anyhow::Ok(())
-    }))
-    .expect("the call finishes in its budget");
-    assert!(EPOCH_TICKS.load(Ordering::Relaxed) > idle);
 }

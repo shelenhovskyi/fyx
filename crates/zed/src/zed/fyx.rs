@@ -2,7 +2,7 @@
 //! fork's logic lives here instead of inside upstream functions.
 
 use anyhow::Context as _;
-use db::kvp::KeyValueStore;
+use db::kvp::{Dismissable as _, KeyValueStore};
 use gpui::{App, UpdateGlobal as _};
 use release_channel::ReleaseChannel;
 use settings::SettingsStore;
@@ -38,8 +38,8 @@ pub fn about_notices() -> impl IntoElement {
 const SKIPPED_ONBOARDING: &[(&str, &str)] = &[
     // First-run onboarding page (`onboarding::FIRST_OPEN`); Fyx opens the welcome page instead.
     (onboarding::FIRST_OPEN, "false"),
-    // The agent panel's new-user card (`OnboardingUpsell` in `agent_ui`, a private type).
-    ("dismissed-trial-upsell", "1"),
+    // The agent panel's new-user card.
+    (agent_ui::OnboardingUpsell::KEY, "1"),
 ];
 
 /// Call right after `settings::init`, before any window opens.
@@ -50,6 +50,8 @@ pub fn init(cx: &mut App) {
     cx.set_app_identity(channel.app_id(), channel.display_name());
     layer_default_settings(cx);
     skip_zed_onboarding(cx);
+    // No telemetry endpoint, so no opt-in on the onboarding page.
+    cx.set_global(onboarding::HideTelemetryOptIn);
     // LM Studio and llama.cpp load their models on first use, like every other provider.
     cx.set_global(language_models::DeferStartupProbes);
 }

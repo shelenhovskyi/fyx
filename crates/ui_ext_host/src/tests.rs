@@ -1181,6 +1181,92 @@ fn key(keys: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Triage-3 #5: the caret of a focused input does not blink, so the surface is not repainted
+/// while nothing happens.
+#[gpui::test]
+async fn test_focused_input_does_not_repaint_by_itself(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let editor = view.read_with(vcx, |view, _| {
+        view.inputs
+            .get(&INPUT)
+            .map(|input| input.editor.clone())
+            .expect("input has an editor")
+    });
+    vcx.update(|window, cx| {
+        window.activate_window();
+        editor.focus_handle(cx).focus(window, cx)
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.simulate_input("x");
+    // Past what focusing and typing schedule (the blink pause).
+    vcx.executor().advance_clock(Duration::from_secs(2));
+    vcx.run_until_parked();
+    let notified = Rc::new(Cell::new(0));
+    let _observe = vcx.update(|_, cx| {
+        let notified = notified.clone();
+        cx.observe(&editor, move |_, _| notified.set(notified.get() + 1))
+    });
+    let mut shown = Vec::new();
+    for _ in 0..8 {
+        vcx.executor().advance_clock(Duration::from_millis(300));
+        vcx.run_until_parked();
+        shown.push(vcx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.show_local_cursors(window, cx))
+        }));
+    }
+    assert_eq!(shown, [true; 8], "the caret stays");
+    assert_eq!(notified.get(), 0, "no blink repaints");
+    assert!(vcx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+}
+
+/// Triage-3, UX F6 and F21: the host's own buttons are in the Tab order and take Enter and
+/// Space; the error footer has a Dismiss.
+#[gpui::test]
+async fn test_host_controls_take_the_keyboard(cx: &mut TestAppContext) {
+    use crate::view::HostControl;
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    focus_surface(&view, vcx);
+    let host_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| view.read(cx).focused_host_control(window))
+    };
+
+    // A footer error: after the surface's nodes come Retry and Dismiss.
+    state.update(vcx, |state, cx| {
+        state.show_reload_error("Reload failed: broken".into(), cx)
+    });
+    vcx.run_until_parked();
+    key("shift-tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::DismissError));
+    key("shift-tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::ReloadRetry));
+    key("shift-tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST), "back into the surface");
+    key("tab", vcx);
+    key("tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::DismissError));
+    key("space", vcx);
+    assert_eq!(
+        state.read_with(vcx, |state, _| state.last_error().cloned()),
+        None
+    );
+
+    // A failed surface: Retry, reached by Tab, retries on Enter.
+    state.update(vcx, |state, cx| state.fail("broken".into(), true, cx));
+    vcx.run_until_parked();
+    backend.take_calls();
+    key("tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::Retry));
+    key("enter", vcx);
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+}
+
 #[gpui::test]
 async fn test_tab_moves_focus_in_tree_order(cx: &mut TestAppContext) {
     init_test(cx);
@@ -1639,6 +1725,52 @@ async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
             "higher priority sits closer to the {side:?} edge"
         );
     }
+}
+
+/// Triage-3, UX F22: `fyx.extensions.hidden_status_items` hides a status item; the group
+/// re-renders when it changes.
+#[gpui::test]
+async fn test_status_items_can_be_hidden(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (_, vcx) = open_view(&state, cx);
+    let group = vcx.update(|_, cx| {
+        cx.new(|_| crate::ExtensionStatusGroup::new(ui_ext::v0_2::StatusBarSide::Left))
+    });
+    let item = vcx.update(|window, cx| {
+        cx.new(|cx| crate::ExtensionStatusItem::new(state.clone(), window, cx))
+    });
+    group.update(vcx, |group, cx| group.add(0, item.clone(), cx));
+    let group_notified = Rc::new(Cell::new(0));
+    let _observe = vcx.update(|_, cx| {
+        let group_notified = group_notified.clone();
+        cx.observe(&group, move |_, _| {
+            group_notified.set(group_notified.get() + 1)
+        })
+    });
+    assert!(!item.read_with(vcx, |item, cx| item.is_hidden(cx)));
+
+    let set_hidden = |hidden: Vec<String>, vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .fyx
+                        .get_or_insert_default()
+                        .extensions
+                        .get_or_insert_default()
+                        .hidden_status_items = Some(hidden)
+                })
+            })
+        });
+        vcx.run_until_parked();
+    };
+    set_hidden(vec!["fake/counter".into()], vcx);
+    assert!(item.read_with(vcx, |item, cx| item.is_hidden(cx)));
+    assert!(group_notified.get() > 0, "the group lays out again");
+    set_hidden(Vec::new(), vcx);
+    assert!(!item.read_with(vcx, |item, cx| item.is_hidden(cx)));
 }
 
 /// The extensions page shows a loaded UI extension's capabilities, from the surfaces it declared.
@@ -2175,6 +2307,25 @@ async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {
     );
 }
 
+/// Triage-3, SEC T8: extension markdown never forms an image, so `data:` images are not decoded.
+#[test]
+fn test_markdown_images_are_not_parsed() {
+    use crate::view::without_images;
+    assert_eq!(
+        without_images("a ![x](data:image/png;base64,AAAA) b"),
+        r"a \![x](data:image/png;base64,AAAA) b"
+    );
+    assert_eq!(without_images("![r][ref]"), r"\![r][ref]");
+    // Already escaped: left alone. Two backslashes are an escaped backslash: escaped again.
+    assert_eq!(without_images(r"\![x](y)"), r"\![x](y)");
+    assert_eq!(without_images(r"\\![x](y)"), r"\\\![x](y)");
+    assert_eq!(
+        without_images("Hi! [link](https://zed.dev)"),
+        "Hi! [link](https://zed.dev)"
+    );
+    assert_eq!(without_images("!!["), r"!\![");
+}
+
 /// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
 #[test]
 fn test_markdown_links_are_filtered() {
@@ -2199,5 +2350,459 @@ fn test_markdown_links_are_filtered() {
         "",
     ] {
         assert!(!link_is_allowed(refused), "{refused}");
+    }
+}
+
+mod notification_tests {
+    use super::*;
+    use crate::notifications::{ExtensionNotification, provenance_name};
+    use ui_ext::v0_2::{
+        Notification, NotificationAction, NotificationActionEvent, NotificationCloseReason,
+        NotificationLevel, notifications::BUTTON_CLICK_GUARD,
+    };
+
+    fn notification(auto_dismiss: bool) -> Notification {
+        Notification {
+            owner: "counter".into(),
+            level: NotificationLevel::Info,
+            title: "Build finished".into(),
+            body: Some("3 problems".into()),
+            actions: vec![NotificationAction {
+                id: "open".into(),
+                label: "Open".into(),
+            }],
+            auto_dismiss,
+        }
+    }
+
+    /// A registry with the fake extension's "counter" panel mounted and a workspace to show in.
+    fn setup(cx: &mut TestAppContext) -> (Rc<FakeBackend>, Entity<crate::UiExtensionRegistry>) {
+        init_test(cx);
+        let backend = Rc::new(FakeBackend::default());
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        let workspace = cx.new(|_| ()).entity_id();
+        registry.update(cx, |registry, cx| {
+            let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+            registry.register_backend(dyn_backend, &[panel_surface("counter", "Counter")], cx);
+            registry.set_active_workspace(workspace);
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        (backend, registry)
+    }
+
+    /// What the workspace does on `ShowNotification`: the view, in a window of its own.
+    fn show<'a>(
+        registry: &Entity<crate::UiExtensionRegistry>,
+        id: u64,
+        notification: Notification,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<ExtensionNotification>, &'a mut VisualTestContext) {
+        registry.update(cx, |registry, cx| {
+            registry.apply_effect("fake", HostEffect::Notify { id, notification }, cx)
+        });
+        let (name, notification) = registry
+            .update(cx, |registry, _| {
+                registry.take_pending_notification("fake", id)
+            })
+            .expect("pending");
+        let weak = registry.downgrade();
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            ExtensionNotification::new(id, "fake".into(), name, notification, weak, window, cx)
+        });
+        vcx.update(|window, _| window.activate_window());
+        registry.update(vcx, |registry, _| {
+            registry.set_notification_view("fake", id, view.downgrade())
+        });
+        vcx.run_until_parked();
+        // The test window's pointer starts over the card.
+        view.update(vcx, |view, cx| view.set_hovered(false, cx));
+        (view, vcx)
+    }
+
+    #[test]
+    fn test_provenance_name_follows_the_registry_rule() {
+        assert_eq!(provenance_name(Some("Todo Tools"), "todo"), "Todo Tools");
+        assert_eq!(provenance_name(None, "todo"), "todo");
+        assert_eq!(provenance_name(Some(""), "todo"), "todo");
+        assert_eq!(provenance_name(Some("Fyx\u{202e}"), "todo"), "todo", "bidi");
+        assert_eq!(provenance_name(Some("a\nb"), "todo"), "todo");
+        assert_eq!(provenance_name(Some(&"x".repeat(65)), "todo"), "todo");
+        assert_eq!(provenance_name(Some(" padded"), "todo"), "todo");
+    }
+
+    /// M.1: auto-dismiss expires with `notification-closed(expired)` after the level's time,
+    /// paused while hovered and while the window is in the background.
+    #[gpui::test]
+    async fn test_notification_expires_and_pauses_on_hover(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(true), cx);
+        vcx.executor().advance_clock(Duration::from_secs(3));
+        view.update(vcx, |view, cx| view.set_hovered(true, cx));
+        vcx.executor().advance_clock(Duration::from_secs(10));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "paused while hovered");
+        view.update(vcx, |view, cx| view.set_hovered(false, cx));
+        // In the background it waits too.
+        vcx.deactivate_window();
+        vcx.executor().advance_clock(Duration::from_secs(10));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "paused in the background");
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(Duration::from_secs(2));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "3 s of 6 were left");
+        vcx.executor().advance_clock(Duration::from_secs(2));
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                1,
+                NotificationCloseReason::Expired
+            ))]
+        );
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_notifications("fake")),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// M.1: a button click inside the guard is ignored; after it, `notification-action` goes to
+    /// the owner and no `notification-closed` follows. The close button works at once.
+    #[gpui::test]
+    async fn test_notification_buttons_and_close(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(false), cx);
+        vcx.executor().advance_clock(Duration::from_millis(500));
+        view.update(vcx, |view, cx| view.click_action("open", cx));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "inside the click guard");
+        vcx.executor().advance_clock(BUTTON_CLICK_GUARD);
+        view.update(vcx, |view, cx| view.click_action("open", cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationAction(
+                NotificationActionEvent {
+                    notification: 1,
+                    action: "open".into()
+                }
+            ))]
+        );
+        drop(view);
+
+        // Another one, closed by the user at once.
+        registry.update(vcx, |registry, cx| {
+            registry.apply_effect(
+                "fake",
+                HostEffect::Notify {
+                    id: 2,
+                    notification: notification(false),
+                },
+                cx,
+            )
+        });
+        let (name, pending) = registry
+            .update(vcx, |registry, _| {
+                registry.take_pending_notification("fake", 2)
+            })
+            .expect("pending");
+        let weak = registry.downgrade();
+        let second = vcx.update(|window, cx| {
+            cx.new(|cx| {
+                ExtensionNotification::new(2, "fake".into(), name, pending, weak, window, cx)
+            })
+        });
+        second.update(vcx, |view, cx| {
+            view.close(NotificationCloseReason::User, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                2,
+                NotificationCloseReason::User
+            ))]
+        );
+    }
+
+    /// M.1: `dismiss-notification` and the owner's removal close without events, and the
+    /// window going away sends `window-closed`.
+    #[gpui::test]
+    async fn test_notifications_close_without_events(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(false), cx);
+        registry.update(vcx, |registry, cx| {
+            registry.apply_effect("fake", HostEffect::DismissNotification { id: 1 }, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "no event on dismiss-notification");
+        // The view is gone with its window: nothing more is sent.
+        drop(view);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), []);
+
+        registry.update(vcx, |registry, cx| {
+            registry.apply_effect(
+                "fake",
+                HostEffect::Notify {
+                    id: 2,
+                    notification: notification(false),
+                },
+                cx,
+            );
+            registry.apply_effect(
+                "fake",
+                HostEffect::RemoveSurface {
+                    surface_id: "counter".into(),
+                },
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "no event when the owner goes");
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_notifications("fake")),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// An owner with no tree (a closed modal) still hears the event, so the host frees the slot.
+    #[gpui::test]
+    async fn test_events_reach_an_unmounted_owner(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let modal = ui_ext::v0_2::Surface {
+            id: "picker".into(),
+            title: "Picker".into(),
+            kind: ui_ext::v0_2::SurfaceKind::Modal(ui_ext::v0_2::ModalDescriptor {
+                width: ui_ext::v0_2::ModalWidth::Medium,
+            }),
+        };
+        registry.update(cx, |registry, cx| {
+            registry.apply_effect("fake", HostEffect::AddSurface(modal), cx)
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        let mut owned_by_modal = notification(false);
+        owned_by_modal.owner = "picker".into();
+        let (view, vcx) = show(&registry, 4, owned_by_modal, cx);
+        view.update(vcx, |view, cx| {
+            view.close(NotificationCloseReason::User, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                4,
+                NotificationCloseReason::User
+            ))]
+        );
+    }
+
+    /// M.1: an open notification whose window goes away tells its owner `window-closed`.
+    #[gpui::test]
+    async fn test_notification_window_closes(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(false), cx);
+        drop(view);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                1,
+                NotificationCloseReason::WindowClosed
+            ))]
+        );
+    }
+}
+
+mod progress_tests {
+    use super::*;
+    use crate::progress::{Progresses, panel_bar};
+    use ui_ext::v0_2::{ProgressLocation, ProgressOptions, ProgressValue};
+
+    fn options(owner: &str, title: &str, location: ProgressLocation) -> ProgressOptions {
+        ProgressOptions {
+            owner: owner.into(),
+            title: title.into(),
+            location,
+            cancellable: true,
+        }
+    }
+
+    fn setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        Rc<FakeBackend>,
+        Entity<crate::UiExtensionRegistry>,
+        Entity<Progresses>,
+    ) {
+        init_test(cx);
+        cx.update(crate::progress::init);
+        let backend = Rc::new(FakeBackend::default());
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        registry.update(cx, |registry, cx| {
+            let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+            registry.register_backend(dyn_backend, &[panel_surface("counter", "Counter")], cx);
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        let progresses = cx.update(|cx| Progresses::global(cx).expect("initialized"));
+        (backend, registry, progresses)
+    }
+
+    fn effect(
+        registry: &Entity<crate::UiExtensionRegistry>,
+        effect: HostEffect,
+        cx: &mut TestAppContext,
+    ) {
+        registry.update(cx, |registry, cx| registry.apply_effect("fake", effect, cx));
+        cx.run_until_parked();
+    }
+
+    /// M.2: start, update (no message keeps the last), the status-bar grouping with the newest
+    /// last, and end.
+    #[gpui::test]
+    async fn test_progress_effects(cx: &mut TestAppContext) {
+        let (backend, registry, progresses) = setup(cx);
+        for (id, title) in [(1, "Indexing"), (2, "Building")] {
+            effect(
+                &registry,
+                HostEffect::ProgressStart {
+                    id,
+                    options: options("counter", title, ProgressLocation::StatusBar),
+                },
+                cx,
+            );
+        }
+        effect(
+            &registry,
+            HostEffect::ProgressUpdate {
+                id: 1,
+                value: ProgressValue::Percent(40),
+                message: Some("src/".into()),
+            },
+            cx,
+        );
+        effect(
+            &registry,
+            HostEffect::ProgressUpdate {
+                id: 1,
+                value: ProgressValue::Percent(60),
+                message: None,
+            },
+            cx,
+        );
+        progresses.read_with(cx, |progresses, _| {
+            let groups = progresses.status_bar();
+            assert_eq!(groups.len(), 1, "one chip per extension");
+            let titles: Vec<&str> = groups[0]
+                .1
+                .iter()
+                .map(|running| running.options.title.as_str())
+                .collect();
+            assert_eq!(titles, ["Indexing", "Building"], "the newest last");
+            let first = groups[0].1[0];
+            assert_eq!(first.value, ProgressValue::Percent(60));
+            assert_eq!(first.message.as_deref(), Some("src/"), "kept");
+        });
+        effect(&registry, HostEffect::ProgressEnd { id: 1 }, cx);
+        progresses.read_with(cx, |progresses, _| {
+            assert_eq!(progresses.running().len(), 1)
+        });
+        assert_eq!(backend.events(), [], "progress effects send no events");
+    }
+
+    /// M.2: Cancel sends `progress-cancel-requested` once; the progress stays until the
+    /// extension ends it. The owner's removal ends it without an event.
+    #[gpui::test]
+    async fn test_progress_cancel_and_owner_removal(cx: &mut TestAppContext) {
+        let (backend, registry, progresses) = setup(cx);
+        effect(
+            &registry,
+            HostEffect::ProgressStart {
+                id: 3,
+                options: options("counter", "Sync", ProgressLocation::Panel),
+            },
+            cx,
+        );
+        assert!(cx.update(|cx| panel_bar("fake", "counter", cx).is_some()));
+        assert!(cx.update(|cx| panel_bar("fake", "other", cx).is_none()));
+        for _ in 0..2 {
+            registry.update(cx, |registry, cx| {
+                registry.request_progress_cancel("fake", 3, cx)
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::ProgressCancelRequested(3))],
+            "once"
+        );
+        progresses.read_with(cx, |progresses, _| {
+            assert!(
+                progresses.running()[0].cancel_requested,
+                "it stays, Cancel disabled"
+            );
+        });
+
+        effect(
+            &registry,
+            HostEffect::RemoveSurface {
+                surface_id: "counter".into(),
+            },
+            cx,
+        );
+        progresses.read_with(cx, |progresses, _| assert!(progresses.running().is_empty()));
+        assert_eq!(backend.events(), []);
+    }
+
+    /// M.2: at most 10 redraws a second, whatever the rate of updates; the last value wins.
+    #[gpui::test]
+    async fn test_progress_redraws_are_coalesced(cx: &mut TestAppContext) {
+        let (_, registry, progresses) = setup(cx);
+        effect(
+            &registry,
+            HostEffect::ProgressStart {
+                id: 1,
+                options: options("counter", "Copy", ProgressLocation::StatusBar),
+            },
+            cx,
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let notified = Rc::new(Cell::new(0));
+        let _observe = cx.update(|cx| {
+            let notified = notified.clone();
+            cx.observe(&progresses, move |_, _| notified.set(notified.get() + 1))
+        });
+        for percent in 0..100u8 {
+            registry.update(cx, |registry, cx| {
+                registry.apply_effect(
+                    "fake",
+                    HostEffect::ProgressUpdate {
+                        id: 1,
+                        value: ProgressValue::Percent(percent),
+                        message: None,
+                    },
+                    cx,
+                )
+            });
+            cx.executor().advance_clock(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(
+            (9..=12).contains(&notified.get()),
+            "{} redraws for 1 s of updates",
+            notified.get()
+        );
+        progresses.read_with(cx, |progresses, _| {
+            assert_eq!(progresses.running()[0].value, ProgressValue::Percent(99))
+        });
     }
 }

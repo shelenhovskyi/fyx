@@ -9993,6 +9993,14 @@ impl Editor {
             && self.focus_handle.is_focused(window)
     }
 
+    // fyx: a steady caret for inputs in extension surfaces, whose every repaint re-renders the
+    // surface (Fyx triage-3 #5).
+    pub fn disable_cursor_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink_manager = cx.new(|cx| BlinkManager::new(CURSOR_BLINK_INTERVAL, |_| false, cx));
+        self._subscriptions
+            .push(cx.observe(&self.blink_manager, |_, _, cx| cx.notify()));
+    }
+
     pub fn set_show_cursor_when_unfocused(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
         self.show_cursor_when_unfocused = is_enabled;
         cx.notify();

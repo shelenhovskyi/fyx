@@ -65,6 +65,7 @@ mod effects;
 mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 pub mod images;
+mod stderr;
 pub mod ticks;
 
 pub use effects::{
@@ -288,11 +289,17 @@ pub struct UiManifest {
     /// 0.2 [`CAPABILITY_MODAL`] and [`CAPABILITY_EDITOR_DECORATIONS`].
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// `name` from the top of `extension.toml`, as its author wrote it: check it before showing
+    /// it (the provenance line of notifications, design.md M.4).
+    #[serde(skip)]
+    pub name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ExtensionToml {
     id: Arc<str>,
+    #[serde(default)]
+    name: Option<String>,
     fyx_ui: Option<UiManifest>,
 }
 
@@ -306,9 +313,10 @@ impl UiManifest {
             .with_context(|| format!("reading {path:?}"))?;
         let toml: ExtensionToml =
             toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
-        let Some(manifest) = toml.fyx_ui else {
+        let Some(mut manifest) = toml.fyx_ui else {
             return Ok(None);
         };
+        manifest.name = toml.name;
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
         for capability in &manifest.capabilities {
@@ -581,7 +589,13 @@ impl UiState {
             message.truncate(end);
             message.push_str(&format!("… ({total} bytes, cut)"));
         }
-        log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        log::log!(
+            target: "fyx_ui",
+            level,
+            "{}: {}",
+            self.extension_id,
+            ui_ext::sanitize_for_log(&message)
+        );
         self.diagnostics.log(level, &message);
         Ok(())
     }
@@ -790,7 +804,8 @@ impl std::task::Wake for RecordingWaker {
 /// a busy tokio worker spends neither, so other work on the shared runtime, or other UI
 /// extensions, cannot get a healthy extension disabled.
 async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
-    // Every guest call runs in here, so this is what keeps the epoch thread ticking.
+    // Every guest call runs in here, so this is what keeps the epoch thread ticking (triage-3,
+    // PERF 7); a call waiting on the host counts too, since the epoch thread polls it again.
     let _active = ActiveCall::begin();
     let limit = budget + UI_DEADLINE_SLACK;
     let mut call = pin!(call);
@@ -850,6 +865,8 @@ pub struct UiExtension {
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
     from_precompiled: bool,
     diagnostics: diagnostics::DiagnosticsBuffer,
+    /// `extension.toml`'s `name`, unchecked; `None` without a manifest.
+    name: Option<Arc<str>>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1058,10 +1075,14 @@ impl UiExtension {
                 async move {
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
-                    wasi.inherit_stderr();
+                    // Line by line through `log`, capped (triage-3, SEC T5).
+                    wasi.stderr(stderr::GuestStderr::new(
+                        extension_id.clone(),
+                        diagnostics.clone(),
+                    ));
                     deny_network(&mut wasi);
                     // No preopened directories, no environment variables, no arguments: the
-                    // builder starts empty and only stderr is inherited.
+                    // builder starts empty and only stderr goes anywhere.
                     let mut store = Store::new(
                         &runtime.engine,
                         UiState::new(
@@ -1153,6 +1174,7 @@ impl UiExtension {
                     _task: Arc::new(task),
                     from_precompiled,
                     diagnostics,
+                    name: None,
                 },
                 pushed_rx,
             ))
@@ -1206,7 +1228,7 @@ impl UiExtension {
             capabilities: Some(manifest.capabilities.clone()),
             ..options
         };
-        let (extension, pushed) =
+        let (mut extension, pushed) =
             Self::load_with_options(extension_id.clone(), wasm_bytes, options, cx)
                 .await
                 .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
@@ -1216,11 +1238,17 @@ impl UiExtension {
             manifest.api_version,
             extension.api_version,
         );
+        extension.name = manifest.name.map(Arc::from);
         Ok((extension, pushed))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {
         &self.extension_id
+    }
+
+    /// `extension.toml`'s `name` as its author wrote it (check it before showing it).
+    pub fn display_name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     pub fn api_version(&self) -> &Version {
