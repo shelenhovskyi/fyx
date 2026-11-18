@@ -163,7 +163,7 @@ path = "node_modules/.bin/eslint"  # worktree-relative: needs a trusted worktree
 args = ["**"]                      # any arguments
 
 [fyx_ui.process]
-env = ["NO_COLOR", "GIT_DIR"]
+env = ["NO_COLOR", "LANG"]            # only names on the host's allowlist (§9, "Environment")
 
 [[fyx_ui.commands]]
 id = "todo.next"
@@ -728,10 +728,19 @@ returns `limit-exceeded`.
 - **Environment.** Cleared, then `PATH`, `HOME` (`USERPROFILE`, `SystemRoot`, `TEMP` and `TMP` on
   Windows, where programs fail without them), `LANG` and `LC_*` from Fyx's environment, the
   names in `[fyx_ui.process].env` taken from Fyx's environment, then the guest's `env` pairs,
-  which may only use those declared names. Never allowed, even when declared: `LD_*`, `DYLD_*`,
-  `NODE_OPTIONS`, `PYTHONSTARTUP`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`, `BASH_ENV`, `ENV`,
-  `GIT_CONFIG_*`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH`, `GIT_ASKPASS`, `SSH_ASKPASS`.
-  The loader rejects a manifest that declares them.
+  which may only use those declared names.
+  - **`[fyx_ui.process].env` is an allowlist** (integration-6 N1, W2c 4458b3abd9,
+    `ui_ext::process::ALLOWED_ENV_NAMES`). Only these names may be declared or set: `LANG`,
+    `LANGUAGE`, `TZ`, `TERM`, `COLORTERM`, `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`,
+    `CLICOLOR_FORCE`, `COLUMNS`, `LINES`, `CI`, `RUST_LOG`, `RUST_BACKTRACE`, `NODE_ENV`,
+    `PYTHONUNBUFFERED`, `PYTHONIOENCODING`, `PYTHONUTF8`, and `LC_*`. Names match in ASCII upper
+    case.
+  - **Everything else is refused**, at load and at the call. A denylist could not end: `HOME`,
+    `XDG_CONFIG_HOME` and `ZDOTDIR` move a program's configuration (a planted `.gitconfig` with
+    `core.fsmonitor` makes `git status` run anything), and `GOFLAGS`, `CLASSPATH` or
+    `GCONV_PATH` load code. The names that load code or redirect a program (`LD_*`, `DYLD_*`,
+    `NODE_OPTIONS`, `PYTHONPATH`, `GIT_*`, …) get a clearer error.
+  - Ask for an addition to the list rather than for a name per extension.
 - **Process tree.** Every process starts in its own group and is killed with everything it
   started:
   - Unix: `process_group(0)`; kill sends `SIGTERM` to the group, then `SIGKILL` after 2 s. On Linux
@@ -787,8 +796,8 @@ part of the grant.
 2. *Planted binaries* in the worktree (spec failure 4): `PATH` filtering, absolute spawn, trusted
    worktree for `path` programs.
 3. *Argument injection through `cmd.exe`*: no batch files, no shell.
-4. *Environment injection* (`LD_PRELOAD`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`): the cleared
-   environment and the forbidden names.
+4. *Environment injection* (`LD_PRELOAD`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, a `HOME` that points
+   at a planted `.gitconfig`): the cleared environment and the allowlist of declarable names.
 5. *Escaping the kill*: a child that calls `setsid` or double-forks leaves the Unix process group.
    Residual risk on macOS and Linux; on Linux the registry entry can also make Fyx a child
    subreaper (`PR_SET_CHILD_SUBREAPER`) so orphans are reparented to Fyx and killed with the set.

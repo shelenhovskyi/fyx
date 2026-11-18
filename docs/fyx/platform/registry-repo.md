@@ -174,7 +174,7 @@ only.
 | **New version of an extension, tier T0 or T1**, no owner change | One of the entry's owners: as the PR's author, or by an approving review. Auto-merges once that holds and the agent review passes; a `concern` needs the owner. |
 | **Any PR whose release is T2**: a new version, a new T2 capability, a new network domain or a new process | The owner, for every version. A T2 update changes code that can reach the network or your files. |
 | **Owners added or removed** | An existing owner of the entry. |
-| **`urgent = true`** | The owner. It skips the 24 h age gate. |
+| **`urgent = true`** | The owner. It skips the 24 h age gate, but only for clients updating from a version the block list blocks; a fresh install waits (integration-6 R8). |
 | **A reserved id** (`policy/reserved-ids.txt`) | The owner, and the entry's only owner must be the registry owner. This is how Fyx's own `fyx-*` demos are registered. |
 | **Entry deleted** | Refused. Releases are permanent; block the extension instead. |
 | **Anything under CODEOWNERS paths** | The owner, through Code Owners review. |
@@ -625,7 +625,8 @@ How a block happens:
    versions (decision 19). They roll back to a kept previous version that is not blocked.
 4. **Fix.** The extension's owners publish a fixed version through a normal PR. The block entry's
    range should end below the fixed version.
-   - The fix can be `urgent = true` with the registry owner's approval, so it skips the age gate.
+   - The fix can be `urgent = true` with the registry owner's approval. Clients whose installed
+     version is blocked then skip the age gate; everyone else waits the 24 h (integration-6 R8).
    - Clients then update straight from the blocked version (`ReplacesBlocked` in
      registry-format.md).
 5. **Lift** a block by removing the entry. The next sequence no longer has it, and clients stop
