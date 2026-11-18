@@ -57,24 +57,23 @@ const ALL_TOKENS: [ColorToken; 9] = [
 
 const ALL_ALIGNS: [Align; 4] = [Align::Start, Align::Center, Align::End, Align::Stretch];
 
-/// Snake_case names of Zed's `IconName`, laid out four per row. `blocks` is left out on purpose:
-/// it is the host's fallback, so it would not tell a known name from an unknown one.
-const KNOWN_ICONS: [(&str, Option<ColorToken>); 12] = [
-    ("check", Some(ColorToken::Success)),
-    ("close", Some(ColorToken::Error)),
-    ("warning", Some(ColorToken::Warning)),
-    ("info", Some(ColorToken::TextAccent)),
-    ("plus", None),
-    ("dash", None),
-    ("folder", None),
-    ("file", None),
-    ("settings", None),
-    ("magnifying_glass", None),
-    ("trash", None),
-    ("pencil", None),
+/// Frozen 0.2 icons with their WIT names, laid out four per row. `blocks` is left out on purpose:
+/// it is the host's fallback, so it would not tell a drawn icon from a missing one.
+const KNOWN_ICONS: [(Icon, &str, Option<ColorToken>); 12] = [
+    (Icon::Check, "check", Some(ColorToken::Success)),
+    (Icon::Close, "close", Some(ColorToken::Error)),
+    (Icon::Warning, "warning", Some(ColorToken::Warning)),
+    (Icon::Info, "info", Some(ColorToken::TextAccent)),
+    (Icon::Plus, "plus", None),
+    (Icon::Dash, "dash", None),
+    (Icon::Folder, "folder", None),
+    (Icon::File, "file", None),
+    (Icon::Settings, "settings", None),
+    (Icon::Search, "search", None),
+    (Icon::Trash, "trash", None),
+    (Icon::Pencil, "pencil", None),
 ];
 const ICONS_PER_ROW: usize = 4;
-const UNKNOWN_ICON: &str = "fyx_no_such_icon";
 
 const MARKDOWN_SOURCE: &str = "\
 # Markdown
@@ -124,7 +123,7 @@ struct ButtonDemo {
     /// How the "Last clicked" label names the button; differs from `label` for the icon-only one.
     name: &'static str,
     label: &'static str,
-    icon: Option<&'static str>,
+    icon: Option<Icon>,
     style: ButtonStyle,
     disabled: bool,
 }
@@ -150,7 +149,7 @@ impl ButtonDemo {
     const fn with_icon(
         name: &'static str,
         label: &'static str,
-        icon: &'static str,
+        icon: Icon,
         style: ButtonStyle,
     ) -> Self {
         Self {
@@ -195,10 +194,15 @@ const BUTTON_GROUPS: [(&str, [ButtonDemo; 4]); 3] = [
     (
         "With icon",
         [
-            ButtonDemo::with_icon("Add", "Add", "plus", ButtonStyle::Filled),
-            ButtonDemo::with_icon("Search", "Search", "magnifying_glass", ButtonStyle::Default),
-            ButtonDemo::with_icon("Delete", "Delete", "trash", ButtonStyle::Danger),
-            ButtonDemo::with_icon("Icon only (settings)", "", "settings", ButtonStyle::Subtle),
+            ButtonDemo::with_icon("Add", "Add", Icon::Plus, ButtonStyle::Filled),
+            ButtonDemo::with_icon("Search", "Search", Icon::Search, ButtonStyle::Default),
+            ButtonDemo::with_icon("Delete", "Delete", Icon::Trash, ButtonStyle::Danger),
+            ButtonDemo::with_icon(
+                "Icon only (settings)",
+                "",
+                Icon::Settings,
+                ButtonStyle::Subtle,
+            ),
         ],
     ),
 ];
@@ -528,11 +532,11 @@ fn build_table(tree: &mut TreeBuilder) -> SectionNodes {
     SectionNodes::Table { table }
 }
 
-fn icon_cell(tree: &mut TreeBuilder, name: &str, color: Option<ColorToken>) {
+fn icon_cell(tree: &mut TreeBuilder, icon: Icon, name: &str, color: Option<ColorToken>) {
     tree.flex(
         FlexProps::column().gap(2).padding(4).align(Align::Center),
         |tree| {
-            let icon = IconProps::new(name);
+            let icon = IconProps::new(icon);
             tree.icon(match color {
                 Some(color) => icon.color(color),
                 None => icon,
@@ -543,17 +547,17 @@ fn icon_cell(tree: &mut TreeBuilder, name: &str, color: Option<ColorToken>) {
 }
 
 fn build_icons(tree: &mut TreeBuilder) {
-    caption(tree, "Known names (snake_case IconName)");
+    caption(tree, "Frozen icons (fyx:ui 0.2 names)");
     for icons in KNOWN_ICONS.chunks(ICONS_PER_ROW) {
         tree.flex(FlexProps::row().gap(12), |tree| {
-            for &(name, color) in icons {
-                icon_cell(tree, name, color);
+            for &(icon, name, color) in icons {
+                icon_cell(tree, icon, name, color);
             }
         });
     }
-    caption(tree, "Unknown name: the host shows its fallback icon");
+    caption(tree, "Spinner: animated by a 0.2 host, load_circle on 0.1");
     tree.flex(FlexProps::row().gap(12), |tree| {
-        icon_cell(tree, UNKNOWN_ICON, None);
+        icon_cell(tree, Icon::Spinner, "spinner", None);
     });
 }
 
@@ -602,7 +606,7 @@ fn build_section(state: &GalleryState, tree: &mut TreeBuilder) -> (NodeId, Secti
 
 fn build_list_row(index: u32, tree: &mut TreeBuilder) {
     tree.flex(FlexProps::row().gap(8).align(Align::Center), |tree| {
-        tree.icon("file");
+        tree.icon(Icon::File);
         tree.text(format!("Row {}", index + 1));
         tree.text(
             TextProps::new(format!("index {index}"))
@@ -674,7 +678,7 @@ impl Gallery {
         let mut status_label = None;
         let mounted = self.status.mount(|tree| {
             tree.flex(FlexProps::row().gap(4).align(Align::Center), |tree| {
-                tree.icon(IconProps::new("list_tree").color(ColorToken::TextMuted));
+                tree.icon(IconProps::new(Icon::ListTree).color(ColorToken::TextMuted));
                 status_label = Some(tree.text(state.status_label()));
             });
         })?;
@@ -723,9 +727,12 @@ impl Gallery {
         if let Some(status_label) = self.status_label {
             self.status
                 .set_props(status_label, self.state.status_label())?;
-            let update = self.status.take_update();
-            if update != Update::Unchanged {
-                push_update(STATUS_SURFACE, &update);
+            // On a refused push the next one resends the status item whole.
+            if let Err(error) = self.status.push(STATUS_SURFACE) {
+                log(
+                    LogLevel::Warn,
+                    &format!("status item update refused: {}", error.message),
+                );
             }
         }
         Ok(())
@@ -837,7 +844,7 @@ impl Extension for Gallery {
                 GALLERY_SURFACE,
                 "Gallery",
                 DockPosition::Right,
-                "sparkle",
+                Icon::Sparkle,
                 420,
             ),
             Surface::status_item(STATUS_SURFACE, "Gallery selection", StatusBarSide::Right, 0),
@@ -894,6 +901,11 @@ impl Extension for Gallery {
     }
 }
 
+// fyx:ui 0.1 by default, which is what Fyx runs today; `--features fyx-ui-0-2` builds the 0.2
+// world from the same code.
+#[cfg(not(feature = "fyx-ui-0-2"))]
+register_extension!(Gallery, v0_1);
+#[cfg(feature = "fyx-ui-0-2")]
 register_extension!(Gallery);
 
 #[cfg(test)]
@@ -1009,6 +1021,7 @@ mod tests {
             .iter()
             .map(|patch| match patch {
                 Patch::SetProps((id, _)) => format!("set {id}"),
+                Patch::InvalidateRows(op) => format!("invalidate {}", op.target),
                 Patch::Remove(id) => format!("remove {id}"),
                 Patch::Insert(InsertOp { node, before }) => {
                     assert_eq!(*before, None, "the gallery only appends");
@@ -1055,7 +1068,13 @@ mod tests {
         assert_eq!(
             surfaces,
             [
-                Surface::panel("gallery", "Gallery", DockPosition::Right, "sparkle", 420),
+                Surface::panel(
+                    "gallery",
+                    "Gallery",
+                    DockPosition::Right,
+                    Icon::Sparkle,
+                    420
+                ),
                 Surface::status_item(
                     "gallery-status",
                     "Gallery selection",
@@ -1355,7 +1374,7 @@ mod tests {
         assert_eq!(
             harness.props(icon_only),
             ButtonProps::new("")
-                .icon("settings")
+                .icon(Icon::Settings)
                 .style(ButtonStyle::Subtle)
                 .into()
         );
@@ -1447,7 +1466,7 @@ mod tests {
         );
         assert_eq!(
             status[1].props,
-            IconProps::new("list_tree")
+            IconProps::new(Icon::ListTree)
                 .color(ColorToken::TextMuted)
                 .into()
         );
@@ -1599,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn icons_are_zed_icon_names_except_the_unknown_one() {
+    fn icons_reach_a_0_1_host_as_zed_icon_names() {
         // Checked against the source rather than through a dependency on the GPL `icons` crate.
         let icons_source = include_str!("../../../crates/icons/src/icons.rs");
         let variants = icons_source
@@ -1618,6 +1637,7 @@ mod tests {
         };
         let mut harness = Harness::mounted();
         harness.show(Section::Icons);
+        // The harness holds the host's 0.1 view, so frozen icons appear as upstream names.
         let names = harness
             .host
             .to_nodes()
@@ -1629,25 +1649,15 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names.len(), KNOWN_ICONS.len() + 1);
         for name in &names {
-            let known = variants.contains(camel_case(name).as_str());
-            assert_eq!(known, name != UNKNOWN_ICON, "{name}");
-        }
-        assert!(
-            !names.contains(&"blocks".to_string()),
-            "blocks is the host's fallback"
-        );
-
-        // Icons used outside the Icons section.
-        for name in [
-            "sparkle",
-            "list_tree",
-            "file",
-            "plus",
-            "magnifying_glass",
-            "trash",
-            "settings",
-        ] {
             assert!(variants.contains(camel_case(name).as_str()), "{name}");
         }
+        assert!(
+            names.iter().any(|name| name == "load_circle"),
+            "the spinner cell"
+        );
+        assert!(
+            !names.iter().any(|name| name == "blocks"),
+            "blocks is the host's fallback"
+        );
     }
 }

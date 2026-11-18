@@ -14,3 +14,14 @@ to code style. Fyx-specific rules:
 - Rust comes from rustup; `rust-toolchain.toml` pins the version and targets. If `cargo` is not on
   `PATH`, add rustup's bin dir (`~/.cargo/bin`; on macOS with keg-only Homebrew rustup,
   `/opt/homebrew/opt/rustup/bin`). `sccache` must be on `PATH` too (`.cargo/config.toml` uses it).
+
+## Autonomy (multi-session work)
+
+- The coordinator session ("Fyx Windows dev setup") assigns and routes work. Send questions to it
+  with SendMessage, not to the user. Never block waiting for the user: take the safe, recommended
+  option, note it in your progress file, and continue.
+- Only the user can decide: system or security settings, money, pushing `main` or tags,
+  force-pushes, PRs to zed-industries/zed, and changes of product direction.
+- `.claude/settings.json` allows shell commands without a prompt and denies the common ways to
+  force-push, push `main`, push tags or delete branches. The deny list cannot cover every
+  spelling (for example `git -C <dir> push`); the rule above still applies.

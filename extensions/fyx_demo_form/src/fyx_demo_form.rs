@@ -194,7 +194,7 @@ impl FormPanel {
 
     fn submit_button(&self) -> ButtonProps {
         ButtonProps::new("Submit")
-            .icon("check")
+            .icon(Icon::Check)
             .style(ButtonStyle::Filled)
             .disabled(!self.is_valid())
     }
@@ -330,7 +330,7 @@ impl Extension for FormPanel {
             SURFACE_ID,
             "Sign-up form",
             DockPosition::Right,
-            "user_check",
+            Icon::Person,
             320,
         )]
     }
@@ -409,11 +409,19 @@ impl Extension for FormPanel {
             }
             UiEvent::Click(id) if id == submit => self.submit(),
             UiEvent::Click(id) if id == reset => self.reset(),
-            UiEvent::Click(_) | UiEvent::RowClick(_) => Ok(Update::Unchanged),
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::RowSelected(_)
+            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
         }
     }
 }
 
+// fyx:ui 0.1 by default, which is what Fyx runs today; `--features fyx-ui-0-2` builds the 0.2
+// world from the same code.
+#[cfg(not(feature = "fyx-ui-0-2"))]
+register_extension!(FormPanel, v0_1);
+#[cfg(feature = "fyx-ui-0-2")]
 register_extension!(FormPanel);
 
 #[cfg(test)]
@@ -520,7 +528,7 @@ mod tests {
         assert_eq!(
             nodes[12].props,
             ButtonProps::new("Submit")
-                .icon("check")
+                .icon(Icon::Check)
                 .style(ButtonStyle::Filled)
                 .disabled(true)
                 .into()
@@ -609,7 +617,7 @@ mod tests {
             set_props_of(&patches, SUBMIT),
             Some(
                 &ButtonProps::new("Submit")
-                    .icon("check")
+                    .icon(Icon::Check)
                     .style(ButtonStyle::Filled)
                     .into()
             )

@@ -225,8 +225,11 @@ impl LmStudioLanguageModelProvider {
             }),
             request_limiters: ModelRateLimiters::default(),
         };
-        this.state
-            .update(cx, |state, cx| state.restart_fetch_models_task(cx));
+        if !cx.has_global::<crate::DeferStartupProbes>() {
+            // fyx: Fyx sets the marker; then `authenticate` fetches on first use.
+            this.state
+                .update(cx, |state, cx| state.restart_fetch_models_task(cx));
+        }
         this
     }
 
@@ -773,7 +776,7 @@ impl ConfigurationView {
             .mb_2()
             .child(
                 Label::new(format!(
-                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Fyx." // fyx: product name
+                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),

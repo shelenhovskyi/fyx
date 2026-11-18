@@ -158,6 +158,15 @@ impl<'a> CommitAvatar<'a> {
         // arrives on a later render, the cached None shadows the
         // fast path forever.
         self.author_email.as_ref()?;
+        // fyx: `git.blame.show_avatar: false` keeps author emails and SHAs off avatar services
+        // everywhere (hover, history, commit view), not only in the blame gutter.
+        if !project::project_settings::ProjectSettings::get_global(cx)
+            .git
+            .blame
+            .show_avatar
+        {
+            return None;
+        }
 
         let remote = self
             .remote

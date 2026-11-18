@@ -146,7 +146,7 @@ pub fn dev(dir: &Path, options: &DevOptions) -> Result<()> {
             .with_context(|| format!("opening {}", dir.display()))?,
     ));
     build(&dir, &options.build)?;
-    let (_, report) = crate::check(&dir)?;
+    let (_, report) = crate::check(&dir, crate::CheckDepth::Load)?;
     report.print();
     anyhow::ensure!(!report.has_errors(), "fix the errors above first");
 
@@ -193,7 +193,8 @@ pub fn dev(dir: &Path, options: &DevOptions) -> Result<()> {
             continue;
         }
         snapshot = current;
-        match build(&dir, &options.build).and_then(|_| crate::check(&dir)) {
+        match build(&dir, &options.build).and_then(|_| crate::check(&dir, crate::CheckDepth::Load))
+        {
             Ok((_, report)) => report.print(),
             Err(error) => eprintln!("error: {error:#}"),
         }

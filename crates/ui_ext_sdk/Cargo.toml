@@ -16,4 +16,5 @@ doctest = false
 
 [dependencies]
 ui_ext.workspace = true
+ui_ext_sdk_v0_1.workspace = true
 wit-bindgen = "0.41"

@@ -57,10 +57,18 @@ the process cannot open its own sockets; the numbering of the modes follows stre
 ### Cross-cutting items
 
 - **Read-only agent configs** (step 1): agents may not write `.claude/`, `.codex/`, `.mcp.json`,
-  `.zed/`, `.fyx/` or `.git/hooks/`, anywhere in the absolute path (so also `~/.claude/` for the
-  built-in agent, which can edit files outside the project). Matching is by path component after
-  resolving `.` and `..`, and ignores ASCII case, so `.Claude/settings.json` on a case-insensitive
-  file system is caught too.
+  `.zed/`, `.fyx/` or `.git/`, anywhere in the absolute path (so also `~/.claude/` for the
+  built-in agent, which can edit files outside the project), nor Fyx's own config directory
+  (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings file, `tasks.json`, `keymap.json`). All of
+  `.git/` is protected, not only `hooks/`: `config` (`core.hooksPath`, `core.fsmonitor`), `info/`,
+  a submodule's `modules/*/config` and a linked worktree's `commondir` each make the next `git` run
+  start a program, and a `.git` file redirects git to another directory. Matching is by path
+  component after resolving `.` and `..`, and ignores ASCII case, so `.Claude/settings.json` on a
+  case-insensitive file system is caught too. "Write" covers every tool that changes paths: edit,
+  write, create directory, delete, and move or copy, whose whole tree is checked as it lands at the
+  destination (moving `pkg/` with a `pkg/.claude/` inside writes a `.claude/`), and for a move or
+  delete also as it goes away at the source. Copying a file out of an agent config is a read and is
+  allowed.
 - **Redaction** (step 5): known secret values (from the OS credential store, the stripped
   environment, matched `private_files`) are replaced in transcripts, tool output shown to the model,
   logs and exported threads.
@@ -87,6 +95,15 @@ Rules:
 - **Only user settings may raise the mode.** `fyx_security` is a top-level key of the user settings
   file; a project's `.zed/settings.json` is parsed as project settings, which have no such key, so a
   repository can neither turn a mode on nor off.
+- **Lowering waits for the user.** An agent's terminal can write the user settings file (terminals
+  are not confined until step 2), so while Fyx runs a change that lowers protection does not apply
+  by itself. Lowering means a lower mode (`shield` → `audit` → `off`), or `allow_env` entries the
+  current mode does not have. Fyx keeps the stricter settings, logs the request at `warn` and asks in
+  a window prompt ("Lower Protection" / "Keep Current Mode"). The lower value applies only once the
+  user confirms, or at the next start, when the file is read as it is. A declined value is not asked
+  about again until the file asks for something else. Raising applies at once. Every change is
+  logged at `warn`. Under shield, agent write tools cannot reach the file at all (read-only agent
+  configs, below).
 - **A repository may only tighten.** `.fyx/security.toml` at a worktree root can add patterns,
   never remove protections, set the mode or allow a variable (below). It has no effect with the mode
   off.
@@ -122,9 +139,12 @@ of Fyx's own process environment are therefore checked as well. Tools treat an e
 |---|---|
 | `AWS_*` | `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE` |
 | `GITHUB_TOKEN`, `GH_TOKEN`, `NPM_TOKEN` | |
-| `*_API_KEY` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` |
+| `*_KEY` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_KEY`, `STRIPE_KEY` |
 | `*_SECRET*` | `CLIENT_SECRET`, `DJANGO_SECRET_KEY` |
 | `*_TOKEN` | `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` |
+| `*_PASSWORD`, `*_PASSWD` | `DB_PASSWORD` |
+| `*_PAT`, `*_CREDENTIALS` | `GITLAB_PAT`, `GOOGLE_APPLICATION_CREDENTIALS` |
+| `DATABASE_URL`, `*_DSN` | URLs that usually embed a password, `SENTRY_DSN` |
 | `SSH_AUTH_SOCK` | the SSH agent: in shield, `git push` over SSH from an agent terminal stops working; allow it with `allow_env` if you want that |
 
 `allow_env` entries are names or `*` patterns and win over the list. Variable names only are
@@ -136,22 +156,32 @@ Shield covers what passes through Fyx; it is not a sandbox. Until step 2:
 
 - An external agent's own tools (Claude Agent's `Read`, `Bash`, …) read and write the disk
   directly, without `fs/read_text_file`.
+- An external agent's own process and stdio MCP servers inherit Fyx's whole environment, including
+  every `AWS_*` and `*_TOKEN`; the scrub covers only terminals Fyx starts. This is the most likely
+  leak in practice.
 - A terminal command can still `cat .env`, read `~/.aws/credentials`, or re-export a variable from a
   shell startup file (`.zshenv` runs for every zsh).
 - Paths are checked lexically: a symlink named `notes` that points to `.claude/` is not caught.
+- A move, copy or delete checks the tree the worktree has scanned; directories excluded from the
+  scan (`.git/` by default) are not looked into.
 - `.fyx/security.toml` is not read from remote worktrees; if one exists there, the worktree fails
   closed under shield.
 
 ## Hooks
 
 The whole upstream surface is listed by `git grep -n 'fyx:'`. Every hook is a no-op with the mode
-off.
+off. Hook tests live in `crates/fyx_guard/tests/` (`acp_hooks.rs`, `agent_tools.rs`), not in the
+upstream files.
 
 | # | Upstream file | Hook | Step |
 |---|---|---|---|
 | H1 | `crates/acp_thread/src/acp_thread.rs`, `read_text_file` | `fyx_guard::check_private_path(project, &path, cx)?` | 1 |
 | H2 | `crates/acp_thread/src/acp_thread.rs`, `write_text_file` | `fyx_guard::check_config_write(project, &path, cx)?` | 1 |
-| H3 | `crates/agent/src/tools/edit_session.rs`, before `authorize` | `fyx_guard::check_config_write(..)` for the built-in agent's edit and write tools | 1 |
+| H3 | `crates/agent/src/tools/edit_session.rs`, before `authorize` | `fyx_guard::check_agent_edit(..)` for the built-in agent's edit and write tools | 1 |
+| H3b | `crates/agent/src/tools/move_path_tool.rs`, after the permission decision | `fyx_guard::check_agent_move(&project, source, destination, cx)?` | 1 |
+| H3c | `crates/agent/src/tools/copy_path_tool.rs`, after the permission decision | `fyx_guard::check_agent_copy(&project, source, destination, cx)?` | 1 |
+| H3d | `crates/agent/src/tools/delete_path_tool.rs`, after the permission decision | `fyx_guard::check_agent_delete(&project, &path, cx)?` | 1 |
+| H3e | `crates/agent/src/tools/create_directory_tool.rs`, first thing after the input | `fyx_guard::check_agent_create(&project, &input.path, cx)?`, before the out-of-project branch | 1 |
 | H4 | `crates/acp_thread/src/terminal.rs`, `create_terminal_entity` | `fyx_guard::scrub_env(&mut env, cx)`: terminals of external ACP agents | 1 |
 | H5 | `crates/acp_thread/src/acp_thread.rs`, `create_terminal` | `fyx_guard::scrub_env(&mut env, cx)`: the built-in agent's terminal | 1 |
 | H6 | `crates/zed/src/main.rs` | `fyx_guard::init(cx)` | 1 |

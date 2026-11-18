@@ -1,0 +1,17 @@
+[package]
+name = "ui_ext_sdk_v0_1"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+description = "The fyx:ui@0.1.0 guest bindings behind ui_ext_sdk's register_extension!(T, v0_1)"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/ui_ext_sdk_v0_1.rs"
+doctest = false
+
+[dependencies]
+wit-bindgen = "0.41"

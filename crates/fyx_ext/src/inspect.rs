@@ -46,8 +46,10 @@ pub fn import_need(import: &str) -> ImportNeed {
     let interface = import.split('@').next().unwrap_or(import);
     match interface {
         "fyx:ui/types" | "fyx:ui/host" => ImportNeed::Nothing,
-        // fyx:ui 0.2, section L of docs/fyx/wit-0.2/design.md.
-        "fyx:ui/decorations" => ImportNeed::Capability("ui:editor-decorations"),
+        // fyx:ui 0.2, design.md section L: linked for every 0.2 component, with
+        // `ui:editor-decorations` checked per call, so importing it needs nothing. The SDK's 0.2
+        // export imports it whether or not the extension places decorations.
+        "fyx:ui/decorations" => ImportNeed::Nothing,
         _ if interface.starts_with("wasi:filesystem/")
             || interface.starts_with("wasi:sockets/")
             || interface.starts_with("wasi:http/") =>
@@ -202,11 +204,14 @@ pub fn check_capabilities(declared: &[String], imports: &[String], report: &mut 
         }
     }
     for capability in declared {
-        if SURFACE_CAPABILITIES.contains(&capability.as_str()) {
-            report.note(format!(
-                "{capability:?} is needed by the surfaces the extension declares; the host checks it when it loads the extension"
-            ));
-        } else if !used.contains(&capability.as_str())
+        // Used by `surfaces()`, not by an import: checked by loading the component
+        // (`CheckDepth::Load`).
+        if SURFACE_CAPABILITIES.contains(&capability.as_str())
+            || capability == "ui:editor-decorations"
+        {
+            continue;
+        }
+        if !used.contains(&capability.as_str())
             && crate::manifest::KNOWN_CAPABILITIES
                 .iter()
                 .any(|(name, _)| name == capability)
@@ -291,10 +296,9 @@ pub mod tests {
             report.errors.is_empty() && report.warnings.is_empty(),
             "{report:?}"
         );
-        assert_eq!(
-            report.notes.len(),
-            1,
-            "ui:panel is checked at load: {report:?}"
+        assert!(
+            report.is_empty(),
+            "ui:panel is checked by loading the component: {report:?}"
         );
     }
 
@@ -340,7 +344,7 @@ pub mod tests {
     }
 
     #[test]
-    fn decorations_need_their_capability() {
+    fn decorations_are_checked_per_call_not_at_import() {
         let info = inspect(&component_v0_2()).expect("inspect");
         assert!(
             info.imports
@@ -348,23 +352,8 @@ pub mod tests {
                 .any(|name| name == "fyx:ui/decorations@0.2.0"),
             "{info:?}"
         );
-
         let mut report = Report::default();
         check_capabilities(&["ui:panel".into()], &info.imports, &mut report);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|e| e.contains("needs \"ui:editor-decorations\"")),
-            "{report:?}"
-        );
-
-        let mut report = Report::default();
-        check_capabilities(
-            &["ui:panel".into(), "ui:editor-decorations".into()],
-            &info.imports,
-            &mut report,
-        );
         assert!(report.errors.is_empty(), "{report:?}");
     }
 
@@ -376,7 +365,7 @@ pub mod tests {
             "acme:secret/api@1.0.0".to_string(),
         ];
         let mut report = Report::default();
-        check_capabilities(&["ui:editor-decorations".into()], &imports, &mut report);
+        check_capabilities(&["network:fetch".into()], &imports, &mut report);
         assert!(
             report
                 .warnings

@@ -2,7 +2,9 @@
 //!
 //! Apache-2.0 so that extension authors, proprietary ones included, stay outside the GPL.
 //!
-//! An extension implements [`Extension`] and exports it with [`register_extension!`]. Trees are
+//! The API is that of `fyx:ui@0.2.0`. An extension implements [`Extension`] and exports it with
+//! [`register_extension!`]: `register_extension!(T)` exports 0.2, and `register_extension!(T,
+//! v0_1)` exports 0.1 from the same code for hosts that only run 0.1. Trees are
 //! written as nested Rust code with [`TreeBuilder`], which assigns node ids and parents and emits
 //! the flat, parents-first `list<node>` the `fyx:ui` world expects. [`SurfaceTree`] remembers the
 //! live tree of one surface so `handle-event` can answer with a few patches instead of a full
@@ -24,7 +26,7 @@
 //!     }
 //!
 //!     fn surfaces(&self) -> Vec<Surface> {
-//!         vec![Surface::panel("hello", "Hello", DockPosition::Right, "sparkle", 240)]
+//!         vec![Surface::panel("hello", "Hello", DockPosition::Right, Icon::Sparkle, 240)]
 //!     }
 //!
 //!     fn mount(&mut self, _surface_id: &str) -> Result<Vec<Node>, String> {
@@ -46,7 +48,8 @@
 //!     }
 //! }
 //!
-//! register_extension!(Hello);
+//! // Fyx runs 0.1 today; `register_extension!(Hello)` exports 0.2.
+//! register_extension!(Hello, v0_1);
 //! ```
 
 use std::cell::RefCell;
@@ -54,11 +57,15 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
+mod host;
 mod host_model;
+mod v0_1;
+
+pub use host::*;
 
 pub mod bindings {
     wit_bindgen::generate!({
-        path: "../ui_ext/wit",
+        path: "../ui_ext/wit/since_v0.2.0",
         world: "ui-extension",
         pub_export_macro: true,
         default_bindings_module: "ui_ext_sdk::bindings",
@@ -66,29 +73,42 @@ pub mod bindings {
     });
 }
 
-pub use bindings::fyx::ui::host::LogLevel;
+/// The `fyx:ui@0.1.0` bindings, for `register_extension!(T, v0_1)`.
+#[doc(hidden)]
+pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
+
+pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
 pub use bindings::fyx::ui::types::*;
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
-/// The `fyx:ui` WIT version this SDK is generated from, as (major, minor, patch).
-pub const API_VERSION: (u16, u16, u16) = (0, 1, 0);
+/// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
+/// patch).
+pub const API_VERSION: (u16, u16, u16) = (0, 2, 0);
+
+/// The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1.
+pub const API_VERSION_V0_1: (u16, u16, u16) = (0, 1, 0);
 
 /// Name of the custom section [`register_extension!`] adds to every component, from which the host
-/// reads [`API_VERSION`] before instantiating it.
+/// reads the version before instantiating it.
 pub const API_VERSION_SECTION: &str = "fyx:ui-api-version";
 
-/// [`API_VERSION`] as stored in the section: three big-endian `u16`s, as in Zed's
-/// `zed:api-version`.
-pub const API_VERSION_SECTION_BYTES: [u8; 6] = {
-    let (major, minor, patch) = API_VERSION;
+const fn version_section_bytes(version: (u16, u16, u16)) -> [u8; 6] {
+    let (major, minor, patch) = version;
     let [major_high, major_low] = major.to_be_bytes();
     let [minor_high, minor_low] = minor.to_be_bytes();
     let [patch_high, patch_low] = patch.to_be_bytes();
     [
         major_high, major_low, minor_high, minor_low, patch_high, patch_low,
     ]
-};
+}
+
+/// [`API_VERSION`] as stored in the section: three big-endian `u16`s, as in Zed's
+/// `zed:api-version`.
+pub const API_VERSION_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION);
+
+/// [`API_VERSION_V0_1`] as stored in the section.
+pub const API_VERSION_V0_1_SECTION_BYTES: [u8; 6] = version_section_bytes(API_VERSION_V0_1);
 
 /// First id handed out inside a [`ListRow`] subtree.
 ///
@@ -97,44 +117,6 @@ pub const API_VERSION_SECTION_BYTES: [u8; 6] = {
 /// of the surface's main tree, whose ids [`IdAllocator`] hands out from 1 upwards.
 pub const ROW_NODE_ID_BASE: NodeId = 0x8000_0000;
 
-/// Writes a message to the host's log. Off WASM, where there is no host (unit tests of an
-/// extension), it goes to stderr.
-pub fn log(level: LogLevel, message: &str) {
-    #[cfg(target_arch = "wasm32")]
-    bindings::fyx::ui::host::log(level, message);
-    #[cfg(not(target_arch = "wasm32"))]
-    eprintln!("[{level:?}] {message}");
-}
-
-/// Sends an update for `surface_id` during a call only: from `mount`, `handle-event` or
-/// `list-rows`, typically for a surface other than the one the call is about, such as a status
-/// item that follows a panel.
-///
-/// A component runs only while the host is calling it, so `fyx:ui` 0.1 cannot push from timers or
-/// background work, whatever the WIT comment says; `tasks/wit-0.2.md` item 2 (`request-tick`) is
-/// the proposal for that. The host applies the pushes of a call in order, before the call's own
-/// reply. Use [`SurfaceTree::take_update`] to produce the update, so the tree the extension
-/// remembers matches the one the host draws. Off WASM the update is kept for
-/// [`take_pushed_updates`].
-pub fn push_update(surface_id: &str, update: &Update) {
-    #[cfg(target_arch = "wasm32")]
-    bindings::fyx::ui::host::push_update(surface_id, update);
-    #[cfg(not(target_arch = "wasm32"))]
-    PUSHED_UPDATES.with_borrow_mut(|pushed| pushed.push((surface_id.to_string(), update.clone())));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-thread_local! {
-    static PUSHED_UPDATES: RefCell<Vec<(String, Update)>> = const { RefCell::new(Vec::new()) };
-}
-
-/// The updates [`push_update`] sent on this thread since the last call, for unit tests of an
-/// extension on the host target.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn take_pushed_updates() -> Vec<(String, Update)> {
-    PUSHED_UPDATES.with_borrow_mut(std::mem::take)
-}
-
 /// A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it
 /// from a single thread, one call at a time.
 pub trait Extension: 'static {
@@ -142,10 +124,10 @@ pub trait Extension: 'static {
     where
         Self: Sized;
 
-    /// Every surface the extension contributes; called once after instantiation.
+    /// The static surfaces, called once after instantiation. [`add_surface`] adds more later.
     fn surfaces(&self) -> Vec<Surface>;
 
-    /// The initial tree of `surface_id`, parents first. [`SurfaceTree::mount`] builds one.
+    /// The whole tree of `surface_id`, parents first. [`SurfaceTree::mount`] builds one.
     fn mount(&mut self, surface_id: &str) -> Result<Vec<Node>, String>;
 
     fn handle_event(&mut self, _surface_id: &str, _event: UiEvent) -> Result<Update, String> {
@@ -163,10 +145,26 @@ pub trait Extension: 'static {
     ) -> Vec<ListRow> {
         Vec::new()
     }
+
+    /// The tick [`request_tick`] asked for. The update applies to `surface_id`, like an event's
+    /// reply. `fyx:ui` 0.1 has no ticks, so a `v0_1` extension never gets this call.
+    fn tick(&mut self, _surface_id: &str) -> Result<Update, String> {
+        Ok(Update::Unchanged)
+    }
 }
 
-/// Exports a type implementing [`Extension`] as the `fyx:ui/ui-extension` world. Call it once,
-/// at the root of the extension's `cdylib` crate.
+/// Exports a type implementing [`Extension`]. Call it once, at the root of the extension's
+/// `cdylib` crate.
+///
+/// - `register_extension!(MyExtension)` exports the `fyx:ui@0.2.0` world.
+/// - `register_extension!(MyExtension, v0_1)` exports `fyx:ui@0.1.0` from the same code, for
+///   hosts that only run 0.1. Values are converted at the boundary: icons become upstream names,
+///   tooltips, selections and row indents are dropped, and what 0.1 cannot express at all (modal
+///   surfaces, `invalidate-rows`, secret inputs, ticks, runtime surfaces, decorations) fails
+///   with an error that says it needs 0.2.
+///
+/// The component then imports only the chosen world's host functions: the SDK calls them through
+/// `extern "Rust"` shims that this macro defines for that world.
 #[macro_export]
 macro_rules! register_extension {
     ($extension_type:ty) => {
@@ -210,7 +208,17 @@ macro_rules! register_extension {
                     extension.list_rows(&surface_id, list_node, start, count)
                 })
             }
+
+            fn tick(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<$crate::Update, ::std::string::String> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension.tick(&surface_id)
+                })
+            }
         }
+
+        $crate::__fyx_host_shims!(v0_2);
 
         // In the extension's own crate rather than the SDK's rlib, so the linker cannot drop it
         // as an unreferenced archive member.
@@ -221,11 +229,162 @@ macro_rules! register_extension {
 
         $crate::bindings::export!(__FyxUiExtension with_types_in $crate::bindings);
     };
+    ($extension_type:ty, v0_1) => {
+        struct __FyxUiExtension;
+
+        fn __fyx_new_extension() -> ::std::boxed::Box<dyn $crate::Extension> {
+            ::std::boxed::Box::new(<$extension_type as $crate::Extension>::new())
+        }
+
+        impl $crate::bindings_v0_1::Guest for __FyxUiExtension {
+            fn surfaces() -> ::std::vec::Vec<$crate::bindings_v0_1::fyx::ui::types::Surface> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_1::surfaces(extension.surfaces())
+                })
+            }
+
+            fn mount(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::bindings_v0_1::fyx::ui::types::Node>,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .mount(&surface_id)
+                        .and_then(|nodes| $crate::__private::v0_1::nodes(&nodes))
+                })
+            }
+
+            fn handle_event(
+                surface_id: ::std::string::String,
+                event: $crate::bindings_v0_1::fyx::ui::types::UiEvent,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_1::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .handle_event(&surface_id, $crate::__private::v0_1::event(event))
+                        .and_then(|update| $crate::__private::v0_1::update(&update))
+                })
+            }
+
+            fn list_rows(
+                surface_id: ::std::string::String,
+                list_node: $crate::NodeId,
+                start: u32,
+                count: u32,
+            ) -> ::std::vec::Vec<$crate::bindings_v0_1::fyx::ui::types::ListRow> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_1::rows(extension.list_rows(
+                        &surface_id,
+                        list_node,
+                        start,
+                        count,
+                    ))
+                })
+            }
+        }
+
+        $crate::__fyx_host_shims!(v0_1);
+
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(link_section = "fyx:ui-api-version")]
+        #[used]
+        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_V0_1_SECTION_BYTES;
+
+        $crate::bindings_v0_1::export!(__FyxUiExtension with_types_in $crate::bindings_v0_1);
+    };
+}
+
+/// Defines the `extern "Rust"` functions through which the SDK's host functions reach the chosen
+/// world's imports (see `host.rs`). Only the functions an extension calls end up imported.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_host_shims {
+    ($world:ident) => {
+        #[cfg(target_arch = "wasm32")]
+        const _: () = {
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_log(level: $crate::LogLevel, message: &str) {
+                $crate::__private::$world::log(level, message)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_push_update(
+                surface_id: &str,
+                update: &$crate::Update,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::push_update(surface_id, update)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_request_tick(
+                surface_id: &str,
+                delay_ms: u32,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::request_tick(surface_id, delay_ms)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_cancel_tick(surface_id: &str) {
+                $crate::__private::$world::cancel_tick(surface_id)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_add_surface(
+                surface: &$crate::Surface,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::add_surface(surface)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_remove_surface(
+                surface_id: &str,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::remove_surface(surface_id)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_show_surface(
+                surface_id: &str,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::show_surface(surface_id)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_hide_surface(
+                surface_id: &str,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::hide_surface(surface_id)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_place_decoration(
+                id: &str,
+                location: &$crate::DecorationLocation,
+                nodes: &[$crate::Node],
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::place_decoration(id, location, nodes)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_remove_decoration(
+                id: &str,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::remove_decoration(id)
+            }
+        };
+    };
 }
 
 #[doc(hidden)]
 pub mod __private {
     use super::*;
+
+    pub use crate::host::v0_2;
+    pub use crate::v0_1::glue as v0_1;
 
     thread_local! {
         static EXTENSION: RefCell<Option<Box<dyn Extension>>> = const { RefCell::new(None) };
@@ -384,6 +543,7 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
     build(&mut tree);
     let row = ListRow {
         index,
+        indent: 0,
         nodes: tree.finish(),
     };
     ui_ext::Tree::from_row(
@@ -469,6 +629,14 @@ impl PatchSet {
         self
     }
 
+    /// The rows of a list or table changed although its props did not: the host fetches them
+    /// again, `rows` only, or all of them for `None`.
+    pub fn invalidate_rows(&mut self, target: NodeId, rows: Option<RowRange>) -> &mut Self {
+        self.patches
+            .push(Patch::InvalidateRows(InvalidateRowsOp { target, rows }));
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.patches.is_empty()
     }
@@ -522,6 +690,11 @@ pub enum TreeError {
     },
     /// A list row the host would reject, reported by `ui_ext::Tree::from_row`.
     InvalidRow(ui_ext::TreeError),
+    /// `invalidate-rows` names a node that is not a list or a table.
+    NotAList {
+        node: NodeId,
+        kind: &'static str,
+    },
 }
 
 impl fmt::Display for TreeError {
@@ -545,6 +718,10 @@ impl fmt::Display for TreeError {
                 write!(formatter, "tree would have {count} nodes, the cap is {max}")
             }
             Self::InvalidRow(error) => write!(formatter, "invalid list row: {error}"),
+            Self::NotAList { node, kind } => write!(
+                formatter,
+                "node {node} is a {kind}; only a list or a table has rows to invalidate"
+            ),
         }
     }
 }
@@ -584,6 +761,8 @@ pub struct SurfaceTree {
     nodes: HashMap<NodeId, LiveNode>,
     roots: Vec<NodeId>,
     pending: PatchSet,
+    /// A push failed, so the host is behind the mirror: the next update is a whole `replace`.
+    unsynced: bool,
 }
 
 impl SurfaceTree {
@@ -702,16 +881,27 @@ impl SurfaceTree {
     /// fight the user's typing), and clearing the field afterwards does queue the `set-props`,
     /// which a stale mirror would have dropped as unchanged.
     pub fn apply_event(&mut self, event: &UiEvent) {
-        let (UiEvent::InputChanged((id, value)) | UiEvent::InputSubmitted((id, value))) = event
-        else {
-            return;
-        };
-        if let Some(LiveNode {
-            props: Props::Input(input),
-            ..
-        }) = self.nodes.get_mut(id)
-        {
-            input.value.clone_from(value);
+        match event {
+            UiEvent::InputChanged((id, value)) | UiEvent::InputSubmitted((id, value)) => {
+                if let Some(LiveNode {
+                    props: Props::Input(input),
+                    ..
+                }) = self.nodes.get_mut(id)
+                {
+                    input.value.clone_from(value);
+                }
+            }
+            // The host moves a modal list's selection itself, like typed text.
+            UiEvent::RowSelected((id, index)) => {
+                if let Some(LiveNode {
+                    props: Props::List(list),
+                    ..
+                }) = self.nodes.get_mut(id)
+                {
+                    list.selected = Some(*index);
+                }
+            }
+            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => {}
         }
     }
 
@@ -794,8 +984,49 @@ impl SurfaceTree {
     }
 
     /// Patches queued since the last call, as an update for `handle-event` or [`push_update`].
+    /// After a failed [`SurfaceTree::push`] it is the whole tree as a `replace` instead.
     pub fn take_update(&mut self) -> Update {
-        std::mem::take(&mut self.pending).into_update()
+        let pending = std::mem::take(&mut self.pending);
+        if std::mem::take(&mut self.unsynced) {
+            return Update::Replace(self.to_nodes());
+        }
+        pending.into_update()
+    }
+
+    /// Pushes the queued update to `surface_id` with [`push_update`]. On `Err` the host did not
+    /// take it, so the mirror is ahead of the host: the next [`SurfaceTree::take_update`] (or
+    /// push) sends the whole tree as a `replace`.
+    pub fn push(&mut self, surface_id: &str) -> Result<(), HostError> {
+        let update = self.take_update();
+        if update == Update::Unchanged {
+            return Ok(());
+        }
+        push_update(surface_id, &update).inspect_err(|_| self.unsynced = true)
+    }
+
+    /// Whether a failed push left the host behind the mirror.
+    pub fn is_unsynced(&self) -> bool {
+        self.unsynced
+    }
+
+    /// Tells the host that the rows of the list or table `target` changed although its props did
+    /// not; it fetches `rows` again, or all of them for `None`. Unlike rebuilding the list, this
+    /// keeps its scroll position.
+    pub fn invalidate_rows(
+        &mut self,
+        target: NodeId,
+        rows: Option<RowRange>,
+    ) -> Result<(), TreeError> {
+        let node = self.node(target)?;
+        if !matches!(node.props, Props::List(_) | Props::Table(_)) {
+            return Err(TreeError::NotAList {
+                node: target,
+                kind: ui_ext::Props::from(&node.props).kind_name(),
+            });
+        }
+        self.check_update_size(self.pending.len() + 1)?;
+        self.pending.invalidate_rows(target, rows);
+        Ok(())
     }
 
     pub fn pending(&self) -> &PatchSet {
@@ -948,7 +1179,7 @@ impl Surface {
         id: impl Into<String>,
         title: impl Into<String>,
         position: DockPosition,
-        icon: impl Into<String>,
+        icon: Icon,
         default_size: u32,
     ) -> Self {
         Self {
@@ -956,9 +1187,18 @@ impl Surface {
             title: title.into(),
             kind: SurfaceKind::Panel(PanelDescriptor {
                 position,
-                icon: icon.into(),
+                icon,
                 default_size,
             }),
+        }
+    }
+
+    /// A modal, closed until [`show_surface`] opens it. Needs `ui:modal`.
+    pub fn modal(id: impl Into<String>, title: impl Into<String>, width: ModalWidth) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            kind: SurfaceKind::Modal(ModalDescriptor { width }),
         }
     }
 
@@ -1068,11 +1308,18 @@ impl ButtonProps {
             icon: None,
             style: ButtonStyle::Default,
             disabled: false,
+            tooltip: None,
         }
     }
 
-    pub fn icon(mut self, icon: impl Into<String>) -> Self {
-        self.icon = Some(icon.into());
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Shown on hover; the host truncates text over 1024 bytes.
+    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -1104,11 +1351,18 @@ impl InputProps {
         Self {
             value: value.into(),
             placeholder: String::new(),
+            secret: false,
         }
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Masks the text on screen (passwords, tokens). The value still reaches the extension.
+    pub fn secret(mut self) -> Self {
+        self.secret = true;
         self
     }
 }
@@ -1118,7 +1372,14 @@ impl ListProps {
         Self {
             row_count,
             row_height,
+            selected: None,
         }
+    }
+
+    /// The highlighted row, scrolled into view.
+    pub fn selected(mut self, selected: Option<u32>) -> Self {
+        self.selected = selected;
+        self
     }
 }
 
@@ -1132,11 +1393,8 @@ impl TableProps {
 }
 
 impl IconProps {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            color: None,
-        }
+    pub fn new(name: Icon) -> Self {
+        Self { name, color: None }
     }
 
     pub fn color(mut self, color: ColorToken) -> Self {
@@ -1145,9 +1403,17 @@ impl IconProps {
     }
 }
 
-impl From<&str> for IconProps {
-    fn from(name: &str) -> Self {
+impl From<Icon> for IconProps {
+    fn from(name: Icon) -> Self {
         Self::new(name)
+    }
+}
+
+impl ListRow {
+    /// Nesting depth, drawn by the host as indentation (tree views); at most 32 levels.
+    pub fn with_indent(mut self, indent: u8) -> Self {
+        self.indent = indent;
+        self
     }
 }
 
@@ -1279,15 +1545,27 @@ mod tests {
 
         let button = ButtonProps::new("Go")
             .style(ButtonStyle::Filled)
-            .icon("play")
-            .disabled(true);
+            .icon(Icon::Play)
+            .disabled(true)
+            .tooltip("Run it");
         assert_eq!(
             Props::from(button),
             Props::Button(ButtonProps {
                 label: "Go".into(),
-                icon: Some("play".into()),
+                icon: Some(Icon::Play),
                 style: ButtonStyle::Filled,
                 disabled: true,
+                tooltip: Some("Run it".into()),
+            })
+        );
+        assert!(InputProps::new("x").secret().secret);
+        assert_eq!(ListProps::new(3, 20).selected(Some(2)).selected, Some(2));
+        assert_eq!(IconProps::from(Icon::Check).name, Icon::Check);
+        let modal = Surface::modal("picker", "Pick", ModalWidth::Small);
+        assert_eq!(
+            modal.kind,
+            SurfaceKind::Modal(ModalDescriptor {
+                width: ModalWidth::Small
             })
         );
 
@@ -1536,7 +1814,7 @@ mod tests {
     #[test]
     fn host_functions_work_off_wasm() {
         log(LogLevel::Info, "logged to stderr in tests");
-        push_update("echo", &Update::Unchanged);
+        push_update("echo", &Update::Unchanged).expect("off WASM pushes succeed");
         assert_eq!(
             take_pushed_updates(),
             [("echo".to_string(), Update::Unchanged)]
@@ -1545,11 +1823,148 @@ mod tests {
     }
 
     #[test]
-    fn api_version_matches_the_wit_package() {
-        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
-        let wit = include_str!("../../ui_ext/wit/fyx-ui.wit");
-        let (major, minor, patch) = API_VERSION;
-        assert!(wit.contains(&format!("package fyx:ui@{major}.{minor}.{patch};")));
+    fn api_versions_match_the_wit_packages() {
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
+        assert_eq!(API_VERSION_V0_1_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
+        for (version, wit) in [
+            (
+                API_VERSION,
+                include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit"),
+            ),
+            (
+                API_VERSION_V0_1,
+                include_str!("../../ui_ext/wit/fyx-ui.wit"),
+            ),
+        ] {
+            let (major, minor, patch) = version;
+            assert!(
+                wit.contains(&format!("package fyx:ui@{major}.{minor}.{patch};")),
+                "{version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalidate_rows_only_on_lists() {
+        let mut surface = SurfaceTree::new();
+        let (mut list, mut label) = (0, 0);
+        let mounted = surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    label = tree.text("label");
+                    list = tree.list(ListProps::new(10, 20));
+                });
+            })
+            .expect("mount");
+        let mut host = host_tree(&mounted);
+        assert_eq!(
+            surface.invalidate_rows(label, None),
+            Err(TreeError::NotAList {
+                node: label,
+                kind: "text"
+            })
+        );
+        let range = RowRange { start: 2, count: 3 };
+        surface.invalidate_rows(list, Some(range)).expect("a list");
+        assert_eq!(
+            surface.pending().patches(),
+            [Patch::InvalidateRows(InvalidateRowsOp {
+                target: list,
+                rows: Some(range)
+            })]
+        );
+        // It changes no node, so the host's tree is the same before and after.
+        apply(&mut host, &mut surface);
+    }
+
+    #[test]
+    fn row_selected_is_mirrored_like_typed_text() {
+        let mut surface = SurfaceTree::new();
+        let mut list = 0;
+        surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    list = tree.list(ListProps::new(10, 20));
+                });
+            })
+            .expect("mount");
+        surface.apply_event(&UiEvent::RowSelected((list, 4)));
+        assert_eq!(
+            surface.props(list),
+            Some(&ListProps::new(10, 20).selected(Some(4)).into())
+        );
+        assert_eq!(
+            surface.set_props(list, ListProps::new(10, 20).selected(Some(4))),
+            Ok(false),
+            "echoing the host's selection queues nothing"
+        );
+    }
+
+    #[test]
+    fn push_records_and_a_failed_push_resends_the_whole_tree() {
+        take_host_effects();
+        let mut surface = SurfaceTree::new();
+        let mut label = 0;
+        surface
+            .mount(|tree| {
+                tree.column(|tree| {
+                    label = tree.text("0");
+                });
+            })
+            .expect("mount");
+        surface.set_props(label, TextProps::new("1")).expect("set");
+        surface.push("status").expect("off WASM pushes succeed");
+        assert_eq!(
+            take_host_effects(),
+            [HostEffect::Push {
+                surface_id: "status".into(),
+                update: Update::Patches(vec![Patch::SetProps((label, text("1")))]),
+            }]
+        );
+        surface.push("status").expect("nothing to push");
+        assert!(take_host_effects().is_empty());
+
+        // What `push` does when the host refuses: the next update is the whole tree.
+        surface.unsynced = true;
+        assert_eq!(surface.take_update(), Update::Replace(surface.to_nodes()));
+        assert!(!surface.is_unsynced());
+        assert_eq!(surface.take_update(), Update::Unchanged);
+    }
+
+    #[test]
+    fn host_functions_record_their_effects() {
+        take_host_effects();
+        request_tick("clock", 1000).expect("tick");
+        cancel_tick("clock");
+        let picker = Surface::modal("picker", "Pick", ModalWidth::Medium);
+        add_surface(&picker).expect("add");
+        show_surface("picker").expect("show");
+        let location = DecorationLocation {
+            path: "src/main.rs".into(),
+            line: 3,
+            placement: DecorationPlacement::Below,
+            height_lines: None,
+        };
+        place_decoration("todo-3", &location, &[]).expect("place");
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::RequestTick {
+                    surface_id: "clock".into(),
+                    delay_ms: 1000
+                },
+                HostEffect::CancelTick {
+                    surface_id: "clock".into()
+                },
+                HostEffect::AddSurface(picker),
+                HostEffect::ShowSurface("picker".into()),
+                HostEffect::PlaceDecoration {
+                    id: "todo-3".into(),
+                    location,
+                    nodes: Vec::new()
+                },
+            ]
+        );
     }
 
     /// A mounted column holding a text and a row with one button; returns (column, text, row).
@@ -1842,7 +2257,7 @@ mod tests {
                 "echo",
                 "Echo",
                 DockPosition::Left,
-                "echo",
+                Icon::Blocks,
                 200,
             )]
         }

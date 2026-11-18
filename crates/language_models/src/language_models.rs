@@ -34,6 +34,11 @@ use crate::provider::x_ai::XAiLanguageModelProvider;
 use crate::provider::x_ai_subscribed::XAiSubscribedProvider;
 pub use crate::settings::*;
 
+/// fyx: when this global is set (Fyx sets it at startup), LM Studio and llama.cpp don't probe
+/// localhost from their constructors; `authenticate` fetches their models on first use instead.
+pub struct DeferStartupProbes;
+impl gpui::Global for DeferStartupProbes {}
+
 pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
     language_model::set_credentials_read_gate::<SettingsStore>(ai_disabled, cx);
     let credentials_provider = client.credentials_provider();

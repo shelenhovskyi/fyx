@@ -185,6 +185,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_ui_test_probe_v0_2"
+version = "0.2.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fyx_ui_test_status_item"
 version = "0.1.0"
 dependencies = [
@@ -597,6 +604,14 @@ name = "ui_ext_sdk"
 version = "0.1.0"
 dependencies = [
  "ui_ext",
+ "ui_ext_sdk_v0_1",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "ui_ext_sdk_v0_1"
+version = "0.1.0"
+dependencies = [
  "wit-bindgen",
 ]
 

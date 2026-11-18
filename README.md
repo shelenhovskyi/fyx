@@ -1,5 +1,7 @@
 # Fyx
 
+*Fyx is an independent fork of Zed and is not affiliated with or endorsed by Zed Industries.*
+
 Fyx is a code editor forked from [Zed](https://github.com/zed-industries/zed). It adds two things
 on top of the upstream editor:
 

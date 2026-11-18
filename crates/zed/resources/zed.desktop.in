@@ -9,11 +9,12 @@ StartupNotify=$DO_STARTUP_NOTIFY
 Exec=$APP_CLI $APP_ARGS
 Icon=$APP_ICON
 Categories=Utility;TextEditor;Development;IDE;
-Keywords=zed;
+Keywords=fyx;zed;
 # To add Zed to "Open Folder With..." context menu, add `inode/directory` to the MimeType field (semicolon separated)
 # Arch linux users have reported this setting Zed as default file browser. See https://github.com/zed-industries/zed/pull/39076 and related issues.
 # If this happens to you, an unconfirmed fix may be to install Arch's `gnome-defaults-list` package.
-MimeType=text/plain;application/x-zerosize;x-scheme-handler/zed;
+# fyx: own URL scheme (fyx://) and the fyx keyword above
+MimeType=text/plain;application/x-zerosize;x-scheme-handler/fyx;
 Actions=NewWorkspace;
 
 [Desktop Action NewWorkspace]

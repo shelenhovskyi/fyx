@@ -13,8 +13,11 @@ use util::{
 /// A repository's own tightening, relative to a worktree root.
 pub const SECURITY_FILE: &str = ".fyx/security.toml";
 
-/// Directories agents may not write into, at any depth.
-const PROTECTED_DIRS: &[&str] = &[".claude", ".codex", ".zed", ".fyx"];
+/// Directories agents may not write into, at any depth. All of `.git/`, not only `hooks/`: `config`
+/// (`core.hooksPath`, `core.fsmonitor`), `info/`, a submodule's `modules/*/config` and a linked
+/// worktree's `commondir` each make the next `git` run start a program. A `.git` file redirects git to
+/// another directory, so the name is protected as a file too.
+const PROTECTED_DIRS: &[&str] = &[".claude", ".codex", ".zed", ".fyx", ".git"];
 /// Files agents may not write, at any depth.
 const PROTECTED_FILES: &[&str] = &[".mcp.json"];
 
@@ -25,9 +28,15 @@ pub const SECRET_ENV_PATTERNS: &[&str] = &[
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "NPM_TOKEN",
-    "*_API_KEY",
+    "*_KEY",
     "*_SECRET*",
     "*_TOKEN",
+    "*_PASSWORD",
+    "*_PASSWD",
+    "*_PAT",
+    "*_CREDENTIALS",
+    "*_DSN",
+    "DATABASE_URL",
     "SSH_AUTH_SOCK",
 ];
 
@@ -60,14 +69,23 @@ fn protected_config_in(names: &[String]) -> Option<String> {
         if is_last && let Some(file) = PROTECTED_FILES.iter().find(|file| is(name, file)) {
             return Some((*file).to_string());
         }
-        if is(name, ".git")
-            && let Some(next) = names.get(index + 1)
-            && is(next, "hooks")
-        {
-            return Some(".git/hooks/".to_string());
-        }
     }
     None
+}
+
+/// Whether `path` is `dir` or inside it, after resolving `.` and `..`, ignoring ASCII case.
+pub fn is_within(path: &Path, dir: &Path) -> bool {
+    let path = util::paths::normalize_path(path);
+    let dir = util::paths::normalize_path(dir);
+    let mut path = path.components();
+    dir.components().all(|dir_component| {
+        path.next().is_some_and(|component| {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&dir_component.as_os_str().to_string_lossy())
+        })
+    })
 }
 
 #[derive(Deserialize, Default)]
@@ -217,6 +235,13 @@ mod tests {
             "/p/.fyx/security.toml",
             "/p/.git/hooks/pre-commit",
             "/p/.Git/Hooks/post-checkout",
+            "/p/.git/config",
+            "/p/.GIT/CONFIG",
+            "/p/.git/info/exclude",
+            "/p/.git/modules/sub/hooks/pre-commit",
+            "/p/.git/modules/sub/config",
+            "/p/.git/worktrees/wt/commondir",
+            "/p/sub/.git",
             "/p/src/../.claude/settings.json",
         ] {
             assert!(protected_config(Path::new(path)).is_some(), "{path}");
@@ -225,8 +250,9 @@ mod tests {
             "/p/src/main.rs",
             "/p/claude/settings.json",
             "/p/.mcp.json.bak/x",
-            "/p/.git/config",
-            "/p/hooks/.git",
+            "/p/.gitignore",
+            "/p/.github/workflows/ci.yml",
+            "/p/git/config",
             "/p/docs/.mcp.json.md",
             "/p/.claude/../src/main.rs",
         ] {
@@ -234,12 +260,41 @@ mod tests {
         }
         assert_eq!(
             protected_config_rel(rel_path("a/.git/hooks/pre-push")).as_deref(),
-            Some(".git/hooks/")
+            Some(".git/")
+        );
+        assert_eq!(
+            protected_config_rel(rel_path(".git/config")).as_deref(),
+            Some(".git/")
         );
         assert_eq!(
             protected_config_rel(rel_path(".mcp.json")).as_deref(),
             Some(".mcp.json")
         );
+    }
+
+    #[test]
+    fn is_within_ignores_case_and_dot_dot() {
+        let dir = Path::new("/home/u/.config/fyx");
+        assert!(is_within(
+            Path::new("/home/u/.config/fyx/settings.json"),
+            dir
+        ));
+        assert!(is_within(Path::new("/home/u/.config/fyx"), dir));
+        assert!(is_within(Path::new("/home/u/.Config/FYX/tasks.json"), dir));
+        assert!(is_within(
+            Path::new("/home/u/x/../.config/fyx/keymap.json"),
+            dir
+        ));
+        assert!(!is_within(
+            Path::new("/home/u/.config/fyx-other/settings.json"),
+            dir
+        ));
+        assert!(!is_within(Path::new("/home/u/.config"), dir));
+        assert!(!is_within(
+            Path::new("/home/u/.config/fyx/../zed/settings.json"),
+            dir
+        ));
+        assert!(!is_within(Path::new("u/.config/fyx/settings.json"), dir));
     }
 
     #[test]
@@ -334,6 +389,16 @@ mod tests {
             "STRIPE_SECRET_KEY",
             "SSH_AUTH_SOCK",
             "TERM",
+            "DB_PASSWORD",
+            "SMTP_PASSWD",
+            "OPENAI_KEY",
+            "STRIPE_KEY",
+            "GITLAB_PAT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "DATABASE_URL",
+            "SENTRY_DSN",
+            "PATH_SEPARATOR",
+            "KEYBOARD_LAYOUT",
         ]
         .map(String::from);
         assert_eq!(
@@ -342,11 +407,19 @@ mod tests {
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN",
                 "AWS_ACCESS_KEY_ID",
+                "DATABASE_URL",
+                "DB_PASSWORD",
                 "GH_TOKEN",
                 "GITHUB_TOKEN",
+                "GITLAB_PAT",
+                "GOOGLE_APPLICATION_CREDENTIALS",
                 "NPM_TOKEN",
                 "OPENAI_API_KEY",
+                "OPENAI_KEY",
+                "SENTRY_DSN",
+                "SMTP_PASSWD",
                 "SSH_AUTH_SOCK",
+                "STRIPE_KEY",
                 "STRIPE_SECRET_KEY",
             ]
         );

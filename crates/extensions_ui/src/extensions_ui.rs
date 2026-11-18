@@ -1142,14 +1142,7 @@ impl ExtensionsPage {
             .child(
                 Banner::new()
                     .severity(Severity::Success)
-                    // fyx: product name in every upsell banner
-                    .child(
-                        Label::new(label.replace(
-                            "Zed",
-                            release_channel::ReleaseChannel::Stable.display_name(),
-                        ))
-                        .mt_0p5(),
-                    )
+                    .child(Label::new(SharedString::new_static(label)).mt_0p5())
                     .map(|this| {
                         if vim {
                             this.action_slot(

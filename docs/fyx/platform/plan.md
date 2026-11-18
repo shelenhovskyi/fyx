@@ -17,7 +17,7 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13]; keep a precompiled `.cwasm` per installed version, keyed by the wasmtime engine, so large components start without recompiling | — | install, update, roll back a local `.fyxext` in the dev build; a second start skips compilation |
+| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13]; keep a precompiled `.cwasm` per installed version, keyed by the wasmtime engine, so large components start without recompiling | — | install, update, roll back a local `.fyxext` in the dev build; a second start skips compilation; only `.cwasm` files Fyx wrote into the install store are ever deserialized, never one from a package |
 | 1.2 | W3 | "Install Dev Extension" + `fyx.extensions.dev_paths`; env var stays as override [6] | 1.1 | dev extension survives restart without the env var |
 | 1.3 | W3 | Hot reload in place + "Restart extension" after a failure [7, 8] | 1.2 | edit → rebuild → panel updates within 1 s; failure 3 of spec §4 passes |
 | 1.4 | new `platform-cli` | `fyx-ext` crate and binary: `new` (from the template), `build`, `dev`, `check` with declared-vs-used capabilities, `package` [4, 5, 12] | 0.1 | `fyx-ext new demo && fyx-ext dev` opens the panel in Fyx |
@@ -42,7 +42,7 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
+| 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16]. Moderation (owner, 2026-11-18): agents plus CI review every entry; T0–T1 entries auto-merge on green CI, T2 needs the owner's approval | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
 | 3.2 | W0 | Registry CI: build Rust extensions from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json`, `snapshot.json` + packages to Releases, and the 12 h refresh of the snapshot and block list ([registry-repo.md](registry-repo.md#ci)) [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
 | 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18]. The client compiles in the three keysets (release, snapshot, block-list keys), verifies the snapshot first (expiry, sequence, revoked keys), then the index against it and the releases against the release keys | 3.2 | install from the index; tampered package refused; a release signed with a block-list key refused; an expired or rolled-back snapshot stops installs and updates |
 | 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19]. Fetched and cached lists are verified only against the block-list keys, minus revoked ones; stale after 7 days or `expires_at` | 3.3 | spec §4 failures 1, 2, 5 pass; a block list signed with a release key refused |
