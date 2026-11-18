@@ -352,6 +352,9 @@ impl Guest for Probe {
                 };
                 format!("fetch-done {id} err {error}")
             }
+            fyx::ui::io::IoEvent::PermissionChanged((capability, state)) => {
+                format!("permission-changed {capability:?} {state:?}")
+            }
             _ => return Err("unexpected io event".into()),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))

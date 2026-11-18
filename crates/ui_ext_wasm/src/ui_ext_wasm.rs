@@ -585,6 +585,25 @@ pub struct UiState {
 }
 
 impl UiState {
+    /// For the T2 imports: the broker's state of `capability`, `Unavailable` without a broker.
+    /// Recorded for the Extension Inspector like [`UiState::check_capability`].
+    pub fn permission_state(&self, capability: &str) -> permissions::PermissionState {
+        let state = self
+            .capability_check
+            .as_ref()
+            .map_or(permissions::PermissionState::Unavailable, |broker| {
+                broker.state(&self.extension_id, capability)
+            });
+        self.diagnostics.capability_check(
+            capability,
+            match state {
+                permissions::PermissionState::Granted | permissions::PermissionState::Ask => None,
+                other => Some(format!("{other:?}")),
+            },
+        );
+        state
+    }
+
     /// For host imports that read or act for the extension: whether it may use `capability`
     /// now. Answers from the host's permission broker each time, so a revocation applies to the
     /// next call. Without a broker, T1 and T2 are denied.
@@ -1158,8 +1177,6 @@ pub struct LoadOptions {
     /// Whether a staged version (0.2 until it is frozen) may load; `None` means
     /// [`staged_api_allowed_by_default`].
     pub allow_staged: Option<bool>,
-    /// The broker's T2 consent (design.md §7). Without it every T2 operation is denied.
-    pub t2_consent: Option<Arc<dyn permissions::T2Consent>>,
     /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
     /// Applies only to a 0.3 component that declares `network:fetch`.
     pub network_domains: Option<Vec<String>>,
@@ -1213,7 +1230,6 @@ impl UiExtension {
             capability_check,
             capabilities,
             allow_staged,
-            t2_consent,
             network_domains,
             resolver,
         } = options;
@@ -1285,7 +1301,7 @@ impl UiExtension {
                 extension_id.clone(),
                 domains.clone(),
                 fetcher,
-                t2_consent,
+                capability_check.clone(),
                 running.clone(),
             ));
 
@@ -1293,7 +1309,12 @@ impl UiExtension {
                 let extension_id = extension_id.clone();
                 let diagnostics = diagnostics.clone();
                 let capabilities = capabilities.clone();
+                let network = network.clone();
                 async move {
+                    // On tokio: revocations reach in-flight requests and `handle-io`.
+                    if ui_api_version == ApiVersion::V0_3_0 {
+                        network.watch_permissions();
+                    }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
                     // Line by line through `log`, capped (triage-3, SEC T5).
