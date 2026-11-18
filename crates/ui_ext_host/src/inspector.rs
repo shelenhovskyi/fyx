@@ -109,6 +109,12 @@ fn describe_props(props: &Props) -> String {
             diff.new_text.len()
         ),
         Props::Image(image) => format!("{kind} {}", short(&image.alt)),
+        Props::Canvas(canvas) => format!(
+            "{kind} {}x{} {}",
+            canvas.width,
+            canvas.height,
+            short(&canvas.description)
+        ),
         Props::Flex(_) => kind.to_string(),
     }
 }

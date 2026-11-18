@@ -223,7 +223,7 @@ pub(crate) async fn grant_and_rescan(
         if let Some((_, manifest)) = ui_ext_wasm::UiManifest::read(fs.as_ref(), &dir).await? {
             let record = ConsentRecord::current(
                 &dir,
-                &manifest.capabilities,
+                &manifest.consent_items(),
                 &dir.join(&manifest.component),
                 false,
                 fs.as_ref(),

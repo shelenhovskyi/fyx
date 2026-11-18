@@ -302,10 +302,12 @@ impl RegistryHub {
             .find(|installed| installed.id.as_str() == id)
     }
 
-    pub fn action_for(&self, id: &str) -> Option<&Action> {
+    /// Every planned action for an id: a block can come with a held update (spec §4, failure
+    /// 1: the extension is disabled, and the page offers "Approve and Update" or "Uninstall").
+    pub fn actions_for<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Action> {
         self.actions
             .iter()
-            .find(|action| action.id.as_str() == id)
+            .filter(move |action| action.id.as_str() == id)
             .map(|action| &action.action)
     }
 }
@@ -805,7 +807,7 @@ impl FyxExtensionsPage {
     ) -> impl IntoElement {
         let hub = self.hub.read(cx);
         let id = installed.id.as_str().to_string();
-        let action = hub.action_for(&id).cloned();
+        let actions: Vec<Action> = hub.actions_for(&id).cloned().collect();
         let workspace = self.workspace.clone();
         let index_release = |version: &semver::Version| {
             hub.listing
@@ -820,48 +822,49 @@ impl FyxExtensionsPage {
             .map(|(_, reason)| (format!("Disabled, {reason}"), Color::Error))
             .collect();
         let mut update: Option<(Release, &'static str)> = None;
-        match &action {
-            Some(Action::Update { to, .. }) => {
-                if let Some(release) = index_release(to) {
-                    update = Some((release, "Update"));
-                } else {
-                    notes.push((format!("Update to {to} available"), Color::Accent));
+        for action in &actions {
+            match action {
+                Action::Update { to, .. } => {
+                    if let Some(release) = index_release(to) {
+                        update = Some((release, "Update"));
+                    } else {
+                        notes.push((format!("Update to {to} available"), Color::Accent));
+                    }
                 }
-            }
-            Some(Action::Hold { version, reasons }) => {
-                for reason in reasons {
-                    match reason {
-                        HoldReason::Pinned => {
-                            notes.push((format!("{version} available; pinned"), Color::Muted))
-                        }
-                        HoldReason::TooNew { .. } => notes.push((
-                            format!("{version} available after the 24 h wait"),
-                            Color::Muted,
-                        )),
-                        HoldReason::NeedsApproval(additions) => {
-                            notes.push((
-                                format!(
-                                    "Update {version} needs approval: {}",
-                                    describe_additions(additions).join(", ")
-                                ),
-                                Color::Warning,
-                            ));
-                            if let Some(release) = index_release(version) {
-                                update = Some((release, "Approve and Update"));
+                Action::Hold { version, reasons } => {
+                    for reason in reasons {
+                        match reason {
+                            HoldReason::Pinned => {
+                                notes.push((format!("{version} available; pinned"), Color::Muted))
+                            }
+                            HoldReason::TooNew { .. } => notes.push((
+                                format!("{version} available after the 24 h wait"),
+                                Color::Muted,
+                            )),
+                            HoldReason::NeedsApproval(additions) => {
+                                notes.push((
+                                    format!(
+                                        "Update {version} needs approval: {}",
+                                        describe_additions(additions).join(", ")
+                                    ),
+                                    Color::Warning,
+                                ));
+                                if let Some(release) = index_release(version) {
+                                    update = Some((release, "Approve and Update"));
+                                }
                             }
                         }
                     }
                 }
+                Action::Rollback { to, block } => notes.push((
+                    format!("Blocked ({}): rolls back to {to}", block.reason),
+                    Color::Error,
+                )),
+                Action::Disable { block } => notes.push((
+                    format!("Blocked ({}): disabled", block.reason),
+                    Color::Error,
+                )),
             }
-            Some(Action::Rollback { to, block }) => notes.push((
-                format!("Blocked ({}): rolls back to {to}", block.reason),
-                Color::Error,
-            )),
-            Some(Action::Disable { block }) => notes.push((
-                format!("Blocked ({}): disabled", block.reason),
-                Color::Error,
-            )),
-            None => {}
         }
         let origin = match installed.active.origin {
             Origin::Registry => ("From the Fyx registry", Color::Muted),

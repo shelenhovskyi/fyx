@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use fs::Fs;
 use futures::{
     FutureExt as _, StreamExt as _,
@@ -290,6 +290,12 @@ pub struct UiManifest {
     /// 0.2 [`CAPABILITY_MODAL`] and [`CAPABILITY_EDITOR_DECORATIONS`].
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// `process:spawn`: the programs it may run (spec decision 24, design.md 0.3 §0.6).
+    #[serde(default)]
+    pub processes: Vec<ProcessSpec>,
+    /// `[fyx_ui.process]`: what every program gets.
+    #[serde(default)]
+    pub process: Option<ProcessManifest>,
     /// `name` from the top of `extension.toml`, as its author wrote it: check it before showing
     /// it (the provenance line of notifications, design.md M.4).
     #[serde(skip)]
@@ -304,6 +310,158 @@ pub struct UiManifest {
 #[serde(deny_unknown_fields)]
 pub struct NetworkManifest {
     pub domains: Vec<String>,
+}
+
+/// One `[[fyx_ui.processes]]` entry.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSpec {
+    /// What `request.program` names; without `path`, resolved on `PATH` outside the worktrees.
+    pub name: String,
+    /// Argument patterns the program may be run with (none: any arguments).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// A worktree-relative program, which needs a trusted worktree.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `[fyx_ui.process]`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessManifest {
+    /// Environment variables passed through besides `PATH`, `HOME`/`USERPROFILE` and `LANG`.
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// The consent item of a network domain: an update that adds one is held (decision 21).
+pub fn domain_consent_item(domain: &str) -> String {
+    format!("network:fetch@{domain}")
+}
+
+/// The consent item of a program.
+pub fn process_consent_item(program: &str) -> String {
+    format!("process:spawn@{program}")
+}
+
+impl UiManifest {
+    /// What the user consents to: the capabilities, and each domain, program, argument pattern
+    /// and environment name, so an update that adds any of them is held until it is approved
+    /// (design.md 0.3 §0.6).
+    pub fn consent_items(&self) -> Vec<String> {
+        let domains = self
+            .network
+            .iter()
+            .flat_map(|network| network.domains.iter())
+            .map(|domain| domain_consent_item(domain));
+        let programs = self.processes.iter().flat_map(|process| {
+            let program = match &process.path {
+                Some(path) => format!("{} ({path})", process.name),
+                None => process.name.clone(),
+            };
+            std::iter::once(process_consent_item(&program)).chain(
+                process
+                    .args
+                    .iter()
+                    .map(move |pattern| format!("process:spawn@{} {pattern}", process.name)),
+            )
+        });
+        let env = self
+            .process
+            .iter()
+            .flat_map(|process| process.env.iter())
+            .map(|name| format!("process:env@{name}"));
+        self.capabilities
+            .iter()
+            .cloned()
+            .chain(domains)
+            .chain(programs)
+            .chain(env)
+            .collect()
+    }
+
+    /// `[fyx_ui.network]` and `network:fetch` go together; the domains follow
+    /// `network::DomainList::parse` (IDNA, no public-suffix wildcards, localhost only with a
+    /// port).
+    pub fn check_network(&self) -> Result<()> {
+        let declares = self
+            .capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        match &self.network {
+            Some(table) => {
+                anyhow::ensure!(
+                    declares,
+                    "[fyx_ui.network] needs {:?} in capabilities",
+                    network::CAPABILITY_NETWORK
+                );
+                network::DomainList::parse(&table.domains)?;
+            }
+            None => anyhow::ensure!(
+                !declares,
+                "{:?} needs [fyx_ui.network] domains",
+                network::CAPABILITY_NETWORK
+            ),
+        }
+        Ok(())
+    }
+
+    /// The process rules (spec decision 24), checked when the manifest is read. W2c enforces
+    /// them when a program runs (plan 4.7).
+    pub fn check_processes(&self) -> Result<()> {
+        let declares = self.capabilities.iter().any(|c| c == "process:spawn");
+        let mut seen = std::collections::BTreeSet::new();
+        for process in &self.processes {
+            let name = &process.name;
+            let plain = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !name.starts_with('.');
+            if !plain {
+                bail!("[[fyx_ui.processes]] name {name:?} must be a program name, not a path");
+            }
+            if !seen.insert(name.clone()) {
+                bail!("[[fyx_ui.processes]] names {name:?} twice");
+            }
+            if let Some(path) = &process.path {
+                let relative = Path::new(path);
+                let inside = !path.is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, PathComponent::Normal(_)));
+                if !inside {
+                    bail!(
+                        "[[fyx_ui.processes]] {name}: path {path:?} must be relative, inside the worktree"
+                    );
+                }
+            }
+            for pattern in &process.args {
+                if pattern.is_empty() || pattern.chars().any(char::is_control) {
+                    bail!("[[fyx_ui.processes]] {name}: argument pattern {pattern:?} is not valid");
+                }
+            }
+        }
+        for variable in self.process.iter().flat_map(|process| process.env.iter()) {
+            let valid = !variable.is_empty()
+                && variable
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                bail!("[fyx_ui.process] env {variable:?} is not a variable name");
+            }
+        }
+        let has_table = !self.processes.is_empty() || self.process.is_some();
+        if has_table && !declares {
+            bail!("[[fyx_ui.processes]] needs the process:spawn capability");
+        }
+        if declares && self.processes.is_empty() {
+            bail!("process:spawn needs [[fyx_ui.processes]]");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -339,26 +497,12 @@ impl UiManifest {
             permissions::grantable_tier(capability)
                 .with_context(|| format!("extension {id}, in {path:?}"))?;
         }
-        let declares_network = manifest
-            .capabilities
-            .iter()
-            .any(|capability| capability == network::CAPABILITY_NETWORK);
-        match &manifest.network {
-            Some(table) => {
-                anyhow::ensure!(
-                    declares_network,
-                    "extension {id}: [fyx_ui.network] needs {:?} in capabilities",
-                    network::CAPABILITY_NETWORK
-                );
-                network::DomainList::parse(&table.domains)
-                    .with_context(|| format!("extension {id}, in {path:?}"))?;
-            }
-            None => anyhow::ensure!(
-                !declares_network,
-                "extension {id}: {:?} needs [fyx_ui.network] domains",
-                network::CAPABILITY_NETWORK
-            ),
-        }
+        manifest
+            .check_network()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .check_processes()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
             "extension {id} targets fyx:ui {}, this build supports 0.1.0, 0.2.0 and 0.3.0 (staged)",

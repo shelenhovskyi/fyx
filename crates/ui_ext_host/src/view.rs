@@ -269,7 +269,12 @@ impl SurfaceView {
                         }
                     }
                     Props::DiffView(_) => diffs.push((id, node.props_arc().clone())),
-                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) | Props::Image(_) => {}
+                    // A canvas takes focus with plan 4.14, when it is clickable.
+                    Props::Flex(_)
+                    | Props::Text(_)
+                    | Props::Icon(_)
+                    | Props::Image(_)
+                    | Props::Canvas(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
             }
@@ -912,6 +917,7 @@ impl Renderer<'_, '_> {
             Props::Markdown(source) => self.markdown(id, source, scope),
             Props::DiffView(props) => self.diff_view(id, props, scope),
             Props::Image(props) => self.image_placeholder(props),
+            Props::Canvas(props) => self.canvas_placeholder(props),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -1256,6 +1262,30 @@ impl Renderer<'_, '_> {
             .bg(self.cx.theme().colors().element_background)
             .child(
                 Label::new(props.alt.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any_element()
+    }
+
+    /// Until plan 4.14 paints the ops: the canvas's box with its description.
+    fn canvas_placeholder(&self, props: &ui_ext::canvas::CanvasProps) -> AnyElement {
+        div()
+            .w(px(props.width as f32))
+            .h(px(props.height as f32))
+            .max_w_full()
+            .p_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.cx.theme().colors().border_variant)
+            .bg(self.cx.theme().colors().element_background)
+            .child(
+                Label::new(props.description.clone())
                     .size(LabelSize::Small)
                     .color(Color::Muted)
                     .truncate(),
