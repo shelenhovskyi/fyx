@@ -1777,9 +1777,10 @@ mod harness_conformance_process {
                 args: vec!["status".into(), "**".into()],
                 path: None,
             },
+            // Any arguments: without patterns a program runs with none (integration-5 S6).
             ProcessSpec {
                 name: format!("{MISSING}-2"),
-                args: Vec::new(),
+                args: vec!["**".into()],
                 path: None,
             },
         ]

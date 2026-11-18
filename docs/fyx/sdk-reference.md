@@ -624,7 +624,7 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - A process that cannot start gets one `IoEvent::SpawnFailed` instead (`SpawnError`
     implements `Display`). A program the manifest does not name gets an id, then
     `SpawnError::NotFound`.
-- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with optional
+- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with their
   argument patterns, and the environment names:
 
   ```toml
@@ -633,8 +633,13 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   args = ["status", "**"]
 
   [fyx_ui.process]
-  env = ["GIT_DIR"]
+  env = ["NO_COLOR"]
   ```
+
+  - **Arguments:** a program without `args` runs with no arguments only; `args = ["**"]` allows
+    any.
+  - **Environment names:** names that load code or redirect a program (`LD_*`, `GIT_DIR`,
+    `CARGO_*`, `PATH`, …) are refused (`ui_ext::process::is_forbidden_env`).
 
 - **Consent and limits:**
   - `process:spawn` is T2: the first spawn asks the user, and a refusal ends
