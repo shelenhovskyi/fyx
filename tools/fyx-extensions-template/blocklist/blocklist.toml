@@ -1,0 +1,8 @@
+# The block list source (registry-repo.md, "Block list"). Only the owner changes it (CODEOWNERS);
+# blocklist.yml signs it into blocklist.json. Example:
+#
+# [[entry]]
+# id       = "todo"
+# versions = ">=1.2.0, <1.2.3"        # or "*"
+# reason   = "Uploads open buffers."  # shown to users, 1-300 characters
+# urgent   = true

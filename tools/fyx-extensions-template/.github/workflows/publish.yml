@@ -1,0 +1,165 @@
+# Trusted (registry-repo.md, "publish.yml"): on a push to main, rebuild each changed entry with
+# no secrets, then sign, index and snapshot it in the Environment `release-signing`. Shares the
+# `publish` concurrency group with refresh.yml, so `index add` and the snapshot sequence never
+# race.
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths: ["extensions/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      entries: ${{ steps.diff.outputs.entries }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: diff
+        run: |
+          entries=$(git diff --name-only HEAD^ HEAD -- 'extensions/*.toml' | jq -R . | jq -sc .)
+          echo "entries=$entries" >> "$GITHUB_OUTPUT"
+
+  # The same steps as pr.yml's build, from main. Publish never takes a package from the PR run.
+  rebuild:
+    needs: changes
+    if: needs.changes.outputs.entries != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        file: ${{ fromJSON(needs.changes.outputs.entries) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Entry, source, offline build
+        env:
+          FILE: ${{ matrix.file }}
+        run: |
+          python3 scripts/registry.py entry "$FILE" > entry.json
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          repository=$(jq -r .source.repository entry.json)
+          commit=$(jq -r .source.commit entry.json)
+          path=$(jq -r .source.path entry.json)
+          git init -q source
+          git -C source fetch -q --depth 1 "$repository" "$commit"
+          git -C source checkout -q FETCH_HEAD
+          docker run --rm -v "$PWD/source:/src" -v "$PWD/cargo-home:/cargo" -e CARGO_HOME=/cargo \
+            -w /src "$image" cargo fetch --locked
+          mkdir -p out
+          docker run --rm --network none -e CARGO_NET_OFFLINE=true -e CARGO_HOME=/cargo \
+            -v "$PWD/source:/src" -v "$PWD/cargo-home:/cargo" -v "$PWD/out:/out" \
+            -w "/src/$path" "$image" sh -euc 'fyx-ext check --deny-warnings && fyx-ext package --out /out'
+          package=$(ls out/*.fyxext)
+          python3 scripts/registry.py release --entry entry.json \
+            --manifest "source/$path/extension.toml" --package "$package" > out/release.json
+          # Reported, not yet failing (open question 1: reproducible builds).
+          echo "rebuilt $(sha256sum "$package")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebuilt-${{ strategy.job-index }}
+          path: out/
+
+  sign:
+    needs: rebuild
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rebuilt-*
+          path: rebuilt
+      - name: Tools
+        run: |
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+      - name: 0. Check the keyset before any key is read
+        env:
+          SNAPSHOT_KEY_ID: ${{ vars.SNAPSHOT_KEY_ID }}
+        run: |
+          docker run --rm --network none -v "$PWD:/w:ro" -w /w "$IMAGE" \
+            fyx-registry verify keyset keys/keyset.json --online-snapshot-key "$SNAPSHOT_KEY_ID"
+      - name: Download the published index and snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p published
+          gh release download index --repo "$REPO" --pattern index.json --pattern snapshot.json \
+            --dir published || echo "::notice::no published index yet: this is the first release"
+      - name: 1. Sign each release
+        env:
+          FYX_REGISTRY_SIGNING_KEY: ${{ secrets.RELEASE_KEY }}
+        run: |
+          now=$(date +%s)
+          for dir in rebuilt/*/; do
+            package=$(ls "$dir"*.fyxext)
+            python3 scripts/registry.py stamp "$dir/release.json" --published-at "$now" > "$dir/stamped.json"
+            docker run --rm --network none -e FYX_REGISTRY_SIGNING_KEY -v "$PWD:/w" -w /w "$IMAGE" \
+              fyx-registry sign release "$dir/stamped.json" --package "$package" --out "$dir/signed.json"
+          done
+      - name: 2. Verify the releases
+        run: |
+          for dir in rebuilt/*/; do
+            docker run --rm --network none -v "$PWD:/w" -w /w "$IMAGE" fyx-registry verify release \
+              "$dir/signed.json" --package "$(ls "$dir"*.fyxext)" --keyset keys/keyset.json
+          done
+      - name: 3. Upload the packages, before the index names them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for dir in rebuilt/*/; do
+            tag="$(jq -r .signed.id "$dir/signed.json")-v$(jq -r .signed.version "$dir/signed.json")"
+            gh release create "$tag" --repo "$REPO" --title "$tag" --notes "" "$dir"*.fyxext
+          done
+      - name: 4. Add them to the index
+        run: |
+          cp published/index.json index.json 2>/dev/null || true
+          for dir in rebuilt/*/; do
+            docker run --rm --network none -v "$PWD:/w" -w /w "$IMAGE" fyx-registry index add \
+              --index index.json --release "$dir/signed.json" --keyset keys/keyset.json
+          done
+      - name: 5. Sign the snapshot
+        env:
+          FYX_REGISTRY_SIGNING_KEY: ${{ secrets.SNAPSHOT_KEY }}
+        run: |
+          sequence=1
+          revoke=()
+          if [ -f published/snapshot.json ]; then
+            sequence=$(( $(jq -r .signed.sequence published/snapshot.json) + 1 ))
+            # Release and snapshot revocations carry over; block-list ones the client keeps itself.
+            mapfile -t revoke < <(python3 scripts/registry.py revocations published/snapshot.json --keyset keys/keyset.json)
+          fi
+          docker run --rm --network none -e FYX_REGISTRY_SIGNING_KEY -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry sign snapshot --index index.json --sequence "$sequence" "${revoke[@]}" --out snapshot.json
+      - name: 6. Verify both
+        run: |
+          docker run --rm --network none -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry verify index index.json --keyset keys/keyset.json --snapshot snapshot.json
+      - name: 7. Upload the index, then the snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release view index --repo "$REPO" > /dev/null 2>&1 \
+            || gh release create index --repo "$REPO" --title index --notes "Registry documents"
+          gh release upload index --repo "$REPO" --clobber index.json
+          gh release upload index --repo "$REPO" --clobber snapshot.json

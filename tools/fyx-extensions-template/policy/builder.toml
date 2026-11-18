@@ -1,0 +1,6 @@
+# The pinned builder image and tools (registry-repo.md, pr.yml step 2). The digest is a
+# placeholder until the image is built from builder/Dockerfile and pushed (task 3.2); CI refuses
+# to build while it is all zeros.
+image   = "ghcr.io/shelenhovskyi/fyx-ext-builder"
+digest  = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+fyx_ext = "0.1.0"

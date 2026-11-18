@@ -1,0 +1,27 @@
+# A submitted review re-runs the policy decision (registry-repo.md, "The policy check"). A
+# `pull_request_review` run from a fork gets a read-only token, so this workflow only exists to
+# trigger review.yml through `workflow_run`, which runs in the base repository's context.
+name: review-trigger
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record the PR for review.yml
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p pr
+          jq -n --argjson number "$NUMBER" --arg head "$HEAD" '{number: $number, head: $head}' > pr/pr.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr
+          path: pr/

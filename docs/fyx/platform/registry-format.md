@@ -399,6 +399,11 @@ fyx-registry verify keyset keyset.json --online-snapshot-key fyx-snap-2026-a
   `SNAPSHOT_KEY`, it also refuses that key unless it has `snapshot` and not
   `blocklist-revocation`, so a rotation cannot put that role into CI by accident. Clients do not
   apply this check.
+- `verify client <dir> --keyset <file> [--now <seconds>]` runs the client core (below) over a
+  folder holding `snapshot.json`, `index.json`, optionally `blocklist.json`, and packages named by
+  the last segment of their `package.url`. It reports each extension as installable (with its
+  package verified when present) or held by the age gate, and fails if the client refuses
+  anything. The registry template's dry run (`tools/fyx-extensions-template`) ends with it.
 - `index add` verifies the whole existing index and the new release, refuses a version that is
   already there, keeps releases sorted by id and version, sets `generated_at` (now, or
   `--generated-at`), and replaces the file atomically. A missing index is created.
