@@ -315,11 +315,12 @@ are what upstream Zed's manifest parser expects.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:151-155 (ExtensionToml { id, fyx_ui }) -->
 
-`[fyx_ui]` accepts exactly these three keys. Unknown keys are an error (`deny_unknown_fields`).
+`[fyx_ui]` accepts these keys, plus the `[fyx_ui.network]` table for `network:fetch` (0.3; see
+the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown_fields`).
 
 | Key | Rule |
 |---|---|
-| `api_version` | A semver string. It must be a version this build supports (exactly `0.1.0` today), and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). |
+| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0`. `0.2.0` and `0.3.0` are staged: dev builds load them (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. |
 

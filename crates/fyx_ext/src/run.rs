@@ -56,11 +56,7 @@ pub fn check_surfaces(manifest: &Manifest, harness: &Harness, report: &mut Repor
             .any(|surface| capability_for(&surface.kind) == capability);
         if SURFACE_CAPABILITIES.contains(&capability.as_str())
             && !used
-            && crate::manifest::KNOWN_CAPABILITIES
-                .iter()
-                .any(|(name, status)| {
-                    name == capability && *status == crate::manifest::CapabilityStatus::Available
-                })
+            && crate::manifest::capability_available(capability, manifest.api_version.as_ref())
         {
             report.warning(format!(
                 "{capability:?} is declared but no surface needs it"
