@@ -225,6 +225,7 @@ impl From<wit::Props> for model::Props {
                 },
                 disabled: button.disabled,
                 tooltip: button.tooltip,
+                accessible_label: button.accessible_label,
             }),
             wit::Props::Input(input) => Self::Input(model::InputProps {
                 value: input.value,

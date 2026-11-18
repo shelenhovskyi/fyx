@@ -129,12 +129,11 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
 pub const MAX_VERSION: Version = Version::new(0, 3, 0);
-/// The newest frozen version. Newer ones are staged: they load only where
-/// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). The
-/// commit that declares 0.2 frozen sets this to an explicit `Version::new(0, 2, 0)`, never to
-/// [`MAX_VERSION`], which is the staged 0.3 (integration-5 A2). That waits until no 0.2 WIT
-/// change is left (A5's button `label`).
-pub const MAX_FROZEN_VERSION: Version = Version::new(0, 1, 0);
+/// The newest frozen version: 0.2 (integration-5 A2). Newer ones are staged: they load only where
+/// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). Freezing a
+/// version names it here explicitly; never set this to [`MAX_VERSION`], which may be a staged
+/// world (0.3 now).
+pub const MAX_FROZEN_VERSION: Version = Version::new(0, 2, 0);
 
 /// Custom section with the `fyx:ui` version a component targets: three big-endian `u16`s, the same
 /// encoding as `zed:api-version`.
@@ -456,9 +455,17 @@ impl UiManifest {
                     "unknown capability {capability:?}"
                 );
             } else if !world.contains(&capability.as_str()) {
+                // The first world that has it: 0.2 for `ui:notifications`, else 0.3.
+                let needs = if world_capabilities(&Version::new(0, 2, 0))
+                    .contains(&capability.as_str())
+                {
+                    "0.2"
+                } else {
+                    "0.3"
+                };
                 match permissions::tier_of(capability) {
                     Some(_) => bail!(
-                        "capability {capability:?} needs fyx:ui 0.3; this extension targets \
+                        "capability {capability:?} needs fyx:ui {needs}; this extension targets \
                          {version}"
                     ),
                     None => bail!("unknown capability {capability:?}"),
@@ -1460,7 +1467,7 @@ pub struct LoadOptions {
     /// together with the broker. `None` (no manifest: tests and bare components) declares every
     /// UI capability. [`UiExtension::load_from_dir_with_options`] sets it from the manifest.
     pub capabilities: Option<Vec<String>>,
-    /// Whether a staged version (0.2 until it is frozen) may load; `None` means
+    /// Whether a staged version (0.3 until it is frozen) may load; `None` means
     /// [`staged_api_allowed_by_default`].
     pub allow_staged: Option<bool>,
     /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.

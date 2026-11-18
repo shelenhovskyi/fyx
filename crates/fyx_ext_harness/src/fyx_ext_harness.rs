@@ -1203,6 +1203,27 @@ impl Harness {
         self.mounted.get(surface_id)?.props.get(&id)
     }
 
+    /// The name a screen reader announces for a button node, by the renderer's rule: its
+    /// `accessible-label` (at most 256 bytes), else a non-empty label, else the tooltip, else the
+    /// icon's name. `None` for a node that is not a button.
+    pub fn accessible_name(&self, surface_id: &str, id: NodeId) -> Option<String> {
+        let model::Props::Button(button) = self.props(surface_id, id)? else {
+            return None;
+        };
+        let name = button
+            .accessible_label_text()
+            .or_else(|| (!button.label.trim().is_empty()).then_some(button.label.as_str()))
+            .or_else(|| button.tooltip_text())
+            .map(str::to_string)
+            .or_else(|| {
+                button.icon.as_ref().map(|icon| match icon {
+                    model::IconRef::Frozen(icon) => icon.name().to_string(),
+                    model::IconRef::Upstream(name) => name.clone(),
+                })
+            });
+        name
+    }
+
     /// The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds
     /// it.
     pub fn tree_v0_1(&self, surface_id: &str) -> Option<&Tree> {

@@ -12,6 +12,10 @@
 # --fyx-ui-0-3 does the same for the staged 0.3 world (`fyx-ui-0-3`, api_version 0.3.0) in
 # <target>/fyx-demos-v0_3/; dev builds run staged worlds.
 #
+# Each world takes its own capabilities (the host's `UiManifest::check_world`). A manifest line
+# `# fyx-ui-0-2: capabilities = [...]` replaces the `capabilities` line in the 0.2 and 0.3 copies,
+# and `# fyx-ui-0-3: ...` in the 0.3 copy; the repository's manifest stays the 0.1 one.
+#
 # Then point the dev build at the directories it prints, e.g. on Windows:
 #   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;...
 set -euo pipefail
@@ -73,6 +77,27 @@ fi
 
 cargo build --target wasm32-wasip2 "${cargo_args[@]}" "$@"
 
+# The manifest for one world: the newest `# fyx-ui-0-N: capabilities = ...` line for N up to
+# that world, in place of the `capabilities` line. Without one the manifest is copied as it is.
+world_manifest() {
+    local manifest=$1 world=$2 markers line
+    case "$world" in
+        0_3) markers=("fyx-ui-0-3" "fyx-ui-0-2") ;;
+        *) markers=("fyx-ui-0-2") ;;
+    esac
+    line=""
+    for marker in "${markers[@]}"; do
+        line=$(sed -n "s/^# $marker: \(capabilities = .*\)\$/\1/p" "$manifest")
+        if [[ -n "$line" ]]; then break; fi
+    done
+    if [[ -z "$line" ]]; then
+        cat "$manifest"
+        return
+    fi
+    awk -v line="$line" '/^capabilities = / { print line; next } /^# fyx-ui-0-[0-9]+: / { next } { print }' \
+        "$manifest"
+}
+
 separator=":"
 dirs=()
 for demo in "${demos[@]}"; do
@@ -84,7 +109,8 @@ for demo in "${demos[@]}"; do
         cp "$component" "$dir/fyx_ui.wasm"
         rm -rf "$dir/assets"
         if [[ -d "extensions/$demo/assets" ]]; then cp -R "extensions/$demo/assets" "$dir/assets"; fi
-        sed "s/^api_version = \"0\\.1\\.0\"\$/api_version = \"$version\"/" "extensions/$demo/extension.toml" \
+        world_manifest "extensions/$demo/extension.toml" "$world" \
+            | sed "s/^api_version = \"0\\.1\\.0\"\$/api_version = \"$version\"/" \
             > "$dir/extension.toml"
         if ! grep -q "^api_version = \"$version\"\$" "$dir/extension.toml"; then
             echo "fyx-build-demos: extensions/$demo/extension.toml has no api_version = \"0.1.0\" line" >&2

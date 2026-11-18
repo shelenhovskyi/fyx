@@ -182,9 +182,10 @@ async fn test_v0_2_probe_loads_as_v0_2(cx: &mut TestAppContext) {
     );
 }
 
+/// integration-5 A2: 0.2 is frozen, so it loads where staged versions are not allowed.
 #[gpui::test]
-async fn test_v0_2_is_staged(cx: &mut TestAppContext) {
-    let error = load_with(
+async fn test_v0_2_is_frozen(cx: &mut TestAppContext) {
+    let extension = load_with(
         LoadOptions {
             allow_staged: Some(false),
             ..LoadOptions::default()
@@ -192,13 +193,8 @@ async fn test_v0_2_is_staged(cx: &mut TestAppContext) {
         cx,
     )
     .await
-    .err()
-    .expect("Stable and Preview stay on 0.1");
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("targets fyx:ui 0.2.0, which is staged"),
-        "{message}"
-    );
+    .expect("Stable and Preview load 0.2");
+    assert_eq!(extension.api_version(), &Version::new(0, 2, 0));
 }
 
 #[gpui::test]
@@ -308,6 +304,7 @@ async fn test_v0_2_mount_and_rows_carry_the_new_props(cx: &mut TestAppContext) {
             style: ui_ext::ButtonStyle::Filled,
             disabled: false,
             tooltip: Some("Accept every hunk".into()),
+            accessible_label: Some("Accept all hunks".into()),
         })
     );
     assert_eq!(

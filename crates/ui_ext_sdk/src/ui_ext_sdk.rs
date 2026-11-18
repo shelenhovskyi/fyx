@@ -2010,7 +2010,16 @@ impl ButtonProps {
             style: ButtonStyle::Default,
             disabled: false,
             tooltip: None,
+            accessible_label: None,
         }
+    }
+
+    /// The name screen readers announce, for a button whose label does not say what it does (an
+    /// icon-only button, or a `+`). Without one, the host announces the label, else the tooltip,
+    /// else the icon's name. At most 256 bytes are used. A 0.1 host drops it.
+    pub fn accessible_label(mut self, label: impl Into<String>) -> Self {
+        self.accessible_label = Some(label.into());
+        self
     }
 
     pub fn icon(mut self, icon: Icon) -> Self {
@@ -2646,6 +2655,7 @@ mod tests {
                 style: ButtonStyle::Filled,
                 disabled: true,
                 tooltip: Some("Run it".into()),
+                accessible_label: None,
             })
         );
         assert!(InputProps::new("x").secret().secret);
