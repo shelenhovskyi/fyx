@@ -417,3 +417,15 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   stops counting toward the 512 and loses its notifications, like `modal_closed`. W3 calls it.
 - Drift: `ALL_UI_CAPABILITIES` should gain `ui:canvas`; held until W4 adds it to the harness's
   `ALL_CAPABILITIES` (the conformance test compares them).
+
+## integration-5 A items (2026-11-18)
+
+- **A2** (`cd9c665a92`): `MAX_FROZEN_VERSION` is an explicit 0.2.0; 0.2 loads in Stable and
+  Preview, 0.3 stays staged. The comment says never to use `MAX_VERSION` for it.
+- **A4**: `UiManifest::read` reads `api_version` first (a 0.4 manifest says "targets 0.4.0", not
+  "unknown field"), then the world's manifest. `UiManifest::check_world` applies
+  migration.md §2's table: per-version capabilities (error, not warning), and the 0.3 tables
+  (`network`, `processes`, `process`, `commands`, `picker_sources`) only from 0.3.
+  `[[fyx_ui.commands]]` (`id`, `title` ≤ 128, ≤ 64) and `[[fyx_ui.picker_sources]]` (`id`,
+  `picker = "<extension>/<surface>"`, ≤ 64) are accepted and checked; nothing uses them yet.
+  If the scope decision moves them to 0.4, only the version gate changes.
