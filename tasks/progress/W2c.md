@@ -345,3 +345,15 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - Lock: async-compression features `brotli`, `zlib`, `zstd` in ui_ext_wasm add brotli 8.0.4,
   brotli-decompressor 5.0.3, alloc-no-stdlib 2.0.4, alloc-stdlib 0.2.4 (BSD-3-Clause/MIT;
   `cargo deny` advisories and bans ok).
+
+## 4.6 follow-ups 4 and 5: TLS roots, local TLS test server (2026-11-18)
+
+- `network:fetch` uses Zed's TLS exactly as its own client does
+  (`use_preconfigured_tls(http_client_tls::tls_config())`): the platform verifier, falling back
+  to the bundled webpki roots when it cannot load. No extension CA, no bypass.
+- `test_server::start_tls` serves the same handler over TLS with a checked-in test CA and
+  `localhost` certificate (`src/test_tls/`, DER, P-256, valid to 2126, regeneration steps in its
+  README); `Fetcher::with_tls` (test only) trusts that CA. Test: https end to end, and the same
+  request with Zed's roots fails with `tls`.
+- Lock: ui_ext_wasm gains `http_client_tls` (dependency) and `rustls`, `tokio-rustls`
+  (dev-dependencies), all already in the workspace.

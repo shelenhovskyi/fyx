@@ -107,6 +107,9 @@ pub struct Fetcher {
     /// Test only: which addresses count as global, so a test server on loopback can stand in
     /// for a public host.
     is_global: fn(IpAddr) -> bool,
+    /// Test only: a TLS configuration that trusts the test CA.
+    #[cfg(test)]
+    tls: Option<rustls::ClientConfig>,
 }
 
 /// The `user-agent` of an extension's requests (design.md §8): `Fyx/<major.minor> (extension
@@ -138,7 +141,15 @@ impl Fetcher {
             resolver: resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
             user_agent,
             is_global,
+            #[cfg(test)]
+            tls: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_tls(mut self, tls: rustls::ClientConfig) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     #[cfg(test)]
@@ -232,7 +243,15 @@ impl Fetcher {
             // No proxy from the environment: those can carry the user's credentials (decision
             // 23). Fyx's own proxy setting is not applied yet.
             .no_proxy()
-            .user_agent(self.user_agent.clone());
+            .user_agent(self.user_agent.clone())
+            // Zed's TLS, as its own client uses it: the platform verifier, or the bundled webpki
+            // roots where the platform's cannot be loaded (design.md §8). No extension CA.
+            .use_preconfigured_tls({
+                let tls = http_client_tls::tls_config();
+                #[cfg(test)]
+                let tls = self.tls.clone().unwrap_or(tls);
+                tls
+            });
         if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
             // Only `127.0.0.1` gets here (IP literals never match a domain pattern).
             if !allowed.loopback || !ip.is_loopback() {
@@ -832,8 +851,49 @@ async fn ask_consent(
     }
 }
 
+/// The test CA and its `localhost` certificate (`test_tls/README.md`).
+#[cfg(test)]
+pub(crate) mod test_tls {
+    use std::sync::Arc;
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    const CA: &[u8] = include_bytes!("test_tls/ca.der");
+    const LOCALHOST: &[u8] = include_bytes!("test_tls/localhost.der");
+    const LOCALHOST_KEY: &[u8] = include_bytes!("test_tls/localhost.key.der");
+
+    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    pub(crate) fn server_config() -> Arc<rustls::ServerConfig> {
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions()
+                .expect("protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(LOCALHOST)],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(LOCALHOST_KEY)),
+                )
+                .expect("the test certificate"),
+        )
+    }
+
+    /// A client configuration that trusts the test CA and nothing else.
+    pub(crate) fn client_config() -> rustls::ClientConfig {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(CA)).expect("the test CA");
+        rustls::ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    }
+}
+
 /// A plain HTTP/1.1 server on loopback for the tests: each request gets the response its path
-/// names (`respond`), then the connection closes.
+/// names (`respond`), then the connection closes. [`test_server::start_tls`] serves it over TLS.
 #[cfg(test)]
 pub(crate) mod test_server {
     use std::sync::{
@@ -879,6 +939,27 @@ pub(crate) mod test_server {
     pub(crate) async fn start(
         respond: impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static,
     ) -> Server {
+        serve(respond, None).await
+    }
+
+    /// [`start`] over TLS, with the `localhost` certificate of the test CA
+    /// ([`super::test_tls`]).
+    pub(crate) async fn start_tls(
+        respond: impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Server {
+        serve(
+            respond,
+            Some(tokio_rustls::TlsAcceptor::from(
+                super::test_tls::server_config(),
+            )),
+        )
+        .await
+    }
+
+    async fn serve(
+        respond: impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static,
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("binds");
@@ -888,34 +969,50 @@ pub(crate) mod test_server {
         tokio::spawn({
             let connections = connections.clone();
             async move {
-                while let Ok((mut stream, _)) = listener.accept().await {
+                while let Ok((stream, _)) = listener.accept().await {
                     connections.fetch_add(1, Ordering::SeqCst);
                     let respond = respond.clone();
+                    let tls = tls.clone();
                     tokio::spawn(async move {
-                        let mut request = Vec::new();
-                        let mut buffer = [0u8; 4096];
-                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                            match stream.read(&mut buffer).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(n) => request.extend_from_slice(&buffer[..n]),
-                            }
-                        }
-                        let text = String::from_utf8_lossy(&request);
-                        let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
-                        // Every server answers this path with the request head it got.
-                        let echoed = (path == "/echo-request").then(|| ok(text.as_bytes()));
-                        match echoed.or_else(|| respond(&path, port)) {
-                            Some(response) => {
-                                stream.write_all(&response).await.ok();
-                                stream.shutdown().await.ok();
-                            }
-                            None => tokio::time::sleep(std::time::Duration::from_secs(60)).await,
+                        match tls {
+                            Some(tls) => match tls.accept(stream).await {
+                                Ok(stream) => answer(stream, respond, port).await,
+                                // A client that refuses the certificate ends the handshake.
+                                Err(_) => {}
+                            },
+                            None => answer(stream, respond, port).await,
                         }
                     });
                 }
             }
         });
         Server { port, connections }
+    }
+
+    async fn answer(
+        mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        respond: Arc<impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static>,
+        port: u16,
+    ) {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buffer[..n]),
+            }
+        }
+        let text = String::from_utf8_lossy(&request);
+        let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
+        // Every server answers this path with the request head it got.
+        let echoed = (path == "/echo-request").then(|| ok(text.as_bytes()));
+        match echoed.or_else(|| respond(&path, port)) {
+            Some(response) => {
+                stream.write_all(&response).await.ok();
+                stream.shutdown().await.ok();
+            }
+            None => tokio::time::sleep(std::time::Duration::from_secs(60)).await,
+        }
     }
 
     pub(crate) fn ok(body: &[u8]) -> Vec<u8> {
@@ -1338,6 +1435,30 @@ mod tests {
         assert!(result.is_err(), "no TLS on the test server: {result:?}");
         assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(server.connections(), 1);
+    }
+
+    /// Plan 4.6 follow-up: `https` end to end against a local TLS server, and its certificate is
+    /// checked: Zed's own roots do not know the test CA, so the same request fails with `tls`.
+    #[tokio::test]
+    async fn https_checks_the_certificate() {
+        let server = test_server::start_tls(|path, _| {
+            (path == "/hello").then(|| test_server::ok(b"over tls"))
+        })
+        .await;
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let url = format!("https://localhost:{}/hello", server.port);
+        let response = run(
+            &domains,
+            &fetcher().with_tls(test_tls::client_config()),
+            request(&url),
+        )
+        .await
+        .expect("https with the test CA");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"over tls");
+        assert_eq!(response.url, url);
+        let refused = run(&domains, &fetcher(), request(&url)).await;
+        assert!(matches!(refused, Err(FetchError::Tls(_))), "{refused:?}");
     }
 
     /// Requests carry Fyx's version, the platform and the extension id.
