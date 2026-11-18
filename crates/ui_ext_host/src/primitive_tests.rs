@@ -44,6 +44,7 @@ fn button(label: &str, icon: Option<&str>, style: ButtonStyle, disabled: bool) -
         style,
         disabled,
         tooltip: None,
+        accessible_label: None,
     })
 }
 
