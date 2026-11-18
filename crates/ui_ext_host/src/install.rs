@@ -38,6 +38,7 @@ pub struct FyxExtensionsSettings {
     pub dev_paths: Vec<PathBuf>,
     pub developer_mode: bool,
     pub hidden_status_items: Vec<String>,
+    pub registry_url: String,
 }
 
 impl Settings for FyxExtensionsSettings {
@@ -61,6 +62,12 @@ impl Settings for FyxExtensionsSettings {
                 .as_ref()
                 .and_then(|fyx| fyx.extensions.as_ref())
                 .and_then(|extensions| extensions.hidden_status_items.clone())
+                .unwrap_or_default(),
+            registry_url: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.registry_url.clone())
                 .unwrap_or_default(),
         }
     }
