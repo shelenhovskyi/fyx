@@ -142,6 +142,7 @@ fn nodes() -> Vec<Node> {
                 value: "draft".into(),
                 placeholder: "Filter".into(),
                 secret: false,
+                label: None,
             }),
         ),
         node(

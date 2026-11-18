@@ -1842,6 +1842,7 @@ fn attach_to_workspace(
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
     crate::store_actions::register(workspace);
+    crate::fyx_extensions_page::register(workspace);
     if crate::inspector::inspector_enabled(cx) {
         let inspector =
             cx.new(|cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
