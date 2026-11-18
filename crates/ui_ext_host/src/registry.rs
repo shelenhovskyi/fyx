@@ -802,10 +802,25 @@ impl UiExtensionRegistry {
                 format!("Allow {name} to connect to the internet?"),
                 format!("Hosts: {}", listed("network:fetch@").join(", ")),
             ),
-            "process:spawn" => (
-                format!("Allow {name} to run programs?"),
-                format!("Programs: {}", listed("process:spawn@").join(", ")),
-            ),
+            "process:spawn" => {
+                let env = listed("process:env@");
+                (
+                    format!("Allow {name} to run programs?"),
+                    format!(
+                        "Programs: {}{}",
+                        listed("process:spawn@").join(", "),
+                        if env.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "
+Environment it may pass: {}",
+                                env.join(", ")
+                            )
+                        }
+                    ),
+                )
+            }
             "workspace:edit" => (
                 format!("Allow {name} to edit files in your projects?"),
                 String::new(),
@@ -1294,6 +1309,11 @@ impl UiExtensionRegistry {
                         cache: found.cache.clone(),
                         capability_check: checker,
                         allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
+                        // The open worktrees, for process:spawn (W2c, plan 4.7).
+                        workspace: Some(cx.update(|cx| {
+                            crate::worktrees::OpenWorktrees::global(cx)
+                                .for_extension(&found.extension_id)
+                        })),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2313,6 +2333,28 @@ fn attach_to_workspace(
     })
     .detach();
 
+    // Its worktrees, and whether each is trusted, for process:spawn (plan 4.7).
+    {
+        let workspace_id = cx.entity_id();
+        let report = move |workspace: &Workspace, cx: &mut App| {
+            let project = workspace.project().clone();
+            let worktrees = crate::worktrees::of_project(workspace_id.as_u64(), &project, cx);
+            crate::worktrees::OpenWorktrees::global(cx).set(workspace_id, worktrees);
+        };
+        report(workspace, cx);
+        let project = workspace.project().clone();
+        cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
+            .detach();
+        if let Some(trust) = project::trusted_worktrees::TrustedWorktrees::try_get_global(cx) {
+            cx.observe(&trust, move |workspace, _, cx| report(workspace, cx))
+                .detach();
+        }
+        cx.on_release(move |_, cx| {
+            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id)
+        })
+        .detach();
+    }
+
     // A closed workspace lets its containers go at once: the registry's observers hold
     // `surfaces` until its next notify (triage-3, ASYNC 8).
     cx.on_release({
@@ -2705,6 +2747,10 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         capability_check: checker,
         // A `FYX_UI_DEV_EXTENSIONS` entry is a dev extension.
         allow_staged: cx.update(|cx| staged_allowed(true, cx)),
+        // Its id is known only after the load: the path keys its worktree ids.
+        workspace: Some(cx.update(|cx| {
+            crate::worktrees::OpenWorktrees::global(cx).for_extension(&path.to_string_lossy())
+        })),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

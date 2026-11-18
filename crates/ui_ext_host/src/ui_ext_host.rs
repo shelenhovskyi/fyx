@@ -34,6 +34,7 @@ mod registry_service_tests;
 mod store_actions;
 mod surface;
 mod view;
+mod worktrees;
 
 #[cfg(test)]
 mod decoration_tests;
