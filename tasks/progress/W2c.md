@@ -390,3 +390,16 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   refused, a reply fails). `Tree::text_bytes()` for the Inspector.
 - 0.1's tree is unchanged. Not counted: list-row trees, each built and dropped per fetch and
   bounded by `max_nodes_per_update` and the per-call text cap.
+
+## integration-5 B items (2026-11-18)
+
+- **R2** (`011d142682`, `0e60df0e1d`): a snapshot is verified against the keyset without the
+  keys the previous one revoked; every revocation carries over; only a rotation-key snapshot
+  lifts one. Old `state.json` (`protected_revocations`) still restores.
+- **S2**: `ui_ext::protected` holds the agent-config rule list (moved from fyx_guard, which now
+  uses it). `workspace:edit` refuses `.git`, `.fyx`, `.zed`, `.vscode`, `.idea` at any depth and
+  every agent config (`.claude/`, `.codex/`, `.mcp.json`, `AGENTS.md`, ...) in every mode.
+  `fyx_guard::extension_write_denial` (mode-independent) for W3's host side.
+- **S1**: `fyx_guard::extension_read_denial` (private_files + `.fyx/security.toml`,
+  mode-independent; repo policies now load in every mode) for W3's observe feed; as a floor,
+  `ui_ext::observe::cut_review` drops the path and hunks of Zed's default private files.
