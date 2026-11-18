@@ -1727,6 +1727,52 @@ async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
     }
 }
 
+/// Triage-3, UX F22: `fyx.extensions.hidden_status_items` hides a status item; the group
+/// re-renders when it changes.
+#[gpui::test]
+async fn test_status_items_can_be_hidden(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (_, vcx) = open_view(&state, cx);
+    let group = vcx.update(|_, cx| {
+        cx.new(|_| crate::ExtensionStatusGroup::new(ui_ext::v0_2::StatusBarSide::Left))
+    });
+    let item = vcx.update(|window, cx| {
+        cx.new(|cx| crate::ExtensionStatusItem::new(state.clone(), window, cx))
+    });
+    group.update(vcx, |group, cx| group.add(0, item.clone(), cx));
+    let group_notified = Rc::new(Cell::new(0));
+    let _observe = vcx.update(|_, cx| {
+        let group_notified = group_notified.clone();
+        cx.observe(&group, move |_, _| {
+            group_notified.set(group_notified.get() + 1)
+        })
+    });
+    assert!(!item.read_with(vcx, |item, cx| item.is_hidden(cx)));
+
+    let set_hidden = |hidden: Vec<String>, vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .fyx
+                        .get_or_insert_default()
+                        .extensions
+                        .get_or_insert_default()
+                        .hidden_status_items = Some(hidden)
+                })
+            })
+        });
+        vcx.run_until_parked();
+    };
+    set_hidden(vec!["fake/counter".into()], vcx);
+    assert!(item.read_with(vcx, |item, cx| item.is_hidden(cx)));
+    assert!(group_notified.get() > 0, "the group lays out again");
+    set_hidden(Vec::new(), vcx);
+    assert!(!item.read_with(vcx, |item, cx| item.is_hidden(cx)));
+}
+
 /// The extensions page shows a loaded UI extension's capabilities, from the surfaces it declared.
 #[gpui::test]
 async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
