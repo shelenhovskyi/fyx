@@ -26,11 +26,21 @@ dev-встановлення, hot reload і **Restart extension**, запит з
    ```
 
    ```bash
-   python script/fyx-pack-ui-extension.py extensions/fyx_demo_counter --out D:/fyx-user-check/w3/packages
+   cargo run -q -p fyx_ext -- package --path extensions/fyx_demo_counter --out D:/fyx-user-check/w3/packages --no-build
+   ```
+
+   Версія 0.2.0 — копія тієї самої папки з іншим `version` у `extension.toml`:
+
+   ```bash
+   rm -rf D:/fyx-user-check/w3/counter-0.2.0 && cp -r extensions/fyx_demo_counter D:/fyx-user-check/w3/counter-0.2.0
    ```
 
    ```bash
-   python script/fyx-pack-ui-extension.py extensions/fyx_demo_counter --version 0.2.0 --out D:/fyx-user-check/w3/packages
+   sed -i 's/^version = "0.1.0"/version = "0.2.0"/' D:/fyx-user-check/w3/counter-0.2.0/extension.toml
+   ```
+
+   ```bash
+   cargo run -q -p fyx_ext -- package --path D:/fyx-user-check/w3/counter-0.2.0 --out D:/fyx-user-check/w3/packages --no-build
    ```
 
    Папку `crash-item` складають `crates/ui_ext_wasm/fixtures/status_item/extension.toml` і

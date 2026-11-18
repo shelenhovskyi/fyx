@@ -498,21 +498,31 @@ pub(crate) fn init(cx: &mut App) {
 }
 
 /// Brings an editor's blocks in line with the decorations: one block per decoration and matching
-/// buffer, at the decoration's anchor in that buffer.
+/// buffer, at the decoration's anchor in that buffer. The review pane's editors (marked
+/// `AgentReviewEditor`) get none, so no extension can draw inside the agent review UI (design.md
+/// 0.3 §11).
 fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
     let Some(decorations) = Decorations::global(cx) else {
         return;
     };
     let editor_id = cx.entity_id();
+    let in_review = editor.addon::<agent_review::AgentReviewEditor>().is_some();
     {
         // Nothing to place and nothing placed: no editor-wide work (triage 3, PERF 10).
         let decorations = decorations.read(cx);
-        if decorations.decorations.is_empty() && !decorations.editors.contains_key(&editor_id) {
+        if (decorations.decorations.is_empty() || in_review)
+            && !decorations.editors.contains_key(&editor_id)
+        {
             return;
         }
     }
     let multibuffer = editor.buffer().read(cx);
-    let buffers: Vec<_> = multibuffer.all_buffers_iter().collect();
+    let buffers: Vec<_> = if in_review {
+        // Takes away what was placed before the review pane marked it.
+        Vec::new()
+    } else {
+        multibuffer.all_buffers_iter().collect()
+    };
     let snapshot = multibuffer.snapshot(cx);
 
     // Which decorations belong in this editor, anchoring lines in buffers seen for the first time.

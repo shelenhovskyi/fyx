@@ -144,6 +144,19 @@ fn tree_lines(tree: &Tree) -> Vec<String> {
     lines
 }
 
+/// Bytes as `812 B`, `4.2 KiB` or `8.0 MiB`.
+fn byte_size(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    let value = bytes as f64;
+    if value < KIB {
+        format!("{bytes} B")
+    } else if value < KIB * KIB {
+        format!("{:.1} KiB", value / KIB)
+    } else {
+        format!("{:.1} MiB", value / (KIB * KIB))
+    }
+}
+
 /// One I/O record: when, which capability, its id, what it does, and how it ended.
 fn io_line(record: &ui_ext_wasm::diagnostics::IoRecord) -> String {
     let outcome = match (&record.outcome, record.duration) {
@@ -188,7 +201,12 @@ pub fn snapshot(
     snapshot.phase = match state.phase() {
         Phase::Closed => "closed (a modal that is not shown)".into(),
         Phase::Mounting => "mounting".into(),
-        Phase::Ready(tree) => format!("ready, {} nodes", tree.len()),
+        Phase::Ready(tree) => format!(
+            "ready, {} nodes, {} of props text (cap {})",
+            tree.len(),
+            byte_size(tree.text_bytes()),
+            byte_size(ui_ext::v0_2::tree::MAX_TREE_TEXT_BYTES)
+        ),
         Phase::Failed { message, .. } => format!("failed: {message}"),
     };
     if let Some(tree) = state.tree() {
@@ -462,7 +480,14 @@ mod tests {
 
     use ui_ext_wasm::diagnostics::IoRecord;
 
-    use super::io_line;
+    use super::{byte_size, io_line};
+
+    #[test]
+    fn test_byte_size() {
+        assert_eq!(byte_size(812), "812 B");
+        assert_eq!(byte_size(4300), "4.2 KiB");
+        assert_eq!(byte_size(8 << 20), "8.0 MiB");
+    }
 
     #[test]
     fn test_io_line() {

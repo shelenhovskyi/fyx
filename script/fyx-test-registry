@@ -31,10 +31,11 @@ demos=("$@")
 py=python3
 command -v "$py" > /dev/null 2>&1 && "$py" -c 'import sys' 2> /dev/null || py=python
 
-cargo build -q --manifest-path "$repo/Cargo.toml" -p fyx_registry --bin fyx-registry
+cargo build -q --manifest-path "$repo/Cargo.toml" -p fyx_registry --bin fyx-registry     -p fyx_ext --bin fyx-ext
 target=$(cargo metadata -q --format-version 1 --no-deps --manifest-path "$repo/Cargo.toml" \
     | "$py" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 registry() { "$target/debug/fyx-registry" "$@"; }
+fyx_ext() { "$target/debug/fyx-ext" "$@"; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -65,7 +66,8 @@ now=$(date +%s)
 published=$((now - 2 * 24 * 60 * 60))
 for demo in "${demos[@]}"; do
     folder="$repo/extensions/$demo"
-    "$py" "$repo/script/fyx-pack-ui-extension.py" "$folder" --out "$work/pack-$demo" > /dev/null
+    # The demo is built already (script/fyx-build-demos); fyx-ext checks and packs it as it is.
+    fyx_ext package --path "$folder" --out "$work/pack-$demo" --no-build > /dev/null
     package=$(ls "$work/pack-$demo"/*.fyxext)
     "$py" - "$folder" "$package" "$published" "$demo" > "$work/$demo.release.json" <<'EOF'
 import hashlib, json, os, sys, tomllib
