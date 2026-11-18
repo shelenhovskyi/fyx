@@ -1382,7 +1382,6 @@ impl UiExtension {
             },
             _ => network::DomainList::default(),
         };
-        let fetcher = network::Fetcher::new(&extension_id, resolver);
         let declares_process = capabilities
             .iter()
             .any(|capability| capability == process::CAPABILITY_PROCESS);
@@ -1426,6 +1425,9 @@ impl UiExtension {
         });
 
         cx.spawn(async move |cx| {
+            // Read here: `load_with_options` may be called while the app is borrowed.
+            let app_version = cx.update(|cx| release_channel::AppVersion::global(cx).to_string());
+            let fetcher = network::Fetcher::new(&extension_id, &app_version, resolver);
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
             // Only a 0.3 component has the `network` import.
@@ -1434,7 +1436,7 @@ impl UiExtension {
             } else {
                 network::DomainList::default()
             });
-            let running = Arc::new(network::Running::default());
+            let running = Arc::new(network::Running::new(diagnostics.clone()));
             let network = Arc::new(network::NetworkHandle::new(
                 extension_id.clone(),
                 domains.clone(),

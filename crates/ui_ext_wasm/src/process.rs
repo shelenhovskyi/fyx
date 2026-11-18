@@ -669,6 +669,15 @@ impl ProcessHandle {
     /// Starts `pending` on the current tokio runtime, in call order.
     pub(crate) fn start(&self, pending: Vec<PendingSpawn>) {
         for spawn in pending {
+            self.running.diagnostics.io_started(
+                CAPABILITY_PROCESS,
+                spawn.id,
+                format!(
+                    "{} ({} arguments)",
+                    spawn.request.program,
+                    spawn.request.args.len()
+                ),
+            );
             let context = SpawnContext {
                 extension_id: self.extension_id.clone(),
                 set: self.set.clone(),

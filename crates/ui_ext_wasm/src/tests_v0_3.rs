@@ -557,6 +557,33 @@ mod network_fetch {
             deliver(&extension, &mut events).await,
             "fetch-done 2 200 hello"
         );
+        // The Extension Inspector's lines.
+        let lines: Vec<_> = extension
+            .diagnostics()
+            .io
+            .iter()
+            .map(|record| {
+                (
+                    record.capability,
+                    record.id,
+                    record.what.clone(),
+                    record.outcome.clone(),
+                )
+            })
+            .collect();
+        let what = format!("Get http://localhost:{}/hello", server.port);
+        assert_eq!(
+            lines,
+            [
+                (
+                    "network:fetch",
+                    1,
+                    what.clone(),
+                    Some("200 (5 bytes)".to_string())
+                ),
+                ("network:fetch", 2, what, Some("200 (5 bytes)".to_string())),
+            ]
+        );
     }
 
     /// Plan 4.6, done: an undeclared domain is `denied` at the import.
@@ -1198,6 +1225,18 @@ mod process_spawn {
         assert_eq!(command(&extension, &format!("kill {id}")).await, "done");
         let (_, end) = run_to_end(&extension, &mut events, &id).await;
         assert_eq!(end, format!("exited {id} none true"));
+        let record = extension
+            .diagnostics()
+            .io
+            .back()
+            .cloned()
+            .expect("a record");
+        assert_eq!(record.capability, "process:spawn");
+        assert_eq!(
+            record.what,
+            format!("{sleeper} ({} arguments)", sleep.split(' ').count())
+        );
+        assert_eq!(record.outcome.as_deref(), Some("killed"));
     }
 
     /// Revoking `process:spawn` kills running processes; a refused prompt never starts one.

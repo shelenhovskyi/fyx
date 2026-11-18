@@ -317,6 +317,19 @@ async fn test_an_edit_applies_after_its_call(cx: &mut TestAppContext) {
     );
     assert_eq!(edit.files[1].target, EditTarget::Document(5));
     assert_eq!(edit.files[1].edits[0].new_text, "", "a deletion");
+
+    // The Extension Inspector's line for it.
+    let record = extension
+        .diagnostics()
+        .io
+        .back()
+        .cloned()
+        .expect("a record");
+    assert_eq!(record.capability, "workspace:edit");
+    assert_eq!(record.id, 1);
+    assert_eq!(record.what, "\"Rename all\" (2 files)");
+    assert_eq!(record.outcome.as_deref(), Some("applied"));
+    assert!(record.duration.is_some());
 }
 
 #[gpui::test]
@@ -560,6 +573,25 @@ async fn test_observe_feeds_a_snapshot_then_changes(cx: &mut TestAppContext) {
 
     assert_eq!(command(&extension, "observe stop").await, "done");
     wait_until(|| feed.is_closed());
+    let notes: Vec<_> = extension
+        .diagnostics()
+        .io
+        .iter()
+        .map(|record| {
+            (
+                record.capability,
+                record.what.clone(),
+                record.outcome.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            ("agent:observe", "start".into(), Some("observing".into())),
+            ("agent:observe", "stop".into(), Some("stopped".into())),
+        ]
+    );
 }
 
 #[gpui::test]
