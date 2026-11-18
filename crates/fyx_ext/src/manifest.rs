@@ -105,8 +105,17 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The component inside the extension folder, with `\` read as `/` on every OS.
     pub fn component_path(&self) -> PathBuf {
-        self.dir.join(&self.component)
+        match normalized_relative(&self.component) {
+            Some(normalized) => self.dir.join(normalized),
+            None => self.dir.join(&self.component),
+        }
+    }
+
+    /// The component's name inside a package: `/`-separated.
+    pub fn component_archive_name(&self) -> Option<String> {
+        normalized_relative(&self.component)
     }
 
     pub fn package_file_name(&self) -> String {
@@ -226,12 +235,24 @@ pub fn is_valid_id(id: &str) -> bool {
         })
 }
 
-/// The host's rule: non-empty, and every component a normal name.
+/// The rule for paths inside an extension, the same on every OS: `\` counts as `/`, and every
+/// part is a plain name, so there is no root, drive, empty part, `.` or `..`. On Linux `..\x.wasm`
+/// is a single file name to `Path`, but it means `../x.wasm` on Windows and inside a zip.
 pub fn is_relative_inside(path: &str) -> bool {
-    !path.is_empty()
-        && Path::new(path)
-            .components()
-            .all(|component| matches!(component, PathComponent::Normal(_)))
+    normalized_relative(path).is_some()
+}
+
+/// `path` with `/` separators, if it follows [`is_relative_inside`].
+pub fn normalized_relative(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let plain_parts = !normalized.is_empty()
+        && normalized.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".." && !part.contains([':', '\0'])
+        });
+    let plain_components = Path::new(&normalized)
+        .components()
+        .all(|component| matches!(component, PathComponent::Normal(_)));
+    (plain_parts && plain_components).then_some(normalized)
 }
 
 #[cfg(test)]
@@ -254,6 +275,29 @@ capabilities = ["ui:panel"]
         let mut report = Report::default();
         let manifest = parse(Path::new("ext"), text, &mut report);
         (manifest, report)
+    }
+
+    #[test]
+    fn paths_inside_an_extension_follow_one_rule_on_every_os() {
+        for (path, normalized) in [
+            ("fyx_ui.wasm", Some("fyx_ui.wasm")),
+            ("bin/fyx_ui.wasm", Some("bin/fyx_ui.wasm")),
+            (r"bin\fyx_ui.wasm", Some("bin/fyx_ui.wasm")),
+            (r"..\fyx_ui.wasm", None),
+            ("../fyx_ui.wasm", None),
+            (r"bin\..\..\x.wasm", None),
+            ("./fyx_ui.wasm", None),
+            ("bin//fyx_ui.wasm", None),
+            ("/fyx_ui.wasm", None),
+            (r"\fyx_ui.wasm", None),
+            (r"C:\fyx_ui.wasm", None),
+            ("C:fyx_ui.wasm", None),
+            ("fyx_ui.wasm:stream", None),
+            ("", None),
+        ] {
+            assert_eq!(normalized_relative(path).as_deref(), normalized, "{path:?}");
+            assert_eq!(is_relative_inside(path), normalized.is_some(), "{path:?}");
+        }
     }
 
     #[test]
