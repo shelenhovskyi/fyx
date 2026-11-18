@@ -1148,6 +1148,7 @@ mod harness_conformance_v0_2 {
         assert_eq!(report(&host_reply.value), report(&outcome.update));
         assert_eq!(harness.pending_tick(SURFACE), Some(MIN_TICK_DELAY));
     }
+}
 
 /// async-1 #5: [`with_budget`] counts only time the call waits on the host. A call that is ready
 /// but not polled (the tokio workers are busy with other work) spends none of its budget.
