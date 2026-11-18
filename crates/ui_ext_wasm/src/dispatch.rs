@@ -209,6 +209,22 @@ impl UiBindings {
         })
     }
 
+    /// Only a 0.3 component starts work outside a call, so only it gets `handle-io`.
+    async fn call_handle_io(
+        &self,
+        store: &mut Store<UiState>,
+        event: crate::network::IoEvent,
+    ) -> wasmtime::Result<Result<(), String>> {
+        Ok(match self {
+            Self::V0_3(extension) => {
+                extension
+                    .call_handle_io(store, &fyx_ui_v0_3::io_event(event))
+                    .await?
+            }
+            Self::V0_2(_) | Self::V0_1(_) => Ok(()),
+        })
+    }
+
     /// A 0.1 component cannot request ticks, so it is never ticked; if it were, nothing changes.
     async fn call_tick(
         &self,
@@ -348,6 +364,47 @@ impl UiExtension {
             effects,
             value: update,
         })
+    }
+
+    /// The outcomes of this instance's work outside a call (0.3 `network.fetch`; design.md §0.3),
+    /// once: the caller hands each to [`UiExtension::handle_io`], in order. At most
+    /// [`crate::network::MAX_QUEUED_IO_EVENTS`] wait; past that, finished requests are held.
+    pub fn take_io_events(
+        &self,
+    ) -> Option<futures::channel::mpsc::Receiver<crate::network::IoEvent>> {
+        self.network.take_events()
+    }
+
+    /// Delivers one outcome through the 0.3 `handle-io` export, queued behind calls already
+    /// queued; its effects come back like any call's. A request whose capability was revoked
+    /// while it ran is delivered as `denied`.
+    pub async fn handle_io(&self, event: crate::network::IoEvent) -> Result<EffectReply<()>> {
+        let network = self.network.clone();
+        let (result, effects) = self
+            .call(
+                "handle-io",
+                "",
+                CallBudget::Regular,
+                move |extension, store| {
+                    async move {
+                        let crate::network::IoEvent::FetchDone(id, result) = event;
+                        store.data_mut().network.delivered(id);
+                        let result = match result {
+                            Ok(_) | Err(_) if !network.granted() => {
+                                Err(crate::network::FetchError::Denied)
+                            }
+                            result => result,
+                        };
+                        extension
+                            .call_handle_io(store, crate::network::IoEvent::FetchDone(id, result))
+                            .await
+                    }
+                    .boxed()
+                },
+            )
+            .await?;
+        self.guest_result(result, &effects)?;
+        Ok(EffectReply { effects, value: () })
     }
 
     /// Tells the host that a modal is no longer shown although no `dismissed` event or

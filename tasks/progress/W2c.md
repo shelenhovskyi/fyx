@@ -146,3 +146,51 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - Minimal fallout fixes in other streams' code: the SDK mirror and four demos (W4) and the harness
   (W4, notifications refused there for now) match the new events; the renderer (W3) logs and
   ignores the new effects until it draws them.
+
+## Plan 4.6: `network:fetch`, host side (2026-11-18)
+
+- **Where:** `crates/ui_ext_wasm/src/network.rs`, the engine and the rules. The import and the
+  `handle-io` conversion are in `fyx_ui_v0_3.rs`. The start-after-call hook is in
+  `UiExtension::call`. `UiExtension::{take_io_events, handle_io}` are in `dispatch.rs`.
+- **No new `HostEffect` variants.** A fetch starts inside `ui_ext_wasm` after its call returns,
+  and a trap drops it. Its outcome arrives on `take_io_events()`; the host passes each one to
+  `handle_io()`, whose effects come back like any call's. W3's exhaustive effect matches are
+  untouched.
+- **Manifest:** `[fyx_ui.network] domains` (`UiManifest.network`). `network:fetch` is allowed
+  only from 0.3 and only with domains. The table without the capability is refused, and so is a
+  wildcard over a public suffix (`fyx_registry::is_public_suffix`, now public).
+- **The import checks:**
+  - the capability is declared; the broker's `CapabilityCheck` runs at every call (refused →
+    `denied`);
+  - the URL: https; http only to a declared `localhost`/`127.0.0.1` port; no user info; ≤ 8 KiB;
+  - the domain list: `http_proxy::HostPattern`, so IDNA, case and the trailing dot are handled,
+    and `*.` matches subdomains only. An undeclared host is `denied` (plan 4.6);
+  - the headers: forbidden set plus `proxy-*` and `accept-encoding`, ≤ 64, ≤ 16 KiB;
+  - the body ≤ 4 MiB, a timeout of 1–30000 ms, 8 in flight, 120 per minute.
+- **When the request is applied:** `T2Consent` (state granted/denied/ask; ask → `request()`
+  waits for the prompt). Without a consent broker, T2 is denied.
+- **The engine:**
+  - redirects followed by hand, ≤ 5, every hop checked (off-list, `http://`, or a sixth hop →
+    `redirect-not-allowed`);
+  - one resolution per hop, every address global or `host-not-allowed`, and reqwest pinned to
+    the checked addresses;
+  - `localhost` never goes to DNS; no environment proxy;
+  - `accept-encoding: gzip` set by the host, gzip decoded, and the 16 MiB cap applied to the
+    decoded stream;
+  - response headers ≤ 64 KiB.
+- **Delivery:** `handle-io`, with a bounded queue of 256 (backpressure). A capability revoked
+  before delivery turns the outcome into `denied`. `cancel-fetch` → `cancelled`. Dropping the
+  instance (reload, disable) aborts its requests, and none delivers.
+- **Model:** `ui_ext::v0_2::HostErrorCode::Denied`. A 0.2 component sees it as `not-permitted`.
+- **Tests:** 11 engine tests against a local HTTP server: the caps, a 17 MiB body by length,
+  streamed, and as a gzip bomb; redirects; timeout; private answers; and pinning, where a
+  rebinding resolver is called once and the connection goes to the checked address. Also
+  6 end-to-end tests through `probe_v0_3`: the import, the broker, consent ask/allow/refuse,
+  no broker, revocation, cancel, the in-flight cap, reload, trap, and the manifest rules.
+- **Not done yet:**
+  - Fyx's proxy setting;
+  - brotli, zstd and deflate (any other `content-encoding` → `other`);
+  - TLS currently uses reqwest's native roots only, without the webpki roots;
+  - a local TLS test server (the pinning test uses a plain TCP server);
+  - an Inspector line per request;
+  - the user-agent carries no Fyx version.

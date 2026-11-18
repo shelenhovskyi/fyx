@@ -115,6 +115,40 @@ pub trait CapabilityCheck: Send + Sync + 'static {
     fn check(&self, extension_id: &str, capability: &str) -> Result<(), CapabilityDenied>;
 }
 
+/// The state of a T2 capability for one extension (design.md §7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsentState {
+    Granted,
+    Denied,
+    /// Not answered yet: the first operation shows the prompt and waits for it.
+    Ask,
+}
+
+/// What the consent prompt shows for a T2 capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsentRequest {
+    pub capability: String,
+    /// `network:fetch`: the manifest's domain patterns, as written.
+    pub domains: Vec<String>,
+}
+
+/// T2 consent at first use (design.md §7, plan 4.5), implemented by the host's permission
+/// broker. Asked when a T2 operation is applied, after the call that started it returned, and
+/// again before its outcome is delivered, so a revocation in between turns it into `denied`.
+/// Without one, every T2 operation is denied.
+pub trait T2Consent: Send + Sync + 'static {
+    /// The current state; cheap and thread-safe.
+    fn state(&self, extension_id: &str, capability: &str) -> ConsentState;
+
+    /// Shows the prompt (or joins one already shown for this extension and capability) and
+    /// resolves to whether the user allowed it. Dismissing it resolves to `false`.
+    fn request(
+        &self,
+        extension_id: &str,
+        request: ConsentRequest,
+    ) -> futures::future::BoxFuture<'static, bool>;
+}
+
 /// The check when the host gave none: T1 and T2 are denied (T0 needs no grant).
 pub(crate) fn check_without_broker(
     check: Option<&Arc<dyn CapabilityCheck>>,
