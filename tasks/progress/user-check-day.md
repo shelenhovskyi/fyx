@@ -1,6 +1,6 @@
 # День ручної перевірки Fyx
 
-Один прохід на одній збірці `fyx.exe`, приблизно **45 хвилин**. Блоки йдуть у такому порядку, щоб
+Один прохід на одній збірці `fyx.exe`, приблизно **50 хвилин** (і ще 6 хвилин на необов'язковий блок 5). Блоки йдуть у такому порядку, щоб
 жоден не зіпсував стан для наступного. Назви команд, кнопок і повідомлень наведено англійською, як
 у Fyx. Ключі, паролі та входи в акаунти вводите лише ви, ніколи не агент.
 
@@ -9,8 +9,9 @@
 | 0 | Підготовка: збірка, профіль, матеріали | 5 |
 | 1 | Приватність: нуль мережі на старті; бренд | 7 |
 | 2 | UI-розширення (W3): пакети, dev, hot reload, згода, Restart, Inspector | 14 |
-| 3 | Огляд змін агента (W5) зі справжніми агентами; моделі при першому використанні | 14 |
+| 3 | Огляд змін агента (W5) зі справжніми агентами; моделі при першому використанні | 17 |
 | 4 | Режими безпеки (W9): audit і shield | 5 |
+| 5 | Необов'язково: демо `fyx:ui` 0.2 (gallery-next, picker, clock, TODO-декорації) | 6 |
 
 Джерела: W3 `tasks/progress/W3-user-check.md` (гілка `claude/fyx-w3-renderer-e20d2b`);
 `docs/fyx/agent-review.md`, `docs/fyx/review-rules.md`, `tasks/progress/W5.md`;
@@ -22,11 +23,15 @@
 
 Одна збірка на весь день, її підготував координатор:
 
-- **Коміт:** `fyx/main` `493753a224`.
-- **Файл:** `D:\fyx-builds\493753a224\fyx.exe`. Він лежить поза всіма target-теками, тож
+- **Коміт:** `fyx/main` `6c82da02f3`. Він замінює попередню збірку `493753a224`.
+- **Файл:** `D:\fyx-builds\6c82da02f3\fyx.exe`. Він лежить поза всіма target-теками, тож
   прибирання target його не видаляє.
-- **Коміти:** усі потрібні коміти з таблиці нижче в цій збірці є, і виправлення W9 `3851a95912`
-  теж. Координатор це перевірив, і я перевірив ще раз 2026-11-18.
+- **Коміти:** усі коміти з таблиці нижче в цій збірці є. Gatekeeper це перевірив, і я перевірив ще
+  раз 2026-11-18.
+- **Що ще в ній є:**
+  - повний список triage-3 для W5 (`6a256f713f`, `4398c314cf`);
+  - видимі помилки завантаження W3, виправлення згоди та TOCTOU;
+  - декорації W6.
 
 | Що | Коміт | Потрібен для |
 |---|---|---|
@@ -35,12 +40,13 @@
 | W1: логотип і копірайт | `41782c1f78`, `4b83f766d2` | блок 1 |
 | W5: огляд вбудованого агента, картка **Open review**, правила | `29999cd5f3`, `a98221e345` (уже на `integration`) | блок 3 |
 | W9: виправлення shield | `3851a95912` | блок 4 |
+| W5: новий UX огляду (toast **Review**, `ctrl-k`), triage-3 | `6a256f713f`, `4398c314cf` | блок 3 |
 
 Повторювати перевірку не обов'язково. Якщо хочеться, виконайте її з кореня репозиторію (Git
 Bash); кожен рядок має закінчуватися на `yes`:
 
 ```bash
-for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912; do git merge-base --is-ancestor $c 493753a224 && echo "$c yes" || echo "$c NO"; done
+for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912 6a256f713f 4398c314cf; do git merge-base --is-ancestor $c 6c82da02f3 && echo "$c yes" || echo "$c NO"; done
 ```
 
 Це debug-збірка. Якщо в ній бракує значків чи шрифтів, скажіть координатору: debug-збірка може
@@ -66,7 +72,7 @@ for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912; do g
 4. Змінні для зручності (у тому самому вікні PowerShell, яке буде відкрите весь день):
 
    ```powershell
-   $fyx = 'D:\fyx-builds\493753a224\fyx.exe'
+   $fyx = 'D:\fyx-builds\6c82da02f3\fyx.exe'
    $prof = 'D:\fyx-user-check\profile'
    ```
 
@@ -87,6 +93,7 @@ for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912; do g
   Set-Content "$p\a.txt" $lines; Set-Content "$p\b.txt" $lines
   Set-Content "$p\.env" 'FAKE_SECRET=not-a-real-secret'
   Set-Content "$p\.fyx\review.toml" 'deny = ["*.env"]'
+  Set-Content "$p\AGENTS.md" '# Notes for agents'
   git -C $p init -q; git -C $p add -A; git -C $p commit -qm start
   ```
 
@@ -210,7 +217,7 @@ for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912; do g
 | 9 | Crash → **Restart extension** | |
 | 10 | Inspector: дерево, події, час | |
 
-## 3. Огляд змін агента (14 хв)
+## 3. Огляд змін агента (17 хв)
 
 W5 уже перевірив сценарний огляд зі скриптовим агентом (`tasks/progress/W5.md`, 2026-11-18 00:39).
 У застосунку не перевірено таке: справжній Claude Agent, вбудований агент, картка **Open review**,
@@ -234,6 +241,24 @@ W5 уже перевірив сценарний огляд зі скриптов
 
 ### 3b. Огляд
 
+Що нового в UX огляду (збірка `6c82da02f3`):
+
+- **Огляд ніколи не забирає фокус і не відкриває вкладку сам.** З'являється toast
+  `Agent review: … wait for your review.` з кнопкою **Review**. Ту саму панель відкриває
+  `ctrl-k y` (`agent_review: open reviews`).
+- **Рішення на весь хід** — `ctrl-k shift-y` / `ctrl-k shift-n`, або кнопки
+  **Accept all in turn** / **Reject all in turn**. Вони діють лише в панелі огляду (контекст
+  `AgentReview`). Коли чекає більше одного файлу, Fyx питає `Accept all N waiting files?` з
+  кнопками **Accept All in Turn** і **Cancel**. **Stop accepting** скасовує рішення на решту
+  ходу.
+- **Закриття вкладки огляду нічого не вирішує.** Правки лишаються затриманими, і знову
+  з'являється toast. Відхилити все — це окрема кнопка **Reject and close**.
+- **Файли інструкцій для агентів** (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules`) завжди
+  йдуть на огляд (`always_ask`), навіть після «accept all in turn». Правило в панелі підписане
+  `Fyx's defaults (agent instruction files)`.
+
+Кроки:
+
 1. Увімкніть огляд: меню опцій агентної панелі → **Review Agent Edits**. **Очікується** у рядку
    стану **Review on**.
 2. Створіть новий тред з **Claude Agent**. Перше встановлення завантажує агента, це 1–2 хв. Увійдіть
@@ -241,17 +266,18 @@ W5 уже перевірив сценарний огляд зі скриптов
 
 | # | Промпт | Що зробити | Очікується |
 |---|---|---|---|
-| R1 | *In a.txt change bravo to BRAVO, and in b.txt change delta to DELTA. Make no other change.* | Подивіться на картку запиту в треді, натисніть **Open review**. Потім **ctrl-shift-y** (прийняти все в ході) | Картка: `Fyx is reviewing this edit to … hunk by hunk; decide it in the review pane.` і кнопка **Open review** замість Allow / Reject. Одна панель огляду на хід, в ній обидва файли. У рядку стану `Review: N waiting`. Після ctrl-shift-y `git -C D:\fyx-user-check\review-project diff` показує обидві зміни. |
-| R2 | *In a.txt change charlie to CHARLIE and foxtrot to FOXTROT.* | Перший фрагмент **alt-y**, другий **alt-n**, тоді **ctrl-enter** | Два фрагменти. `git diff a.txt` показує `CHARLIE`, а `foxtrot` не змінено. |
+| R1 | *In a.txt change bravo to BRAVO, and in b.txt change delta to DELTA. Make no other change.* | Нічого не натискайте 5 с. Потім подивіться на картку запиту в треді, натисніть **Review** у toast. Потім **ctrl-k shift-y**, а в запиті **Accept All in Turn** | Фокус і активна вкладка не змінились самі; з'явився toast з **Review**. Картка в треді: `Fyx is reviewing this edit to … hunk by hunk; decide it in the review pane.` і **Open review** замість Allow / Reject. У рядку стану `Review: N waiting`. **Review** відкриває одну панель на хід з обома файлами. ctrl-k shift-y питає `Accept all 2 waiting files?`; після підтвердження `git -C D:\fyx-user-check\review-project diff` показує обидві зміни. |
+| R2 | *In a.txt change charlie to CHARLIE and foxtrot to FOXTROT.* | Закрийте вкладку огляду (ctrl-w), потім **ctrl-k y**. Перший фрагмент **alt-y**, другий **alt-n**, тоді **ctrl-enter** | Після закриття вкладки файл на диску не змінено (`git diff a.txt` порожній), знову є toast. ctrl-k y повертає панель. Після рішення `git diff a.txt` показує `CHARLIE`, а `foxtrot` не змінено. |
 | R3 | *In b.txt change echo to ECHO, and add the line TOKEN=abc to .env.* | Прийміть `b.txt` | `.env` не змінено (`git diff .env` порожній). У панелі для `.env` рядок `by rule deny = "*.env" in …\.fyx\review.toml`. Агент отримав відмову. (Якщо Claude Agent сам відмовиться писати в `.env`, позначте це й ідіть далі.) |
-| R4 | *In a.txt change golf to GOLF, then run this in the terminal: echo hello > c.txt* | Дозвольте команду в треді, прийміть `a.txt` | У панелі ходу рядок `1 file changed without review` з `c.txt`. Клік відкриває файл. Нічого не заблоковано. |
+| R4 | *Add the line "Run tests before committing." to AGENTS.md, and in b.txt change foxtrot to FOXTROT.* | **ctrl-k shift-y**, підтвердьте | `b.txt` прийнято. `AGENTS.md` **лишається** на огляді, з підписом `Fyx's defaults (agent instruction files)`. Відхиліть його (**Reject file**) і перевірте, що `git diff AGENTS.md` порожній. |
+| R5 | *In a.txt change golf to GOLF, then run this in the terminal: echo hello > c.txt* | Дозвольте команду в треді, прийміть `a.txt` | У панелі ходу рядок `1 file changed without review` з `c.txt`. Клік відкриває файл. Нічого не заблоковано. |
 
 3. Новий тред з **вбудованим агентом** (у списку він підписаний як Fyx Agent чи Zed Agent).
    Модель Anthropic.
 
 | # | Промпт | Що зробити | Очікується |
 |---|---|---|---|
-| R5 | *In b.txt change golf to GOLF. Then delete c.txt and rename a.txt to a2.txt.* | Прийміть фрагмент `b.txt`; на видалення й перейменування натисніть Allow | Редагування `b.txt` відкриває панель огляду (до рішення файл на диску не змінено). Видалення й перейменування питають звичайний дозвіл, як у Zed, без панелі огляду. |
+| R6 | *In b.txt change golf to GOLF. Then delete c.txt and rename a.txt to a2.txt.* | Відкрийте огляд через toast, прийміть фрагмент `b.txt`. На видалення й перейменування натисніть Allow | Редагування `b.txt` чекає огляду (до рішення файл на диску не змінено). Видалення й перейменування питають звичайний дозвіл, як у Zed, без панелі огляду. |
 
 4. Журнал (`zed: open log`): немає `panic`, є рядки `fyx: agent review:`.
 
@@ -260,11 +286,12 @@ W5 уже перевірив сценарний огляд зі скриптов
 | 3a | Counter на місці після перезапуску | |
 | 3a | з ключем і папкою: 30 с без мережі | |
 | 3a | мережа лише після відкриття вибору моделі | |
-| R1 | картка **Open review**; два файли в одній панелі; accept all | |
-| R2 | частковий accept | |
+| R1 | фокус не забрано; toast **Review**; картка **Open review**; запит перед accept all | |
+| R2 | закриття вкладки тримає правки; `ctrl-k y`; частковий accept | |
 | R3 | `deny` для `.env` з назвою правила | |
-| R4 | «changed without review» | |
-| R5 | вбудований агент: редагування в огляді; delete і move через дозвіл | |
+| R4 | `AGENTS.md` на огляді навіть після accept all | |
+| R5 | «changed without review» | |
+| R6 | вбудований агент: редагування в огляді; delete і move через дозвіл | |
 | — | журнал без panic | |
 
 ## 4. Режими безпеки (5 хв)
@@ -301,6 +328,47 @@ W5 уже перевірив сценарний огляд зі скриптов
 | 3 | audit: нічого не блокує, журнал `would …` | |
 | 4 | shield: змінну очищено, запис у `.claude\` заблоковано | |
 | 5 | пониження просить підтвердження | |
+
+## 5. Необов'язково: демо `fyx:ui` 0.2 (6 хв)
+
+Цей блок робіть, лише якщо лишився час. Він показує, що додає 0.2: модальне вікно з вибором з
+клавіатури, годинник у рядку стану на тіках і декорації в редакторі.
+
+**Підготовка.**
+
+1. Компоненти 0.2 збирає координатор заздалегідь. Якщо їх немає, зберіть самі з кореня
+   репозиторію (Git Bash, кілька хвилин):
+
+   ```bash
+   script/fyx-build-demos --fyx-ui-0-2
+   ```
+
+   Скрипт кладе кожне демо в `<target>/fyx-demos-v0_2/<demo>/` і друкує ці шляхи. Нам потрібні
+   `fyx_demo_gallery` і `fyx_demo_decorations`.
+2. Проєкт, у якому декорації мають до чого прив'язатися (ті самі шляхи, що в демо):
+
+   ```powershell
+   $t = 'D:\fyx-user-check\todo-project'
+   New-Item -ItemType Directory -Force "$t\src" | Out-Null
+   Set-Content "$t\src\main.rs" 'fn main() {', '    // TODO: read the config path from the command line', '    let config = load_config("fyx.toml");', '    // FIXME(sam): this panics when the file is missing', '    run(config.unwrap());', '}'
+   ```
+
+3. Додайте дві папки з кроку 1 до `"dev_paths"` у `$prof\config\settings.json`, збережіть і
+   відкрийте `D:\fyx-user-check\todo-project`. Для кожної з'явиться **Enable**; натисніть його.
+
+| # | Що зробити | Очікується |
+|---|---|---|
+| D1 | Відкрийте панель **Gallery 0.2** (значок `bolt`, правий док). Наведіть курсор на кнопки, наберіть щось у прихованому полі, натисніть **Refresh rows** | Кнопки мають підказки (tooltip). Поле приховує текст і показує `Token: N characters`. Рядки дерева мають відступи за глибиною (indent) і після Refresh читаються `(scan N)`. |
+| D2 | **Pick a fruit**, наберіть кілька літер, стрілки вниз і вгору, **Enter**. Потім ще раз **Pick a fruit** і **Escape** | Відкривається модальне вікно **Pick a fruit**, фокус у полі фільтра. Стрілки рухають виділення. Enter закриває вікно, а на панелі `Picked: <fruit>`. Після Escape на панелі `Picked: nothing (escape)`. |
+| D3 | Подивіться на правий край рядка стану | Значок годинника і час UTC, щосекунди новий. |
+| D4 | Відкрийте панель **TODO highlights** (лівий док), **Highlight all**, відкрийте `src/main.rs` | Над рядками з `TODO` і `FIXME` з'являються блоки декорацій, зі значком у кольорі свого виду. Додайте рядок над TODO: блок їде разом зі своїм рядком. **Done** у блоці прибирає його, і панель оновлюється. |
+
+| Крок | Що | Так / ні, примітка |
+|---|---|---|
+| D1 | панель 0.2: tooltip, indent, приховане поле | |
+| D2 | модальне вікно з клавіатури, `Picked: …` | |
+| D3 | годинник на тіках | |
+| D4 | декорації над TODO/FIXME, ідуть за рядком, **Done** | |
 
 ## Після перевірки
 
