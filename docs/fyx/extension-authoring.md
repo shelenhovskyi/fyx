@@ -141,11 +141,12 @@ What `check` reports, as errors unless marked:
   - **0.1** takes `ui:panel` and `ui:status-bar`, plus `ui:modal` and `ui:editor-decorations`
     unused (a warning), so a manifest can declare them before its component moves to 0.2.
   - **0.2** adds `ui:modal`, `ui:editor-decorations` and `ui:notifications`.
-  - **0.3** takes every known capability, T1 and T2 included. One that is not built yet is a
-    warning.
-  - Anything else is an error. So are the 0.3 tables (`[fyx_ui.network]`,
-    `[[fyx_ui.processes]]`, `[fyx_ui.process]`, `[[fyx_ui.commands]]`,
-    `[[fyx_ui.picker_sources]]`) in a manifest that targets 0.1 or 0.2.
+  - **0.3** adds `ui:images`, `ui:canvas` and the T2 capabilities (`network:fetch`,
+    `process:spawn`, `workspace:edit`, `agent:observe`).
+  - Anything else is an error. That includes what is planned for 0.4 (`ui:picker`, `ui:hover`,
+    `ui:code-lens`, `ui:virtual-documents`, `ui:commands` and the T1 `workspace:*` reads), at any
+    version. The 0.3 tables (`[fyx_ui.network]`, `[[fyx_ui.processes]]`, `[fyx_ui.process]`) are
+    errors in a manifest that targets 0.1 or 0.2.
 
   A missing `name` or a `schema_version` other than 1 is a warning.
 - **Component:** it must be a valid component (not a core module) and at most 32 MiB. It must
@@ -378,8 +379,6 @@ the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown
 | `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. Each `api_version` takes its own capabilities (see [the `fyx-ext` commands](#the-fyx-ext-commands)); a capability the world does not take fails the load with `<capability> needs fyx:ui 0.3; this extension targets <version>`. |
-| `[[fyx_ui.commands]]` (0.3) | `id` (1 to 64 of `a-z 0-9 . _ -`, none twice) and `title` (one line, at most 128 bytes); at most 64. |
-| `[[fyx_ui.picker_sources]]` (0.3) | `id` (the same rule) and `picker = "<extension>/<picker surface>"`; at most 64. Both tables refuse unknown keys. |
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:139-149 (UiManifest, deny_unknown_fields, capabilities default), 171-183 (version supported, component path: all components Normal), 188-203 (check_surfaces), 551-557 (manifest version == component version, check_surfaces) -->
 
@@ -1173,8 +1172,7 @@ Declare `workspace:edit` and `agent:observe`. Both ask the user on first use.
 ```rust
 let edit = WorkspaceEdit::new("Sort imports").file(
     FileEdit::path("src/main.rs")
-        .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), "use a;\nuse b;\n")
-        .expected_version(version),
+        .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), "use a;\nuse b;\n"),
 );
 let id = apply_edit(&edit)?;
 start_observing()?;

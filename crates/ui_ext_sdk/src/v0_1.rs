@@ -215,14 +215,6 @@ pub mod glue {
                         );
                         return None;
                     }
-                    #[cfg(feature = "fyx-ui-0-3")]
-                    SurfaceKind::Picker(_) => {
-                        log(
-                            LogLevel::Error,
-                            &needs_0_3(&format!("picker surface {:?}", surface.id)),
-                        );
-                        return None;
-                    }
                 };
                 Some(v1::Surface {
                     id: surface.id,

@@ -95,14 +95,8 @@ mod t2 {
         /// The rest is the call's own problem.
         fn from_error(error: &HostError, queried: PermissionState, before: Known) -> Known {
             match error.code {
-                HostErrorCode::Denied | HostErrorCode::Unavailable
-                    if error.message.contains("not trusted") =>
-                {
-                    Known::Untrusted
-                }
-                HostErrorCode::Unavailable if error.message.starts_with("no worktree") => {
-                    Known::NoWorktree
-                }
+                HostErrorCode::UntrustedWorktree => Known::Untrusted,
+                HostErrorCode::NoWorktree => Known::NoWorktree,
                 HostErrorCode::Denied => match queried {
                     PermissionState::Denied | PermissionState::Unavailable => {
                         Known::from_state(queried)
@@ -473,8 +467,8 @@ mod t2 {
         fn agent(&mut self, event: AgentEvent) {
             self.agent_state = Known::Allowed;
             match event {
-                AgentEvent::Snapshot(reviews) => {
-                    self.reviews = reviews.iter().map(review_row).collect();
+                AgentEvent::Snapshot(snapshot) => {
+                    self.reviews = snapshot.reviews.iter().map(review_row).collect();
                 }
                 AgentEvent::Opened(info)
                 | AgentEvent::Updated(info)
@@ -798,7 +792,7 @@ mod t2 {
         #[test]
         fn refusals_say_why() {
             let untrusted = HostError {
-                code: HostErrorCode::Denied,
+                code: HostErrorCode::UntrustedWorktree,
                 message: "the worktree is restricted: it is not trusted".into(),
             };
             let known = Known::from_error(&untrusted, PermissionState::Granted, Known::Allowed);
@@ -808,7 +802,7 @@ mod t2 {
                 "Trust this project to use git"
             );
             let none_open = HostError {
-                code: HostErrorCode::Unavailable,
+                code: HostErrorCode::NoWorktree,
                 message: "no worktree is open".into(),
             };
             assert_eq!(
