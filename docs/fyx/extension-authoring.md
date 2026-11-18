@@ -315,6 +315,20 @@ The capability check runs only when Fyx loads the extension from its directory. 
 loaded for quick iteration (below) skips it. `fyx-ext check` applies all of these rules before
 Fyx does.
 
+`fyx-ext check` also looks at the PNG and SVG files in `assets/`, which `image` nodes can show
+(0.3). A file over 2 MiB is an error. These are warnings, because Fyx draws the image's alt text
+instead and does not fail the update:
+
+- a file that is not a valid PNG or SVG;
+- a PNG over 2048 px on a side;
+- an SVG that declares XML entities;
+- a name an image node cannot use.
+
+An SVG with `<image>`, `<script>` or `<foreignObject>` is also a warning, since Fyx drops those
+parts.
+
+<!-- crates/fyx_ext/src/assets.rs, crates/ui_ext/src/image.rs (check_asset_path, check_image_bytes) -->
+
 <!-- crates/ui_ext_host/src/registry.rs:330-350 -->
 
 ## Building
