@@ -369,8 +369,8 @@ fn resolve(
             return Err(EditError::NotFound(format!("{display} does not exist")));
         };
         if !worktree.trusted {
-            // Decision 26: restricted mode refuses without a prompt.
-            return Err(EditError::Denied);
+            // Decision 26: restricted mode refuses without a prompt, with its own code (W2c A5).
+            return Err(EditError::UntrustedWorktree);
         }
         check_target(&project, &project_path, &abs_path, exists, &display, cx)?;
         if workspace.is_none() {

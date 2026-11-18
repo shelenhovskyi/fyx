@@ -178,7 +178,7 @@ async fn test_untrusted_worktree_is_denied(cx: &mut TestAppContext) {
         cx,
     )
     .await;
-    assert_eq!(result.err(), Some(EditError::Denied));
+    assert_eq!(result.err(), Some(EditError::UntrustedWorktree));
     let a = buffer(&project, "a.txt", cx).await;
     assert_eq!(text(&a, cx), "one\ntwo\n");
 }
