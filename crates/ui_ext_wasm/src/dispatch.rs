@@ -142,6 +142,11 @@ impl UiBindings {
                 .await?
                 .and_then(|update| guest_value(update.try_into()))
                 .and_then(|update| checked_images(store, surface_id, update)),
+            // A 0.2 surface has no canvas, so the host never sends it `canvas-click`: defence in
+            // depth, like 0.1's below.
+            Self::V0_2(_) if matches!(event, model::UiEvent::CanvasClick(_)) => {
+                Ok(model::Update::Unchanged)
+            }
             Self::V0_2(extension) => extension
                 .call_handle_event(store, surface_id, &event.into())
                 .await?
@@ -635,6 +640,11 @@ pub(crate) mod shim {
             // 0.3 only; 0.1 has no image, so its alt text stands in.
             model::Props::Image(props) => ui_ext::Props::Text(ui_ext::TextProps {
                 content: props.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
+            // 0.3 only; so does a canvas's description.
+            model::Props::Canvas(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: props.description.clone(),
                 ..ui_ext::TextProps::default()
             }),
         }

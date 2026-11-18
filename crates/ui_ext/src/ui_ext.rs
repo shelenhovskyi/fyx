@@ -6,6 +6,7 @@
 //! converts into. [`ApiVersion`] selects the rules that differ between the two.
 
 mod api_version;
+pub mod canvas;
 pub mod image;
 mod tree;
 mod types;
