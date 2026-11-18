@@ -18,6 +18,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::ShowSurface` | variant |  |
 | `add_surface` | fn | Adds a surface at runtime. The manifest must declare the capability of its kind; at most 32 live surfaces per extension. Panels and status items are mounted at once; a modal waits for `show_surface`. |
 | `cancel_tick` | fn | Drops the pending tick of a surface, if any. |
+| `exported_api_version` | fn | The `fyx:ui` version the component exports: `crate::API_VERSION` for `register_extension!(T)`, `crate::API_VERSION_V0_1` for `register_extension!(T, v0_1)`. Off WASM it is `crate::API_VERSION`. |
 | `hide_surface` | fn | Closes a modal (no `dismissed` event) or hides a panel's dock if that panel is active. |
 | `log` | fn | Writes a message to the host's log. Off WASM it goes to stderr. |
 | `place_decoration` | fn | Places a decoration: a tree drawn as a block above or below a buffer line, anchored by the host. Needs `ui:editor-decorations`; at most 512 per extension. Placing a live id again moves it and replaces its tree. The id then works like a surface id for `push_update`, `handle-event`, `list-rows` and `mount`. |

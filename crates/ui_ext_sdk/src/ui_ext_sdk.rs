@@ -307,6 +307,11 @@ macro_rules! __fyx_host_shims {
         #[cfg(target_arch = "wasm32")]
         const _: () = {
             #[unsafe(no_mangle)]
+            fn __fyx_ui_exported_api_version() -> (u16, u16, u16) {
+                $crate::__private::$world::API_VERSION
+            }
+
+            #[unsafe(no_mangle)]
             fn __fyx_ui_log(level: $crate::LogLevel, message: &str) {
                 $crate::__private::$world::log(level, message)
             }
@@ -1011,7 +1016,8 @@ impl SurfaceTree {
 
     /// Tells the host that the rows of the list or table `target` changed although its props did
     /// not; it fetches `rows` again, or all of them for `None`. Unlike rebuilding the list, this
-    /// keeps its scroll position.
+    /// keeps its scroll position. In an extension exported as 0.1 it queues an unchanged
+    /// `set-props` of the list instead, after which a 0.1 host fetches all its rows again.
     pub fn invalidate_rows(
         &mut self,
         target: NodeId,
@@ -1025,7 +1031,14 @@ impl SurfaceTree {
             });
         }
         self.check_update_size(self.pending.len() + 1)?;
-        self.pending.invalidate_rows(target, rows);
+        if exported_api_version() == API_VERSION_V0_1 {
+            // 0.1 has no invalidate-rows, but a 0.1 host fetches every row of a list a patch
+            // touches again, so an unchanged set-props does the same job.
+            let props = node.props.clone();
+            self.pending.set_props(target, props);
+        } else {
+            self.pending.invalidate_rows(target, rows);
+        }
         Ok(())
     }
 
@@ -1171,6 +1184,23 @@ impl SurfaceTree {
                 None => siblings.push(node.id),
             }
         }
+    }
+}
+
+impl Icon {
+    /// Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2).
+    pub fn all() -> impl ExactSizeIterator<Item = Icon> {
+        (0..ui_ext::v0_2::Icon::ALL.len()).map(|index| {
+            let index = u8::try_from(index).expect("fewer than 256 icons");
+            // SAFETY: wit-bindgen enums are `repr(u8)` in WIT order, like `ui_ext::v0_2::Icon::ALL`,
+            // and `index` is below its length; `icons_are_in_wit_order` checks both.
+            unsafe { Icon::_lift(index) }
+        })
+    }
+
+    /// The WIT case name, such as `arrow-up`.
+    pub fn name(self) -> &'static str {
+        ui_ext::v0_2::Icon::ALL[self as usize].name()
     }
 }
 
@@ -1820,6 +1850,20 @@ mod tests {
             [("echo".to_string(), Update::Unchanged)]
         );
         assert!(take_pushed_updates().is_empty());
+    }
+
+    #[test]
+    fn icons_are_in_wit_order() {
+        let icons = Icon::all().collect::<Vec<_>>();
+        assert_eq!(icons.len(), 101);
+        for (icon, model) in icons.iter().zip(ui_ext::v0_2::Icon::ALL) {
+            // wit-bindgen's `Debug` prints `Icon::ArrowUp`; the model's prints `ArrowUp`.
+            let wit = format!("{icon:?}");
+            assert_eq!(wit.rsplit("::").next(), Some(format!("{model:?}").as_str()));
+            assert_eq!(icon.name(), model.name());
+        }
+        assert_eq!(Icon::ArrowUp.name(), "arrow-up");
+        assert_eq!(Icon::Blocks.name(), "blocks");
     }
 
     #[test]

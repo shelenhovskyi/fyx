@@ -10,4 +10,5 @@ authors = ["Fyx"]
 [fyx_ui]
 api_version = "0.1.0"
 component = "fyx_ui.wasm"
-capabilities = ["ui:panel", "ui:status-bar"]
+# `ui:modal` is for the picker of the 0.2 build (`script/fyx-build-demos --fyx-ui-0-2`).
+capabilities = ["ui:panel", "ui:status-bar", "ui:modal"]

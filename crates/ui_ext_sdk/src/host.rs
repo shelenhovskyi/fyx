@@ -16,6 +16,7 @@ use crate::{DecorationLocation, HostError, LogLevel, Node, Surface, Update};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
+    safe fn __fyx_ui_exported_api_version() -> (u16, u16, u16);
     safe fn __fyx_ui_log(level: LogLevel, message: &str);
     safe fn __fyx_ui_push_update(surface_id: &str, update: &Update) -> Result<(), HostError>;
     safe fn __fyx_ui_request_tick(surface_id: &str, delay_ms: u32) -> Result<(), HostError>;
@@ -91,6 +92,16 @@ pub fn take_pushed_updates() -> Vec<(String, Update)> {
         });
         pushed
     })
+}
+
+/// The `fyx:ui` version the component exports: [`crate::API_VERSION`] for
+/// `register_extension!(T)`, [`crate::API_VERSION_V0_1`] for `register_extension!(T, v0_1)`.
+/// Off WASM it is [`crate::API_VERSION`].
+pub fn exported_api_version() -> (u16, u16, u16) {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_exported_api_version();
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::API_VERSION
 }
 
 /// Writes a message to the host's log. Off WASM it goes to stderr.
@@ -212,6 +223,8 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError> {
 pub mod v0_2 {
     use crate::bindings::fyx::ui::{decorations, host};
     use crate::{DecorationLocation, HostError, LogLevel, Node, Surface, Update};
+
+    pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION;
 
     pub fn log(level: LogLevel, message: &str) {
         host::log(level, message);

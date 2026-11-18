@@ -2,21 +2,24 @@
 //!
 //! The signing key comes from `--key-file` or the `FYX_REGISTRY_SIGNING_KEY` environment
 //! variable, as `{"key_id": "...", "seed": "<base64 of 32 bytes>"}`. This tool never creates or
-//! writes a signing key.
+//! writes a signing key. The variable is removed from the environment as soon as it is read, and
+//! on Unix a key file readable by group or others is refused (security-2 T9).
 
 use std::{
+    collections::BTreeSet,
     env::VarError,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use fyx_registry::{
-    Blocklist, Index, Keyset, Release, Signed, SigningKey, Timestamp, VerifiedBlocklist,
+    Blocklist, Index, KeyId, KeyRole, Keyset, Release, Signed, SigningKey, Snapshot, Timestamp,
+    VerifiedBlocklist, VerifiedSnapshot,
 };
 use zeroize::Zeroizing;
 
@@ -51,6 +54,9 @@ enum Command {
     },
     /// Print the public key entry for the signing key, for a keyset file.
     PublicKey {
+        /// What the key may sign: release, blocklist, snapshot. At least one.
+        #[arg(long = "role", required = true, value_parser = parse_role)]
+        roles: Vec<KeyRole>,
         #[command(flatten)]
         key: KeyArgs,
     },
@@ -61,9 +67,9 @@ enum SignDocument {
     /// Sign an unsigned release (the `signed` part of an index entry).
     Release {
         file: PathBuf,
-        /// Check the release's package size and sha256 against this file before signing.
+        /// The package the release names; its size and sha256 are checked before signing.
         #[arg(long)]
-        package: Option<PathBuf>,
+        package: PathBuf,
         #[command(flatten)]
         key: KeyArgs,
         #[command(flatten)]
@@ -72,6 +78,27 @@ enum SignDocument {
     /// Sign an unsigned block list.
     Blocklist {
         file: PathBuf,
+        #[command(flatten)]
+        key: KeyArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Sign the snapshot of an index: its size and sha256, the time, an expiry and a sequence.
+    Snapshot {
+        #[arg(long)]
+        index: PathBuf,
+        /// Must be higher than every earlier snapshot's.
+        #[arg(long)]
+        sequence: u64,
+        /// How long the snapshot is valid; the CI re-signs before it expires.
+        #[arg(long, default_value_t = 48)]
+        validity_hours: u64,
+        /// Unix seconds for `generated_at`; defaults to now.
+        #[arg(long)]
+        generated_at: Option<u64>,
+        /// A key whose signatures clients refuse from now on. Repeat for several.
+        #[arg(long = "revoke")]
+        revoked_keys: Vec<String>,
         #[command(flatten)]
         key: KeyArgs,
         #[command(flatten)]
@@ -89,8 +116,16 @@ enum VerifyDocument {
         #[arg(long)]
         package: Option<PathBuf>,
     },
-    /// Verify every release in an index.
+    /// Verify every release in an index, and with `--snapshot` that the snapshot names it.
     Index {
+        file: PathBuf,
+        #[arg(long)]
+        keyset: PathBuf,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
+    /// Verify a signed snapshot and that it has not expired.
+    Snapshot {
         file: PathBuf,
         #[arg(long)]
         keyset: PathBuf,
@@ -143,6 +178,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // SAFETY: nothing else runs yet: no thread has been started and no library has read the
+    // environment, so removing a variable cannot race with a reader.
+    unsafe { std::env::remove_var(SIGNING_KEY_VARIABLE) };
     let mut stdout = io::stdout().lock();
     match run(cli, signing_key_variable, &mut stdout) {
         Ok(()) => ExitCode::SUCCESS,
@@ -170,9 +208,7 @@ fn run(
                 let release: Release = serde_json::from_slice(&read(&file)?)
                     .with_context(|| format!("{} is not an unsigned release", file.display()))?;
                 release.validate()?;
-                if let Some(package) = package {
-                    release.verify_package(&read(&package)?)?;
-                }
+                release.verify_package(&read(&package)?)?;
                 let signed = Signed::sign(release, &key);
                 write_output(&output, &to_json(&signed)?, stdout)
             }
@@ -183,6 +219,38 @@ fn run(
                 blocklist.validate()?;
                 let signed = Signed::sign(blocklist, &key);
                 write_output(&output, &to_json(&signed)?, stdout)
+            }
+            SignDocument::Snapshot {
+                index,
+                sequence,
+                validity_hours,
+                generated_at,
+                revoked_keys,
+                key,
+                output,
+            } => {
+                let key = signing_key(&key, signing_key_variable)?;
+                let index_bytes = read(&index)?;
+                Index::from_json(&index_bytes)
+                    .with_context(|| format!("{} is not an index", index.display()))?;
+                let generated_at = match generated_at {
+                    Some(seconds) => Timestamp(seconds),
+                    None => now()?,
+                };
+                let revoked_keys = revoked_keys
+                    .into_iter()
+                    .map(KeyId::new)
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                let snapshot = Snapshot::for_index(
+                    &index_bytes,
+                    sequence,
+                    generated_at,
+                    Duration::from_secs(validity_hours.saturating_mul(3600)),
+                    revoked_keys,
+                );
+                snapshot.validate()?;
+                let signed = Signed::sign(snapshot, &key);
+                write_output(&output, &Snapshot::to_json(&signed)?, stdout)
             }
         },
         Command::Verify { document } => match document {
@@ -204,26 +272,47 @@ fn run(
                 )?;
                 Ok(())
             }
-            VerifyDocument::Index { file, keyset } => {
+            VerifyDocument::Index {
+                file,
+                keyset,
+                snapshot,
+            } => {
                 let keyset = read_keyset(&keyset)?;
-                let index = Index::from_json(&read(&file)?)?;
-                let verified = index.verify(&keyset);
+                let bytes = read(&file)?;
+                let index = Index::from_json(&bytes)?;
+                let verified = match snapshot {
+                    Some(snapshot) => {
+                        let snapshot =
+                            VerifiedSnapshot::from_json(&read(&snapshot)?, &keyset, now()?, None)?;
+                        Index::verify_with_snapshot(&bytes, &snapshot, &keyset)?
+                    }
+                    None => index.verify(&keyset),
+                };
                 for rejected in verified.rejected() {
-                    writeln!(
-                        stdout,
-                        "rejected: {}@{}: {}",
-                        rejected.id, rejected.version, rejected.error
-                    )?;
+                    writeln!(stdout, "rejected: {}: {}", rejected.label(), rejected.error)?;
                 }
+                let entries = index.releases.len() + index.malformed.len();
                 if !verified.rejected().is_empty() {
                     bail!(
-                        "{} of {} releases in {} do not verify",
+                        "{} of {entries} releases in {} do not verify",
                         verified.rejected().len(),
-                        index.releases.len(),
                         file.display()
                     );
                 }
-                writeln!(stdout, "ok: {} releases", index.releases.len())?;
+                index.verify_strict(&keyset)?;
+                writeln!(stdout, "ok: {entries} releases")?;
+                Ok(())
+            }
+            VerifyDocument::Snapshot { file, keyset } => {
+                let keyset = read_keyset(&keyset)?;
+                let snapshot = VerifiedSnapshot::from_json(&read(&file)?, &keyset, now()?, None)?;
+                writeln!(
+                    stdout,
+                    "ok: snapshot sequence {} expires at {} signed by {}",
+                    snapshot.sequence(),
+                    snapshot.expires_at().0,
+                    snapshot.signed().signature.key_id
+                )?;
                 Ok(())
             }
             VerifyDocument::Blocklist { file, keyset } => {
@@ -270,17 +359,49 @@ fn run(
             )?;
             Ok(())
         }
-        Command::PublicKey { key } => {
+        Command::PublicKey { roles, key } => {
             let key = signing_key(&key, signing_key_variable)?;
-            stdout.write_all(&to_json(&key.public_key())?)?;
+            stdout.write_all(&to_json(&key.public_key(roles))?)?;
             Ok(())
         }
     }
 }
 
+fn parse_role(text: &str) -> Result<KeyRole, String> {
+    KeyRole::ALL
+        .into_iter()
+        .find(|role| role.as_str() == text)
+        .ok_or_else(|| format!("{text:?} is not a role: use release, blocklist or snapshot"))
+}
+
+/// On Unix a signing key file must not be readable by group or others.
+fn check_key_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            bail!(
+                "signing key file {} is readable by others (mode {:o}); run chmod 600 on it",
+                path.display(),
+                mode & 0o777
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn signing_key(key: &KeyArgs, variable: Option<Zeroizing<String>>) -> Result<SigningKey> {
     let contents = match (&key.key_file, variable) {
-        (Some(path), _) => Zeroizing::new(read(path)?),
+        (Some(path), _) => {
+            check_key_file_permissions(path)?;
+            Zeroizing::new(read(path)?)
+        }
         (None, Some(variable)) => Zeroizing::new(variable.as_bytes().to_vec()),
         (None, None) => bail!("no signing key: pass --key-file or set {SIGNING_KEY_VARIABLE}"),
     };
@@ -308,13 +429,31 @@ fn write_output(output: &OutputArgs, bytes: &[u8], stdout: &mut dyn Write) -> Re
     }
 }
 
-/// A CI job killed mid-write must not leave a truncated index behind.
+/// A CI job killed mid-write must not leave a truncated index behind. The temporary file has a
+/// random name and is created exclusively, so a link planted at a predictable name cannot
+/// redirect the write (security-2 T9).
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    use ring::rand::{SecureRandom as _, SystemRandom};
+
+    let mut suffix = [0u8; 8];
+    SystemRandom::new()
+        .fill(&mut suffix)
+        .map_err(|_| anyhow::anyhow!("no random numbers for a temporary file name"))?;
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
+    temporary.push(format!(".{}.tmp", hex::encode(suffix)));
     let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, bytes).with_context(|| format!("writing {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .with_context(|| format!("creating {}", temporary.display()))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written.and_then(|()| fs::rename(&temporary, path)) {
+        fs::remove_file(&temporary).ok();
+        return Err(error).with_context(|| format!("replacing {}", path.display()));
+    }
+    Ok(())
 }
 
 fn now() -> Result<Timestamp> {
@@ -328,7 +467,7 @@ fn now() -> Result<Timestamp> {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    use fyx_registry::{KeyId, Sha256Digest};
+    use fyx_registry::Sha256Digest;
     use serde_json::json;
 
     // A test-only seed; it is public in this file and must never sign real releases.
@@ -348,7 +487,7 @@ mod tests {
             fixture.write("key.json", test_key_json("test-registry", 1).as_bytes());
             let public_key = SigningKey::from_json(test_key_json("test-registry", 1).as_bytes())
                 .expect("test key")
-                .public_key();
+                .public_key(KeyRole::ALL);
             let keyset = json!({"keys": [public_key]});
             fixture.write("keyset.json", keyset.to_string().as_bytes());
             fixture.write("todo-1.0.0.fyxext", b"package bytes");
@@ -490,17 +629,82 @@ mod tests {
             ])
             .expect("verifies");
         assert_eq!(verified, "ok: 1 releases\n");
+
+        // The snapshot pins this index; once the index changes it no longer verifies.
+        let signed = fixture
+            .run(&[
+                "sign",
+                "snapshot",
+                "--index",
+                "{dir}/index.json",
+                "--sequence",
+                "1",
+                "--key-file",
+                "{dir}/key.json",
+                "--out",
+                "{dir}/snapshot.json",
+            ])
+            .expect("signs the snapshot");
+        assert!(signed.is_empty());
+        let verified = fixture
+            .run(&[
+                "verify",
+                "snapshot",
+                "{dir}/snapshot.json",
+                "--keyset",
+                "{dir}/keyset.json",
+            ])
+            .expect("verifies the snapshot");
+        assert!(
+            verified.starts_with("ok: snapshot sequence 1"),
+            "{verified}"
+        );
+        let with_snapshot = [
+            "verify",
+            "index",
+            "{dir}/index.json",
+            "--keyset",
+            "{dir}/keyset.json",
+            "--snapshot",
+            "{dir}/snapshot.json",
+        ];
+        fixture.run(&with_snapshot).expect("matches");
+        let edited = fixture
+            .read("index.json")
+            .replace("\"generated_at\": 5", "\"generated_at\": 6");
+        fixture.write("index.json", edited.as_bytes());
+        let error = fixture.run(&with_snapshot).expect_err("another index");
+        assert!(
+            error
+                .to_string()
+                .contains("is not the index snapshot 1 names"),
+            "{error}"
+        );
     }
 
     #[test]
     fn tampering_is_refused_everywhere() {
         let fixture = Fixture::new();
         fixture.write("release.json", fixture.release_json("1.0.0").as_bytes());
+        assert!(
+            fixture
+                .run(&[
+                    "sign",
+                    "release",
+                    "{dir}/release.json",
+                    "--key-file",
+                    "{dir}/key.json",
+                ])
+                .is_err(),
+            "--package is required"
+        );
         fixture
             .run(&[
                 "sign",
                 "release",
                 "{dir}/release.json",
+                "--package",
+                "{dir}/todo-1.0.0.fyxext",
                 "--key-file",
                 "{dir}/key.json",
                 "--out",
@@ -600,6 +804,7 @@ mod tests {
             "schema": 1,
             "sequence": 7,
             "generated_at": 100,
+            "expires_at": 100 + 86_400,
             "entries": [
                 {"id": "todo", "versions": ">=1.2.0, <1.3.0", "reason": "Leaks buffers.", "urgent": true}
             ]
@@ -651,12 +856,32 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("release.json", fixture.release_json("1.0.0").as_bytes());
         let error = fixture
-            .run(&["sign", "release", "{dir}/release.json"])
+            .run(&[
+                "sign",
+                "release",
+                "{dir}/release.json",
+                "--package",
+                "{dir}/todo-1.0.0.fyxext",
+            ])
             .expect_err("no key");
         assert!(error.to_string().contains(SIGNING_KEY_VARIABLE), "{error}");
 
+        assert!(
+            fixture
+                .run(&["public-key", "--key-file", "{dir}/key.json"])
+                .is_err(),
+            "a role is required"
+        );
         let printed = fixture
-            .run(&["public-key", "--key-file", "{dir}/key.json"])
+            .run(&[
+                "public-key",
+                "--key-file",
+                "{dir}/key.json",
+                "--role",
+                "release",
+                "--role",
+                "snapshot",
+            ])
             .expect("prints");
         let public_key: fyx_registry::PublicKey =
             serde_json::from_str(&printed).expect("a keyset entry");
@@ -664,6 +889,32 @@ mod tests {
             public_key.key_id,
             KeyId::new("test-registry").expect("valid")
         );
+        assert_eq!(
+            public_key.roles,
+            [KeyRole::Release, KeyRole::Snapshot].into()
+        );
         assert!(!printed.contains(&BASE64.encode([1u8; 32])));
+    }
+
+    #[test]
+    fn atomic_writes_leave_no_temporary_file() {
+        let fixture = Fixture::new();
+        write_atomically(&fixture.path("out.json"), b"one").expect("writes");
+        write_atomically(&fixture.path("out.json"), b"two").expect("replaces");
+        assert_eq!(fixture.read("out.json"), "two");
+        let names: Vec<String> = fs::read_dir(fixture.directory.path())
+            .expect("lists")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            !names.iter().any(|name| name.ends_with(".tmp")),
+            "{names:?}"
+        );
     }
 }

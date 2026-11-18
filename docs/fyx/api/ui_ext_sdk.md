@@ -34,6 +34,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FlexProps::row` | method | A row with no gap, no padding and children aligned to the start. |
 | `HostError` | re-export | `bindings::fyx::ui::host::HostError` |
 | `HostErrorCode` | re-export | `bindings::fyx::ui::host::HostErrorCode` |
+| `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2). |
+| `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
 | `IconProps::new` | method |  |
 | `IdAllocator` | struct | Hands out the node ids of one surface. Ids only ever increase, so an id is never reused for a different node while the surface lives, as the `fyx:ui` contract requires. |
@@ -69,7 +71,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SurfaceTree::clear_children` | method | Removes every child of `parent`. |
 | `SurfaceTree::contains` | method |  |
 | `SurfaceTree::insert` | method | Builds a subtree under the flex node `parent`, before its child `before` or after its last child, and returns the ids of the subtree's top-level nodes. |
-| `SurfaceTree::invalidate_rows` | method | Tells the host that the rows of the list or table `target` changed although its props did not; it fetches `rows` again, or all of them for `None`. Unlike rebuilding the list, this keeps its scroll position. |
+| `SurfaceTree::invalidate_rows` | method | Tells the host that the rows of the list or table `target` changed although its props did not; it fetches `rows` again, or all of them for `None`. Unlike rebuilding the list, this keeps its scroll position. In an extension exported as 0.1 it queues an unchanged `set-props` of the list instead, after which a 0.1 host fetches all its rows again. |
 | `SurfaceTree::is_empty` | method |  |
 | `SurfaceTree::is_mounted` | method |  |
 | `SurfaceTree::is_unsynced` | method | Whether a failed push left the host behind the mirror. |

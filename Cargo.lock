@@ -6862,6 +6862,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_decorations"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_form"
 version = "0.1.0"
 dependencies = [

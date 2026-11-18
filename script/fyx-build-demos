@@ -1,24 +1,42 @@
 #!/usr/bin/env bash
 # Builds the Fyx demo UI extensions for wasm32-wasip2 and copies each component next to its
 # extension.toml as fyx_ui.wasm, so each demo directory loads as a UI extension.
-# Usage: script/fyx-build-demos [--release] [extra cargo build args, e.g. -j 2]
-# Then point the dev build at the directories, e.g. on Windows:
+# Usage: script/fyx-build-demos [--release] [--fyx-ui-0-2] [extra cargo build args, e.g. -j 2]
+#
+# --fyx-ui-0-2 builds every demo's fyx:ui 0.2 world (its `fyx-ui-0-2` feature) instead, for a dev
+# build whose host runs 0.2. It leaves the repository alone: each demo goes to
+# <target>/fyx-demos-v0_2/<demo>/, with fyx_ui.wasm and a copy of extension.toml whose api_version
+# is 0.2.0. The 0.2 builds use the target directory <target>/fyx-demos-v0_2/target, so they do not
+# overwrite the 0.1 ones.
+#
+# Then point the dev build at the directories it prints, e.g. on Windows:
 #   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;...
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-demos=(fyx_demo_counter fyx_demo_todo fyx_demo_gallery fyx_demo_markdown fyx_demo_gitstatus fyx_demo_form)
+demos=(fyx_demo_counter fyx_demo_todo fyx_demo_gallery fyx_demo_markdown fyx_demo_gitstatus fyx_demo_form fyx_demo_decorations)
 profile=debug
+v0_2=false
 cargo_args=()
-if [[ "${1:-}" == "--release" ]]; then
-    profile=release
-    cargo_args+=(--release)
-    shift
-fi
-for demo in "${demos[@]}"; do cargo_args+=(-p "$demo"); done
-
-cargo build --target wasm32-wasip2 "${cargo_args[@]}" "$@"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release)
+            profile=release
+            cargo_args+=(--release)
+            shift
+            ;;
+        --fyx-ui-0-2)
+            v0_2=true
+            shift
+            ;;
+        *) break ;;
+    esac
+done
+for demo in "${demos[@]}"; do
+    cargo_args+=(-p "$demo")
+    if $v0_2; then cargo_args+=(--features "$demo/fyx-ui-0-2"); fi
+done
 
 # Honors CARGO_TARGET_DIR and .cargo/config.toml; JSON escapes Windows backslashes, so turn
 # them into forward slashes, which Git Bash accepts.
@@ -32,18 +50,40 @@ if [[ -z "$target_dir" ]]; then
     exit 1
 fi
 
+out_root=""
+build_dir="$target_dir"
+if $v0_2; then
+    out_root="$target_dir/fyx-demos-v0_2"
+    build_dir="$out_root/target"
+    cargo_args+=(--target-dir "$build_dir")
+fi
+
+cargo build --target wasm32-wasip2 "${cargo_args[@]}" "$@"
+
 separator=":"
 dirs=()
 for demo in "${demos[@]}"; do
-    component="$target_dir/wasm32-wasip2/$profile/$demo.wasm"
-    cp "$component" "extensions/$demo/fyx_ui.wasm"
-    dir="$PWD/extensions/$demo"
+    component="$build_dir/wasm32-wasip2/$profile/$demo.wasm"
+    if $v0_2; then
+        dir="$out_root/$demo"
+        mkdir -p "$dir"
+        cp "$component" "$dir/fyx_ui.wasm"
+        sed 's/^api_version = "0\.1\.0"$/api_version = "0.2.0"/' "extensions/$demo/extension.toml" \
+            > "$dir/extension.toml"
+        if ! grep -q '^api_version = "0.2.0"$' "$dir/extension.toml"; then
+            echo "fyx-build-demos: extensions/$demo/extension.toml has no api_version = \"0.1.0\" line" >&2
+            exit 1
+        fi
+    else
+        dir="$PWD/extensions/$demo"
+        cp "$component" "$dir/fyx_ui.wasm"
+    fi
+    echo "fyx-build-demos: $component -> $dir/fyx_ui.wasm"
     if command -v cygpath >/dev/null 2>&1; then
         dir=$(cygpath -w "$dir")
         separator=";"
     fi
     dirs+=("$dir")
-    echo "fyx-build-demos: $component -> extensions/$demo/fyx_ui.wasm"
 done
 
 joined=$(IFS="$separator"; echo "${dirs[*]}")

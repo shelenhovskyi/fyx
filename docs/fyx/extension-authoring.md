@@ -322,6 +322,11 @@ line (`;`-separated on Windows, `:` elsewhere). `fyx-ext check --path extensions
 script/fyx-build-demos --release
 ```
 
+`script/fyx-build-demos --fyx-ui-0-2` builds every demo's `fyx:ui` 0.2 world instead, for a dev
+build whose host runs 0.2. It leaves the repository alone: each demo goes to
+`<target>/fyx-demos-v0_2/<demo>/`, with a copy of its `extension.toml` set to
+`api_version = "0.2.0"`, and the printed `FYX_UI_DEV_EXTENSIONS` line points there.
+
 <!-- script/fyx-build-demos -->
 
 Inside the Fyx checkout, `.cargo/config.toml` sets `rustc-wrapper = "sccache"`. On a machine
@@ -819,10 +824,11 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 |---|---|
 | `extensions/fyx_demo_counter` | the smallest complete extension: a mount, `set-props` replies, `list-rows` |
 | `extensions/fyx_demo_todo` | inputs without echo, filter buttons, `row-click`, rebuilding a list |
-| `extensions/fyx_demo_gallery` | every node kind, and a status item |
+| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows` and all 101 frozen icons |
 | `extensions/fyx_demo_markdown` | an input previewed live in a `markdown` node, clearing an input after Enter |
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
+| `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
 
 `script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a
 headless test of the counter's contract; run it with

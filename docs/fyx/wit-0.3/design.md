@@ -936,6 +936,17 @@ record image-props {
 | Concurrent decodes | 2 per extension, 4 in total | Bounds transient memory (below) |
 | Where | panel trees and panel list rows | Not status items, modals, pickers or decorations: those sit next to host UI and would be easy to spoof (threats). An `image` there rejects the update (`invalid-argument` for a push) |
 
+**Errors (decided 2026-11-18).** Each check runs at the earliest point where it can be made:
+
+| Case | When it is checked | Result |
+|---|---|---|
+| `asset` path syntax (relative, `/` separators, no `..`, root, drive, backslash or `:`) | when the update is applied | the whole update is rejected (`invalid-argument` for a push; a resync for a reply), like any invalid props |
+| asset exists, its size (2 MiB), its dimensions (2048 × 2048), its format | at decode | the alt placeholder with an error icon, and one log line naming the file and the reason; the update stands |
+| `generated` handle returned earlier in the same call | — | usable: effects apply in call order, so `add-image` is applied before the update that uses it |
+| `generated` handle never returned, or returned later in the same call | when the update is applied | a reference error: the update is rejected, like a patch that names a missing node |
+| `generated` handle that was removed (`remove-image`, or freed by a reload) | at draw | the alt placeholder and one log line; no trap, no rejected update |
+| `tint` on a PNG | at decode | ignored, one log line; `fyx-ext check` warns when a mounted tree has it |
+
 **Decoding.** Decoding never happens on the main thread and never inside `render()`.
 
 1. The first time a node needs an image at a given size and scale, the host queues a decode on
@@ -1236,7 +1247,12 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
 13. **Image budget per extension (§12).** **Decided 2026-11-18** (coordinator, for the owner): 64 MiB
     of decoded pixels, 32 live generated images, 2 concurrent decodes per extension (4 in total).
     Also decided: images in panel list rows (the LRU covers virtualized rows), only a `clickable`
-    canvas is interactive, and `canvas-click` grants the click-or-Enter activation.
+    canvas is interactive, and `canvas-click` grants the click-or-Enter activation. Error
+    semantics, also decided: asset path syntax fails the update when it is applied; existence,
+    size and dimensions are checked at decode and fall back to the alt text with a log line; a
+    removed generated handle gives the alt text with a log line and no trap; a handle from
+    earlier in the same call is usable and one from later is a reference error; `tint` is SVG
+    only, ignored with a log line on PNG, and `fyx-ext check` warns (§12, "Errors").
 14. **Canvas paint strategy (§13).** *Recommended:* paint the draw list directly with GPUI each
     frame and switch to a texture cached per update only if the 16384-op bench misses 4 ms. A
     texture costs width × height × 4 × scale² of memory per canvas (up to 256 MiB at 4096 × 4096
