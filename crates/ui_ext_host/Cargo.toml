@@ -31,6 +31,7 @@ log.workspace = true
 markdown.workspace = true
 menu.workspace = true
 paths.workspace = true
+release_channel.workspace = true
 schemars.workspace = true
 semver.workspace = true
 serde.workspace = true
