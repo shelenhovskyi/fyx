@@ -30,8 +30,15 @@
 //!   `unchanged`.
 //! - Every other event returns `patches` with only `set-props`, or `unchanged`; never `replace`.
 //!   Events for nodes that are not shown return `unchanged`. An unknown surface id is an error.
+//! - The `fyx-ui-0-2` build adds three surfaces that show what 0.2 adds (a modal picker with
+//!   keyboard selection, a ticking clock, tooltips, indent, a secret input, `invalidate-rows` and
+//!   every frozen icon). They are described in `next.rs`; the surfaces above stay exactly as they
+//!   are.
 
 use ui_ext_sdk::*;
+
+#[cfg(feature = "fyx-ui-0-2")]
+mod next;
 
 const GALLERY_SURFACE: &str = "gallery";
 const STATUS_SURFACE: &str = "gallery-status";
@@ -357,6 +364,8 @@ struct Gallery {
     gallery_nodes: Option<GalleryNodes>,
     status: SurfaceTree,
     status_label: Option<NodeId>,
+    #[cfg(feature = "fyx-ui-0-2")]
+    next: next::Next,
 }
 
 fn token_name(token: ColorToken) -> &'static str {
@@ -839,7 +848,8 @@ impl Extension for Gallery {
     }
 
     fn surfaces(&self) -> Vec<Surface> {
-        vec![
+        #[allow(unused_mut)]
+        let mut surfaces = vec![
             Surface::panel(
                 GALLERY_SURFACE,
                 "Gallery",
@@ -848,19 +858,31 @@ impl Extension for Gallery {
                 420,
             ),
             Surface::status_item(STATUS_SURFACE, "Gallery selection", StatusBarSide::Right, 0),
-        ]
+        ];
+        #[cfg(feature = "fyx-ui-0-2")]
+        surfaces.extend(next::surfaces());
+        surfaces
     }
 
     fn mount(&mut self, surface_id: &str) -> Result<Vec<Node>, String> {
         match surface_id {
             GALLERY_SURFACE => self.mount_gallery(),
             STATUS_SURFACE => self.mount_status(),
+            #[cfg(feature = "fyx-ui-0-2")]
+            surface_id if next::owns(surface_id) => self.next.mount(surface_id),
             _ => Err(unknown_surface(surface_id)),
         }
     }
 
+    #[cfg(feature = "fyx-ui-0-2")]
+    fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
+        self.next.tick(surface_id)
+    }
+
     fn handle_event(&mut self, surface_id: &str, event: UiEvent) -> Result<Update, String> {
         match surface_id {
+            #[cfg(feature = "fyx-ui-0-2")]
+            surface_id if next::owns(surface_id) => self.next.handle_event(surface_id, event),
             GALLERY_SURFACE => self.handle_gallery_event(event),
             STATUS_SURFACE => {
                 if self.status_label.is_none() {
@@ -879,6 +901,10 @@ impl Extension for Gallery {
         start: u32,
         count: u32,
     ) -> Vec<ListRow> {
+        #[cfg(feature = "fyx-ui-0-2")]
+        if next::owns(surface_id) {
+            return self.next.list_rows(surface_id, list_node, start, count);
+        }
         let section = (surface_id == GALLERY_SURFACE)
             .then_some(self.gallery_nodes.as_ref())
             .flatten()
@@ -1065,8 +1091,9 @@ mod tests {
     fn behaves_as_documented() {
         let mut gallery = Gallery::new();
         let surfaces = gallery.surfaces();
+        // The 0.2 build appends its own surfaces after these (`next.rs`).
         assert_eq!(
-            surfaces,
+            surfaces[..2],
             [
                 Surface::panel(
                     "gallery",

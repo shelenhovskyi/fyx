@@ -23,6 +23,26 @@ two review lines that root `CLAUDE.md` requires.
 Not checked: loading the gallery in the dev build (this VM does not build `zed`). That is W3's
 check, and this contract is what it should see.
 
+## The 0.2 build (2026-11-18, plan 2.4)
+
+`--features fyx-ui-0-2` exports `fyx:ui` 0.2. The panel and the status item above stay as they
+are, and three surfaces are added after them (`src/next.rs`, whose module doc is the contract):
+
+- panel `gallery-next` ("Gallery 0.2", icon `bolt`), with:
+  - a `Pick a fruit` button that opens the picker;
+  - buttons with icons and tooltips;
+  - a secret input;
+  - `Refresh rows`, which answers `invalidate-rows`;
+  - a tree list with `indent` per depth;
+  - a list of all 101 frozen icons with their names;
+- modal `gallery-picker`: a filter input, and a list whose `selected` row follows `row-selected`;
+  Enter or a row click picks, and Escape dismisses;
+- status item `gallery-clock`: the UTC time, refreshed by a one-second tick.
+
+The manifest now declares `ui:modal` for the picker; a 0.1 host ignores it. The harness tests in
+`crates/fyx_ext_harness/src/tests/demos_v0_2.rs` drive all three surfaces.
+`script/fyx-build-demos --fyx-ui-0-2` builds the dev-build copy.
+
 ## Loading it
 
 ```

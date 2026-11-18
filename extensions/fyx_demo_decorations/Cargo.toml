@@ -1,0 +1,22 @@
+[package]
+name = "fyx_demo_decorations"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_demo_decorations.rs"
+crate-type = ["cdylib"]
+test = true
+doctest = false
+
+[features]
+# Export the fyx:ui 0.2 world instead of 0.1 (see the end of the crate root).
+fyx-ui-0-2 = []
+
+[dependencies]
+ui_ext_sdk.workspace = true
