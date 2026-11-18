@@ -316,13 +316,18 @@ pub fn prescan_svg(text: &str) -> Result<(), String> {
     // Open elements, and whether each is a `<style>`.
     let mut open: Vec<(usize, bool)> = Vec::new();
     let mut at = 0;
+    // CSS function names are case-insensitive (`URL(`), and a CSS escape can spell one
+    // (`u\72l(`): a `<style>` may hold neither `url(` in any case nor a backslash.
     let check_text = |text: &str, open: &[(usize, bool)]| -> Result<(), String> {
-        if open.last().is_some_and(|(_, style)| *style) && decode_references(text).contains("url(")
-        {
-            return Err(
-                "a <style> in an SVG may not use url(…); use the element's fill or style"
-                    .to_string(),
-            );
+        if open.last().is_some_and(|(_, style)| *style) {
+            let text = decode_references(text).to_ascii_lowercase();
+            if text.contains("url(") || text.contains('\\') {
+                return Err(
+                    "a <style> in an SVG may not use url(…) or CSS escapes; use the element's \
+                     fill or style"
+                        .to_string(),
+                );
+            }
         }
         Ok(())
     };
@@ -369,6 +374,10 @@ pub fn prescan_svg(text: &str) -> Result<(), String> {
         let mut element = Element::default();
         for (name, value) in attributes(tag.trim_end_matches('/')) {
             let value = decode_references(value);
+            // A `style` attribute is CSS too: an escape could hide a `url(` from the count.
+            if (name == "style" || name.ends_with(":style")) && value.contains('\\') {
+                return Err("an SVG style attribute may not use CSS escapes".to_string());
+            }
             if name == "id" {
                 ids.insert(value.clone(), index);
             }
@@ -559,11 +568,14 @@ fn decode_references(value: &str) -> String {
     decoded
 }
 
-/// The ids of every `url(#id)` in `text` (quotes and spaces allowed, as CSS allows them).
+/// The ids of every `url(#id)` in `text`, `url` in any case (quotes and spaces allowed, as CSS
+/// allows them).
 fn url_references(text: &str) -> Vec<String> {
     let mut found = Vec::new();
+    // ASCII lowercasing keeps every byte offset, so the ids are sliced from the original.
+    let lower = text.to_ascii_lowercase();
     let mut rest = text;
-    while let Some(start) = rest.find("url(") {
+    while let Some(start) = lower[text.len() - rest.len()..].find("url(") {
         let after = &rest[start + 4..];
         let Some(end) = after.find(')') else {
             break;
@@ -608,14 +620,36 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("cycle"), "{error}");
 
-        let error = prescan_svg(&svg("<style>rect { fill: url(#p) }</style><rect/>")).unwrap_err();
-        assert!(error.contains("<style>"), "{error}");
+        for style in [
+            "url(#p)",
+            "URL(#p)",
+            "Url( #p )",
+            "u\\72l(#p)",
+            "&#85;RL(#p)",
+        ] {
+            let error = prescan_svg(&svg(&format!(
+                "<style>rect {{ fill: {style} }}</style><rect/>"
+            )))
+            .unwrap_err();
+            assert!(error.contains("<style>"), "{style}: {error}");
+        }
+        let error = prescan_svg(&svg("<rect style=\"fill: u\\72l(#p)\"/>")).unwrap_err();
+        assert!(error.contains("escapes"), "{error}");
+
+        // `URL(` in an attribute counts like `url(`: a cycle through it is found.
+        for function in ["url", "URL", "Url"] {
+            let error = prescan_svg(&svg(&format!(
+                "<g id=\"a\" fill=\"{function}(#b)\"/><g id=\"b\" style=\"fill: {function}('#a')\"/>"
+            )))
+            .unwrap_err();
+            assert!(error.contains("cycle"), "{function}: {error}");
+        }
 
         // 40000 elements, each referring to the next: refused on depth, on this thread's stack.
         let mut chain = String::new();
         for index in 0..40_000 {
             chain.push_str(&format!(
-                "<g id=\"c{index}\" fill=\"url(#c{})\"/>",
+                "<g id=\"c{index}\" fill=\"URL(#c{})\"/>",
                 index + 1
             ));
         }
