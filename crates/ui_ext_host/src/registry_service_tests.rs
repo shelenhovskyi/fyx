@@ -114,6 +114,24 @@ impl TestRegistry {
 
     /// Publishes `package` as `id` `version` (2 days old, past the age gate).
     pub fn publish(&mut self, id: &str, version: &str, package: &[u8], capabilities: &[&str]) {
+        self.publish_at(
+            id,
+            version,
+            package,
+            capabilities,
+            Timestamp(now().0 - 2 * 24 * 60 * 60),
+        );
+    }
+
+    /// [`Self::publish`] with its publication time.
+    pub fn publish_at(
+        &mut self,
+        id: &str,
+        version: &str,
+        package: &[u8],
+        capabilities: &[&str],
+        published_at: Timestamp,
+    ) {
         let path = format!("packages/{id}-{version}.fyxext");
         let file = self.dir.path().join(&path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -134,7 +152,7 @@ impl TestRegistry {
                 sha256: Sha256Digest::of(package),
                 size: package.len() as u64,
             },
-            published_at: Timestamp(now().0 - 2 * 24 * 60 * 60),
+            published_at,
             urgent: false,
             tier: capabilities
                 .iter()
@@ -363,6 +381,12 @@ async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
     let mut test_registry = TestRegistry::new();
     let package = crate::install_store::test_support::package("demo", "1.0.0", b"component").await;
     test_registry.publish("demo", "1.0.0", &package, &["ui:status-bar"]);
+    // integration-5 R1: what the listing offers is what the install plan allows.
+    let fresh = crate::install_store::test_support::package("fresh", "1.0.0", b"component").await;
+    test_registry.publish_at("fresh", "1.0.0", &fresh, &[], now());
+    let bad = crate::install_store::test_support::package("bad", "1.0.0", b"component").await;
+    test_registry.publish("bad", "1.0.0", &bad, &[]);
+    test_registry.write_blocklist(blocklist_blocking("bad", 1));
     let url = format!("file:///{}", test_registry.dir.path().display()).replace('\\', "/");
     cx.update(|cx| {
         gpui::BorrowAppContext::update_global::<settings::SettingsStore, _>(cx, |store, cx| {
@@ -397,13 +421,39 @@ async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
     hub.read_with(cx, |hub, _| {
         assert_eq!(hub.off_reason(), None);
         assert_eq!(hub.unavailable, None);
-        let ids: Vec<&str> = hub
+        let mut listed: Vec<(&str, Option<&str>)> = hub
             .listing
             .iter()
-            .map(|release| release.id.as_str())
+            .map(|listed| {
+                let refusal = match &listed.refusal {
+                    None => None,
+                    Some(fyx_registry::InstallRefusal::Blocked { .. }) => Some("blocked"),
+                    Some(fyx_registry::InstallRefusal::TooNew { .. }) => Some("too new"),
+                    Some(fyx_registry::InstallRefusal::NotInIndex) => Some("not in index"),
+                };
+                (listed.release.id.as_str(), refusal)
+            })
             .collect();
-        assert_eq!(ids, ["demo"]);
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                ("bad", Some("blocked")),
+                ("demo", None),
+                ("fresh", Some("too new"))
+            ]
+        );
     });
+    // The install path refuses the same releases, with no way around it.
+    let registry = hub.update(cx, |hub, cx| hub.registry(cx).expect("registry"));
+    for (id, installable) in [("demo", true), ("fresh", false), ("bad", false)] {
+        let id = ExtensionId::new(id).unwrap();
+        let result = registry.download_for_install(&id, now()).await;
+        assert_eq!(result.is_ok(), installable, "{:?}", result.err());
+    }
+    // A refresh is a check: the 6 h timer counts from it, across restarts.
+    let last = RegistryStateDir(state.path().to_path_buf()).last_check();
+    assert!(last.is_some_and(|last| now().0 - last.0 < 60), "{last:?}");
 }
 
 /// Plan 3.4: the update check updates a registry install, rolls a blocked version back,
@@ -774,4 +824,42 @@ async fn test_first_use_prompt_goes_to_the_active_window(cx: &mut gpui::TestAppC
         registry.read_with(cx, |registry, _| registry.t2_state("demo", "network:fetch")),
         PermissionState::Granted
     );
+}
+
+/// Decision 3: the timed check runs 6 h after the last check (kept across restarts), and never
+/// at startup.
+#[test]
+fn test_check_timer_counts_from_the_last_check() {
+    use crate::fyx_extensions_page::RegistryHub;
+    let state = tempfile::tempdir().unwrap();
+    let dir = RegistryStateDir(state.path().to_path_buf());
+    let started = std::time::Instant::now();
+    let hub = |dir: &RegistryStateDir| {
+        let mut hub = RegistryHub::default();
+        hub.set_state_dir(dir.clone());
+        hub
+    };
+
+    // Never checked: due, but not before the startup grace.
+    let mut fresh = hub(&dir);
+    assert!(fresh.check_due());
+    assert!(fresh.next_check_in(started) >= Duration::from_secs(14 * 60));
+
+    // Checked 5 h ago in an earlier run: due in about 1 h.
+    dir.set_last_check(Timestamp(now().0 - 5 * 60 * 60))
+        .unwrap();
+    let mut restarted = hub(&dir);
+    assert!(!restarted.check_due());
+    let wait = restarted.next_check_in(started);
+    assert!(
+        wait > Duration::from_secs(55 * 60) && wait <= Duration::from_secs(60 * 60),
+        "{wait:?}"
+    );
+
+    // Checked 7 h ago: due, after the grace.
+    dir.set_last_check(Timestamp(now().0 - 7 * 60 * 60))
+        .unwrap();
+    let mut overdue = hub(&dir);
+    assert!(overdue.check_due());
+    assert!(overdue.next_check_in(started) >= Duration::from_secs(14 * 60));
 }

@@ -25,8 +25,8 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use futures::{AsyncReadExt as _, lock::Mutex};
 use fyx_registry::{
-    CacheUpdate, ExtensionId, Fetch, FetchRequest, IndexRefresh, Keyset, RegistryClient,
-    RegistryFile, Release, StoredState, Timestamp,
+    Action, CacheUpdate, ExtensionId, Fetch, FetchRequest, HoldReason, IndexRefresh,
+    InstalledExtension, Keyset, RegistryClient, RegistryFile, Release, StoredState, Timestamp,
 };
 use http_client::{AsyncBody, HttpClient};
 
@@ -232,6 +232,7 @@ impl RegistryStateDir {
     }
 
     const SNAPSHOT: &str = "snapshot-state.json";
+    const LAST_CHECK: &str = "last-check";
     const INDEX: &str = "index.json";
     const BLOCKLIST: &str = "blocklist.json";
 
@@ -243,6 +244,21 @@ impl RegistryStateDir {
             index: read(Self::INDEX),
             blocklist: read(Self::BLOCKLIST),
         }
+    }
+
+    /// When the last registry check started (decision 3: the 6 h timer counts from it, across
+    /// restarts).
+    pub fn last_check(&self) -> Option<Timestamp> {
+        let text = std::fs::read_to_string(self.0.join(Self::LAST_CHECK)).ok()?;
+        text.trim().parse().ok().map(Timestamp)
+    }
+
+    pub fn set_last_check(&self, at: Timestamp) -> Result<()> {
+        std::fs::create_dir_all(&self.0)
+            .with_context(|| format!("creating {}", self.0.display()))?;
+        let path = self.0.join(Self::LAST_CHECK);
+        std::fs::write(&path, at.0.to_string())
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     pub fn store(&self, state: &StoredState) -> Result<()> {
@@ -375,8 +391,45 @@ impl Registry {
         Ok((release, bytes))
     }
 
-    /// Downloads and verifies one release (an update the plan named).
-    pub async fn download(&self, release: &Release) -> Result<Vec<u8>> {
+    /// Downloads and verifies an update of `installed` to `release`, if the plan, made again now,
+    /// still names it: an update, or a held update that waits only for the user's approval
+    /// (which the caller just got). A block or a pin that came since stops it.
+    pub async fn download_planned_update(
+        &self,
+        installed: &InstalledExtension,
+        release: &Release,
+        now: Timestamp,
+    ) -> Result<Vec<u8>> {
+        let client = self.client.lock().await;
+        let planned = client
+            .plan_updates(std::slice::from_ref(installed), now)
+            .into_iter()
+            .any(|action| match action.action {
+                Action::Update { to, .. } => to == release.version,
+                Action::Hold { version, reasons } => {
+                    version == release.version
+                        && reasons
+                            .iter()
+                            .all(|reason| matches!(reason, HoldReason::NeedsApproval(_)))
+                }
+                _ => false,
+            });
+        anyhow::ensure!(
+            planned,
+            "{} {} is no longer an update the registry allows; refresh and try again",
+            release.id,
+            release.version
+        );
+        client
+            .download(&self.fetch, release)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    /// Downloads and verifies one release the caller's plan named: the update check's updates,
+    /// planned in the same refresh. Every other install goes through
+    /// [`Self::download_for_install`] or [`Self::download_planned_update`].
+    pub(crate) async fn download(&self, release: &Release) -> Result<Vec<u8>> {
         let client = self.client.lock().await;
         client
             .download(&self.fetch, release)
