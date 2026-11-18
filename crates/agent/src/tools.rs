@@ -13,6 +13,7 @@ mod evals;
 mod fetch_tool;
 mod find_path_tool;
 mod find_references_tool;
+mod fyx_file_operations; // fyx: host review of delete, move and copy
 mod get_code_actions_tool;
 mod go_to_definition_tool;
 mod grep_tool;

@@ -33,7 +33,9 @@ crate_features() {
         if grep -q 'nothing to print' <<<"$output"; then
             echo "absent"
         else
-            head -1 <<<"$output"
+            # Only the `--format ',{f},'` line: stderr also carries cargo's status lines, such as
+            # "Blocking waiting for file lock" while another build holds the package cache.
+            grep -m1 '^,' <<<"$output" || true
         fi
     elif grep -q 'did not match any packages' <<<"$output"; then
         echo "absent"

@@ -470,13 +470,24 @@ impl Render for SurfaceView {
                         .color(Color::Error)
                         .size(LabelSize::Small),
                 )
-                // A dead instance refuses every call, so a retry could only fail again.
+                // A dead instance refuses every call, so a retry could only fail again: it gets a
+                // fresh instance instead.
                 .when(*retryable, |this| {
                     this.child(
                         Button::new("fyx-ui-retry", "Retry")
                             .style(UiButtonStyle::Subtle)
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.state.update(cx, |state, cx| state.retry(cx))
+                            })),
+                    )
+                })
+                .when(!*retryable && state.can_restart(), |this| {
+                    this.child(
+                        Button::new("fyx-ui-restart", "Restart extension")
+                            .style(UiButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.state
+                                    .update(cx, |state, cx| state.restart_extension(cx))
                             })),
                     )
                 })
@@ -516,6 +527,7 @@ impl Render for SurfaceView {
                 }
             }
         };
+        let reload_failed = state.reload_failed() && state.can_restart();
         let error = state.last_error().cloned().map(|error| {
             h_flex()
                 .id("fyx-ui-error")
@@ -535,6 +547,17 @@ impl Render for SurfaceView {
                         .color(Color::Error)
                         .truncate(),
                 )
+                .when(reload_failed, |this| {
+                    this.child(
+                        Button::new("fyx-ui-reload-retry", "Retry")
+                            .style(UiButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.state
+                                    .update(cx, |state, cx| state.restart_extension(cx))
+                            })),
+                    )
+                })
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.state.update(cx, |state, cx| state.dismiss_error(cx));

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
-use ui_ext::{Patch, Props, TreeNode, UiEvent, Update};
+use ui_ext::{Patch, Props, Tree, TreeNode, UiEvent, Update};
 
 use super::*;
 
@@ -245,6 +245,11 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     .await;
     let future = write(
         "/extensions/future",
+        &table("\"ui:panel\"", "fyx_ui.wasm", "0.3.0"),
+    )
+    .await;
+    let mismatch = write(
+        "/extensions/mismatch",
         &table("\"ui:panel\"", "fyx_ui.wasm", "0.2.0"),
     )
     .await;
@@ -268,7 +273,11 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     assert!(load(plain).await.expect("reads").is_none());
     for (dir, message) in [
         (escaping, "must be a relative path inside the extension"),
-        (future, "targets fyx:ui 0.2.0"),
+        (future, "targets fyx:ui 0.3.0"),
+        (
+            mismatch,
+            "extension.toml says fyx:ui 0.2.0, the component targets 0.1.0",
+        ),
         (no_panel, "needs \"ui:panel\""),
     ] {
         let error = load(dir).await.err().expect("rejected");
@@ -555,11 +564,77 @@ async fn test_call_blocked_in_host_is_cut_off_and_disables_extension(cx: &mut Te
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
+/// Plan 1.1: the first load compiles and writes a `.cwasm`; the next uses it; a broken copy is
+/// compiled again and replaced; another component gets a file of its own.
+#[gpui::test]
+async fn test_precompiled_cache(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cache = PrecompiledCache {
+        dir: dir.path().join("probe"),
+        stem: "0.1.0".into(),
+    };
+    let wasm = probe_wasm();
+    let file = cache.file_for(&wasm).expect("cache file");
+    assert!(file.starts_with(dir.path().join("probe")));
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("0.1.0-")
+    );
+
+    let load = |cx: &mut TestAppContext| {
+        let wasm = wasm.clone();
+        let cache = cache.clone();
+        cx.update(|cx| {
+            UiExtension::load_with_cache("probe".into(), wasm, Some(cache), &cx.to_async())
+        })
+    };
+    let (first, _) = load(cx).await.expect("compiles");
+    assert!(!first.from_precompiled());
+    assert!(file.is_file(), "written after compiling");
+
+    let (second, _) = load(cx).await.expect("loads the copy");
+    assert!(second.from_precompiled());
+    second
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("the precompiled component works");
+
+    std::fs::write(&file, b"not a cwasm").expect("break the copy");
+    let (third, _) = load(cx).await.expect("compiles again");
+    assert!(!third.from_precompiled());
+    let (fourth, _) = load(cx).await.expect("uses the rewritten copy");
+    assert!(fourth.from_precompiled());
+
+    let other = cache
+        .file_for(&demo_counter_wasm())
+        .expect("other cache file");
+    assert_ne!(other, file, "keyed by the component");
+}
+
 #[test]
 fn test_api_version_gating() {
     assert!(is_supported_api_version(&Version::new(0, 1, 0)));
-    assert!(!is_supported_api_version(&Version::new(0, 2, 0)));
-    assert!(!is_supported_api_version(&Version::new(0, 0, 9)));
+    assert!(is_supported_api_version(&Version::new(0, 2, 0)));
+    for unknown in [(0, 0, 9), (0, 1, 1), (0, 3, 0), (1, 0, 0)] {
+        let version = Version::new(unknown.0, unknown.1, unknown.2);
+        assert!(!is_supported_api_version(&version), "{version}");
+    }
+    assert_eq!(
+        known_api_version(&Version::new(0, 2, 0)),
+        Some(ApiVersion::V0_2_0)
+    );
+    assert_eq!(known_api_version(&"0.2.0-rc.1".parse().unwrap()), None);
+    // Staged: 0.2 loads only where staged versions are allowed (Stable/Preview stay on 0.1).
+    assert!(!api_version_range(false).contains(&Version::new(0, 2, 0)));
+    assert!(api_version_range(false).contains(&Version::new(0, 1, 0)));
+    assert!(api_version_range(true).contains(&Version::new(0, 2, 0)));
+    assert!(!staged_api_allowed(false, false));
+    assert!(staged_api_allowed(true, false));
+    assert!(staged_api_allowed(false, true));
 
     assert_eq!(
         parse_api_version("probe", &probe_wasm()).expect("parses"),
