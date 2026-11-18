@@ -830,7 +830,7 @@ mod network_fetch {
             (
                 "api_version = \"0.2.0\"\ncapabilities = [\"network:fetch\"]\n\
                  [fyx_ui.network]\ndomains = [\"api.example.com\"]\n",
-                "T2",
+                "needs fyx:ui 0.3",
             ),
             (
                 "api_version = \"0.3.0\"\ncapabilities = [\"network:fetch\"]\n",
@@ -858,6 +858,92 @@ mod network_fetch {
                 "{problem}: {error:#}"
             );
         }
+    }
+}
+
+/// integration-5 A4: the manifest is read version first, and each world declares only what it
+/// can use (wit-0.3/migration.md §2).
+#[gpui::test]
+async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
+    let fs = fs::FakeFs::new(cx.executor());
+    fs.create_dir(Path::new("/ext/m")).await.expect("dir");
+    let read = |fyx_ui: &str| {
+        let fs = fs.clone();
+        let text = format!(
+            "id = \"m\"\nname = \"M\"\nversion = \"0.1.0\"\nschema_version = 1\n[fyx_ui]\n\
+             component = \"fyx_ui.wasm\"\n{fyx_ui}"
+        );
+        async move {
+            fs.insert_file("/ext/m/extension.toml", text.into_bytes())
+                .await;
+            UiManifest::read(fs.as_ref(), Path::new("/ext/m")).await
+        }
+    };
+    for fyx_ui in [
+        "api_version = \"0.1.0\"\ncapabilities = [\"ui:panel\", \"ui:modal\"]\n",
+        "api_version = \"0.2.0\"\ncapabilities = [\"ui:notifications\", \"ui:editor-decorations\"]\n",
+        "api_version = \"0.3.0\"\ncapabilities = [\"ui:canvas\", \"ui:picker\", \"workspace:read-buffers\"]\n",
+    ] {
+        read(fyx_ui)
+            .await
+            .unwrap_or_else(|error| panic!("{fyx_ui}: {error:#}"));
+    }
+    let manifest = read(
+        "api_version = \"0.3.0\"\ncapabilities = [\"ui:commands\"]\n\
+         [[fyx_ui.commands]]\nid = \"todo.next\"\ntitle = \"Next TODO\"\n\
+         [[fyx_ui.picker_sources]]\nid = \"todos\"\npicker = \"acme-find/everything\"\n",
+    )
+    .await
+    .expect("valid")
+    .expect("a fyx_ui table")
+    .1;
+    assert_eq!(manifest.commands[0].title, "Next TODO");
+    assert_eq!(manifest.picker_sources[0].picker, "acme-find/everything");
+    for (fyx_ui, problem) in [
+        // A newer world's tables do not hide its version.
+        (
+            "api_version = \"0.4.0\"\n[fyx_ui.future]\nx = 1\n",
+            "targets fyx:ui 0.4.0",
+        ),
+        (
+            "api_version = \"0.2.0\"\ncapabilities = [\"ui:canvas\"]\n",
+            "\"ui:canvas\" needs fyx:ui 0.3",
+        ),
+        (
+            "api_version = \"0.2.0\"\ncapabilities = [\"workspace:read-buffers\"]\n",
+            "needs fyx:ui 0.3",
+        ),
+        (
+            "api_version = \"0.1.0\"\ncapabilities = [\"ui:notifications\"]\n",
+            "needs fyx:ui 0.3",
+        ),
+        (
+            "api_version = \"0.2.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n",
+            "[[fyx_ui.commands]] needs fyx:ui 0.3",
+        ),
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"ui:sparkles\"]\n",
+            "unknown capability",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n\
+             [[fyx_ui.commands]]\nid = \"a\"\ntitle = \"B\"\n",
+            "twice",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.picker_sources]]\nid = \"s\"\npicker = \"nope\"\n",
+            "<extension>/<picker surface>",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\nkeys = 1\n",
+            "unknown field",
+        ),
+    ] {
+        let error = read(fyx_ui).await.err().expect("refused");
+        assert!(
+            format!("{error:#}").contains(problem),
+            "{problem}: {error:#}"
+        );
     }
 }
 
