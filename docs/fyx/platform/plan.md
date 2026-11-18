@@ -72,6 +72,20 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 rank below every other P4 task. If P4 slips, 4.10–4.12 (images) stay and 4.13–4.15 (canvas) move
 to 0.4.
 
+**4.6 follow-ups** (W2c's "not done yet" list in `tasks/progress/W2c.md`, at 0213dd3cc7). The
+first cut of `network:fetch` lands without these; each is still W2c's and still needed for 4.6 to
+match [design §8](../wit-0.3/design.md#8-networkfetch-plan-46):
+
+- Fyx's proxy setting (without credentials; the address check cannot run behind a proxy);
+- brotli, zstd and deflate decoding, with the 16 MiB decoded cap (today any other
+  `content-encoding` → `other`);
+- the webpki roots next to the system roots (today reqwest's native roots only);
+- a local TLS test server with a test CA injected only in tests (the pinning test uses a plain TCP
+  server);
+- one Extension Inspector line per request: method, host, path, status, bytes, time; never bodies
+  or header values;
+- the Fyx version in the user-agent (`Fyx/<major.minor> (extension <id>/<version>)`).
+
 ## Deferred after 1.0
 
 TypeScript extensions are deferred until after 1.0, and whether to do them at all is re-evaluated

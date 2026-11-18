@@ -1017,7 +1017,7 @@ interface network {
         url: string,
         /// At most 64 headers, 16 KiB in total. `host`, `content-length`, `transfer-encoding`,
         /// `connection`, `upgrade`, `te`, `trailer`, `expect`, `keep-alive` and every `proxy-*`
-        /// header are set by the host and rejected here.
+        /// header, and `accept-encoding`, are set by the host and rejected here.
         headers: list<tuple<string, string>>,
         /// At most 4 MiB.
         body: option<list<u8>>,
