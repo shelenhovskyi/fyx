@@ -482,9 +482,15 @@ impl UiExtensionRegistry {
             surface,
             FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
         );
-        if let Some(loaded) = self.surface_of(backend.extension_id(), &surface.id) {
+        if let Some(index) = self.surfaces.iter().position(|loaded| {
+            loaded.extension_id.as_ref() == backend.extension_id()
+                && loaded.surface_id.as_ref() == surface.id
+        }) {
             log::info!("fyx:ui: reloading surface {}", info.key);
-            loaded.state.update(cx, |state, cx| {
+            // The new instance's title and icon (triage-3, BUG 31); containers made from now on
+            // use them.
+            self.surfaces[index].info = Rc::new(info);
+            self.surfaces[index].state.update(cx, |state, cx| {
                 state.replace_backend(backend.clone(), surface.clone(), cx)
             });
             return;
@@ -1377,9 +1383,23 @@ pub fn init(cx: &mut App) {
     })
     .detach();
 
-    load_dev_extensions(cx);
+    // FYX_UI_DEV_EXTENSIONS loads without consent, so only dev builds honour it (triage-3).
+    if dev_build(cx) {
+        load_dev_extensions(cx);
+    } else if !dev_extension_paths().is_empty() {
+        log::warn!(
+            "fyx:ui: {DEV_EXTENSIONS_ENV} is ignored outside dev builds; use \
+             fyx_ui: install dev UI extension"
+        );
+    }
     follow_dev_paths_setting(cx);
     watch_installed_extensions(cx);
+}
+
+/// A dev build: the Dev release channel (also when none is set, as in tests).
+fn dev_build(cx: &App) -> bool {
+    release_channel::ReleaseChannel::try_global(cx)
+        .is_none_or(|channel| channel == release_channel::ReleaseChannel::Dev)
 }
 
 /// Whether a staged `fyx:ui` version (0.2 before it is frozen) may load (migration.md §2): on Dev
@@ -1566,6 +1586,18 @@ fn attach_to_workspace(
         }
     })
     .detach();
+
+    // A banner while FYX_UI_DEV_EXTENSIONS is in use: those load without consent (triage-3).
+    if dev_build(cx) && !dev_extension_paths().is_empty() {
+        let message = format!(
+            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent.              Unset it to stop."
+        );
+        workspace.show_notification(
+            NotificationId::named("fyx-ui-dev-extensions-env".into()),
+            cx,
+            move |cx| cx.new(|cx| MessageNotification::new(message, cx)),
+        );
+    }
 
     // Modals open in the window the user was in last.
     let workspace_id = cx.entity_id();

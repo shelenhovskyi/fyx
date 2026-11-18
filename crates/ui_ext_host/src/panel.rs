@@ -177,7 +177,13 @@ impl<const SLOT: usize> Render for ExtensionPanel<SLOT> {
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
-            .child(self.view.clone())
+            // A cached view: a redraw caused by anything else in the window (a caret blinking in
+            // another editor) reuses the surface's last frame instead of rendering its whole
+            // tree again (triage-3 #5). The surface's root is `size_full`, as the cache needs.
+            .child(
+                gpui::AnyView::from(self.view.clone())
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
     }
 }
 

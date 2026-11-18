@@ -914,11 +914,14 @@ impl Renderer<'_, '_> {
         table_columns: Option<usize>,
         scope: Scope,
     ) -> AnyElement {
-        if let Scope::Row { .. } = scope {
-            return Label::new("Lists inside list rows are not supported")
-                .color(Color::Muted)
-                .size(LabelSize::Small)
-                .into_any_element();
+        if let Scope::Row { list, index } = scope {
+            // An authoring mistake: logged for the author, nothing drawn for the user.
+            log::debug!(
+                "fyx:ui {}: list {id} inside row {index} of list {list} is not drawn (lists \
+                 inside list rows are not supported)",
+                self.state.extension_id()
+            );
+            return div().into_any_element();
         }
         let row_height = if row_height == 0 {
             DEFAULT_ROW_HEIGHT
