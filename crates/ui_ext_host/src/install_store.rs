@@ -875,6 +875,14 @@ mod tests {
         let folder = setup.dir.join("dev");
         std::fs::create_dir_all(&folder).expect("folder");
         assert!(!crate::install::has_zed_extension(&folder, fs).await);
+        // Build output and dependencies are not looked at; any other depth is (integration-6).
+        std::fs::create_dir_all(folder.join("target/wasm32-wasip2")).expect("target");
+        std::fs::write(folder.join("target/wasm32-wasip2/extension.wasm"), b"zed").expect("built");
+        assert!(!crate::install::has_zed_extension(&folder, fs).await);
+        std::fs::create_dir_all(folder.join("a/b")).expect("nested");
+        std::fs::write(folder.join("a/b/Extension.Wasm"), b"zed").expect("nested zed extension");
+        assert!(crate::install::has_zed_extension(&folder, fs).await);
+        std::fs::remove_dir_all(folder.join("a")).expect("removed");
         std::fs::write(folder.join("EXTENSION.wasm"), b"zed").expect("zed extension");
         assert!(crate::install::has_zed_extension(&folder, fs).await);
         assert!(

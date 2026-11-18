@@ -341,25 +341,59 @@ pub(crate) fn prompt_and_install(
 pub const ZED_EXTENSION_WARNING: &str = fyx_registry::RUNS_ZED_EXTENSION_WARNING;
 
 /// Whether `dir` (an unpacked package or a dev folder) has a Zed extension next to `fyx_ui`: a
-/// file at its root that [`fyx_registry::is_zed_extension_wasm`] names one (any case).
+/// file that [`fyx_registry::is_zed_extension_wasm`] names one (any case), at any depth, as for
+/// packages (owner's Q1, integration-6). Links are not followed. `.git`, `target` and
+/// `node_modules` are skipped (version control, build output and dependencies, which a dev folder
+/// of any size has); past [`MAX_SCANNED_ENTRIES`] it answers yes, since it cannot rule one out,
+/// and the warning only over-warns.
 pub async fn has_zed_extension(dir: &Path, fs: &dyn Fs) -> bool {
     use futures::StreamExt as _;
-    let Ok(mut entries) = fs.read_dir(dir).await else {
-        return false;
-    };
-    while let Some(entry) = entries.next().await {
-        if let Ok(path) = entry
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(fyx_registry::is_zed_extension_wasm)
-            && fs.is_file(&path).await
-        {
-            return true;
+    let mut pending = vec![dir.to_path_buf()];
+    let mut scanned = 0;
+    while let Some(dir) = pending.pop() {
+        let Ok(mut entries) = fs.read_dir(&dir).await else {
+            continue;
+        };
+        while let Some(entry) = entries.next().await {
+            let Ok(path) = entry else {
+                continue;
+            };
+            scanned += 1;
+            if scanned > MAX_SCANNED_ENTRIES {
+                log::warn!(
+                    "fyx:ui: {} has more than {MAX_SCANNED_ENTRIES} entries; assuming it holds a \
+                     Zed extension",
+                    dir.display()
+                );
+                return true;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Ok(Some(metadata)) = fs.metadata(&path).await else {
+                continue;
+            };
+            if metadata.is_symlink {
+                continue;
+            }
+            if metadata.is_dir {
+                if !SKIPPED_DIRS
+                    .iter()
+                    .any(|skipped| name.eq_ignore_ascii_case(skipped))
+                {
+                    pending.push(path);
+                }
+            } else if fyx_registry::is_zed_extension_wasm(name) {
+                return true;
+            }
         }
     }
     false
 }
+
+/// How many entries [`has_zed_extension`] looks at before it gives up and warns.
+pub const MAX_SCANNED_ENTRIES: usize = 20_000;
+const SKIPPED_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
 /// The programs among consent items (`process:spawn@<program>`, with its `process:args@`
 /// patterns) that can run any program on the computer (owner's Q2,

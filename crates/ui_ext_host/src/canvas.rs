@@ -389,3 +389,264 @@ mod tests {
         );
     }
 }
+
+/// Plan 4.14's paint bench (Q14): one 16384-op canvas painted frame after frame must stay within
+/// 4 ms, or canvases fall back to a texture cached per update. Ignored by default; meaningful
+/// only in an optimized build:
+/// `cargo test --profile release-fast -p ui_ext_host --lib canvas_paint_bench -- --ignored --nocapture`.
+///
+/// It times `paint_ops` itself (inside a real paint phase of a test window: quads, path
+/// tessellation, text lines) and the whole frame around it. The test platform's text system
+/// shapes without a font and rasterizes no glyphs, so the text figures are a lower bound; GPU
+/// time is not part of it.
+#[cfg(test)]
+mod bench {
+    use std::{cell::RefCell, time::Duration, time::Instant};
+
+    use gpui::{AvailableSpace, TestAppContext, size};
+    use ui_ext::canvas::{CanvasColor, Num, Paint, Point as CanvasPoint, Rect, Stroke};
+
+    use super::*;
+
+    const OPS: usize = ui_ext::canvas::MAX_OPS;
+    const SIDE: u32 = 1024;
+    const FRAMES: usize = 40;
+    const WARMUP: usize = 5;
+
+    fn p(x: f32, y: f32) -> CanvasPoint {
+        CanvasPoint {
+            x: Num(x),
+            y: Num(y),
+        }
+    }
+
+    /// A 128 × 128 grid over the 1024 × 1024 box, so every op is inside it.
+    fn spot(i: usize) -> (f32, f32) {
+        ((i % 128) as f32 * 8., (i / 128 % 128) as f32 * 8.)
+    }
+
+    fn paint(i: usize) -> Paint {
+        let series = [
+            DataColor::Series1,
+            DataColor::Series2,
+            DataColor::Series3,
+            DataColor::Series4,
+            DataColor::Series5,
+            DataColor::Series6,
+            DataColor::Series7,
+            DataColor::Series8,
+        ];
+        Paint {
+            color: CanvasColor::Data(series[i % 8]),
+            opacity: 90,
+        }
+    }
+
+    fn stroke(i: usize) -> Stroke {
+        Stroke {
+            paint: paint(i + 3),
+            width: Num(1.),
+        }
+    }
+
+    fn rect(i: usize) -> DrawOp {
+        let (x, y) = spot(i);
+        DrawOp::Rect {
+            bounds: Rect {
+                x: Num(x),
+                y: Num(y),
+                width: Num(7.),
+                height: Num(7.),
+            },
+            fill: Some(paint(i)),
+            stroke: Some(stroke(i)),
+        }
+    }
+
+    fn rounded(i: usize) -> DrawOp {
+        let (x, y) = spot(i);
+        DrawOp::RoundedRect {
+            bounds: Rect {
+                x: Num(x),
+                y: Num(y),
+                width: Num(7.),
+                height: Num(5.),
+            },
+            radius: Num(2.),
+            fill: Some(paint(i)),
+            stroke: None,
+        }
+    }
+
+    fn circle(i: usize) -> DrawOp {
+        let (x, y) = spot(i);
+        DrawOp::Circle {
+            center: p(x + 4., y + 4.),
+            radius: Num(3.5),
+            fill: Some(paint(i)),
+            stroke: Some(stroke(i)),
+        }
+    }
+
+    fn line(i: usize) -> DrawOp {
+        let (x, y) = spot(i);
+        DrawOp::Line {
+            from: p(x, y),
+            to: p(x + 7., y + 5.),
+            stroke: stroke(i),
+        }
+    }
+
+    /// Four segments: 16384 of them is the 65536-segment cap.
+    fn path(i: usize) -> DrawOp {
+        let (x, y) = spot(i);
+        DrawOp::Path {
+            segments: vec![
+                PathSegment::MoveTo(p(x, y + 7.)),
+                PathSegment::LineTo(p(x + 3., y)),
+                PathSegment::CubicTo(p(x + 5., y), p(x + 7., y + 3.), p(x + 7., y + 7.)),
+                PathSegment::Close,
+            ],
+            fill: Some(paint(i)),
+            stroke: Some(stroke(i)),
+        }
+    }
+
+    fn text(i: usize) -> DrawOp {
+        let (x, y) = spot(i);
+        DrawOp::Text {
+            at: p(x, y + 7.),
+            text: format!("{}", i % 1000),
+            paint: paint(i),
+            size: CanvasTextSize::Small,
+            anchor: TextAnchor::Start,
+            monospace: false,
+        }
+    }
+
+    fn mixed(i: usize) -> DrawOp {
+        match i % 6 {
+            0 => rect(i),
+            1 => circle(i),
+            2 => line(i),
+            3 => path(i),
+            4 => text(i),
+            _ => rounded(i),
+        }
+    }
+
+    fn canvas(op: fn(usize) -> DrawOp) -> Arc<CanvasProps> {
+        Arc::new(CanvasProps {
+            width: SIDE,
+            height: SIDE,
+            description: "bench".into(),
+            ops: (0..OPS).map(op).collect(),
+            clickable: false,
+            fit: CanvasFit::Clip,
+        })
+    }
+
+    struct Stats {
+        median: Duration,
+        p95: Duration,
+        max: Duration,
+    }
+
+    fn stats(mut samples: Vec<Duration>) -> Stats {
+        samples.sort();
+        Stats {
+            median: samples[samples.len() / 2],
+            p95: samples[samples.len() * 95 / 100],
+            max: samples[samples.len() - 1],
+        }
+    }
+
+    /// GPUI's own cost for as many quads, with nothing of ours: the floor for quad ops.
+    fn raw_quads(bounds: Bounds<Pixels>, window: &mut Window) {
+        let color = gpui::red();
+        for i in 0..OPS {
+            let (x, y) = spot(i);
+            window.paint_quad(gpui::fill(
+                Bounds::new(
+                    point(bounds.origin.x + px(x), bounds.origin.y + px(y)),
+                    size(px(7.), px(7.)),
+                ),
+                color,
+            ));
+        }
+    }
+
+    fn ms(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1000.
+    }
+
+    #[gpui::test]
+    #[ignore = "bench: run in release-fast with --ignored --nocapture"]
+    fn canvas_paint_bench(cx: &mut TestAppContext) {
+        crate::tests::init_test(cx);
+        let cases: [(&str, fn(usize) -> DrawOp); 8] = [
+            ("gpui paint_quad alone (baseline)", rect),
+            ("rect (fill + stroke)", rect),
+            ("rounded rect (fill)", rounded),
+            ("circle (fill + stroke)", circle),
+            ("line", line),
+            ("path, 4 segments (fill + stroke)", path),
+            ("text (no glyphs)", text),
+            ("mixed, 1/6 of each", mixed),
+        ];
+        let vcx = cx.add_empty_window();
+        println!("canvas paint bench: {OPS} ops, {SIDE} x {SIDE}, {FRAMES} frames after {WARMUP}");
+        println!(
+            "{:<34} {:>11} {:>8} {:>8} {:>13}",
+            "case", "paint med", "p95", "max", "frame med"
+        );
+        for (name, op) in cases {
+            let props = canvas(op);
+            let paints = Rc::new(RefCell::new(Vec::new()));
+            let mut frames = Vec::new();
+            for frame in 0..WARMUP + FRAMES {
+                let (props, paints_in) = (props.clone(), paints.clone());
+                let start = Instant::now();
+                vcx.draw(
+                    point(px(0.), px(0.)),
+                    size(
+                        AvailableSpace::Definite(px(SIDE as f32)),
+                        AvailableSpace::Definite(px(SIDE as f32)),
+                    ),
+                    move |_, _| {
+                        gpui_canvas(
+                            |_, _, _| (),
+                            move |bounds, (), window, cx| {
+                                let start = Instant::now();
+                                if name.starts_with("gpui") {
+                                    raw_quads(bounds, window);
+                                } else {
+                                    paint_ops(&props, bounds, window, cx);
+                                }
+                                paints_in.borrow_mut().push(start.elapsed());
+                            },
+                        )
+                        .w(px(SIDE as f32))
+                        .h(px(SIDE as f32))
+                    },
+                );
+                let elapsed = start.elapsed();
+                // A real frame in between, so each measured paint starts on an empty scene.
+                vcx.run_until_parked();
+                if frame >= WARMUP {
+                    frames.push(elapsed);
+                }
+            }
+            let paints = stats(paints.borrow_mut().split_off(WARMUP));
+            let frames = stats(frames);
+            println!(
+                "{:<34} {:>8.2} ms {:>5.2} ms {:>5.2} ms {:>10.2} ms",
+                name,
+                ms(paints.median),
+                ms(paints.p95),
+                ms(paints.max),
+                ms(frames.median),
+            );
+        }
+    }
+}

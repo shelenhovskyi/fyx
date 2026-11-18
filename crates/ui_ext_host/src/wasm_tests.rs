@@ -1281,3 +1281,54 @@ async fn test_dev_extension_hot_reloads(cx: &mut TestAppContext) {
         text_of(&surface, LABEL, cx)
     );
 }
+
+/// integration-6 N5 (M2 in production): the renderer's `decoration_closed` goes through
+/// `impl UiBackend for UiExtension` to the instance, so a decoration the renderer dropped stops
+/// counting toward the 512 live ones.
+#[gpui::test]
+async fn test_decoration_closed_reaches_the_instance(cx: &mut TestAppContext) {
+    use ui_ext::v0_2::{UiEvent as Event, Update};
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let (extension, _pushed) = cx
+        .update(|cx| {
+            UiExtension::load_with_options(
+                "probe-v0-2".into(),
+                ui_ext_wasm::test_support::fixture_wasm("fyx_ui_test_probe_v0_2"),
+                ui_ext_wasm::LoadOptions {
+                    allow_staged: Some(true),
+                    ..Default::default()
+                },
+                &cx.to_async(),
+            )
+        })
+        .await
+        .expect("the 0.2 probe loads");
+    // The probe runs the script stored by typing into node 100 when node 7 changes.
+    async fn run(extension: &UiExtension, script: &str) -> String {
+        extension
+            .handle_event_v0_2("probe", Event::InputChanged(100, script.into()))
+            .await
+            .expect("stores the script");
+        let reply = extension
+            .handle_event_v0_2("probe", Event::InputChanged(7, "x".into()))
+            .await
+            .expect("runs the script");
+        match reply.value {
+            Update::Replace(nodes) => match &nodes[0].props {
+                ui_ext::v0_2::Props::Text(text) => text.content.clone(),
+                other => panic!("not a report: {other:?}"),
+            },
+            other => panic!("not a report: {other:?}"),
+        }
+    }
+    let report = run(&extension, "repeat 300 place a# src/a.rs 1").await;
+    assert!(report.ends_with("ok*300"), "{report}");
+    let report = run(&extension, "repeat 213 place b# src/a.rs 1").await;
+    assert!(report.ends_with("ok*212,limit-exceeded*1"), "{report}");
+
+    let backend: &dyn UiBackend = &extension;
+    backend.decoration_closed("a0");
+    let report = run(&extension, "place c src/a.rs 1; place d src/a.rs 1").await;
+    assert!(report.ends_with("ok | limit-exceeded"), "{report}");
+}

@@ -149,6 +149,43 @@ async fn test_several_files_and_undo(cx: &mut TestAppContext) {
     assert_eq!(text(&c, cx), "c\n");
 }
 
+/// Q5: the Show/Undo card is for an edit of several files or of a file no editor shows; an edit
+/// of the one file the user has open needs none.
+#[gpui::test]
+async fn test_card_only_for_several_or_unopened_files(cx: &mut TestAppContext) {
+    let (_, project) = setup(true, cx).await;
+    let (workspace, vcx) =
+        cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+    let one = |text: &str| edit(vec![file("a.txt", &[(at(0, 0), at(0, 3), text)])]);
+    let card = |applied: &Applied, vcx: &mut gpui::VisualTestContext| {
+        workspace.read_with(vcx, |workspace, cx| {
+            needs_card(&applied.transaction, workspace, cx)
+        })
+    };
+
+    let applied = run(one("ONE"), vcx).await.unwrap();
+    assert!(card(&applied, vcx), "a file no editor shows");
+
+    let a = buffer(&project, "a.txt", vcx).await;
+    workspace.update_in(vcx, |workspace, window, cx| {
+        let editor = cx.new(|cx| Editor::for_buffer(a, Some(project.clone()), window, cx));
+        workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+    });
+    let applied = run(one("Uno"), vcx).await.unwrap();
+    assert!(!card(&applied, vcx), "the open file");
+
+    let applied = run(
+        edit(vec![
+            file("a.txt", &[(at(0, 0), at(0, 3), "one")]),
+            file("b.txt", &[(at(0, 0), at(0, 1), "y")]),
+        ]),
+        vcx,
+    )
+    .await
+    .unwrap();
+    assert!(card(&applied, vcx), "several files, one of them open");
+}
+
 /// One refused file refuses the whole edit: nothing is applied to the others.
 #[gpui::test]
 async fn test_a_private_file_refuses_the_whole_edit(cx: &mut TestAppContext) {
@@ -404,5 +441,102 @@ async fn test_a_link_in_an_unscanned_directory_is_refused(cx: &mut TestAppContex
             .await
             .unwrap(),
         "s\n"
+    );
+}
+
+/// integration-6 (decision Q8): an extension sees full hunks only for worktree files that are
+/// not private. With a real worktree's `private_files` (`.env`), the snapshot and every streamed
+/// event hide the private file's path and text, from the observation through to the extension.
+#[gpui::test]
+async fn test_observe_redacts_private_files_end_to_end(cx: &mut TestAppContext) {
+    use agent_review::observe::{
+        ObservedEvent, ObservedHunk, ObservedReview, ObservedSource, ObservedTurnFile,
+    };
+    use futures::StreamExt as _;
+    use ui_ext_wasm::observe::AgentEvent;
+    let (_, _project) = setup(true, cx).await;
+    let review = |id: u64, path: &str| ObservedReview {
+        id,
+        session: 1,
+        turn: 1,
+        abs_path: PathBuf::from(path),
+        source: ObservedSource::Write,
+        rule: None,
+        resolution: agent_review::Resolution::Pending { undecided: 1 },
+        submitted: false,
+        operation: false,
+        hunks: vec![ObservedHunk {
+            old_start: 0,
+            old_count: 1,
+            new_start: 0,
+            new_count: 1,
+            old_text: "SECRET=1\n".into(),
+            new_text: "SECRET=2\n".into(),
+            decision: agent_review::HunkDecision::Pending,
+            comment: None,
+        }],
+    };
+    let env = path!("/work/.env");
+    let a = path!("/work/a.txt");
+    let (feed, reviews) = cx.update(|cx| {
+        crate::agent_observe::TestFeed::new("ext", true, vec![review(1, env), review(2, a)], cx)
+    });
+    let (snapshot, mut events) = reviews.subscribe().await;
+    assert_eq!(snapshot[0].file, None, "the private file's path is hidden");
+    assert!(snapshot[0].hunks.is_empty(), "and its text");
+    assert_eq!(
+        snapshot[1].file.as_ref().map(|file| file.path.as_str()),
+        Some("a.txt")
+    );
+    assert_eq!(
+        snapshot[1].hunks.len(),
+        1,
+        "a worktree file keeps its hunks"
+    );
+
+    cx.update(|cx| {
+        feed.observe(ObservedEvent::Updated(review(1, env)), cx);
+        feed.observe(
+            ObservedEvent::TurnEnded(
+                1,
+                [env, a]
+                    .into_iter()
+                    .map(|path| ObservedTurnFile {
+                        abs_path: PathBuf::from(path),
+                        resolution: agent_review::Resolution::AcceptedAll,
+                        rule: None,
+                    })
+                    .collect(),
+            ),
+            cx,
+        );
+        feed.observe(
+            ObservedEvent::UnreviewedChanges(1, vec![PathBuf::from(env), PathBuf::from(a)]),
+            cx,
+        );
+    });
+    let received: Vec<AgentEvent> = events.by_ref().take(4).collect().await;
+    assert_eq!(received[0], AgentEvent::ReviewMode(true));
+    let AgentEvent::Updated(updated) = &received[1] else {
+        panic!("{:?}", received[1]);
+    };
+    assert_eq!((updated.file.clone(), updated.hunks.len()), (None, 0));
+    let AgentEvent::TurnEnded(1, files) = &received[2] else {
+        panic!("{:?}", received[2]);
+    };
+    assert_eq!(files[0].file, None);
+    assert_eq!(
+        files[1].file.as_ref().map(|file| file.path.as_str()),
+        Some("a.txt")
+    );
+    let AgentEvent::UnreviewedChanges(1, paths) = &received[3] else {
+        panic!("{:?}", received[3]);
+    };
+    assert_eq!(
+        paths
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.txt"]
     );
 }

@@ -494,8 +494,17 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
                     .collect(),
                 Err(_) => Vec::new(),
             };
+            let blocks_checked = crate::fyx_extensions_page::lifts_blocks(&client, now());
             drop(client);
-            let applied = apply_plan(&registry, &store, fs.as_ref(), &actions, &updates).await;
+            let applied = apply_plan(
+                &registry,
+                &store,
+                fs.as_ref(),
+                &actions,
+                &updates,
+                blocks_checked,
+            )
+            .await;
             drop(state);
             applied
         }
@@ -576,6 +585,17 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
     let applied = check(&test_registry).await.lines;
     assert_eq!(applied, ["enabled demo again: no longer blocked"]);
     assert_eq!(active(&store, &fs).await.1, None);
+
+    // integration-6 N4: with no verified list (here none can be fetched; the same as a cache
+    // dropped after a key rotation), "no list" is not "nothing blocked": it stays disabled.
+    store
+        .set_disabled("demo", Some("blocked: test".into()), fs.as_ref())
+        .await
+        .unwrap();
+    std::fs::remove_file(test_registry.dir.path().join("blocklist.json")).unwrap();
+    let applied = check(&test_registry).await.lines;
+    assert!(applied.is_empty(), "{applied:?}");
+    assert!(active(&store, &fs).await.1.is_some(), "still disabled");
 }
 
 /// Plan 3.4: a block that changes an installed extension is shown in the active window, with
@@ -746,7 +766,7 @@ async fn test_spec_failure_1_held_t2_update_then_blocked(cx: &mut gpui::TestAppC
             .any(|action| matches!(action.action, fyx_registry::Action::Update { .. })),
         "never upgraded to the held version: {actions:?}"
     );
-    let outcome = apply_plan(&registry, &store, fs.as_ref(), &actions, &[]).await;
+    let outcome = apply_plan(&registry, &store, fs.as_ref(), &actions, &[], true).await;
     assert_eq!(outcome.blocks[0].what, "disabled");
     let entry = store.state(fs.as_ref()).await.unwrap().extensions["demo"].clone();
     assert_eq!(entry.active, Version::new(1, 0, 0), "not upgraded");
@@ -1020,4 +1040,33 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// integration-6 R9: a release keyset in which one key has two signing roles is refused like
+/// one that does not parse.
+#[test]
+fn test_release_keyset_needs_role_separation() {
+    use crate::registry_service::{TEST_KEYSET_JSON, parse_release_keyset};
+    assert!(parse_release_keyset(TEST_KEYSET_JSON).is_some());
+    let merged = TEST_KEYSET_JSON.replacen("\"release\"", "\"release\", \"blocklist\"", 1);
+    assert_ne!(merged, TEST_KEYSET_JSON);
+    assert!(parse_release_keyset(&merged).is_none());
+    assert!(parse_release_keyset("not json").is_none());
+}
+
+/// Owner's Q1 (W2c 226eea0e96): an update that starts running a Zed extension asks with the
+/// warning among what it asks for.
+#[test]
+fn test_a_new_zed_extension_is_asked_for_with_the_warning() {
+    use crate::fyx_extensions_page::describe_additions;
+    let additions = fyx_registry::Additions {
+        zed_extension: true,
+        ..Default::default()
+    };
+    assert!(!additions.is_empty());
+    assert_eq!(
+        describe_additions(&additions),
+        [crate::install::ZED_EXTENSION_WARNING]
+    );
+    assert!(describe_additions(&fyx_registry::Additions::default()).is_empty());
 }
