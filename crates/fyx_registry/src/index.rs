@@ -280,7 +280,8 @@ impl Release {
         Ok(())
     }
 
-    /// Checks downloaded package bytes against the signed size and hash.
+    /// Checks downloaded package bytes against the signed size and hash, then their contents: a
+    /// package with a Zed `extension.wasm` is refused ([`crate::check_package_contents`]).
     pub fn verify_package(&self, package: &[u8]) -> Result<(), Error> {
         let size = package.len() as u64;
         if size != self.package.size {
@@ -296,7 +297,7 @@ impl Release {
                 self.id, self.version, self.package.sha256
             )));
         }
-        Ok(())
+        crate::check_package_contents(package).map_err(Error::PackageRefused)
     }
 
     pub fn from_json(bytes: &[u8]) -> Result<Signed<Release>, Error> {
