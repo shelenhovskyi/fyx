@@ -628,12 +628,11 @@ fn test_api_version_gating() {
         Some(ApiVersion::V0_2_0)
     );
     assert_eq!(known_api_version(&"0.2.0-rc.1".parse().unwrap()), None);
-    // 0.2 is frozen (integration-5 A2): it loads everywhere. 0.3 is staged: only where staged
-    // versions are allowed (Stable/Preview stay on 0.2).
+    // 0.2 (integration-5 A2) and 0.3 (integration-6) are frozen: they load everywhere.
     assert!(api_version_range(false).contains(&Version::new(0, 2, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 1, 0)));
-    assert!(!api_version_range(false).contains(&Version::new(0, 3, 0)));
-    assert!(api_version_range(true).contains(&Version::new(0, 3, 0)));
+    assert!(api_version_range(false).contains(&Version::new(0, 3, 0)));
+    assert_eq!(api_version_range(false), api_version_range(true));
     assert!(!staged_api_allowed(false, false));
     assert!(staged_api_allowed(true, false));
     assert!(staged_api_allowed(false, true));
