@@ -222,6 +222,7 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::InvalidArgument => wit_host::HostErrorCode::InvalidArgument,
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
+                model::HostErrorCode::Denied => wit_host::HostErrorCode::Denied,
             },
             message,
         }

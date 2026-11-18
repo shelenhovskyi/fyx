@@ -19410,8 +19410,10 @@ dependencies = [
  "extension_host",
  "fs",
  "futures 0.3.34",
+ "fyx_registry",
  "gpui",
  "gpui_tokio",
+ "http_client",
  "language",
  "log",
  "markdown",
@@ -19465,12 +19467,15 @@ name = "ui_ext_wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "bytes 1.11.1",
  "fs",
  "futures 0.3.34",
  "fyx_ext_harness",
+ "fyx_registry",
  "gpui",
  "gpui_tokio",
+ "http_proxy",
  "log",
  "moka",
  "semver",
@@ -19480,9 +19485,11 @@ dependencies = [
  "tokio",
  "toml 0.9.8",
  "ui_ext",
+ "url",
  "wasmparser 0.254.2",
  "wasmtime",
  "wasmtime-wasi",
+ "zed-reqwest",
 ]
 
 [[package]]

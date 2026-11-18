@@ -139,6 +139,8 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::InvalidArgument => wit_host::HostErrorCode::InvalidArgument,
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
+                // 0.2 has no `denied`; the host maps it to `not-permitted` too.
+                model::HostErrorCode::Denied => wit_host::HostErrorCode::NotPermitted,
             },
             message,
         }

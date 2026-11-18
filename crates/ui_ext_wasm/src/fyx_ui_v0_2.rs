@@ -30,7 +30,7 @@ use bindings::fyx::ui::{
     types as wit,
 };
 
-conversions::host_imports!();
+conversions::host_imports!(denied: wit_host::HostErrorCode::NotPermitted);
 conversions::notification_imports!();
 
 impl wit_decorations::Host for UiState {

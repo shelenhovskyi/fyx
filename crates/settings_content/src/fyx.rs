@@ -91,4 +91,10 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: []
     pub hidden_status_items: Option<Vec<String>>,
+    /// The Fyx extension registry: an `https://` base URL, `http://localhost:<port>/` for a
+    /// local test server, or `file:///<dir>` for a registry directory. Empty turns the registry
+    /// off. Nothing is fetched until you open the Fyx tab or an update check is due.
+    ///
+    /// Default: ""
+    pub registry_url: Option<String>,
 }

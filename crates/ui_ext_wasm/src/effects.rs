@@ -270,6 +270,13 @@ impl ApiState {
             .retain(|_, running| running != owner);
     }
 
+    /// Whether the manifest (or, without one, the load options) declares `capability`.
+    pub(crate) fn declares(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|declared| declared == capability)
+    }
+
     /// After a call: the effects it made, in order. An activation granted by it starts counting
     /// down.
     pub(crate) fn finish_call(&mut self) -> Vec<HostEffect> {

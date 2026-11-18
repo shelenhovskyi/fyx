@@ -553,6 +553,9 @@ pub enum HostErrorCode {
     InvalidArgument,
     NotPermitted,
     Unavailable,
+    /// 0.3: the user refused or revoked a T2 capability the manifest declares. A 0.2 component
+    /// never gets it; it sees `not-permitted`.
+    Denied,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
