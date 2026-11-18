@@ -947,10 +947,15 @@ impl Renderer<'_, '_> {
         let button = if props.label.is_empty()
             && let Some(icon) = icon
         {
+            // F16: an icon-only button is named by its tooltip, else by its icon.
+            let name: SharedString = tooltip
+                .clone()
+                .unwrap_or_else(|| format!("{icon:?}").into());
             IconButton::new(element_id, icon)
                 .icon_size(IconSize::Small)
                 .style(style)
                 .disabled(props.disabled)
+                .aria_label(name)
                 .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(focus, |this, focus| this.track_focus(focus))
                 .when_some(on_click, |this, on_click| this.on_click(on_click))
@@ -994,8 +999,15 @@ impl Renderer<'_, '_> {
             return Label::new(text).color(color).into_any_element();
         };
         let colors = self.cx.theme().colors();
+        // F16: the input's accessible name is its `label`, else its placeholder.
+        let name: SharedString = props
+            .label_text()
+            .unwrap_or(&props.placeholder)
+            .to_string()
+            .into();
         div()
             .id(scope.element_id(id))
+            .aria_label(name)
             .w_full()
             .min_w_0()
             .px_2()
