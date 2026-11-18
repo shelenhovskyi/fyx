@@ -1,11 +1,11 @@
-//! `register_extension!(T, v0_1)`: an extension written against the SDK's 0.2 types, exported as
+//! `register_extension!(T, v0_1)`: an extension written against the SDK's types, exported as
 //! `fyx:ui@0.1.0` for hosts that only run 0.1.
 //!
 //! Values cross the boundary converted. What 0.1 has no field for is dropped (tooltips, list
 //! selection, row indent), icons become upstream `IconName`s, and what 0.1 cannot express without
 //! changing behaviour is an error that names 0.2: modal surfaces, `invalidate-rows`, secret
 //! inputs (0.1 would show the text), the `blank` icon node, ticks, runtime surfaces and
-//! decorations.
+//! decorations, and, naming 0.3, images, canvases and pickers.
 
 use crate::bindings_v0_1::fyx::ui::types as v1;
 use crate::{
@@ -17,6 +17,11 @@ const NEEDS_0_2: &str = "needs fyx:ui 0.2; this extension is exported as 0.1";
 
 fn needs_0_2(what: &str) -> String {
     format!("{what} {NEEDS_0_2}")
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+fn needs_0_3(what: &str) -> String {
+    format!("{what} needs fyx:ui 0.3; this extension is exported as 0.1")
 }
 
 /// The upstream `IconName` (snake case) a 0.1 host resolves for a frozen 0.2 icon, or `None` for
@@ -126,6 +131,10 @@ fn props(props: &Props) -> Result<v1::Props, String> {
             new_text: diff.new_text.clone(),
             language: diff.language.clone(),
         }),
+        #[cfg(feature = "fyx-ui-0-3")]
+        Props::Image(_) => return Err(needs_0_3("an image node")),
+        #[cfg(feature = "fyx-ui-0-3")]
+        Props::Canvas(_) => return Err(needs_0_3("a canvas node")),
     })
 }
 
@@ -203,6 +212,14 @@ pub mod glue {
                         log(
                             LogLevel::Error,
                             &needs_0_2(&format!("modal surface {:?}", surface.id)),
+                        );
+                        return None;
+                    }
+                    #[cfg(feature = "fyx-ui-0-3")]
+                    SurfaceKind::Picker(_) => {
+                        log(
+                            LogLevel::Error,
+                            &needs_0_3(&format!("picker surface {:?}", surface.id)),
                         );
                         return None;
                     }
@@ -312,6 +329,18 @@ pub mod glue {
     pub fn remove_decoration(_id: &str) -> Result<(), HostError> {
         unavailable("remove_decoration")
     }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn add_image(_format: crate::ImageFormat, _bytes: &[u8]) -> Result<u32, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("add_image"),
+        })
+    }
+
+    /// Nothing to free: 0.1 has no generated images.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn remove_image(_image: u32) {}
 }
 
 #[cfg(test)]

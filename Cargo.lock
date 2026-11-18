@@ -19434,11 +19434,19 @@ version = "0.1.0"
 dependencies = [
  "ui_ext",
  "ui_ext_sdk_v0_1",
+ "ui_ext_sdk_v0_2",
  "wit-bindgen 0.41.0",
 ]
 
 [[package]]
 name = "ui_ext_sdk_v0_1"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "ui_ext_sdk_v0_2"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen 0.41.0",

@@ -806,6 +806,7 @@ mod harness_conformance {
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(harness_versions, [MIN_VERSION, Version::new(0, 2, 0)]);
         assert!(harness_versions.iter().all(is_supported_api_version));
+        assert!(harness_versions.contains(&MAX_FROZEN_VERSION));
         assert_eq!(MAX_VERSION, Version::new(0, 3, 0));
     }
 
