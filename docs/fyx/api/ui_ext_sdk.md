@@ -65,6 +65,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `ListProps::selected` | method | The highlighted row, scrolled into view. |
 | `ListRow::with_indent` | method | Nesting depth, drawn by the host as indentation (tree views); at most 32 levels. |
 | `LogLevel` | re-export | `bindings::fyx::ui::host::LogLevel` |
+| `Notification` | re-export | `bindings::fyx::ui::notifications::Notification` |
+| `Notification::action` | method | A button, at most 2; the first is the primary one. `id` (1 to 64 bytes of `[a-z0-9._-]`) comes back in `UiEvent::NotificationAction`; `label` is 1 to 24 bytes. |
+| `Notification::body` | method | Plain text, at most 500 bytes and 4 lines. |
+| `Notification::new` | method | A notification whose events go to `owner`, a surface or decoration id: no body, no buttons, and closed by the host after a while (6 s for `info` and `success`, 10 s for `warning` and `error`). The title is 1 to 80 bytes on one line. |
+| `Notification::sticky` | method | Stays until the user or `dismiss_notification` closes it. |
+| `NotificationAction` | re-export | `bindings::fyx::ui::notifications::NotificationAction` |
+| `NotificationLevel` | re-export | `bindings::fyx::ui::notifications::NotificationLevel` |
 | `PatchSet` | struct | An ordered batch of patches, turned into an `update` with `PatchSet::into_update`. |
 | `PatchSet::insert` | method | Inserts one node under `node.parent`, before the sibling `before` or at the end. |
 | `PatchSet::insert_subtree` | method | Inserts a subtree in parents-first order, such as one built with `TreeBuilder::under`. Its top-level nodes (those whose parent is outside `nodes`) go before `before`, keeping their order; deeper nodes are appended to their new parents. |
@@ -76,6 +83,11 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `PatchSet::patches` | method |  |
 | `PatchSet::remove` | method | Removes the node and its whole subtree. |
 | `PatchSet::set_props` | method |  |
+| `ProgressLocation` | re-export | `bindings::fyx::ui::notifications::ProgressLocation` |
+| `ProgressOptions` | re-export | `bindings::fyx::ui::notifications::ProgressOptions` |
+| `ProgressOptions::cancellable` | method | Draws a Cancel button that sends `UiEvent::ProgressCancelRequested` to the owner. |
+| `ProgressOptions::new` | method | A progress whose events go to `owner`, which must be a panel for `ProgressLocation::Panel`; not cancellable. The title is 1 to 80 bytes on one line. |
+| `ProgressValue` | re-export | `bindings::fyx::ui::notifications::ProgressValue` |
 | `ROW_NODE_ID_BASE` | const | First id handed out inside a `ListRow` subtree. |
 | `Surface::modal` | method | A modal, closed until `show_surface` opens it. Needs `ui:modal`. |
 | `Surface::panel` | method |  |
