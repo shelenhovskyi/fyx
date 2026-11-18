@@ -66,6 +66,10 @@ actions!(
         CommentHunk,
         /// Returns from the comment field to the diff.
         FocusDiff,
+        /// Moves the keyboard to the pane's next button (`tab`).
+        FocusNextControl,
+        /// Moves the keyboard to the pane's previous button (`shift-tab`).
+        FocusPreviousControl,
         /// Sends the decisions; every hunk must be decided.
         SubmitReview,
         /// Opens the review panes of every open review in this workspace.
@@ -1039,6 +1043,7 @@ impl ReviewPane {
                     ("review-file", id.0),
                     display_path(&self.project, &path, cx),
                 )
+                .tab_index(0isize)
                 .label_size(LabelSize::Small)
                 .toggle_state(is_current)
                 .style(if is_current {
@@ -1075,6 +1080,7 @@ impl ReviewPane {
                         ("unreviewed-file", index),
                         display_path(&self.project, &path, cx),
                     )
+                    .tab_index(0isize)
                     .label_size(LabelSize::Small)
                     .style(ButtonStyle::Subtle)
                     .tooltip(Tooltip::text(
@@ -1244,6 +1250,7 @@ impl ReviewPane {
         let action = action.boxed_clone();
         // The tooltip shows the binding from the keymap, as the user has it.
         Button::new(id, label)
+            .tab_index(0isize)
             .tooltip(Tooltip::for_action_title(label, action.as_ref()))
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     }
@@ -1308,6 +1315,10 @@ impl Render for ReviewPane {
         v_flex()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            // `tab` / `shift-tab` walk the buttons in the order they are drawn.
+            .tab_group()
+            .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .on_action(cx.listener(Self::accept_hunk))
@@ -1827,6 +1838,20 @@ mod tests {
         pane.update_in(cx, |pane, window, cx| pane.show_next(window, cx));
         cx.run_until_parked();
         assert_eq!(pane.read_with(cx, |pane, _| pane.current_hunk), Some(0));
+
+        // `tab` leaves the diff for the pane's buttons; `escape` comes back.
+        let diff_focused = |cx: &mut gpui::VisualTestContext| {
+            pane.update_in(cx, |pane, window, cx| {
+                pane.diff_focus_handle(cx).is_focused(window)
+            })
+        };
+        assert!(diff_focused(cx));
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(!diff_focused(cx), "a button has the keyboard");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(diff_focused(cx));
 
         // An action that cannot be done says why.
         cx.simulate_keystrokes(&format!("{MOD}-enter"));
