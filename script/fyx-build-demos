@@ -42,6 +42,10 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
+# Demos that exist only for the staged 0.3 world (their manifest says api_version 0.3.0).
+if [[ "$world" == "0_3" ]]; then
+    demos+=(fyx_demo_t2)
+fi
 for demo in "${demos[@]}"; do
     cargo_args+=(-p "$demo")
     if [[ -n "$world" ]]; then cargo_args+=(--features "$demo/fyx-ui-${world/_/-}"); fi
