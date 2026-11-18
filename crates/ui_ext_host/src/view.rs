@@ -399,6 +399,8 @@ impl SurfaceView {
                 editor.set_text(props.value.as_str(), window, cx);
                 // Design K: a secret input is masked.
                 editor.set_masked(props.secret, cx);
+                // Triage-3 #5: a blinking caret repaints the whole surface twice a second.
+                editor.disable_cursor_blink(cx);
                 editor
             });
             let sets_seen = self.state.read(cx).input_set_count(id);

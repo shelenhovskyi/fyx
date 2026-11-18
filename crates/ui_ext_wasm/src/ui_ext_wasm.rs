@@ -65,6 +65,7 @@ mod effects;
 mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 pub mod images;
+mod stderr;
 pub mod ticks;
 
 pub use effects::{
@@ -1065,10 +1066,14 @@ impl UiExtension {
                 async move {
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
-                    wasi.inherit_stderr();
+                    // Line by line through `log`, capped (triage-3, SEC T5).
+                    wasi.stderr(stderr::GuestStderr::new(
+                        extension_id.clone(),
+                        diagnostics.clone(),
+                    ));
                     deny_network(&mut wasi);
                     // No preopened directories, no environment variables, no arguments: the
-                    // builder starts empty and only stderr is inherited.
+                    // builder starts empty and only stderr goes anywhere.
                     let mut store = Store::new(
                         &runtime.engine,
                         UiState::new(

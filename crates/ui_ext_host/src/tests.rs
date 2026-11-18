@@ -1181,6 +1181,48 @@ fn key(keys: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Triage-3 #5: the caret of a focused input does not blink, so the surface is not repainted
+/// while nothing happens.
+#[gpui::test]
+async fn test_focused_input_does_not_repaint_by_itself(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    let editor = view.read_with(vcx, |view, _| {
+        view.inputs
+            .get(&INPUT)
+            .map(|input| input.editor.clone())
+            .expect("input has an editor")
+    });
+    vcx.update(|window, cx| {
+        window.activate_window();
+        editor.focus_handle(cx).focus(window, cx)
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.simulate_input("x");
+    // Past what focusing and typing schedule (the blink pause).
+    vcx.executor().advance_clock(Duration::from_secs(2));
+    vcx.run_until_parked();
+    let notified = Rc::new(Cell::new(0));
+    let _observe = vcx.update(|_, cx| {
+        let notified = notified.clone();
+        cx.observe(&editor, move |_, _| notified.set(notified.get() + 1))
+    });
+    let mut shown = Vec::new();
+    for _ in 0..8 {
+        vcx.executor().advance_clock(Duration::from_millis(300));
+        vcx.run_until_parked();
+        shown.push(vcx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.show_local_cursors(window, cx))
+        }));
+    }
+    assert_eq!(shown, [true; 8], "the caret stays");
+    assert_eq!(notified.get(), 0, "no blink repaints");
+    assert!(vcx.update(|window, cx| editor.focus_handle(cx).is_focused(window)));
+}
+
 /// Triage-3, UX F6 and F21: the host's own buttons are in the Tab order and take Enter and
 /// Space; the error footer has a Dismiss.
 #[gpui::test]
