@@ -389,6 +389,7 @@ macro_rules! conversions {
                         },
                         disabled: props.disabled,
                         tooltip: props.tooltip,
+                        accessible_label: props.accessible_label,
                     }),
                     wit::Props::Input(props) => Self::Input(model::InputProps {
                         value: props.value,

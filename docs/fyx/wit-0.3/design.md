@@ -584,33 +584,37 @@ result<http-response, fetch-error>)`. A host import, not WASI sockets (spec deci
   these. It connects to the address it checked, never resolving twice, so a name cannot pass the
   check with one address and connect to another. `localhost` never goes to DNS. Corporate hosts
   that resolve to private addresses need a user setting (Q4).
-- **Proxy.** With a proxy configured in Fyx, requests go through it without the user's proxy
-  credentials (decision 23). Then the proxy resolves names and the address check cannot run; the
-  domain list, HTTPS and certificate checks still hold. The extensions page says so.
+- **Proxy.** With a proxy configured in Fyx, a fetch to a declared domain is **refused in 1.0**
+  (`other`: "Fyx is set to use a proxy, and network:fetch does not go through proxies yet"; W2c,
+  a1c2557b27).
+  - **Why:** the host pins the address it checked and keeps the domain for TLS SNI. reqwest's
+    CONNECT through a proxy cannot do both, so the proxy would resolve the name again and the
+    address check would mean nothing.
+  - **What still works:** `localhost` goes direct, as before. Proxy URLs with credentials are
+    never used. Fyx reads only its own proxy setting, never environment proxies.
+  - **After 1.0:** proxied fetches through a hand-made CONNECT tunnel that pins the checked address
+    and keeps SNI. This does not change the WIT.
 - **TLS.** The system roots plus webpki roots; no extension-supplied CA, no client certificates,
   no TLS bypass.
 - **Headers.** The guest may set any header except the hop-by-hop and framing set (WIT comment),
   `proxy-*` and `accept-encoding`. `accept-encoding` is host-owned because the host decodes the
-  body and applies the cap to the decoded size: it sends only the encodings it can decode (W2c,
-  0213dd3cc7: `gzip` today). The host sets `user-agent: Fyx/<major.minor> (extension <id>/<version>)`
-  unless the guest sets one, and adds no cookie, no authorization and no editor token. There is no
+  body and applies the cap to the decoded size: it sends only the encodings it can decode,
+  `accept-encoding: gzip, deflate, br, zstd` (W2c, 1cec81f03f).
+- **User-agent.** The host sets `user-agent: Fyx/<major.minor> (extension <id>/<version>)` unless
+  the guest sets one (W2c, 9fad627507). Fyx's version comes from the app; the extension's version
+  from `extension.toml`, and only when it is a plain version string, otherwise `/<version>` is left
+  out.
+- **No credentials.** The host adds no cookie, no authorization and no editor token. There is no
   cookie jar; `set-cookie` is returned to the guest as a header.
-- **Decompression.** gzip, deflate, brotli and zstd are decoded by the host, and the 16 MiB cap
-  applies to the decoded body, counted while streaming (a compression bomb ends with `too-large`).
-  A `content-length` above 16 MiB fails before the body is read. W2c's first cut (0213dd3cc7)
-  decodes gzip only; any other `content-encoding` gives `other` until the rest land (plan 4.6
-  follow-ups).
-- **WIT comment fix (for the gatekeeper).** The `headers` comment in
-  `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit` does not list `accept-encoding` yet. One line, at
-  line 1011 on `origin/integration` (1014 on W2c's branch):
-
-  ```diff
-  @@ -1011 +1011 @@
-  -        /// header are set by the host and rejected here.
-  +        /// header, and `accept-encoding`, are set by the host and rejected here.
-  ```
-
-  The same change is already in this folder's `fyx-ui-0.3.wit`.
+- **Decompression.** The host decodes `gzip`, `deflate` (zlib, as RFC 9110 defines it), `br` and
+  `zstd` (W2c, 1cec81f03f). The 16 MiB cap applies to the decoded body, counted while streaming,
+  so a compression bomb ends with `too-large`. zstd frames may use a window of at most 8 MiB
+  (`window_log_max(23)`), so a frame cannot make the decoder allocate 128 MiB; a wider window
+  fails. Any other `content-encoding` gives `other`. A `content-length` above 16 MiB fails before
+  the body is read.
+- **The WIT comment** on `headers` names `accept-encoding` among the host-set headers (W0,
+  e1da7d5e3f, in `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`; also in this folder's
+  `fyx-ui-0.3.wit`).
 - **Timeout.** 30 s for the whole request, redirects included; the guest may ask for less.
 
 **Limits.** 8 in flight (decision 23), 120 started per minute (token bucket), request body 4 MiB,
@@ -689,9 +693,11 @@ returns `limit-exceeded`.
     it leaves the worktree through a symlink.
   - The resolved path is resolved again on every spawn (a `PATH` change applies) and shown in the
     Inspector.
-- **Arguments.** Passed as an argument vector, never through a shell. With `args` patterns in the
-  manifest (Q2), every argument must match the pattern at its position (`**` matches the rest),
-  as Zed's `process:exec` capability does.
+- **Arguments.** Passed as an argument vector, never through a shell. Every argument must match
+  the manifest's `args` pattern at its position (`**` matches the rest), as Zed's `process:exec`
+  capability does (Q2).
+  - **No `args` means no arguments:** the program may run only with none. Write
+    `args = ["**"]` to allow any arguments (W2c, a1c2557b27).
 - **Working directory.** A directory inside a worktree (`file-ref`), default the first worktree
   root; refused if it leaves the worktree through a symlink. No worktree: `unavailable`.
 - **Environment.** Cleared, then `PATH`, `HOME` (`USERPROFILE`, `SystemRoot`, `TEMP` and `TMP` on
@@ -799,9 +805,16 @@ version it was computed against, and non-overlapping text edits.
   - the path is worktree-relative with the path rule; `document` targets must have origin `file`;
   - the target is refused if it, or a parent, is a symlink leaving the worktree (the worktree
     entry is `is_external`), or if it is ignored-and-excluded (`file_scan_exclusions`);
-  - **protected paths** are refused with `not-allowed`: `.git/`, `.fyx/` (agent review rules, so an
-    extension cannot set `auto_accept`), `.zed/` (settings, tasks: code execution), `.vscode/`,
-    `.idea/`, and files matching the `private_files` setting;
+  - **protected paths** are refused with `not-allowed`, **in every security mode**, shield or not
+    (W2c, e740fd00d5):
+    - the directories `.git`, `.fyx` (agent review rules, so an extension cannot set
+      `auto_accept`), `.zed` (settings, tasks: code execution), `.vscode` and `.idea`, at any depth;
+    - every agent config, from the one list `ui_ext::protected` that the agent shield
+      (`fyx_guard`) uses too: `.claude/`, `.codex/`, `.gemini/`, `.agents/`, `.cursor/`,
+      `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules`, `.cursorrules`,
+      `.vscode/tasks.json`, `.vscode/launch.json`;
+    - the worktree's `read_only` patterns, links out of the project, and files matching the
+      `private_files` setting (`fyx_guard::extension_write_denial`);
   - collaboration guests (a project shared by someone else) are refused: that is another person's
     project;
   - untrusted worktree: `denied` without a prompt (decision 26).
@@ -1210,6 +1223,8 @@ Paths assume W3's `crates/ui_ext_wasm` (`be53175`); if that move does not land, 
 ## Open questions for the owner
 
 Ranked by how much of the design depends on the answer and how hard it is to change after 1.0.
+[open-questions.md](open-questions.md) has each question with its options, the recommended answer
+and its kind (product or technical), for the full 0.3 and for the smaller 0.3 of integration-5.
 
 1. **Close the `zed:extension` side door before T2 ships?** A Fyx package may also contain an
    `extension.wasm` (`zed:extension`), whose `fetch`/`fetch_stream` have no capability check and
@@ -1251,8 +1266,10 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
    for files inside the worktrees, nothing for files outside, opaque ids (§11); the alternative,
    metadata only (paths and counts), makes review dashboards possible but not review-aware linters.
 9. **Version lifetime once 1.0 follows 0.3.** Decision 29 removes 0.1 "in 0.4", which never ships.
-   *Recommended:* 1.0 takes 0.4's place: 0.1 is removed in 1.0, 0.2 in 1.1, and 0.3 stays for all of
-   1.x, since it is the same world as 1.0 under another package version.
+   **Open, the owner's decision.** The owner's rule, applied as written, removes 0.1 in 1.0 and 0.2
+   in 1.1. Integration-5 (decision 4) recommends keeping both through all of 1.x. 0.3 stays as long
+   as 1.0, since it is the same world under another package version. The options are in
+   [open-questions.md](open-questions.md#q9-version-lifetime-open-the-owners-decision).
 10. **Consent prompt form.** *Recommended:* the non-modal notification of §7 with the 1 s guard and
     no keyboard answer; a modal dialog would interrupt typing and be answered by reflex.
 11. **Picker contributions across extensions.** *Recommended:* only into pickers that opt in

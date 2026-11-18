@@ -6956,6 +6956,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_t2"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_todo"
 version = "0.1.0"
 dependencies = [
@@ -19452,6 +19459,7 @@ name = "ui_ext_host"
 version = "0.1.0"
 dependencies = [
  "acp_thread",
+ "agent_review",
  "anyhow",
  "async_zip",
  "collections",
@@ -19459,6 +19467,7 @@ dependencies = [
  "extension_host",
  "fs",
  "futures 0.3.34",
+ "fyx_guard",
  "fyx_registry",
  "gpui",
  "gpui_tokio",
