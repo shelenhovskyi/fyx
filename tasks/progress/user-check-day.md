@@ -342,9 +342,12 @@ Agent.
 
 **Підготовка.**
 
-1. Компоненти 0.2 W4 збирає заздалегідь у `D:\fyx-user-check\demos-0.2\`: теки
-   `fyx_demo_gallery\` і `fyx_demo_decorations\`. У кожній є `extension.toml`
-   (`api_version = "0.2.0"`) і `fyx_ui.wasm`. Якщо цих тек немає, скажіть координатору.
+1. Компоненти 0.2 вже готові. W4 зібрав їх із того самого `fyx/main` `6c82da02f3` у теки
+   `D:\fyx-user-check\demos-0.2\fyx_demo_gallery\` і `…\fyx_demo_decorations\`.
+   - У кожній теці є `extension.toml` з `api_version = "0.2.0"` і `fyx_ui.wasm`. Я перевірив це
+     2026-11-18.
+   - Gallery просить `ui:panel`, `ui:status-bar` і `ui:modal`, а декорації — `ui:panel` і
+     `ui:editor-decorations`.
 2. Проєкт, у якому декорації мають до чого прив'язатися (ті самі шляхи, що в демо):
 
    ```powershell
