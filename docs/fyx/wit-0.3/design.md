@@ -1207,6 +1207,8 @@ Paths assume W3's `crates/ui_ext_wasm` (`be53175`); if that move does not land, 
 ## Open questions for the owner
 
 Ranked by how much of the design depends on the answer and how hard it is to change after 1.0.
+[open-questions.md](open-questions.md) has each question with its options, the recommended answer
+and its kind (product or technical), for the full 0.3 and for the smaller 0.3 of integration-5.
 
 1. **Close the `zed:extension` side door before T2 ships?** A Fyx package may also contain an
    `extension.wasm` (`zed:extension`), whose `fetch`/`fetch_stream` have no capability check and
@@ -1248,8 +1250,11 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
    for files inside the worktrees, nothing for files outside, opaque ids (§11); the alternative,
    metadata only (paths and counts), makes review dashboards possible but not review-aware linters.
 9. **Version lifetime once 1.0 follows 0.3.** Decision 29 removes 0.1 "in 0.4", which never ships.
-   *Recommended:* 1.0 takes 0.4's place: 0.1 is removed in 1.0, 0.2 in 1.1, and 0.3 stays for all of
-   1.x, since it is the same world as 1.0 under another package version.
+   **Decided 2026-11-18** (integration-5 decision 4, matching the owner's rule in decision 29):
+   0.1 and 0.2 keep loading through 1.x, and their removal is stated as "two minor versions after
+   1.0". 0.3 stays as long as 1.0, since it is the same world under another package version. This
+   replaces the earlier recommendation (0.1 removed in 1.0, 0.2 in 1.1). See
+   [open-questions.md](open-questions.md#already-decided) for the one wording point to confirm.
 10. **Consent prompt form.** *Recommended:* the non-modal notification of §7 with the 1 s guard and
     no keyboard answer; a modal dialog would interrupt typing and be answered by reflex.
 11. **Picker contributions across extensions.** *Recommended:* only into pickers that opt in

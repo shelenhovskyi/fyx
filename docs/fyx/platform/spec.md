@@ -223,7 +223,9 @@ line decorations, code lenses, read-only documents, network and processes behind
     rest of P4. If P4 slips, images stay in 0.3 and the canvas moves to 0.4.
 29. Version support: every world version keeps working until **two** later minor versions have
     shipped (0.1 until 0.3 inclusive, removed in 0.4). The host runs each component against the
-    world it declares.
+    world it declares. **With 1.0 following 0.3** (decided 2026-11-18, integration-5 decision 4):
+    0.4 never ships, so 0.1 and 0.2 keep loading through 1.x, and their removal is stated as "two
+    minor versions after 1.0" ([0.3 open questions](../wit-0.3/open-questions.md#already-decided)).
 30. `fyx:ui@1.0.0` = 0.3 once it has run **4 weeks** with no breaking change. After 1.0 only
     additive changes until 2.0, and 1.x stays supported for **12 months** after 2.0 ships.
 
