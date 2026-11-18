@@ -396,6 +396,18 @@ Some errors offer **Retry**.
 
 <!-- crates/ui_ext_host/src/view.rs: "Retry"; (coming) 0004efba01 on claude/fyx-w3-renderer-e20d2b -->
 
+### Network access and proxies (coming, `fyx:ui` 0.3)
+
+`network:fetch`, the permission for an extension to reach the internet, comes with `fyx:ui` 0.3.
+An extension may reach only the domains it declares, and Fyx asks you the first time it does.
+
+**If you use a proxy:** with a proxy set in Fyx's settings, an extension's requests to its
+domains are **refused**. The extension gets the message "Fyx is set to use a proxy, and
+network:fetch does not go through proxies yet". Fyx checks the address a domain resolves to
+before it connects, and the current HTTP client cannot keep that check through a proxy. Requests
+to `localhost` still work. Support for proxies is planned after 1.0.
+<!-- source: W2c a1c2557b27, crates/ui_ext_wasm/src/network.rs; docs/fyx/wit-0.3/design.md §8 -->
+
 ### Dev folders in settings (coming)
 
 `fyx_ui: install dev UI extension` will add the folder to a setting instead of linking it. The

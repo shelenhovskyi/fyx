@@ -87,12 +87,15 @@ Done (W2c, `claude/fyx-w2c-host-0-2-cbde2c`):
   duration), with the URL stripped of user info, query and fragment; never bodies or header
   values. Showing the records in the Inspector is W3's (`ui_ext_host/src/inspector.rs`).
 
-Still open:
+- ~~the webpki roots and a local TLS test server~~: **done** in d11017466c (Zed's TLS config:
+  platform verifier, webpki roots as fallback; a test CA only in tests);
+- Fyx's proxy setting: **done as a refusal** in b3822c6fce and a1c2557b27. Fyx's own setting is
+  read, never environment proxies, and credentials are never used. A fetch to a declared domain
+  is refused while a proxy is set, because reqwest's CONNECT cannot keep the checked address and
+  the SNI name. `localhost` goes direct.
 
-- Fyx's proxy setting (without credentials; the address check cannot run behind a proxy);
-- the webpki roots next to the system roots (today reqwest's native roots only);
-- a local TLS test server with a test CA injected only in tests (the pinning test uses a plain TCP
-  server).
+After 1.0: proxied fetches through a hand-made CONNECT tunnel that pins the checked address
+([design §8](../wit-0.3/design.md#8-networkfetch-plan-46), "Proxy").
 
 ## Deferred after 1.0
 

@@ -56,9 +56,15 @@ the process cannot open its own sockets; the numbering of the modes follows stre
 
 ### Cross-cutting items
 
-- **Read-only agent configs** (step 1): agents may not write `.claude/`, `.codex/`, `.mcp.json`,
-  `.zed/`, `.fyx/` or `.git/`, anywhere in the absolute path (so also `~/.claude/` for the
-  built-in agent, which can edit files outside the project), nor Fyx's own config directory
+- **Read-only agent configs** (step 1). Agents may not write any of:
+  - the directories `.claude/`, `.codex/`, `.gemini/`, `.agents/`, `.cursor/`, `.zed/`, `.fyx/`
+    and `.git/`;
+  - the files `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules` and `.cursorrules`;
+  - `.vscode/tasks.json` and `.vscode/launch.json`.
+
+  The list is `ui_ext::protected` (W2c, e740fd00d5). It matches anywhere in the absolute path, so
+  also `~/.claude/` for the built-in agent, which can edit files outside the project. Agents may
+  not write Fyx's own config directory either
   (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings file, `tasks.json`, `keymap.json`). All of
   `.git/` is protected, not only `hooks/`: `config` (`core.hooksPath`, `core.fsmonitor`), `info/`,
   a submodule's `modules/*/config` and a linked worktree's `commondir` each make the next `git` run
@@ -69,6 +75,16 @@ the process cannot open its own sockets; the numbering of the modes follows stre
   destination (moving `pkg/` with a `pkg/.claude/` inside writes a `.claude/`), and for a move or
   delete also as it goes away at the source. Copying a file out of an agent config is a read and is
   allowed.
+- **UI extensions get the same list in every mode** (W2c, e740fd00d5; integration-5 S1, S2). The
+  agent shield applies the list only under shield, but the extension host applies it always:
+  - **Writes:** `workspace:edit` refuses every path on the list, the worktree's `read_only`
+    patterns and links out of the project, in `off`, `audit` and `shield` alike
+    (`fyx_guard::extension_write_denial`).
+  - **Reads:** an extension never gets the text of a `private_files` match or of
+    `.fyx/security.toml` (`fyx_guard::extension_read_denial`). That applies to `agent:observe`'s
+    review feed, for instance.
+  - **The repository's `.fyx/security.toml`** is therefore read in every mode, `off` included. The
+    agent hooks still ignore it while the mode is `off`.
 - **Redaction** (step 5): known secret values (from the OS credential store, the stripped
   environment, matched `private_files`) are replaced in transcripts, tool output shown to the model,
   logs and exported threads.
