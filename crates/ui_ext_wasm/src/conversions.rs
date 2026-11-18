@@ -47,7 +47,7 @@ pub(crate) fn update_text_len(update: &model::Update) -> usize {
 macro_rules! host_imports {
     // `denied`: the version's code for model `denied` (0.3 has `denied`; 0.2 has none, and gets
     // `not-permitted`, which no 0.2 import produces for a denial anyway).
-    (denied: $denied:expr) => {
+    (denied: $denied:expr, untrusted_worktree: $untrusted:expr, no_worktree: $no_worktree:expr) => {
         impl wit::Host for UiState {}
 
         fn result(
@@ -163,6 +163,8 @@ macro_rules! host_imports {
                         model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                         model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
                         model::HostErrorCode::Denied => $denied,
+                        model::HostErrorCode::UntrustedWorktree => $untrusted,
+                        model::HostErrorCode::NoWorktree => $no_worktree,
                     },
                     message,
                 }

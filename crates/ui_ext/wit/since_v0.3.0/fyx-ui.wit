@@ -631,9 +631,14 @@ interface host {
         not-permitted,
         /// The host cannot do it now (no workspace window to show a modal in).
         unavailable,
-        /// 0.3. The user refused or revoked the capability, or the worktree is not trusted. The
-        /// manifest does declare it; `permissions.query` says which case it is.
+        /// 0.3. The user refused or revoked the capability. The manifest does declare it;
+        /// `permissions.query` says whether it is denied or unavailable.
         denied,
+        /// 0.3. The worktree the call works in is not trusted (Zed's restricted mode): T2 work
+        /// there is refused without a prompt until the user trusts it. Not a permission state.
+        untrusted-worktree,
+        /// 0.3. The call needs an open worktree and the window has none.
+        no-worktree,
     }
 
     record host-error {
@@ -839,6 +844,8 @@ interface process {
         not-found(string),
         limit-exceeded,
         io(string),
+        /// Anything else; the text says what.
+        other(string),
     }
 
     /// Starts the program after the current call returns and returns its id. Output arrives as
@@ -895,6 +902,10 @@ interface workspace-edit {
         not-found(string),
         invalid(string),
         cancelled,
+        /// A file is in a worktree that is not trusted (Zed's restricted mode).
+        untrusted-worktree,
+        /// Anything else; the text says what.
+        other(string),
     }
 
     /// Applies the edit after the current call returns, all or nothing, and returns its id. The
@@ -956,7 +967,18 @@ interface agent-observe {
         submitted: bool,
         /// Empty when `file` is `none`. Cut after 256 KiB of hunk text, with `truncated` set.
         hunks: list<hunk-info>,
+        /// The hunks were cut (or dropped with `file`), and only that.
         truncated: bool,
+    }
+
+    /// Every open review. It replaces whatever the extension knew: it comes first after `start`,
+    /// and again whenever the host resyncs a feed that fell behind (more than 1024 events
+    /// queued), in which case the events in between are not sent.
+    record review-snapshot {
+        /// At most 1000, oldest first.
+        reviews: list<review-info>,
+        /// Older reviews were left out to stay within 1000.
+        older-dropped: bool,
     }
 
     record turn-file {
@@ -966,8 +988,8 @@ interface agent-observe {
     }
 
     variant agent-event {
-        /// First event after `start`: every open review.
-        snapshot(list<review-info>),
+        /// First event after `start`, and after a resync.
+        snapshot(review-snapshot),
         opened(review-info),
         updated(review-info),
         resolved(review-info),

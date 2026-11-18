@@ -78,7 +78,12 @@ pub struct TurnFile {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
-    Snapshot(Vec<ReviewInfo>),
+    /// Every open review; it replaces what the extension knew. `older_dropped`: reviews were left
+    /// out to stay within [`MAX_SNAPSHOT_REVIEWS`] (the host's own snapshots set it `false`).
+    Snapshot {
+        reviews: Vec<ReviewInfo>,
+        older_dropped: bool,
+    },
     Opened(ReviewInfo),
     Updated(ReviewInfo),
     Resolved(ReviewInfo),
@@ -134,18 +139,15 @@ pub fn cut_review(mut info: ReviewInfo) -> ReviewInfo {
 }
 
 /// A snapshot as the extension gets it: at most [`MAX_SNAPSHOT_REVIEWS`], the oldest dropped
-/// first (reviews are given oldest first), with `truncated` set on the last one kept.
-pub fn cut_snapshot(mut reviews: Vec<ReviewInfo>) -> Vec<ReviewInfo> {
+/// first (reviews are given oldest first), and whether any were dropped. `truncated` stays about
+/// each review's hunks only (integration-5 A5).
+pub fn cut_snapshot(mut reviews: Vec<ReviewInfo>) -> (Vec<ReviewInfo>, bool) {
     let mut dropped = false;
     if reviews.len() > MAX_SNAPSHOT_REVIEWS {
         reviews.drain(..reviews.len() - MAX_SNAPSHOT_REVIEWS);
         dropped = true;
     }
-    let mut reviews: Vec<ReviewInfo> = reviews.into_iter().map(cut_review).collect();
-    if dropped && let Some(last) = reviews.last_mut() {
-        last.truncated = true;
-    }
-    reviews
+    (reviews.into_iter().map(cut_review).collect(), dropped)
 }
 
 /// Maps the host's review, session and turn ids to opaque ones of one extension (design.md §0.5):
@@ -188,12 +190,16 @@ impl OpaqueIds {
     /// The event with this extension's ids, and its reviews cut.
     pub fn event(&mut self, event: AgentEvent) -> AgentEvent {
         match event {
-            AgentEvent::Snapshot(reviews) => AgentEvent::Snapshot(
-                cut_snapshot(reviews)
-                    .into_iter()
-                    .map(|info| self.info(info))
-                    .collect(),
-            ),
+            AgentEvent::Snapshot {
+                reviews,
+                older_dropped,
+            } => {
+                let (reviews, dropped) = cut_snapshot(reviews);
+                AgentEvent::Snapshot {
+                    reviews: reviews.into_iter().map(|info| self.info(info)).collect(),
+                    older_dropped: older_dropped || dropped,
+                }
+            }
             AgentEvent::Opened(info) => AgentEvent::Opened(self.info(cut_review(info))),
             AgentEvent::Updated(info) => AgentEvent::Updated(self.info(cut_review(info))),
             AgentEvent::Resolved(info) => AgentEvent::Resolved(self.info(cut_review(info))),
@@ -281,10 +287,17 @@ mod tests {
     #[test]
     fn snapshots_keep_the_newest_thousand() {
         let reviews: Vec<ReviewInfo> = (0..1005).map(|id| review(id, true, Vec::new())).collect();
-        let cut = cut_snapshot(reviews);
+        let (cut, dropped) = cut_snapshot(reviews);
         assert_eq!(cut.len(), MAX_SNAPSHOT_REVIEWS);
         assert_eq!(cut[0].review, 5);
-        assert!(cut.last().unwrap().truncated);
+        assert!(dropped);
+        assert!(
+            !cut.last().unwrap().truncated,
+            "truncated is about hunks only"
+        );
+        let (whole, dropped) = cut_snapshot(vec![review(1, true, Vec::new())]);
+        assert_eq!(whole.len(), 1);
+        assert!(!dropped);
     }
 
     #[test]

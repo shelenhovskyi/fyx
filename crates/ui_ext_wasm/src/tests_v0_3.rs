@@ -1348,14 +1348,17 @@ mod process_spawn {
         assert_eq!(end, format!("spawn-failed {id} denied"));
     }
 
-    /// Decision 26: an untrusted worktree is `denied` without a prompt; no worktree is
-    /// `unavailable`.
+    /// Decision 26: an untrusted worktree is refused without a prompt; integration-5 A5 gives it
+    /// and "no worktree" their own codes, so an extension need not match the message.
     #[gpui::test]
     async fn test_worktree_rules(cx: &mut TestAppContext) {
         let mut setup = Setup::new(&["hostname"]);
         setup.trusted = false;
         let extension = setup.load(cx).await;
-        assert_eq!(command(&extension, "spawn -- hostname").await, "denied");
+        assert_eq!(
+            command(&extension, "spawn -- hostname").await,
+            "untrusted-worktree"
+        );
         let none = load_with(
             LoadOptions {
                 allow_staged: Some(true),
@@ -1373,7 +1376,7 @@ mod process_spawn {
         )
         .await
         .expect("loads");
-        assert_eq!(command(&none, "spawn -- hostname").await, "unavailable");
+        assert_eq!(command(&none, "spawn -- hostname").await, "no-worktree");
     }
 
     /// The child sees only the filtered environment, and stdin reaches it.

@@ -239,7 +239,10 @@ async fn feed(reviews: &dyn AgentReviews, running: &Running) {
     let mut ids = OpaqueIds::default();
     let mut queue = VecDeque::new();
     let (snapshot, mut stream) = reviews.subscribe().await;
-    queue.push_back(ids.event(AgentEvent::Snapshot(snapshot)));
+    queue.push_back(ids.event(AgentEvent::Snapshot {
+        reviews: snapshot,
+        older_dropped: false,
+    }));
     let mut ended = false;
     enum Step {
         Ready(bool),
@@ -272,7 +275,7 @@ async fn feed(reviews: &dyn AgentReviews, running: &Running) {
             }
             Step::Event(None) => ended = true,
             Step::Event(Some(event)) => {
-                if matches!(event, AgentEvent::Snapshot(_)) {
+                if matches!(event, AgentEvent::Snapshot { .. }) {
                     queue.clear();
                 }
                 if !enqueue(&mut queue, ids.event(event)) {
@@ -281,7 +284,10 @@ async fn feed(reviews: &dyn AgentReviews, running: &Running) {
                     let (snapshot, fresh) = reviews.subscribe().await;
                     stream = fresh;
                     queue.clear();
-                    queue.push_back(ids.event(AgentEvent::Snapshot(snapshot)));
+                    queue.push_back(ids.event(AgentEvent::Snapshot {
+                        reviews: snapshot,
+                        older_dropped: false,
+                    }));
                 }
             }
         }

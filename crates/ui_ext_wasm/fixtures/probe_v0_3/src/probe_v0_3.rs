@@ -259,6 +259,8 @@ fn code(error: &HostError) -> &'static str {
         HostErrorCode::NotPermitted => "not-permitted",
         HostErrorCode::Unavailable => "unavailable",
         HostErrorCode::Denied => "denied",
+        HostErrorCode::UntrustedWorktree => "untrusted-worktree",
+        HostErrorCode::NoWorktree => "no-worktree",
     }
 }
 
@@ -636,6 +638,7 @@ impl Guest for Probe {
                     process::SpawnError::NotFound(_) => "not-found",
                     process::SpawnError::LimitExceeded => "limit-exceeded",
                     process::SpawnError::Io(_) => "io",
+                    process::SpawnError::Other(_) => "other",
                 }
             ),
             fyx::ui::io::IoEvent::EditDone((id, Ok(()))) => format!("edit-done {id} ok"),
@@ -648,6 +651,8 @@ impl Guest for Probe {
                     workspace_edit::EditError::NotFound(_) => "not-found",
                     workspace_edit::EditError::Invalid(_) => "invalid",
                     workspace_edit::EditError::Cancelled => "cancelled",
+                    workspace_edit::EditError::UntrustedWorktree => "untrusted-worktree",
+                    workspace_edit::EditError::Other(_) => "other",
                 }
             ),
             fyx::ui::io::IoEvent::Agent(event) => format!("agent {}", agent_report(&event)),
@@ -762,9 +767,11 @@ fn review_report(info: &agent_observe::ReviewInfo) -> String {
 fn agent_report(event: &agent_observe::AgentEvent) -> String {
     use agent_observe::AgentEvent;
     match event {
-        AgentEvent::Snapshot(reviews) => format!(
-            "snapshot {}",
-            reviews
+        AgentEvent::Snapshot(snapshot) => format!(
+            "snapshot{} {}",
+            if snapshot.older_dropped { " (older dropped)" } else { "" },
+            snapshot
+                .reviews
                 .iter()
                 .map(review_report)
                 .collect::<Vec<_>>()

@@ -245,6 +245,7 @@ pub enum SpawnError {
     NotFound(String),
     LimitExceeded,
     Io(String),
+    Other(String),
 }
 
 fn invalid(message: impl Into<String>) -> HostError {

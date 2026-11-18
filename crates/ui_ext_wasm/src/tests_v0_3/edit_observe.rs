@@ -474,6 +474,14 @@ async fn test_editor_errors_reach_the_guest(cx: &mut TestAppContext) {
         .clone();
     // 0.3 has no document versions (0.4): the host never gets one.
     assert_eq!(applied[0].1.files[0].expected_version, None);
+
+    // integration-5 A5: restricted mode is its own case, not a message to match.
+    *setup.edits.as_ref().unwrap().result.lock().unwrap() = Some(EditError::UntrustedWorktree);
+    let id = command(&extension, "edit a.rs@0.0-0.0=x").await;
+    assert_eq!(
+        deliver(&extension, &mut events).await,
+        format!("edit-done {id} err untrusted-worktree")
+    );
 }
 
 #[gpui::test]
@@ -701,7 +709,7 @@ async fn test_updates_coalesce_while_the_guest_lags(cx: &mut TestAppContext) {
     }
     assert!(matches!(
         delivered[0],
-        IoEvent::Agent(AgentEvent::Snapshot(_))
+        IoEvent::Agent(AgentEvent::Snapshot { .. })
     ));
     assert_eq!(delivered.iter().filter(|event| newest(event)).count(), 1);
 }
