@@ -570,3 +570,48 @@ async fn test_block_notice_goes_to_the_active_window(cx: &mut gpui::TestAppConte
     );
     assert_eq!(*target, workspace);
 }
+
+/// What `script/fyx-test-registry` writes is what a debug build accepts: run with
+/// `FYX_TEST_REGISTRY=<its OUT_DIR> cargo nextest run -p ui_ext_host --run-ignored all
+/// test_script_registry`.
+#[gpui::test]
+#[ignore = "needs the output of script/fyx-test-registry"]
+async fn test_script_registry(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let dir = std::env::var("FYX_TEST_REGISTRY").expect("FYX_TEST_REGISTRY");
+    let state = tempfile::tempdir().unwrap();
+    let registry = Registry::open(
+        compiled_keyset(),
+        RegistryLocation::Directory(dir.into()),
+        Arc::new(http_client::BlockedHttpClient),
+        RegistryStateDir(state.path().to_path_buf()),
+    )
+    .expect("keys");
+    let outcome = registry.refresh(now()).await;
+    assert_eq!(outcome.index, IndexRefresh::Updated);
+    assert!(
+        matches!(
+            outcome.blocklist,
+            Some(fyx_registry::CacheUpdate::Replace(_))
+        ),
+        "{:?}",
+        outcome.blocklist
+    );
+    let ids: Vec<ExtensionId> = registry
+        .client()
+        .lock()
+        .await
+        .index(now())
+        .expect("index")
+        .extensions()
+        .cloned()
+        .collect();
+    assert!(!ids.is_empty());
+    for id in ids {
+        let (release, bytes) = registry
+            .download_for_install(&id, now())
+            .await
+            .unwrap_or_else(|error| panic!("{id}: {error:#}"));
+        assert_eq!(bytes.len() as u64, release.package.size);
+    }
+}
