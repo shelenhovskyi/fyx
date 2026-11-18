@@ -158,6 +158,10 @@ pub struct SurfaceState {
     history: VecDeque<HistoryEntry>,
     /// What differs by the component's `fyx:ui` version.
     rules: ApiRules,
+    /// Bumped when the surface moves to a new instance (`replace_backend`): a result of a call
+    /// made on an older instance is dropped, so an old instance can neither patch the new tree
+    /// nor fail a healthy extension (triage-3 #4).
+    backend_epoch: u64,
     _mount: Option<Task<()>>,
 }
 
@@ -398,6 +402,7 @@ impl SurfaceState {
             next_row_generation: 0,
             history: VecDeque::new(),
             rules: ApiRules::for_version(&backend_version),
+            backend_epoch: 0,
             _mount: None,
         }
     }
@@ -464,10 +469,18 @@ impl SurfaceState {
     /// Asks the extension for the whole tree again, discarding the retained one.
     pub fn mount(&mut self, cx: &mut Context<Self>) {
         let call = self.backend.mount(&self.surface.id);
+        let epoch = self.backend_epoch;
         self._mount = Some(cx.spawn(async move |this, cx| {
             let result = call.await;
             this.update(cx, |this, cx| {
+                if this.backend_epoch != epoch {
+                    return;
+                }
                 this.resyncing = false;
+                // A surface that stopped (failed) while its mount was in flight stays stopped.
+                if matches!(this.phase, Phase::Failed { .. }) {
+                    return;
+                }
                 if !this.is_open() {
                     // A modal closed while its mount was in flight.
                     return;
@@ -511,6 +524,8 @@ impl SurfaceState {
     ) {
         self.backend = backend;
         self.surface = surface;
+        self.backend_epoch += 1;
+        self.rules = ApiRules::for_version(&self.backend.api_version());
         self.events.clear();
         self.retry(cx);
     }
@@ -531,7 +546,9 @@ impl SurfaceState {
     pub fn fail(&mut self, message: SharedString, retryable: bool, cx: &mut Context<Self>) {
         self.phase = Phase::Failed { message, retryable };
         self.events.clear();
-        // A failed surface drops its tick (design.md, B).
+        // A failed surface drops its tick (design.md, B) and its mount in flight, so it does not
+        // revive when that mount answers (triage-3 #4).
+        self._mount = None;
         self.tick = None;
         self._tick_timer = None;
         self.tick_waits_for_mount = false;
@@ -661,16 +678,22 @@ impl SurfaceState {
                             }
                             Next::Tick => this.backend.tick(&this.surface.id),
                         };
-                        (next, call, this_now)
+                        (next, call, this_now, this.backend_epoch)
                     })
                 });
-                let Ok(Some((next, call, started))) = next else {
+                let Ok(Some((next, call, started, epoch))) = next else {
                     break;
                 };
                 let result = call.await;
-                let applied = this.update(cx, |this, cx| match next {
-                    Next::Event(event) => this.apply_reply(&event, result, cx),
-                    Next::Tick => this.apply_tick_reply(result, started, cx),
+                let applied = this.update(cx, |this, cx| {
+                    // A reply from the instance this surface had before a reload.
+                    if this.backend_epoch != epoch {
+                        return;
+                    }
+                    match next {
+                        Next::Event(event) => this.apply_reply(&event, result, cx),
+                        Next::Tick => this.apply_tick_reply(result, started, cx),
+                    }
                 });
                 if applied.is_err() {
                     break;
@@ -1187,10 +1210,13 @@ impl SurfaceState {
         let call = self
             .backend
             .list_rows(&self.surface.id, list, range.start, range.len() as u32);
+        let epoch = self.backend_epoch;
         cx.spawn(async move |this, cx| {
             let result = call.await;
             this.update(cx, |this, cx| {
-                this.receive_rows(list, generation, range, result, cx)
+                if this.backend_epoch == epoch {
+                    this.receive_rows(list, generation, range, result, cx)
+                }
             })
             .ok();
         })
