@@ -1664,6 +1664,19 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(review_bindings.len() > 20, "the review blocks load");
         cx.bind_keys(review_bindings);
+        // The pane's tab navigation as the default keymap binds it, bound here as well so these
+        // tests do not depend on when those keymap lines land.
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", FocusNextControl, Some(KEY_CONTEXT)),
+            gpui::KeyBinding::new("shift-tab", FocusPreviousControl, Some(KEY_CONTEXT)),
+            gpui::KeyBinding::new("escape", FocusDiff, Some(KEY_CONTEXT)),
+            gpui::KeyBinding::new("tab", FocusNextControl, Some("AgentReview > Editor")),
+            gpui::KeyBinding::new(
+                "shift-tab",
+                FocusPreviousControl,
+                Some("AgentReview > Editor"),
+            ),
+        ]);
     }
 
     #[test]
