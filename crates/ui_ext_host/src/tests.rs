@@ -2884,7 +2884,9 @@ async fn test_canvas_paints_every_op(cx: &mut TestAppContext) {
         },
         DrawOp::Rect {
             bounds: rect,
-            fill: Some(paint(CanvasColor::Token(ui_ext::v0_2::ColorToken::TextMuted))),
+            fill: Some(paint(CanvasColor::Token(
+                ui_ext::v0_2::ColorToken::TextMuted,
+            ))),
             stroke: Some(stroke),
         },
         DrawOp::RoundedRect {
