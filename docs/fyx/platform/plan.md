@@ -73,18 +73,29 @@ rank below every other P4 task. If P4 slips, 4.10–4.12 (images) stay and 4.13�
 to 0.4.
 
 **4.6 follow-ups** (W2c's "not done yet" list in `tasks/progress/W2c.md`, at 0213dd3cc7). The
-first cut of `network:fetch` lands without these; each is still W2c's and still needed for 4.6 to
-match [design §8](../wit-0.3/design.md#8-networkfetch-plan-46):
+first cut of `network:fetch` landed without these; each is W2c's, needed for 4.6 to match
+[design §8](../wit-0.3/design.md#8-networkfetch-plan-46).
 
-- Fyx's proxy setting (without credentials; the address check cannot run behind a proxy);
-- brotli, zstd and deflate decoding, with the 16 MiB decoded cap (today any other
-  `content-encoding` → `other`);
-- the webpki roots next to the system roots (today reqwest's native roots only);
-- a local TLS test server with a test CA injected only in tests (the pinning test uses a plain TCP
-  server);
-- one Extension Inspector line per request: method, host, path, status, bytes, time; never bodies
-  or header values;
-- the Fyx version in the user-agent (`Fyx/<major.minor> (extension <id>/<version>)`).
+Done (W2c, `claude/fyx-w2c-host-0-2-cbde2c`):
+
+- ~~brotli, zstd and deflate decoding~~: **done** in 1cec81f03f. `accept-encoding: gzip, deflate,
+  br, zstd`, each under the 16 MiB decoded cap, zstd windows capped at 8 MiB;
+- ~~the Fyx version in the user-agent~~: **done** in 9fad627507,
+  `Fyx/<major.minor> (extension <id>/<version>)`;
+- ~~one Extension Inspector line per request~~: **done host side** in 6b36bc4e7d. Each fetch,
+  process, edit and agent-feed operation leaves a record (capability, id, what, outcome,
+  duration), with the URL stripped of user info, query and fragment; never bodies or header
+  values. Showing the records in the Inspector is W3's (`ui_ext_host/src/inspector.rs`).
+
+- ~~the webpki roots and a local TLS test server~~: **done** in d11017466c (Zed's TLS config:
+  platform verifier, webpki roots as fallback; a test CA only in tests);
+- Fyx's proxy setting: **done as a refusal** in b3822c6fce and a1c2557b27. Fyx's own setting is
+  read, never environment proxies, and credentials are never used. A fetch to a declared domain
+  is refused while a proxy is set, because reqwest's CONNECT cannot keep the checked address and
+  the SNI name. `localhost` goes direct.
+
+After 1.0: proxied fetches through a hand-made CONNECT tunnel that pins the checked address
+([design §8](../wit-0.3/design.md#8-networkfetch-plan-46), "Proxy").
 
 All six are done (2026-11-18, W2c `6b36bc4e7d`, `9fad627507`, `1cec81f03f`, `d11017466c`,
 `b3822c6fce`). The proxy turned out unsafe as built and now refuses proxied domain fetches

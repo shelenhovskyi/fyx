@@ -244,6 +244,12 @@ struct Found {
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
 
+/// Tests that need the registry as the global without the whole `init`.
+#[cfg(test)]
+pub(crate) fn set_global_for_tests(registry: Entity<UiExtensionRegistry>, cx: &mut App) {
+    cx.set_global(GlobalRegistry(registry));
+}
+
 impl Global for GlobalRegistry {}
 
 impl UiExtensionRegistry {
@@ -490,8 +496,9 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
-        // A new instance (a reload) starts with none of the old one's notifications.
+        // A new instance (a reload) starts with none of the old one's notifications or images.
         self.close_notifications_of(backend.extension_id(), None, cx);
+        clear_images(backend.extension_id(), cx);
         // A reload starts without decorations; the new instance places its own.
         remove_decorations(backend.extension_id(), cx);
         for loaded in self.surfaces_of(backend.extension_id()) {
@@ -801,10 +808,25 @@ impl UiExtensionRegistry {
                 format!("Allow {name} to connect to the internet?"),
                 format!("Hosts: {}", listed("network:fetch@").join(", ")),
             ),
-            "process:spawn" => (
-                format!("Allow {name} to run programs?"),
-                format!("Programs: {}", listed("process:spawn@").join(", ")),
-            ),
+            "process:spawn" => {
+                let env = listed("process:env@");
+                (
+                    format!("Allow {name} to run programs?"),
+                    format!(
+                        "Programs: {}{}",
+                        listed("process:spawn@").join(", "),
+                        if env.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "
+Environment it may pass: {}",
+                                env.join(", ")
+                            )
+                        }
+                    ),
+                )
+            }
             "workspace:edit" => (
                 format!("Allow {name} to edit files in your projects?"),
                 String::new(),
@@ -1022,6 +1044,42 @@ impl UiExtensionRegistry {
         }
         surface.state.update(cx, |state, cx| state.show(cx));
         cx.emit(RegistryEvent::ShowModal { key, workspace });
+    }
+
+    /// The modal layer did not take a modal that `show-surface` opened (the open modal refused to
+    /// close, or the window went): it is closed again and the extension is told, as when there is
+    /// no window, so a later `show-surface` opens it (integration-5 M4).
+    pub(crate) fn modal_not_shown(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(surface) = self.surface(key) else {
+            return;
+        };
+        let (extension_id, surface_id, state) = (
+            surface.extension_id.clone(),
+            surface.surface_id.clone(),
+            surface.state.clone(),
+        );
+        if !state.read(cx).is_open() {
+            return;
+        }
+        log::warn!("fyx:ui: {extension_id}: the modal {surface_id:?} could not be shown");
+        state.update(cx, |state, cx| state.close(None, cx));
+        if let Some(backend) = self.backends.get(&extension_id) {
+            backend.modal_closed(&surface_id);
+        }
+    }
+
+    /// The renderer removed an extension decoration that failed to mount (integration-5 M2): its
+    /// notifications and progresses go, and the instance is told.
+    pub(crate) fn decoration_closed(
+        &mut self,
+        extension_id: &str,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_notifications_of(extension_id, Some(id), cx);
+        if let Some(backend) = self.backends.get(extension_id) {
+            backend.decoration_closed(id);
+        }
     }
 
     /// The extension closed a modal: nothing is sent to it.
@@ -1293,6 +1351,19 @@ impl UiExtensionRegistry {
                         cache: found.cache.clone(),
                         capability_check: checker,
                         allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
+                        // The open worktrees, for process:spawn (W2c, plan 4.7).
+                        workspace: Some(cx.update(|cx| {
+                            crate::worktrees::OpenWorktrees::global(cx)
+                                .for_extension(&found.extension_id)
+                        })),
+                        // workspace:edit and agent:observe (plan 4.8).
+                        workspace_edits: Some(cx.update(|cx| {
+                            crate::workspace_edit::for_extension(&found.extension_id, cx)
+                        })),
+                        agent_reviews: cx.update(|cx| {
+                            crate::agent_observe::for_extension(&found.extension_id, cx)
+                        }),
+                        proxy: Some(cx.update(extension_proxy)),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -1333,6 +1404,7 @@ impl UiExtensionRegistry {
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
                                 this.consent
                                     .declare(&found.extension_id, found.capabilities.clone());
+                                set_image_dir(&found.extension_id, found.dir.clone(), cx);
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
                                     this.watch_component(
@@ -1569,6 +1641,7 @@ impl UiExtensionRegistry {
         // notifications, and the registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
         self.close_notifications_of(extension_id, None, cx);
+        clear_images(extension_id, cx);
         self.io_instances.remove(extension_id);
         self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
@@ -1703,12 +1776,24 @@ impl UiExtensionRegistry {
                     log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
                 }
             }
-            // Images are 0.3 (plan 4.10, 4.11): no renderer for them yet, and a 0.2 component
-            // cannot make these effects.
-            HostEffect::AddImage { handle, .. } | HostEffect::RemoveImage { handle } => {
-                log::debug!(
-                    "fyx:ui: {extension_id}: image {handle} ignored (no image renderer yet)"
-                )
+            // Plan 4.11: generated images, decoded when a node shows them.
+            HostEffect::AddImage {
+                handle,
+                format,
+                bytes,
+            } => {
+                if let Some(images) = crate::images::ImageCache::global(cx) {
+                    images.update(cx, |images, _| {
+                        images.add_generated(extension_id, handle, format, bytes)
+                    });
+                }
+            }
+            HostEffect::RemoveImage { handle } => {
+                if let Some(images) = crate::images::ImageCache::global(cx) {
+                    images.update(cx, |images, cx| {
+                        images.remove_generated(extension_id, handle, cx)
+                    });
+                }
             }
             HostEffect::Notify { id, notification } => {
                 self.show_notification(extension_id, id, notification, cx)
@@ -2008,6 +2093,7 @@ pub fn init(cx: &mut App) {
         );
     }
     follow_dev_paths_setting(cx);
+    follow_proxy_setting(cx);
     watch_installed_extensions(cx);
 }
 
@@ -2033,6 +2119,43 @@ fn staged_allowed(dev_extension: bool, cx: &App) -> Option<bool> {
 }
 
 /// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
+/// Fyx's `proxy` setting for `network:fetch`, one cell shared by every load and kept current
+/// (W2c, plan 4.6). The raw setting, never `ProxySettings::proxy_url`, which falls back to
+/// `HTTP_PROXY` and friends: environment proxies never apply (decision 23).
+#[derive(Clone, Default)]
+struct ExtensionProxy(ui_ext_wasm::network::ProxySetting);
+
+impl Global for ExtensionProxy {}
+
+fn proxy_setting(cx: &App) -> Option<String> {
+    cx.try_global::<settings::SettingsStore>()?
+        .merged_settings()
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn follow_proxy_setting(cx: &mut App) {
+    let proxy = cx.default_global::<ExtensionProxy>().0.clone();
+    let apply = move |cx: &mut App| {
+        let setting = proxy_setting(cx);
+        if !proxy.set(setting.as_deref()) && setting.is_some() {
+            log::warn!("fyx:ui: the proxy setting is not a usable proxy URL; fetches go direct");
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
+    }
+}
+
+/// The proxy cell every load gets.
+pub(crate) fn extension_proxy(cx: &mut App) -> ui_ext_wasm::network::ProxySetting {
+    cx.default_global::<ExtensionProxy>().0.clone()
+}
+
 fn follow_dev_paths_setting(cx: &mut App) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
@@ -2298,6 +2421,35 @@ fn attach_to_workspace(
     })
     .detach();
 
+    // Its worktrees, and whether each is trusted, for process:spawn (plan 4.7).
+    {
+        let workspace_id = cx.entity_id();
+        let report = move |workspace: &Workspace, cx: &mut App| {
+            let project = workspace.project().clone();
+            let worktrees = crate::worktrees::of_project(workspace_id.as_u64(), &project, cx);
+            crate::worktrees::OpenWorktrees::global(cx).set(workspace_id, worktrees);
+        };
+        report(workspace, cx);
+        crate::workspace_edit::register_workspace(
+            workspace_id,
+            Some(cx.weak_entity()),
+            workspace.project().downgrade(),
+            cx,
+        );
+        let project = workspace.project().clone();
+        cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
+            .detach();
+        if let Some(trust) = project::trusted_worktrees::TrustedWorktrees::try_get_global(cx) {
+            cx.observe(&trust, move |workspace, _, cx| report(workspace, cx))
+                .detach();
+        }
+        cx.on_release(move |_, cx| {
+            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id);
+            crate::workspace_edit::unregister_workspace(workspace_id, cx);
+        })
+        .detach();
+    }
+
     // A closed workspace lets its containers go at once: the registry's observers hold
     // `surfaces` until its next notify (triage-3, ASYNC 8).
     cx.on_release({
@@ -2396,6 +2548,19 @@ fn ask_permission(
     .detach();
 }
 
+/// Where an extension's image assets are (plan 4.11).
+fn set_image_dir(extension_id: &str, dir: PathBuf, cx: &mut App) {
+    if let Some(images) = crate::images::ImageCache::global(cx) {
+        images.update(cx, |images, _| images.set_dir(extension_id, dir));
+    }
+}
+
+fn clear_images(extension_id: &str, cx: &mut App) {
+    if let Some(images) = crate::images::ImageCache::global(cx) {
+        images.update(cx, |images, cx| images.clear(extension_id, cx));
+    }
+}
+
 fn close_notification_view(open: OpenNotification, cx: &mut App) {
     if let Some(view) = open.view.and_then(|view| view.upgrade()) {
         view.update(cx, |view, cx| view.close_by_host(cx));
@@ -2490,9 +2655,17 @@ fn open_modal(
     };
     let weak = cx.weak_entity();
     workspace.hide_modal(window, cx);
-    workspace.toggle_modal(window, cx, move |window, cx| {
-        ExtensionModal::new(key, state, weak, window, cx)
+    workspace.toggle_modal(window, cx, {
+        let key = key.clone();
+        move |window, cx| ExtensionModal::new(key, state, weak, window, cx)
     });
+    // The open modal can refuse to close, and then the layer builds nothing.
+    let shown = workspace
+        .active_modal::<ExtensionModal>(cx)
+        .is_some_and(|modal| *modal.read(cx).key() == key);
+    if !shown {
+        registry.update(cx, |registry, cx| registry.modal_not_shown(&key, cx));
+    }
 }
 
 /// Brings the workspace's containers in line with the registry: adds the missing panels and
@@ -2677,6 +2850,16 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         capability_check: checker,
         // A `FYX_UI_DEV_EXTENSIONS` entry is a dev extension.
         allow_staged: cx.update(|cx| staged_allowed(true, cx)),
+        // Its id is known only after the load: the path keys its worktree ids.
+        workspace: Some(cx.update(|cx| {
+            crate::worktrees::OpenWorktrees::global(cx).for_extension(&path.to_string_lossy())
+        })),
+        workspace_edits: Some(
+            cx.update(|cx| crate::workspace_edit::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        agent_reviews: cx
+            .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
+        proxy: Some(cx.update(extension_proxy)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
@@ -2722,6 +2905,9 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             };
             registry.claim_extension_id(&extension_id, source)?;
             registry.consent.declare(&extension_id, declared);
+            if reload_path.is_dir() {
+                set_image_dir(&extension_id, reload_path.clone(), cx);
+            }
             registry.register_extension(extension, pushed, cx);
             if let Some(component) = component {
                 registry.watch_component(
