@@ -1180,6 +1180,12 @@ pub struct LoadOptions {
     /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
     /// Applies only to a 0.3 component that declares `network:fetch`.
     pub network_domains: Option<Vec<String>>,
+    /// `[[fyx_ui.processes]]`, checked by `UiManifest::check_processes`; `None` when none are
+    /// declared. [`UiExtension::load_checked`] sets it. Enforced by the 0.3 `process` import
+    /// (plan 4.7).
+    pub processes: Option<Vec<ProcessSpec>>,
+    /// `[fyx_ui.process] env`; `None` when none is declared.
+    pub process_env: Option<Vec<String>>,
     /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
     pub resolver: Option<Arc<dyn network::Resolve>>,
 }
@@ -1232,6 +1238,9 @@ impl UiExtension {
             allow_staged,
             network_domains,
             resolver,
+            // The 0.3 `process` import takes these (W2c, plan 4.7).
+            processes: _,
+            process_env: _,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1471,6 +1480,8 @@ impl UiExtension {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
             network_domains: manifest.network.as_ref().map(|table| table.domains.clone()),
+            processes: (!manifest.processes.is_empty()).then(|| manifest.processes.clone()),
+            process_env: manifest.process.as_ref().map(|process| process.env.clone()),
             ..options
         };
         let (mut extension, pushed) =
