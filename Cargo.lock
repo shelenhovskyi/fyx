@@ -19457,6 +19457,7 @@ name = "ui_ext_wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes 1.11.1",
  "fs",
  "futures 0.3.34",
  "fyx_ext_harness",
@@ -19468,6 +19469,7 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
+ "tokio",
  "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",
