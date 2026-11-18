@@ -380,3 +380,13 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - Probe: case 6 now traps on `language.unregister-provider`; cases 10 and 11 and the
   `perm query|request` commands. 3 tests.
 - `AgentReviews::subscribe` is async (85a7d3c2ed) for W5's `agent_review::observe(&mut App)`.
+
+## Retained-tree text cap (2026-11-18, triage-3 #7 remainder)
+
+- `ui_ext::v0_2::tree::MAX_TREE_TEXT_BYTES` = 8 MiB of props text per surface tree (0.2 and
+  0.3), counted by `Props::text_len()` (moved from ui_ext_wasm's conversions, same rules) and
+  kept as a running total through insert, set-props, remove, replace and undo.
+- Past it: `TreeError::TreeTextTooLarge { max }`, atomically like the other caps (a push is
+  refused, a reply fails). `Tree::text_bytes()` for the Inspector.
+- 0.1's tree is unchanged. Not counted: list-row trees, each built and dropped per fetch and
+  bounded by `max_nodes_per_update` and the per-call text cap.
