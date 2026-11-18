@@ -4,7 +4,7 @@
 //! the call returns, in call order, before the call's own value.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,7 +12,10 @@ use std::{
 use ui_ext::{
     ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement,
     image::{self, ImageFormat},
-    v0_2,
+    v0_2::{
+        self,
+        notifications::{self as notify, Notification, ProgressOptions, ProgressValue},
+    },
 };
 
 use crate::MAX_PUSHES_PER_CALL;
@@ -74,6 +77,22 @@ pub enum HostEffect {
     },
     /// `images.remove-image` of a live handle: nodes that show it fall back to their alt text.
     RemoveImage { handle: u32 },
+    /// `notifications.notify` (design.md M.1): show it in the active workspace window without
+    /// moving focus, with the extension's provenance line. Its events go to `handle-event` of
+    /// `notification.owner`.
+    Notify { id: u64, notification: Notification },
+    /// `dismiss-notification` of an open notification: close it, with no event.
+    DismissNotification { id: u64 },
+    /// `progress-start` (M.2), indeterminate until the first update.
+    ProgressStart { id: u64, options: ProgressOptions },
+    /// `progress-update` of a running progress; `None` keeps the previous message.
+    ProgressUpdate {
+        id: u64,
+        value: ProgressValue,
+        message: Option<String>,
+    },
+    /// `progress-end` of a running progress, with no event.
+    ProgressEnd { id: u64 },
 }
 
 /// The validated result of a call with the effects the guest made during it: apply `effects` in
@@ -141,6 +160,17 @@ pub(crate) struct ApiState {
     /// Live generated images (0.3), at most [`image::MAX_GENERATED_IMAGES`].
     images: BTreeSet<u32>,
     next_image: u32,
+    /// Open notifications and running progresses by id, with their owners (§M).
+    open_notifications: BTreeMap<u64, String>,
+    running_progresses: BTreeMap<u64, String>,
+    next_notification: u64,
+    next_progress: u64,
+    /// When the accepted `notify` and `progress-start` calls of the rolling window were made.
+    notify_times: VecDeque<Instant>,
+    progress_start_times: VecDeque<Instant>,
+    /// `notify` effects and `progress-update` calls of the running call.
+    notification_effects: usize,
+    progress_updates: usize,
 }
 
 impl ApiState {
@@ -160,6 +190,14 @@ impl ApiState {
             decoration_effects: 0,
             images: BTreeSet::new(),
             next_image: 1,
+            open_notifications: BTreeMap::new(),
+            running_progresses: BTreeMap::new(),
+            next_notification: 1,
+            next_progress: 1,
+            notify_times: VecDeque::new(),
+            progress_start_times: VecDeque::new(),
+            notification_effects: 0,
+            progress_updates: 0,
         }
     }
 
@@ -190,6 +228,8 @@ impl ApiState {
         self.pushes = 0;
         self.pushed_items = 0;
         self.decoration_effects = 0;
+        self.notification_effects = 0;
+        self.progress_updates = 0;
         if let Activation::Until(until) = self.activation
             && Instant::now() >= until
         {
@@ -199,6 +239,8 @@ impl ApiState {
 
     /// Before `handle-event`: a click or Enter grants an activation, and a `dismissed` modal is
     /// no longer shown.
+    /// A clicked notification action is a gesture too (design.md M.3), and it, like a closed
+    /// notification, frees the notification's open slot.
     pub(crate) fn begin_event(&mut self, surface_id: &str, event: &v0_2::UiEvent) {
         match event {
             v0_2::UiEvent::Click(_)
@@ -207,8 +249,25 @@ impl ApiState {
             v0_2::UiEvent::Dismissed(_) => {
                 self.shown_modals.remove(surface_id);
             }
-            v0_2::UiEvent::InputChanged(..) | v0_2::UiEvent::RowSelected(..) => {}
+            v0_2::UiEvent::NotificationAction(action) => {
+                self.activation = Activation::DuringCall;
+                self.open_notifications.remove(&action.notification);
+            }
+            v0_2::UiEvent::NotificationClosed(id, _) => {
+                self.open_notifications.remove(id);
+            }
+            v0_2::UiEvent::InputChanged(..)
+            | v0_2::UiEvent::RowSelected(..)
+            | v0_2::UiEvent::ProgressCancelRequested(_) => {}
         }
+    }
+
+    /// The owner is gone: its notifications close and its progresses end, without events (the
+    /// renderer does the same when it applies the removal).
+    fn forget_owner(&mut self, owner: &str) {
+        self.open_notifications.retain(|_, open| open != owner);
+        self.running_progresses
+            .retain(|_, running| running != owner);
     }
 
     /// After a call: the effects it made, in order. An activation granted by it starts counting
@@ -337,6 +396,7 @@ impl ApiState {
     pub(crate) fn remove_surface(&mut self, surface_id: String) -> Result<(), v0_2::HostError> {
         self.live.remove_surface(&surface_id).map_err(api_error)?;
         self.shown_modals.remove(&surface_id);
+        self.forget_owner(&surface_id);
         self.effects.push(HostEffect::RemoveSurface { surface_id });
         Ok(())
     }
@@ -430,6 +490,7 @@ impl ApiState {
         self.live
             .remove_decoration(&id, &self.capabilities[..])
             .map_err(api_error)?;
+        self.forget_owner(&id);
         self.decoration_effects += 1;
         self.effects.push(HostEffect::RemoveDecoration { id });
         Ok(())
@@ -484,6 +545,189 @@ impl ApiState {
     pub(crate) fn remove_image(&mut self, handle: u32) {
         if self.images.remove(&handle) {
             self.effects.push(HostEffect::RemoveImage { handle });
+        }
+    }
+}
+
+impl ApiState {
+    fn require_notifications(&self) -> Result<(), v0_2::HostError> {
+        if self
+            .capabilities
+            .iter()
+            .any(|capability| capability == notify::CAPABILITY_NOTIFICATIONS)
+        {
+            Ok(())
+        } else {
+            Err(host_error(
+                v0_2::HostErrorCode::NotPermitted,
+                format!(
+                    "notifications and progress need {:?} in [fyx_ui].capabilities",
+                    notify::CAPABILITY_NOTIFICATIONS
+                ),
+            ))
+        }
+    }
+
+    /// A live surface or decoration of the extension.
+    fn require_owner(&self, owner: &str) -> Result<(), v0_2::HostError> {
+        if self.live.surface_kind(owner).is_some() || self.live.is_decoration(owner) {
+            Ok(())
+        } else {
+            Err(api_error(ApiError::UnknownSurface {
+                id: owner.to_owned(),
+            }))
+        }
+    }
+
+    /// Drops the times that left the rolling window and says whether another one fits.
+    fn window_has_room(times: &mut VecDeque<Instant>, max: usize) -> bool {
+        let now = Instant::now();
+        while times
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= notify::RATE_WINDOW)
+        {
+            times.pop_front();
+        }
+        times.len() < max
+    }
+
+    /// `notifications.notify` (design.md M.1), checked in this order: the capability, the
+    /// owner, the text rules, the per-call cap, the open cap, the rate cap. Past a cap the error
+    /// is `limit-exceeded`, and the caller writes the title to the log instead.
+    pub(crate) fn notify(&mut self, notification: Notification) -> Result<u64, v0_2::HostError> {
+        self.require_notifications()?;
+        self.require_owner(&notification.owner)?;
+        notification
+            .validate()
+            .map_err(|error| host_error(v0_2::HostErrorCode::InvalidArgument, error.0))?;
+        let limit = |message: String| host_error(v0_2::HostErrorCode::LimitExceeded, message);
+        if self.notification_effects >= notify::MAX_NOTIFICATION_EFFECTS_PER_CALL {
+            return Err(limit(format!(
+                "at most {} notifications per call",
+                notify::MAX_NOTIFICATION_EFFECTS_PER_CALL
+            )));
+        }
+        if self.open_notifications.len() >= notify::MAX_OPEN_NOTIFICATIONS {
+            return Err(limit(format!(
+                "at most {} open notifications per extension",
+                notify::MAX_OPEN_NOTIFICATIONS
+            )));
+        }
+        if !Self::window_has_room(&mut self.notify_times, notify::MAX_NOTIFY_PER_WINDOW) {
+            return Err(limit(format!(
+                "at most {} notifications per {} s per extension",
+                notify::MAX_NOTIFY_PER_WINDOW,
+                notify::RATE_WINDOW.as_secs()
+            )));
+        }
+        let id = self.next_notification;
+        self.next_notification += 1;
+        self.notify_times.push_back(Instant::now());
+        self.notification_effects += 1;
+        self.open_notifications
+            .insert(id, notification.owner.clone());
+        self.effects.push(HostEffect::Notify { id, notification });
+        Ok(id)
+    }
+
+    /// `dismiss-notification`: unknown or closed ids are ignored.
+    pub(crate) fn dismiss_notification(&mut self, id: u64) {
+        if self.open_notifications.remove(&id).is_some() {
+            self.effects.push(HostEffect::DismissNotification { id });
+        }
+    }
+
+    /// `progress-start` (design.md M.2): the capability, the owner (a panel for `panel`), the
+    /// title, the running cap, the rate cap.
+    pub(crate) fn progress_start(
+        &mut self,
+        options: ProgressOptions,
+    ) -> Result<u64, v0_2::HostError> {
+        self.require_notifications()?;
+        self.require_owner(&options.owner)?;
+        if options.location == notify::ProgressLocation::Panel
+            && !matches!(
+                self.live.surface_kind(&options.owner),
+                Some(v0_2::SurfaceKind::Panel(_))
+            )
+        {
+            return Err(host_error(
+                v0_2::HostErrorCode::InvalidArgument,
+                format!(
+                    "a `panel` progress needs a panel as its owner, and {:?} is not one",
+                    options.owner
+                ),
+            ));
+        }
+        options
+            .validate()
+            .map_err(|error| host_error(v0_2::HostErrorCode::InvalidArgument, error.0))?;
+        if self.running_progresses.len() >= notify::MAX_RUNNING_PROGRESSES {
+            return Err(host_error(
+                v0_2::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} running progresses per extension",
+                    notify::MAX_RUNNING_PROGRESSES
+                ),
+            ));
+        }
+        if !Self::window_has_room(
+            &mut self.progress_start_times,
+            notify::MAX_PROGRESS_STARTS_PER_WINDOW,
+        ) {
+            return Err(host_error(
+                v0_2::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} progress starts per {} s per extension",
+                    notify::MAX_PROGRESS_STARTS_PER_WINDOW,
+                    notify::RATE_WINDOW.as_secs()
+                ),
+            ));
+        }
+        let id = self.next_progress;
+        self.next_progress += 1;
+        self.progress_start_times.push_back(Instant::now());
+        self.running_progresses.insert(id, options.owner.clone());
+        self.effects.push(HostEffect::ProgressStart { id, options });
+        Ok(id)
+    }
+
+    /// `progress-update`: a running id, a valid value and message, at most
+    /// [`notify::MAX_PROGRESS_UPDATES_PER_CALL`] per call.
+    pub(crate) fn progress_update(
+        &mut self,
+        id: u64,
+        value: ProgressValue,
+        message: Option<String>,
+    ) -> Result<(), v0_2::HostError> {
+        self.require_notifications()?;
+        if !self.running_progresses.contains_key(&id) {
+            return Err(host_error(
+                v0_2::HostErrorCode::InvalidArgument,
+                format!("progress {id} is not running"),
+            ));
+        }
+        notify::check_progress_update(value, message.as_deref())
+            .map_err(|error| host_error(v0_2::HostErrorCode::InvalidArgument, error.0))?;
+        if self.progress_updates >= notify::MAX_PROGRESS_UPDATES_PER_CALL {
+            return Err(host_error(
+                v0_2::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} progress updates per call",
+                    notify::MAX_PROGRESS_UPDATES_PER_CALL
+                ),
+            ));
+        }
+        self.progress_updates += 1;
+        self.effects
+            .push(HostEffect::ProgressUpdate { id, value, message });
+        Ok(())
+    }
+
+    /// `progress-end`: unknown or ended ids are ignored.
+    pub(crate) fn progress_end(&mut self, id: u64) {
+        if self.running_progresses.remove(&id).is_some() {
+            self.effects.push(HostEffect::ProgressEnd { id });
         }
     }
 }

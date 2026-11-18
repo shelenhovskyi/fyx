@@ -1142,7 +1142,12 @@ impl SurfaceTree {
             UiEvent::InputChanged((id, _))
             | UiEvent::InputSubmitted((id, _))
             | UiEvent::RowSelected((id, _)) => *id,
-            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => return,
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(_)
+            | UiEvent::ProgressCancelRequested(_) => return,
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::Orphaned | UiEvent::CanvasClick(_) => return,
         };
@@ -1173,7 +1178,12 @@ impl SurfaceTree {
                     list.selected = Some(*index);
                 }
             }
-            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => {}
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(_)
+            | UiEvent::ProgressCancelRequested(_) => {}
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::Orphaned | UiEvent::CanvasClick(_) => {}
         }

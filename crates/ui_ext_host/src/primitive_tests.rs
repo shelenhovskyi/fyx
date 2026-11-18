@@ -198,7 +198,7 @@ impl UiBackend for StaticBackend {
         let tree = Tree::from_nodes(nodes(), TreeLimits::default()).map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -213,7 +213,7 @@ impl UiBackend for StaticBackend {
         self.events.borrow_mut().push(event);
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -226,17 +226,21 @@ impl UiBackend for StaticBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         let rows = if list == TABLE {
             (start..(start + count).min(TABLE_ROWS))
-                .map(|index| (index, table_row(index)))
+                .map(|index| crate::backend::Row {
+                    index,
+                    indent: 0,
+                    tree: table_row(index),
+                })
                 .collect()
         } else {
             Vec::new()
         };
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: rows,
             })
         }
@@ -451,4 +455,71 @@ async fn test_diff_view_language_from_name(cx: &mut TestAppContext) {
         "diff.txt"
     );
     assert_eq!(crate::view::diff_path(None, &languages), "diff.txt");
+}
+
+/// Triage-3 #5 (PERF 1): how long a redraw takes when nothing in the surface changed (a caret
+/// blink elsewhere), for a tree at the node cap. Prints the timing; run with `--ignored`.
+#[gpui::test]
+#[ignore]
+async fn bench_redraw_of_a_large_tree(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let flex = |direction| {
+        Props::Flex(FlexProps {
+            direction,
+            ..FlexProps::default()
+        })
+    };
+    let mut nodes = vec![node(1, None, flex(FlexDirection::Column))];
+    let mut next = 2;
+    for _ in 0..128 {
+        let group = next;
+        next += 1;
+        nodes.push(node(group, Some(1), flex(FlexDirection::Row)));
+        for i in 0..126 {
+            nodes.push(node(next, Some(group), text(format!("cell {i}"))));
+            next += 1;
+        }
+    }
+    let count = nodes.len();
+    let tree = Tree::from_nodes(nodes, TreeLimits::default()).expect("valid tree");
+    let backend: Rc<dyn UiBackend> = Rc::new(StaticBackend::default());
+    let surface = ui_ext::v0_2::Surface {
+        id: "static".into(),
+        title: "Static".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
+            default_size: 320,
+        }),
+    };
+    let state = cx.new(|cx| SurfaceState::with_tree(backend, surface, None, tree, cx));
+    // How a panel hosts it: as a cached view (`AnyView::cached`), so a redraw caused by
+    // something else (a caret blinking in another editor) reuses its last frame.
+    struct CachedHost(Entity<SurfaceView>);
+    impl gpui::Render for CachedHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            gpui::div().size_full().child(
+                gpui::AnyView::from(self.0.clone())
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
+        }
+    }
+    let (host, vcx) = cx.add_window_view(|window, cx| {
+        CachedHost(cx.new(|cx| SurfaceView::new(state, false, window, cx)))
+    });
+    vcx.run_until_parked();
+    for round in 0..3 {
+        let started = std::time::Instant::now();
+        // As a caret blink elsewhere does: one other view notifies, the window redraws.
+        host.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        eprintln!("redraw {round} of {count} nodes: {:?}", started.elapsed());
+    }
 }

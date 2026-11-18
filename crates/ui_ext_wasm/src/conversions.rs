@@ -194,6 +194,145 @@ macro_rules! host_imports {
     };
 }
 
+/// `impl wit_notifications::Host for UiState` (design.md M): `wit_notifications` is the version's
+/// `notifications` module. Both worlds have the same interface.
+macro_rules! notification_imports {
+    () => {
+        impl wit_notifications::Host for UiState {
+            fn notify(
+                &mut self,
+                notification: wit_notifications::Notification,
+            ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+                let notification = model::Notification {
+                    owner: notification.owner,
+                    level: match notification.level {
+                        wit_notifications::NotificationLevel::Info => model::NotificationLevel::Info,
+                        wit_notifications::NotificationLevel::Success => {
+                            model::NotificationLevel::Success
+                        }
+                        wit_notifications::NotificationLevel::Warning => {
+                            model::NotificationLevel::Warning
+                        }
+                        wit_notifications::NotificationLevel::Error => {
+                            model::NotificationLevel::Error
+                        }
+                    },
+                    title: notification.title,
+                    body: notification.body,
+                    actions: notification
+                        .actions
+                        .into_iter()
+                        .map(|action| model::NotificationAction {
+                            id: action.id,
+                            label: action.label,
+                        })
+                        .collect(),
+                    auto_dismiss: notification.auto_dismiss,
+                };
+                self.count_lifted_text(
+                    notification.owner.len()
+                        + notification.title.len()
+                        + notification.body.as_ref().map_or(0, String::len)
+                        + notification
+                            .actions
+                            .iter()
+                            .map(|action| action.id.len() + action.label.len())
+                            .sum::<usize>(),
+                )?;
+                if let Err(error) = self.permit(model::CAPABILITY_NOTIFICATIONS) {
+                    return Ok(Err(error.into()));
+                }
+                let title = notification.title.clone();
+                let result = self.api.notify(notification);
+                if let Err(error) = &result
+                    && error.code == model::HostErrorCode::LimitExceeded
+                {
+                    // Spec decision 22: notifications past the caps go to the log instead.
+                    log::info!(
+                        target: "fyx_ui",
+                        "{}: notification not shown ({}): {}",
+                        self.extension_id,
+                        error.message,
+                        $crate::conversions::sanitize_title(&title)
+                    );
+                }
+                Ok(result.map_err(Into::into))
+            }
+
+            fn dismiss_notification(&mut self, id: u64) -> wasmtime::Result<()> {
+                self.api.dismiss_notification(id);
+                Ok(())
+            }
+
+            fn progress_start(
+                &mut self,
+                options: wit_notifications::ProgressOptions,
+            ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+                let options = model::ProgressOptions {
+                    owner: options.owner,
+                    title: options.title,
+                    location: match options.location {
+                        wit_notifications::ProgressLocation::StatusBar => {
+                            model::ProgressLocation::StatusBar
+                        }
+                        wit_notifications::ProgressLocation::Panel => {
+                            model::ProgressLocation::Panel
+                        }
+                    },
+                    cancellable: options.cancellable,
+                };
+                self.count_lifted_text(options.owner.len() + options.title.len())?;
+                if let Err(error) = self.permit(model::CAPABILITY_NOTIFICATIONS) {
+                    return Ok(Err(error.into()));
+                }
+                Ok(self.api.progress_start(options).map_err(Into::into))
+            }
+
+            fn progress_update(
+                &mut self,
+                id: u64,
+                value: wit_notifications::ProgressValue,
+                message: Option<String>,
+            ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+                self.count_lifted_text(message.as_ref().map_or(0, String::len))?;
+                let value = match value {
+                    wit_notifications::ProgressValue::Indeterminate => {
+                        model::ProgressValue::Indeterminate
+                    }
+                    wit_notifications::ProgressValue::Percent(percent) => {
+                        model::ProgressValue::Percent(percent)
+                    }
+                };
+                Ok(self
+                    .api
+                    .progress_update(id, value, message)
+                    .map_err(Into::into))
+            }
+
+            fn progress_end(&mut self, id: u64) -> wasmtime::Result<()> {
+                self.api.progress_end(id);
+                Ok(())
+            }
+        }
+    };
+}
+
+/// A notification title as it goes into the log: one line, control and format characters
+/// escaped.
+pub(crate) fn sanitize_title(title: &str) -> String {
+    title
+        .chars()
+        .take(80)
+        .flat_map(|character| {
+            if character.is_control() || matches!(character, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}') {
+                character.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
+}
+
 /// The conversions of the copied-forward types. `props: { … }` and `kinds: { … }` are the extra
 /// `match` arms of the version's `props` and `surface-kind` variants; they map the case or return
 /// `Err` with [`unsupported`].
@@ -426,6 +565,29 @@ macro_rules! conversions {
                         model::DismissReason::Replaced => wit::DismissReason::Replaced,
                         model::DismissReason::WindowClosed => wit::DismissReason::WindowClosed,
                     }),
+                    model::UiEvent::NotificationAction(event) => {
+                        Self::NotificationAction(wit::NotificationActionEvent {
+                            notification: event.notification,
+                            action: event.action,
+                        })
+                    }
+                    model::UiEvent::NotificationClosed(id, reason) => Self::NotificationClosed((
+                        id,
+                        match reason {
+                            model::NotificationCloseReason::User => {
+                                wit::NotificationCloseReason::User
+                            }
+                            model::NotificationCloseReason::Expired => {
+                                wit::NotificationCloseReason::Expired
+                            }
+                            model::NotificationCloseReason::WindowClosed => {
+                                wit::NotificationCloseReason::WindowClosed
+                            }
+                        },
+                    )),
+                    model::UiEvent::ProgressCancelRequested(id) => {
+                        Self::ProgressCancelRequested(id)
+                    }
                 }
             }
         }
@@ -449,7 +611,7 @@ macro_rules! icons {
     };
 }
 
-pub(crate) use {conversions, host_imports, icons};
+pub(crate) use {conversions, host_imports, icons, notification_imports};
 
 /// A list conversion that stops at the first value the model cannot hold.
 pub(crate) fn try_collect<T, U>(values: Vec<T>) -> Result<Vec<U>, model::HostError>

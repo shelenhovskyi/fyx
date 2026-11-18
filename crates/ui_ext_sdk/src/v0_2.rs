@@ -303,6 +303,29 @@ pub mod glue {
                 v2::DismissReason::Replaced => DismissReason::Replaced,
                 v2::DismissReason::WindowClosed => DismissReason::WindowClosed,
             }),
+            v2::UiEvent::NotificationAction(action) => {
+                UiEvent::NotificationAction(crate::NotificationActionEvent {
+                    notification: action.notification,
+                    action: action.action,
+                })
+            }
+            v2::UiEvent::NotificationClosed((notification, reason)) => {
+                UiEvent::NotificationClosed((
+                    notification,
+                    match reason {
+                        v2::NotificationCloseReason::User => crate::NotificationCloseReason::User,
+                        v2::NotificationCloseReason::Expired => {
+                            crate::NotificationCloseReason::Expired
+                        }
+                        v2::NotificationCloseReason::WindowClosed => {
+                            crate::NotificationCloseReason::WindowClosed
+                        }
+                    },
+                ))
+            }
+            v2::UiEvent::ProgressCancelRequested(progress) => {
+                UiEvent::ProgressCancelRequested(progress)
+            }
         }
     }
 

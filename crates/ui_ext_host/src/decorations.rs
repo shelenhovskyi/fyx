@@ -133,6 +133,9 @@ struct Decoration {
     static_backend: Option<Rc<StaticBackend>>,
     /// The line as a CRDT anchor, per buffer it was found in.
     anchors: HashMap<BufferId, language::Anchor>,
+    /// Block height in editor lines, kept current as the tree changes. Editors resync only when
+    /// it changes (triage 3, PERF 10): a repaint inside the block needs no editor work.
+    lines: u32,
 }
 
 /// One block a decoration has in one editor.
@@ -169,7 +172,8 @@ impl Decorations {
         surface: Surface,
         cx: &mut Context<Self>,
     ) -> DecorationId {
-        self.insert(target, backend, surface, None, None, None, cx)
+        let state = cx.new(|cx| SurfaceState::new(backend, surface, None, cx));
+        self.insert(target, state, None, None, cx)
     }
 
     /// A decoration showing a host-supplied tree. Events are dropped.
@@ -193,15 +197,11 @@ impl Decorations {
                 priority: 0,
             }),
         };
-        Ok(self.insert(
-            target,
-            backend.clone(),
-            surface,
-            Some(backend),
-            None,
-            None,
-            cx,
-        ))
+        let state = {
+            let backend: Rc<dyn UiBackend> = backend.clone();
+            cx.new(|cx| SurfaceState::new(backend, surface, None, cx))
+        };
+        Ok(self.insert(target, state, Some(backend), None, cx))
     }
 
     /// Applies an extension's `place-decoration(id, location, nodes)` effect (design.md §L).
@@ -209,8 +209,10 @@ impl Decorations {
     /// The host checked the call (capability, id rule, path rule, caps); the path and the
     /// per-extension cap are checked here again, so no other caller can get around them. A live
     /// id moves: the old decoration, its blocks and its queued events are dropped, and the line is
-    /// anchored anew. A tree that does not fit is not shown; the extension is asked for
-    /// `mount(id)` instead, and a decoration whose mount fails too is removed with one warning.
+    /// anchored anew. The placed tree is live at once, so a `push-update(id, ..)` later in the
+    /// same effect list applies to it. A tree that does not fit is not shown; the extension is
+    /// asked for `mount(id)` instead, and a decoration whose mount fails too is removed with one
+    /// warning.
     ///
     /// `backend` is the extension's: calls for the decoration use `id` as the surface id. `link`
     /// routes what those calls push for other surfaces back to the registry.
@@ -244,10 +246,6 @@ impl Decorations {
                 None
             }
         };
-        let backend = Rc::new(PlacedBackend {
-            inner: backend,
-            placed: RefCell::new(placed),
-        });
         // Decorations are not surfaces; `SurfaceState` never reads `kind`.
         let surface = Surface {
             id: id.to_string(),
@@ -267,7 +265,11 @@ impl Decorations {
             extension_id: extension_id.into(),
             id: id.to_string(),
         };
-        Ok(self.insert(target, backend, surface, None, Some(owner), link, cx))
+        let state = cx.new(|cx| match placed {
+            Some(tree) => SurfaceState::with_tree(backend, surface, link, tree, cx),
+            None => SurfaceState::new(backend, surface, link, cx),
+        });
+        Ok(self.insert(target, state, None, Some(owner), cx))
     }
 
     /// Applies `remove-decoration(id)`. Returns whether the decoration was live.
@@ -340,20 +342,16 @@ impl Decorations {
             .count()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         target: DecorationTarget,
-        backend: Rc<dyn UiBackend>,
-        surface: Surface,
+        state: Entity<SurfaceState>,
         static_backend: Option<Rc<StaticBackend>>,
         owner: Option<Owner>,
-        link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> DecorationId {
         let id = DecorationId(self.next_id);
         self.next_id += 1;
-        let state = cx.new(|cx| SurfaceState::new(backend, surface, link, cx));
         let owned = owner.is_some();
         cx.observe(&state, move |this, state, cx| {
             // An extension decoration that cannot be mounted is removed, not shown as an error.
@@ -367,10 +365,17 @@ impl Decorations {
                 }
                 this.remove(id, cx);
             }
-            // A mounted tree can change the estimated height.
-            cx.notify();
+            // A new tree can change the estimated height; only then do editors resize blocks.
+            if let Some(decoration) = this.decorations.iter_mut().find(|d| d.id == id) {
+                let lines = block_lines(&decoration.target, &state, cx);
+                if decoration.lines != lines {
+                    decoration.lines = lines;
+                    cx.notify();
+                }
+            }
         })
         .detach();
+        let lines = block_lines(&target, &state, cx);
         self.decorations.push(Decoration {
             id,
             owner,
@@ -378,6 +383,7 @@ impl Decorations {
             state,
             static_backend,
             anchors: HashMap::default(),
+            lines,
         });
         cx.notify();
         id
@@ -498,6 +504,13 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
         return;
     };
     let editor_id = cx.entity_id();
+    {
+        // Nothing to place and nothing placed: no editor-wide work (triage 3, PERF 10).
+        let decorations = decorations.read(cx);
+        if decorations.decorations.is_empty() && !decorations.editors.contains_key(&editor_id) {
+            return;
+        }
+    }
     let multibuffer = editor.buffer().read(cx);
     let buffers: Vec<_> = multibuffer.all_buffers_iter().collect();
     let snapshot = multibuffer.snapshot(cx);
@@ -541,11 +554,7 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
                 let Some(anchor) = snapshot.anchor_in_excerpt(anchor) else {
                     continue;
                 };
-                let lines = decoration
-                    .target
-                    .lines
-                    .unwrap_or_else(|| decoration.state.read(cx).tree().map_or(1, estimate_lines))
-                    .clamp(1, MAX_BLOCK_LINES);
+                let lines = decoration.lines;
                 wanted.push((
                     (decoration.id, buffer_id),
                     anchor,
@@ -641,6 +650,14 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
     });
 }
 
+/// The block height for a decoration: the one it asked for, or estimated from its tree.
+fn block_lines(target: &DecorationTarget, state: &Entity<SurfaceState>, cx: &App) -> u32 {
+    target
+        .lines
+        .unwrap_or_else(|| state.read(cx).tree().map_or(1, estimate_lines))
+        .clamp(1, MAX_BLOCK_LINES)
+}
+
 /// `wanted` is absolute (compared with the file's absolute path) or a suffix of the
 /// worktree-qualified path, by whole components.
 pub(crate) fn path_matches(wanted: &Path, full_path: &Path, abs_path: Option<&Path>) -> bool {
@@ -701,7 +718,7 @@ impl UiBackend for StaticBackend {
             .map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -711,7 +728,7 @@ impl UiBackend for StaticBackend {
     fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -724,62 +741,14 @@ impl UiBackend for StaticBackend {
         _: NodeId,
         _: u32,
         _: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Vec::new(),
             })
         }
         .boxed_local()
-    }
-}
-
-/// An extension's backend for one decoration: the first mount answers with the placed tree
-/// without calling the extension; later mounts (a resync after a misfit) are `mount(id)` calls.
-struct PlacedBackend {
-    inner: Rc<dyn UiBackend>,
-    placed: RefCell<Option<Tree>>,
-}
-
-impl UiBackend for PlacedBackend {
-    fn extension_id(&self) -> &str {
-        self.inner.extension_id()
-    }
-
-    fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
-        match self.placed.borrow_mut().take() {
-            Some(value) => async move {
-                Ok(Reply {
-                    pushed: Vec::new(),
-                    value,
-                })
-            }
-            .boxed_local(),
-            None => self.inner.mount(surface_id),
-        }
-    }
-
-    fn handle_event(
-        &self,
-        surface_id: &str,
-        event: UiEvent,
-    ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
-        self.inner.handle_event(surface_id, event)
-    }
-
-    fn list_rows(
-        &self,
-        surface_id: &str,
-        list_node: NodeId,
-        start: u32,
-        count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
-        self.inner.list_rows(surface_id, list_node, start, count)
-    }
-
-    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
-        self.inner.diagnostics()
     }
 }
 

@@ -10,6 +10,7 @@ Imports:
 - interface `fyx:ui/host@0.3.0`
 - interface `fyx:ui/documents@0.3.0`
 - interface `fyx:ui/decorations@0.3.0`
+- interface `fyx:ui/notifications@0.3.0`
 - interface `fyx:ui/language@0.3.0`
 - interface `fyx:ui/virtual-documents@0.3.0`
 - interface `fyx:ui/picker@0.3.0`
@@ -417,6 +418,21 @@ Why the host closed a modal. Never sent when the extension closed it itself.
 
 Cases: `escape`, `focus-lost`, `replaced`, `window-closed`.
 
+### record `notification-action-event`
+
+§M. Which action of which notification was clicked.
+
+| Field | Type | Notes |
+|---|---|---|
+| `notification` | `u64` |  |
+| `action` | `string` | The `id` the extension gave the action. |
+
+### enum `notification-close-reason`
+
+§M. Why a notification closed when the extension did not close it.
+
+Cases: `user`, `expired`, `window-closed`.
+
 ### record `canvas-click`
 
 | Field | Type | Notes |
@@ -437,6 +453,9 @@ Cases: `escape`, `focus-lost`, `replaced`, `window-closed`.
 | `dismissed` | `dismiss-reason` | The host closed a modal surface; its tree is gone. The reply must be `unchanged`. |
 | `orphaned` |  | 0.3, block decorations only: the line the decoration was anchored to was deleted. The block stays where the anchor collapsed to until the extension moves or removes it. |
 | `canvas-click` | `canvas-click` | 0.3. A click on a `clickable` canvas, in canvas coordinates (after `scale-down`, so they match the draw list). Grants the click-or-Enter activation like `click`. |
+| `notification-action` | `notification-action-event` | §M. The user clicked an action button of a notification this surface owns. Grants the click-or-Enter activation, like `click`. |
+| `notification-closed` | `tuple<u64, notification-close-reason>` | §M. A notification this surface owns closed without the extension asking (an extension's own `dismiss-notification` sends nothing). |
+| `progress-cancel-requested` | `u64` | §M. The user pressed Cancel on a cancellable progress this surface owns. The progress stays until the extension calls `progress-end`. |
 
 ### enum `dock-position`
 
@@ -1388,3 +1407,72 @@ Frees a generated image. Nodes that still show it show their alt text. Unknown h
 ### `set-items: func(source: string, session: u64, items: list<picker-item>, append: bool) -> result<_, host-error>`
 
 Sets the items of `source` for one showing of a picker (`session` from `picker-source-event`). `source` is the picker's surface id for the owner, or the source id from the manifest for a contributor. Replaces the items given before for this session unless `append` is set. Items for a session that has closed are dropped without error. At most 10000 items per source and session, and 2000 per call.
+
+## Interface `notifications`
+
+Notifications and progress (design.md, "M"). Needs the `ui:notifications` capability (tier T0); without it every call returns `not-permitted`. Every function follows the effect rule of `host`: checked at the call, applied after the export returns, dropped by a trap. Every notification and progress has an **owner**: a live surface or decoration id of this extension. Its events arrive as `handle-event(owner, …)`, and removing the owner closes them without an event. The host always draws the extension's name and id above a notification and next to a progress; the extension cannot style, hide or replace that line.
+
+### type `host-error` = `host-error`
+
+
+### enum `notification-level`
+
+Cases: `info`, `success`, `warning`, `error`.
+
+### record `notification-action`
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `string` | 1 to 64 bytes of `[a-z0-9._-]`, unique within the notification. Sent back in `notification-action-event`. |
+| `label` | `string` | The button text: 1 to 24 bytes of plain text on one line. |
+
+### record `notification`
+
+| Field | Type | Notes |
+|---|---|---|
+| `owner` | `string` | The surface or decoration whose `handle-event` gets this notification's events. |
+| `level` | `notification-level` |  |
+| `title` | `string` | 1 to 80 bytes of plain text on one line. |
+| `body` | `option<string>` | At most 500 bytes of plain text, at most 4 lines. No markdown, links or icons. |
+| `actions` | `list<notification-action>` | At most 2. Drawn as buttons in list order; the first is the primary one. |
+| `auto-dismiss` | `bool` | `true`: the host closes it after a time it chooses by level (6 s for `info` and `success`, 10 s for `warning` and `error`), paused while the pointer is over it or the window is in the background. `false`: it stays until the user or the extension closes it. |
+
+### enum `progress-location`
+
+Cases: `status-bar`, `panel`.
+
+### record `progress-options`
+
+| Field | Type | Notes |
+|---|---|---|
+| `owner` | `string` | The surface or decoration whose `handle-event` gets `progress-cancel-requested`; a panel for `location: panel`. |
+| `title` | `string` | 1 to 80 bytes of plain text on one line. |
+| `location` | `progress-location` |  |
+| `cancellable` | `bool` | Draws a Cancel button that sends `progress-cancel-requested`. |
+
+### variant `progress-value`
+
+| Case | Payload | Notes |
+|---|---|---|
+| `indeterminate` |  |  |
+| `percent` | `u8` | 0 to 100. |
+
+### `notify: func(notification: notification) -> result<u64, host-error>`
+
+Shows a notification in the active workspace window, without moving focus, and returns its id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension; past either, `limit-exceeded`, and the title is written to the log instead.
+
+### `dismiss-notification: func(id: u64)`
+
+Closes a notification of this extension; no event is sent. Unknown or closed ids are ignored.
+
+### `progress-start: func(options: progress-options) -> result<u64, host-error>`
+
+Starts a progress, indeterminate until the first `progress-update`, and returns its id. At most 4 running progresses per extension and 30 starts per rolling 60 s.
+
+### `progress-update: func(id: u64, value: progress-value, message: option<string>) -> result<_, host-error>`
+
+Sets the value and, when given, a one-line message (at most 120 bytes). The host redraws at most 10 times a second and keeps the last value. At most 64 updates per export call.
+
+### `progress-end: func(id: u64)`
+
+Ends a progress. Unknown or ended ids are ignored. Disabling, reloading or unloading the extension, or removing the owner, ends its progresses too.

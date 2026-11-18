@@ -93,6 +93,8 @@ fn describe_props(props: &Props) -> String {
             short(&button.label),
             if button.disabled { " (disabled)" } else { "" }
         ),
+        // Design K: a secret value is never shown.
+        Props::Input(input) if input.secret => format!("{kind} (secret)"),
         Props::Input(input) => format!("{kind} {}", short(&input.value)),
         Props::List(list) => format!("{kind} {} rows", list.row_count),
         Props::Table(table) => format!("{kind} {} rows", table.row_count),
@@ -157,6 +159,7 @@ pub fn snapshot(
     };
     let state = loaded.state.read(cx);
     snapshot.phase = match state.phase() {
+        Phase::Closed => "closed (a modal that is not shown)".into(),
         Phase::Mounting => "mounting".into(),
         Phase::Ready(tree) => format!("ready, {} nodes", tree.len()),
         Phase::Failed { message, .. } => format!("failed: {message}"),
