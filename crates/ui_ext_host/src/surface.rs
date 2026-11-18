@@ -551,6 +551,11 @@ impl SurfaceState {
     /// Stops the surface: no events, no rows, the message in place of the tree. `retry` mounts
     /// again when `retryable`.
     pub fn fail(&mut self, message: SharedString, retryable: bool, cx: &mut Context<Self>) {
+        if !retryable {
+            // The instance will not be called again: let it go (a restart or reinstall brings a
+            // new one through `replace_backend`).
+            self.backend = Rc::new(crate::backend::DeadBackend::of(&*self.backend));
+        }
         self.phase = Phase::Failed { message, retryable };
         self.events.clear();
         // A failed surface drops its tick (design.md, B) and its mount in flight, so it does not

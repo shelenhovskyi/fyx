@@ -1016,8 +1016,10 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
-        // The instance is gone (trap, disabled, uninstalled): so are its decorations.
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations, and the
+        // registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
+        self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
