@@ -10,6 +10,7 @@
 //! error (in a reply): `canvas` nodes and `picker` surfaces.
 
 use ui_ext::{
+    canvas as model_canvas,
     image::{self as model_image},
     v0_2 as model,
 };
@@ -18,6 +19,7 @@ use crate::{
     UiState,
     conversions::{self, unsupported},
     network,
+    permissions::PermissionState,
 };
 
 pub(crate) mod bindings {
@@ -84,13 +86,17 @@ impl wit_network::Host for UiState {
             }
             .into()));
         }
-        // The broker at every call; a declared T2 capability it refuses is `denied`.
-        if let Err(denied) = self.check_capability(network::CAPABILITY_NETWORK) {
-            return Ok(Err(model::HostError {
-                code: model::HostErrorCode::Denied,
-                message: denied.to_string(),
+        // The broker at every call. `ask` is accepted: the prompt comes when the request is
+        // applied, after this call returns (design.md §0.3, §7).
+        match self.permission_state(network::CAPABILITY_NETWORK) {
+            PermissionState::Granted | PermissionState::Ask => {}
+            state @ (PermissionState::Denied | PermissionState::Unavailable) => {
+                return Ok(Err(model::HostError {
+                    code: model::HostErrorCode::Denied,
+                    message: format!("{} is {state:?}", network::CAPABILITY_NETWORK),
+                }
+                .into()));
             }
-            .into()));
         }
         let request = network::FetchRequest {
             method: match request.method {
@@ -116,9 +122,27 @@ impl wit_network::Host for UiState {
     }
 }
 
-/// An outcome for the `handle-io` export.
-pub(crate) fn io_event(event: network::IoEvent) -> wit_io::IoEvent {
-    match event {
+/// An outcome for the `handle-io` export; `None` for a capability 0.3 has no name for.
+pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
+    use bindings::fyx::ui::permissions as wit_permissions;
+    Some(match event {
+        network::IoEvent::PermissionChanged(capability, state) => {
+            wit_io::IoEvent::PermissionChanged((
+                match capability.as_str() {
+                    "network:fetch" => wit_permissions::T2Capability::NetworkFetch,
+                    "process:spawn" => wit_permissions::T2Capability::ProcessSpawn,
+                    "workspace:edit" => wit_permissions::T2Capability::WorkspaceEdit,
+                    "agent:observe" => wit_permissions::T2Capability::AgentObserve,
+                    _ => return None,
+                },
+                match state {
+                    PermissionState::Granted => wit_permissions::PermissionState::Granted,
+                    PermissionState::Denied => wit_permissions::PermissionState::Denied,
+                    PermissionState::Ask => wit_permissions::PermissionState::Ask,
+                    PermissionState::Unavailable => wit_permissions::PermissionState::Unavailable,
+                },
+            ))
+        }
         network::IoEvent::FetchDone(id, result) => wit_io::IoEvent::FetchDone((
             id,
             result
@@ -145,7 +169,7 @@ pub(crate) fn io_event(event: network::IoEvent) -> wit_io::IoEvent {
                     network::FetchError::Other(error) => wit_network::FetchError::Other(error),
                 }),
         )),
-    }
+    })
 }
 
 conversions::conversions! {
@@ -164,10 +188,17 @@ conversions::conversions! {
             },
             tint: props.tint.map(Into::into),
         }),
-        wit::Props::Canvas(_) => return Err(unsupported("a canvas node")),
+        wit::Props::Canvas(props) => Self::Canvas(canvas(props)),
     }
     kinds: {
         wit::SurfaceKind::Picker(_) => return Err(unsupported("a picker surface")),
+    }
+    events: {
+        model::UiEvent::CanvasClick(click) => Self::CanvasClick(wit::CanvasClick {
+            canvas: click.canvas,
+            x: click.x.0,
+            y: click.y.0,
+        }),
     }
 }
 
@@ -220,6 +251,134 @@ pub(crate) fn define_unbuilt_as_traps(
         }
     }
     Ok(())
+}
+
+fn paint(paint: wit::Paint) -> model_canvas::Paint {
+    model_canvas::Paint {
+        color: match paint.color {
+            wit::CanvasColor::Token(token) => model_canvas::CanvasColor::Token(token.into()),
+            wit::CanvasColor::Data(data) => model_canvas::CanvasColor::Data(match data {
+                wit::DataColor::Series1 => model_canvas::DataColor::Series1,
+                wit::DataColor::Series2 => model_canvas::DataColor::Series2,
+                wit::DataColor::Series3 => model_canvas::DataColor::Series3,
+                wit::DataColor::Series4 => model_canvas::DataColor::Series4,
+                wit::DataColor::Series5 => model_canvas::DataColor::Series5,
+                wit::DataColor::Series6 => model_canvas::DataColor::Series6,
+                wit::DataColor::Series7 => model_canvas::DataColor::Series7,
+                wit::DataColor::Series8 => model_canvas::DataColor::Series8,
+            }),
+        },
+        opacity: paint.opacity,
+    }
+}
+
+fn stroke(stroke: wit::Stroke) -> model_canvas::Stroke {
+    model_canvas::Stroke {
+        paint: paint(stroke.paint),
+        width: stroke.width.into(),
+    }
+}
+
+fn point(point: wit::Point) -> model_canvas::Point {
+    model_canvas::Point {
+        x: point.x.into(),
+        y: point.y.into(),
+    }
+}
+
+fn rect(rect: wit::Rect) -> model_canvas::Rect {
+    model_canvas::Rect {
+        x: rect.x.into(),
+        y: rect.y.into(),
+        width: rect.width.into(),
+        height: rect.height.into(),
+    }
+}
+
+/// A 0.3 canvas as the model holds it; [`model_canvas::check_canvas_props`] runs when the update
+/// or the reply is applied ([`crate::effects::ApiState::check_images`]).
+fn canvas(props: wit::CanvasProps) -> model_canvas::CanvasProps {
+    model_canvas::CanvasProps {
+        width: props.width,
+        height: props.height,
+        description: props.description,
+        ops: props
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                wit::DrawOp::Line(op) => model_canvas::DrawOp::Line {
+                    from: point(op.from),
+                    to: point(op.to),
+                    stroke: stroke(op.stroke),
+                },
+                wit::DrawOp::Rect(op) => model_canvas::DrawOp::Rect {
+                    bounds: rect(op.bounds),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::RoundedRect(op) => model_canvas::DrawOp::RoundedRect {
+                    bounds: rect(op.bounds),
+                    radius: op.radius.into(),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::Circle(op) => model_canvas::DrawOp::Circle {
+                    center: point(op.center),
+                    radius: op.radius.into(),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::Path(op) => model_canvas::DrawOp::Path {
+                    segments: op
+                        .segments
+                        .into_iter()
+                        .map(|segment| match segment {
+                            wit::PathSegment::MoveTo(at) => {
+                                model_canvas::PathSegment::MoveTo(point(at))
+                            }
+                            wit::PathSegment::LineTo(to) => {
+                                model_canvas::PathSegment::LineTo(point(to))
+                            }
+                            wit::PathSegment::QuadTo((control, to)) => {
+                                model_canvas::PathSegment::QuadTo(point(control), point(to))
+                            }
+                            wit::PathSegment::CubicTo((first, second, to)) => {
+                                model_canvas::PathSegment::CubicTo(
+                                    point(first),
+                                    point(second),
+                                    point(to),
+                                )
+                            }
+                            wit::PathSegment::Close => model_canvas::PathSegment::Close,
+                        })
+                        .collect(),
+                    fill: op.fill.map(paint),
+                    stroke: op.stroke.map(stroke),
+                },
+                wit::DrawOp::Text(op) => model_canvas::DrawOp::Text {
+                    at: point(op.at),
+                    text: op.text,
+                    paint: paint(op.paint),
+                    size: match op.size {
+                        wit::CanvasTextSize::Small => model_canvas::CanvasTextSize::Small,
+                        wit::CanvasTextSize::Medium => model_canvas::CanvasTextSize::Medium,
+                        wit::CanvasTextSize::Large => model_canvas::CanvasTextSize::Large,
+                    },
+                    anchor: match op.anchor {
+                        wit::TextAnchor::Start => model_canvas::TextAnchor::Start,
+                        wit::TextAnchor::Middle => model_canvas::TextAnchor::Middle,
+                        wit::TextAnchor::End => model_canvas::TextAnchor::End,
+                    },
+                    monospace: op.monospace,
+                },
+            })
+            .collect(),
+        clickable: props.clickable,
+        fit: match props.fit {
+            wit::CanvasFit::Clip => model_canvas::CanvasFit::Clip,
+            wit::CanvasFit::ScaleDown => model_canvas::CanvasFit::ScaleDown,
+        },
+    }
 }
 
 /// The 0.3 linker: WASI and the interfaces above; the rest trap (see the module doc).

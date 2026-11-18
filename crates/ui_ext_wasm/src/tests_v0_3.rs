@@ -254,6 +254,84 @@ async fn test_v0_3_image_replies(cx: &mut TestAppContext) {
     assert_eq!(case(&extension, 1).await.0, ["1", "2"]);
 }
 
+/// Design.md §13: canvas pushes are checked when applied, like images: the props rules and
+/// panels only. The 16-per-surface and no-list-row rules belong to the tree (`ui_ext`).
+#[gpui::test]
+async fn test_v0_3_canvas_pushes(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let (results, effects) = case(&extension, 8).await;
+    assert_eq!(
+        results,
+        [
+            "ok",
+            "invalid-argument",
+            "invalid-argument",
+            "limit-exceeded",
+            "invalid-argument",
+            "invalid-argument"
+        ]
+    );
+    let pushes: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            HostEffect::Push {
+                update: Update::Replace(nodes),
+                ..
+            } => Some(&nodes[0].props),
+            _ => None,
+        })
+        .collect();
+    let [Props::Canvas(canvas)] = &pushes[..] else {
+        panic!("one canvas push: {pushes:?}");
+    };
+    assert_eq!(canvas.ops.len(), 6);
+    assert_eq!(canvas.fit, ui_ext::canvas::CanvasFit::ScaleDown);
+    assert_eq!(ui_ext::canvas::check_canvas_props(canvas), Ok(()));
+}
+
+/// A canvas reply is checked too (panels only), and `canvas-click` reaches the guest in canvas
+/// coordinates.
+#[gpui::test]
+async fn test_v0_3_canvas_replies_and_clicks(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::Click(9))
+        .await
+        .expect("a canvas in a panel");
+    assert!(
+        matches!(&reply.value, Update::Replace(nodes) if matches!(nodes[0].props, Props::Canvas(_)))
+    );
+    let error = extension
+        .handle_event_v0_2("modal", UiEvent::Click(9))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("can only be in a panel"),
+        "{error:#}"
+    );
+
+    let reply = extension
+        .handle_event_v0_2(
+            SURFACE,
+            UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                canvas: 1,
+                x: 12.5.into(),
+                y: 3.0.into(),
+            }),
+        )
+        .await
+        .expect("handled");
+    assert!(
+        matches!(&reply.value, Update::Replace(nodes)
+        if nodes[0].props == Props::Text(ui_ext::v0_2::TextProps {
+            content: "canvas-click 1 12.5 3".into(),
+            ..Default::default()
+        })),
+        "{:?}",
+        reply.value
+    );
+}
+
 /// A 0.3 interface this build does not implement traps when called, which disables the
 /// extension; it still loads, because nothing calls it at instantiation. WASI imports at a newer
 /// patch version than the host's (std's `HashMap` seed in the probe's `surfaces`) still resolve.
@@ -309,62 +387,81 @@ mod network_fetch {
     use super::*;
     use crate::{
         network::{IoEvent, test_server},
-        permissions::{CapabilityCheck, CapabilityDenied, ConsentRequest, ConsentState, T2Consent},
+        permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
     };
 
+    /// A test permission broker: one state for `network:fetch`, a fixed answer to the prompt,
+    /// and a change stream.
     struct Broker {
-        allows_calls: Mutex<bool>,
-        state: Mutex<ConsentState>,
-        answer: bool,
+        state: Mutex<PermissionState>,
+        answer: PermissionState,
         prompts: AtomicUsize,
+        subscribers: Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, PermissionState)>>>,
     }
 
     impl Broker {
-        fn new(state: ConsentState, answer: bool) -> Arc<Self> {
+        fn new(state: PermissionState, answer: PermissionState) -> Arc<Self> {
             Arc::new(Self {
-                allows_calls: Mutex::new(true),
                 state: Mutex::new(state),
                 answer,
                 prompts: AtomicUsize::new(0),
+                subscribers: Mutex::new(Vec::new()),
             })
         }
 
-        fn set(&self, state: ConsentState) {
+        fn set(&self, state: PermissionState) {
             *self.state.lock().unwrap() = state;
+        }
+
+        /// The extensions page revokes the grant.
+        fn revoke(&self) {
+            self.set(PermissionState::Denied);
+            for subscriber in self.subscribers.lock().unwrap().iter() {
+                subscriber
+                    .unbounded_send(("network:fetch".into(), PermissionState::Denied))
+                    .ok();
+            }
         }
     }
 
     impl CapabilityCheck for Broker {
         fn check(&self, extension_id: &str, capability: &str) -> Result<(), CapabilityDenied> {
-            if *self.allows_calls.lock().unwrap() {
-                Ok(())
-            } else {
-                Err(CapabilityDenied {
+            match self.state(extension_id, capability) {
+                PermissionState::Granted => Ok(()),
+                state => Err(CapabilityDenied {
                     extension_id: extension_id.into(),
                     capability: capability.into(),
-                    reason: "refused".into(),
-                })
+                    reason: format!("{state:?}"),
+                }),
             }
         }
-    }
 
-    impl T2Consent for Broker {
-        fn state(&self, _: &str, _: &str) -> ConsentState {
-            *self.state.lock().unwrap()
+        fn state(&self, _: &str, capability: &str) -> PermissionState {
+            if capability == "network:fetch" {
+                *self.state.lock().unwrap()
+            } else {
+                PermissionState::Unavailable
+            }
         }
 
         fn request(
             &self,
             _: &str,
-            request: ConsentRequest,
-        ) -> futures::future::BoxFuture<'static, bool> {
-            assert_eq!(request.capability, "network:fetch");
-            assert_eq!(request.domains.len(), 1);
+            capability: &str,
+        ) -> futures::future::BoxFuture<'static, PermissionState> {
+            assert_eq!(capability, "network:fetch");
             self.prompts.fetch_add(1, Ordering::SeqCst);
-            if self.answer {
-                self.set(ConsentState::Granted);
-            }
+            self.set(self.answer);
             futures::future::ready(self.answer).boxed()
+        }
+
+        fn changes(
+            &self,
+            _: &str,
+        ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+            let (sender, receiver) = futures::channel::mpsc::unbounded();
+            self.subscribers.lock().unwrap().push(sender);
+            receiver
         }
     }
 
@@ -395,10 +492,7 @@ mod network_fetch {
                 allow_staged: Some(true),
                 capabilities: Some(capabilities),
                 network_domains: Some(vec![format!("localhost:{port}")]),
-                capability_check: broker
-                    .clone()
-                    .map(|broker| broker as Arc<dyn CapabilityCheck>),
-                t2_consent: broker.map(|broker| broker as Arc<dyn T2Consent>),
+                capability_check: broker.map(|broker| broker as Arc<dyn CapabilityCheck>),
                 ..LoadOptions::default()
             },
             cx,
@@ -445,7 +539,7 @@ mod network_fetch {
     #[gpui::test]
     async fn test_fetch_and_handle_io(cx: &mut TestAppContext) {
         let server = server(cx);
-        let broker = Broker::new(ConsentState::Granted, true);
+        let broker = Broker::new(PermissionState::Granted, PermissionState::Granted);
         let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
         let mut events = extension.take_io_events().expect("once");
         assert!(extension.take_io_events().is_none());
@@ -467,7 +561,7 @@ mod network_fetch {
     #[gpui::test]
     async fn test_what_the_import_refuses(cx: &mut TestAppContext) {
         let server = server(cx);
-        let broker = Broker::new(ConsentState::Granted, true);
+        let broker = Broker::new(PermissionState::Granted, PermissionState::Granted);
         let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
         assert_eq!(
             command(
@@ -482,7 +576,7 @@ mod network_fetch {
             ["denied", "denied", "invalid-argument"]
         );
         // The broker at every call.
-        *broker.allows_calls.lock().unwrap() = false;
+        broker.set(PermissionState::Denied);
         assert_eq!(
             command(
                 &extension,
@@ -510,7 +604,7 @@ mod network_fetch {
         let server = server(cx);
         let url = format!("http://localhost:{}/hello", server.port);
 
-        let refused = Broker::new(ConsentState::Ask, false);
+        let refused = Broker::new(PermissionState::Ask, PermissionState::Denied);
         let extension = load_network(server.port, Some(refused.clone()), true, cx).await;
         let mut events = extension.take_io_events().expect("once");
         assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
@@ -521,7 +615,7 @@ mod network_fetch {
         assert_eq!(refused.prompts.load(Ordering::SeqCst), 1);
         assert_eq!(server.connections(), 0, "nothing was sent");
 
-        let allowed = Broker::new(ConsentState::Ask, true);
+        let allowed = Broker::new(PermissionState::Ask, PermissionState::Granted);
         let extension = load_network(server.port, Some(allowed.clone()), true, cx).await;
         let mut events = extension.take_io_events().expect("once");
         assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
@@ -534,7 +628,7 @@ mod network_fetch {
         assert_eq!(command(&extension, &format!("fetch {url}")).await, ["2"]);
         let event = events.next().await.expect("an outcome");
         assert!(matches!(&event, IoEvent::FetchDone(2, Ok(_))));
-        allowed.set(ConsentState::Denied);
+        allowed.set(PermissionState::Denied);
         let reply = extension.handle_io(event).await.expect("handle-io");
         assert!(
             format!("{:?}", reply.effects).contains("fetch-done 2 err denied"),
@@ -543,11 +637,10 @@ mod network_fetch {
         );
     }
 
-    /// Without a consent broker (W3's plan 4.5 not wired yet), T2 stays denied.
+    /// A broker that predates T2 (only `check`, the default `state`) leaves T2 denied.
     #[gpui::test]
-    async fn test_t2_is_denied_without_a_consent_broker(cx: &mut TestAppContext) {
+    async fn test_t2_is_denied_by_a_broker_without_t2(cx: &mut TestAppContext) {
         let server = server(cx);
-        cx.update(gpui_tokio::init);
         struct AllowCalls;
         impl CapabilityCheck for AllowCalls {
             fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
@@ -571,19 +664,57 @@ mod network_fetch {
         )
         .await
         .expect("loads");
-        let mut events = extension.take_io_events().expect("once");
         let url = format!("http://localhost:{}/hello", server.port);
-        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
         assert_eq!(
+            command(&extension, &format!("fetch {url}")).await,
+            ["denied"]
+        );
+        // No broker at all: the same.
+        let no_broker = load_network(server.port, None, true, cx).await;
+        assert_eq!(
+            command(&no_broker, &format!("fetch {url}")).await,
+            ["denied"]
+        );
+    }
+
+    /// Decision 26: revoking cancels the requests in flight with `denied`, and the extension is
+    /// told through `permission-changed`.
+    #[gpui::test]
+    async fn test_revoking_cancels_requests_in_flight(cx: &mut TestAppContext) {
+        let server = server(cx);
+        let broker = Broker::new(PermissionState::Granted, PermissionState::Granted);
+        let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let hang = format!("http://localhost:{}/hang", server.port);
+        assert_eq!(command(&extension, &format!("fetch {hang}")).await, ["1"]);
+        // Let the request connect before revoking it.
+        while server.connections() == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        broker.revoke();
+        let mut outcomes = vec![
             deliver(&extension, &mut events).await,
-            "fetch-done 1 err denied"
+            deliver(&extension, &mut events).await,
+        ];
+        outcomes.sort();
+        assert_eq!(
+            outcomes,
+            [
+                "fetch-done 1 err denied",
+                "permission-changed T2Capability::NetworkFetch PermissionState::Denied"
+            ]
+        );
+        // Later calls are refused at once.
+        assert_eq!(
+            command(&extension, &format!("fetch {hang}")).await,
+            ["denied"]
         );
     }
 
     #[gpui::test]
     async fn test_cancel_caps_trap_and_reload(cx: &mut TestAppContext) {
         let server = server(cx);
-        let broker = Broker::new(ConsentState::Granted, true);
+        let broker = Broker::new(PermissionState::Granted, PermissionState::Granted);
         let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
         let mut events = extension.take_io_events().expect("once");
         let hang = format!("http://localhost:{}/hang", server.port);

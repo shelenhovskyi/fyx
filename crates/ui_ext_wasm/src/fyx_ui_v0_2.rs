@@ -73,6 +73,11 @@ impl wit_decorations::Host for UiState {
 conversions::conversions! {
     props: {}
     kinds: {}
+    events: {
+        // Never sent: a 0.2 surface has no canvas, and `call_handle_event` drops the event
+        // before it gets here (defence in depth, like 0.1's).
+        model::UiEvent::CanvasClick(click) => Self::Click(click.canvas),
+    }
 }
 
 impl From<wit::DecorationLocation> for model::DecorationLocation {

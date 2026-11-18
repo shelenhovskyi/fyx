@@ -167,8 +167,14 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
     and `*.` matches subdomains only. An undeclared host is `denied` (plan 4.6);
   - the headers: forbidden set plus `proxy-*` and `accept-encoding`, ≤ 64, ≤ 16 KiB;
   - the body ≤ 4 MiB, a timeout of 1–30000 ms, 8 in flight, 120 per minute.
-- **When the request is applied:** `T2Consent` (state granted/denied/ask; ask → `request()`
-  waits for the prompt). Without a consent broker, T2 is denied.
+- **The broker** (W3's plan 4.5 API, agreed 2026-11-18): `CapabilityCheck::{state, request,
+  changes}` and `PermissionState { Granted, Denied, Ask, Unavailable }`.
+  - At the import: `state()`. Ask or Granted is accepted; Denied or Unavailable is `denied`.
+  - When the request is applied: in Ask, `request()` awaits the prompt.
+  - Before delivery: `state()` again, and anything but Granted is `denied`.
+  - `changes()`: a revocation aborts the requests in flight, which deliver `denied`, and every
+    change goes out as `io-event::permission-changed`.
+  - A broker without T2 (the defaults), or no broker at all, leaves T2 denied.
 - **The engine:**
   - redirects followed by hand, ≤ 5, every hop checked (off-list, `http://`, or a sixth hop →
     `redirect-not-allowed`);
@@ -185,8 +191,9 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - **Tests:** 11 engine tests against a local HTTP server: the caps, a 17 MiB body by length,
   streamed, and as a gzip bomb; redirects; timeout; private answers; and pinning, where a
   rebinding resolver is called once and the connection goes to the checked address. Also
-  6 end-to-end tests through `probe_v0_3`: the import, the broker, consent ask/allow/refuse,
-  no broker, revocation, cancel, the in-flight cap, reload, trap, and the manifest rules.
+  7 end-to-end tests through `probe_v0_3`: the import, the broker, consent ask/allow/refuse,
+  no broker, revocation before delivery and in flight (`permission-changed`), cancel, the
+  in-flight cap, reload, trap, and the manifest rules.
 - **Not done yet:**
   - Fyx's proxy setting;
   - brotli, zstd and deflate (any other `content-encoding` → `other`);
@@ -194,3 +201,32 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   - a local TLS test server (the pinning test uses a plain TCP server);
   - an Inspector line per request;
   - the user-agent carries no Fyx version.
+
+## Plan 4.13: canvas host and limits (2026-11-18)
+
+- **Model** (`crates/ui_ext/src/canvas.rs`):
+  - `CanvasProps`, `DrawOp` (line, rect, rounded-rect, circle, path, text), `Paint`,
+    `Stroke`, `Point`, `Rect`, `PathSegment`, `DataColor`, `CanvasFit`, `CanvasClick`;
+  - numbers are `Num(f32)`, compared by bits so the model keeps `Eq`;
+  - `Props::Canvas` and `UiEvent::CanvasClick` (whose target is the canvas).
+- **Shared checks:**
+  - `check_canvas_props`: sides 1–4096; description 1–1024 bytes; ≤ 16384 ops,
+    65536 segments and 256 KiB of text; every number finite and within ±32768, with
+    non-negative sizes and radii; strokes 0.5–16; opacity ≤ 100; text ops one line of
+    ≤ 256 bytes; paths start with move-to, draw something, and have a fill or a stroke;
+  - `check_canvas_placement`: panels only;
+  - `canvas_text_len`: the description plus the text ops, which is what the host counts
+    toward the lifted-text cap.
+- **The tree** (`v0_2::Tree`): at most 16 canvases per surface, counted across inserts,
+  set-props, replaces, removals and rollbacks; `from_row` refuses a canvas
+  (`TreeError::{TooManyCanvases, CanvasInRow}`).
+- **Host:**
+  - the 0.3 conversion;
+  - `check_images` also checks canvases: props and panels only, in pushes and in 0.3 replies;
+  - `canvas-click` is a gesture;
+  - the 0.1 shim shows the description;
+  - a 0.2 component never gets `canvas-click`.
+- **Probe:** case 8 (pushes: valid, NaN, no description, 16385 ops, status, modal), case 9 (a
+  canvas reply), and a `canvas-click` report.
+- **Not done here:** the renderer and the hit-test mapping (W3, 4.14), the SDK and the harness
+  (W4, 4.15), and the bench.

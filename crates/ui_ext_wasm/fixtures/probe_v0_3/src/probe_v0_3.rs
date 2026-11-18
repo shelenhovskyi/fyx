@@ -14,7 +14,14 @@
 //!    and the asset to the status item `status` and the modal `modal` (invalid-argument); then
 //!    `add-image`, a push of that handle, `remove-image`, and the push again: all their results;
 //! 5. answers with an `image` node instead of the report, on whatever surface it came from;
-//! 6. calls `permissions.query`, which this build links as a trap.
+//! 6. calls `permissions.query`, which this build links as a trap;
+//! 7. (reserved)
+//! 8. `push-update`s with `canvas` nodes (design.md §13): a valid one to `probe` (ok), one with a
+//!    NaN coordinate, one without a description, one of 16385 ops, and the valid one to `status`
+//!    and to `modal`: all their results;
+//! 9. answers with a clickable `canvas` node (id 1) instead of the report.
+//!
+//! A `canvas-click` is answered with a text node (id 1): `canvas-click <canvas> <x> <y>`.
 //!
 //! `mount` answers a text node on `probe` and an `image` node anywhere else; `list-rows` answers
 //! one row holding an `image` node.
@@ -85,6 +92,102 @@ fn push(surface_id: &str, update: Update) -> String {
         Ok(()) => "ok".into(),
         Err(error) => code(&error).into(),
     }
+}
+
+fn stroke() -> Stroke {
+    Stroke {
+        paint: Paint {
+            color: CanvasColor::Token(ColorToken::TextAccent),
+            opacity: 100,
+        },
+        width: 1.5,
+    }
+}
+
+/// A small bar chart with every op kind.
+fn chart() -> CanvasProps {
+    let fill = Some(Paint {
+        color: CanvasColor::Data(DataColor::Series1),
+        opacity: 80,
+    });
+    CanvasProps {
+        width: 240,
+        height: 120,
+        description: "Commits per day".into(),
+        ops: vec![
+            DrawOp::Rect(RectOp {
+                bounds: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 240.0,
+                    height: 120.0,
+                },
+                fill,
+                stroke: None,
+            }),
+            DrawOp::RoundedRect(RoundedRectOp {
+                bounds: Rect {
+                    x: 10.0,
+                    y: 40.0,
+                    width: 20.0,
+                    height: 80.0,
+                },
+                radius: 3.0,
+                fill,
+                stroke: Some(stroke()),
+            }),
+            DrawOp::Circle(CircleOp {
+                center: Point { x: 60.0, y: 60.0 },
+                radius: 5.0,
+                fill,
+                stroke: None,
+            }),
+            DrawOp::Line(LineOp {
+                from: Point { x: 0.0, y: 119.0 },
+                to: Point { x: 240.0, y: 119.0 },
+                stroke: stroke(),
+            }),
+            DrawOp::Path(PathOp {
+                segments: vec![
+                    PathSegment::MoveTo(Point { x: 0.0, y: 90.0 }),
+                    PathSegment::LineTo(Point { x: 30.0, y: 40.0 }),
+                    PathSegment::QuadTo((Point { x: 45.0, y: 20.0 }, Point { x: 60.0, y: 50.0 })),
+                    PathSegment::CubicTo((
+                        Point { x: 70.0, y: 60.0 },
+                        Point { x: 80.0, y: 30.0 },
+                        Point { x: 90.0, y: 40.0 },
+                    )),
+                    PathSegment::Close,
+                ],
+                fill: None,
+                stroke: Some(stroke()),
+            }),
+            DrawOp::Text(TextOp {
+                at: Point { x: 4.0, y: 14.0 },
+                text: "Commits".into(),
+                paint: Paint {
+                    color: CanvasColor::Token(ColorToken::TextMuted),
+                    opacity: 100,
+                },
+                size: CanvasTextSize::Small,
+                anchor: TextAnchor::Start,
+                monospace: false,
+            }),
+        ],
+        clickable: true,
+        fit: CanvasFit::ScaleDown,
+    }
+}
+
+fn push_canvas(surface_id: &str, props: CanvasProps) -> String {
+    push(
+        surface_id,
+        Update::Replace(vec![Node {
+            id: 2,
+            parent: None,
+            props: Props::Canvas(props),
+        }]),
+    )
 }
 
 fn push_image(surface_id: &str, props: ImageProps) -> String {
@@ -226,6 +329,28 @@ fn run(case: NodeId) -> Result<Vec<String>, String> {
             results.push(push_image(SURFACE_ID, generated));
             results
         }
+        8 => {
+            let mut results = vec![push_canvas(SURFACE_ID, chart())];
+            let mut nan = chart();
+            nan.ops.push(DrawOp::Line(LineOp {
+                from: Point {
+                    x: f32::NAN,
+                    y: 0.0,
+                },
+                to: Point { x: 1.0, y: 1.0 },
+                stroke: stroke(),
+            }));
+            results.push(push_canvas(SURFACE_ID, nan));
+            let mut undescribed = chart();
+            undescribed.description.clear();
+            results.push(push_canvas(SURFACE_ID, undescribed));
+            let mut huge = chart();
+            huge.ops = vec![huge.ops[0].clone(); 16385];
+            results.push(push_canvas(SURFACE_ID, huge));
+            results.push(push_canvas("status", chart()));
+            results.push(push_canvas("modal", chart()));
+            results
+        }
         6 => vec![format!(
             "{:?}",
             permissions::query(permissions::T2Capability::NetworkFetch)
@@ -281,17 +406,15 @@ impl Guest for Probe {
         match event {
             UiEvent::InputChanged((_, command)) => {
                 let words: Vec<&str> = command.split_whitespace().collect();
-                let fetch = |url: &str| {
-                    match network::fetch(&network::HttpRequest {
-                        method: network::HttpMethod::Get,
-                        url: url.into(),
-                        headers: Vec::new(),
-                        body: None,
-                        timeout_ms: None,
-                    }) {
-                        Ok(id) => id.to_string(),
-                        Err(error) => code(&error).to_string(),
-                    }
+                let fetch = |url: &str| match network::fetch(&network::HttpRequest {
+                    method: network::HttpMethod::Get,
+                    url: url.into(),
+                    headers: Vec::new(),
+                    body: None,
+                    timeout_ms: None,
+                }) {
+                    Ok(id) => id.to_string(),
+                    Err(error) => code(&error).to_string(),
                 };
                 let report = match words.as_slice() {
                     ["fetch", urls @ ..] => urls.iter().map(|url| fetch(url)).collect(),
@@ -308,6 +431,15 @@ impl Guest for Probe {
                 Ok(Update::Replace(vec![text(1, &report.join(" | "))]))
             }
             UiEvent::Click(5) => Ok(Update::Replace(vec![image(1)])),
+            UiEvent::Click(9) => Ok(Update::Replace(vec![Node {
+                id: 1,
+                parent: None,
+                props: Props::Canvas(chart()),
+            }])),
+            UiEvent::CanvasClick(click) => Ok(Update::Replace(vec![text(
+                1,
+                &format!("canvas-click {} {} {}", click.canvas, click.x, click.y),
+            )])),
             UiEvent::Click(case) => {
                 let report = run(case)?.join(" | ");
                 Ok(Update::Replace(vec![text(1, &report)]))
@@ -351,6 +483,9 @@ impl Guest for Probe {
                     network::FetchError::Other(_) => "other".into(),
                 };
                 format!("fetch-done {id} err {error}")
+            }
+            fyx::ui::io::IoEvent::PermissionChanged((capability, state)) => {
+                format!("permission-changed {capability:?} {state:?}")
             }
             _ => return Err("unexpected io event".into()),
         };

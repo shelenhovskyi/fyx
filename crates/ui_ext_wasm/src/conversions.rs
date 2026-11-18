@@ -52,6 +52,7 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
         model::Props::DiffView(props) => {
             props.old_text.len() + props.new_text.len() + option_len(&props.language)
         }
+        model::Props::Canvas(props) => ui_ext::canvas::canvas_text_len(props),
         model::Props::Image(props) => {
             props.alt.len()
                 + match &props.source {
@@ -349,7 +350,7 @@ pub(crate) fn sanitize_title(title: &str) -> String {
 /// `match` arms of the version's `props` and `surface-kind` variants; they map the case or return
 /// `Err` with [`unsupported`].
 macro_rules! conversions {
-    (props: { $($props:tt)* } kinds: { $($kinds:tt)* }) => {
+    (props: { $($props:tt)* } kinds: { $($kinds:tt)* } events: { $($events:tt)* }) => {
         impl From<wit::ColorToken> for model::ColorToken {
             fn from(value: wit::ColorToken) -> Self {
                 match value {
@@ -601,6 +602,7 @@ macro_rules! conversions {
                     model::UiEvent::ProgressCancelRequested(id) => {
                         Self::ProgressCancelRequested(id)
                     }
+                    $($events)*
                 }
             }
         }

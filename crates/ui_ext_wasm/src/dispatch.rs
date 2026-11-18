@@ -142,6 +142,11 @@ impl UiBindings {
                 .await?
                 .and_then(|update| guest_value(update.try_into()))
                 .and_then(|update| checked_images(store, surface_id, update)),
+            // A 0.2 surface has no canvas, so the host never sends it `canvas-click`: defence in
+            // depth, like 0.1's below.
+            Self::V0_2(_) if matches!(event, model::UiEvent::CanvasClick(_)) => {
+                Ok(model::Update::Unchanged)
+            }
             Self::V0_2(extension) => extension
                 .call_handle_event(store, surface_id, &event.into())
                 .await?
@@ -216,11 +221,10 @@ impl UiBindings {
         event: crate::network::IoEvent,
     ) -> wasmtime::Result<Result<(), String>> {
         Ok(match self {
-            Self::V0_3(extension) => {
-                extension
-                    .call_handle_io(store, &fyx_ui_v0_3::io_event(event))
-                    .await?
-            }
+            Self::V0_3(extension) => match fyx_ui_v0_3::io_event(event) {
+                Some(event) => extension.call_handle_io(store, &event).await?,
+                None => Ok(()),
+            },
             Self::V0_2(_) | Self::V0_1(_) => Ok(()),
         })
     }
@@ -387,17 +391,19 @@ impl UiExtension {
                 CallBudget::Regular,
                 move |extension, store| {
                     async move {
-                        let crate::network::IoEvent::FetchDone(id, result) = event;
-                        store.data_mut().network.delivered(id);
-                        let result = match result {
-                            Ok(_) | Err(_) if !network.granted() => {
-                                Err(crate::network::FetchError::Denied)
+                        let event = match event {
+                            crate::network::IoEvent::FetchDone(id, result) => {
+                                store.data_mut().network.delivered(id);
+                                let result = if network.granted() {
+                                    result
+                                } else {
+                                    Err(crate::network::FetchError::Denied)
+                                };
+                                crate::network::IoEvent::FetchDone(id, result)
                             }
-                            result => result,
+                            other => other,
                         };
-                        extension
-                            .call_handle_io(store, crate::network::IoEvent::FetchDone(id, result))
-                            .await
+                        extension.call_handle_io(store, event).await
                     }
                     .boxed()
                 },
@@ -634,6 +640,11 @@ pub(crate) mod shim {
             // 0.3 only; 0.1 has no image, so its alt text stands in.
             model::Props::Image(props) => ui_ext::Props::Text(ui_ext::TextProps {
                 content: props.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
+            // 0.3 only; so does a canvas's description.
+            model::Props::Canvas(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: props.description.clone(),
                 ..ui_ext::TextProps::default()
             }),
         }

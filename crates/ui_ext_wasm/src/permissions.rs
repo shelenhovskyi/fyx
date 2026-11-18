@@ -17,6 +17,8 @@
 
 use std::{fmt, sync::Arc};
 
+use futures::FutureExt as _;
+
 use anyhow::{Result, bail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -109,44 +111,54 @@ impl fmt::Display for CapabilityDenied {
 
 impl std::error::Error for CapabilityDenied {}
 
-/// Answers whether an extension may use a capability right now. Implemented by the host; called
-/// from host imports on the extension's call queue, so it must be cheap and thread-safe.
-pub trait CapabilityCheck: Send + Sync + 'static {
-    fn check(&self, extension_id: &str, capability: &str) -> Result<(), CapabilityDenied>;
-}
-
-/// The state of a T2 capability for one extension (design.md §7).
+/// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConsentState {
+pub enum PermissionState {
+    /// Allowed by the user.
     Granted,
+    /// Refused or revoked by the user; only the extensions page changes it back.
     Denied,
-    /// Not answered yet: the first operation shows the prompt and waits for it.
+    /// Not asked yet: the first use shows the prompt.
     Ask,
+    /// Not available here: not declared, or (later) the worktree is not trusted.
+    Unavailable,
 }
 
-/// What the consent prompt shows for a T2 capability.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConsentRequest {
-    pub capability: String,
-    /// `network:fetch`: the manifest's domain patterns, as written.
-    pub domains: Vec<String>,
-}
+/// Answers whether an extension may use a capability right now. Implemented by the host's
+/// permission broker; called from host imports on the extension's call queue and from tokio,
+/// so it must be cheap and thread-safe.
+pub trait CapabilityCheck: Send + Sync + 'static {
+    /// For T0 and T1, and for T2 only when it is `Granted` (`Ask`, `Denied` and `Unavailable`
+    /// are errors with that reason).
+    fn check(&self, extension_id: &str, capability: &str) -> Result<(), CapabilityDenied>;
 
-/// T2 consent at first use (design.md §7, plan 4.5), implemented by the host's permission
-/// broker. Asked when a T2 operation is applied, after the call that started it returned, and
-/// again before its outcome is delivered, so a revocation in between turns it into `denied`.
-/// Without one, every T2 operation is denied.
-pub trait T2Consent: Send + Sync + 'static {
-    /// The current state; cheap and thread-safe.
-    fn state(&self, extension_id: &str, capability: &str) -> ConsentState;
+    /// A T2 capability's state, for `permissions.query` and the T2 imports.
+    fn state(&self, _extension_id: &str, _capability: &str) -> PermissionState {
+        PermissionState::Unavailable
+    }
 
-    /// Shows the prompt (or joins one already shown for this extension and capability) and
-    /// resolves to whether the user allowed it. Dismissing it resolves to `false`.
+    /// First use (or `permissions.request`): in state `Ask`, shows the prompt in the active
+    /// window (concurrent requests share one) and resolves with the answer, `Granted` or
+    /// `Denied` (refused or closed). With no window it resolves `Ask` at once and records
+    /// nothing. Any other state resolves at once. Awaited outside any call budget, after the
+    /// call that started the operation returned.
     fn request(
         &self,
-        extension_id: &str,
-        request: ConsentRequest,
-    ) -> futures::future::BoxFuture<'static, bool>;
+        _extension_id: &str,
+        _capability: &str,
+    ) -> futures::future::BoxFuture<'static, PermissionState> {
+        futures::future::ready(PermissionState::Ask).boxed()
+    }
+
+    /// Every state change of this extension's T2 capabilities, as `(capability, state)`: the
+    /// host sends `io-event::permission-changed` for each and cancels in-flight work of a
+    /// revoked one (decision 26).
+    fn changes(
+        &self,
+        _extension_id: &str,
+    ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+        futures::channel::mpsc::unbounded().1
+    }
 }
 
 /// The check when the host gave none: T1 and T2 are denied (T0 needs no grant).
