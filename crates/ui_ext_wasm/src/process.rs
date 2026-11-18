@@ -569,7 +569,7 @@ impl ProcessState {
             .unwrap_or_default();
         if worktrees.is_empty() {
             return Err(HostError {
-                code: HostErrorCode::Unavailable,
+                code: HostErrorCode::NoWorktree,
                 message: "no worktree is open".into(),
             });
         }
@@ -577,7 +577,7 @@ impl ProcessState {
             && !worktree.trusted
         {
             return Err(HostError {
-                code: HostErrorCode::Denied,
+                code: HostErrorCode::UntrustedWorktree,
                 message: "the worktree is restricted: it is not trusted".into(),
             });
         }
