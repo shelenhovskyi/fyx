@@ -47,9 +47,9 @@ use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 use fyx_guard::paths::ResolvedPath;
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
 pub use review_pane::{
-    AcceptAllHunks, AcceptHunk, AcceptTurn, CommentHunk, NextHunk, OpenReviews, PreviousHunk,
-    RejectAllHunks, RejectHunk, RejectTurn, ReviewPane, SubmitReview, ToggleReviewMode,
-    permission_card_notice,
+    AcceptAllHunks, AcceptHunk, AcceptTurn, ClearTurnDecision, CommentHunk, NextHunk, OpenReviews,
+    PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk, RejectTurn, ReviewPane, SubmitReview,
+    ToggleReviewMode, permission_card_notice,
 };
 use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
@@ -605,9 +605,9 @@ impl AgentReview {
         *self.panes.entry(turn).or_default() += 1;
     }
 
-    /// When the last pane of a turn closes, its open reviews close too: a held write fails ("the
-    /// file is unchanged") instead of waiting for a pane nobody can see.
-    pub(crate) fn pane_closed(&mut self, turn: TurnId, cx: &mut Context<Self>) {
+    /// Closing a pane decides nothing: its edits stay held until the user decides them (the pane can
+    /// be opened again) or the turn ends. Rejecting them is the explicit "Reject and close".
+    pub(crate) fn pane_closed(&mut self, turn: TurnId) {
         let remaining = self
             .panes
             .get(&turn)
@@ -616,16 +616,31 @@ impl AgentReview {
             .saturating_sub(1);
         if remaining > 0 {
             self.panes.insert(turn, remaining);
-            return;
+        } else {
+            self.panes.remove(&turn);
         }
-        self.panes.remove(&turn);
+    }
+
+    /// "Stop accepting" / "stop rejecting": later edits of the turn wait for review again.
+    pub fn clear_turn_decision(&mut self, turn: TurnId, cx: &mut Context<Self>) {
+        if self.turn_decisions.remove(&turn).is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Rejects every edit of the turn that waits, without deciding the turn's later edits.
+    pub fn reject_waiting(&mut self, turn: TurnId, cx: &mut Context<Self>) -> Result<()> {
         let ids = self
             .open_reviews_in_turn(turn)
             .map(|review| review.id)
             .collect::<Vec<_>>();
         for id in ids {
-            self.close(id, cx);
+            self.open_review_mut(id)?
+                .edit
+                .decide_pending(HunkDecision::Rejected);
+            self.submit(id, cx)?;
         }
+        Ok(())
     }
 
     /// Reviews waiting for a decision, across all turns.
@@ -2555,17 +2570,16 @@ mod tests {
                 [PathBuf::from(util::path!("/p/sub/b.txt"))]
             );
         });
-        let pane_turns = workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .items_of_type::<ReviewPane>(cx)
-                .map(|pane| pane.read(cx).turn())
-                .collect::<Vec<_>>()
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.items_of_type::<ReviewPane>(cx).next().is_none(),
+                "nothing takes the active tab"
+            );
+            assert!(
+                workspace.has_notification(&review_pane::review_toast_id(turn)),
+                "a toast offers the turn's pane"
+            );
         });
-        assert_eq!(
-            pane_turns,
-            [turn],
-            "the turn's pane opens to show the change"
-        );
         drop(thread);
     }
 
@@ -3114,18 +3128,31 @@ mod tests {
             0
         );
 
-        // Closing the last pane of a turn closes its open reviews; another pane keeps them.
+        // Closing panes decides nothing: the edit stays held until rejected explicitly.
         let held = gate_write(&review, agent_write("/p/b.txt", cx), cx);
         let turn = review.read_with(cx, |review, _| review.reviews()[0].turn());
         review.update(cx, |review, cx| {
             review.pane_opened(turn);
-            review.pane_opened(turn);
-            review.pane_closed(turn, cx);
+            review.pane_closed(turn);
             assert_eq!(review.open_review_count(), 1);
-            review.pane_closed(turn, cx);
+            review.reject_waiting(turn, cx).unwrap();
             assert_eq!(review.open_review_count(), 0);
+            assert_eq!(review.turn_decision(turn), None, "later edits still wait");
         });
-        assert!(held.await.is_err());
+        assert_eq!(held.await.unwrap().content, None);
+
+        // "Stop accepting": a later edit of the turn waits again.
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap();
+            review.clear_turn_decision(turn, cx);
+        });
+        let _held = gate_write(&review, agent_write("/p/c.txt", cx), cx);
+        assert_eq!(
+            review.read_with(cx, |review, _| review.open_review_count()),
+            1
+        );
     }
 
     fn v2_edit_permission(
