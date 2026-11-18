@@ -268,6 +268,7 @@ impl From<wit::Props> for model::Props {
                 value: input.value,
                 placeholder: input.placeholder,
                 secret: input.secret,
+                label: input.label,
             }),
             wit::Props::List(list) => Self::List(model::ListProps {
                 row_count: list.row_count,

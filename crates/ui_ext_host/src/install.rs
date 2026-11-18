@@ -142,6 +142,30 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
             "workspace:diagnostics" => format!(
                 "Reads errors and warnings (asks once, here; you can revoke it) ({capability})"
             ),
+            "network:fetch" => format!(
+                "Connects to the internet, to the hosts below (asks the first time) ({capability})"
+            ),
+            "process:spawn" => {
+                format!("Runs the programs below (asks the first time) ({capability})")
+            }
+            "workspace:edit" => {
+                format!("Edits files in your projects (asks the first time) ({capability})")
+            }
+            "agent:observe" => {
+                format!("Watches agent sessions (asks the first time) ({capability})")
+            }
+            other if other.starts_with("network:fetch@") => {
+                format!("Connects to {}", &other["network:fetch@".len()..])
+            }
+            other if other.starts_with("process:spawn@") => {
+                format!("Runs {}", &other["process:spawn@".len()..])
+            }
+            other if other.starts_with("process:env@") => {
+                format!(
+                    "Passes the environment variable {}",
+                    &other["process:env@".len()..]
+                )
+            }
             other => match tier_of(other) {
                 Some(_) => format!("Not used by this version of Fyx ({other})"),
                 None => format!("Unknown to this version of Fyx ({other})"),
@@ -159,7 +183,15 @@ pub fn capability_chip_label(capability: &str) -> String {
         "workspace:read-buffers" => "Reads Open Files".into(),
         "workspace:read-files" => "Reads Project Files".into(),
         "workspace:diagnostics" => "Reads Diagnostics".into(),
-        other => other.to_string(),
+        "network:fetch" => "Network".into(),
+        "process:spawn" => "Runs Programs".into(),
+        "workspace:edit" => "Edits Files".into(),
+        "agent:observe" => "Watches Agents".into(),
+        other => match other.split_once('@') {
+            Some(("network:fetch", domain)) => domain.to_string(),
+            Some(("process:spawn", program)) => format!("Runs {program}"),
+            _ => other.to_string(),
+        },
     }
 }
 
@@ -232,7 +264,7 @@ pub(crate) fn prompt_and_install(
             // The user just confirmed these capabilities for this folder.
             let record = ConsentRecord::current(
                 &source,
-                &manifest.capabilities,
+                &manifest.consent_items(),
                 &source.join(&manifest.component),
                 true,
                 fs.as_ref(),

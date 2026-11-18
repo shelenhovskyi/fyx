@@ -331,6 +331,38 @@ fn hold_reasons(
     reasons
 }
 
+/// How the plan changed between two runs of [`plan_updates`], for the host's notifications: a
+/// new `Disable` or `Rollback` says "blocked: <reason>", a `Disable` that went away says the block
+/// was lifted. The plan is level-triggered, so an unchanged plan gives no change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanChanges {
+    /// In the new plan, not in the old one.
+    pub added: Vec<PlannedAction>,
+    /// In the old plan, not in the new one.
+    pub removed: Vec<PlannedAction>,
+}
+
+impl PlanChanges {
+    pub fn between(previous: &[PlannedAction], current: &[PlannedAction]) -> Self {
+        Self {
+            added: current
+                .iter()
+                .filter(|action| !previous.contains(action))
+                .cloned()
+                .collect(),
+            removed: previous
+                .iter()
+                .filter(|action| !current.contains(action))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstallRefusal {
     NotInIndex,

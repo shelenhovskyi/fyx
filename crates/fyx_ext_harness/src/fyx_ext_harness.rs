@@ -8,8 +8,9 @@
 //! It runs components of `fyx:ui` 0.1 and 0.2. Internally every value is the 0.2 model
 //! (`ui_ext::v0_2`), into which 0.1 data converts without loss. The `*_v0_2` methods and
 //! [`Outcome`] show the 0.2 model; the older methods show the 0.1 model, which is lossless for a
-//! 0.1 component and drops tooltips, `secret`, `selected`, `indent`, `invalidate-rows`, modals and
-//! every effect but pushes for a 0.2 one, as the host's 0.1 view does.
+//! 0.1 component and drops tooltips, `secret`, input labels, `selected`, `indent`,
+//! `invalidate-rows`, modals and every effect but pushes for a 0.2 one, as the host's 0.1 view
+//! does.
 //!
 //! What it shares with Fyx and what it mirrors:
 //! - Trees, patches, id rules, caps and capability checks are `ui_ext`'s, the same model and
@@ -311,7 +312,9 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
         model::Props::Button(props) => {
             props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
         }
-        model::Props::Input(props) => props.value.len() + props.placeholder.len(),
+        model::Props::Input(props) => {
+            props.value.len() + props.placeholder.len() + option_len(&props.label)
+        }
         model::Props::Table(props) => props.columns.iter().map(String::len).sum(),
         model::Props::Icon(props) => icon_len(&props.name),
         model::Props::Markdown(text) => text.len(),
@@ -1543,9 +1546,9 @@ impl From<Outcome> for EventOutcome {
 }
 
 /// The 0.2 model seen through the 0.1 types, as the host's 0.1 view shows it: lossless for a 0.1
-/// component. For a 0.2 one it drops tooltips, `secret`, `selected`, `indent`, `invalidate-rows`,
-/// modals and every effect but pushes; frozen icons become their snake_case name; a 0.3 image
-/// becomes its alt text.
+/// component. For a 0.2 one it drops tooltips, `secret`, input labels, `selected`, `indent`,
+/// `invalidate-rows`, modals and every effect but pushes; frozen icons become their snake_case
+/// name; a 0.3 image becomes its alt text.
 mod shim {
     use super::*;
 

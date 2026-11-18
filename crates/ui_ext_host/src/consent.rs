@@ -394,6 +394,95 @@ mod tests {
         }
     }
 
+    /// Plan 4.5: the manifest's domains, programs, argument patterns and environment names are
+    /// consent items (design.md 0.3 §0.6), so an update that adds one, or a T2 capability, is held
+    /// like one that adds T1; their rules are checked when the manifest is read.
+    #[test]
+    fn test_domains_programs_and_t2_hold_updates() {
+        let manifest = |extra: &str| -> ui_ext_wasm::UiManifest {
+            toml::from_str(&format!(
+                "api_version = \"0.3.0\"\ncomponent = \"x.wasm\"\n{extra}"
+            ))
+            .expect("manifest")
+        };
+        let check = |manifest: &ui_ext_wasm::UiManifest| {
+            manifest
+                .check_network()
+                .and_then(|()| manifest.check_processes())
+        };
+        let items = |m: &ui_ext_wasm::UiManifest| {
+            let mut items = m.consent_items();
+            items.sort();
+            items
+        };
+        let record = |m: &ui_ext_wasm::UiManifest| ConsentRecord {
+            capabilities: items(m),
+            grant: component(),
+        };
+        let v1 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\"]\n[network]\ndomains = [\"api.example.com\"]",
+        );
+        check(&v1).expect("valid");
+        let mut store = ConsentStore::default();
+        store.grant("ext", record(&v1));
+        assert_eq!(store.state("ext", &record(&v1)), ConsentState::Allowed);
+
+        // A new domain: held.
+        let v2 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\"]\n[network]\ndomains = [\"api.example.com\", \"*.cdn.example.org\"]",
+        );
+        check(&v2).expect("valid");
+        assert_eq!(
+            store.state("ext", &record(&v2)),
+            ConsentState::NeedsApproval {
+                new_capabilities: vec!["network:fetch@*.cdn.example.org".into()]
+            }
+        );
+        // A new T2 capability with a program, an argument pattern and an environment name.
+        let v3 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]\n[network]\ndomains = [\"api.example.com\"]\n[[processes]]\nname = \"git\"\nargs = [\"status\"]\n[process]\nenv = [\"GIT_DIR\"]",
+        );
+        check(&v3).expect("valid");
+        let ConsentState::NeedsApproval { new_capabilities } = store.state("ext", &record(&v3))
+        else {
+            panic!("held")
+        };
+        assert_eq!(
+            new_capabilities,
+            [
+                "process:env@GIT_DIR",
+                "process:spawn",
+                "process:spawn@git",
+                "process:spawn@git status"
+            ]
+        );
+        assert!(
+            crate::install::describe_capability_ids(&new_capabilities)
+                .contains(&"Runs git".to_string())
+        );
+
+        // The rules.
+        for bad in [
+            "capabilities = [\"network:fetch\"]",
+            "[network]\ndomains = [\"example.com\"]",
+            "capabilities = [\"network:fetch\"]\n[network]\ndomains = [\"*.com\"]",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"bin/git\"",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"..\"",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"lint\"\npath = \"../x\"",
+            "capabilities = [\"process:spawn\"]",
+            "[[processes]]\nname = \"git\"",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"git\"\n[process]\nenv = [\"A=B\"]",
+        ] {
+            assert!(check(&manifest(bad)).is_err(), "{bad}");
+        }
+        for good in [
+            "capabilities = [\"network:fetch\"]\n[network]\ndomains = [\"localhost:8080\", \"*.example.com\"]",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"eslint\"\npath = \"node_modules/.bin/eslint\"\n[process]\nenv = [\"NO_COLOR\"]",
+        ] {
+            check(&manifest(good)).unwrap_or_else(|error| panic!("{good}: {error:#}"));
+        }
+    }
+
     /// The broker's check: T0 needs only the declaration, T1 a grant, and a revocation applies
     /// to the very next check of the same checker.
     #[test]

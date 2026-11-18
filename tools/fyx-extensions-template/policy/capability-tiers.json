@@ -1,0 +1,24 @@
+{
+  "comment": "Capability -> tier, as Fyx's client knows them (fyx_registry::Tier::of_capability; a test in crates/fyx_registry checks this file against it). A capability missing here counts as t2.",
+  "capabilities": {
+    "ui:panel": "t0",
+    "ui:status-bar": "t0",
+    "ui:modal": "t0",
+    "ui:notifications": "t0",
+    "ui:editor-decorations": "t0",
+    "ui:picker": "t0",
+    "ui:code-lens": "t0",
+    "ui:hover": "t0",
+    "ui:virtual-documents": "t0",
+    "ui:commands": "t0",
+    "ui:images": "t0",
+    "ui:canvas": "t0",
+    "workspace:read-buffers": "t1",
+    "workspace:read-files": "t1",
+    "workspace:diagnostics": "t1",
+    "network:fetch": "t2",
+    "process:spawn": "t2",
+    "workspace:edit": "t2",
+    "agent:observe": "t2"
+  }
+}

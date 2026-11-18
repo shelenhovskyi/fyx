@@ -57,6 +57,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `ImageProps::size` | method | The box in logical pixels; the image keeps its aspect ratio inside it (`ImageProps::fit`). |
 | `ImageProps::tint` | method | SVG only: draw it as a one-colour mask in this theme colour, like the host's own icons. |
 | `ImageProps::width` | method | Only the width; the height follows the aspect ratio. |
+| `InputProps::label` | method | The accessible name screen readers announce; without one they read the placeholder. At most 256 bytes: the host cuts longer text at a character boundary. Dropped for 0.1. |
 | `InputProps::new` | method |  |
 | `InputProps::placeholder` | method |  |
 | `InputProps::secret` | method | Masks the text on screen (passwords, tokens). The value still reaches the extension. |

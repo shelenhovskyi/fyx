@@ -132,6 +132,11 @@ pub struct UiExtensionRegistry {
     active_workspace: Option<gpui::EntityId>,
     /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
     load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
+    /// The instance whose 0.3 I/O outcomes (`handle-io`) are being delivered, per extension, with
+    /// the epoch its delivery loop was started for. A reload or a stop replaces or removes it,
+    /// which ends the old loop and lets the old instance go.
+    io_instances: HashMap<Arc<str>, (u64, UiExtension)>,
+    next_io_epoch: u64,
     /// Open extension notifications, by extension and the id its instance gave them.
     notifications: HashMap<(Arc<str>, u64), OpenNotification>,
     /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
@@ -154,6 +159,14 @@ pub enum RegistryEvent {
     },
     /// The extension closed a modal (`hide-surface`, `remove-surface`): no `dismissed`.
     CloseModal(SharedString),
+    /// A message from Fyx itself (no provenance line) for the workspace named: a block list
+    /// entry rolled back or disabled an installed extension (platform plan 3.4).
+    HostNotice {
+        id: SharedString,
+        title: SharedString,
+        message: SharedString,
+        workspace: gpui::EntityId,
+    },
     /// `notify` (design.md M.1): the workspace named shows it (the active window's).
     ShowNotification {
         extension_id: Arc<str>,
@@ -677,6 +690,29 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// Tells the user, in the active window, that a block changed an installed extension. With
+    /// no window it stays in the log (the update check logged it already).
+    pub(crate) fn notify_block(
+        &mut self,
+        name: &str,
+        block: &crate::fyx_extensions_page::BlockNotice,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace else {
+            return;
+        };
+        cx.emit(RegistryEvent::HostNotice {
+            id: format!("fyx-ui-block-{}", block.extension_id).into(),
+            title: format!("{name} was {}", block.what).into(),
+            message: format!(
+                "The Fyx block list says: {}\n({} · {})",
+                block.reason, name, block.extension_id
+            )
+            .into(),
+            workspace,
+        });
+    }
+
     /// The name in the provenance line of an extension's notifications and progress (M.4).
     pub fn provenance_name(&self, extension_id: &str) -> SharedString {
         crate::notifications::provenance_name(
@@ -898,6 +934,11 @@ impl UiExtensionRegistry {
         let extension_id = extension.extension_id().clone();
         let surfaces: Vec<Surface> = extension.surfaces_v0_2().to_vec();
         let initial_effects = extension.initial_effects().to_vec();
+        let io_events = extension.take_io_events();
+        self.io_instances.remove(&extension_id);
+        if let Some(io_events) = io_events {
+            self.start_io_loop(extension.clone(), io_events, cx);
+        }
         self.register_backend(Rc::new(extension), &surfaces, cx);
         // Effects of instantiation and `surfaces` (0.2), after the static surfaces exist.
         for effect in initial_effects {
@@ -916,6 +957,85 @@ impl UiExtensionRegistry {
                     }
                 });
                 if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Delivers an instance's I/O outcomes (a finished fetch) through `handle-io`, one at a time,
+    /// applying each reply's effects like a tick's (W2c, plan 4.6). The loop ends when the
+    /// instance is replaced or stops.
+    fn start_io_loop(
+        &mut self,
+        extension: UiExtension,
+        mut events: futures::channel::mpsc::Receiver<ui_ext_wasm::network::IoEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let extension_id = extension.extension_id().clone();
+        self.next_io_epoch += 1;
+        let epoch = self.next_io_epoch;
+        self.io_instances
+            .insert(extension_id.clone(), (epoch, extension));
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.next().await {
+                let Ok(Some(instance)) = this.update(cx, |this, _| {
+                    this.io_instances
+                        .get(&extension_id)
+                        .filter(|(current, _)| *current == epoch)
+                        .map(|(_, instance)| instance.clone())
+                }) else {
+                    break;
+                };
+                let result = instance.handle_io(event).await;
+                drop(instance);
+                let still_current = this.update(cx, |this, cx| {
+                    let current = this
+                        .io_instances
+                        .get(&extension_id)
+                        .is_some_and(|(current, _)| *current == epoch);
+                    if !current {
+                        return false;
+                    }
+                    match result {
+                        Ok(reply) => {
+                            for effect in reply.effects {
+                                this.apply_effect(&extension_id, effect, cx);
+                            }
+                        }
+                        Err(error) => match error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<ui_ext_wasm::EffectReplyError>())
+                        {
+                            Some(rejected) => {
+                                log::error!(
+                                    "fyx:ui: {extension_id}: handle-io failed: {}",
+                                    ui_ext::sanitize_for_log(&rejected.message)
+                                );
+                                for effect in rejected.effects.clone() {
+                                    this.apply_effect(&extension_id, effect, cx);
+                                }
+                            }
+                            // A trap or the time budget: the instance is dead.
+                            None => {
+                                log::error!(
+                                    "fyx:ui: {extension_id}: handle-io stopped it: {}",
+                                    ui_ext::sanitize_for_log(&format!("{error:#}"))
+                                );
+                                this.fail_extension(
+                                    &extension_id,
+                                    "",
+                                    format!("{extension_id} crashed. Restart the extension to try again.")
+                                        .into(),
+                                    cx,
+                                );
+                            }
+                        },
+                    }
+                    true
+                });
+                if !matches!(still_current, Ok(true)) {
                     break;
                 }
             }
@@ -1318,6 +1438,7 @@ impl UiExtensionRegistry {
         // notifications, and the registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
         self.close_notifications_of(extension_id, None, cx);
+        self.io_instances.remove(extension_id);
         self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
@@ -1619,7 +1740,8 @@ async fn found_at(
             extension_id,
             component,
             is_dev,
-            capabilities: manifest.capabilities.clone(),
+            // With its domains and programs, so an update that adds one is held (plan 4.5).
+            capabilities: manifest.consent_items(),
             source,
             cache,
             manifest,
@@ -1842,6 +1964,7 @@ fn attach_to_workspace(
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
     crate::store_actions::register(workspace);
+    crate::fyx_extensions_page::register(workspace);
     if crate::inspector::inspector_enabled(cx) {
         let inspector =
             cx.new(|cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
@@ -1922,6 +2045,28 @@ fn attach_to_workspace(
                             window,
                             cx,
                         );
+                    }
+                    return;
+                }
+                RegistryEvent::HostNotice {
+                    id,
+                    title,
+                    message,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        let (title, message) = (title.clone(), message.clone());
+                        workspace.show_notification(NotificationId::named(id.clone()), cx, |cx| {
+                            cx.new(|cx| {
+                                MessageNotification::new(message, cx)
+                                    .with_title(title)
+                                    .primary_message("Open Fyx Extensions")
+                                    .primary_on_click(|window, cx| {
+                                        window
+                                            .dispatch_action(Box::new(crate::OpenFyxExtensions), cx)
+                                    })
+                            })
+                        });
                     }
                     return;
                 }
@@ -2355,7 +2500,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
         if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
-            declared = manifest.capabilities;
+            declared = manifest.consent_items();
         }
         UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?
