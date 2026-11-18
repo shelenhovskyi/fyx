@@ -717,3 +717,61 @@ async fn registry_release(
         .release(&ExtensionId::new(id).ok()?, &Version::parse(version).ok()?)
         .cloned()
 }
+
+/// Plan 4.5: a first-use request goes to the active window as a prompt naming the extension and
+/// the hosts; the answer resolves it. With no window it resolves `Ask` and records nothing.
+#[gpui::test]
+async fn test_first_use_prompt_goes_to_the_active_window(cx: &mut gpui::TestAppContext) {
+    use futures::FutureExt as _;
+    use gpui::AppContext as _;
+    use ui_ext_wasm::permissions::PermissionState;
+    crate::tests::init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let checker = registry.update(cx, |registry, cx| {
+        registry.start_permission_prompts(cx);
+        registry.consent_mut().declare(
+            "demo",
+            vec![
+                "network:fetch".into(),
+                "network:fetch@api.example.com".into(),
+            ],
+        );
+        registry.capability_check()
+    });
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscription = cx.update(|cx| {
+        let events = events.clone();
+        cx.subscribe(&registry, move |_, event: &crate::RegistryEvent, _| {
+            events.borrow_mut().push(event.clone())
+        })
+    });
+
+    // No window: Ask, nothing asked.
+    let request = checker.request("demo", "network:fetch");
+    cx.run_until_parked();
+    assert_eq!(request.now_or_never(), Some(PermissionState::Ask));
+    assert!(events.borrow().is_empty());
+
+    let workspace = cx.new(|_| ()).entity_id();
+    registry.update(cx, |registry, _| registry.set_active_workspace(workspace));
+    let request = checker.request("demo", "network:fetch");
+    cx.run_until_parked();
+    assert!(matches!(
+        events.borrow().as_slice(),
+        [crate::RegistryEvent::PermissionPrompt { capability, workspace: target, .. }]
+            if capability.as_ref() == "network:fetch" && *target == workspace
+    ));
+    let (title, detail) = registry.read_with(cx, |registry, _| {
+        registry.permission_prompt_text("demo", "network:fetch")
+    });
+    assert_eq!(title, "Allow demo to connect to the internet?");
+    assert!(detail.starts_with("Hosts: api.example.com"), "{detail}");
+    registry.update(cx, |registry, cx| {
+        registry.answer_permission("demo", "network:fetch", Some(true), false, cx)
+    });
+    assert_eq!(request.now_or_never(), Some(PermissionState::Granted));
+    assert_eq!(
+        registry.read_with(cx, |registry, _| registry.t2_state("demo", "network:fetch")),
+        PermissionState::Granted
+    );
+}
