@@ -40,7 +40,7 @@ pub(super) async fn review(
             },
         })
     };
-    if !cx.update(|cx| acp_thread::fyx_review::has_agent_write_gate(cx)) {
+    if !cx.update(|cx| acp_thread::fyx_review::wants_agent_review(cx)) {
         return unchanged(session, error);
     }
     let Ok(session_id) = session

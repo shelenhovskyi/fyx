@@ -5,6 +5,7 @@
 //! `fyx_security` key, so a repository can neither raise nor lower it. A repository can only
 //! tighten, through `.fyx/security.toml` (see [`RepoPolicy`]).
 
+pub mod paths;
 mod policy;
 
 use std::path::Path;

@@ -60,8 +60,20 @@ the diff.
   - `auto_accept` patterns from your settings are relative to the root of the worktree that holds
     the file.
 - Patterns use [globset](https://docs.rs/globset) syntax (`?`, `[abc]`, `{a,b}`).
-- Fyx matches the file the edit really goes to: the opened file's path, with `.` and `..`
-  resolved. On Windows and macOS the comparison ignores case, as those file systems do, so
+- The gitignore spellings mean what they mean there:
+  - a leading `/` anchors the pattern at the root: `/Cargo.lock` matches only the root `Cargo.lock`;
+  - a trailing `/` names a directory and everything in it: `secrets/` matches `secrets/key.pem` and
+    `app/secrets/key.pem`, `/config/` only the root `config/`;
+  - a leading `./` is dropped: `./build/**` is `build/**`.
+- Fyx matches every spelling of the file the edit really goes to:
+  - the path the agent sent and the opened file's path, with `.` and `..` resolved and a `\\?\`
+    prefix dropped;
+  - the same path with Windows' silent renames undone: `.env.`, `.env ` and `.env::$DATA` are `.env`;
+  - the real file on disk, with symlinks and Windows 8.3 short names (`PROGRA~1`) resolved. A
+    symlink committed to the repository cannot move a denied file out of reach.
+- A `deny` or `always_ask` pattern applies when any spelling matches it. `auto_accept` applies only
+  when every spelling matches, so a symlink that leads out of the project is never auto-accepted.
+- On Windows and macOS the comparison ignores case, as those file systems do, so
   `Config/PROD.ENV` matches `*.env`.
 - In a project with several worktrees, each worktree's own `.fyx/review.toml` covers its files.
   For nested worktrees, the innermost one wins.

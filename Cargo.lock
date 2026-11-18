@@ -385,6 +385,7 @@ dependencies = [
  "editor",
  "fs",
  "futures 0.3.34",
+ "fyx_guard",
  "globset",
  "gpui",
  "language",

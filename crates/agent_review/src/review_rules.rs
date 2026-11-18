@@ -92,9 +92,25 @@ pub(crate) struct Pattern {
 }
 
 impl Pattern {
+    /// Also takes the gitignore spellings people write: `/Cargo.lock` (at the root only),
+    /// `./x/**` (the same as `x/**`) and `secrets/` (a directory at any depth, with everything in it).
     pub(crate) fn new(source: &str) -> Result<Self> {
-        let file_name_only = !source.contains('/');
-        let matcher = GlobBuilder::new(source)
+        let mut glob = source.trim();
+        while let Some(rest) = glob.strip_prefix("./") {
+            glob = rest;
+        }
+        let anchored = glob.starts_with('/');
+        let glob = glob.trim_start_matches('/');
+        let glob = match glob.strip_suffix('/') {
+            Some(dir) if anchored || dir.contains('/') => format!("{dir}/**"),
+            Some(dir) => format!("**/{dir}/**"),
+            None => glob.to_string(),
+        };
+        if glob.is_empty() {
+            anyhow::bail!("invalid pattern {source:?}: it names no file");
+        }
+        let file_name_only = !anchored && !glob.contains('/');
+        let matcher = GlobBuilder::new(&glob)
             .literal_separator(true)
             .case_insensitive(CASE_INSENSITIVE)
             .build()
@@ -144,6 +160,9 @@ impl UserAutoAccept {
 /// `auto_accept` patterns still have a root to match against.
 pub struct ReviewRules {
     root: PathBuf,
+    /// The root as the file system resolves it (a symlinked checkout, `subst` drive, 8.3 name), so a
+    /// file's real path is matched too.
+    real_root: Option<PathBuf>,
     source: String,
     always_ask: Vec<Pattern>,
     deny: Vec<Pattern>,
@@ -164,6 +183,7 @@ impl ReviewRules {
             deny: compile(&file.deny)?,
             ignored_auto_accept: !file.auto_accept.is_empty(),
             root,
+            real_root: None,
             source: text.to_string(),
         })
     }
@@ -189,6 +209,7 @@ impl ReviewRules {
         }
         ReviewRules {
             root: self.root.clone(),
+            real_root: other.real_root.clone().or_else(|| self.real_root.clone()),
             source: format!(
                 "{}\n# and still in force until confirmed:\n{}",
                 other.source, self.source
@@ -203,6 +224,7 @@ impl ReviewRules {
     pub fn none(root: PathBuf) -> Self {
         Self {
             root,
+            real_root: None,
             source: String::new(),
             always_ask: Vec::new(),
             deny: Vec::new(),
@@ -212,6 +234,18 @@ impl ReviewRules {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Sets where the root really is on disk (see [`Self::relative_path`]).
+    pub fn with_real_root(mut self, real_root: Option<PathBuf>) -> Self {
+        self.real_root = real_root.filter(|real_root| *real_root != self.root);
+        self
+    }
+
+    /// Whether the rules restrict anything (a `deny` or `always_ask` pattern), so they apply with
+    /// review mode off too.
+    pub fn has_restrictions(&self) -> bool {
+        !self.deny.is_empty() || !self.always_ask.is_empty()
     }
 
     /// Whether the file had an `auto_accept` key, which a project file may not set.
@@ -245,31 +279,12 @@ impl ReviewRules {
         loosened
     }
 
-    /// The path of `abs_path` inside this worktree, or `None` when it lies outside.
+    /// The path of `abs_path` inside this worktree (under its root as opened, or as resolved on
+    /// disk), or `None` when it lies outside.
     pub fn relative_path(&self, abs_path: &Path) -> Option<PathBuf> {
-        let path = normalize(abs_path);
-        let root = normalize(&self.root);
-        let mut path_components = path.components();
-        for root_component in root.components() {
-            let component = path_components.next()?;
-            let same = if CASE_INSENSITIVE {
-                component
-                    .as_os_str()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&root_component.as_os_str().to_string_lossy())
-            } else {
-                component == root_component
-            };
-            if !same {
-                return None;
-            }
-        }
-        // Patterns are written with `/`; Windows paths are compared the same way.
-        let relative = path_components
-            .as_path()
-            .to_string_lossy()
-            .replace('\\', "/");
-        Some(PathBuf::from(relative))
+        std::iter::once(&self.root)
+            .chain(&self.real_root)
+            .find_map(|root| relative_to(abs_path, root))
     }
 
     /// The rule for `abs_path`, if it lies in this worktree and a rule matches: the project's `deny`
@@ -299,6 +314,33 @@ impl ReviewRules {
             })
         })
     }
+}
+
+/// The path of `abs_path` relative to `root`, compared as the platform's file system compares names.
+fn relative_to(abs_path: &Path, root: &Path) -> Option<PathBuf> {
+    let path = normalize(abs_path);
+    let root = normalize(root);
+    let mut path_components = path.components();
+    for root_component in root.components() {
+        let component = path_components.next()?;
+        let same = if CASE_INSENSITIVE {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&root_component.as_os_str().to_string_lossy())
+        } else {
+            component == root_component
+        };
+        if !same {
+            return None;
+        }
+    }
+    // Patterns are written with `/`; Windows paths are compared the same way.
+    let relative = path_components
+        .as_path()
+        .to_string_lossy()
+        .replace('\\', "/");
+    Some(PathBuf::from(relative))
 }
 
 /// The key a worktree's confirmed rules are remembered under: its normalised root, compared the way
@@ -476,5 +518,49 @@ mod tests {
         assert!(ReviewRules::parse(PathBuf::from("/r"), "deny = [\"[\"]").is_err());
         assert!(ReviewRules::parse(PathBuf::from("/r"), "allow = []").is_err());
         assert!(ReviewRules::parse(PathBuf::from("/r"), "").is_ok());
+        assert!(ReviewRules::parse(PathBuf::from("/r"), "deny = [\"/\"]").is_err());
+    }
+
+    #[test]
+    fn gitignore_spellings_match_what_they_mean() {
+        let rules = ReviewRules::parse(
+            PathBuf::from("/repo"),
+            r#"deny = ["/Cargo.lock", "secrets/", "./build/**", "/config/"]"#,
+        )
+        .unwrap();
+        let nobody = user(&[]);
+        let denied = |path: &str| kind(&rules, &nobody, path) == Some(RuleKind::Deny);
+        assert!(denied("Cargo.lock"));
+        assert!(
+            !denied("crates/x/Cargo.lock"),
+            "a leading / anchors at the root"
+        );
+        assert!(denied("secrets/key.pem"));
+        assert!(
+            denied("app/secrets/deep/key.pem"),
+            "a directory at any depth"
+        );
+        assert!(denied("build/out.o"));
+        assert!(denied("config/prod.toml"));
+        assert!(!denied("app/config/prod.toml"));
+    }
+
+    #[test]
+    fn the_real_root_matches_too() {
+        let rules = ReviewRules::parse(PathBuf::from("/link"), "deny = [\"*.env\"]")
+            .unwrap()
+            .with_real_root(Some(PathBuf::from("/real/repo")));
+        let nobody = user(&[]);
+        assert_eq!(
+            rules
+                .evaluate(Path::new("/real/repo/a/.env"), &nobody)
+                .map(|rule| rule.kind),
+            Some(RuleKind::Deny)
+        );
+        assert_eq!(
+            rules.relative_path(Path::new("/link/a/.env")),
+            Some(PathBuf::from("a/.env"))
+        );
+        assert_eq!(rules.relative_path(Path::new("/real/other")), None);
     }
 }
