@@ -160,6 +160,12 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
             other if other.starts_with("process:spawn@") => {
                 format!("Runs {}", &other["process:spawn@".len()..])
             }
+            other if other.starts_with("process:env@") => {
+                format!(
+                    "Passes the environment variable {}",
+                    &other["process:env@".len()..]
+                )
+            }
             other => match tier_of(other) {
                 Some(_) => format!("Not used by this version of Fyx ({other})"),
                 None => format!("Unknown to this version of Fyx ({other})"),

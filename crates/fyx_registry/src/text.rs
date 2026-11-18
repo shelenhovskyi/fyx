@@ -173,9 +173,10 @@ const MULTI_LABEL_PUBLIC_SUFFIXES: &[&str] = &[
     "surge.sh",
 ];
 
-/// Whether `domain` is a public suffix: a single label, or one of
-/// [`MULTI_LABEL_PUBLIC_SUFFIXES`].
-pub(crate) fn is_public_suffix(domain: &str) -> bool {
+/// Whether `domain` (lowercase ASCII, no trailing dot) is a public suffix: a single label, or
+/// one of [`MULTI_LABEL_PUBLIC_SUFFIXES`]. Also used by the `network:fetch` domain list in
+/// `ui_ext_wasm`, which refuses a wildcard whose base is one.
+pub fn is_public_suffix(domain: &str) -> bool {
     !domain.contains('.') || MULTI_LABEL_PUBLIC_SUFFIXES.contains(&domain)
 }
 

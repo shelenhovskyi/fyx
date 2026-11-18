@@ -18,6 +18,15 @@
 //!
 //! `mount` answers a text node on `probe` and an `image` node anywhere else; `list-rows` answers
 //! one row holding an `image` node.
+//!
+//! `network:fetch` is driven by `input-changed` on `probe`, whose text is a command; the reply
+//! reports each result (an id or an error code), joined with ` | `:
+//! - `fetch <url>...`: one GET per URL;
+//! - `fetch-trap <url>`: a GET, then a trap, so the request is dropped with the call;
+//! - `cancel <id>`: `cancel-fetch`, reported as `done`.
+//!
+//! `handle-io` pushes the outcome to `probe` as one text node (id 1): `fetch-done <id> <status>
+//! <body>` or `fetch-done <id> err <error>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.3.0",
@@ -26,6 +35,7 @@ wit_bindgen::generate!({
 
 use fyx::ui::host::{self, HostError, HostErrorCode};
 use fyx::ui::images::{self, ImageFormat};
+use fyx::ui::network;
 use fyx::ui::permissions;
 use fyx::ui::types::*;
 
@@ -269,6 +279,34 @@ impl Guest for Probe {
 
     fn handle_event(_surface_id: String, event: UiEvent) -> Result<Update, String> {
         match event {
+            UiEvent::InputChanged((_, command)) => {
+                let words: Vec<&str> = command.split_whitespace().collect();
+                let fetch = |url: &str| {
+                    match network::fetch(&network::HttpRequest {
+                        method: network::HttpMethod::Get,
+                        url: url.into(),
+                        headers: Vec::new(),
+                        body: None,
+                        timeout_ms: None,
+                    }) {
+                        Ok(id) => id.to_string(),
+                        Err(error) => code(&error).to_string(),
+                    }
+                };
+                let report = match words.as_slice() {
+                    ["fetch", urls @ ..] => urls.iter().map(|url| fetch(url)).collect(),
+                    ["fetch-trap", url] => {
+                        fetch(url);
+                        panic!("trap after a fetch")
+                    }
+                    ["cancel", id] => {
+                        network::cancel_fetch(id.parse().map_err(|e| format!("{e}"))?);
+                        vec!["done".to_string()]
+                    }
+                    _ => return Err(format!("no command {command:?}")),
+                };
+                Ok(Update::Replace(vec![text(1, &report.join(" | "))]))
+            }
             UiEvent::Click(5) => Ok(Update::Replace(vec![image(1)])),
             UiEvent::Click(case) => {
                 let report = run(case)?.join(" | ");
@@ -290,8 +328,34 @@ impl Guest for Probe {
         Ok(Update::Unchanged)
     }
 
-    fn handle_io(_event: fyx::ui::io::IoEvent) -> Result<(), String> {
-        Err("unsupported".into())
+    fn handle_io(event: fyx::ui::io::IoEvent) -> Result<(), String> {
+        let report = match event {
+            fyx::ui::io::IoEvent::FetchDone((id, Ok(response))) => format!(
+                "fetch-done {id} {} {}",
+                response.status,
+                String::from_utf8_lossy(&response.body)
+            ),
+            fyx::ui::io::IoEvent::FetchDone((id, Err(error))) => {
+                let error = match error {
+                    network::FetchError::Denied => "denied".to_string(),
+                    network::FetchError::HostNotAllowed(host) => format!("host-not-allowed {host}"),
+                    network::FetchError::RedirectNotAllowed(host) => {
+                        format!("redirect-not-allowed {host}")
+                    }
+                    network::FetchError::Dns(_) => "dns".into(),
+                    network::FetchError::Connect(_) => "connect".into(),
+                    network::FetchError::Tls(_) => "tls".into(),
+                    network::FetchError::Timeout => "timeout".into(),
+                    network::FetchError::TooLarge => "too-large".into(),
+                    network::FetchError::Cancelled => "cancelled".into(),
+                    network::FetchError::Other(_) => "other".into(),
+                };
+                format!("fetch-done {id} err {error}")
+            }
+            _ => return Err("unexpected io event".into()),
+        };
+        host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))
+            .map_err(|error| code(&error).to_string())
     }
 
     fn handle_command(

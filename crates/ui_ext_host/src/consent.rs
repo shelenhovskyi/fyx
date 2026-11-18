@@ -394,116 +394,92 @@ mod tests {
         }
     }
 
-    /// Plan 4.5: the manifest's network domains and programs are consent items, so an update
-    /// that adds one, or adds a T2 capability, is held like one that adds T1; the rules for them
-    /// are checked when the manifest is read.
+    /// Plan 4.5: the manifest's domains, programs, argument patterns and environment names are
+    /// consent items (design.md 0.3 §0.6), so an update that adds one, or a T2 capability, is held
+    /// like one that adds T1; their rules are checked when the manifest is read.
     #[test]
     fn test_domains_programs_and_t2_hold_updates() {
         let manifest = |extra: &str| -> ui_ext_wasm::UiManifest {
             toml::from_str(&format!(
-                "api_version = \"0.3.0\"
-component = \"x.wasm\"
-{extra}"
+                "api_version = \"0.3.0\"\ncomponent = \"x.wasm\"\n{extra}"
             ))
             .expect("manifest")
         };
-        let v1 = manifest(
-            "capabilities = [\"ui:panel\", \"network:fetch\"]
-network_domains = [\"api.example.com\"]",
-        );
-        v1.check_network_and_processes().expect("valid");
-        let mut store = ConsentStore::default();
+        let check = |manifest: &ui_ext_wasm::UiManifest| {
+            manifest
+                .check_network()
+                .and_then(|()| manifest.check_processes())
+        };
         let items = |m: &ui_ext_wasm::UiManifest| {
             let mut items = m.consent_items();
             items.sort();
             items
         };
-        let granted = ConsentRecord {
-            capabilities: items(&v1),
+        let record = |m: &ui_ext_wasm::UiManifest| ConsentRecord {
+            capabilities: items(m),
             grant: component(),
         };
-        store.grant("ext", granted.clone());
-        assert_eq!(store.state("ext", &granted), ConsentState::Allowed);
+        let v1 = manifest(
+            "capabilities = [\"ui:panel\", \"network:fetch\"]\n[network]\ndomains = [\"api.example.com\"]",
+        );
+        check(&v1).expect("valid");
+        let mut store = ConsentStore::default();
+        store.grant("ext", record(&v1));
+        assert_eq!(store.state("ext", &record(&v1)), ConsentState::Allowed);
 
         // A new domain: held.
         let v2 = manifest(
-            "capabilities = [\"ui:panel\", \"network:fetch\"]
-network_domains = [\"api.example.com\", \"*.cdn.example.org\"]",
+            "capabilities = [\"ui:panel\", \"network:fetch\"]\n[network]\ndomains = [\"api.example.com\", \"*.cdn.example.org\"]",
         );
-        v2.check_network_and_processes().expect("valid");
-        let update = ConsentRecord {
-            capabilities: items(&v2),
-            grant: component(),
-        };
+        check(&v2).expect("valid");
         assert_eq!(
-            store.state("ext", &update),
+            store.state("ext", &record(&v2)),
             ConsentState::NeedsApproval {
                 new_capabilities: vec!["network:fetch@*.cdn.example.org".into()]
             }
         );
-        // A new T2 capability with its program: held, both listed.
+        // A new T2 capability with a program, an argument pattern and an environment name.
         let v3 = manifest(
-            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]
-network_domains = [\"api.example.com\"]
-[[processes]]
-name = \"git\"",
+            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]\n[network]\ndomains = [\"api.example.com\"]\n[[processes]]\nname = \"git\"\nargs = [\"status\"]\n[process]\nenv = [\"GIT_DIR\"]",
         );
-        v3.check_network_and_processes().expect("valid");
-        let ConsentState::NeedsApproval { new_capabilities } = store.state(
-            "ext",
-            &ConsentRecord {
-                capabilities: items(&v3),
-                grant: component(),
-            },
-        ) else {
+        check(&v3).expect("valid");
+        let ConsentState::NeedsApproval { new_capabilities } = store.state("ext", &record(&v3))
+        else {
             panic!("held")
         };
-        assert_eq!(new_capabilities, ["process:spawn", "process:spawn@git"]);
         assert_eq!(
-            crate::install::describe_capability_ids(&new_capabilities)[1],
-            "Runs git"
+            new_capabilities,
+            [
+                "process:env@GIT_DIR",
+                "process:spawn",
+                "process:spawn@git",
+                "process:spawn@git status"
+            ]
+        );
+        assert!(
+            crate::install::describe_capability_ids(&new_capabilities)
+                .contains(&"Runs git".to_string())
         );
 
         // The rules.
         for bad in [
-            "capabilities = [\"network:fetch\"]
-network_domains = [\"Example.com\"]",
-            "capabilities = [\"network:fetch\"]
-network_domains = [\"example\"]",
-            "capabilities = [\"network:fetch\"]
-network_domains = [\"example.com:443\"]",
-            "capabilities = [\"network:fetch\"]
-network_domains = [\"*.*.example.com\"]",
-            "network_domains = [\"example.com\"]",
-            "capabilities = [\"process:spawn\"]
-[[processes]]
-name = \"bin/git\"",
-            "capabilities = [\"process:spawn\"]
-[[processes]]
-name = \"..\"",
-            "[[processes]]
-name = \"git\"",
-            "capabilities = [\"process:spawn\"]
-[[processes]]
-name = \"git\"
-env = [\"A=B\"]",
+            "capabilities = [\"network:fetch\"]",
+            "[network]\ndomains = [\"example.com\"]",
+            "capabilities = [\"network:fetch\"]\n[network]\ndomains = [\"*.com\"]",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"bin/git\"",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"..\"",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"lint\"\npath = \"../x\"",
+            "capabilities = [\"process:spawn\"]",
+            "[[processes]]\nname = \"git\"",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"git\"\n[process]\nenv = [\"A=B\"]",
         ] {
-            assert!(
-                manifest(bad).check_network_and_processes().is_err(),
-                "{bad}"
-            );
+            assert!(check(&manifest(bad)).is_err(), "{bad}");
         }
         for good in [
-            "capabilities = [\"network:fetch\"]
-network_domains = [\"localhost:8080\", \"127.0.0.1\", \"*.example.com\"]",
-            "capabilities = [\"process:spawn\"]
-[[processes]]
-name = \"git\"
-env = [\"GIT_DIR\"]",
+            "capabilities = [\"network:fetch\"]\n[network]\ndomains = [\"localhost:8080\", \"*.example.com\"]",
+            "capabilities = [\"process:spawn\"]\n[[processes]]\nname = \"eslint\"\npath = \"node_modules/.bin/eslint\"\n[process]\nenv = [\"NO_COLOR\"]",
         ] {
-            manifest(good)
-                .check_network_and_processes()
-                .unwrap_or_else(|error| panic!("{good}: {error:#}"));
+            check(&manifest(good)).unwrap_or_else(|error| panic!("{good}: {error:#}"));
         }
     }
 

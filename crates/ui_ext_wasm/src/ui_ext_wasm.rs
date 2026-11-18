@@ -65,6 +65,7 @@ mod effects;
 mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 pub mod images;
+pub mod network;
 mod stderr;
 pub mod ticks;
 
@@ -289,25 +290,46 @@ pub struct UiManifest {
     /// 0.2 [`CAPABILITY_MODAL`] and [`CAPABILITY_EDITOR_DECORATIONS`].
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// `network:fetch`: the hosts requests may go to, `example.com` or `*.example.com`
-    /// (spec decision 23); `localhost` and `127.0.0.1` may name a port.
-    #[serde(default)]
-    pub network_domains: Vec<String>,
-    /// `process:spawn`: the programs it may run, by name (spec decision 24).
+    /// `process:spawn`: the programs it may run (spec decision 24, design.md 0.3 §0.6).
     #[serde(default)]
     pub processes: Vec<ProcessSpec>,
+    /// `[fyx_ui.process]`: what every program gets.
+    #[serde(default)]
+    pub process: Option<ProcessManifest>,
     /// `name` from the top of `extension.toml`, as its author wrote it: check it before showing
     /// it (the provenance line of notifications, design.md M.4).
     #[serde(skip)]
     pub name: Option<String>,
+    /// 0.3, with `network:fetch`: the hosts the extension may fetch from (design.md §8).
+    #[serde(default)]
+    pub network: Option<NetworkManifest>,
+}
+
+/// `[fyx_ui.network]`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkManifest {
+    pub domains: Vec<String>,
 }
 
 /// One `[[fyx_ui.processes]]` entry.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSpec {
-    /// A program name resolved on `PATH`, never a path.
+    /// What `request.program` names; without `path`, resolved on `PATH` outside the worktrees.
     pub name: String,
+    /// Argument patterns the program may be run with (none: any arguments).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// A worktree-relative program, which needs a trusted worktree.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `[fyx_ui.process]`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessManifest {
     /// Environment variables passed through besides `PATH`, `HOME`/`USERPROFILE` and `LANG`.
     #[serde(default)]
     pub env: Vec<String>,
@@ -324,35 +346,72 @@ pub fn process_consent_item(program: &str) -> String {
 }
 
 impl UiManifest {
-    /// What the user consents to: the capabilities, each network domain and each program, so an
-    /// update that adds any of them is held until it is approved.
+    /// What the user consents to: the capabilities, and each domain, program, argument pattern
+    /// and environment name, so an update that adds any of them is held until it is approved
+    /// (design.md 0.3 §0.6).
     pub fn consent_items(&self) -> Vec<String> {
+        let domains = self
+            .network
+            .iter()
+            .flat_map(|network| network.domains.iter())
+            .map(|domain| domain_consent_item(domain));
+        let programs = self.processes.iter().flat_map(|process| {
+            let program = match &process.path {
+                Some(path) => format!("{} ({path})", process.name),
+                None => process.name.clone(),
+            };
+            std::iter::once(process_consent_item(&program)).chain(
+                process
+                    .args
+                    .iter()
+                    .map(move |pattern| format!("process:spawn@{} {pattern}", process.name)),
+            )
+        });
+        let env = self
+            .process
+            .iter()
+            .flat_map(|process| process.env.iter())
+            .map(|name| format!("process:env@{name}"));
         self.capabilities
             .iter()
             .cloned()
-            .chain(
-                self.network_domains
-                    .iter()
-                    .map(|domain| domain_consent_item(domain)),
-            )
-            .chain(
-                self.processes
-                    .iter()
-                    .map(|process| process_consent_item(&process.name)),
-            )
+            .chain(domains)
+            .chain(programs)
+            .chain(env)
             .collect()
     }
 
-    /// The domain and process rules (spec decisions 23, 24), checked when the manifest is read.
-    pub fn check_network_and_processes(&self) -> Result<()> {
-        for domain in &self.network_domains {
-            check_domain(domain)?;
+    /// `[fyx_ui.network]` and `network:fetch` go together; the domains follow
+    /// `network::DomainList::parse` (IDNA, no public-suffix wildcards, localhost only with a
+    /// port).
+    pub fn check_network(&self) -> Result<()> {
+        let declares = self
+            .capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        match &self.network {
+            Some(table) => {
+                anyhow::ensure!(
+                    declares,
+                    "[fyx_ui.network] needs {:?} in capabilities",
+                    network::CAPABILITY_NETWORK
+                );
+                network::DomainList::parse(&table.domains)?;
+            }
+            None => anyhow::ensure!(
+                !declares,
+                "{:?} needs [fyx_ui.network] domains",
+                network::CAPABILITY_NETWORK
+            ),
         }
-        if !self.network_domains.is_empty()
-            && !self.capabilities.iter().any(|c| c == "network:fetch")
-        {
-            bail!("[fyx_ui].network_domains needs the network:fetch capability");
-        }
+        Ok(())
+    }
+
+    /// The process rules (spec decision 24), checked when the manifest is read. W2c enforces
+    /// them when a program runs (plan 4.7).
+    pub fn check_processes(&self) -> Result<()> {
+        let declares = self.capabilities.iter().any(|c| c == "process:spawn");
+        let mut seen = std::collections::BTreeSet::new();
         for process in &self.processes {
             let name = &process.name;
             let plain = !name.is_empty()
@@ -364,61 +423,45 @@ impl UiManifest {
             if !plain {
                 bail!("[[fyx_ui.processes]] name {name:?} must be a program name, not a path");
             }
-            for variable in &process.env {
-                let valid = !variable.is_empty()
-                    && variable
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
-                if !valid {
-                    bail!("[[fyx_ui.processes]] {name}: env {variable:?} is not a variable name");
+            if !seen.insert(name.clone()) {
+                bail!("[[fyx_ui.processes]] names {name:?} twice");
+            }
+            if let Some(path) = &process.path {
+                let relative = Path::new(path);
+                let inside = !path.is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, PathComponent::Normal(_)));
+                if !inside {
+                    bail!(
+                        "[[fyx_ui.processes]] {name}: path {path:?} must be relative, inside the worktree"
+                    );
+                }
+            }
+            for pattern in &process.args {
+                if pattern.is_empty() || pattern.chars().any(char::is_control) {
+                    bail!("[[fyx_ui.processes]] {name}: argument pattern {pattern:?} is not valid");
                 }
             }
         }
-        if !self.processes.is_empty() && !self.capabilities.iter().any(|c| c == "process:spawn") {
+        for variable in self.process.iter().flat_map(|process| process.env.iter()) {
+            let valid = !variable.is_empty()
+                && variable
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                bail!("[fyx_ui.process] env {variable:?} is not a variable name");
+            }
+        }
+        let has_table = !self.processes.is_empty() || self.process.is_some();
+        if has_table && !declares {
             bail!("[[fyx_ui.processes]] needs the process:spawn capability");
+        }
+        if declares && self.processes.is_empty() {
+            bail!("process:spawn needs [[fyx_ui.processes]]");
         }
         Ok(())
     }
-}
-
-/// `example.com`, `*.example.com`, or `localhost` / `127.0.0.1` with an optional port.
-fn check_domain(domain: &str) -> Result<()> {
-    let (host, port) = match domain.rsplit_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (domain, None),
-    };
-    let local = matches!(host, "localhost" | "127.0.0.1");
-    if let Some(port) = port {
-        if !local || port.parse::<u16>().map_or(true, |port| port == 0) {
-            bail!("network domain {domain:?}: only localhost and 127.0.0.1 take a port");
-        }
-        return Ok(());
-    }
-    if local {
-        return Ok(());
-    }
-    let name = host.strip_prefix("*.").unwrap_or(host);
-    let labels: Vec<&str> = name.split('.').collect();
-    let valid = labels.len() >= 2
-        && name.len() <= 253
-        && labels.iter().all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        })
-        && !labels
-            .last()
-            .is_some_and(|tld| tld.chars().all(|c| c.is_ascii_digit()));
-    if !valid {
-        bail!(
-            "network domain {domain:?} must be a lowercase host name like example.com or *.example.com"
-        );
-    }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -445,12 +488,20 @@ impl UiManifest {
         manifest.name = toml.name;
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
+        let network_capable = manifest.api_version >= Version::new(0, 3, 0);
         for capability in &manifest.capabilities {
+            // `network:fetch` is the first T2 capability this host provides, from 0.3 on.
+            if capability == network::CAPABILITY_NETWORK && network_capable {
+                continue;
+            }
             permissions::grantable_tier(capability)
                 .with_context(|| format!("extension {id}, in {path:?}"))?;
         }
         manifest
-            .check_network_and_processes()
+            .check_network()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .check_processes()
             .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
@@ -529,6 +580,8 @@ pub struct UiState {
     diagnostics: diagnostics::DiagnosticsBuffer,
     /// Live ids, declared capabilities, shown modals and the effect list of the 0.2 imports.
     api: effects::ApiState,
+    /// The 0.3 `network` import's ids, counters and the requests of the running call.
+    network: network::NetworkState,
 }
 
 impl UiState {
@@ -554,11 +607,13 @@ impl UiState {
         capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
         diagnostics: diagnostics::DiagnosticsBuffer,
         api: effects::ApiState,
+        network: network::NetworkState,
     ) -> Self {
         Self {
             capability_check,
             diagnostics,
             api,
+            network,
             extension_id,
             table: ResourceTable::new(),
             ctx,
@@ -996,6 +1051,8 @@ pub struct UiExtension {
     diagnostics: diagnostics::DiagnosticsBuffer,
     /// `extension.toml`'s `name`, unchecked; `None` without a manifest.
     name: Option<Arc<str>>,
+    /// Starts `network.fetch` requests after their call and hands back the outcomes.
+    network: Arc<network::NetworkHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1101,6 +1158,13 @@ pub struct LoadOptions {
     /// Whether a staged version (0.2 until it is frozen) may load; `None` means
     /// [`staged_api_allowed_by_default`].
     pub allow_staged: Option<bool>,
+    /// The broker's T2 consent (design.md §7). Without it every T2 operation is denied.
+    pub t2_consent: Option<Arc<dyn permissions::T2Consent>>,
+    /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
+    /// Applies only to a 0.3 component that declares `network:fetch`.
+    pub network_domains: Option<Vec<String>>,
+    /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
+    pub resolver: Option<Arc<dyn network::Resolve>>,
 }
 
 impl UiExtension {
@@ -1149,6 +1213,9 @@ impl UiExtension {
             capability_check,
             capabilities,
             allow_staged,
+            t2_consent,
+            network_domains,
+            resolver,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1162,6 +1229,17 @@ impl UiExtension {
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
+        let declares_network = capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        let domains = match network_domains {
+            Some(domains) if declares_network => match network::DomainList::parse(&domains) {
+                Ok(domains) => domains,
+                Err(error) => return Task::ready(Err(error)),
+            },
+            _ => network::DomainList::default(),
+        };
+        let fetcher = network::Fetcher::new(&extension_id, resolver);
         let compile_task = cx.background_executor().spawn({
             let extension_id = extension_id.clone();
             async move {
@@ -1196,6 +1274,20 @@ impl UiExtension {
         cx.spawn(async move |cx| {
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
+            // Only a 0.3 component has the `network` import.
+            let domains = Arc::new(if ui_api_version == ApiVersion::V0_3_0 {
+                domains
+            } else {
+                network::DomainList::default()
+            });
+            let running = Arc::new(network::Running::default());
+            let network = Arc::new(network::NetworkHandle::new(
+                extension_id.clone(),
+                domains.clone(),
+                fetcher,
+                t2_consent,
+                running.clone(),
+            ));
 
             let instantiate = {
                 let extension_id = extension_id.clone();
@@ -1220,6 +1312,7 @@ impl UiExtension {
                             capability_check,
                             diagnostics.clone(),
                             effects::ApiState::new(ui_api_version, capabilities),
+                            network::NetworkState::new(domains, running),
                         ),
                     );
                     store.limiter(|state| &mut state.limits);
@@ -1304,6 +1397,7 @@ impl UiExtension {
                     from_precompiled,
                     diagnostics,
                     name: None,
+                    network,
                 },
                 pushed_rx,
             ))
@@ -1355,6 +1449,7 @@ impl UiExtension {
     ) -> Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)> {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
+            network_domains: manifest.network.as_ref().map(|table| table.domains.clone()),
             ..options
         };
         let (mut extension, pushed) =
@@ -1425,6 +1520,7 @@ impl UiExtension {
     {
         let (return_tx, return_rx) = oneshot::channel();
         let diagnostics = self.diagnostics.clone();
+        let network = self.network.clone();
         let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
@@ -1440,6 +1536,9 @@ impl UiExtension {
                         })
                         .await;
                         let effects = store.data_mut().finish_call();
+                        // The call's requests start now, after it returned, or are dropped with
+                        // its effects if it failed (design.md §0.3).
+                        network.start(store.data_mut().network.finish_call(result.is_ok()));
                         diagnostics.call(diagnostics::CallRecord {
                             kind,
                             surface_id,

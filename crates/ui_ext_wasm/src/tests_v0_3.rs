@@ -296,3 +296,405 @@ fn test_v0_2_world_has_no_images() {
     let wit_v0_3 = include_str!("../../ui_ext/wit/since_v0.3.0/fyx-ui.wit");
     assert!(wit_v0_3.contains("image(image-props)") && wit_v0_3.contains("interface images"));
 }
+
+/// `network:fetch` end to end (design.md §8, plan 4.6): the import's checks, the broker, consent
+/// when the request is applied, delivery through `handle-io`, cancel, the caps, a trap and a
+/// reload. The engine's own rules (caps, redirects, addresses) are tested in `network.rs`.
+mod network_fetch {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::*;
+    use crate::{
+        network::{IoEvent, test_server},
+        permissions::{CapabilityCheck, CapabilityDenied, ConsentRequest, ConsentState, T2Consent},
+    };
+
+    struct Broker {
+        allows_calls: Mutex<bool>,
+        state: Mutex<ConsentState>,
+        answer: bool,
+        prompts: AtomicUsize,
+    }
+
+    impl Broker {
+        fn new(state: ConsentState, answer: bool) -> Arc<Self> {
+            Arc::new(Self {
+                allows_calls: Mutex::new(true),
+                state: Mutex::new(state),
+                answer,
+                prompts: AtomicUsize::new(0),
+            })
+        }
+
+        fn set(&self, state: ConsentState) {
+            *self.state.lock().unwrap() = state;
+        }
+    }
+
+    impl CapabilityCheck for Broker {
+        fn check(&self, extension_id: &str, capability: &str) -> Result<(), CapabilityDenied> {
+            if *self.allows_calls.lock().unwrap() {
+                Ok(())
+            } else {
+                Err(CapabilityDenied {
+                    extension_id: extension_id.into(),
+                    capability: capability.into(),
+                    reason: "refused".into(),
+                })
+            }
+        }
+    }
+
+    impl T2Consent for Broker {
+        fn state(&self, _: &str, _: &str) -> ConsentState {
+            *self.state.lock().unwrap()
+        }
+
+        fn request(
+            &self,
+            _: &str,
+            request: ConsentRequest,
+        ) -> futures::future::BoxFuture<'static, bool> {
+            assert_eq!(request.capability, "network:fetch");
+            assert_eq!(request.domains.len(), 1);
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            if self.answer {
+                self.set(ConsentState::Granted);
+            }
+            futures::future::ready(self.answer).boxed()
+        }
+    }
+
+    fn server(cx: &mut TestAppContext) -> test_server::Server {
+        cx.executor().allow_parking();
+        test_server::start_in_thread(|path, _| match path {
+            "/hello" => Some(test_server::ok(b"hello")),
+            _ => None,
+        })
+    }
+
+    async fn load_network(
+        port: u16,
+        broker: Option<Arc<Broker>>,
+        declare: bool,
+        cx: &mut TestAppContext,
+    ) -> UiExtension {
+        let mut capabilities = vec![
+            CAPABILITY_PANEL.to_string(),
+            ui_ext::v0_2::CAPABILITY_STATUS_BAR.to_string(),
+            ui_ext::v0_2::CAPABILITY_MODAL.to_string(),
+        ];
+        if declare {
+            capabilities.push("network:fetch".into());
+        }
+        load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(capabilities),
+                network_domains: Some(vec![format!("localhost:{port}")]),
+                capability_check: broker
+                    .clone()
+                    .map(|broker| broker as Arc<dyn CapabilityCheck>),
+                t2_consent: broker.map(|broker| broker as Arc<dyn T2Consent>),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads")
+    }
+
+    async fn command(extension: &UiExtension, command: &str) -> Vec<String> {
+        let reply = extension
+            .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, command.into()))
+            .await
+            .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+        match &reply.value {
+            Update::Replace(nodes) => match &nodes[0].props {
+                Props::Text(text) => text.content.split(" | ").map(String::from).collect(),
+                other => panic!("not a report: {other:?}"),
+            },
+            other => panic!("not a report: {other:?}"),
+        }
+    }
+
+    /// The next outcome, through `handle-io`: what the guest pushed in answer.
+    async fn deliver(
+        extension: &UiExtension,
+        events: &mut futures::channel::mpsc::Receiver<IoEvent>,
+    ) -> String {
+        let event = events.next().await.expect("an outcome");
+        let reply = extension.handle_io(event).await.expect("handle-io");
+        match &reply.effects[..] {
+            [
+                HostEffect::Push {
+                    update: Update::Replace(nodes),
+                    ..
+                },
+            ] => match &nodes[0].props {
+                Props::Text(text) => text.content.clone(),
+                other => panic!("not a report: {other:?}"),
+            },
+            other => panic!("not one push: {other:?}"),
+        }
+    }
+
+    #[gpui::test]
+    async fn test_fetch_and_handle_io(cx: &mut TestAppContext) {
+        let server = server(cx);
+        let broker = Broker::new(ConsentState::Granted, true);
+        let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        assert!(extension.take_io_events().is_none());
+        let url = format!("http://localhost:{}/hello", server.port);
+        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
+        assert_eq!(
+            deliver(&extension, &mut events).await,
+            "fetch-done 1 200 hello"
+        );
+        // Ids never repeat.
+        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["2"]);
+        assert_eq!(
+            deliver(&extension, &mut events).await,
+            "fetch-done 2 200 hello"
+        );
+    }
+
+    /// Plan 4.6, done: an undeclared domain is `denied` at the import.
+    #[gpui::test]
+    async fn test_what_the_import_refuses(cx: &mut TestAppContext) {
+        let server = server(cx);
+        let broker = Broker::new(ConsentState::Granted, true);
+        let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
+        assert_eq!(
+            command(
+                &extension,
+                &format!(
+                    "fetch https://undeclared.example/ http://localhost:{}/ https://user:pw@localhost:{}/",
+                    server.port + 1,
+                    server.port
+                )
+            )
+            .await,
+            ["denied", "denied", "invalid-argument"]
+        );
+        // The broker at every call.
+        *broker.allows_calls.lock().unwrap() = false;
+        assert_eq!(
+            command(
+                &extension,
+                &format!("fetch http://localhost:{}/hello", server.port)
+            )
+            .await,
+            ["denied"]
+        );
+        // Not declared in the manifest.
+        let undeclared = load_network(server.port, Some(broker), false, cx).await;
+        assert_eq!(
+            command(
+                &undeclared,
+                &format!("fetch http://localhost:{}/hello", server.port)
+            )
+            .await,
+            ["not-permitted"]
+        );
+    }
+
+    /// T2 consent when the request is applied: `ask` shows the prompt and waits; "Don't allow"
+    /// and no broker are `denied`; a revocation before delivery turns the outcome into `denied`.
+    #[gpui::test]
+    async fn test_consent(cx: &mut TestAppContext) {
+        let server = server(cx);
+        let url = format!("http://localhost:{}/hello", server.port);
+
+        let refused = Broker::new(ConsentState::Ask, false);
+        let extension = load_network(server.port, Some(refused.clone()), true, cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
+        assert_eq!(
+            deliver(&extension, &mut events).await,
+            "fetch-done 1 err denied"
+        );
+        assert_eq!(refused.prompts.load(Ordering::SeqCst), 1);
+        assert_eq!(server.connections(), 0, "nothing was sent");
+
+        let allowed = Broker::new(ConsentState::Ask, true);
+        let extension = load_network(server.port, Some(allowed.clone()), true, cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
+        assert_eq!(
+            deliver(&extension, &mut events).await,
+            "fetch-done 1 200 hello"
+        );
+
+        // Revoked while the request ran: the guest gets `denied`, not the response.
+        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["2"]);
+        let event = events.next().await.expect("an outcome");
+        assert!(matches!(&event, IoEvent::FetchDone(2, Ok(_))));
+        allowed.set(ConsentState::Denied);
+        let reply = extension.handle_io(event).await.expect("handle-io");
+        assert!(
+            format!("{:?}", reply.effects).contains("fetch-done 2 err denied"),
+            "{:?}",
+            reply.effects
+        );
+    }
+
+    /// Without a consent broker (W3's plan 4.5 not wired yet), T2 stays denied.
+    #[gpui::test]
+    async fn test_t2_is_denied_without_a_consent_broker(cx: &mut TestAppContext) {
+        let server = server(cx);
+        cx.update(gpui_tokio::init);
+        struct AllowCalls;
+        impl CapabilityCheck for AllowCalls {
+            fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+                Ok(())
+            }
+        }
+        let extension = load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(vec![
+                    CAPABILITY_PANEL.to_string(),
+                    ui_ext::v0_2::CAPABILITY_STATUS_BAR.to_string(),
+                    ui_ext::v0_2::CAPABILITY_MODAL.to_string(),
+                    "network:fetch".into(),
+                ]),
+                network_domains: Some(vec![format!("localhost:{}", server.port)]),
+                capability_check: Some(Arc::new(AllowCalls)),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let mut events = extension.take_io_events().expect("once");
+        let url = format!("http://localhost:{}/hello", server.port);
+        assert_eq!(command(&extension, &format!("fetch {url}")).await, ["1"]);
+        assert_eq!(
+            deliver(&extension, &mut events).await,
+            "fetch-done 1 err denied"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_cancel_caps_trap_and_reload(cx: &mut TestAppContext) {
+        let server = server(cx);
+        let broker = Broker::new(ConsentState::Granted, true);
+        let extension = load_network(server.port, Some(broker.clone()), true, cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let hang = format!("http://localhost:{}/hang", server.port);
+
+        // Cancel a running request.
+        assert_eq!(command(&extension, &format!("fetch {hang}")).await, ["1"]);
+        assert_eq!(command(&extension, "cancel 1").await, ["done"]);
+        assert_eq!(
+            deliver(&extension, &mut events).await,
+            "fetch-done 1 err cancelled"
+        );
+
+        // At most 8 in flight, counted until delivered.
+        let nine = [hang.as_str(); 9].join(" ");
+        let results = command(&extension, &format!("fetch {nine}")).await;
+        assert_eq!(results[..8], ["2", "3", "4", "5", "6", "7", "8", "9"]);
+        assert_eq!(results[8], "limit-exceeded");
+
+        // Reload: dropping the instance cancels its requests, and nothing is delivered.
+        drop(extension);
+        assert!(
+            events.next().await.is_none(),
+            "the old instance's outcomes are gone with it"
+        );
+
+        // A trap drops the request with the call's effects: it never starts.
+        let extension = load_network(server.port, Some(broker), true, cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let before = server.connections();
+        let error = extension
+            .handle_event_v0_2(
+                SURFACE,
+                UiEvent::InputChanged(
+                    1,
+                    format!("fetch-trap http://localhost:{}/hello", server.port),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_none(),
+            "{error:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            events.try_recv().is_err(),
+            "no outcome for a dropped request"
+        );
+        assert_eq!(server.connections(), before);
+    }
+
+    /// The manifest rules for `network:fetch` (design.md §0.6, §8).
+    #[gpui::test]
+    async fn test_network_manifest_rules(cx: &mut TestAppContext) {
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/ext/net")).await.expect("dir");
+        let read = |fyx_ui: &str| {
+            let fs = fs.clone();
+            let text = format!(
+                "id = \"net\"\nname = \"Net\"\nversion = \"0.1.0\"\nschema_version = 1\n[fyx_ui]\n\
+                 component = \"fyx_ui.wasm\"\n{fyx_ui}"
+            );
+            async move {
+                fs.insert_file("/ext/net/extension.toml", text.into_bytes())
+                    .await;
+                UiManifest::read(fs.as_ref(), Path::new("/ext/net")).await
+            }
+        };
+        let manifest = read(
+            "api_version = \"0.3.0\"\ncapabilities = [\"ui:panel\", \"network:fetch\"]\n\
+             [fyx_ui.network]\ndomains = [\"api.example.com\", \"localhost:8080\"]\n",
+        )
+        .await
+        .expect("valid")
+        .expect("a fyx_ui table")
+        .1;
+        assert_eq!(
+            manifest.network.expect("network").domains,
+            ["api.example.com", "localhost:8080"]
+        );
+        for (fyx_ui, problem) in [
+            (
+                "api_version = \"0.2.0\"\ncapabilities = [\"network:fetch\"]\n\
+                 [fyx_ui.network]\ndomains = [\"api.example.com\"]\n",
+                "T2",
+            ),
+            (
+                "api_version = \"0.3.0\"\ncapabilities = [\"network:fetch\"]\n",
+                "needs [fyx_ui.network]",
+            ),
+            (
+                "api_version = \"0.3.0\"\ncapabilities = [\"ui:panel\"]\n\
+                 [fyx_ui.network]\ndomains = [\"api.example.com\"]\n",
+                "needs \"network:fetch\"",
+            ),
+            (
+                "api_version = \"0.3.0\"\ncapabilities = [\"network:fetch\"]\n\
+                 [fyx_ui.network]\ndomains = [\"*.co.uk\"]\n",
+                "public suffix",
+            ),
+            (
+                "api_version = \"0.3.0\"\ncapabilities = [\"network:fetch\"]\n\
+                 [fyx_ui.network]\ndomains = [\"api.example.com\"]\nextra = 1\n",
+                "unknown field",
+            ),
+        ] {
+            let error = read(fyx_ui).await.err().expect("refused");
+            assert!(
+                format!("{error:#}").contains(problem),
+                "{problem}: {error:#}"
+            );
+        }
+    }
+}
