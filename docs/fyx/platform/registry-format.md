@@ -22,31 +22,47 @@ Extensions page (3.5).
 The registry signs with Ed25519 (`ring`, already in the workspace). A signature names its key:
 
 ```json
-{"key_id": "fyx-2026-a", "ed25519": "<base64 of 64 bytes>"}
+{"key_id": "fyx-rel-2026-a", "ed25519": "<base64 of 64 bytes>"}
 ```
 
 Key ids are 1–64 characters of `a-z`, `0-9`, `-` and `.`, starting with a letter or digit.
 
-A **keyset** lists the public keys a reader accepts. The client compiles in the registry key and
-one rotation key (decision 18); the CI tool reads a keyset file:
+A **keyset** lists the public keys a reader accepts:
 
 ```json
 {"keys": [
-  {"key_id": "fyx-2026-a", "ed25519": "<base64 of 32 bytes>"},
-  {"key_id": "fyx-2026-b", "ed25519": "<base64 of 32 bytes>"}
+  {"key_id": "fyx-rel-2026-a", "ed25519": "<base64 of 32 bytes>"},
+  {"key_id": "fyx-rel-2026-b", "ed25519": "<base64 of 32 bytes>"}
 ]}
 ```
 
-Rotation: sign new documents with the rotation key; old releases keep verifying with the old key
-while it is in the keyset. Before a client release drops the old key, the CI re-signs every
-release with the new one. A signature by a key that is not in the keyset is refused as
-`UnknownKey`; one that does not match is `BadSignature`.
+There are **two keysets**, one per kind of document (decision 18, owner 2026-11-18):
+
+| Keyset | Verifies | Registry repo file |
+|---|---|---|
+| Release keys | every release in `index.json` | `keys/releases.json` |
+| Block-list keys | `blocklist.json` | `keys/blocklist.json` |
+
+Each keyset holds a current key and one rotation key, and the two keysets share no key. The client
+compiles in both and passes each document's own keyset to its verify call: `Release::verify` and
+the index get the release keyset, `Blocklist::verify` and `BlocklistCache::from_json` the
+block-list keyset. A stolen release key therefore cannot sign a block list that a client accepts,
+and a stolen block-list key cannot sign a release. This needs no format change: every verify call
+already takes the keyset to check against, and the domain tags keep the two kinds of document
+apart. How the keys are held and rotated:
+[registry-repo.md](registry-repo.md#keys).
+
+Rotation, per keyset: sign new documents with the rotation key; old documents keep verifying with
+the old key while it is in the keyset. Before a client release drops the old release key, CI
+re-signs every release with the new one. A signature by a key that is not in the keyset is refused
+as `UnknownKey`; one that does not match is `BadSignature`. A cached block list signed by a key
+that a newer client dropped fails verification when it is loaded, so it is discarded.
 
 The **signing key file** (CI secret, never committed, never created by the tool) holds the
-32-byte Ed25519 seed:
+32-byte Ed25519 seed of one key. The release key and the block-list key are separate secrets:
 
 ```json
-{"key_id": "fyx-2026-a", "seed": "<base64 of 32 bytes>"}
+{"key_id": "fyx-rel-2026-a", "seed": "<base64 of 32 bytes>"}
 ```
 
 Any 32 random bytes are a valid seed, e.g. `openssl rand -base64 32`. The tool reads it from
@@ -108,7 +124,7 @@ of random documents back to equal documents, which shows the encoding is unambig
         "network_domains": ["api.example.com"],
         "processes": []
       },
-      "signature": {"key_id": "fyx-2026-a", "ed25519": "<base64>"}
+      "signature": {"key_id": "fyx-rel-2026-a", "ed25519": "<base64>"}
     }
   ]
 }
@@ -154,7 +170,7 @@ unpacked (`Release::verify_package`).
       {"id": "todo", "versions": ">=1.2.0, <1.2.3", "reason": "Uploads open buffers.", "urgent": true}
     ]
   },
-  "signature": {"key_id": "fyx-2026-a", "ed25519": "<base64>"}
+  "signature": {"key_id": "fyx-bl-2026-a", "ed25519": "<base64>"}
 }
 ```
 
@@ -242,11 +258,11 @@ fyx-registry sign release release.json --package todo-1.2.0.fyxext --key-file ke
 ```
 
 ```bash
-fyx-registry index add --index index.json --release signed.json --keyset keyset.json
+fyx-registry index add --index index.json --release signed.json --keyset keys/releases.json
 ```
 
 ```bash
-fyx-registry verify index index.json --keyset keyset.json
+fyx-registry verify index index.json --keyset keys/releases.json
 ```
 
 ```bash
@@ -254,7 +270,7 @@ fyx-registry sign blocklist blocklist-unsigned.json --out blocklist.json
 ```
 
 ```bash
-fyx-registry verify blocklist blocklist.json --keyset keyset.json
+fyx-registry verify blocklist blocklist.json --keyset keys/blocklist.json
 ```
 
 - `sign release` takes the unsigned release (the `signed` part above), validates it, checks it
@@ -268,6 +284,10 @@ fyx-registry verify blocklist blocklist.json --keyset keyset.json
 - `public-key` prints the keyset entry for the signing key.
 
 Without `--key-file`, the signing commands read `FYX_REGISTRY_SIGNING_KEY`.
+
+The tool signs with whatever key it is given. Keeping the two kinds apart is CI's job: the release
+key and the block-list key live in separate GitHub Environments, and only the workflow for each kind
+of document can read its key (registry-repo.md, "CI").
 
 ## Schema changes
 
