@@ -520,6 +520,20 @@ mod t2 {
     }
 
     #[test]
+    fn an_untrusted_worktree_says_to_trust_it() {
+        let mut harness = mounted();
+        harness.set_broker(TestBroker::granted(Box::new(zen)));
+        harness.set_worktree(Some(false));
+        harness.click(PANEL, "Run git status").expect("run");
+        assert!(shows(&harness, "Trust this project to use git"));
+        assert!(shows(&harness, "(permission: granted)"));
+        assert!(harness.processes().is_empty());
+        // Another event keeps the reason: the query cannot see the worktree.
+        harness.click(PANEL, "Fetch zen").expect("fetch");
+        assert!(shows(&harness, "Trust this project to use git"));
+    }
+
+    #[test]
     fn insert_header_makes_one_edit() {
         let mut harness = mounted();
         harness.set_broker(TestBroker::granted(Box::new(zen)));
