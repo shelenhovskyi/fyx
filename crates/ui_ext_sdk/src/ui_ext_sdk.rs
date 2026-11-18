@@ -894,7 +894,12 @@ impl SurfaceTree {
             UiEvent::InputChanged((id, _))
             | UiEvent::InputSubmitted((id, _))
             | UiEvent::RowSelected((id, _)) => *id,
-            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => return,
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(_)
+            | UiEvent::ProgressCancelRequested(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
