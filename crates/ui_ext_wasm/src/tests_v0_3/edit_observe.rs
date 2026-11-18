@@ -674,22 +674,27 @@ async fn test_updates_coalesce_while_the_guest_lags(cx: &mut TestAppContext) {
     wait_until(|| reviews.read.load(Ordering::SeqCst) == 1001);
     std::thread::sleep(Duration::from_millis(50));
     drop(feed);
+    // The channel holds at most its capacity plus one per sender; the rest of the 1001 updates
+    // fold into the one the feed still queues, which comes once there is room.
+    let newest = |event: &IoEvent| matches!(event, IoEvent::Agent(AgentEvent::Updated(info)) if info.hunks.len() == 5);
     let mut delivered = Vec::new();
     while let Some(Some(event)) = events.next().now_or_never() {
         delivered.push(event);
     }
-    // The channel holds its capacity plus one per sender; the 1001 updates fold into the rest.
     assert!(
         delivered.len() <= crate::network::MAX_QUEUED_IO_EVENTS + 4,
         "{} delivered",
         delivered.len()
     );
-    match delivered.last() {
-        Some(IoEvent::Agent(AgentEvent::Updated(info))) => {
-            assert_eq!(info.hunks.len(), 5, "the newest update is kept")
-        }
-        other => panic!("{other:?}"),
+    while !delivered.last().is_some_and(newest) {
+        delivered.push(events.next().await.expect("an event"));
+        assert!(
+            delivered.len() <= crate::network::MAX_QUEUED_IO_EVENTS + 8,
+            "the updates did not fold: {} delivered",
+            delivered.len()
+        );
     }
+    assert_eq!(delivered.iter().filter(|event| newest(event)).count(), 1);
 }
 
 /// The world gives no way to decide a review: no `agent-observe` function takes an argument.

@@ -272,7 +272,7 @@ impl Fetcher {
             .map_err(|error| FetchError::Other(format!("{error}")))?;
         let mut request = client
             .request(reqwest_method(method), url.clone())
-            .header(reqwest::header::ACCEPT_ENCODING, "gzip");
+            .header(reqwest::header::ACCEPT_ENCODING, ACCEPT_ENCODING);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -357,11 +357,23 @@ async fn read_response(
                 .map_err(|error| io::Error::other(error.to_string())),
         )
         .into_async_read();
+        use async_compression::futures::bufread;
+        let buffered = || futures::io::BufReader::new(raw);
         match encoding.as_deref() {
-            None | Some("") | Some("identity") => read_capped(raw).await?,
+            None | Some("") | Some("identity") => read_capped(buffered()).await?,
             Some("gzip") | Some("x-gzip") => {
-                read_capped(async_compression::futures::bufread::GzipDecoder::new(
-                    futures::io::BufReader::new(raw),
+                read_capped(bufread::GzipDecoder::new(buffered())).await?
+            }
+            // HTTP's `deflate` is the zlib format (RFC 9110 §8.4.1.2).
+            Some("deflate") => read_capped(bufread::ZlibDecoder::new(buffered())).await?,
+            Some("br") => read_capped(bufread::BrotliDecoder::new(buffered())).await?,
+            Some("zstd") => {
+                // A small window bounds the decoder's memory, whatever the frame asks for.
+                read_capped(bufread::ZstdDecoder::with_params(
+                    buffered(),
+                    &[async_compression::zstd::DParameter::window_log_max(
+                        ZSTD_WINDOW_LOG_MAX,
+                    )],
                 ))
                 .await?
             }
@@ -383,6 +395,15 @@ async fn read_response(
         url: url.to_string(),
     })
 }
+
+/// The encodings the host decodes, so the only ones it asks for; the guest cannot set the
+/// header (design.md §8).
+pub const ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+
+/// The largest zstd window the decoder accepts (8 MiB): RFC 8878 §3.1.1.1.2 recommends that
+/// decoders support at least this, and a larger one would let a frame make it allocate up to
+/// 128 MiB.
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 
 /// Reads to the end, failing with `too-large` as soon as the decoded body passes the cap, so a
 /// compression bomb never inflates past it.
@@ -1005,6 +1026,140 @@ mod tests {
             response.url,
             format!("http://localhost:{}/hello", server.port)
         );
+    }
+
+    async fn encode(encoding: &str, body: &[u8]) -> Vec<u8> {
+        use async_compression::futures::bufread;
+        let input = futures::io::Cursor::new(body.to_vec());
+        let mut compressed = Vec::new();
+        match encoding {
+            "gzip" => {
+                bufread::GzipEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            "deflate" => {
+                bufread::ZlibEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            "br" => {
+                bufread::BrotliEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            "zstd" => {
+                bufread::ZstdEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            other => panic!("{other}"),
+        }
+        .expect("compresses");
+        compressed
+    }
+
+    /// Plan 4.6 follow-up: gzip, deflate, brotli and zstd bodies are decoded, each under the
+    /// 16 MiB cap of the decoded size; the request offers exactly these.
+    #[tokio::test]
+    async fn every_offered_encoding_is_decoded_under_the_cap() {
+        let encodings = ["gzip", "deflate", "br", "zstd"];
+        let mut bodies = std::collections::HashMap::new();
+        for encoding in encodings {
+            let hello = encode(encoding, b"hello, fyx").await;
+            let bomb = encode(encoding, &vec![0u8; 17 << 20]).await;
+            assert!(bomb.len() < 1 << 20, "{encoding}: {}", bomb.len());
+            bodies.insert(format!("/{encoding}/hello"), (encoding, hello));
+            bodies.insert(format!("/{encoding}/bomb"), (encoding, bomb));
+        }
+        let server = test_server::start(move |path, _| {
+            let (encoding, body) = bodies.get(path)?;
+            let mut response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-encoding: {encoding}\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            response.extend_from_slice(body);
+            Some(response)
+        })
+        .await;
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let url = |path: &str| format!("http://localhost:{}{path}", server.port);
+        for encoding in encodings {
+            let response = run(
+                &domains,
+                &fetcher(),
+                request(&url(&format!("/{encoding}/hello"))),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{encoding}: {error:?}"));
+            assert_eq!(response.body, b"hello, fyx", "{encoding}");
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .all(|(name, _)| name != "content-encoding" && name != "content-length"),
+                "{encoding}: {:?}",
+                response.headers
+            );
+            let bomb = run(
+                &domains,
+                &fetcher(),
+                request(&url(&format!("/{encoding}/bomb"))),
+            )
+            .await;
+            assert!(
+                matches!(bomb, Err(FetchError::TooLarge)),
+                "{encoding}: {bomb:?}"
+            );
+        }
+        let head = run(&domains, &fetcher(), request(&url("/echo-request")))
+            .await
+            .expect("echo");
+        let head = String::from_utf8_lossy(&head.body).to_ascii_lowercase();
+        assert!(
+            head.contains("accept-encoding: gzip, deflate, br, zstd\r\n"),
+            "{head}"
+        );
+    }
+
+    /// A zstd frame that asks for a window over 8 MiB is refused rather than allocated.
+    #[tokio::test]
+    async fn zstd_windows_are_bounded() {
+        let body = zstd_frame_with_window_log(27);
+        let server = test_server::start(move |path, _| {
+            (path == "/wide").then(|| {
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-encoding: zstd\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&body);
+                response
+            })
+        })
+        .await;
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let result = run(
+            &domains,
+            &fetcher(),
+            request(&format!("http://localhost:{}/wide", server.port)),
+        )
+        .await;
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// A zstd frame header declaring a `1 << window_log` window and no content size, followed by
+    /// one empty raw block: valid, but needs the large window.
+    fn zstd_frame_with_window_log(window_log: u8) -> Vec<u8> {
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+        // Frame header descriptor: no single segment, no checksum, no dictionary, no size.
+        frame.push(0x00);
+        // Window descriptor: exponent (window_log - 10), mantissa 0.
+        frame.push((window_log - 10) << 3);
+        // Last block, raw, size 0.
+        frame.extend_from_slice(&[0x01, 0x00, 0x00]);
+        frame
     }
 
     /// Plan 4.6, done: a 17 MiB response is cut off, by its length or while streaming, and so

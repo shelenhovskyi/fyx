@@ -332,3 +332,16 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - `what` holds no secrets: a URL without user info, query or fragment; a program and its
   argument count; an edit's label and file count.
 - Rendering it in the Inspector is W3's (ui_ext_host/src/inspector.rs).
+
+## 4.6 follow-ups 2 and 3: user-agent, decoders (2026-11-18)
+
+- `user-agent: Fyx/<major.minor> (extension <id>/<version>)` (design §8); the version from
+  `extension.toml` (`UiManifest.version`, `LoadOptions.extension_version`) only when it is a
+  plain version string, else left out. Fyx's version from `release_channel::AppVersion`.
+- `accept-encoding: gzip, deflate, br, zstd`; each is decoded under the 16 MiB decoded cap
+  (`deflate` is zlib, RFC 9110); zstd windows are capped at 8 MiB (`window_log_max(23)`), so a
+  frame cannot make the decoder allocate 128 MiB. Tests: round trip and bomb per encoding, the
+  header, a wide-window zstd frame refused.
+- Lock: async-compression features `brotli`, `zlib`, `zstd` in ui_ext_wasm add brotli 8.0.4,
+  brotli-decompressor 5.0.3, alloc-no-stdlib 2.0.4, alloc-stdlib 0.2.4 (BSD-3-Clause/MIT;
+  `cargo deny` advisories and bans ok).

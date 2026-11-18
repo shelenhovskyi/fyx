@@ -18,7 +18,8 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
+# fyx: the decoders network:fetch offers in `accept-encoding`.
+async-compression = { workspace = true, features = ["brotli", "zlib", "zstd"] }
 bytes.workspace = true
 fs.workspace = true
 futures.workspace = true
