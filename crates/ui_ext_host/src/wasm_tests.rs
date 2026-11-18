@@ -10,7 +10,7 @@ use std::{
 use ui_ext_wasm::permissions::Tier;
 
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
-use ui_ext::{NodeId, Props, TextProps, UiEvent};
+use ui_ext::v0_2::{NodeId, Props, TextProps, UiEvent};
 use ui_ext_wasm::UiExtension;
 
 use crate::{ExtensionPanel, ExtensionStatusItem, SurfaceInfo, SurfaceState, backend::UiBackend};
@@ -45,7 +45,10 @@ fn run_until(
     what: &str,
     mut done: impl FnMut(&mut TestAppContext) -> bool,
 ) {
-    for _ in 0..500 {
+    // Wall-clock, and generous: under a loaded full gate, compiling a component alone can take
+    // several seconds (W0, integration de84e8d4b3).
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         cx.run_until_parked();
         if done(cx) {
             return;
@@ -63,7 +66,7 @@ fn text_of(state: &Entity<SurfaceState>, id: NodeId, cx: &mut TestAppContext) ->
 }
 
 fn new_state(extension: &UiExtension, cx: &mut TestAppContext) -> Entity<SurfaceState> {
-    let surface = extension.surfaces()[0].clone();
+    let surface: ui_ext::v0_2::Surface = extension.surfaces()[0].clone().into();
     let backend: Rc<dyn UiBackend> = Rc::new(extension.clone());
     let state = cx.new(|cx| SurfaceState::new(backend, surface, None, cx));
     run_until(cx, "mount", |cx| {
@@ -92,7 +95,7 @@ async fn test_counter_panel_increments(cx: &mut TestAppContext) {
 
     let info = Rc::new(SurfaceInfo::new(
         "fyx-demo-counter",
-        &extension.surfaces()[0],
+        &extension.surfaces()[0].clone().into(),
         100,
     ));
     let (_panel, vcx) = cx.add_window_view(|window, cx| {
@@ -129,8 +132,8 @@ async fn test_status_item_click_updates_label(cx: &mut TestAppContext) {
     crate::tests::init_test(cx);
     let extension = load("fyx-test-status-item", status_item_wasm(), cx).await;
     assert!(matches!(
-        extension.surfaces()[0].kind,
-        ui_ext::SurfaceKind::StatusItem(_)
+        ui_ext::v0_2::Surface::from(extension.surfaces()[0].clone()).kind,
+        ui_ext::v0_2::SurfaceKind::StatusItem(_)
     ));
     let state = new_state(&extension, cx);
     // Ids pinned by the fixture's crate doc.
@@ -275,7 +278,16 @@ async fn test_gallery_renders_every_section(cx: &mut TestAppContext) {
     // Through the registry, so a push for the status item made during a panel event is routed.
     let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     registry.update(cx, |registry, cx| {
-        registry.register_backend(Rc::new(extension.clone()), extension.surfaces(), cx)
+        registry.register_backend(
+            Rc::new(extension.clone()),
+            &extension
+                .surfaces()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<_>>(),
+            cx,
+        )
     });
     let (panel_info, panel_state, status_state) = registry.read_with(cx, |registry, _| {
         let panel = registry.surface("fyx-demo-gallery/gallery").expect("panel");
@@ -1072,7 +1084,8 @@ async fn test_restart_and_failed_reload(cx: &mut TestAppContext) {
     ping(cx, "Pings: 1");
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(source.join("fyx_ui.wasm"), b"not a component").expect("broken build");
-    for _ in 0..250 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         settle(cx);
         if surface.read_with(cx, |state, _| state.reload_failed()) {
             break;
@@ -1093,7 +1106,8 @@ async fn test_restart_and_failed_reload(cx: &mut TestAppContext) {
     // The next good build loads by itself and clears the error.
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("fixed build");
-    for _ in 0..250 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         settle(cx);
         if text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0") {
             break;
@@ -1161,7 +1175,8 @@ async fn test_dev_extension_hot_reloads(cx: &mut TestAppContext) {
     // A rebuilt component: the surface remounts on a fresh instance by itself.
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(source.join("fyx_ui.wasm"), &wasm).expect("rebuilt component");
-    for _ in 0..250 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         settle(cx, 1);
         if text_of(&surface, LABEL, cx).as_deref() == Some("Pings: 0") {
             return;

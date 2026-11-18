@@ -10,16 +10,18 @@ use gpui::{
     VisualTestContext,
 };
 use settings::SettingsStore;
-use ui_ext::{
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
     ButtonProps, FlexDirection, FlexProps, InputProps, ListProps, Node, NodeId, Patch, Props,
-    TextProps, Tree, TreeLimits, UiEvent, Update,
+    TextProps, UiEvent, Update, tree::Tree,
 };
 
 use crate::{
     SurfaceState, SurfaceView, TYPING_DEBOUNCE,
     backend::{PushedUpdate, Reply, ReplyError, UiBackend},
+    icons::upstream_icon as icon_name,
     surface::fetch_range,
-    view::{DiffLine, diff_lines, icon_name},
+    view::{DiffLine, diff_lines},
 };
 
 const LABEL: NodeId = 2;
@@ -138,6 +140,7 @@ fn list(row_count: u32) -> Props {
     Props::List(ListProps {
         row_count,
         row_height: 24,
+        selected: None,
     })
 }
 
@@ -145,6 +148,7 @@ fn input(value: &str) -> Props {
     Props::Input(InputProps {
         value: value.into(),
         placeholder: "Filter".into(),
+        secret: false,
     })
 }
 
@@ -359,12 +363,12 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
 }
 
 fn new_state(backend: &Rc<FakeBackend>, cx: &mut TestAppContext) -> Entity<SurfaceState> {
-    let surface = ui_ext::Surface {
+    let surface = ui_ext::v0_2::Surface {
         id: "counter".into(),
         title: "Counter".into(),
-        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
-            position: ui_ext::DockPosition::Right,
-            icon: "hash".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
             default_size: 320,
         }),
     };
@@ -1417,7 +1421,7 @@ async fn test_own_rebuild_does_not_carry_typing(cx: &mut TestAppContext) {
         state.apply_update(
             Update::Patches(vec![
                 Patch::Remove(INPUT),
-                Patch::Insert(ui_ext::InsertOp {
+                Patch::Insert(ui_ext::v0_2::InsertOp {
                     node: node(CLEARED, Some(1), input("")),
                     before: None,
                 }),
@@ -1443,13 +1447,13 @@ async fn test_own_rebuild_does_not_carry_typing(cx: &mut TestAppContext) {
 
 // (c) Names, titles and status item order.
 
-fn panel_surface(id: &str, title: &str) -> ui_ext::Surface {
-    ui_ext::Surface {
+fn panel_surface(id: &str, title: &str) -> ui_ext::v0_2::Surface {
+    ui_ext::v0_2::Surface {
         id: id.into(),
         title: title.into(),
-        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
-            position: ui_ext::DockPosition::Left,
-            icon: "hash".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Left,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
             default_size: 300,
         }),
     }
@@ -1466,11 +1470,11 @@ fn test_panels_get_names_of_their_own() {
     let second = crate::SurfaceInfo::new("names-test", &panel_surface("b", "Beta"), 101);
     let status = crate::SurfaceInfo::new(
         "names-test",
-        &ui_ext::Surface {
+        &ui_ext::v0_2::Surface {
             id: "s".into(),
             title: "Status".into(),
-            kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
-                side: ui_ext::StatusBarSide::Right,
+            kind: ui_ext::v0_2::SurfaceKind::StatusItem(ui_ext::v0_2::StatusItemDescriptor {
+                side: ui_ext::v0_2::StatusBarSide::Right,
                 priority: 0,
             }),
         },
@@ -1508,8 +1512,8 @@ async fn test_status_items_follow_their_priority(cx: &mut TestAppContext) {
     let state = new_state(&backend, cx);
     let (_, vcx) = open_view(&state, cx);
     for (side, expected) in [
-        (ui_ext::StatusBarSide::Left, [10, 5, 5, 1]),
-        (ui_ext::StatusBarSide::Right, [1, 5, 5, 10]),
+        (ui_ext::v0_2::StatusBarSide::Left, [10, 5, 5, 1]),
+        (ui_ext::v0_2::StatusBarSide::Right, [1, 5, 5, 10]),
     ] {
         let group = vcx.update(|_, cx| cx.new(|_| crate::ExtensionStatusGroup::new(side)));
         for priority in [5, 10, 1, 5] {
@@ -1533,11 +1537,11 @@ async fn test_capabilities_for_the_extensions_page(cx: &mut TestAppContext) {
     let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
     let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     let panel = panel_surface("main", "Main");
-    let status = ui_ext::Surface {
+    let status = ui_ext::v0_2::Surface {
         id: "status".into(),
         title: "Status".into(),
-        kind: ui_ext::SurfaceKind::StatusItem(ui_ext::StatusItemDescriptor {
-            side: ui_ext::StatusBarSide::Right,
+        kind: ui_ext::v0_2::SurfaceKind::StatusItem(ui_ext::v0_2::StatusItemDescriptor {
+            side: ui_ext::v0_2::StatusBarSide::Right,
             priority: 0,
         }),
     };
