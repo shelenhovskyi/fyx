@@ -1,0 +1,10 @@
+# Guest components for the fyx_ext_harness tests, built for wasm32-wasip2 by the tests themselves.
+# Not part of Fyx's workspace: one workspace and one lockfile of their own.
+[workspace]
+members = ["v0_2"]
+resolver = "3"
+
+[profile.release]
+opt-level = "s"
+debug = false
+strip = true

@@ -153,8 +153,9 @@ What `check` reports, as errors unless marked:
 There are two levels, and `fyx-ext test` runs both.
 
 - **Unit tests** run your extension's Rust code on your machine, not in WASM. The SDK works off
-  WASM: `log` prints to stderr and `push_update` is recorded for `take_pushed_updates()`. Plain
-  `cargo test` runs them. See [Step 8](#step-8-test-it).
+  WASM: `log` prints to stderr, and every other host function (`push_update`, ticks, surfaces,
+  decorations) succeeds and is recorded for `take_host_effects()`; `take_pushed_updates()` takes
+  only the pushes. Plain `cargo test` runs them. See [Step 8](#step-8-test-it).
 - **Headless tests** run the *built component* in wasmtime with `fyx_ext_harness`, the way Fyx
   runs it, without the editor. Trees, patches and their limits are validated with Fyx's own tree
   model, and the call contract matches the host's: time budgets, the push cap, pushes before the
@@ -172,6 +173,22 @@ There are two levels, and `fyx-ext test` runs both.
 The harness API: `mount`, `event`, `click(surface, label)`, `rows`, `tree`, `text`, `find_text`,
 `find_button`, plus `pushed()`, `logs()` and `disabled()` for assertions. The full list is in the
 [harness reference](api/fyx_ext_harness.md).
+
+The harness runs `fyx:ui` 0.1 and 0.2 components. For 0.2, the `*_v0_2` methods (`event_v0_2`,
+`click_v0_2`, `rows_v0_2`, `props_v0_2`, `nodes_v0_2`, `surfaces_v0_2`) show the 0.2 model:
+tooltips, `secret`, `selected`, `indent` and `invalidate-rows`. Each returns an `Outcome` with the
+call's effects. On top of these:
+- `tick(surface)` runs a pending tick; `pending_tick(surface)` shows its delay, since the harness
+  has no clock.
+- `dismiss(modal, reason)` closes a shown modal as the user would; `is_shown(modal)` says whether
+  one is open.
+- `decoration(id)` and `decorations()` list placed decorations; `tree(id)` holds their trees.
+- `effects()` records every host call's effect.
+- `Harness::load_with_capabilities` loads with a manifest's capabilities instead of all of them.
+
+The host's 0.2 rules apply: each import is checked when it is called, and its effect applies after
+the call. Showing a modal needs a click or Enter, a modal mounts when it is shown, and three failed
+ticks in a row stop a surface's ticks until the next event on it.
 
 <!-- crates/fyx_ext_harness/src/fyx_ext_harness.rs, crates/fyx_ext/src/run.rs, crates/ui_ext_wasm/src/tests.rs (harness_conformance) -->
 
