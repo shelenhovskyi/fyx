@@ -41,9 +41,8 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 ## P3 registry
 
 **Status 2026-11-19.** The user created `shelenhovskyi/fyx-extensions`. It is **private**, and goes
-public at 1.0. Its seed is prepared as one initial commit of `tools/fyx-extensions-template/` from
-`fyx/main` `062d6c99cd`; it is done for 3.1 once that commit is pushed to the new repository's
-`main`. The user does the rest later: branch rules, Environments, keys, and the GitHub App behind
+public at 1.0. **3.1 is done:** its `main` holds one initial commit, `551cdc8`, of
+`tools/fyx-extensions-template/` from `fyx/main` `062d6c99cd` (pushed with the user's yes). The user does the rest later: branch rules, Environments, keys, and the GitHub App behind
 `AUTO_MERGE_TOKEN` ([registry-repo.md](registry-repo.md#bootstrap-task-31-then-32)).
 
 | # | Owner | Task | Depends on | Done when |
@@ -79,7 +78,8 @@ public at 1.0. Its seed is prepared as one initial commit of `tools/fyx-extensio
   to 0.4, and the staged 0.3 WIT drops their interfaces.
 - **No pre-1.0 support.** The frozen 0.3 becomes `fyx:ui@1.0.0`, and loading 0.1 and 0.2 is
   removed at the 1.0 cut.
-- **Q1, Q2, Q5, Q8 and Q10 are answered** as recommended
+- **Q2, Q5, Q8 and Q10 are answered** as recommended. **Q1 differs:** a package with an
+  `extension.wasm` is accepted, always as tier T2, with an explicit warning
   ([0.3 open questions](../wit-0.3/open-questions.md)).
 
 **Priority within P4 (owner's rule, 2026-11-18):** P4 is the first candidate to cut. Tasks 4.10–4.15
