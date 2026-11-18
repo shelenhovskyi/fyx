@@ -28,22 +28,71 @@ pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Environment names never passed to a program, even when the manifest declares them: they load
-/// code into it (design.md §9, "Environment").
+/// code into it, name another program for it to run, or choose where it finds programs and
+/// configuration (design.md §9, "Environment"; integration-5 S6). Matched in ASCII upper case.
 const FORBIDDEN_ENV_NAMES: &[&str] = &[
+    // Interpreters and runtimes.
     "NODE_OPTIONS",
+    "NODE_PATH",
     "PYTHONSTARTUP",
     "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONUSERBASE",
     "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
     "RUBYOPT",
+    "RUBYLIB",
+    "LUA_PATH",
+    "LUA_CPATH",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "DOTNET_STARTUP_HOOKS",
+    "PSMODULEPATH",
+    // Shells.
     "BASH_ENV",
     "ENV",
+    "PROMPT_COMMAND",
+    // Programs other programs start.
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
+    "GIT_EXTERNAL_DIFF",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
     "GIT_EXEC_PATH",
     "GIT_ASKPASS",
     "SSH_ASKPASS",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTDOC",
+    // Where git finds its repository, hooks and configuration.
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_TEMPLATE_DIR",
+    // Where programs are found: the host passes its own, filtered (design.md §9).
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
 ];
-const FORBIDDEN_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_CONFIG_"];
+const FORBIDDEN_ENV_PREFIXES: &[&str] = &[
+    "LD_",
+    "DYLD_",
+    "GIT_CONFIG_",
+    "NPM_CONFIG_",
+    "YARN_",
+    "CARGO_",
+    "COR_",
+    "CORECLR_",
+];
 
 /// One `[[fyx_ui.processes]]` entry.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -51,8 +100,9 @@ const FORBIDDEN_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_CONFIG_"];
 pub struct ProcessSpec {
     /// What `request.program` names; without `path`, resolved on `PATH` outside the worktrees.
     pub name: String,
-    /// Argument patterns the program may be run with (none: any arguments). One per position:
-    /// a literal, `*` within it for any text, or `**` as the last pattern for any rest.
+    /// Argument patterns the program may be run with. One per position: a literal, `*` within it
+    /// for any text, or `**` as the last pattern for any rest. None: no arguments at all (an
+    /// open program needs `args = ["**"]`, which the consent prompt shows; integration-5 S6).
     #[serde(default)]
     pub args: Vec<String>,
     /// A worktree-relative program, which needs a trusted worktree.
@@ -94,11 +144,8 @@ pub fn check_env_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `args` fit `patterns` (see [`ProcessSpec::args`]). No patterns: any arguments.
+/// Whether `args` fit `patterns` (see [`ProcessSpec::args`]). No patterns: no arguments.
 pub fn args_match(patterns: &[String], args: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
     let rest = patterns.last().is_some_and(|last| last == "**");
     let fixed = if rest {
         &patterns[..patterns.len() - 1]
@@ -317,7 +364,7 @@ mod tests {
                 },
                 ProcessSpec {
                     name: "echo".into(),
-                    args: Vec::new(),
+                    args: strings(&["**"]),
                     path: None,
                 },
             ],
@@ -354,7 +401,13 @@ mod tests {
         let exact = strings(&["--version"]);
         assert!(args_match(&exact, &strings(&["--version"])));
         assert!(!args_match(&exact, &strings(&["--version", "x"])));
-        assert!(args_match(&[], &strings(&["anything", "at", "all"])));
+        // No patterns: no arguments (integration-5 S6); `**` alone: any.
+        assert!(!args_match(&[], &strings(&["-c", "alias.x=!cmd", "x"])));
+        assert!(args_match(&[], &[]));
+        assert!(args_match(
+            &strings(&["**"]),
+            &strings(&["anything", "at", "all"])
+        ));
     }
 
     #[test]

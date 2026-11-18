@@ -99,8 +99,18 @@ impl AgentEvent {
 }
 
 /// Cuts a review to [`MAX_HUNK_TEXT_BYTES`] of hunk text, keeping whole hunks, and drops every
-/// hunk of a review whose file is outside the worktrees (design.md §11).
+/// hunk of a review whose file is outside the worktrees (design.md §11). A file matching Zed's
+/// default `private_files` ([`crate::protected::is_default_private`]) loses its path and hunks
+/// too (integration-5 S1); the host applies the user's own `private_files` and `.fyx/security.toml`
+/// before this.
 pub fn cut_review(mut info: ReviewInfo) -> ReviewInfo {
+    if info
+        .file
+        .as_ref()
+        .is_some_and(|file| crate::protected::is_default_private(&file.path))
+    {
+        info.file = None;
+    }
     if info.file.is_none() {
         info.truncated = info.truncated || !info.hunks.is_empty();
         info.hunks.clear();
@@ -246,6 +256,19 @@ mod tests {
                 .hunks
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn private_files_have_no_path_and_no_hunks() {
+        let mut env = review(1, true, vec![hunk(10)]);
+        env.file = Some(FileRef {
+            worktree: Some(1),
+            path: "app/.env.local".into(),
+        });
+        let cut = cut_review(env);
+        assert!(cut.file.is_none());
+        assert!(cut.hunks.is_empty());
+        assert!(cut.truncated);
     }
 
     #[test]

@@ -97,6 +97,10 @@ Done (W2c, `claude/fyx-w2c-host-0-2-cbde2c`):
 After 1.0: proxied fetches through a hand-made CONNECT tunnel that pins the checked address
 ([design §8](../wit-0.3/design.md#8-networkfetch-plan-46), "Proxy").
 
+All six are done (2026-11-18, W2c `6b36bc4e7d`, `9fad627507`, `1cec81f03f`, `d11017466c`,
+`b3822c6fce`). The proxy turned out unsafe as built and now refuses proxied domain fetches
+(integration-5 S4); routing through the proxy is D.2.
+
 ## Deferred after 1.0
 
 TypeScript extensions are deferred until after 1.0, and whether to do them at all is re-evaluated
@@ -106,6 +110,7 @@ stays in the repository as an unsupported prototype.
 | # | Was | Task | Revisit |
 |---|---|---|---|
 | D.1 | 2.5, new `ts-sdk` | `@fyx/sdk` on the current world with `jco componentize`, `fyx-ext new --lang ts`, SDK parity test | after the 1.0 freeze |
+| D.2 | 4.6 follow-up, integration-5 S4 | `network:fetch` through Fyx's proxy: a hand-made `CONNECT` to the checked address, keeping the name for SNI, `Host` and the certificate check, so the address pinning holds behind a proxy. Until then a proxied fetch to a declared domain is refused (W2c `a1c2557b27`) | after 1.0 |
 
 ## Parallelism
 

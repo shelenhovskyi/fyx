@@ -439,6 +439,19 @@ impl UiExtension {
             .ok();
     }
 
+    /// Tells the host that the renderer dropped decoration `id` on its own, because its tree
+    /// failed to apply (integration-5 M2): it stops counting toward the 512 live decorations, and
+    /// its notifications and progresses are forgotten, as after `remove-decoration`. The guest
+    /// gets no event; a later `place-decoration` with the id places it again.
+    pub fn decoration_closed(&self, id: &str) {
+        let id = id.to_string();
+        self.tx
+            .unbounded_send(Box::new(move |_, store| {
+                async move { store.data_mut().api.decoration_closed(&id) }.boxed()
+            }))
+            .ok();
+    }
+
     #[cfg(test)]
     pub(crate) async fn with_state<T: 'static + Send>(
         &self,

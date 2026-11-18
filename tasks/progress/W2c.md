@@ -390,3 +390,48 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   refused, a reply fails). `Tree::text_bytes()` for the Inspector.
 - 0.1's tree is unchanged. Not counted: list-row trees, each built and dropped per fetch and
   bounded by `max_nodes_per_update` and the per-call text cap.
+
+## integration-5 B items (2026-11-18)
+
+- **R2** (`011d142682`, `0e60df0e1d`): a snapshot is verified against the keyset without the
+  keys the previous one revoked; every revocation carries over; only a rotation-key snapshot
+  lifts one. Old `state.json` (`protected_revocations`) still restores.
+- **S2**: `ui_ext::protected` holds the agent-config rule list (moved from fyx_guard, which now
+  uses it). `workspace:edit` refuses `.git`, `.fyx`, `.zed`, `.vscode`, `.idea` at any depth and
+  every agent config (`.claude/`, `.codex/`, `.mcp.json`, `AGENTS.md`, ...) in every mode.
+  `fyx_guard::extension_write_denial` (mode-independent) for W3's host side.
+- **S1**: `fyx_guard::extension_read_denial` (private_files + `.fyx/security.toml`,
+  mode-independent; repo policies now load in every mode) for W3's observe feed; as a floor,
+  `ui_ext::observe::cut_review` drops the path and hunks of Zed's default private files.
+- **S4**: with Fyx's proxy set, `network:fetch` to a declared domain is refused (`other`,
+  "does not go through proxies yet"): reqwest cannot CONNECT to the checked address and keep
+  the name for SNI, so the proxy would resolve again. Proxy URLs with credentials are never used.
+  `localhost` still goes direct. Revisit with a hand-made CONNECT tunnel if proxied fetches matter.
+- **S6**: more forbidden names (git's programs and dirs, pagers and editors, Java/.NET/Perl/Node/
+  Lua/PowerShell module paths, `RUSTC*`, `NPM_CONFIG_*`, `YARN_*`, `CARGO_*`, `COR_*`, `PATH`,
+  `PATHEXT`, `ComSpec`); the program's PATH drops empty, relative and worktree entries; no
+  `args` patterns now means no arguments (`["**"]` for any).
+- **S7**: `authorization`, `cookie`, `proxy-authorization` are dropped on a cross-origin
+  redirect.
+- **M2** (host side): `UiExtension::decoration_closed(id)`: a decoration the renderer dropped
+  stops counting toward the 512 and loses its notifications, like `modal_closed`. W3 calls it.
+- Drift: `ALL_UI_CAPABILITIES` should gain `ui:canvas`; held until W4 adds it to the harness's
+  `ALL_CAPABILITIES` (the conformance test compares them).
+
+## integration-5 A items (2026-11-18)
+
+- **A2** (`cd9c665a92`): `MAX_FROZEN_VERSION` is an explicit 0.2.0; 0.2 loads in Stable and
+  Preview, 0.3 stays staged. The comment says never to use `MAX_VERSION` for it.
+- **A4**: `UiManifest::read` reads `api_version` first (a 0.4 manifest says "targets 0.4.0", not
+  "unknown field"), then the world's manifest. `UiManifest::check_world` applies
+  migration.md §2's table: per-version capabilities (error, not warning), and the 0.3 tables
+  (`network`, `processes`, `process`, `commands`, `picker_sources`) only from 0.3.
+  `[[fyx_ui.commands]]` (`id`, `title` ≤ 128, ≤ 64) and `[[fyx_ui.picker_sources]]` (`id`,
+  `picker = "<extension>/<surface>"`, ≤ 64) are accepted and checked; nothing uses them yet.
+  If the scope decision moves them to 0.4, only the version gate changes.
+- **A6**: doc comments only, in both WIT files where the text is copied forward (so 0.2 and 0.3
+  stay identical there): depth 64 and 8 MiB of tree text (`update`), 32768 pushed items
+  (`push-update`), 24 h tick delay (`request-tick`), 512 decoration calls (`place-decoration`),
+  4 notify/dismiss calls (`notify`), `notification-action` as a gesture (`show-surface`); 0.3
+  only: `canvas-click` as a gesture, the protected paths of `edit-error.not-allowed`, the asset
+  path rule. `docs/fyx/api/*.md` regenerated.
