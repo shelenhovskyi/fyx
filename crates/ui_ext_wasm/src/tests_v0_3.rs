@@ -335,30 +335,20 @@ async fn test_v0_3_canvas_replies_and_clicks(cx: &mut TestAppContext) {
     );
 }
 
-/// A 0.3 interface this build does not implement traps when called, which disables the
-/// extension; it still loads, because nothing calls it at instantiation. WASI imports at a newer
-/// patch version than the host's (std's `HashMap` seed in the probe's `surfaces`) still resolve.
+/// The smaller 0.3 (integration-5 A3) links every interface of its world: a 0.3 component keeps
+/// 0.2's `place-decoration`. WASI imports at a newer patch version than the host's (std's
+/// `HashMap` seed in the probe's `surfaces`) still resolve.
 #[gpui::test]
-async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
+async fn test_v0_3_keeps_place_decoration(cx: &mut TestAppContext) {
     let extension = load(cx).await;
-    let error = extension
-        .handle_event_v0_2(SURFACE, UiEvent::Click(6))
-        .await
-        .unwrap_err();
+    let (results, effects) = case(&extension, 6).await;
+    assert_eq!(results, ["done"]);
     assert!(
-        error.downcast_ref::<EffectReplyError>().is_none(),
-        "{error:#}"
+        effects
+            .iter()
+            .any(|effect| matches!(effect, HostEffect::PlaceDecoration { id, .. } if id == "probe-decoration")),
+        "{effects:?}"
     );
-    assert!(
-        format!("{error:?}")
-            .contains("fyx:ui/language@0.3.0#unregister-provider is not implemented"),
-        "{error:?}"
-    );
-    let error = extension
-        .handle_event_v0_2(SURFACE, UiEvent::Click(1))
-        .await
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
 #[test]
@@ -882,23 +872,12 @@ async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
     for fyx_ui in [
         "api_version = \"0.1.0\"\ncapabilities = [\"ui:panel\", \"ui:modal\"]\n",
         "api_version = \"0.2.0\"\ncapabilities = [\"ui:notifications\", \"ui:editor-decorations\"]\n",
-        "api_version = \"0.3.0\"\ncapabilities = [\"ui:canvas\", \"ui:picker\", \"workspace:read-buffers\"]\n",
+        "api_version = \"0.3.0\"\ncapabilities = [\"ui:canvas\", \"ui:images\", \"network:fetch\"]\n[fyx_ui.network]\ndomains = [\"api.example.com\"]\n",
     ] {
         read(fyx_ui)
             .await
             .unwrap_or_else(|error| panic!("{fyx_ui}: {error:#}"));
     }
-    let manifest = read(
-        "api_version = \"0.3.0\"\ncapabilities = [\"ui:commands\"]\n\
-         [[fyx_ui.commands]]\nid = \"todo.next\"\ntitle = \"Next TODO\"\n\
-         [[fyx_ui.picker_sources]]\nid = \"todos\"\npicker = \"acme-find/everything\"\n",
-    )
-    .await
-    .expect("valid")
-    .expect("a fyx_ui table")
-    .1;
-    assert_eq!(manifest.commands[0].title, "Next TODO");
-    assert_eq!(manifest.picker_sources[0].picker, "acme-find/everything");
     for (fyx_ui, problem) in [
         // A newer world's tables do not hide its version.
         (
@@ -910,33 +889,33 @@ async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
             "\"ui:canvas\" needs fyx:ui 0.3",
         ),
         (
-            "api_version = \"0.2.0\"\ncapabilities = [\"workspace:read-buffers\"]\n",
-            "needs fyx:ui 0.3",
-        ),
-        (
             "api_version = \"0.1.0\"\ncapabilities = [\"ui:notifications\"]\n",
             "\"ui:notifications\" needs fyx:ui 0.2",
         ),
+        // The smaller 0.3 (integration-5 A3): the 0.4 capabilities and tables are refused.
         (
-            "api_version = \"0.2.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n",
-            "[[fyx_ui.commands]] needs fyx:ui 0.3",
+            "api_version = \"0.3.0\"\ncapabilities = [\"ui:picker\"]\n",
+            "\"ui:picker\" is not in fyx:ui 0.3.0; it is planned for a later version",
+        ),
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"workspace:read-buffers\"]\n",
+            "planned for a later version",
+        ),
+        (
+            "api_version = \"0.2.0\"\ncapabilities = [\"ui:commands\"]\n",
+            "planned for a later version",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n",
+            "unknown field `commands`",
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.picker_sources]]\nid = \"s\"\npicker = \"a/b\"\n",
+            "unknown field `picker_sources`",
         ),
         (
             "api_version = \"0.3.0\"\ncapabilities = [\"ui:sparkles\"]\n",
             "unknown capability",
-        ),
-        (
-            "api_version = \"0.3.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n\
-             [[fyx_ui.commands]]\nid = \"a\"\ntitle = \"B\"\n",
-            "twice",
-        ),
-        (
-            "api_version = \"0.3.0\"\n[[fyx_ui.picker_sources]]\nid = \"s\"\npicker = \"nope\"\n",
-            "<extension>/<picker surface>",
-        ),
-        (
-            "api_version = \"0.3.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\nkeys = 1\n",
-            "unknown field",
         ),
     ] {
         let error = read(fyx_ui).await.err().expect("refused");
@@ -1583,29 +1562,12 @@ mod harness_conformance_v0_3 {
         compare(&host, &mut harness, SURFACE, UiEvent::Click(1)).await;
     }
 
-    /// An interface this build does not implement traps alike, and disables both.
+    /// 0.3 keeps 0.2's `place-decoration` in the harness too (integration-5 A3).
     #[gpui::test]
-    async fn test_unbuilt_interfaces_trap_in_the_harness(cx: &mut TestAppContext) {
+    async fn test_place_decoration_matches_the_harness(cx: &mut TestAppContext) {
         let host = load(cx).await;
         let mut harness = harness();
-        let host_error = host
-            .handle_event_v0_2(SURFACE, UiEvent::Click(6))
-            .await
-            .unwrap_err();
-        let harness_error = harness
-            .handle_event_raw_v0_2(SURFACE, UiEvent::Click(6))
-            .unwrap_err();
-        let message =
-            "fyx:ui/language@0.3.0#unregister-provider is not implemented by this build of Fyx yet";
-        assert!(
-            format!("{host_error:?}").contains(message),
-            "{host_error:?}"
-        );
-        assert!(
-            format!("{harness_error:?}").contains(message),
-            "{harness_error:?}"
-        );
-        assert!(harness.disabled().is_some());
+        compare(&host, &mut harness, SURFACE, UiEvent::Click(6)).await;
     }
 }
 

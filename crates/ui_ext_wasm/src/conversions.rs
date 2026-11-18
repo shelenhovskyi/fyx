@@ -22,14 +22,6 @@ impl UiState {
     }
 }
 
-/// A value of a newer world the model cannot hold yet, as an `invalid-argument`.
-pub(crate) fn unsupported(what: &str) -> model::HostError {
-    model::HostError {
-        code: model::HostErrorCode::InvalidArgument,
-        message: format!("{what} is not supported by this build of Fyx yet"),
-    }
-}
-
 /// String bytes of a node's props, for [`crate::MAX_LIFTED_TEXT_PER_CALL`].
 pub(crate) fn props_text_len(props: &model::Props) -> usize {
     props.text_len()
@@ -321,6 +313,63 @@ pub(crate) fn sanitize_title(title: &str) -> String {
 /// The conversions of the copied-forward types. `props: { … }` and `kinds: { … }` are the extra
 /// `match` arms of the version's `props` and `surface-kind` variants; they map the case or return
 /// `Err` with [`unsupported`].
+/// The `decorations` interface, the same in 0.2 and 0.3: `place-decoration` and
+/// `remove-decoration` (0.3's own decoration extras are 0.4's).
+macro_rules! decoration_imports {
+    () => {
+        impl wit_decorations::Host for UiState {
+            fn place_decoration(
+                &mut self,
+                id: String,
+                location: wit::DecorationLocation,
+                nodes: Vec<wit::Node>,
+            ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+                let nodes: Vec<model::Node> = match $crate::conversions::try_collect(nodes) {
+                    Ok(nodes) => nodes,
+                    Err(error) => return result(Err(error)),
+                };
+                self.count_lifted_text(
+                    id.len()
+                        + location.path.len()
+                        + nodes
+                            .iter()
+                            .map(|node| conversions::props_text_len(&node.props))
+                            .sum::<usize>(),
+                )?;
+                if let Err(error) = self.permit(model::CAPABILITY_EDITOR_DECORATIONS) {
+                    return result(Err(error));
+                }
+                result(self.api.place_decoration(id, location.into(), nodes))
+            }
+
+            fn remove_decoration(
+                &mut self,
+                id: String,
+            ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+                self.count_lifted_text(id.len())?;
+                if let Err(error) = self.permit(model::CAPABILITY_EDITOR_DECORATIONS) {
+                    return result(Err(error));
+                }
+                result(self.api.remove_decoration(id))
+            }
+        }
+
+        impl From<wit::DecorationLocation> for model::DecorationLocation {
+            fn from(value: wit::DecorationLocation) -> Self {
+                Self {
+                    path: value.path,
+                    line: value.line,
+                    placement: match value.placement {
+                        wit::DecorationPlacement::Above => model::DecorationPlacement::Above,
+                        wit::DecorationPlacement::Below => model::DecorationPlacement::Below,
+                    },
+                    height_lines: value.height_lines,
+                }
+            }
+        }
+    };
+}
+
 macro_rules! conversions {
     (props: { $($props:tt)* } kinds: { $($kinds:tt)* } events: { $($events:tt)* }) => {
         impl From<wit::ColorToken> for model::ColorToken {
@@ -599,7 +648,7 @@ macro_rules! icons {
     };
 }
 
-pub(crate) use {conversions, host_imports, icons, notification_imports};
+pub(crate) use {conversions, decoration_imports, host_imports, icons, notification_imports};
 
 /// A list conversion that stops at the first value the model cannot hold.
 pub(crate) fn try_collect<T, U>(values: Vec<T>) -> Result<Vec<U>, model::HostError>

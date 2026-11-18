@@ -6,10 +6,7 @@
 
 use ui_ext::v0_2 as model;
 
-use crate::{
-    UiState,
-    conversions::{self, try_collect},
-};
+use crate::{UiState, conversions};
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -32,43 +29,7 @@ use bindings::fyx::ui::{
 
 conversions::host_imports!(denied: wit_host::HostErrorCode::NotPermitted);
 conversions::notification_imports!();
-
-impl wit_decorations::Host for UiState {
-    fn place_decoration(
-        &mut self,
-        id: String,
-        location: wit::DecorationLocation,
-        nodes: Vec<wit::Node>,
-    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        let nodes: Vec<model::Node> = match try_collect(nodes) {
-            Ok(nodes) => nodes,
-            Err(error) => return result(Err(error)),
-        };
-        self.count_lifted_text(
-            id.len()
-                + location.path.len()
-                + nodes
-                    .iter()
-                    .map(|node| conversions::props_text_len(&node.props))
-                    .sum::<usize>(),
-        )?;
-        if let Err(error) = self.permit(model::CAPABILITY_EDITOR_DECORATIONS) {
-            return result(Err(error));
-        }
-        result(self.api.place_decoration(id, location.into(), nodes))
-    }
-
-    fn remove_decoration(
-        &mut self,
-        id: String,
-    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        self.count_lifted_text(id.len())?;
-        if let Err(error) = self.permit(model::CAPABILITY_EDITOR_DECORATIONS) {
-            return result(Err(error));
-        }
-        result(self.api.remove_decoration(id))
-    }
-}
+conversions::decoration_imports!();
 
 conversions::conversions! {
     props: {}
@@ -77,19 +38,5 @@ conversions::conversions! {
         // Never sent: a 0.2 surface has no canvas, and `call_handle_event` drops the event
         // before it gets here (defence in depth, like 0.1's).
         model::UiEvent::CanvasClick(click) => Self::Click(click.canvas),
-    }
-}
-
-impl From<wit::DecorationLocation> for model::DecorationLocation {
-    fn from(value: wit::DecorationLocation) -> Self {
-        Self {
-            path: value.path,
-            line: value.line,
-            placement: match value.placement {
-                wit::DecorationPlacement::Above => model::DecorationPlacement::Above,
-                wit::DecorationPlacement::Below => model::DecorationPlacement::Below,
-            },
-            height_lines: value.height_lines,
-        }
     }
 }

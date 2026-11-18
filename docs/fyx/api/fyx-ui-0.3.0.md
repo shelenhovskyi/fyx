@@ -8,12 +8,8 @@ Imports:
 
 - interface `fyx:ui/types@0.3.0`
 - interface `fyx:ui/host@0.3.0`
-- interface `fyx:ui/documents@0.3.0`
 - interface `fyx:ui/decorations@0.3.0`
 - interface `fyx:ui/notifications@0.3.0`
-- interface `fyx:ui/language@0.3.0`
-- interface `fyx:ui/virtual-documents@0.3.0`
-- interface `fyx:ui/picker@0.3.0`
 - interface `fyx:ui/images@0.3.0`
 - interface `fyx:ui/permissions@0.3.0`
 - interface `fyx:ui/network@0.3.0`
@@ -21,7 +17,6 @@ Imports:
 - interface `fyx:ui/workspace-edit@0.3.0`
 - interface `fyx:ui/agent-observe@0.3.0`
 - interface `fyx:ui/io@0.3.0`
-- interface `fyx:ui/requests@0.3.0`
 - type `surface`
 - type `node`
 - type `node-id`
@@ -29,30 +24,15 @@ Imports:
 - type `update`
 - type `list-row`
 - type `io-event`
-- type `decoration`
-- type `decoration-request`
-- type `hover-request`
-- type `hover-reply`
-- type `code-lens-request`
-- type `code-lens`
-- type `command-context`
-- type `picker-source-event`
-- type `virtual-document`
 
 Exports:
 
 - `surfaces: func() -> list<surface>`: ---- 0.2, unchanged ---- Called once after instantiation; declares the static surfaces. More can be added with `add-surface`.
-- `mount: func(surface-id: string) -> result<list<node>, string>`: The whole tree of a surface (at most 16384 nodes): when a panel or status item is added, each time a modal is shown, and again whenever the host resyncs after an update that did not fit, which for a decoration replaces the tree it was placed with. Never for a picker.
+- `mount: func(surface-id: string) -> result<list<node>, string>`: The whole tree of a surface (at most 16384 nodes): when a panel or status item is added, each time a modal is shown, and again whenever the host resyncs after an update that did not fit, which for a decoration replaces the tree it was placed with.
 - `handle-event: func(surface-id: string, event: ui-event) -> result<update, string>`: At most one call per input event; the host debounces scroll, hover and typing.
 - `list-rows: func(surface-id: string, list-node: node-id, start: u32, count: u32) -> list<list-row>`
 - `tick: func(surface-id: string) -> result<update, string>`: The tick `request-tick` asked for. Never called while the surface is mounting or failed, nor for a modal that is not shown. The update applies to `surface-id`, like an event's.
 - `handle-io: func(event: io-event) -> result<_, string>`: ---- 0.3 ---- The outcome of a fetch, a process, an edit, an agent-review event or a permission change. Not tied to a surface: push to surfaces with `push-update`.
-- `handle-command: func(command: string, argument: option<string>, context: command-context) -> result<_, string>`: One of the manifest's `[[fyx_ui.commands]]` ran (palette, keymap, code lens, gutter sign). The call has the click-or-Enter activation.
-- `provide-decorations: func(request: decoration-request) -> result<list<decoration>, string>`: Decorations of a pull namespace for `request.lines`; they replace the namespace's decorations in those lines. At most 10000.
-- `provide-hover: func(request: hover-request) -> result<hover-reply, string>`
-- `provide-code-lenses: func(request: code-lens-request) -> result<list<code-lens>, string>`: At most 256 lenses, 8 per line.
-- `provide-virtual-document: func(path: string) -> result<virtual-document, string>`: The text of one of this extension's virtual documents, when its tab opens, after `invalidate-virtual-document`, and after a reload of the extension.
-- `picker-source-event: func(source: string, session: u64, event: picker-source-event) -> result<_, string>`: Events of a picker session for one source of this extension (`source` as in `picker.set-items`). The owner gets `dismissed` through `handle-event` as for any modal.
 
 ## Interface `types`
 
@@ -175,7 +155,7 @@ Cases: `contain`, `cover`.
 
 ### record `image-props`
 
-0.3. A raster or vector image, drawn inside its own box and clipped to it. Panels only: an `image` in a status item, modal, picker or decoration tree rejects the update. Not interactive: a click on it is not an event.
+0.3. A raster or vector image, drawn inside its own box and clipped to it. Panels only: an `image` in a status item, modal or decoration tree rejects the update. Not interactive: a click on it is not an event.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -453,7 +433,6 @@ Cases: `user`, `expired`, `window-closed`.
 | `row-click` | `tuple<node-id, u32>` | The list node and the row index within it. A click on anything inside a row, buttons included, is a `row-click`. |
 | `row-selected` | `tuple<node-id, u32>` | The user moved a list's selection with the keyboard (modals only). The host has already set `selected` in its tree; the extension need not echo it. |
 | `dismissed` | `dismiss-reason` | The host closed a modal surface; its tree is gone. The reply must be `unchanged`. |
-| `orphaned` |  | 0.3, block decorations only: the line the decoration was anchored to was deleted. The block stays where the anchor collapsed to until the extension moves or removes it. |
 | `canvas-click` | `canvas-click` | 0.3. A click on a `clickable` canvas, in canvas coordinates (after `scale-down`, so they match the draw list). Grants the click-or-Enter activation like `click`. |
 | `notification-action` | `notification-action-event` | §M. The user clicked an action button of a notification this surface owns. Grants the click-or-Enter activation, like `click`. |
 | `notification-closed` | `tuple<u64, notification-close-reason>` | §M. A notification this surface owns closed without the extension asking (an extension's own `dismiss-notification` sends nothing). |
@@ -496,69 +475,57 @@ Like Zed's own modals, an extension modal always closes on Escape, on a click ou
 |---|---|---|
 | `width` | `modal-width` |  |
 
-### enum `picker-action-key`
-
-Cases: `alt-enter`, `secondary-enter`.
-
-### record `picker-action`
-
-| Field | Type | Notes |
-|---|---|---|
-| `id` | `string` | 1 to 64 bytes of `a-z`, `0-9`, `-`, `_`, `.`. |
-| `label` | `string` | At most 64 bytes; shown in the picker footer next to its key. |
-| `key` | `picker-action-key` |  |
-
-### record `picker-descriptor`
-
-0.3. A picker is a modal whose body the host draws: a query input and a fuzzy-filtered list of items that sources supply (design.md, "Picker protocol"). It has the modal lifecycle: `show-surface` after a click or Enter, one modal per window, `dismissed` when the user closes it. The host never calls `mount` for a picker.
-
-| Field | Type | Notes |
-|---|---|---|
-| `width` | `modal-width` |  |
-| `placeholder` | `string` | Shown in the empty query input. |
-| `multi-select` | `bool` | Tab marks or unmarks the highlighted item; Enter accepts the marked items, or the highlighted one when none is marked. |
-| `dynamic` | `bool` | Sources get every query change (debounced 100 ms) and answer with new items, instead of the host filtering the items they gave when the picker opened. |
-| `open-to-sources` | `bool` | Other extensions may contribute sources to this picker (manifest `[[fyx_ui.picker_sources]]`). Their items are shown by the host and never reach the owner. |
-| `actions` | `list<picker-action>` | At most 2 extra ways to accept, one per key. |
-
 ### variant `surface-kind`
 
-Panels and status items are mounted when they are added and live until removed. A modal is mounted each time it is shown and its tree is dropped when it closes. A picker is never mounted (0.3).
+Panels and status items are mounted when they are added and live until removed. A modal is mounted each time it is shown and its tree is dropped when it closes.
 
 | Case | Payload | Notes |
 |---|---|---|
 | `panel` | `panel-descriptor` |  |
 | `status-item` | `status-item-descriptor` |  |
 | `modal` | `modal-descriptor` |  |
-| `picker` | `picker-descriptor` |  |
-
-### type `document-id` = `u64`
-
-0.3. An open document (an editor buffer), as the host names it to this extension. Stable while the document is open; never reused for another document during the session.
 
 ### enum `decoration-placement`
 
 Cases: `above`, `below`.
 
-### variant `decoration-target`
-
-0.3. What a decoration is anchored in.
-
-| Case | Payload | Notes |
-|---|---|---|
-| `path` | `string` | Relative to a worktree root, `/`-separated, without `..` (`src/main.rs`), as in 0.2: matched against every worktree of every open workspace, anchored in buffers that are open now or opened later. |
-| `document` | `document-id` | One open document. The decoration is removed when that document closes. |
-
 ### record `decoration-location`
 
-Where a block decoration goes. Only checked for syntax when `place-decoration` is called.
+Where an editor decoration goes. Only checked for syntax when `place-decoration` is called; the host anchors it in every open buffer of that file, and in buffers opened later.
 
 | Field | Type | Notes |
 |---|---|---|
-| `target` | `decoration-target` | 0.3: replaces 0.2's `path: string`; `target: path(...)` behaves exactly like it. |
-| `line` | `u32` | Zero-based row when the decoration is anchored. The host turns it into a CRDT anchor per buffer, so from then on the block moves with the line; rows past the end clamp to the last row. If the anchored line is deleted, the block stays where the anchor collapses to and the extension gets `orphaned` (0.3). |
+| `path` | `string` | Relative to a worktree root, `/`-separated, without `..` (`src/main.rs`). Matched against every worktree of every open workspace. |
+| `line` | `u32` | Zero-based row when the decoration is anchored. The host turns it into a CRDT anchor per buffer, so from then on the block moves with the line; rows past the end clamp to the last row. If the anchored line is deleted, the block stays where the anchor collapses to. |
 | `placement` | `decoration-placement` |  |
 | `height-lines` | `option<u16>` | Block height in editor lines; `none` lets the host estimate it from the tree. |
+
+### record `position`
+
+Zero-based line, and a column in UTF-8 bytes from the start of the line. A column that is not on a character boundary is rejected with `invalid-argument`; one past the end of the line clamps to the end.
+
+| Field | Type | Notes |
+|---|---|---|
+| `line` | `u32` |  |
+| `column` | `u32` |  |
+
+### record `text-range`
+
+Half-open: `start` is included, `end` is not.
+
+| Field | Type | Notes |
+|---|---|---|
+| `start` | `position` |  |
+| `end` | `position` |  |
+
+### record `file-ref`
+
+A file in a worktree of an open workspace.
+
+| Field | Type | Notes |
+|---|---|---|
+| `worktree` | `option<u64>` | Opaque id of the worktree, stable for the session. `none` in a request means "the one worktree that has this path"; a path found in more than one is `invalid-argument`. |
+| `path` | `string` | Relative to the worktree root, `/`-separated, without empty, `.` or `..` components. |
 
 ### record `surface`
 
@@ -615,7 +582,7 @@ Removes a live surface, static or runtime: its containers close in every window,
 
 ### `show-surface: func(surface-id: string) -> result<_, host-error>`
 
-Opens a modal in the active workspace window and focuses it, or reveals a panel there (opens its dock and activates it, without moving focus). Showing a modal needs a click or Enter: it is allowed during `handle-event` for `click`, `row-click`, `input-submitted` or a clicked `notification-action`, or within 5 s after one, once. Typing (`input-changed`), `row-selected` and `dismissed` do not count. Showing a surface that is already shown does nothing. 0.3: a picker is a modal for this rule. A `canvas-click`, `handle-command` and an accepted picker item also grant the click-or-Enter activation (design.md, "Gestures in 0.3").
+Opens a modal in the active workspace window and focuses it, or reveals a panel there (opens its dock and activates it, without moving focus). Showing a modal needs a click or Enter: it is allowed during `handle-event` for `click`, `row-click`, `input-submitted` or a clicked `notification-action`, or within 5 s after one, once. Typing (`input-changed`), `row-selected` and `dismissed` do not count. Showing a surface that is already shown does nothing. 0.3: a `canvas-click` also grants the click-or-Enter activation (design.md, "Gestures in 0.3").
 
 ### `hide-surface: func(surface-id: string) -> result<_, host-error>`
 
@@ -623,112 +590,9 @@ Closes a modal (no `dismissed` event) or hides a panel's dock if that panel is a
 
 ### `log: func(level: log-level, message: string)`
 
-## Interface `documents`
-
-0.3. Positions, ranges and what the host tells an extension about a document.
-
-### type `document-id` = `document-id`
-
-
-### record `position`
-
-Zero-based line, and a column in UTF-8 bytes from the start of the line. A column that is not on a character boundary is rejected with `invalid-argument`; one past the end of the line clamps to the end.
-
-| Field | Type | Notes |
-|---|---|---|
-| `line` | `u32` |  |
-| `column` | `u32` |  |
-
-### record `text-range`
-
-Half-open: `start` is included, `end` is not.
-
-| Field | Type | Notes |
-|---|---|---|
-| `start` | `position` |  |
-| `end` | `position` |  |
-
-### record `line-range`
-
-`count` lines from `start`.
-
-| Field | Type | Notes |
-|---|---|---|
-| `start` | `u32` |  |
-| `count` | `u32` |  |
-
-### record `file-ref`
-
-A file in a worktree of an open workspace.
-
-| Field | Type | Notes |
-|---|---|---|
-| `worktree` | `option<u64>` | Opaque id of the worktree, stable for the session. `none` in a request means "the one worktree that has this path"; a path found in more than one is `invalid-argument`. |
-| `path` | `string` | Relative to the worktree root, `/`-separated, without empty, `.` or `..` components. |
-
-### variant `document-origin`
-
-| Case | Payload | Notes |
-|---|---|---|
-| `file` | `file-ref` |  |
-| `virtual` | `string` | One of this extension's own virtual documents (`fyx-ext://<id>/<path>`), by its path. |
-| `other` |  | Neither: an untitled buffer, or a file outside every worktree. The host never names it. |
-
-### record `document-info`
-
-| Field | Type | Notes |
-|---|---|---|
-| `id` | `document-id` |  |
-| `origin` | `document-origin` |  |
-| `language` | `option<string>` | The language name as the host knows it (`Rust`, `Markdown`), if any. |
-| `version` | `u64` | Grows with every change to the buffer; an edit can name the version it was computed against. |
-| `line-count` | `u32` |  |
-
-### record `text-slice`
-
-Lines of a document, joined with `\n`, starting at `start-line`.
-
-| Field | Type | Notes |
-|---|---|---|
-| `start-line` | `u32` |  |
-| `text` | `string` |  |
-
-### enum `diagnostic-severity`
-
-Cases: `error`, `warning`, `information`, `hint`.
-
-### record `diagnostic`
-
-| Field | Type | Notes |
-|---|---|---|
-| `range` | `text-range` |  |
-| `severity` | `diagnostic-severity` |  |
-| `message` | `string` | At most 4 KiB; longer messages are truncated. |
-| `source` | `option<string>` | The language server or tool that reported it. |
-
-### record `document-context`
-
-What a request tells the extension about a document. `text` and `selections` are filled only for an extension granted `workspace:read-buffers`, `diagnostics` only for one granted `workspace:diagnostics` (T1, design.md "N"); otherwise they are `none`.
-
-| Field | Type | Notes |
-|---|---|---|
-| `info` | `document-info` |  |
-| `text` | `option<text-slice>` | The lines the request is about (the visible range, the hovered line), plus up to 200 lines around them; at most 1 MiB. |
-| `selections` | `option<list<text-range>>` |  |
-| `diagnostics` | `option<list<diagnostic>>` | Diagnostics inside the lines of `text`, or of the requested range when `text` is `none`; at most 1000. |
-
-### record `document-selector`
-
-Which documents a provider or a decoration namespace wants requests for. A document matches when its language is in `languages` or its worktree path matches one of `globs` (globset syntax). Both empty matches every document of origin `file`.
-
-| Field | Type | Notes |
-|---|---|---|
-| `languages` | `list<string>` |  |
-| `globs` | `list<string>` |  |
-
 ## Interface `decorations`
 
-Editor decorations: retained `fyx:ui` trees drawn as blocks above or below a buffer line (0.2, design.md "L"), and 0.3's styled decorations in namespaces. Needs the `ui:editor-decorations` capability; without it every call returns `not-permitted`. Every function follows the effect rule of `host`. A block decoration id lives in the same namespace as the extension's surface ids and follows the same id rule, so it must not equal a live surface id. Once placed, the id works like a surface id for `push-update`, `handle-event` (clicks, input, 0.3 `orphaned`), `list-rows` and `mount` (the host calls `mount(id)` to resync a decoration whose update did not fit), but not for `request-tick`, `show-surface` or `remove-surface`. At most 512 live block decorations per extension, not counted against the 32 surfaces.
+Editor decorations: retained `fyx:ui` trees drawn as blocks above or below a buffer line (design.md, "L"). Needs the `ui:editor-decorations` capability; without it every call returns `not-permitted`. Both functions follow the effect rule of `host`. A decoration id lives in the same namespace as the extension's surface ids and follows the same id rule, so it must not equal a live surface id. Once placed, the id works like a surface id for `push-update`, `handle-event` (clicks, input), `list-rows` and `mount` (the host calls `mount(id)` to resync a decoration whose update did not fit), but not for `request-tick`, `show-surface` or `remove-surface`. At most 512 live decorations per extension, not counted against the 32 surfaces.
 
 ### type `node` = `node`
 
@@ -736,145 +600,8 @@ Editor decorations: retained `fyx:ui` trees drawn as blocks above or below a buf
 ### type `decoration-location` = `decoration-location`
 
 
-### type `color-token` = `color-token`
-
-
-### type `icon` = `icon`
-
-
-### type `document-id` = `document-id`
-
-
 ### type `host-error` = `host-error`
 
-
-### type `position` = `position`
-
-
-### type `text-range` = `text-range`
-
-
-### type `line-range` = `line-range`
-
-
-### type `document-selector` = `document-selector`
-
-
-### variant `decoration-color`
-
----- 0.3: styled decorations ---- A colour for decorations: a theme token, or one of the theme's accent colours (the ones bracket colouring and indent guides use), taken modulo however many the theme has.
-
-| Case | Payload | Notes |
-|---|---|---|
-| `token` | `color-token` |  |
-| `accent` | `u8` |  |
-
-### enum `underline-style`
-
-Cases: `straight`, `wavy`.
-
-### record `underline`
-
-| Field | Type | Notes |
-|---|---|---|
-| `style` | `underline-style` |  |
-| `color` | `option<decoration-color>` |  |
-
-### record `inline-style`
-
-Styles a range of text. Several styles on the same text merge; the extension that defined its namespace later wins a conflict.
-
-| Field | Type | Notes |
-|---|---|---|
-| `range` | `text-range` |  |
-| `foreground` | `option<decoration-color>` |  |
-| `background` | `option<decoration-color>` |  |
-| `underline` | `option<underline>` |  |
-| `strikethrough` | `bool` |  |
-| `bold` | `bool` |  |
-| `italic` | `bool` |  |
-
-### record `eol-text`
-
-Muted text after the end of a line (inline blame, inline diagnostics). At most 256 bytes.
-
-| Field | Type | Notes |
-|---|---|---|
-| `line` | `u32` |  |
-| `text` | `string` |  |
-| `color` | `option<decoration-color>` |  |
-
-### enum `inline-side`
-
-Cases: `before`, `after`.
-
-### record `inline-text`
-
-Text drawn between characters, which the cursor skips (an inlay). At most 64 bytes.
-
-| Field | Type | Notes |
-|---|---|---|
-| `position` | `position` |  |
-| `side` | `inline-side` |  |
-| `text` | `string` |  |
-| `color` | `option<decoration-color>` |  |
-
-### record `command-invocation`
-
-What clicking a gutter sign or a code lens runs: one of the extension's own manifest commands, called as `handle-command(command, argument, ...)`.
-
-| Field | Type | Notes |
-|---|---|---|
-| `command` | `string` |  |
-| `argument` | `option<string>` | Opaque to the host. At most 4 KiB. |
-
-### record `gutter-sign`
-
-An icon in the gutter. One sign per line per extension: the last one given wins.
-
-| Field | Type | Notes |
-|---|---|---|
-| `line` | `u32` |  |
-| `icon` | `icon` |  |
-| `color` | `option<decoration-color>` |  |
-| `tooltip` | `option<string>` | Shown on hover. At most 1024 bytes. |
-| `on-click` | `option<command-invocation>` |  |
-
-### record `line-background`
-
-Paints whole lines.
-
-| Field | Type | Notes |
-|---|---|---|
-| `lines` | `line-range` |  |
-| `color` | `decoration-color` |  |
-
-### record `color-swatch`
-
-A small square of a raw colour, drawn before or after `position` with a border, so it is legible on any theme. The only place where a raw colour is accepted (`0xRRGGBBAA`).
-
-| Field | Type | Notes |
-|---|---|---|
-| `position` | `position` |  |
-| `side` | `inline-side` |  |
-| `rgba` | `u32` |  |
-
-### variant `decoration`
-
-| Case | Payload | Notes |
-|---|---|---|
-| `inline-style` | `inline-style` |  |
-| `eol-text` | `eol-text` |  |
-| `inline-text` | `inline-text` |  |
-| `gutter-sign` | `gutter-sign` |  |
-| `line-background` | `line-background` |  |
-| `color-swatch` | `color-swatch` |  |
-
-### record `namespace-options`
-
-| Field | Type | Notes |
-|---|---|---|
-| `pull` | `option<document-selector>` | When set, the host calls `provide-decorations` for matching documents as their visible range changes (debounced 50 ms). When `none`, the namespace is filled with `set-decorations` only. |
 
 ### `place-decoration: func(id: string, location: decoration-location, nodes: list<node>) -> result<_, host-error>`
 
@@ -883,61 +610,6 @@ Places a decoration with the initial tree `nodes` (at most 16384 nodes, parents 
 ### `remove-decoration: func(id: string) -> result<_, host-error>`
 
 Removes a live decoration in every editor; no event is sent. The id may be placed again.
-
-### `define-namespace: func(namespace: string, options: namespace-options) -> result<_, host-error>`
-
-Declares a namespace: 1 to 64 bytes of `a-z`, `0-9`, `-`, `_`, `.`, owned by this extension. Defining it again replaces its options and keeps its decorations. At most 16 namespaces per extension.
-
-### `set-decorations: func(namespace: string, document: document-id, lines: option<line-range>, decorations: list<decoration>) -> result<_, host-error>`
-
-Replaces the namespace's decorations in one open document: within `lines` only, or in the whole document when `lines` is `none`. The host anchors every decoration, so it follows edits until it is replaced. At most 10000 decorations per call, per namespace and document, and 50000 per extension.
-
-### `clear-namespace: func(namespace: string) -> result<_, host-error>`
-
-Removes the namespace's decorations from every document. The namespace stays defined.
-
-## Interface `language`
-
-0.3. Hover and code lens contributions, drawn by the editor's own hover popover and code lens lines. `ui:hover` and `ui:code-lens` respectively.
-
-### type `host-error` = `host-error`
-
-
-### type `document-selector` = `document-selector`
-
-
-### enum `provider-kind`
-
-Cases: `hover`, `code-lens`.
-
-### `register-provider: func(kind: provider-kind, selector: document-selector) -> result<u32, host-error>`
-
-The host calls `provide-hover` or `provide-code-lenses` with the returned id for documents that match. At most 16 providers per extension.
-
-### `unregister-provider: func(provider: u32)`
-
-### `resolve-hover: func(request: u64, markdown: option<string>) -> result<_, host-error>`
-
-Answers a hover that `provide-hover` left `pending`. Ignored after 3 s, or once the hover popover has closed. `none` shows nothing.
-
-## Interface `virtual-documents`
-
-0.3. Read-only editor tabs whose text the extension supplies, at `fyx-ext://<id>/<path>`. `ui:virtual-documents`. The host pulls the text with `provide-virtual-document`.
-
-### type `host-error` = `host-error`
-
-
-### `open-virtual-document: func(path: string) -> result<_, host-error>`
-
-Opens the document in a tab of the active workspace window, or focuses its tab. Needs the click-or-Enter activation, like `show-surface` on a modal. `path` follows the worktree-path rule, at most 256 bytes.
-
-### `invalidate-virtual-document: func(path: string) -> result<_, host-error>`
-
-The text changed: the host calls `provide-virtual-document` again if the document is open.
-
-### `close-virtual-document: func(path: string) -> result<_, host-error>`
-
-Closes every tab of the document.
 
 ## Interface `permissions`
 
@@ -1085,9 +757,6 @@ Kills the process and everything it started.
 ### type `host-error` = `host-error`
 
 
-### type `document-id` = `document-id`
-
-
 ### type `text-range` = `text-range`
 
 
@@ -1101,19 +770,11 @@ Kills the process and everything it started.
 | `range` | `text-range` |  |
 | `new-text` | `string` |  |
 
-### variant `edit-target`
-
-| Case | Payload | Notes |
-|---|---|---|
-| `document` | `document-id` |  |
-| `file` | `file-ref` |  |
-
 ### record `file-edit`
 
 | Field | Type | Notes |
 |---|---|---|
-| `target` | `edit-target` |  |
-| `expected-version` | `option<u64>` | Fails the whole edit with `conflict` if the document has changed since this version. |
+| `file` | `file-ref` |  |
 | `create` | `bool` | Create the file if it does not exist (its parent directory must exist). |
 | `edits` | `list<text-edit>` | Non-overlapping, at most 4096 per edit in total. |
 
@@ -1129,7 +790,7 @@ Kills the process and everything it started.
 | Case | Payload | Notes |
 |---|---|---|
 | `denied` |  |  |
-| `conflict` | `string` | A file changed since `expected-version`. |
+| `conflict` | `string` | A file changed while the edit was being applied. |
 | `not-allowed` | `string` | The path is outside every worktree, leaves it through a symlink, or names a protected path, at any depth and whatever the security mode: `.git/`, `.fyx/`, `.zed/`, `.vscode/`, `.idea/`, agent configs (`.claude/`, `.codex/`, `.gemini/`, `.agents/`, `.cursor/`, `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules`, `.cursorrules`), the repository's `.fyx/security.toml` `read_only` patterns, or the `private_files` setting. |
 | `not-found` | `string` |  |
 | `invalid` | `string` |  |
@@ -1269,104 +930,6 @@ Starts delivering `io-event::agent` events, beginning with a `snapshot`. The fir
 | `agent` | `agent-event` |  |
 | `permission-changed` | `tuple<t2-capability, permission-state>` | The user answered a prompt or changed the extension's permissions; in-flight work of a revoked capability has already been cancelled. |
 
-## Interface `requests`
-
-0.3. What the host passes along with a request to an extension's provider exports.
-
-### type `document-context` = `document-context`
-
-
-### type `position` = `position`
-
-
-### type `line-range` = `line-range`
-
-
-### type `command-invocation` = `command-invocation`
-
-
-### enum `decoration-reason`
-
-Cases: `opened`, `scrolled`, `edited`, `refresh`.
-
-### record `decoration-request`
-
-| Field | Type | Notes |
-|---|---|---|
-| `namespace` | `string` |  |
-| `document` | `document-context` |  |
-| `lines` | `line-range` | The lines in view, plus one screen above and below. |
-| `reason` | `decoration-reason` |  |
-
-### record `hover-request`
-
-| Field | Type | Notes |
-|---|---|---|
-| `provider` | `u32` |  |
-| `request` | `u64` | For `resolve-hover`. |
-| `document` | `document-context` |  |
-| `position` | `position` |  |
-
-### variant `hover-reply`
-
-| Case | Payload | Notes |
-|---|---|---|
-| `none` |  |  |
-| `ready` | `string` | Markdown, at most 64 KiB. Links open only when they are `https:`. |
-| `pending` |  | The answer comes later through `resolve-hover`. |
-
-### record `code-lens-request`
-
-| Field | Type | Notes |
-|---|---|---|
-| `provider` | `u32` |  |
-| `document` | `document-context` |  |
-| `lines` | `line-range` |  |
-
-### enum `command-source`
-
-Cases: `palette`, `keymap`, `code-lens`, `gutter-sign`.
-
-### record `command-context`
-
-| Field | Type | Notes |
-|---|---|---|
-| `source` | `command-source` |  |
-| `document` | `option<document-context>` | The focused editor's document, if any. |
-
-### enum `picker-accept`
-
-Cases: `enter`, `alt-enter`, `secondary-enter`.
-
-### variant `picker-source-event`
-
-| Case | Payload | Notes |
-|---|---|---|
-| `opened` | `string` | The picker opened; send items with `picker.set-items`. Carries the initial query. |
-| `query-changed` | `string` | Dynamic pickers only: the query changed (debounced 100 ms). |
-| `highlighted` | `string` | The highlighted item of this source changed, for a live preview. Coalesced; at most every 50 ms. |
-| `accepted` | `tuple<list<string>, picker-accept>` | The user accepted these items of this source, with that key. |
-| `closed` |  | The picker closed, accepted or dismissed. No more events for this session. |
-
-### record `code-lens`
-
-One code lens line item, drawn like a language server's lens above `line`.
-
-| Field | Type | Notes |
-|---|---|---|
-| `line` | `u32` |  |
-| `title` | `string` | At most 256 bytes. |
-| `tooltip` | `option<string>` |  |
-| `on-click` | `option<command-invocation>` |  |
-
-### record `virtual-document`
-
-| Field | Type | Notes |
-|---|---|---|
-| `text` | `string` | At most 8 MiB. |
-| `language` | `option<string>` | A language name the host knows (`JSON`, `Markdown`); plain text otherwise. |
-| `title` | `option<string>` | The tab title after the extension's name; the last path component when `none`. At most 128 bytes. |
-
 ## Interface `images`
 
 0.3. Images the extension makes at run time, for `image-source::generated` (design.md §12). `ui:images`. Package assets need no call.
@@ -1385,30 +948,6 @@ Registers an image and returns its handle. The bytes are checked and decoded off
 ### `remove-image: func(image: u32)`
 
 Frees a generated image. Nodes that still show it show their alt text. Unknown handles are ignored. A reload or a disable frees all of them.
-
-## Interface `picker`
-
-0.3. Items for pickers: the owner's own picker surfaces and the sources this extension contributes to other pickers (manifest `[[fyx_ui.picker_sources]]`). `ui:picker`.
-
-### type `icon` = `icon`
-
-
-### type `host-error` = `host-error`
-
-
-### record `picker-item`
-
-| Field | Type | Notes |
-|---|---|---|
-| `key` | `string` | Unique within the source; 1 to 128 bytes. |
-| `label` | `string` | What the host matches the query against, unless `filter-text` is set. At most 512 bytes. |
-| `detail` | `option<string>` | Muted text right of the label (a path, a branch). At most 512 bytes. |
-| `icon` | `option<icon>` |  |
-| `filter-text` | `option<string>` |  |
-
-### `set-items: func(source: string, session: u64, items: list<picker-item>, append: bool) -> result<_, host-error>`
-
-Sets the items of `source` for one showing of a picker (`session` from `picker-source-event`). `source` is the picker's surface id for the owner, or the source id from the manifest for a contributor. Replaces the items given before for this session unless `append` is set. Items for a session that has closed are dropped without error. At most 10000 items per source and session, and 2000 per call.
 
 ## Interface `notifications`
 

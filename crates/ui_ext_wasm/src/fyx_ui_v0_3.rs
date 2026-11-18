@@ -17,13 +17,7 @@ use ui_ext::{
     v0_2 as model,
 };
 
-use crate::{
-    UiState,
-    conversions::{self, unsupported},
-    edit, network, observe,
-    permissions::PermissionState,
-    process,
-};
+use crate::{UiState, conversions, edit, network, observe, permissions::PermissionState, process};
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -40,7 +34,7 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    agent_observe as wit_observe, documents as wit_documents, host as wit_host,
+    agent_observe as wit_observe, decorations as wit_decorations, host as wit_host,
     images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
     permissions as wit_permissions, process as wit_process, types as wit,
     workspace_edit as wit_edit,
@@ -48,6 +42,7 @@ use bindings::fyx::ui::{
 
 conversions::host_imports!(denied: wit_host::HostErrorCode::Denied);
 conversions::notification_imports!();
+conversions::decoration_imports!();
 
 impl wit_images::Host for UiState {
     fn add_image(
@@ -267,21 +262,21 @@ impl wit_permissions::Host for UiState {
     }
 }
 
-fn file_ref(file: wit_documents::FileRef) -> process::FileRef {
+fn file_ref(file: wit::FileRef) -> process::FileRef {
     process::FileRef {
         worktree: file.worktree,
         path: file.path,
     }
 }
 
-fn wit_file_ref(file: process::FileRef) -> wit_documents::FileRef {
-    wit_documents::FileRef {
+fn wit_file_ref(file: process::FileRef) -> wit::FileRef {
+    wit::FileRef {
         worktree: file.worktree,
         path: file.path,
     }
 }
 
-fn position(position: wit_documents::Position) -> edit::Position {
+fn position(position: wit::Position) -> edit::Position {
     edit::Position {
         line: position.line,
         column: position.column,
@@ -299,15 +294,12 @@ impl wit_edit::Host for UiState {
                     .files
                     .iter()
                     .map(|file| {
-                        let path = match &file.target {
-                            wit_edit::EditTarget::File(file) => file.path.len(),
-                            wit_edit::EditTarget::Document(_) => 0,
-                        };
-                        path + file
-                            .edits
-                            .iter()
-                            .map(|edit| edit.new_text.len())
-                            .sum::<usize>()
+                        file.file.path.len()
+                            + file
+                                .edits
+                                .iter()
+                                .map(|edit| edit.new_text.len())
+                                .sum::<usize>()
                     })
                     .sum::<usize>(),
         )?;
@@ -320,11 +312,10 @@ impl wit_edit::Host for UiState {
                 .files
                 .into_iter()
                 .map(|file| edit::FileEdit {
-                    target: match file.target {
-                        wit_edit::EditTarget::Document(id) => edit::EditTarget::Document(id),
-                        wit_edit::EditTarget::File(file) => edit::EditTarget::File(file_ref(file)),
-                    },
-                    expected_version: file.expected_version,
+                    // 0.3 edits files only: document targets and versions come with the
+                    // document context of 0.4.
+                    target: edit::EditTarget::File(file_ref(file.file)),
+                    expected_version: None,
                     create: file.create,
                     edits: file
                         .edits
@@ -543,9 +534,7 @@ conversions::conversions! {
         }),
         wit::Props::Canvas(props) => Self::Canvas(canvas(props)),
     }
-    kinds: {
-        wit::SurfaceKind::Picker(_) => return Err(unsupported("a picker surface")),
-    }
+    kinds: {}
     events: {
         model::UiEvent::CanvasClick(click) => Self::CanvasClick(wit::CanvasClick {
             canvas: click.canvas,
@@ -556,9 +545,10 @@ conversions::conversions! {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 9] = [
+const LINKED_INTERFACES: [&str; 10] = [
     "types",
     "host",
+    "decorations",
     "images",
     "notifications",
     "network",
@@ -750,6 +740,7 @@ pub(crate) fn add_to_linker(
 ) -> wasmtime::Result<()> {
     wit::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_host::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_decorations::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_images::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_notifications::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_network::add_to_linker::<_, UiState>(linker, |state| state)?;
