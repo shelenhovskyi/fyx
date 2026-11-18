@@ -257,6 +257,58 @@ async fn test_updates_repaint_and_resize_the_block(cx: &mut TestAppContext) {
     assert_eq!(text.as_deref(), Some("first\nsecond"));
 }
 
+/// design.md 0.3 §11: nothing of an extension is drawn in the review pane's editors.
+#[gpui::test]
+async fn test_review_pane_editors_get_no_block(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let (project, buffer) = scratch_buffer(
+        "a
+b
+", cx,
+    )
+    .await;
+    let id = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("scratch/notes.txt", 0), text_tree("note"), cx)
+        })
+        .expect("valid tree");
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    only_block(&decorations, &editor, id, &mut vcx);
+
+    let window = cx.add_window(|window, cx| {
+        let mut editor = Editor::for_buffer(buffer.clone(), Some(project.clone()), window, cx);
+        editor.register_addon(agent_review::AgentReviewEditor);
+        editor
+    });
+    let review = window.root(cx).expect("editor window");
+    let mut review_cx = VisualTestContext::from_window(*window, cx);
+    redraw(&mut review_cx);
+    let blocks_in = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+        decorations.read_with(cx, |decorations, _| {
+            decorations.blocks_in(editor.entity_id(), id)
+        })
+    };
+    assert!(blocks_in(&review, &mut review_cx).is_empty());
+
+    // Marked after a block was placed: it goes at the next sync (here, a decorations change).
+    editor.update(&mut vcx, |editor, _| {
+        editor.register_addon(agent_review::AgentReviewEditor)
+    });
+    let second = decorations
+        .update(&mut vcx, |decorations, cx| {
+            decorations.add_tree(below("scratch/notes.txt", 1), text_tree("another"), cx)
+        })
+        .expect("valid tree");
+    redraw(&mut vcx);
+    assert!(blocks_in(&editor, &mut vcx).is_empty());
+    assert!(
+        decorations
+            .read_with(&mut vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), second))
+            .is_empty()
+    );
+}
+
 #[gpui::test]
 async fn test_other_files_get_no_block(cx: &mut TestAppContext) {
     let decorations = init(cx);
