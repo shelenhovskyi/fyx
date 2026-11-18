@@ -164,12 +164,19 @@ fn io_line(record: &ui_ext_wasm::diagnostics::IoRecord) -> String {
         (Some(outcome), None) => outcome.clone(),
         (None, _) => "running".to_string(),
     };
+    // A fetch's method as HTTP writes it (the record has the enum's name, `Get`).
+    let what = match record.what.split_once(' ') {
+        Some((method, rest)) if record.capability == "network:fetch" => {
+            format!("{} {rest}", method.to_ascii_uppercase())
+        }
+        _ => record.what.clone(),
+    };
     format!(
         "{} {} #{} {}: {}",
         clock(record.at),
         record.capability,
         record.id,
-        ui_ext::sanitize_for_log(&record.what),
+        ui_ext::sanitize_for_log(&what),
         outcome
     )
 }
@@ -496,7 +503,7 @@ mod tests {
             at,
             capability: "network:fetch",
             id: 3,
-            what: "GET https://example.com/a\nforged line".into(),
+            what: "Get https://example.com/a\nforged line".into(),
             outcome: None,
             duration: None,
         };

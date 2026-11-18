@@ -133,6 +133,14 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
             CAPABILITY_PANEL => format!("Adds panels to your docks ({capability})"),
             CAPABILITY_STATUS_BAR => format!("Adds items to the status bar ({capability})"),
             "ui:modal" => format!("Opens dialogs after you click or press Enter ({capability})"),
+            "ui:notifications" => {
+                format!("Shows notifications and progress in the workspace ({capability})")
+            }
+            "ui:editor-decorations" => format!(
+                "Adds highlights, gutter marks and notes to your editors ({capability})"
+            ),
+            "ui:images" => format!("Shows images from its package or that it makes ({capability})"),
+            "ui:canvas" => format!("Draws shapes and charts in its views ({capability})"),
             "workspace:read-buffers" => {
                 format!("Reads your open files (asks once, here; you can revoke it) ({capability})")
             }
@@ -160,6 +168,12 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
             other if other.starts_with("process:spawn@") => {
                 format!("Runs {}", &other["process:spawn@".len()..])
             }
+            other if other.starts_with("process:args@") => {
+                let (program, pattern) = other["process:args@".len()..]
+                    .split_once(' ')
+                    .unwrap_or_default();
+                format!("Runs {program} with arguments matching {pattern}")
+            }
             other if other.starts_with("process:env@") => {
                 format!(
                     "Passes the environment variable {}",
@@ -180,6 +194,10 @@ pub fn capability_chip_label(capability: &str) -> String {
         CAPABILITY_PANEL => "Panels".into(),
         CAPABILITY_STATUS_BAR => "Status Bar Items".into(),
         "ui:modal" => "Dialogs".into(),
+        "ui:notifications" => "Notifications".into(),
+        "ui:editor-decorations" => "Editor Decorations".into(),
+        "ui:images" => "Images".into(),
+        "ui:canvas" => "Drawing".into(),
         "workspace:read-buffers" => "Reads Open Files".into(),
         "workspace:read-files" => "Reads Project Files".into(),
         "workspace:diagnostics" => "Reads Diagnostics".into(),
@@ -190,6 +208,7 @@ pub fn capability_chip_label(capability: &str) -> String {
         other => match other.split_once('@') {
             Some(("network:fetch", domain)) => domain.to_string(),
             Some(("process:spawn", program)) => format!("Runs {program}"),
+            Some(("process:args", args)) => args.to_string(),
             _ => other.to_string(),
         },
     }

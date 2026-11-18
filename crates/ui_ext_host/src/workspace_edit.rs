@@ -101,7 +101,7 @@ pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
             || global.is_path_excluded(path)
             || settings.is_path_private(path)
             || global.is_path_private(path)
-            || fyx_guard::check_agent_read(project, &project_path, cx).is_err()
+            || fyx_guard::extension_read_denial(project, &project_path, cx).is_some()
     })
 }
 
@@ -442,11 +442,13 @@ fn check_target(
             "it matches the `private_files` setting",
         ));
     }
-    // The shield's extra rules (`.fyx/security.toml`, agent configs), when it is on.
-    fyx_guard::check_agent_read(project, project_path, cx)
-        .map_err(|why| not_allowed(display, &why))?;
-    fyx_guard::check_config_write(project, abs_path, cx)
-        .map_err(|error| not_allowed(display, &error.to_string()))?;
+    // `fyx_guard`'s rules for extensions, in every security mode (integration-5 S1, S2): its
+    // private paths, agent configs at any depth, `read_only` patterns, links out.
+    if let Some(why) = fyx_guard::extension_read_denial(project, project_path, cx)
+        .or_else(|| fyx_guard::extension_write_denial(project, abs_path, cx))
+    {
+        return Err(not_allowed(display, &why));
+    }
     match worktree.entry_for_path(path) {
         Some(entry) if entry.is_dir() => {
             Err(EditError::Invalid(format!("{display} is a directory")))

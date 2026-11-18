@@ -943,11 +943,13 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
     let package = zip(&[
         (
             "extension.toml",
+            // T1 capabilities are 0.3's (W2c A4).
             manifest(
                 "demo",
                 "1.0.0",
                 "\"ui:status-bar\", \"workspace:diagnostics\"",
             )
+            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
             .as_bytes(),
         ),
         ("fyx_ui.wasm", b"component"),

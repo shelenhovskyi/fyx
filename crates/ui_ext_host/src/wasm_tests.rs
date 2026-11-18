@@ -621,13 +621,24 @@ async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
     // Plan 1.5: an update that adds only T0 loads silently (and a changed component needs
     // nothing either) ...
     let manifest = std::fs::read_to_string(ui_dir.join("extension.toml")).expect("manifest");
+    // T1 capabilities are 0.3's (W2c A4), so a manifest with one targets 0.3.
     let with = |capabilities: &str| {
+        let mut edited = manifest.replace(
+            r#"capabilities = ["ui:status-bar"]"#,
+            &format!("capabilities = [{capabilities}]"),
+        );
+        // With the 0.3 probe as the component: its status item has the same id.
+        if capabilities.contains("workspace:") {
+            edited = edited.replace(r#"api_version = "0.1.0""#, r#"api_version = "0.3.0""#);
+            std::fs::write(
+                ui_dir.join("fyx_ui.wasm"),
+                ui_ext_wasm::test_support::fixture_wasm("fyx_ui_test_probe_v0_3"),
+            )
+            .expect("0.3 component");
+        }
         std::fs::write(
             ui_dir.join("extension.toml"),
-            manifest.replace(
-                r#"capabilities = ["ui:status-bar"]"#,
-                &format!("capabilities = [{capabilities}]"),
-            ),
+            edited,
         )
         .expect("edited manifest");
     };
@@ -637,7 +648,8 @@ async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
     assert!(pending(&registry, cx).is_empty());
 
     // ... while one that adds T1 is held for approval, and approving grants it.
-    with(r#""ui:status-bar", "workspace:read-buffers""#);
+    // The probe's panel and modal need their (T0) capabilities.
+    with(r#""ui:status-bar", "ui:panel", "ui:modal", "workspace:read-buffers""#);
     let registry = start(cx);
     run_until(cx, "the held update", |cx| {
         !pending(&registry, cx).is_empty()
@@ -660,6 +672,8 @@ async fn test_installed_extensions_wait_for_consent(cx: &mut TestAppContext) {
             .declared_capabilities("fyx-test-status-item")),
         [
             ("ui:status-bar".to_string(), Tier::T0, true),
+            ("ui:panel".to_string(), Tier::T0, true),
+            ("ui:modal".to_string(), Tier::T0, true),
             ("workspace:read-buffers".to_string(), Tier::T1, true),
         ]
     );
@@ -780,7 +794,7 @@ async fn test_unknown_and_t2_capabilities_are_refused(cx: &mut TestAppContext) {
     let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
     for (capability, expected) in [
         ("ui:pannel", "unknown capability \"ui:pannel\""),
-        ("network:fetch", "not available in this version"),
+        ("network:fetch", "needs fyx:ui 0.3"),
     ] {
         let source = root.path().join(capability.replace(':', "-"));
         std::fs::create_dir_all(&source).expect("source");

@@ -192,6 +192,17 @@ struct OpenNotification {
 
 impl gpui::EventEmitter<RegistryEvent> for UiExtensionRegistry {}
 
+/// An extension from outside the install store, for the Fyx tab's Installed list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalExtension {
+    pub extension_id: String,
+    pub path: PathBuf,
+    /// A `dev_paths` folder, a dev link or a bare component, not an installed folder.
+    pub is_dev: bool,
+    /// Waits for "Enable" (with the new capabilities of a held update).
+    pub pending: Option<Vec<String>>,
+}
+
 /// An installed extension waiting for the user's "Enable".
 #[derive(Clone, Debug)]
 pub struct PendingConsent {
@@ -312,6 +323,55 @@ impl UiExtensionRegistry {
                 .state
                 .update(cx, |state, cx| state.show_reload_error(message.clone(), cx));
         }
+    }
+
+    /// Extensions loaded or waiting for "Enable" that the install store does not hold: dev paths,
+    /// dev links, bare components and the installed-extensions folder, by id.
+    pub fn local_extensions(&self) -> Vec<LocalExtension> {
+        let mut local: Vec<LocalExtension> = self
+            .sources
+            .iter()
+            .filter_map(|(id, source)| {
+                let (path, is_file) = match source {
+                    ExtensionSource::Directory(path) => (path, false),
+                    ExtensionSource::File(path) => (path, true),
+                    ExtensionSource::Store => return None,
+                };
+                Some(LocalExtension {
+                    extension_id: id.to_string(),
+                    path: path.clone(),
+                    is_dev: is_file
+                        || self.watches.contains_key(id)
+                        || self.dev_paths.iter().any(|dev| path.starts_with(dev)),
+                    pending: None,
+                })
+            })
+            .collect();
+        let store_dir = self.store.as_ref().map(|store| store.root().to_path_buf());
+        for pending in &self.pending_consent {
+            if store_dir
+                .as_ref()
+                .is_some_and(|root| pending.dir.starts_with(root))
+            {
+                continue;
+            }
+            let new = pending.new_capabilities.clone();
+            match local
+                .iter_mut()
+                .find(|local| local.extension_id == pending.extension_id.as_ref())
+            {
+                Some(local) => local.pending = Some(new),
+                None => local.push(LocalExtension {
+                    extension_id: pending.extension_id.to_string(),
+                    path: pending.dir.clone(),
+                    is_dev: pending.is_dev
+                        || self.dev_paths.iter().any(|dev| pending.dir.starts_with(dev)),
+                    pending: Some(new),
+                }),
+            }
+        }
+        local.sort_by(|a, b| a.extension_id.cmp(&b.extension_id));
+        local
     }
 
     /// The capabilities a loaded extension declared, with their tier and whether each is granted
@@ -847,11 +907,17 @@ impl UiExtensionRegistry {
             ),
             "process:spawn" => {
                 let env = listed("process:env@");
+                let args = listed("process:args@");
                 (
                     format!("Allow {name} to run programs?"),
                     format!(
-                        "Programs: {}{}",
+                        "Programs: {}{}{}",
                         listed("process:spawn@").join(", "),
+                        if args.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\nArguments: {}", args.join(", "))
+                        },
                         if env.is_empty() {
                             String::new()
                         } else {
