@@ -29,7 +29,8 @@ Key ids are 1–64 characters of `a-z`, `0-9`, `-` and `.`, starting with a lett
 
 A **keyset** lists the public keys a reader accepts, each with its **roles**: `release`,
 `blocklist` and `snapshot`. A key signs only documents of its roles, so a leaked block-list key
-cannot publish a release (security-2 T9). The CI tool reads a keyset file:
+cannot publish a release (security-2 T9). The role `blocklist-revocation` signs no document; it
+lets a snapshot revoke block-list keys, and only the offline snapshot rotation key has it. The CI tool reads a keyset file:
 
 ```json
 {"keys": [
@@ -191,9 +192,14 @@ time of the index. Rules:
   shows up.
 - `revoked_keys` (optional, at most 256) are removed from the keyset for releases and block
   lists.
-  Decided (registry-repo.md, open question 3): a `blocklist` key may be revoked only by a snapshot
-  signed by the snapshot rotation key, and the client ignores such entries in any other snapshot.
-  W2c is implementing it; until then, the code revokes keys of every role.
+  A `blocklist` key, or a key with the `blocklist-revocation` role, may be revoked only by a
+  snapshot signed by a key with the `blocklist-revocation` role: the offline snapshot rotation key
+  (registry-repo.md, open question 3). In any other snapshot such entries are ignored and reported
+  (`VerifiedSnapshot::ignored_revocations`), so a leaked CI environment cannot revoke the
+  block-list keys and unblock everything. The block-list revocations of a rotation-key snapshot
+  carry over to every later snapshot until another rotation-key snapshot lists different ones; a
+  client stores them with the last snapshot it accepted (`VerifiedSnapshot::to_state_json`,
+  `from_state_json`), so the daily snapshot need not repeat them.
 
 A client verifies the snapshot first (`VerifiedSnapshot::verify`), then the index with
 `Index::verify_with_snapshot(bytes, &snapshot, &keyset)`. Canonical order: schema, sequence,
