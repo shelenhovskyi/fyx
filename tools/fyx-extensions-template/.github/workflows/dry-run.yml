@@ -1,0 +1,44 @@
+# The whole pipeline against the sample entry with throwaway TEST keys generated in this run
+# (scripts/dry-run.sh). It holds no secret and publishes nothing; the test keys die with the
+# runner. Run it after changing a workflow or the policy script.
+name: dry-run
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["scripts/**", "policy/**", ".github/workflows/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: registry
+      - name: Fyx at the sample's commit (fyx-registry, the demo source)
+        run: |
+          repository=$(python3 -c 'import tomllib; print(tomllib.load(open("registry/extensions/fyx-demo-counter.toml", "rb"))["source"]["repository"])')
+          commit=$(python3 -c 'import tomllib; print(tomllib.load(open("registry/extensions/fyx-demo-counter.toml", "rb"))["source"]["commit"])')
+          git init -q fyx
+          git -C fyx fetch -q --depth 1 "$repository" "$commit"
+          git -C fyx checkout -q FETCH_HEAD
+          # The template is tested as it is in this repository, not as it was at that commit.
+          mkdir -p fyx/tools && rm -rf fyx/tools/fyx-extensions-template
+          cp -r registry fyx/tools/fyx-extensions-template
+      - name: Build the demo component
+        working-directory: fyx
+        run: |
+          rustup show active-toolchain
+          rustup target add wasm32-wasip2
+          script/fyx-build-demos
+      - name: Dry run
+        working-directory: fyx
+        run: tools/fyx-extensions-template/scripts/dry-run.sh --keep "$RUNNER_TEMP/published"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-test-documents
+          path: ${{ runner.temp }}/published

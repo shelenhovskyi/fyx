@@ -1,0 +1,30 @@
+name: Report an extension
+description: Something an extension does that it should not. For a vulnerability, open a private security advisory instead.
+labels: ["report"]
+body:
+  - type: input
+    id: extension
+    attributes:
+      label: Extension id
+      placeholder: todo
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "1.2.0, or all"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+    validations:
+      required: true

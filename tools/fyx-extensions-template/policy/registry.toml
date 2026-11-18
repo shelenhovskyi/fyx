@@ -1,0 +1,3 @@
+# Who the registry's owner is, and where packages are published (registry-repo.md, "Publishing").
+owner         = "shelenhovskyi"
+download_base = "https://github.com/shelenhovskyi/fyx-extensions/releases/download"

@@ -35,6 +35,14 @@ if ! script/fyx-api-docs --check; then
     echo "gate: RED: docs/fyx/api is out of date; run script/fyx-api-docs and commit the pages"
     exit 1
 fi
+# The registry template's policy script (stdlib Python, offline). Its dry-run clones an entry's
+# source repository, so it is not part of the gate.
+if [[ -d tools/fyx-extensions-template/scripts ]]; then
+    if ! (cd tools/fyx-extensions-template/scripts && python -I -m unittest -q 2>&1 | tail -3; exit "${PIPESTATUS[0]}"); then
+        echo "gate: RED: tools/fyx-extensions-template policy tests failed"
+        exit 1
+    fi
+fi
 
 changed_crates=$(
     git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \

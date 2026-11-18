@@ -1806,7 +1806,15 @@ impl InputProps {
             value: value.into(),
             placeholder: String::new(),
             secret: false,
+            label: None,
         }
+    }
+
+    /// The accessible name screen readers announce; without one they read the placeholder. At
+    /// most 256 bytes: the host cuts longer text at a character boundary. Dropped for 0.1.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {

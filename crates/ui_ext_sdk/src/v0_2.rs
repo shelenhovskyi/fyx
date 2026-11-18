@@ -99,6 +99,7 @@ fn props(props: &Props) -> Result<v2::Props, String> {
             value: input.value.clone(),
             placeholder: input.placeholder.clone(),
             secret: input.secret,
+            label: input.label.clone(),
         }),
         Props::List(list) => v2::Props::List(v2::ListProps {
             row_count: list.row_count,

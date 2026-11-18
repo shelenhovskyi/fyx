@@ -180,7 +180,7 @@ checks nothing: the rules apply when a node goes into a tree.
 | `FlexProps` | `FlexProps::column()`, `FlexProps::row()`: gap 0, padding 0, no grow, `Align::Start`, no background | `.gap(u16)`, `.padding(u16)`, `.grow()`, `.align(Align)`, `.background(ColorToken)` |
 | `TextProps` | `TextProps::new(content)`: no colour, not bold, not monospace; also `From<&str>` and `From<String>` | `.color(ColorToken)`, `.bold()`, `.monospace()` |
 | `ButtonProps` | `ButtonProps::new(label)`: no icon, `ButtonStyle::Default`, enabled, no tooltip; also `From<&str>` and `From<String>` | `.icon(Icon)`, `.style(ButtonStyle)`, `.disabled(bool)`, `.tooltip(text)` |
-| `InputProps` | `InputProps::new(value)`: empty placeholder, not secret | `.placeholder(text)`, `.secret()` |
+| `InputProps` | `InputProps::new(value)`: empty placeholder, not secret, no label | `.placeholder(text)`, `.secret()`, `.label(text)`: the accessible name, at most 256 bytes (0.2) |
 | `ListProps` | `ListProps::new(row_count: u32, row_height: u16)`: no selected row | `.selected(Option<u32>)` |
 | `TableProps` | `TableProps::new(columns: impl IntoIterator<Item = impl Into<String>>, row_count: u32)` | — |
 | `IconProps` | `IconProps::new(Icon)`: no colour; also `From<Icon>` | `.color(ColorToken)` |
