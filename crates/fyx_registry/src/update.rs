@@ -5,7 +5,10 @@
 //! and an extension whose block is lifted simply stops getting a `Disable`. The host turns
 //! changes between runs into notifications.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -34,10 +37,62 @@ impl AgeGate {
     }
 }
 
+/// When this client first saw each release in an accepted index (integration-5 R8). The age gate
+/// counts from the later of that and `published_at`: `published_at` is signed by the online
+/// release key, so a leaked key could backdate a release to skip the wait, but it cannot change
+/// when a client first saw it. A client with no history yet (the first index it ever accepts)
+/// has nothing better than `published_at`, and records that.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FirstSeen(BTreeMap<String, Timestamp>);
+
+impl FirstSeen {
+    fn key(release: &Release) -> String {
+        format!(
+            "{}@{}#{}",
+            release.id, release.version, release.package.sha256
+        )
+    }
+
+    /// When the client first saw `release`, if it has.
+    pub fn get(&self, release: &Release) -> Option<Timestamp> {
+        self.0.get(&Self::key(release)).copied()
+    }
+
+    /// Records the releases of a newly accepted index: new ones at `now`, or at their
+    /// `published_at` while the client has no history (`first_index`). Releases no longer in the
+    /// index are forgotten, so this never outgrows the index.
+    pub fn record(&mut self, index: &VerifiedIndex, now: Timestamp, first_index: bool) {
+        let mut next = BTreeMap::new();
+        for id in index.extensions() {
+            for release in index.releases(id) {
+                let key = Self::key(release);
+                let seen = self.0.get(&key).copied().unwrap_or(if first_index {
+                    release.published_at
+                } else {
+                    now
+                });
+                next.insert(key, seen);
+            }
+        }
+        self.0 = next;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A publish time in the future (a fast registry clock or a slow local one) counts as just
-/// published: the wait is never shortened by skew.
+/// published: the wait is never shortened by skew. Without a first sight, `published_at` alone.
 pub fn age_gate(release: &Release, now: Timestamp) -> AgeGate {
-    let ready_at = release.published_at.saturating_add(AGE_GATE);
+    age_gate_seen(release, None, now)
+}
+
+/// [`age_gate`] from the later of `published_at` and when the client first saw the release.
+pub fn age_gate_seen(release: &Release, first_seen: Option<Timestamp>, now: Timestamp) -> AgeGate {
+    let start = first_seen.map_or(release.published_at, |seen| seen.max(release.published_at));
+    let ready_at = start.saturating_add(AGE_GATE);
     if now >= ready_at {
         AgeGate::Ready
     } else if release.urgent {
@@ -226,11 +281,12 @@ pub fn plan_updates(
     installed: &[InstalledExtension],
     index: &VerifiedIndex,
     blocklist: Option<&VerifiedBlocklist>,
+    first_seen: &FirstSeen,
     now: Timestamp,
 ) -> Vec<PlannedAction> {
     let mut plan = Vec::new();
     for extension in installed {
-        for action in plan_extension(extension, index, blocklist, now) {
+        for action in plan_extension(extension, index, blocklist, first_seen, now) {
             plan.push(PlannedAction {
                 id: extension.id.clone(),
                 action,
@@ -244,6 +300,7 @@ fn plan_extension(
     extension: &InstalledExtension,
     index: &VerifiedIndex,
     blocklist: Option<&VerifiedBlocklist>,
+    first_seen: &FirstSeen,
     now: Timestamp,
 ) -> Vec<Action> {
     let block_for = |version: &Version, package_sha256: Option<&Sha256Digest>| {
@@ -261,7 +318,7 @@ fn plan_extension(
             if block_for(&release.version, Some(&release.package.sha256)).is_some() {
                 continue;
             }
-            let reasons = hold_reasons(extension, release, now);
+            let reasons = hold_reasons(extension, release, first_seen, now);
             if reasons.is_empty() {
                 update = Some(release);
                 break;
@@ -315,13 +372,14 @@ fn plan_extension(
 fn hold_reasons(
     extension: &InstalledExtension,
     release: &Release,
+    first_seen: &FirstSeen,
     now: Timestamp,
 ) -> Vec<HoldReason> {
     let mut reasons = Vec::new();
     if extension.pinned {
         reasons.push(HoldReason::Pinned);
     }
-    if let AgeGate::Waiting { ready_at } = age_gate(release, now) {
+    if let AgeGate::Waiting { ready_at } = age_gate_seen(release, first_seen.get(release), now) {
         reasons.push(HoldReason::TooNew { ready_at });
     }
     let additions = extension.approved.additions(release);
@@ -383,6 +441,7 @@ pub fn plan_install<'a>(
     id: &ExtensionId,
     index: &'a VerifiedIndex,
     blocklist: Option<&VerifiedBlocklist>,
+    first_seen: &FirstSeen,
     now: Timestamp,
 ) -> Result<&'a Release, InstallRefusal> {
     let mut first_block = None;
@@ -394,7 +453,7 @@ pub fn plan_install<'a>(
             first_block.get_or_insert(block);
             continue;
         }
-        match age_gate(release, now) {
+        match age_gate_seen(release, first_seen.get(release), now) {
             AgeGate::Ready | AgeGate::Urgent => return Ok(release),
             AgeGate::Waiting { ready_at } => {
                 newest_waiting.get_or_insert((release, ready_at));
@@ -485,13 +544,19 @@ mod tests {
         blocklist: Option<&VerifiedBlocklist>,
         now: Timestamp,
     ) -> Vec<Action> {
-        plan_updates(std::slice::from_ref(extension), index, blocklist, now)
-            .into_iter()
-            .map(|planned| {
-                assert_eq!(planned.id, extension.id);
-                planned.action
-            })
-            .collect()
+        plan_updates(
+            std::slice::from_ref(extension),
+            index,
+            blocklist,
+            &FirstSeen::default(),
+            now,
+        )
+        .into_iter()
+        .map(|planned| {
+            assert_eq!(planned.id, extension.id);
+            planned.action
+        })
+        .collect()
     }
 
     fn update(to: &str) -> Action {
@@ -805,7 +870,13 @@ mod tests {
         let index = index(vec![todo("1.0.0"), todo("1.1.0"), other, other_next]);
         let mut lint = installed("2.0.0", None);
         lint.id = ExtensionId::new("lint").expect("valid");
-        let plan = plan_updates(&[lint, installed("1.0.0", None)], &index, None, LATER);
+        let plan = plan_updates(
+            &[lint, installed("1.0.0", None)],
+            &index,
+            None,
+            &FirstSeen::default(),
+            LATER,
+        );
         assert_eq!(
             plan.iter()
                 .map(|planned| (planned.id.to_string(), planned.action.clone()))
@@ -824,11 +895,19 @@ mod tests {
             todo("1.1.0"),
             published(todo("1.2.0"), LATER),
         ]);
-        let picked = plan_install(&id(), &index, None, LATER).expect("installable");
+        let picked =
+            plan_install(&id(), &index, None, &FirstSeen::default(), LATER).expect("installable");
         assert_eq!(picked.version, version("1.1.0"));
 
         let blocklist = verified(blocklist(1, vec![entry("todo", "=1.1.0")]));
-        let picked = plan_install(&id(), &index, Some(&blocklist), LATER).expect("installable");
+        let picked = plan_install(
+            &id(),
+            &index,
+            Some(&blocklist),
+            &FirstSeen::default(),
+            LATER,
+        )
+        .expect("installable");
         assert_eq!(picked.version, version("1.0.0"));
     }
 
@@ -836,13 +915,19 @@ mod tests {
     fn install_refusals_explain_themselves() {
         let unknown = ExtensionId::new("unknown").expect("valid");
         assert_eq!(
-            plan_install(&unknown, &VerifiedIndex::default(), None, LATER),
+            plan_install(
+                &unknown,
+                &VerifiedIndex::default(),
+                None,
+                &FirstSeen::default(),
+                LATER
+            ),
             Err(InstallRefusal::NotInIndex)
         );
 
         let fresh = index(vec![published(todo("1.0.0"), LATER)]);
         assert_eq!(
-            plan_install(&id(), &fresh, None, LATER),
+            plan_install(&id(), &fresh, None, &FirstSeen::default(), LATER),
             Err(InstallRefusal::TooNew {
                 version: version("1.0.0"),
                 ready_at: LATER.saturating_add(AGE_GATE),
@@ -853,7 +938,13 @@ mod tests {
         let blocklist = verified(blocklist(1, vec![block.clone()]));
         let index = index(vec![todo("1.0.0")]);
         assert_eq!(
-            plan_install(&id(), &index, Some(&blocklist), LATER),
+            plan_install(
+                &id(),
+                &index,
+                Some(&blocklist),
+                &FirstSeen::default(),
+                LATER
+            ),
             Err(InstallRefusal::Blocked { block })
         );
     }
