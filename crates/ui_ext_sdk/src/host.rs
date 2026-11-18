@@ -17,7 +17,7 @@ use crate::{
     Surface, Update,
 };
 #[cfg(feature = "fyx-ui-0-3")]
-use crate::{HttpRequest, ImageFormat};
+use crate::{HttpRequest, ImageFormat, SpawnRequest};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
@@ -53,6 +53,14 @@ unsafe extern "Rust" {
     safe fn __fyx_ui_fetch(request: &HttpRequest) -> Result<u64, HostError>;
     #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_cancel_fetch(request: u64);
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_spawn(request: &SpawnRequest) -> Result<u64, HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_write_stdin(process: u64, data: &[u8]) -> Result<(), HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_close_stdin(process: u64) -> Result<(), HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_kill(process: u64) -> Result<(), HostError>;
 }
 
 /// What a host function did, recorded off WASM for unit tests.
@@ -112,6 +120,22 @@ pub enum HostEffect {
     },
     #[cfg(feature = "fyx-ui-0-3")]
     CancelFetch(u64),
+    /// [`spawn`]; ids are the shared 1, 2, ….
+    #[cfg(feature = "fyx-ui-0-3")]
+    Spawn {
+        id: u64,
+        request: SpawnRequest,
+    },
+    /// [`write_stdin`]; the bytes are kept.
+    #[cfg(feature = "fyx-ui-0-3")]
+    WriteStdin {
+        process: u64,
+        data: Vec<u8>,
+    },
+    #[cfg(feature = "fyx-ui-0-3")]
+    CloseStdin(u64),
+    #[cfg(feature = "fyx-ui-0-3")]
+    Kill(u64),
 }
 
 /// A generated image from [`add_image`], for `ImageProps::generated`. `Copy` and without `Drop`:
@@ -434,21 +458,75 @@ pub fn cancel_fetch(request: u64) {
     record(HostEffect::CancelFetch(request)).ok();
 }
 
+/// `fyx:ui` 0.3, `process:spawn` (design.md §9): starts a program the manifest's
+/// `[[fyx_ui.processes]]` names, after the current call returns, and returns its id. Output
+/// arrives in [`Extension::handle_io`](crate::Extension) as `IoEvent::ProcessOutput`, then one
+/// `IoEvent::ProcessExited`, or one `IoEvent::SpawnFailed` instead. The first spawn asks the
+/// user; if they refuse, it fails with `SpawnError::Denied`. At most 4 processes per extension.
+/// A program the manifest does not name gets an id and then `SpawnError::NotFound`. Off WASM it
+/// records [`HostEffect::Spawn`] and hands out ids.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn spawn(request: &SpawnRequest) -> Result<u64, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_spawn(request);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let id = next_id();
+        record(HostEffect::Spawn {
+            id,
+            request: request.clone(),
+        })?;
+        Ok(id)
+    }
+}
+
+/// `fyx:ui` 0.3: writes to a process spawned with `stdin`. At most 1 MiB per call and 4 MiB
+/// queued per process.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn write_stdin(process: u64, data: &[u8]) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_write_stdin(process, data);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::WriteStdin {
+        process,
+        data: data.to_vec(),
+    })
+}
+
+/// `fyx:ui` 0.3: closes a process's stdin, which many programs wait for before they finish.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn close_stdin(process: u64) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_close_stdin(process);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::CloseStdin(process))
+}
+
+/// `fyx:ui` 0.3: kills a process and everything it started; `ProcessExited` follows with
+/// `killed` set. A process that already exited is `invalid-argument`.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn kill(process: u64) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_kill(process);
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::Kill(process))
+}
+
 /// The implementations behind the shims of `register_extension!(T)`: the SDK's own world, 0.2
 /// or (with `fyx-ui-0-3`) 0.3.
 #[doc(hidden)]
 pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::HttpRequest;
-    #[cfg(feature = "fyx-ui-0-3")]
     use crate::ImageFormat;
     use crate::bindings::fyx::ui::{decorations, host, notifications};
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::bindings::fyx::ui::{images, network};
+    use crate::bindings::fyx::ui::{images, network, process};
     use crate::{
         DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions,
         ProgressValue, Surface, Update,
     };
+    #[cfg(feature = "fyx-ui-0-3")]
+    use crate::{HttpRequest, SpawnRequest};
 
     pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION;
 
@@ -538,5 +616,25 @@ pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn cancel_fetch(request: u64) {
         network::cancel_fetch(request);
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn spawn(request: &SpawnRequest) -> Result<u64, HostError> {
+        process::spawn(request)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn write_stdin(id: u64, data: &[u8]) -> Result<(), HostError> {
+        process::write_stdin(id, data)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn close_stdin(id: u64) -> Result<(), HostError> {
+        process::close_stdin(id)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn kill(id: u64) -> Result<(), HostError> {
+        process::kill(id)
     }
 }

@@ -453,6 +453,15 @@ impl Running {
         }
     }
 
+    /// The way outcomes leave, for a feed that sends without waiting; `None` once the instance
+    /// is gone.
+    pub(crate) fn sender(&self) -> Option<futures::channel::mpsc::Sender<IoEvent>> {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     pub(crate) async fn deliver(&self, event: IoEvent) {
         let sender = self
             .events
@@ -550,6 +559,13 @@ impl NetworkState {
     }
 }
 
+/// What a revocation stops besides the running requests (decision 26).
+pub(crate) struct Revocable {
+    pub(crate) processes: std::sync::Weak<crate::process::ProcessSet>,
+    pub(crate) edits: std::sync::Weak<crate::edit::EditSet>,
+    pub(crate) observer: std::sync::Weak<crate::observe::ObserveHandle>,
+}
+
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
 /// the last [`crate::UiExtension`] clone cancels every running request, so a reloaded or
 /// disabled instance gets no outcome of the old one's ids (design §0.3 step 7).
@@ -605,7 +621,7 @@ impl NetworkHandle {
     /// Follows the broker's state changes for this instance, on the current tokio runtime: a
     /// revocation of `network:fetch` ends the running requests with `denied`, and every change
     /// is delivered as `permission-changed`. Only for a component that has `handle-io`.
-    pub(crate) fn watch_permissions(&self, processes: std::sync::Weak<crate::process::ProcessSet>) {
+    pub(crate) fn watch_permissions(&self, revocable: Revocable) {
         let Some(broker) = &self.broker else {
             return;
         };
@@ -620,11 +636,25 @@ impl NetworkHandle {
                 if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
                     running.revoke_all();
                 }
-                if capability == crate::process::CAPABILITY_PROCESS
-                    && state != PermissionState::Granted
-                    && let Some(processes) = processes.upgrade()
-                {
-                    processes.kill_all();
+                if state != PermissionState::Granted {
+                    match capability.as_str() {
+                        crate::process::CAPABILITY_PROCESS => {
+                            if let Some(processes) = revocable.processes.upgrade() {
+                                processes.kill_all();
+                            }
+                        }
+                        crate::edit::CAPABILITY_EDIT => {
+                            if let Some(edits) = revocable.edits.upgrade() {
+                                edits.revoke_all();
+                            }
+                        }
+                        crate::observe::CAPABILITY_OBSERVE => {
+                            if let Some(observer) = revocable.observer.upgrade() {
+                                observer.stop();
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 running
                     .deliver(IoEvent::PermissionChanged(capability, state))

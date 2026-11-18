@@ -138,7 +138,41 @@ pub type FetchResponder = Box<
         -> std::result::Result<ui_ext::network::FetchResponse, ui_ext::network::FetchError>,
 >;
 
-/// A stand-in for the user and the network, for `network:fetch` tests (0.3). Without one the
+/// What a fake program does when it runs: it sees the request and everything written to its
+/// stdin, and returns its output and exit code.
+pub type FakeProgram = Box<dyn FnMut(&ui_ext::process::SpawnRequest, &[u8]) -> FakeRun>;
+
+/// The run of a fake program: its whole stdout and stderr, and its exit code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FakeRun {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// `None` as for a program ended by a signal.
+    pub code: Option<i32>,
+}
+
+impl FakeRun {
+    /// Prints `stdout` and exits with 0.
+    pub fn ok(stdout: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: Vec::new(),
+            code: Some(0),
+        }
+    }
+
+    /// Prints `stderr` and exits with `code`.
+    pub fn fail(code: i32, stderr: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+            code: Some(code),
+        }
+    }
+}
+
+/// A stand-in for the user and the network, for `network:fetch` and `process:spawn` tests (0.3);
+/// its state is the state of every T2 capability. Without one the
 /// harness grants no T2 capability, as the host without a broker: `fetch` returns `denied`.
 pub struct TestBroker {
     /// The state at the import. `Ask` accepts the request and asks when it is delivered.
@@ -848,8 +882,11 @@ pub struct Harness {
     surfaces_v0_1: Vec<ui_ext::Surface>,
     mounted: HashMap<String, Mounted>,
     decorations: BTreeMap<String, model::DecorationLocation>,
-    /// The permission broker for `network:fetch` (0.3); `None` grants nothing, as in the host.
+    /// The permission broker for the T2 capabilities (0.3); `None` grants nothing, as in the
+    /// host.
     broker: Option<TestBroker>,
+    /// What `process:spawn` runs instead of real programs, by name.
+    fake_programs: HashMap<String, FakeProgram>,
     /// What the renderer shows of §M: open notifications and running progresses, by id.
     notifications: BTreeMap<u64, model::notifications::Notification>,
     progresses: BTreeMap<u64, Progress>,
@@ -977,6 +1014,7 @@ impl Harness {
             mounted: HashMap::new(),
             decorations: BTreeMap::new(),
             broker: None,
+            fake_programs: HashMap::new(),
             notifications: BTreeMap::new(),
             progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
@@ -1048,6 +1086,26 @@ impl Harness {
                 .collect::<Vec<_>>();
             harness = harness
                 .with_network_domains(&domains)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(programs) = table.get("processes") {
+            let programs: Vec<ui_ext::process::ProcessSpec> = programs
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.processes]] in {manifest_path:?}"))?;
+            let env = table
+                .get("process")
+                .and_then(toml::Value::as_table)
+                .and_then(|process| process.get("env"))
+                .and_then(toml::Value::as_array)
+                .map(|env| {
+                    env.iter()
+                        .filter_map(toml::Value::as_str)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            harness = harness
+                .with_processes(programs, &env)
                 .with_context(|| format!("in {manifest_path:?}"))?;
         }
         harness.package =
@@ -1187,6 +1245,54 @@ impl Harness {
         self.broker.as_ref()
     }
 
+    /// The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env`
+    /// declare them; [`Harness::load_package`] reads them from the manifest.
+    pub fn with_processes(
+        mut self,
+        programs: Vec<ui_ext::process::ProcessSpec>,
+        env: &[&str],
+    ) -> Result<Self> {
+        for name in env {
+            ui_ext::process::check_env_name(name)
+                .map_err(|error| anyhow::anyhow!("[fyx_ui.process] env: {error}"))?;
+        }
+        self.store
+            .data_mut()
+            .api
+            .set_process_policy(ui_ext::process::ProcessPolicy {
+                programs,
+                env: env.iter().map(ToString::to_string).collect(),
+            });
+        Ok(self)
+    }
+
+    /// Runs `program` for spawns of `name` instead of a real program. A declared program with
+    /// no fake ends `spawn-failed(not-found)`.
+    pub fn fake_program(
+        &mut self,
+        name: &str,
+        program: impl FnMut(&ui_ext::process::SpawnRequest, &[u8]) -> FakeRun + 'static,
+    ) {
+        self.fake_programs
+            .insert(name.to_string(), Box::new(program));
+    }
+
+    /// The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it
+    /// is trusted (an untrusted one is `denied`). Trusted by default.
+    pub fn set_worktree(&mut self, worktree: Option<bool>) {
+        self.store.data_mut().api.set_worktree(worktree);
+    }
+
+    /// Processes `spawn` accepted that have not finished, oldest first.
+    pub fn processes(&self) -> Vec<(u64, ui_ext::process::SpawnRequest)> {
+        self.store
+            .data()
+            .api
+            .processes()
+            .map(|(id, process)| (id, process.request.clone()))
+            .collect()
+    }
+
     /// Requests `fetch` accepted that [`Harness::deliver_io`] has not delivered yet, oldest first.
     pub fn pending_fetches(&self) -> Vec<(u64, ui_ext::network::FetchRequest)> {
         self.store
@@ -1237,7 +1343,112 @@ impl Harness {
             self.run_follow_ups(follow_ups);
             delivered.push(RawEffects { effects, value });
         }
+        for event in self.run_processes() {
+            let Some(event) = v0_3::io_event(event) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
         Ok(delivered)
+    }
+
+    /// The outcomes of the processes that can move, oldest first: a start (the prompt of an
+    /// `Ask` broker, `spawn-failed` for a refusal or an unknown program), the run of a fake
+    /// program once its stdin is closed (its output in chunks, then `process-exited`), or a
+    /// kill. A process whose stdin is open waits for `close-stdin`.
+    fn run_processes(&mut self) -> Vec<ui_ext::network::IoEvent> {
+        use ui_ext::network::{IoEvent, PermissionState};
+        use ui_ext::process::{OutputStream, ProcessExit, ProcessOutput, SpawnError};
+        let ids = self
+            .store
+            .data()
+            .api
+            .processes()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for id in ids {
+            let Some(process) = self.store.data_mut().api.process_mut(id).map(|p| p.clone()) else {
+                continue;
+            };
+            if process.killed {
+                self.store.data_mut().api.process_finished(id);
+                events.push(IoEvent::ProcessExited(ProcessExit {
+                    process: id,
+                    code: None,
+                    killed: true,
+                }));
+                continue;
+            }
+            if !process.started {
+                let failure = if process.not_declared {
+                    Some(SpawnError::NotFound(process.request.program.clone()))
+                } else {
+                    let state = match self.broker.as_mut() {
+                        Some(broker) => {
+                            if broker.state == PermissionState::Ask {
+                                broker.prompts += 1;
+                                broker.state = broker.answer;
+                                self.store
+                                    .data_mut()
+                                    .api
+                                    .set_network_permission(broker.state);
+                            }
+                            broker.state
+                        }
+                        None => PermissionState::Unavailable,
+                    };
+                    if state != PermissionState::Granted {
+                        Some(SpawnError::Denied)
+                    } else if !self.fake_programs.contains_key(&process.request.program) {
+                        Some(SpawnError::NotFound(format!(
+                            "{} (no fake program in the harness)",
+                            process.request.program
+                        )))
+                    } else {
+                        None
+                    }
+                };
+                if let Some(failure) = failure {
+                    self.store.data_mut().api.process_finished(id);
+                    events.push(IoEvent::SpawnFailed(id, failure));
+                    continue;
+                }
+                if let Some(process) = self.store.data_mut().api.process_mut(id) {
+                    process.started = true;
+                }
+            }
+            if process.stdin_open {
+                continue;
+            }
+            let Some(program) = self.fake_programs.get_mut(&process.request.program) else {
+                continue;
+            };
+            let run = program(&process.request, &process.stdin);
+            self.store.data_mut().api.process_finished(id);
+            for (stream, bytes) in [
+                (OutputStream::Stdout, &run.stdout),
+                (OutputStream::Stderr, &run.stderr),
+            ] {
+                for chunk in bytes.chunks(ui_ext::process::MAX_OUTPUT_CHUNK_BYTES) {
+                    events.push(IoEvent::ProcessOutput(ProcessOutput {
+                        process: id,
+                        stream,
+                        data: chunk.to_vec(),
+                    }));
+                }
+            }
+            events.push(IoEvent::ProcessExited(ProcessExit {
+                process: id,
+                code: run.code,
+                killed: false,
+            }));
+        }
+        events
     }
 
     /// The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or

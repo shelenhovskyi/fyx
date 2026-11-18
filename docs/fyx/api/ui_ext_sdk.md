@@ -32,6 +32,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Extension::surfaces` | method | The static surfaces, called once after instantiation. `add_surface` adds more later. |
 | `Extension::tick` | method | The tick `request_tick` asked for. The update applies to `surface_id`, like an event's reply. `fyx:ui` 0.1 has no ticks, so a `v0_1` extension never gets this call. |
 | `FetchError` | re-export | `bindings::fyx::ui::network::FetchError` |
+| `FileRef` | re-export | `bindings::fyx::ui::documents::FileRef` |
 | `FlexProps::align` | method |  |
 | `FlexProps::background` | method |  |
 | `FlexProps::column` | method | A column with no gap, no padding and children aligned to the start. |
@@ -88,6 +89,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Notification::sticky` | method | Stays until the user or `dismiss_notification` closes it. |
 | `NotificationAction` | re-export | `bindings::fyx::ui::notifications::NotificationAction` |
 | `NotificationLevel` | re-export | `bindings::fyx::ui::notifications::NotificationLevel` |
+| `OutputStream` | re-export | `bindings::fyx::ui::process::OutputStream` |
 | `PatchSet` | struct | An ordered batch of patches, turned into an `update` with `PatchSet::into_update`. |
 | `PatchSet::insert` | method | Inserts one node under `node.parent`, before the sibling `before` or at the end. |
 | `PatchSet::insert_subtree` | method | Inserts a subtree in parents-first order, such as one built with `TreeBuilder::under`. Its top-level nodes (those whose parent is outside `nodes`) go before `before`, keeping their order; deeper nodes are appended to their new parents. |
@@ -99,12 +101,23 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `PatchSet::patches` | method |  |
 | `PatchSet::remove` | method | Removes the node and its whole subtree. |
 | `PatchSet::set_props` | method |  |
+| `ProcessExit` | re-export | `bindings::fyx::ui::process::ProcessExit` |
+| `ProcessOutput` | re-export | `bindings::fyx::ui::process::ProcessOutput` |
+| `ProcessOutput::text` | method | The chunk as text; a chunk may end inside a UTF-8 character, so this is lossy. |
 | `ProgressLocation` | re-export | `bindings::fyx::ui::notifications::ProgressLocation` |
 | `ProgressOptions` | re-export | `bindings::fyx::ui::notifications::ProgressOptions` |
 | `ProgressOptions::cancellable` | method | Draws a Cancel button that sends `UiEvent::ProgressCancelRequested` to the owner. |
 | `ProgressOptions::new` | method | A progress whose events go to `owner`, which must be a panel for `ProgressLocation::Panel`; not cancellable. The title is 1 to 80 bytes on one line. |
 | `ProgressValue` | re-export | `bindings::fyx::ui::notifications::ProgressValue` |
 | `ROW_NODE_ID_BASE` | const | First id handed out inside a `ListRow` subtree. |
+| `SpawnError` | re-export | `bindings::fyx::ui::process::SpawnError` |
+| `SpawnRequest` | re-export | `bindings::fyx::ui::process::SpawnRequest` |
+| `SpawnRequest::arg` | method | At most 256 arguments, 128 KiB in total; they must fit the manifest's patterns. |
+| `SpawnRequest::args` | method |  |
+| `SpawnRequest::cwd` | method | A directory relative to the root of the one worktree that has it. |
+| `SpawnRequest::env` | method | Only names the manifest lists in `[fyx_ui.process] env`; at most 32. |
+| `SpawnRequest::new` | method | `program` as the manifest's `[[fyx_ui.processes]]` names it (never a path): no arguments, the first worktree's root, no environment, stdin closed. |
+| `SpawnRequest::stdin` | method | Keeps stdin open for `write_stdin` until `close_stdin`. |
 | `Surface::modal` | method | A modal, closed until `show_surface` opens it. Needs `ui:modal`. |
 | `Surface::panel` | method |  |
 | `Surface::status_item` | method |  |

@@ -49,9 +49,11 @@ pub fn import_need(import: &str) -> ImportNeed {
         // Linked for every 0.2 or 0.3 component, with the capability (`ui:editor-decorations`,
         // `ui:notifications`, `ui:images`, `network:fetch`) checked per call, so importing them
         // needs nothing. The SDK imports them whether or not the extension calls them.
-        "fyx:ui/decorations" | "fyx:ui/notifications" | "fyx:ui/images" | "fyx:ui/network" => {
-            ImportNeed::Nothing
-        }
+        "fyx:ui/decorations"
+        | "fyx:ui/notifications"
+        | "fyx:ui/images"
+        | "fyx:ui/network"
+        | "fyx:ui/process" => ImportNeed::Nothing,
         // The rest of the staged 0.3 world: the host links each interface it does not run yet
         // with functions that trap, so a component loads, and the SDK's 0.3 build imports their
         // types. A call traps, which `fyx-ext test` shows.
@@ -236,6 +238,7 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "ui:images",
     "ui:canvas",
     "network:fetch",
+    "process:spawn",
 ];
 
 /// Declared capabilities against the imports that need them: an import whose capability is not
