@@ -8,7 +8,8 @@ use fs::{FakeFs, Fs as _};
 use gpui::{Entity, Pixels, TestAppContext, VisualTestContext};
 use language::{Buffer, Point};
 use project::Project;
-use ui_ext::{FlexDirection, FlexProps, Node, Patch, Props, TextProps, Tree, TreeLimits, Update};
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{FlexDirection, FlexProps, Node, Patch, Props, TextProps, Update, tree::Tree};
 use util::path;
 
 use crate::{

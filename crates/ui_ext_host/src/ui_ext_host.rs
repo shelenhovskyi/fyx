@@ -15,6 +15,7 @@
 mod backend;
 mod consent;
 mod decorations;
+mod icons;
 mod inspector;
 mod install;
 pub mod install_store;

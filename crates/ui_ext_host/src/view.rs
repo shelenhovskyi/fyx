@@ -21,12 +21,12 @@ use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle as UiButtonStyle, Clickable as _, Color,
-    Disableable as _, Icon, IconButton, IconName, IconSize, Label, LabelCommon as _, LabelSize,
-    TintColor, WithScrollbar as _, h_flex, v_flex,
+    CommonAnimationExt as _, Disableable as _, Icon, IconButton, IconName, IconSize, Label,
+    LabelCommon as _, LabelSize, TintColor, WithScrollbar as _, h_flex, v_flex,
 };
-use ui_ext::{
+use ui_ext::v0_2::{
     Align, ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps,
-    IconProps, InputProps, ListProps, NodeId, Props, TableProps, TextProps, Tree, UiEvent,
+    IconProps, InputProps, ListProps, NodeId, Props, TableProps, TextProps, UiEvent, tree::Tree,
 };
 
 use crate::surface::{Phase, SurfaceState, fetch_range};
@@ -720,7 +720,10 @@ impl Renderer<'_, '_> {
 
     fn button(&self, id: NodeId, props: &ButtonProps, scope: Scope) -> AnyElement {
         let element_id = scope.element_id(id);
-        let icon = props.icon.as_deref().map(icon_name);
+        let icon = props
+            .icon
+            .as_ref()
+            .map(|icon| crate::icons::resolve_icon(icon).static_name());
         let style = button_style(props.style);
         // Inside a row the whole row is the click target (`row-click`): row-local ids are not
         // surface ids, so a `click` on them would be ambiguous.
@@ -955,12 +958,24 @@ impl Renderer<'_, '_> {
     }
 
     fn icon(&self, props: &IconProps) -> AnyElement {
-        Icon::new(icon_name(&props.name))
-            .size(IconSize::Small)
-            .when_some(props.color, |this, token| {
-                this.color(text_color(token, self.cx))
-            })
-            .into_any_element()
+        use crate::icons::ResolvedIcon;
+        let icon = |name: IconName| {
+            Icon::new(name)
+                .size(IconSize::Small)
+                .when_some(props.color, |this, token| {
+                    this.color(text_color(token, self.cx))
+                })
+        };
+        match crate::icons::resolve_icon(&props.name) {
+            ResolvedIcon::Named(name) => icon(name).into_any_element(),
+            ResolvedIcon::Spinner => icon(IconName::LoadCircle)
+                .with_rotate_animation(2)
+                .into_any_element(),
+            ResolvedIcon::Blank => div()
+                .size(IconSize::Small.rems())
+                .flex_none()
+                .into_any_element(),
+        }
     }
 
     fn markdown(&self, id: NodeId, source: &str, scope: Scope) -> AnyElement {
@@ -1224,10 +1239,6 @@ fn open_extension_link(url: SharedString, window: &mut Window, cx: &mut App) {
 }
 
 /// Icon names are snake_case `IconName`s (`plus`, `list_todo`); unknown names get a neutral icon.
-pub(crate) fn icon_name(name: &str) -> IconName {
-    name.parse().unwrap_or(IconName::Blocks)
-}
-
 pub(crate) fn button_style(style: ButtonStyle) -> UiButtonStyle {
     match style {
         ButtonStyle::Default => UiButtonStyle::Outlined,
