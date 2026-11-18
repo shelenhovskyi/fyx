@@ -46,7 +46,10 @@ pub fn package(dir: &Path, out_dir: &Path, depth: crate::CheckDepth) -> Result<P
     }
 
     let size = std::fs::metadata(&destination)?.len();
-    eprintln!("fyx-ext: packaged {} ({size} bytes)", destination.display());
+    eprintln!(
+        "fyx-ext: packaged {} ({size} bytes). Fyx cannot install .fyxext files yet; install the folder with `fyx_ui: install dev UI extension`.",
+        destination.display()
+    );
     Ok(destination)
 }
 

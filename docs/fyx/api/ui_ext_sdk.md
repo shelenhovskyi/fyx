@@ -77,7 +77,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SurfaceTree::is_unsynced` | method | Whether a failed push left the host behind the mirror. |
 | `SurfaceTree::len` | method |  |
 | `SurfaceTree::limits` | method |  |
-| `SurfaceTree::mount` | method | Builds the surface's tree from scratch and returns it for `mount`. Pending patches are dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never names a node of the new tree. Fails, keeping the previous tree, if the new one has more nodes than one update may carry. |
+| `SurfaceTree::mount` | method | Builds the surface's tree from scratch and returns it for `mount`. Pending patches are dropped. Ids keep counting up from earlier trees, so a node id from a previous mount never names a node of the new tree. Fails, keeping the previous tree, if the new one has more nodes than a tree may hold (`max_nodes`, 16384), the host's cap for a mount and a `replace`. So a tree grown past 2048 nodes with `insert` can always be mounted again. |
 | `SurfaceTree::new` | method |  |
 | `SurfaceTree::parent` | method |  |
 | `SurfaceTree::pending` | method |  |

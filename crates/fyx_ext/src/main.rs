@@ -32,7 +32,7 @@ enum Command {
         /// Depend on the SDK from this git repository instead.
         #[arg(long)]
         sdk_git: Option<String>,
-        /// Branch of --sdk-git (default: integration).
+        /// Branch of --sdk-git (default: fyx/main, the repository's main branch).
         #[arg(long, requires = "sdk_git", conflicts_with = "sdk_rev")]
         sdk_branch: Option<String>,
         /// Commit of --sdk-git.
@@ -41,9 +41,10 @@ enum Command {
     },
     /// Build for wasm32-wasip2 and copy the component next to extension.toml.
     Build {
-        /// The extension directory.
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Build with the release profile.
         #[arg(long)]
         release: bool,
         /// Arguments for cargo build, after `--`.
@@ -52,6 +53,7 @@ enum Command {
     },
     /// Build, start Fyx with the extension loaded, and rebuild on every change.
     Dev {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// The Fyx binary (default: FYX_BIN, then `fyx` on PATH).
@@ -69,6 +71,7 @@ enum Command {
     },
     /// Check extension.toml and the built component the way Fyx does when it loads them.
     Check {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Fail on warnings too.
@@ -78,6 +81,7 @@ enum Command {
     /// Build, check, run every surface headless, then the crate's own `cargo test` with
     /// FYX_EXT_COMPONENT set to the built component.
     Test {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Arguments for cargo test, after `--`.
@@ -86,6 +90,7 @@ enum Command {
     },
     /// Build for release, check, and write <id>-<version>.fyxext.
     Package {
+        /// The extension directory (with extension.toml).
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Where the package goes (default: the extension directory).
@@ -123,7 +128,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     reference: match sdk_rev {
                         Some(rev) => GitReference::Rev(rev),
                         None => GitReference::Branch(
-                            sdk_branch.unwrap_or_else(|| "integration".to_string()),
+                            sdk_branch.unwrap_or_else(|| "fyx/main".to_string()),
                         ),
                     },
                 },
@@ -138,7 +143,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             })?;
             eprintln!("fyx-ext: created {}", crate_dir.display());
             eprintln!(
-                "Next:\n  cd {}\n  fyx-ext dev --fyx <path to fyx>",
+                "Next:\n  cd {}\n  fyx-ext dev --fyx <path to the fyx binary>\n(If fyx-ext is not on PATH: RUSTC_WRAPPER= cargo install --path <fyx checkout>/crates/fyx_ext)",
                 crate_dir.display()
             );
             Ok(ExitCode::SUCCESS)

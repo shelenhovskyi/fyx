@@ -306,7 +306,7 @@ The rules come from `ui_ext` itself, not from a copy: `ui_ext::Props::is_contain
 
 | Method | Returns | Checks, and errors |
 |---|---|---|
-| `mount(build)` | `Result<Vec<Node>, TreeError>`: the tree to return from `Extension::mount` | Node count ≤ `max_nodes_per_update` (**2048**, stricter than the host's 16384 for a mount) → `UpdateTooLarge`. Node count ≤ `max_nodes` → `TreeTooLarge`. On success, the previous mirror **and any queued patches are dropped**. On error, the previous tree is kept. |
+| `mount(build)` | `Result<Vec<Node>, TreeError>`: the tree to return from `Extension::mount` | Node count ≤ `max_nodes` (16384, the host's cap for a mount) → `TreeTooLarge`. On success, the previous mirror **and any queued patches are dropped**. On error, the previous tree is kept. |
 | `replace(build)` | `Result<Update, TreeError>`: `Update::Replace(nodes)` | Same as `mount`. For a `handle_event` answer where patching would be more work than rebuilding. |
 
 <!-- sdk:601-624 -->
@@ -552,7 +552,7 @@ import stubs abort the test process.
 | Helper | Children only under flex | Patch / row cap (2048) | Tree cap (16384) | Single-root rows | Unknown ids / siblings |
 |---|---|---|---|---|---|
 | `TreeBuilder` | by construction | — | — | — | — |
-| `SurfaceTree` | yes | yes (also caps `mount` at 2048) | yes | — | yes |
+| `SurfaceTree` | yes | yes | yes (also for `mount`) | — | yes |
 | `PatchSet` | — | — | — | — | — |
 | `list_row` / `list_rows` | by construction | yes (per row) | — | yes | — |
 | host (`ui_ext::Tree`) | yes | patches and rows | yes (mount, replace, patches) | yes | yes |

@@ -46,12 +46,17 @@ pub struct Names {
 }
 
 pub fn names(name: &str) -> Result<Names> {
-    anyhow::ensure!(
-        is_valid_name(name),
-        "name must be lower-case letters and digits separated by single '-' or '_', starting with a letter: {name}"
-    );
-    let crate_name = name.replace('-', "_");
     let id = name.replace('_', "-");
+    if !is_valid_name(name) || !crate::manifest::is_valid_id(&id) {
+        let mut message = format!(
+            "name must be lower-case letters and digits separated by single '-' or '_', starting with a letter, at most 64 characters: {name}"
+        );
+        if let Some(suggestion) = suggest_name(name) {
+            message.push_str(&format!(". Try `{suggestion}`."));
+        }
+        anyhow::bail!(message);
+    }
+    let crate_name = name.replace('-', "_");
     let spaced = id.replace('-', " ");
     let mut chars = spaced.chars();
     let title = chars
@@ -75,6 +80,25 @@ fn is_valid_name(name: &str) -> bool {
         })
 }
 
+/// A valid name close to `name` (ux-1 F20 k): lower-cased, with every run of other characters
+/// turned into one `-`, cut to 64 characters. `None` when nothing valid is left.
+fn suggest_name(name: &str) -> Option<String> {
+    let mut suggestion = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            suggestion.push(character.to_ascii_lowercase());
+        } else if !suggestion.is_empty() && !suggestion.ends_with('-') {
+            suggestion.push('-');
+        }
+    }
+    let mut suggestion = suggestion
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .to_string();
+    suggestion.truncate(64);
+    let suggestion = suggestion.trim_end_matches('-').to_string();
+    (suggestion != name && crate::manifest::is_valid_id(&suggestion)).then_some(suggestion)
+}
+
 fn toolchain_channel() -> Result<&'static str> {
     RUST_TOOLCHAIN
         .lines()
@@ -89,10 +113,32 @@ fn toolchain_channel() -> Result<&'static str> {
         .context("no channel in Fyx's rust-toolchain.toml")
 }
 
-/// A path as Cargo on Windows accepts it in TOML: forward slashes, no `\\?\` prefix.
+/// A path as Cargo on Windows accepts it in TOML: forward slashes, no `\\?\` prefix, and a UNC
+/// share as `//server/share` (bugs-1 #33).
 fn toml_path(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    text.strip_prefix("//?/").unwrap_or(&text).to_string()
+    crate::build::display_path(path).replace('\\', "/")
+}
+
+/// A TOML basic string with every character escaped as TOML needs (bugs-1 #24): `C:\fyx` must
+/// not read as `C:` plus a form feed.
+fn toml_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            control if control.is_control() => {
+                quoted.push_str(&format!("\\u{:04X}", u32::from(control)));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Writes the crate and returns its directory.
@@ -162,14 +208,20 @@ fn dependency(crate_name: &str, source: &SdkSource) -> Result<String> {
             let path = path
                 .canonicalize()
                 .with_context(|| format!("resolving {path:?}"))?;
-            format!("{crate_name} = {{ path = \"{}\" }}", toml_path(&path))
+            format!(
+                "{crate_name} = {{ path = {} }}",
+                toml_string(&toml_path(&path))
+            )
         }
         SdkSource::Git { url, reference } => {
             let reference = match reference {
-                GitReference::Branch(branch) => format!("branch = \"{branch}\""),
-                GitReference::Rev(rev) => format!("rev = \"{rev}\""),
+                GitReference::Branch(branch) => format!("branch = {}", toml_string(branch)),
+                GitReference::Rev(rev) => format!("rev = {}", toml_string(rev)),
             };
-            format!("{crate_name} = {{ git = \"{url}\", {reference} }}")
+            format!(
+                "{crate_name} = {{ git = {}, {reference} }}",
+                toml_string(url)
+            )
         }
     })
 }
@@ -252,7 +304,7 @@ fn clicking_updates_the_label() {
     assert!(harness.find_text("__ID__", "Clicked 0 times").is_some());
 
     harness.click("__ID__", "Click me").expect("click");
-    assert!(harness.find_text("__ID__", "Clicked 1 times").is_some());
+    assert!(harness.find_text("__ID__", "Clicked 1 time").is_some());
 }
 "#;
 
@@ -272,7 +324,8 @@ struct Panel {
 
 impl Panel {
     fn label(&self) -> TextProps {
-        TextProps::new(format!("Clicked {} times", self.clicks)).color(ColorToken::TextMuted)
+        let times = if self.clicks == 1 { "time" } else { "times" };
+        TextProps::new(format!("Clicked {} {times}", self.clicks)).color(ColorToken::TextMuted)
     }
 }
 
@@ -346,7 +399,7 @@ mod tests {
         let update = panel
             .handle_event(SURFACE_ID, UiEvent::Click(panel.button))
             .expect("click");
-        let label = Props::Text(TextProps::new("Clicked 1 times").color(ColorToken::TextMuted));
+        let label = Props::Text(TextProps::new("Clicked 1 time").color(ColorToken::TextMuted));
         assert_eq!(
             update,
             Update::Patches(vec![Patch::SetProps((panel.label, label))])
@@ -375,7 +428,7 @@ fyx-ext dev --fyx /path/to/fyx
 ```
 
 This builds the component, checks it, starts Fyx with the extension loaded from this folder, and
-rebuilds when a source file changes. Open the right dock and click the sparkle button.
+rebuilds when a source file changes. Open the right dock (sparkle icon) and click **Click me**.
 
 ## Other commands
 
@@ -405,6 +458,37 @@ mod tests {
         for bad in ["", "My", "2x", "a__b", "a-", "a.b"] {
             assert!(super::names(bad).is_err(), "{bad}");
         }
+        // bugs-1 #23: `check` refuses ids over 64 characters, so `new` does too.
+        let long = "a".repeat(65);
+        assert!(super::names(&long).is_err());
+        assert!(super::names(&"a".repeat(64)).is_ok());
+        // ux-1 F20 k: a suggestion when a valid name is close.
+        let error = super::names("My_Panel")
+            .expect_err("upper case")
+            .to_string();
+        assert!(error.contains("Try `my-panel`."), "{error}");
+        assert_eq!(
+            suggest_name(&long).as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        assert_eq!(suggest_name("..."), None);
+    }
+
+    /// bugs-1 #24: values reach `Cargo.toml` as TOML strings, whatever they contain.
+    #[test]
+    fn sdk_values_are_escaped_for_toml() {
+        let dependency = dependency(
+            "ui_ext_sdk",
+            &SdkSource::Git {
+                url: r#"C:\fyx "repo""#.into(),
+                reference: GitReference::Branch(r"feature\Unicode".into()),
+            },
+        )
+        .expect("dependency");
+        let parsed: toml::Table = toml::from_str(&dependency).expect("valid TOML");
+        let table = parsed["ui_ext_sdk"].as_table().expect("a table");
+        assert_eq!(table["git"].as_str(), Some(r#"C:\fyx "repo""#));
+        assert_eq!(table["branch"].as_str(), Some(r"feature\Unicode"));
     }
 
     #[test]

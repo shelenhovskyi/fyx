@@ -195,7 +195,14 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
             .iter()
             .find(|(name, _)| name == capability)
         {
-            None => report.error(format!("unknown capability {capability:?}")),
+            None => report.error(format!(
+                "unknown capability {capability:?}; known capabilities: {}",
+                KNOWN_CAPABILITIES
+                    .iter()
+                    .map(|(name, _)| format!("{name:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
             Some((_, CapabilityStatus::Planned(release))) => report.warning(format!(
                 "capability {capability:?} arrives with {release}; the current host ignores it"
             )),

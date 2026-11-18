@@ -54,10 +54,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::ui_api_version` | method |  |
 | `HostEffect` | re-export | `api_state::HostEffect` |
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
+| `INSTANCES_LIMIT` | const |  |
 | `MAX_CONSECUTIVE_TICK_ERRORS` | const | Consecutive `tick` errors after which a surface's ticks stop until an event on it. |
 | `MAX_PUSHED_ITEMS_PER_CALL_V0_2` | re-export | `api_state::MAX_PUSHED_ITEMS_PER_CALL_V0_2` |
 | `MAX_PUSHES_PER_CALL` | const |  |
 | `MAX_TICK_DELAY` | re-export | `api_state::MAX_TICK_DELAY` |
+| `MEMORIES_LIMIT` | const |  |
+| `MEMORY_LIMIT` | const | Linear memory one component may grow to, and its other store caps: the host's (`ui_ext_wasm::UI_*_LIMIT`). Growing past one traps, which disables the extension. |
 | `MIN_TICK_DELAY` | re-export | `api_state::MIN_TICK_DELAY` |
 | `Outcome` | struct | What one event or tick did. |
 | `Outcome::effects` | field | The call's effects, applied first, in order. |
@@ -74,4 +77,6 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `RawReply::pushed` | field |  |
 | `RawReply::value` | field |  |
 | `SUPPORTED_API_VERSIONS` | const | The `fyx:ui` versions the harness runs, the same as the host's supported range. |
+| `TABLES_LIMIT` | const |  |
+| `TABLE_ELEMENTS_LIMIT` | const |  |
 | `api_version_section` | fn | The version in the component's `fyx:ui-api-version` section, if it has one. |
