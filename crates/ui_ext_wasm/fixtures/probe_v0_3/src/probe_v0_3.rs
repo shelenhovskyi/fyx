@@ -226,6 +226,11 @@ fn run(case: NodeId) -> Result<Vec<String>, String> {
 
 impl Guest for Probe {
     fn surfaces() -> Vec<Surface> {
+        // std's `HashMap` seeds itself through `wasi:random/insecure-seed`, at a newer WASI patch
+        // version than the host's wasmtime-wasi defines: it must resolve, not trap.
+        let mut seen = std::collections::HashMap::new();
+        seen.insert(SURFACE_ID, ());
+        assert_eq!(seen.len(), 1);
         vec![
             Surface {
                 id: SURFACE_ID.into(),

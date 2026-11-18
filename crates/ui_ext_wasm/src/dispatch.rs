@@ -60,7 +60,8 @@ impl UiBindings {
                 // The 0.3 interfaces this build does not implement yet trap when called (they are
                 // staged with the WIT, plan 4.x); a component that never calls them works.
                 let mut linker = runtime.linker_v0_3.clone();
-                linker.define_unknown_imports_as_traps(component)?;
+                let engine = store.engine().clone();
+                fyx_ui_v0_3::define_unbuilt_as_traps(&mut linker, component, &engine)?;
                 Self::V0_3(
                     fyx_ui_v0_3::UiExtension::instantiate_async(store, component, &linker).await?,
                 )
