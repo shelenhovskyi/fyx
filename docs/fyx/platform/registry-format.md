@@ -3,8 +3,8 @@
 The files the Fyx extension registry publishes and the client reads, as implemented by
 `crates/fyx_registry` (Platform 1 [spec](spec.md), decisions 14–21; [plan](plan.md) tasks
 3.2–3.4). The crate is pure: it takes bytes and the current time and returns verified documents
-and decisions. Fetching, storing and the UI belong to the registry client (3.3, 3.4) and the
-Extensions page (3.5).
+and decisions. The client core (3.3, below) adds the order of trust and the stop rules on top,
+still without I/O: the host does the fetching (HTTP), the storing and the UI (3.5).
 
 ## Conventions
 
@@ -311,6 +311,44 @@ list applies to them.
 `plan_install(id, index, blocklist, now)` picks the newest release of an extension that is not
 blocked and passes the age gate, or says why none can install (`NotInIndex`, `Blocked`,
 `TooNew`).
+
+## Client core
+
+`RegistryClient` (`crates/fyx_registry/src/client.rs`, plan 3.3) is what the extensions page and
+the install store call. It holds the compiled-in keyset, the last accepted snapshot and index,
+and the block-list cache. It never touches the network, the disk or the clock:
+
+- **`Fetch`**: the host's fetcher, `fetch(&FetchRequest) -> Future<anyhow::Result<Vec<u8>>> +
+  Send`. A `FetchRequest` names the file (`Snapshot`, `Index`, `Blocklist`,
+  `Package { url }`) and `max_bytes`: 64 KiB for the snapshot, exactly the snapshot's
+  `index_size` for the index, 4 MiB for the block list, `package.size` for a package. The client
+  refuses a longer body even if the fetcher does not stop.
+- **`refresh_index(fetch, now)`**: the snapshot first, against the keyset and the last accepted
+  snapshot; then the index it names (not fetched again when the held one matches). The two are
+  accepted together or not at all. Returns `Updated`, `Unchanged`, `FetchFailed` (offline: the
+  state stays) or `Refused(error)`.
+- **`refresh_blocklist(fetch, now)`**: `BlocklistCache::apply_fetch` with the keyset of the last
+  accepted snapshot (revoked keys removed). A snapshot that revokes the key of the cached list
+  drops that list. Due every 6 h (`BlocklistCache::fetch_due`).
+- **`index(now)`**: the verified index, or why installs and updates are stopped
+  (`Unavailable`): `NeverFetched`; `Expired` (the last snapshot is past `expires_at`);
+  `Refused(error)` (the last fetched snapshot or index failed: a rollback, a bad signature, an
+  index the snapshot does not name), cleared by the next good refresh. Offline stops nothing
+  while the last snapshot is valid.
+- **`plan_install(id, now)`**: `plan_install` on the current index, plus `consent`: what the
+  install confirmation asks for (T1/T2 and unknown capabilities, domains, programs, tier; empty
+  for an all-T0 release). Refused with `Unavailable` while stopped.
+- **`plan_updates(installed, now)`**: `plan_updates` on the current index. While stopped, only the
+  block list acts: blocked versions still roll back or are disabled, nothing updates or is held.
+  Held updates for new T1/T2 capabilities come from `Permissions::additions`; record the user's
+  approval with `Permissions::approve`.
+- **`download(fetch, release)`**: fetches the package capped at `package.size` and checks it
+  with `Release::verify_package` before the install store unpacks it.
+- **`stored_state()` / `restore(keyset, &StoredState)`**: three opaque files (the snapshot state,
+  the index bytes, the block-list cache). Store them after `Updated` and after a block-list
+  `Replace` or `Refresh`. `restore` verifies each again and leaves out, and reports, any part
+  that fails (the index is kept only with the snapshot that names it); the next refresh fetches
+  it again. The restored snapshot keeps guarding the sequence.
 
 ## `fyx-registry` (CI tool)
 
