@@ -231,6 +231,14 @@ impl<const SLOT: usize> Panel for ExtensionPanel<SLOT> {
     fn activation_priority(&self) -> u32 {
         self.info.activation_priority
     }
+
+    /// The dock reports when this panel becomes the shown one (active in an open dock) or stops
+    /// being it: the surface's ticks wait while it is hidden everywhere (design.md, B).
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        let container = cx.entity_id();
+        let state = self.view.read(cx).state().clone();
+        state.update(cx, |state, cx| state.set_visible(container, active, cx));
+    }
 }
 
 /// An extension panel of any slot, as the registry keeps it.

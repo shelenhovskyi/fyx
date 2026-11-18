@@ -3,11 +3,17 @@
 //!
 //! All extension calls start here and run on tasks; views only read this state while rendering.
 
-use std::{collections::VecDeque, ops::Range, rc::Rc};
+use std::{
+    collections::VecDeque,
+    ops::Range,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use collections::HashMap;
-use gpui::{App, Context, SharedString, Task};
-use ui_ext::v0_2::{NodeId, Patch, Props, Surface, UiEvent, Update, tree::Tree};
+use collections::{HashMap, HashSet};
+use gpui::{App, Context, EntityId, SharedString, Task};
+use ui_ext::v0_2::{NodeId, Patch, Props, Surface, SurfaceKind, UiEvent, Update, tree::Tree};
+use ui_ext_wasm::ticks::{PendingTick, TickConditions, TickErrors};
 
 use crate::backend::{HostEffect, Reply, ReplyError, Row, UiBackend};
 
@@ -21,6 +27,30 @@ pub trait SurfaceLink {
     /// Loads the extension again from where it came from, on a fresh instance; its surfaces
     /// remount on it (plan 1.3, spec decision 8).
     fn restart_extension(&self, cx: &mut App);
+    /// The extension's tick budget (design.md, B), shared by its surfaces: when a tick due at
+    /// `due` may run. Without a registry, at `due`.
+    fn reserve_tick(&self, due: Instant, _cx: &mut App) -> Instant {
+        due
+    }
+    /// The extension's least tick delay now (raised while it is throttled).
+    fn min_tick_delay(&self, _cx: &App) -> Duration {
+        ui_ext_wasm::ticks::MIN_TICK_DELAY
+    }
+    /// A tick call finished after `busy`, for the extension's CPU share.
+    fn record_tick(&self, _finished_at: Instant, _busy: Duration, _cx: &mut App) {}
+}
+
+/// An item of a surface's queue: a user event, or a due tick, which waits behind the events
+/// queued before it and never overtakes one (design.md, B).
+enum Queued {
+    Event(QueuedEvent),
+    Tick,
+}
+
+/// What the event worker sends next.
+enum Next {
+    Event(UiEvent),
+    Tick,
 }
 
 /// Remounts in a row caused by updates that did not fit, with no user input between them, before
@@ -95,8 +125,18 @@ pub struct SurfaceState {
     /// `last_error` is a failed reload: the old instance still runs, and the footer offers Retry.
     reload_failed: bool,
     lists: HashMap<NodeId, RowCache>,
-    events: VecDeque<QueuedEvent>,
+    events: VecDeque<Queued>,
     event_worker_running: bool,
+    /// The one pending `request-tick`, if any; a new request replaces it.
+    tick: Option<PendingTick>,
+    /// The timer that queues the pending tick when it is due.
+    _tick_timer: Option<Task<()>>,
+    tick_errors: TickErrors,
+    /// A due tick met a surface that was mounting: it goes out after the mount.
+    tick_waits_for_mount: bool,
+    /// Shown somewhere: a status item always; a panel while it is the active panel of an open
+    /// dock in some window (reported by its containers). Ticks wait while hidden.
+    visible_in: HashSet<EntityId>,
     /// How many times the extension has set each input's `value` (`set-props`, insert, replace).
     /// A view writes the value into its editor when this moves past what it last saw; otherwise
     /// the user's text stands (integrator decision 6). A counter, not a flag, so every window's
@@ -232,6 +272,11 @@ impl SurfaceState {
             lists: HashMap::default(),
             events: VecDeque::new(),
             event_worker_running: false,
+            tick: None,
+            _tick_timer: None,
+            tick_errors: TickErrors::default(),
+            tick_waits_for_mount: false,
+            visible_in: HashSet::default(),
             input_sets: HashMap::default(),
             revision: 0,
             mounts: 0,
@@ -369,6 +414,10 @@ impl SurfaceState {
     pub fn fail(&mut self, message: SharedString, retryable: bool, cx: &mut Context<Self>) {
         self.phase = Phase::Failed { message, retryable };
         self.events.clear();
+        // A failed surface drops its tick (design.md, B).
+        self.tick = None;
+        self._tick_timer = None;
+        self.tick_waits_for_mount = false;
         self.lists.clear();
         self.resyncing = false;
         self.revision += 1;
@@ -406,6 +455,9 @@ impl SurfaceState {
     }
 
     fn set_tree(&mut self, tree: Tree) {
+        if std::mem::take(&mut self.tick_waits_for_mount) {
+            self.events.push_back(Queued::Tick);
+        }
         self.record(HistoryEntry::Update {
             at: std::time::SystemTime::now(),
             summary: format!("mount: {} nodes", tree.len()),
@@ -444,62 +496,85 @@ impl SurfaceState {
             self.set_input_locally(*id, value);
         }
         if let UiEvent::InputChanged(id, _) = &event
-            && let Some(QueuedEvent {
+            && let Some(Queued::Event(QueuedEvent {
                 event: UiEvent::InputChanged(queued_id, _),
                 ..
-            }) = self.events.back()
+            })) = self.events.back()
             && queued_id == id
         {
             self.events.pop_back();
         }
+        // A user event lets ticks resume after errors stopped them.
+        self.tick_errors.on_user_event();
         let row_generation = match &event {
             // The generation of the row the user saw, which may be older than the list's
             // current one while its replacement is on the way (integration-3 finding 9).
             UiEvent::RowClick(list, index) => Some(self.drawn_row_generation(*list, *index)),
             _ => None,
         };
-        self.events.push_back(QueuedEvent {
+        self.events.push_back(Queued::Event(QueuedEvent {
             event,
             row_generation,
-        });
-        if !self.event_worker_running {
-            self.event_worker_running = true;
-            cx.spawn(async move |this, cx| {
-                loop {
-                    let next = this.update(cx, |this, _| {
-                        let event = this.next_event();
-                        if event.is_none() {
-                            this.event_worker_running = false;
-                        }
-                        event.map(|event| {
-                            let call = this.backend.handle_event(&this.surface.id, event.clone());
-                            (event, call)
-                        })
-                    });
-                    let Ok(Some((event, call))) = next else {
-                        break;
-                    };
-                    let result = call.await;
-                    if this
-                        .update(cx, |this, cx| this.apply_reply(&event, result, cx))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .detach();
+        }));
+        self.run_queue(cx);
+    }
+
+    /// Starts the worker that sends queued items one at a time, unless it runs already.
+    fn run_queue(&mut self, cx: &mut Context<Self>) {
+        if self.event_worker_running {
+            return;
         }
+        self.event_worker_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let next = this.update(cx, |this, cx| {
+                    let this_now = cx.background_executor().now();
+                    let next = this.next_item();
+                    if next.is_none() {
+                        this.event_worker_running = false;
+                    }
+                    next.map(|next| {
+                        let call = match &next {
+                            Next::Event(event) => {
+                                this.backend.handle_event(&this.surface.id, event.clone())
+                            }
+                            Next::Tick => this.backend.tick(&this.surface.id),
+                        };
+                        (next, call, this_now)
+                    })
+                });
+                let Ok(Some((next, call, started))) = next else {
+                    break;
+                };
+                let result = call.await;
+                let applied = this.update(cx, |this, cx| match next {
+                    Next::Event(event) => this.apply_reply(&event, result, cx),
+                    Next::Tick => this.apply_tick_reply(result, started, cx),
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The next queued event that still means what it meant when the user made it. Replies to
     /// earlier events may have removed its node or changed the list under a row click.
-    fn next_event(&mut self) -> Option<UiEvent> {
-        while let Some(QueuedEvent {
-            event,
-            row_generation,
-        }) = self.events.pop_front()
-        {
+    fn next_item(&mut self) -> Option<Next> {
+        while let Some(item) = self.events.pop_front() {
+            let QueuedEvent {
+                event,
+                row_generation,
+            } = match item {
+                // A tick goes out only to a mounted surface; otherwise it waits for the mount.
+                Queued::Tick if self.tree().is_some() => return Some(Next::Tick),
+                Queued::Tick => {
+                    self.tick_waits_for_mount = true;
+                    continue;
+                }
+                Queued::Event(queued) => queued,
+            };
             let still_there = self
                 .tree()
                 .is_some_and(|tree| event.target().is_none_or(|target| tree.contains(target)));
@@ -510,7 +585,7 @@ impl SurfaceState {
                 _ => true,
             };
             if still_there && same_rows {
-                return Some(event);
+                return Some(Next::Event(event));
             }
             log::debug!("fyx:ui: dropping {event:?}, an earlier reply changed its target");
         }
@@ -542,8 +617,141 @@ impl SurfaceState {
     pub(crate) fn queued_events(&self) -> Vec<UiEvent> {
         self.events
             .iter()
-            .map(|queued| queued.event.clone())
+            .filter_map(|queued| match queued {
+                Queued::Event(queued) => Some(queued.event.clone()),
+                Queued::Tick => None,
+            })
             .collect()
+    }
+
+    /// `request-tick` for this surface: one pending tick, `delay` from now (when the requesting
+    /// call's effects apply), replacing any earlier one. Ignored while errors stopped its ticks.
+    pub fn request_tick(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.tick_errors.stopped() {
+            log::debug!(
+                "fyx:ui {}/{}: request-tick ignored, ticks stopped after errors",
+                self.backend.extension_id(),
+                self.surface.id
+            );
+            return;
+        }
+        self.tick = Some(PendingTick::new(delay, cx.background_executor().now()));
+        self.schedule_tick(cx);
+    }
+
+    pub fn cancel_tick(&mut self) {
+        self.tick = None;
+        self._tick_timer = None;
+    }
+
+    pub fn has_pending_tick(&self) -> bool {
+        self.tick.is_some()
+    }
+
+    /// A container of this surface became visible or hidden (`id` names the container).
+    pub fn set_visible(&mut self, container: EntityId, visible: bool, cx: &mut Context<Self>) {
+        let changed = if visible {
+            self.visible_in.insert(container)
+        } else {
+            self.visible_in.remove(&container)
+        };
+        if changed {
+            self.schedule_tick(cx);
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        matches!(self.surface.kind, SurfaceKind::StatusItem(_)) || !self.visible_in.is_empty()
+    }
+
+    /// Arms the timer for the pending tick under design B's rules, or disarms it while hidden.
+    fn schedule_tick(&mut self, cx: &mut Context<Self>) {
+        let Some(tick) = self.tick else {
+            self._tick_timer = None;
+            return;
+        };
+        let min_delay = self
+            .link
+            .as_ref()
+            .map_or(ui_ext_wasm::ticks::MIN_TICK_DELAY, |link| {
+                link.min_tick_delay(cx)
+            });
+        let conditions = TickConditions {
+            visible: self.is_visible(),
+            app_active: cx.active_window().is_some(),
+            extension_min_delay: min_delay,
+        };
+        let Some(due) = tick.due(conditions) else {
+            self._tick_timer = None;
+            return;
+        };
+        let run_at = match self.link.clone() {
+            Some(link) => link.reserve_tick(due, cx),
+            None => due,
+        };
+        let wait = run_at.saturating_duration_since(cx.background_executor().now());
+        let timer = cx.background_executor().timer(wait);
+        self._tick_timer = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            this.update(cx, |this, cx| this.tick_due(cx)).ok();
+        }));
+    }
+
+    /// The pending tick is due: it joins the queue behind the events already in it.
+    fn tick_due(&mut self, cx: &mut Context<Self>) {
+        if self.tick.take().is_none() {
+            return;
+        }
+        self._tick_timer = None;
+        self.events.push_back(Queued::Tick);
+        self.run_queue(cx);
+    }
+
+    /// A tick's reply applies like an event's, but does not count as user progress for the
+    /// remount bound, so a tick loop cannot keep a broken surface remounting (design.md, B).
+    fn apply_tick_reply(
+        &mut self,
+        result: anyhow::Result<Reply<Update>>,
+        started: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let finished = cx.background_executor().now();
+        if let Some(link) = self.link.clone() {
+            link.record_tick(finished, finished - started, cx);
+        }
+        match result {
+            Ok(Reply { effects, value }) => {
+                self.tick_errors.on_success();
+                if self.apply_effects(effects, cx) {
+                    self.apply_update(value, cx);
+                }
+            }
+            Err(error) => {
+                log::error!(
+                    "fyx:ui {}/{}: tick failed: {error:#}",
+                    self.extension_id(),
+                    self.surface.id
+                );
+                match reply_error_effects(&error) {
+                    Some(effects) => {
+                        self.apply_effects(effects, cx);
+                        if self.tick_errors.on_error() {
+                            log::warn!(
+                                "fyx:ui {}/{}: ticks stopped after {} errors in a row, until the \
+                                 next user event",
+                                self.extension_id(),
+                                self.surface.id,
+                                ui_ext_wasm::ticks::MAX_CONSECUTIVE_TICK_ERRORS
+                            );
+                            self.cancel_tick();
+                        }
+                        self.last_error = Some(format!("{error:#}").into());
+                        cx.notify();
+                    }
+                    None => self.fail_extension(&error, cx),
+                }
+            }
+        }
     }
 
     fn row_generation(&self, list: NodeId) -> u64 {
@@ -622,6 +830,12 @@ impl SurfaceState {
                     if own_ok && !self.apply_update(update, cx) {
                         own_ok = false;
                     }
+                }
+                HostEffect::RequestTick { surface_id, delay } if surface_id == self.surface.id => {
+                    self.request_tick(delay, cx)
+                }
+                HostEffect::CancelTick { surface_id } if surface_id == self.surface.id => {
+                    self.cancel_tick()
                 }
                 effect => match self.link.clone() {
                     Some(link) => link.route_effect(effect, cx),

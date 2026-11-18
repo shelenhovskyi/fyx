@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -52,6 +53,7 @@ enum Call {
         start: u32,
         count: u32,
     },
+    Tick,
 }
 
 /// A counter-like extension: a label, an increment button, a list with one row per count and a
@@ -73,6 +75,12 @@ struct FakeBackend {
     renumbered_input: Cell<Option<NodeId>>,
     /// Restart requests that reached the link.
     restarts: Cell<u32>,
+    /// Ticks answered so far; each sets the label to `Tick {n}`.
+    ticks: Cell<u32>,
+    /// Each tick asks for the next one, this long after.
+    tick_again: Cell<Option<Duration>>,
+    /// Each tick fails with the extension's own error.
+    fail_ticks: Cell<bool>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -117,7 +125,7 @@ impl FakeBackend {
             .into_iter()
             .filter_map(|call| match call {
                 Call::Event(event) => Some(event),
-                Call::Mount | Call::Rows { .. } => None,
+                Call::Mount | Call::Rows { .. } | Call::Tick => None,
             })
             .collect()
     }
@@ -291,6 +299,33 @@ impl UiBackend for FakeBackend {
             })
         }
         .boxed_local()
+    }
+
+    fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.calls.borrow_mut().push(Call::Tick);
+        if self.fail_ticks.get() {
+            let error = anyhow::Error::new(ReplyError {
+                effects: Vec::new(),
+                message: "tick failed".into(),
+            });
+            return async move { Err(error) }.boxed_local();
+        }
+        let n = self.ticks.get() + 1;
+        self.ticks.set(n);
+        let effects = self
+            .tick_again
+            .get()
+            .map(|delay| HostEffect::RequestTick {
+                surface_id: "counter".into(),
+                delay,
+            })
+            .into_iter()
+            .collect();
+        let reply = Reply {
+            effects,
+            value: Update::Patches(vec![Patch::SetProps(LABEL, text(format!("Tick {n}")))]),
+        };
+        async move { Ok(reply) }.boxed_local()
     }
 
     fn list_rows(
@@ -1696,6 +1731,87 @@ async fn test_runtime_surfaces(cx: &mut TestAppContext) {
         assert!(registry.surface_of("fake", "added").is_none());
         assert!(registry.surface_of("fake", "main").is_some());
     });
+}
+
+/// Plan 2.3, design B: a requested tick fires once after its delay (at least 1 s while no window
+/// is active, as in tests), replaces an earlier one, repeats when the tick asks again, waits while
+/// the panel is hidden, stops after 3 errors in a row until a user event, and goes when cancelled.
+#[gpui::test]
+async fn test_ticks(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let panel = cx.update(|cx| cx.new(|_| ()).entity_id());
+    let ticks = |backend: &FakeBackend| {
+        backend
+            .calls()
+            .iter()
+            .filter(|call| **call == Call::Tick)
+            .count()
+    };
+    let advance = |cx: &mut TestAppContext, ms: u64| {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    };
+
+    // Hidden: nothing, however long; shown: the due tick goes out at once.
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 5000);
+    assert_eq!(ticks(&backend), 0, "a hidden panel is not ticked");
+    state.update(cx, |state, cx| state.set_visible(panel, true, cx));
+    advance(cx, 0);
+    assert_eq!(ticks(&backend), 1);
+    assert_eq!(props_of(&state, LABEL, cx), text("Tick 1"));
+
+    // Visible, app in the background: not before 1 s.
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 900);
+    assert_eq!(ticks(&backend), 1);
+    advance(cx, 150);
+    assert_eq!(ticks(&backend), 2);
+
+    // A tick that asks again keeps going; cancelling stops it.
+    backend.tick_again.set(Some(Duration::from_millis(100)));
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 1050);
+    advance(cx, 1050);
+    assert_eq!(ticks(&backend), 4);
+    assert!(state.read_with(cx, |state, _| state.has_pending_tick()));
+    state.update(cx, |state, _| state.cancel_tick());
+    advance(cx, 3000);
+    assert_eq!(ticks(&backend), 4);
+
+    // Three errors in a row stop the ticks until a user event.
+    backend.fail_ticks.set(true);
+    for _ in 0..3 {
+        state.update(cx, |state, cx| {
+            state.request_tick(Duration::from_millis(100), cx)
+        });
+        advance(cx, 1050);
+    }
+    assert_eq!(ticks(&backend), 7);
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 3000);
+    assert_eq!(ticks(&backend), 7, "stopped");
+    backend.fail_ticks.set(false);
+    backend.tick_again.set(None);
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::Click(INCREMENT), cx)
+    });
+    advance(cx, 0);
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    advance(cx, 1050);
+    assert_eq!(ticks(&backend), 8, "resumed after a user event");
 }
 
 /// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).

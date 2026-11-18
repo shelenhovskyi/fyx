@@ -120,6 +120,8 @@ pub struct UiExtensionRegistry {
     dev_paths: Vec<PathBuf>,
     /// The instance of each registered extension, for surfaces it adds later (`add-surface`).
     backends: HashMap<Arc<str>, Rc<dyn UiBackend>>,
+    /// Per extension: the token bucket and CPU share of its surfaces' ticks (design.md, B).
+    tick_budgets: HashMap<Arc<str>, ui_ext_wasm::ticks::TickBudget>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -896,6 +898,23 @@ impl UiExtensionRegistry {
                     log::debug!("fyx:ui: {extension_id}: show-surface of unknown {surface_id:?}")
                 }
             },
+            HostEffect::RequestTick { surface_id, delay } => {
+                match self.surface_of(extension_id, &surface_id) {
+                    Some(surface) => surface
+                        .state
+                        .update(cx, |state, cx| state.request_tick(delay, cx)),
+                    None => {
+                        log::debug!(
+                            "fyx:ui: {extension_id}: request-tick of unknown {surface_id:?}"
+                        )
+                    }
+                }
+            }
+            HostEffect::CancelTick { surface_id } => {
+                if let Some(surface) = self.surface_of(extension_id, &surface_id) {
+                    surface.state.update(cx, |state, _| state.cancel_tick());
+                }
+            }
             HostEffect::HideSurface { surface_id } => {
                 if let Some(surface) = self.surface_of(extension_id, &surface_id)
                     && matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_))
@@ -1045,6 +1064,57 @@ impl SurfaceLink for RegistryLink {
         self.registry
             .update(cx, |registry, cx| {
                 registry.fail_extension(&self.extension_id, from_surface, message, cx)
+            })
+            .ok();
+    }
+
+    fn reserve_tick(&self, due: std::time::Instant, cx: &mut App) -> std::time::Instant {
+        self.registry
+            .update(cx, |registry, _| {
+                registry
+                    .tick_budgets
+                    .entry(self.extension_id.clone())
+                    .or_default()
+                    .reserve(due)
+            })
+            .unwrap_or(due)
+    }
+
+    fn min_tick_delay(&self, cx: &App) -> std::time::Duration {
+        self.registry
+            .upgrade()
+            .and_then(|registry| {
+                registry
+                    .read(cx)
+                    .tick_budgets
+                    .get(&self.extension_id)
+                    .map(|budget| budget.min_delay(cx.background_executor().now()))
+            })
+            .unwrap_or(ui_ext_wasm::ticks::MIN_TICK_DELAY)
+    }
+
+    fn record_tick(
+        &self,
+        finished_at: std::time::Instant,
+        busy: std::time::Duration,
+        cx: &mut App,
+    ) {
+        self.registry
+            .update(cx, |registry, _| {
+                let throttled = registry
+                    .tick_budgets
+                    .entry(self.extension_id.clone())
+                    .or_default()
+                    .record(finished_at, busy);
+                if throttled {
+                    log::warn!(
+                        "fyx:ui: {} spends more than {}% of its time in ticks; its ticks run at \
+                         most once a second for {:?}",
+                        self.extension_id,
+                        ui_ext_wasm::ticks::TICK_CPU_SHARE_PERCENT,
+                        ui_ext_wasm::ticks::TICK_CPU_WINDOW
+                    );
+                }
             })
             .ok();
     }
