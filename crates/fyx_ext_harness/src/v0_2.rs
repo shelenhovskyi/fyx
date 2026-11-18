@@ -3,7 +3,7 @@
 
 use ui_ext::v0_2 as model;
 
-use crate::State;
+use crate::{State, props_text_len, update_text_len};
 
 pub(crate) mod bindings {
     wasmtime::component::bindgen!({
@@ -26,10 +26,9 @@ impl wit_host::Host for State {
         surface_id: String,
         update: wit::Update,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(self
-            .api
-            .push_update(surface_id, update.into())
-            .map_err(Into::into))
+        let update: model::Update = update.into();
+        self.count_lifted_text(surface_id.len() + update_text_len(&update))?;
+        Ok(self.api.push_update(surface_id, update).map_err(Into::into))
     }
 
     fn request_tick(
@@ -37,6 +36,7 @@ impl wit_host::Host for State {
         surface_id: String,
         delay_ms: u32,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self
             .api
             .request_tick(surface_id, delay_ms)
@@ -44,6 +44,7 @@ impl wit_host::Host for State {
     }
 
     fn cancel_tick(&mut self, surface_id: String) -> wasmtime::Result<()> {
+        self.count_lifted_text(surface_id.len())?;
         self.api.cancel_tick(surface_id);
         Ok(())
     }
@@ -52,6 +53,7 @@ impl wit_host::Host for State {
         &mut self,
         surface: wit::Surface,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface.id.len() + surface.title.len())?;
         Ok(self.api.add_surface(surface.into()).map_err(Into::into))
     }
 
@@ -59,6 +61,7 @@ impl wit_host::Host for State {
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self.api.remove_surface(surface_id).map_err(Into::into))
     }
 
@@ -66,6 +69,7 @@ impl wit_host::Host for State {
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self.api.show_surface(surface_id).map_err(Into::into))
     }
 
@@ -73,6 +77,7 @@ impl wit_host::Host for State {
         &mut self,
         surface_id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(surface_id.len())?;
         Ok(self.api.hide_surface(surface_id).map_err(Into::into))
     }
 
@@ -84,8 +89,7 @@ impl wit_host::Host for State {
             wit_host::LogLevel::Warn => ui_ext::LogLevel::Warn,
             wit_host::LogLevel::Error => ui_ext::LogLevel::Error,
         };
-        self.logs.push((level, message));
-        Ok(())
+        self.write_log(level, message)
     }
 }
 
@@ -96,7 +100,15 @@ impl wit_decorations::Host for State {
         location: wit::DecorationLocation,
         nodes: Vec<wit::Node>,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        let nodes = nodes.into_iter().map(Into::into).collect();
+        let nodes: Vec<model::Node> = nodes.into_iter().map(Into::into).collect();
+        self.count_lifted_text(
+            id.len()
+                + location.path.len()
+                + nodes
+                    .iter()
+                    .map(|node| props_text_len(&node.props))
+                    .sum::<usize>(),
+        )?;
         Ok(self
             .api
             .place_decoration(id, location.into(), nodes)
@@ -107,6 +119,7 @@ impl wit_decorations::Host for State {
         &mut self,
         id: String,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(id.len())?;
         Ok(self.api.remove_decoration(id).map_err(Into::into))
     }
 }
