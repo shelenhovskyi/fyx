@@ -342,15 +342,9 @@ Agent.
 
 **Підготовка.**
 
-1. Компоненти 0.2 збирає координатор заздалегідь. Якщо їх немає, зберіть самі з кореня
-   репозиторію (Git Bash, кілька хвилин):
-
-   ```bash
-   script/fyx-build-demos --fyx-ui-0-2
-   ```
-
-   Скрипт кладе кожне демо в `<target>/fyx-demos-v0_2/<demo>/` і друкує ці шляхи. Нам потрібні
-   `fyx_demo_gallery` і `fyx_demo_decorations`.
+1. Компоненти 0.2 W4 збирає заздалегідь у `D:\fyx-user-check\demos-0.2\`: теки
+   `fyx_demo_gallery\` і `fyx_demo_decorations\`. У кожній є `extension.toml`
+   (`api_version = "0.2.0"`) і `fyx_ui.wasm`. Якщо цих тек немає, скажіть координатору.
 2. Проєкт, у якому декорації мають до чого прив'язатися (ті самі шляхи, що в демо):
 
    ```powershell
@@ -359,8 +353,20 @@ Agent.
    Set-Content "$t\src\main.rs" 'fn main() {', '    // TODO: read the config path from the command line', '    let config = load_config("fyx.toml");', '    // FIXME(sam): this panics when the file is missing', '    run(config.unwrap());', '}'
    ```
 
-3. Додайте дві папки з кроку 1 до `"dev_paths"` у `$prof\config\settings.json`, збережіть і
-   відкрийте `D:\fyx-user-check\todo-project`. Для кожної з'явиться **Enable**; натисніть його.
+3. Допишіть обидві теки до `"dev_paths"` у `$prof\config\settings.json` (два записи з блоку 2
+   лишаються) і збережіть:
+
+   ```json
+   "fyx": { "extensions": { "dev_paths": [
+     "D:\\fyx-user-check\\w3\\dev-todo",
+     "D:\\fyx-user-check\\w3\\crash-item",
+     "D:\\fyx-user-check\\demos-0.2\\fyx_demo_gallery",
+     "D:\\fyx-user-check\\demos-0.2\\fyx_demo_decorations"
+   ] } }
+   ```
+
+   Потім відкрийте `D:\fyx-user-check\todo-project`. Для кожної нової теки з'явиться **Enable**,
+   натисніть його.
 
 | # | Що зробити | Очікується |
 |---|---|---|
