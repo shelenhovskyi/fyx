@@ -201,3 +201,32 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   - a local TLS test server (the pinning test uses a plain TCP server);
   - an Inspector line per request;
   - the user-agent carries no Fyx version.
+
+## Plan 4.13: canvas host and limits (2026-11-18)
+
+- **Model** (`crates/ui_ext/src/canvas.rs`):
+  - `CanvasProps`, `DrawOp` (line, rect, rounded-rect, circle, path, text), `Paint`,
+    `Stroke`, `Point`, `Rect`, `PathSegment`, `DataColor`, `CanvasFit`, `CanvasClick`;
+  - numbers are `Num(f32)`, compared by bits so the model keeps `Eq`;
+  - `Props::Canvas` and `UiEvent::CanvasClick` (whose target is the canvas).
+- **Shared checks:**
+  - `check_canvas_props`: sides 1–4096; description 1–1024 bytes; ≤ 16384 ops,
+    65536 segments and 256 KiB of text; every number finite and within ±32768, with
+    non-negative sizes and radii; strokes 0.5–16; opacity ≤ 100; text ops one line of
+    ≤ 256 bytes; paths start with move-to, draw something, and have a fill or a stroke;
+  - `check_canvas_placement`: panels only;
+  - `canvas_text_len`: the description plus the text ops, which is what the host counts
+    toward the lifted-text cap.
+- **The tree** (`v0_2::Tree`): at most 16 canvases per surface, counted across inserts,
+  set-props, replaces, removals and rollbacks; `from_row` refuses a canvas
+  (`TreeError::{TooManyCanvases, CanvasInRow}`).
+- **Host:**
+  - the 0.3 conversion;
+  - `check_images` also checks canvases: props and panels only, in pushes and in 0.3 replies;
+  - `canvas-click` is a gesture;
+  - the 0.1 shim shows the description;
+  - a 0.2 component never gets `canvas-click`.
+- **Probe:** case 8 (pushes: valid, NaN, no description, 16385 ops, status, modal), case 9 (a
+  canvas reply), and a `canvas-click` report.
+- **Not done here:** the renderer and the hit-test mapping (W3, 4.14), the SDK and the harness
+  (W4, 4.15), and the bench.

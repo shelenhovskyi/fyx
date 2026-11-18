@@ -3,7 +3,7 @@
 //! [`IconRef::Upstream`] and the 0.2-only fields empty.
 //!
 //! It is the newest model, including the staged 0.3 additions built so far: [`Props::Image`]
-//! (design.md §12). A 0.1 or 0.2 component cannot produce those, because its world has no such
+//! (design.md §12), [`Props::Canvas`] and [`UiEvent::CanvasClick`] (§13). A 0.1 or 0.2 component cannot produce those, because its world has no such
 //! case; only a 0.3 component's values convert into them.
 //!
 //! It is a module of its own rather than new fields and cases on the 0.1 types in
@@ -310,6 +310,10 @@ pub enum Props {
     /// 0.3 (design.md §12): checked by [`crate::image::check_image_props`] and
     /// [`crate::image::check_image_placement`] when the host applies the update.
     Image(crate::image::ImageProps),
+    /// 0.3 (design.md §13): checked by [`crate::canvas::check_canvas_props`] and
+    /// [`crate::canvas::check_canvas_placement`] when the host applies the update; the tree
+    /// allows [`crate::canvas::MAX_CANVASES_PER_SURFACE`] and none in a list row.
+    Canvas(crate::canvas::CanvasProps),
 }
 
 impl Props {
@@ -330,6 +334,7 @@ impl Props {
             Props::Markdown(_) => "markdown",
             Props::DiffView(_) => "diff-view",
             Props::Image(_) => "image",
+            Props::Canvas(_) => "canvas",
         }
     }
 }
@@ -453,6 +458,8 @@ pub enum UiEvent {
     NotificationClosed(u64, NotificationCloseReason),
     /// §M. Cancel was pressed on a cancellable progress the surface owns.
     ProgressCancelRequested(u64),
+    /// 0.3 (§13). A click on a clickable canvas, in canvas coordinates; a gesture, like `click`.
+    CanvasClick(crate::canvas::CanvasClick),
 }
 
 impl UiEvent {
@@ -464,6 +471,7 @@ impl UiEvent {
             | UiEvent::InputSubmitted(id, _)
             | UiEvent::RowClick(id, _)
             | UiEvent::RowSelected(id, _) => Some(*id),
+            UiEvent::CanvasClick(click) => Some(click.canvas),
             UiEvent::Dismissed(_)
             | UiEvent::NotificationAction(_)
             | UiEvent::NotificationClosed(..)
@@ -719,6 +727,7 @@ impl TryFrom<UiEvent> for v0_1::UiEvent {
             | UiEvent::ProgressCancelRequested(_) => {
                 Err(not_in_v0_1("notification and progress events"))
             }
+            UiEvent::CanvasClick(_) => Err(not_in_v0_1("the canvas-click event")),
         }
     }
 }

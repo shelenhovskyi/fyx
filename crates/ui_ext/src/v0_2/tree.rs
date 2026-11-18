@@ -13,6 +13,7 @@ use std::{
 };
 
 use super::{InsertOp, InvalidateRowsOp, Node, NodeId, Patch, Props, RowRange, Update};
+use crate::canvas::MAX_CANVASES_PER_SURFACE;
 use crate::tree::{TreeError, TreeLimits};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +140,12 @@ pub struct Tree {
     nodes: HashMap<NodeId, TreeNode>,
     roots: Vec<NodeId>,
     limits: TreeLimits,
+    /// Canvas nodes in the tree, at most [`MAX_CANVASES_PER_SURFACE`] (design.md §13).
+    canvases: usize,
+}
+
+fn is_canvas(props: &Props) -> bool {
+    matches!(props, Props::Canvas(_))
 }
 
 impl Tree {
@@ -147,6 +154,7 @@ impl Tree {
             nodes: HashMap::default(),
             roots: Vec::new(),
             limits,
+            canvases: 0,
         }
     }
 
@@ -160,6 +168,9 @@ impl Tree {
     pub fn from_row(nodes: Vec<Node>, limits: TreeLimits) -> Result<Self, TreeError> {
         let mut tree = Self::new(limits);
         tree.check_update_size(nodes.len())?;
+        if let Some(canvas) = nodes.iter().find(|node| is_canvas(&node.props)) {
+            return Err(TreeError::CanvasInRow(canvas.id));
+        }
         tree.replace(nodes)?;
         if tree.roots.len() != 1 {
             return Err(TreeError::RowRootCount(tree.roots.len()));
@@ -282,11 +293,14 @@ impl Tree {
             match entry {
                 Undo::Props(id, props) => {
                     if let Some(node) = self.nodes.get_mut(&id) {
-                        node.props = props;
+                        let replaced = std::mem::replace(&mut node.props, props);
+                        self.canvases = self.canvases + usize::from(is_canvas(&node.props))
+                            - usize::from(is_canvas(&replaced));
                     }
                 }
                 Undo::Inserted(id) => {
                     if let Some(node) = self.nodes.remove(&id) {
+                        self.canvases -= usize::from(is_canvas(&node.props));
                         self.siblings_mut(node.parent)
                             .retain(|&sibling| sibling != id);
                     }
@@ -297,6 +311,10 @@ impl Tree {
                     index,
                     nodes,
                 } => {
+                    self.canvases += nodes
+                        .iter()
+                        .filter(|(_, node)| is_canvas(&node.props))
+                        .count();
                     self.nodes.extend(nodes);
                     let siblings = self.siblings_mut(parent);
                     let index = index.min(siblings.len());
@@ -399,7 +417,16 @@ impl Tree {
                 kind: props.kind_name(),
             });
         }
-        Ok(std::mem::replace(&mut node.props, Arc::new(props)))
+        let adds_canvas = is_canvas(&props) && !is_canvas(&node.props);
+        if adds_canvas && self.canvases >= MAX_CANVASES_PER_SURFACE {
+            return Err(TreeError::TooManyCanvases {
+                max: MAX_CANVASES_PER_SURFACE,
+            });
+        }
+        let old = std::mem::replace(&mut node.props, Arc::new(props));
+        self.canvases =
+            self.canvases + usize::from(is_canvas(&node.props)) - usize::from(is_canvas(&old));
+        Ok(old)
     }
 
     /// Levels from `id` up to its root, inclusive (a root is 1). The walk stops at
@@ -427,6 +454,11 @@ impl Tree {
         if self.nodes.len() >= self.limits.max_nodes {
             return Err(TreeError::TreeTooLarge {
                 max: self.limits.max_nodes,
+            });
+        }
+        if is_canvas(&node.props) && self.canvases >= MAX_CANVASES_PER_SURFACE {
+            return Err(TreeError::TooManyCanvases {
+                max: MAX_CANVASES_PER_SURFACE,
             });
         }
         if let Some(parent_id) = node.parent
@@ -467,6 +499,7 @@ impl Tree {
                 })?,
         };
         siblings.insert(index, node.id);
+        self.canvases += usize::from(is_canvas(&node.props));
         self.nodes.insert(
             node.id,
             TreeNode {
@@ -496,10 +529,12 @@ impl Tree {
             .unwrap_or(siblings.len());
         siblings.retain(|&sibling| sibling != id);
         let mut pending = node.children.clone();
+        self.canvases -= usize::from(is_canvas(&node.props));
         let mut nodes = vec![(id, node)];
         while let Some(child) = pending.pop() {
             if let Some(node) = self.nodes.remove(&child) {
                 removed.insert(child);
+                self.canvases -= usize::from(is_canvas(&node.props));
                 pending.extend(node.children.iter().copied());
                 nodes.push((child, node));
             }
@@ -652,6 +687,83 @@ mod tests {
         assert_eq!(tree.get(1).expect("root").children(), [2, 5, 3, 4]);
         assert_eq!(tree.get(5).expect("restored").children(), [6]);
         assert_eq!(tree.roots(), [1]);
+    }
+
+    fn canvas() -> Props {
+        Props::Canvas(crate::canvas::CanvasProps {
+            width: 10,
+            height: 10,
+            description: "A chart".into(),
+            ops: Vec::new(),
+            clickable: false,
+            fit: crate::canvas::CanvasFit::Clip,
+        })
+    }
+
+    /// Design.md §13: at most 16 canvases per surface, however they arrive, and none in a row.
+    #[test]
+    fn canvases_per_surface_and_rows() {
+        let max = MAX_CANVASES_PER_SURFACE as NodeId;
+        let mut nodes = vec![flex(1, None)];
+        nodes.extend((0..max).map(|i| node(10 + i, Some(1), canvas())));
+        let mut tree = Tree::from_nodes(nodes.clone(), TreeLimits::default()).expect("16 fit");
+        let too_many = TreeError::TooManyCanvases {
+            max: MAX_CANVASES_PER_SURFACE,
+        };
+        let mut seventeen = nodes.clone();
+        seventeen.push(node(99, Some(1), canvas()));
+        assert_eq!(
+            Tree::from_nodes(seventeen, TreeLimits::default()).unwrap_err(),
+            too_many
+        );
+        let insert = |id| {
+            Patch::Insert(InsertOp {
+                node: node(id, Some(1), canvas()),
+                before: None,
+            })
+        };
+        let before = tree.clone();
+        assert!(matches!(
+            tree.apply_patches(vec![insert(99)]).unwrap_err(),
+            TreeError::Patch { error, .. } if *error == too_many
+        ));
+        tree.apply_patches(vec![Patch::Insert(InsertOp {
+            node: node(2, Some(1), text("a")),
+            before: None,
+        })])
+        .expect("not a canvas");
+        assert!(matches!(
+            tree.apply_patches(vec![Patch::SetProps(2, canvas())]).unwrap_err(),
+            TreeError::Patch { error, .. } if *error == too_many
+        ));
+        // Replacing a canvas by a canvas, or removing one first, frees no slot by accident and
+        // uses a freed one.
+        tree.apply_patches(vec![Patch::SetProps(10, canvas())])
+            .expect("still 16");
+        tree.apply_patches(vec![Patch::Remove(10), Patch::SetProps(2, canvas())])
+            .expect("a freed slot");
+        // A rejected update restores the count with the tree.
+        tree.apply_patches(vec![
+            Patch::Remove(11),
+            Patch::Remove(12),
+            insert(98),
+            Patch::Remove(99),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            tree.apply_patches(vec![insert(97)]).unwrap_err(),
+            TreeError::Patch { error, .. } if *error == too_many
+        ));
+        assert_ne!(tree, before);
+
+        assert_eq!(
+            Tree::from_row(
+                vec![flex(1, None), node(2, Some(1), canvas())],
+                TreeLimits::default()
+            )
+            .unwrap_err(),
+            TreeError::CanvasInRow(2)
+        );
     }
 
     /// perf-1 #12: a node's props `Arc` changes exactly when its props are replaced.

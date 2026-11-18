@@ -245,7 +245,8 @@ impl ApiState {
         match event {
             v0_2::UiEvent::Click(_)
             | v0_2::UiEvent::RowClick(..)
-            | v0_2::UiEvent::InputSubmitted(..) => self.activation = Activation::DuringCall,
+            | v0_2::UiEvent::InputSubmitted(..)
+            | v0_2::UiEvent::CanvasClick(_) => self.activation = Activation::DuringCall,
             v0_2::UiEvent::Dismissed(_) => {
                 self.shown_modals.remove(surface_id);
             }
@@ -549,7 +550,8 @@ impl ApiState {
         Ok(handle)
     }
 
-    /// The `image` nodes among `props` (0.3, design.md §12), checked when an update or a reply
+    /// The `image` and `canvas` nodes among `props` (0.3, design.md §12, §13): canvases get
+    /// [`ui_ext::canvas::check_canvas_props`] and panels only. Images are checked when an update or a reply
     /// for `surface_id` is applied: the props rules of [`image::check_image_props`], panels only
     /// ([`image::check_image_placement`]), and a `generated` handle that `add-image` returned
     /// earlier. A handle removed since is fine: the renderer draws the alt text for it.
@@ -559,6 +561,14 @@ impl ApiState {
         props: impl IntoIterator<Item = &'a v0_2::Props>,
     ) -> Result<(), v0_2::HostError> {
         for props in props {
+            if let v0_2::Props::Canvas(canvas) = props {
+                ui_ext::canvas::check_canvas_props(canvas)
+                    .and_then(|()| {
+                        ui_ext::canvas::check_canvas_placement(self.live.surface_kind(surface_id))
+                    })
+                    .map_err(|error| host_error(error.code(), error.to_string()))?;
+                continue;
+            }
             let v0_2::Props::Image(props) = props else {
                 continue;
             };
