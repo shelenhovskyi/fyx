@@ -111,18 +111,9 @@ impl fmt::Display for CapabilityDenied {
 
 impl std::error::Error for CapabilityDenied {}
 
-/// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PermissionState {
-    /// Allowed by the user.
-    Granted,
-    /// Refused or revoked by the user; only the extensions page changes it back.
-    Denied,
-    /// Not asked yet: the first use shows the prompt.
-    Ask,
-    /// Not available here: not declared, or (later) the worktree is not trusted.
-    Unavailable,
-}
+/// The state of a T2 capability for one extension (design.md §7); defined in `ui_ext` so the
+/// Apache harness shares it.
+pub use ui_ext::network::PermissionState;
 
 /// Answers whether an extension may use a capability right now. Implemented by the host's
 /// permission broker; called from host imports on the extension's call queue and from tokio,

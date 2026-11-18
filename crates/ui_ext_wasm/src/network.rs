@@ -1,8 +1,8 @@
 //! `network:fetch` for fyx:ui 0.3 (docs/fyx/wit-0.3/design.md §8, plan 4.6, spec decision 23): a
 //! host import, not WASI sockets (the WASI context denies those, [`crate::deny_network`]).
 //!
-//! - [`DomainList`]: the manifest's `[fyx_ui.network] domains`, parsed at load.
-//! - [`check_request`]: what the import checks at once. An undeclared host is `denied`.
+//! - [`DomainList`], [`check_request`] and the limits and types are `ui_ext::network`'s (shared
+//!   with the Apache harness), re-exported here. An undeclared host is `denied` at the import.
 //! - [`Fetcher`]: runs a checked request after the call returns (design §0.3). The host follows
 //!   redirects itself, checking every hop like the first. It resolves each name once, refuses
 //!   any non-global address for a public domain, and connects only to the addresses it checked
@@ -13,7 +13,7 @@
 
 use std::{
     collections::HashMap,
-    fmt, io,
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -22,333 +22,17 @@ use std::{
 use futures::{
     AsyncReadExt as _, FutureExt as _, SinkExt as _, TryStreamExt as _, future::BoxFuture,
 };
-use http_proxy::HostPattern;
+pub use ui_ext::network::{
+    Allowed, CAPABILITY_NETWORK, DomainList, FetchCounters, FetchError, FetchRequest,
+    FetchResponse, IoEvent, MAX_DOMAINS, MAX_IN_FLIGHT, MAX_REDIRECTS, MAX_REQUEST_BODY_BYTES,
+    MAX_REQUEST_HEADER_BYTES, MAX_REQUEST_HEADERS, MAX_RESPONSE_BODY_BYTES,
+    MAX_RESPONSE_HEADER_BYTES, MAX_STARTED_PER_MINUTE, MAX_TIMEOUT, MAX_URL_BYTES, Method,
+    check_request, host_and_port,
+};
 use ui_ext::v0_2::{HostError, HostErrorCode};
 
 use crate::permissions::{CapabilityCheck, PermissionState};
 use url::Url;
-
-pub const CAPABILITY_NETWORK: &str = "network:fetch";
-/// Requests in flight per instance, counted until their `fetch-done` is delivered (decision 23).
-pub const MAX_IN_FLIGHT: usize = 8;
-/// Requests started per rolling minute.
-pub const MAX_STARTED_PER_MINUTE: usize = 120;
-pub const MAX_URL_BYTES: usize = 8 * 1024;
-pub const MAX_REQUEST_HEADERS: usize = 64;
-pub const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
-pub const MAX_REQUEST_BODY_BYTES: usize = 4 << 20;
-/// The decoded response body; a longer one ends with [`FetchError::TooLarge`].
-pub const MAX_RESPONSE_BODY_BYTES: u64 = 16 << 20;
-pub const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
-/// Redirects followed; the next one ends with [`FetchError::RedirectNotAllowed`].
-pub const MAX_REDIRECTS: usize = 5;
-pub const MAX_TIMEOUT: Duration = Duration::from_secs(30);
-/// Domain patterns per manifest.
-pub const MAX_DOMAINS: usize = 64;
-
-/// Request headers the host sets or that frame the request, refused at the import (WIT
-/// `http-request.headers`), plus `accept-encoding`: the host decodes the body, so it chooses.
-const FORBIDDEN_HEADERS: &[&str] = &[
-    "host",
-    "content-length",
-    "transfer-encoding",
-    "connection",
-    "upgrade",
-    "te",
-    "trailer",
-    "expect",
-    "keep-alive",
-    "accept-encoding",
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Method {
-    Get,
-    Head,
-    Post,
-    Put,
-    Patch,
-    Delete,
-    Options,
-}
-
-impl Method {
-    fn as_reqwest(self) -> reqwest::Method {
-        match self {
-            Method::Get => reqwest::Method::GET,
-            Method::Head => reqwest::Method::HEAD,
-            Method::Post => reqwest::Method::POST,
-            Method::Put => reqwest::Method::PUT,
-            Method::Patch => reqwest::Method::PATCH,
-            Method::Delete => reqwest::Method::DELETE,
-            Method::Options => reqwest::Method::OPTIONS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FetchRequest {
-    pub method: Method,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
-    pub timeout_ms: Option<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FetchResponse {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    /// The URL that answered, after the redirects the host followed.
-    pub url: String,
-}
-
-/// The WIT `fetch-error`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FetchError {
-    Denied,
-    HostNotAllowed(String),
-    RedirectNotAllowed(String),
-    Dns(String),
-    Connect(String),
-    Tls(String),
-    Timeout,
-    TooLarge,
-    Cancelled,
-    Other(String),
-}
-
-impl fmt::Display for FetchError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FetchError::Denied => f.write_str("denied"),
-            FetchError::HostNotAllowed(host) => write!(f, "host not allowed: {host}"),
-            FetchError::RedirectNotAllowed(host) => write!(f, "redirect not allowed: {host}"),
-            FetchError::Dns(error) => write!(f, "dns: {error}"),
-            FetchError::Connect(error) => write!(f, "connect: {error}"),
-            FetchError::Tls(error) => write!(f, "tls: {error}"),
-            FetchError::Timeout => f.write_str("timeout"),
-            FetchError::TooLarge => f.write_str("too large"),
-            FetchError::Cancelled => f.write_str("cancelled"),
-            FetchError::Other(error) => f.write_str(error),
-        }
-    }
-}
-
-/// What the host delivers through the `handle-io` export (design §0.3).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IoEvent {
-    FetchDone(u64, Result<FetchResponse, FetchError>),
-    /// A T2 capability's state changed (the prompt was answered, or the extensions page
-    /// changed it); in-flight work of a revoked one was cancelled first.
-    PermissionChanged(String, crate::permissions::PermissionState),
-}
-
-// ---------------------------------------------------------------------------------------------
-// The domain list
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PatternHost {
-    Name(HostPattern),
-    /// `localhost:<port>` or `127.0.0.1:<port>`: `http://` allowed, never resolved through DNS.
-    Loopback,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DomainPattern {
-    text: String,
-    host: PatternHost,
-    /// 443 unless the pattern names one; a loopback pattern always names one.
-    port: Option<u16>,
-}
-
-/// A host the list allows, with what that allows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Allowed {
-    loopback: bool,
-}
-
-/// The manifest's `[fyx_ui.network] domains` (design §8, "Domain list").
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DomainList {
-    patterns: Vec<DomainPattern>,
-}
-
-impl DomainList {
-    /// Parses the patterns, refusing what the loader refuses: a wildcard whose base is a public
-    /// suffix (`*.com`, `*.github.io`), an IP literal other than `127.0.0.1`, `localhost` or
-    /// `127.0.0.1` without a port, more than [`MAX_DOMAINS`].
-    pub fn parse(patterns: &[String]) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            patterns.len() <= MAX_DOMAINS,
-            "at most {MAX_DOMAINS} network domains, got {}",
-            patterns.len()
-        );
-        let mut parsed = Vec::new();
-        for text in patterns {
-            parsed.push(parse_pattern(text)?);
-        }
-        Ok(Self { patterns: parsed })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
-    }
-
-    /// The patterns as written, for the consent prompt.
-    pub fn texts(&self) -> Vec<String> {
-        self.patterns.iter().map(|p| p.text.clone()).collect()
-    }
-
-    fn allows(&self, url: &Url) -> Option<Allowed> {
-        let port = url.port_or_known_default()?;
-        let host = url.host()?;
-        for pattern in &self.patterns {
-            let matches = match (&pattern.host, &host) {
-                (PatternHost::Loopback, url::Host::Domain(name)) => {
-                    name.eq_ignore_ascii_case("localhost")
-                }
-                (PatternHost::Loopback, url::Host::Ipv4(ip)) => ip.is_loopback(),
-                (PatternHost::Loopback, url::Host::Ipv6(_)) => false,
-                // IP literals never match a domain pattern.
-                (PatternHost::Name(name), url::Host::Domain(domain)) => name.matches(domain),
-                (PatternHost::Name(_), _) => false,
-            };
-            if matches && pattern.port.unwrap_or(443) == port {
-                return Some(Allowed {
-                    loopback: pattern.host == PatternHost::Loopback,
-                });
-            }
-        }
-        None
-    }
-}
-
-fn parse_pattern(text: &str) -> anyhow::Result<DomainPattern> {
-    let (host, port) = match text.rsplit_once(':') {
-        Some((host, port)) if !host.contains(':') => {
-            let port: u16 = port
-                .parse()
-                .map_err(|_| anyhow::anyhow!("network domain {text:?}: {port:?} is not a port"))?;
-            anyhow::ensure!(port != 0, "network domain {text:?}: port 0");
-            (host, Some(port))
-        }
-        _ => (text, None),
-    };
-    if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" {
-        anyhow::ensure!(
-            port.is_some(),
-            "network domain {text:?}: localhost needs a port, such as localhost:8080"
-        );
-        return Ok(DomainPattern {
-            text: text.to_string(),
-            host: PatternHost::Loopback,
-            port,
-        });
-    }
-    let pattern = HostPattern::parse(host)
-        .map_err(|error| anyhow::anyhow!("network domain {text:?}: {error}"))?;
-    // A wildcard over a public suffix (`*.com`, `*.github.io`) would allow every site under it;
-    // an exact host that is one is a site of its own (`github.io`), unless it is a bare label.
-    match &pattern {
-        HostPattern::Subdomain(base) => anyhow::ensure!(
-            !fyx_registry::is_public_suffix(base),
-            "network domain {text:?}: {base} is a public suffix, so the pattern would allow \
-             every site under it"
-        ),
-        HostPattern::Exact(host) => anyhow::ensure!(
-            host.contains('.'),
-            "network domain {text:?}: {host} is a top-level domain, not a host"
-        ),
-    }
-    Ok(DomainPattern {
-        text: text.to_string(),
-        host: PatternHost::Name(pattern),
-        port,
-    })
-}
-
-// ---------------------------------------------------------------------------------------------
-// The checks at the import
-
-fn invalid(message: impl Into<String>) -> HostError {
-    HostError {
-        code: HostErrorCode::InvalidArgument,
-        message: message.into(),
-    }
-}
-
-/// Everything the import can check at once (design §8, "Semantics"). Syntax errors are
-/// `invalid-argument`; a host the manifest does not list, or `http://` to one that is not a
-/// declared loopback, is `denied` (plan 4.6).
-pub fn check_request(request: &FetchRequest, domains: &DomainList) -> Result<Url, HostError> {
-    if request.url.len() > MAX_URL_BYTES {
-        return Err(invalid(format!("the URL is over {MAX_URL_BYTES} bytes")));
-    }
-    let url = Url::parse(&request.url).map_err(|error| invalid(format!("bad URL: {error}")))?;
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid("the URL may not carry user info"));
-    }
-    if !matches!(url.scheme(), "https" | "http") {
-        return Err(invalid(format!("scheme {} is not allowed", url.scheme())));
-    }
-    let Some(allowed) = domains.allows(&url) else {
-        return Err(HostError {
-            code: HostErrorCode::Denied,
-            message: format!(
-                "{} is not in the extension's network domains",
-                host_and_port(&url)
-            ),
-        });
-    };
-    if url.scheme() == "http" && !allowed.loopback {
-        return Err(HostError {
-            code: HostErrorCode::Denied,
-            message: "http:// is allowed only to a declared localhost port".into(),
-        });
-    }
-    if request.headers.len() > MAX_REQUEST_HEADERS {
-        return Err(invalid(format!("at most {MAX_REQUEST_HEADERS} headers")));
-    }
-    let mut header_bytes = 0;
-    for (name, value) in &request.headers {
-        header_bytes += name.len() + value.len();
-        let lower = name.to_ascii_lowercase();
-        if FORBIDDEN_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
-            return Err(invalid(format!("header {name} is set by the host")));
-        }
-        reqwest::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| invalid(format!("bad header name {name:?}")))?;
-        reqwest::header::HeaderValue::from_str(value)
-            .map_err(|_| invalid(format!("bad value for header {name}")))?;
-    }
-    if header_bytes > MAX_REQUEST_HEADER_BYTES {
-        return Err(invalid(format!(
-            "the headers are over {MAX_REQUEST_HEADER_BYTES} bytes"
-        )));
-    }
-    if request.body.as_ref().map_or(0, Vec::len) > MAX_REQUEST_BODY_BYTES {
-        return Err(invalid(format!(
-            "the body is over {MAX_REQUEST_BODY_BYTES} bytes"
-        )));
-    }
-    if request
-        .timeout_ms
-        .is_some_and(|ms| ms == 0 || u128::from(ms) > MAX_TIMEOUT.as_millis())
-    {
-        return Err(invalid("timeout-ms must be 1 to 30000"));
-    }
-    Ok(url)
-}
-
-fn host_and_port(url: &Url) -> String {
-    match (url.host_str(), url.port()) {
-        (Some(host), Some(port)) => format!("{host}:{port}"),
-        (Some(host), None) => host.to_string(),
-        _ => url.to_string(),
-    }
-}
 
 // ---------------------------------------------------------------------------------------------
 // Addresses
@@ -564,7 +248,7 @@ impl Fetcher {
             .build()
             .map_err(|error| FetchError::Other(format!("{error}")))?;
         let mut request = client
-            .request(method.as_reqwest(), url.clone())
+            .request(reqwest_method(method), url.clone())
             .header(reqwest::header::ACCEPT_ENCODING, "gzip");
         for (name, value) in headers {
             request = request.header(name, value);
@@ -573,6 +257,18 @@ impl Fetcher {
             request = request.body(body);
         }
         request.send().await.map_err(send_error)
+    }
+}
+
+fn reqwest_method(method: Method) -> reqwest::Method {
+    match method {
+        Method::Get => reqwest::Method::GET,
+        Method::Head => reqwest::Method::HEAD,
+        Method::Post => reqwest::Method::POST,
+        Method::Put => reqwest::Method::PUT,
+        Method::Patch => reqwest::Method::PATCH,
+        Method::Delete => reqwest::Method::DELETE,
+        Method::Options => reqwest::Method::OPTIONS,
     }
 }
 
@@ -787,9 +483,8 @@ pub(crate) struct PendingFetch {
 pub(crate) struct NetworkState {
     /// Empty unless the manifest declares `network:fetch` with domains.
     domains: Arc<DomainList>,
-    next_id: u64,
-    in_flight: std::collections::BTreeSet<u64>,
-    started: std::collections::VecDeque<std::time::Instant>,
+    /// Ids and the in-flight and per-minute caps, shared with the harness.
+    counters: FetchCounters,
     pending: Vec<PendingFetch>,
     running: Arc<Running>,
 }
@@ -798,9 +493,7 @@ impl NetworkState {
     pub(crate) fn new(domains: Arc<DomainList>, running: Arc<Running>) -> Self {
         Self {
             domains,
-            next_id: 1,
-            in_flight: Default::default(),
-            started: Default::default(),
+            counters: FetchCounters::default(),
             pending: Vec::new(),
             running,
         }
@@ -818,30 +511,7 @@ impl NetworkState {
             });
         }
         let url = check_request(&request, &self.domains)?;
-        if self.in_flight.len() >= MAX_IN_FLIGHT {
-            return Err(HostError {
-                code: HostErrorCode::LimitExceeded,
-                message: format!("at most {MAX_IN_FLIGHT} requests in flight"),
-            });
-        }
-        let now = std::time::Instant::now();
-        while self
-            .started
-            .front()
-            .is_some_and(|started| now.duration_since(*started) >= Duration::from_secs(60))
-        {
-            self.started.pop_front();
-        }
-        if self.started.len() >= MAX_STARTED_PER_MINUTE {
-            return Err(HostError {
-                code: HostErrorCode::LimitExceeded,
-                message: format!("at most {MAX_STARTED_PER_MINUTE} requests per minute"),
-            });
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.in_flight.insert(id);
-        self.started.push_back(now);
+        let id = self.counters.start(std::time::Instant::now())?;
         self.pending.push(PendingFetch {
             id,
             url,
@@ -868,7 +538,7 @@ impl NetworkState {
             pending
         } else {
             for fetch in &pending {
-                self.in_flight.remove(&fetch.id);
+                self.counters.finished(fetch.id);
             }
             Vec::new()
         }
@@ -876,7 +546,7 @@ impl NetworkState {
 
     /// Before `handle-io` delivers `fetch-done`: the request is no longer in flight.
     pub(crate) fn delivered(&mut self, id: u64) {
-        self.in_flight.remove(&id);
+        self.counters.finished(id);
     }
 }
 
@@ -1142,10 +812,6 @@ mod tests {
         }
     }
 
-    fn code(result: Result<Url, HostError>) -> Option<HostErrorCode> {
-        result.err().map(|error| error.code)
-    }
-
     fn fetcher() -> Fetcher {
         Fetcher::new("probe", Some(Arc::new(PanicResolver)))
     }
@@ -1401,141 +1067,6 @@ mod tests {
             registration,
         ));
         assert!(aborted.is_err());
-    }
-
-    #[test]
-    fn domain_patterns() {
-        let domains = list(&["api.example.com", "*.cdn.example.com", "example.org:8443"]);
-        let allowed = |url: &str| code(check_request(&request(url), &domains)).is_none();
-        assert!(allowed("https://api.example.com/v1"));
-        assert!(
-            allowed("https://API.Example.com./v1"),
-            "case and trailing dot"
-        );
-        assert!(allowed("https://a.cdn.example.com/x"));
-        assert!(allowed("https://a.b.cdn.example.com/x"), "any depth");
-        assert!(allowed("https://example.org:8443/"));
-        for refused in [
-            "https://cdn.example.com/",
-            "https://evilcdn.example.com/",
-            "https://api.example.com.evil.net/",
-            "https://example.com/",
-            "https://api.example.com:8443/",
-            "https://example.org/",
-            "https://93.184.216.34/",
-            // Cyrillic "а" in "аpi": a homograph does not match its ASCII look-alike.
-            "https://\u{0430}pi.example.com/",
-        ] {
-            assert_eq!(
-                code(check_request(&request(refused), &domains)),
-                Some(HostErrorCode::Denied),
-                "{refused}"
-            );
-        }
-        // A UTF-8 pattern matches its punycode form.
-        let idn = list(&["bücher.example"]);
-        assert!(
-            code(check_request(
-                &request("https://xn--bcher-kva.example/"),
-                &idn
-            ))
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn patterns_refused_at_load() {
-        for bad in [
-            "*.com",
-            "*.co.uk",
-            "*.github.io",
-            "com",
-            "localhost",
-            "127.0.0.1",
-            "10.0.0.1",
-            "[::1]:80",
-            "foo.*.com",
-            "example.com:0",
-            "example.com:http",
-            "",
-        ] {
-            assert!(
-                DomainList::parse(&[bad.to_string()]).is_err(),
-                "{bad:?} should be refused"
-            );
-        }
-        assert!(DomainList::parse(&vec!["a.example.com".to_string(); MAX_DOMAINS + 1]).is_err());
-        list(&[
-            "localhost:8080",
-            "127.0.0.1:3000",
-            "*.example.com",
-            "github.io",
-        ]);
-    }
-
-    #[test]
-    fn import_checks() {
-        let domains = list(&["api.example.com", "localhost:8080"]);
-        let check = |request: FetchRequest| code(check_request(&request, &domains));
-        assert_eq!(
-            check(request("https://user:pw@api.example.com/")),
-            Some(HostErrorCode::InvalidArgument)
-        );
-        assert_eq!(
-            check(request("ftp://api.example.com/")),
-            Some(HostErrorCode::InvalidArgument)
-        );
-        assert_eq!(
-            check(request("not a url")),
-            Some(HostErrorCode::InvalidArgument)
-        );
-        assert_eq!(
-            check(request(&format!(
-                "https://api.example.com/{}",
-                "a".repeat(MAX_URL_BYTES)
-            ))),
-            Some(HostErrorCode::InvalidArgument)
-        );
-        assert_eq!(
-            check(request("http://api.example.com/")),
-            Some(HostErrorCode::Denied)
-        );
-        assert_eq!(check(request("http://localhost:8080/")), None);
-        assert_eq!(check(request("http://127.0.0.1:8080/")), None);
-        assert_eq!(
-            check(request("http://localhost:8081/")),
-            Some(HostErrorCode::Denied)
-        );
-        for header in [
-            "Host",
-            "content-length",
-            "Transfer-Encoding",
-            "Proxy-Authorization",
-            "accept-encoding",
-        ] {
-            let mut forbidden = request("https://api.example.com/");
-            forbidden.headers.push((header.into(), "x".into()));
-            assert_eq!(
-                check(forbidden),
-                Some(HostErrorCode::InvalidArgument),
-                "{header}"
-            );
-        }
-        let mut ok = request("https://api.example.com/");
-        ok.headers.push(("authorization".into(), "Bearer t".into()));
-        ok.headers.push(("cookie".into(), "a=b".into()));
-        assert_eq!(check(ok.clone()), None, "the guest may send what it holds");
-        let mut many = ok.clone();
-        many.headers = vec![("x-a".into(), "1".into()); MAX_REQUEST_HEADERS + 1];
-        assert_eq!(check(many), Some(HostErrorCode::InvalidArgument));
-        let mut big = ok.clone();
-        big.body = Some(vec![0; MAX_REQUEST_BODY_BYTES + 1]);
-        assert_eq!(check(big), Some(HostErrorCode::InvalidArgument));
-        for timeout in [0, 30_001] {
-            let mut slow = ok.clone();
-            slow.timeout_ms = Some(timeout);
-            assert_eq!(check(slow), Some(HostErrorCode::InvalidArgument));
-        }
     }
 
     #[test]
