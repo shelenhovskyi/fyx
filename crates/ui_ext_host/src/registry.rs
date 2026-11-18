@@ -154,6 +154,14 @@ pub enum RegistryEvent {
     },
     /// The extension closed a modal (`hide-surface`, `remove-surface`): no `dismissed`.
     CloseModal(SharedString),
+    /// A message from Fyx itself (no provenance line) for the workspace named: a block list
+    /// entry rolled back or disabled an installed extension (platform plan 3.4).
+    HostNotice {
+        id: SharedString,
+        title: SharedString,
+        message: SharedString,
+        workspace: gpui::EntityId,
+    },
     /// `notify` (design.md M.1): the workspace named shows it (the active window's).
     ShowNotification {
         extension_id: Arc<str>,
@@ -675,6 +683,29 @@ impl UiExtensionRegistry {
                 cx,
             );
         }
+    }
+
+    /// Tells the user, in the active window, that a block changed an installed extension. With
+    /// no window it stays in the log (the update check logged it already).
+    pub(crate) fn notify_block(
+        &mut self,
+        name: &str,
+        block: &crate::fyx_extensions_page::BlockNotice,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace else {
+            return;
+        };
+        cx.emit(RegistryEvent::HostNotice {
+            id: format!("fyx-ui-block-{}", block.extension_id).into(),
+            title: format!("{name} was {}", block.what).into(),
+            message: format!(
+                "The Fyx block list says: {}\n({} · {})",
+                block.reason, name, block.extension_id
+            )
+            .into(),
+            workspace,
+        });
     }
 
     /// The name in the provenance line of an extension's notifications and progress (M.4).
@@ -1923,6 +1954,28 @@ fn attach_to_workspace(
                             window,
                             cx,
                         );
+                    }
+                    return;
+                }
+                RegistryEvent::HostNotice {
+                    id,
+                    title,
+                    message,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        let (title, message) = (title.clone(), message.clone());
+                        workspace.show_notification(NotificationId::named(id.clone()), cx, |cx| {
+                            cx.new(|cx| {
+                                MessageNotification::new(message, cx)
+                                    .with_title(title)
+                                    .primary_message("Open Fyx Extensions")
+                                    .primary_on_click(|window, cx| {
+                                        window
+                                            .dispatch_action(Box::new(crate::OpenFyxExtensions), cx)
+                                    })
+                            })
+                        });
                     }
                     return;
                 }

@@ -39,7 +39,8 @@ use crate::{
     install::{FyxExtensionsSettings, capability_chip_label, describe_capability_ids},
     install_store::VersionSource,
     registry_service::{
-        RefreshOutcome, Registry, RegistryLocation, RegistryStateDir, compiled_keyset, now,
+        RefreshOutcome, Registry, RegistryLocation, RegistryStateDir, UPDATE_CHECK_INTERVAL,
+        compiled_keyset, now,
     },
     store_actions::{
         Outcome, expect_load, grant_and_rescan, installed_outcome, load_outcome, show_outcome,
@@ -73,6 +74,10 @@ pub struct RegistryHub {
     pub freshness: Option<Freshness>,
     pub installed: Vec<InstalledExtension>,
     pub actions: Vec<PlannedAction>,
+    /// Ids the store has disabled, with why.
+    pub disabled: Vec<(String, String)>,
+    /// What the last update check did, for the page.
+    pub applied: Vec<String>,
     _refresh: Option<Task<()>>,
 }
 
@@ -88,6 +93,19 @@ pub(crate) fn init(cx: &mut App) {
             if hub.opened && hub.url != url {
                 hub.reset();
                 cx.notify();
+            }
+        })
+        .detach();
+        // The update check: never at startup, then every 6 h, only with a registry set.
+        cx.spawn(async move |hub, cx| {
+            loop {
+                cx.background_executor().timer(UPDATE_CHECK_INTERVAL).await;
+                if hub
+                    .update(cx, |hub, cx| hub.refresh_and_apply(true, cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -163,6 +181,13 @@ impl RegistryHub {
 
     /// Fetches the index (and the block list when due), then what the page shows.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_and_apply(false, cx)
+    }
+
+    /// [`Self::refresh`], and with `apply` the plan's automatic actions (the update check):
+    /// updates of registry installs, a rollback of a blocked version, disabling a blocked version
+    /// with nothing to roll back to (and enabling it when the block lifts). Held updates wait.
+    pub fn refresh_and_apply(&mut self, apply: bool, cx: &mut Context<Self>) {
         if self.refreshing {
             return;
         }
@@ -199,10 +224,60 @@ impl RegistryHub {
                 };
                 let actions = client.plan_updates(&installed, time);
                 let freshness = client.blocklist_freshness(time);
-                (outcome, listing, unavailable, freshness, installed, actions)
+                // The releases the updates name, while the index is at hand.
+                let updates: Vec<Release> = match client.index(time) {
+                    Ok(index) => actions
+                        .iter()
+                        .filter_map(|action| match &action.action {
+                            Action::Update { to, .. } => index.release(&action.id, to).cloned(),
+                            _ => None,
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                drop(client);
+                let mut applied = PlanOutcome::default();
+                let mut disabled = Vec::new();
+                if let Some(store) = &store {
+                    if apply {
+                        applied =
+                            apply_plan(&registry, store, fs.as_ref(), &actions, &updates).await;
+                    }
+                    if let Ok(state) = store.state(fs.as_ref()).await {
+                        disabled = state
+                            .extensions
+                            .iter()
+                            .filter_map(|(id, entry)| Some((id.clone(), entry.disabled.clone()?)))
+                            .collect();
+                    }
+                }
+                (
+                    outcome,
+                    listing,
+                    unavailable,
+                    freshness,
+                    installed,
+                    actions,
+                    applied,
+                    disabled,
+                )
             };
-            let (outcome, listing, unavailable, freshness, installed, actions) =
+            let (outcome, listing, unavailable, freshness, installed, actions, applied, disabled) =
                 cx.background_spawn(work).await;
+            if !applied.lines.is_empty() {
+                cx.update(|cx| {
+                    if let Some(registry) = UiExtensionRegistry::global(cx) {
+                        registry.update(cx, |registry, cx| {
+                            // The name while the instance is still loaded.
+                            for block in &applied.blocks {
+                                let name = registry.provenance_name(&block.extension_id);
+                                registry.notify_block(&name, block, cx);
+                            }
+                            registry.rescan(cx)
+                        });
+                    }
+                });
+            }
             this.update(cx, |this, cx| {
                 this.refreshing = false;
                 this.last_refresh = Some(outcome);
@@ -211,6 +286,10 @@ impl RegistryHub {
                 this.freshness = Some(freshness);
                 this.installed = installed;
                 this.actions = actions;
+                this.disabled = disabled;
+                if apply {
+                    this.applied = applied.lines;
+                }
                 cx.notify();
             })
             .ok();
@@ -228,6 +307,121 @@ impl RegistryHub {
             .iter()
             .find(|action| action.id.as_str() == id)
             .map(|action| &action.action)
+    }
+}
+
+/// What the user is told in the window when a block changes an installed extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockNotice {
+    pub extension_id: String,
+    /// "rolled back to 1.0.0" or "disabled".
+    pub what: String,
+    /// The block list's reason.
+    pub reason: String,
+}
+
+/// What the update check did: one line per change (also logged), and the block changes to
+/// show in the window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlanOutcome {
+    pub lines: Vec<String>,
+    pub blocks: Vec<BlockNotice>,
+}
+
+/// Carries out what the update check may do by itself.
+pub(crate) async fn apply_plan(
+    registry: &Registry,
+    store: &crate::install_store::InstallStore,
+    fs: &dyn Fs,
+    actions: &[PlannedAction],
+    updates: &[Release],
+) -> PlanOutcome {
+    let mut applied = Vec::new();
+    let mut blocks = Vec::new();
+    let mut note = |line: String| {
+        log::warn!("fyx:ui: {line}");
+        applied.push(line);
+    };
+    let disabled_now: Vec<String> = actions
+        .iter()
+        .filter(|action| matches!(action.action, Action::Disable { .. }))
+        .map(|action| action.id.as_str().to_string())
+        .collect();
+    for action in actions {
+        let id = action.id.as_str();
+        match &action.action {
+            Action::Update { to, .. } => {
+                let Some(release) = updates
+                    .iter()
+                    .find(|release| release.id == action.id && &release.version == to)
+                else {
+                    continue;
+                };
+                let result = async {
+                    let bytes = registry.download(release).await?;
+                    store
+                        .install_package_bytes(
+                            bytes,
+                            &format!("{id} {to}"),
+                            VersionSource {
+                                origin: Origin::Registry,
+                                package_sha256: Some(release.package.sha256),
+                            },
+                            None,
+                            fs,
+                        )
+                        .await
+                }
+                .await;
+                match result {
+                    Ok(_) => note(format!("updated {id} to {to}")),
+                    Err(error) => note(format!("could not update {id} to {to}: {error:#}")),
+                }
+            }
+            Action::Rollback { to, block } => match store.rollback(id, fs).await {
+                Ok(_) => {
+                    note(format!(
+                        "rolled {id} back to {to}: blocked ({})",
+                        block.reason
+                    ));
+                    blocks.push(BlockNotice {
+                        extension_id: id.to_string(),
+                        what: format!("rolled back to {to}"),
+                        reason: block.reason.clone(),
+                    });
+                }
+                Err(error) => note(format!("could not roll {id} back: {error:#}")),
+            },
+            Action::Disable { block } => {
+                let reason = format!("blocked: {}", block.reason);
+                match store.set_disabled(id, Some(reason.clone()), fs).await {
+                    Ok(()) => {
+                        note(format!("disabled {id}: {reason}"));
+                        blocks.push(BlockNotice {
+                            extension_id: id.to_string(),
+                            what: "disabled".into(),
+                            reason: block.reason.clone(),
+                        });
+                    }
+                    Err(error) => note(format!("could not disable {id}: {error:#}")),
+                }
+            }
+            Action::Hold { .. } => {}
+        }
+    }
+    // A block that lifted enables the extension again.
+    if let Ok(state) = store.state(fs).await {
+        for (id, entry) in state.extensions {
+            if entry.disabled.is_some() && !disabled_now.contains(&id) {
+                if store.set_disabled(&id, None, fs).await.is_ok() {
+                    note(format!("enabled {id} again: no longer blocked"));
+                }
+            }
+        }
+    }
+    PlanOutcome {
+        lines: applied,
+        blocks,
     }
 }
 
@@ -619,7 +813,12 @@ impl FyxExtensionsPage {
                 .find(|release| release.id.as_str() == id && &release.version == version)
                 .cloned()
         };
-        let mut notes: Vec<(String, Color)> = Vec::new();
+        let mut notes: Vec<(String, Color)> = hub
+            .disabled
+            .iter()
+            .filter(|(disabled, _)| *disabled == id)
+            .map(|(_, reason)| (format!("Disabled, {reason}"), Color::Error))
+            .collect();
         let mut update: Option<(Release, &'static str)> = None;
         match &action {
             Some(Action::Update { to, .. }) => {
@@ -815,6 +1014,11 @@ impl Render for FyxExtensionsPage {
             .when_some(status, |this, (status, color)| {
                 this.child(Label::new(status).size(LabelSize::Small).color(color))
             })
+            .children(self.hub.read(cx).applied.iter().map(|line| {
+                Label::new(format!("Update check: {line}"))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+            }))
             .child(
                 div()
                     .h_8()
