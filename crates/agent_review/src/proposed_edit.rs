@@ -16,8 +16,10 @@ pub struct Hunk {
     pub old_rows: Range<u32>,
     /// Rows of the new text that this hunk inserts.
     pub new_rows: Range<u32>,
-    pub old_text: String,
-    pub new_text: String,
+    /// Bytes of the edit's old and new text the hunk covers: a hunk holds no copy of the text, so a
+    /// review of a large file keeps it twice (old and new), not three or four times.
+    pub old_bytes: Range<usize>,
+    pub new_bytes: Range<usize>,
     pub decision: HunkDecision,
     pub comment: Option<String>,
 }
@@ -93,6 +95,15 @@ impl ProposedEdit {
 
     pub fn hunks(&self) -> &[Hunk] {
         &self.hunks
+    }
+
+    /// The old and the new text of hunk `index`.
+    pub fn hunk_texts(&self, index: usize) -> Option<(&str, &str)> {
+        let hunk = self.hunks.get(index)?;
+        Some((
+            &self.old_text[hunk.old_bytes.clone()],
+            &self.new_text[hunk.new_bytes.clone()],
+        ))
     }
 
     /// The hunk at `row` of the new text, for the cursor. A pure deletion is at the row that follows
@@ -191,7 +202,7 @@ impl ProposedEdit {
         if let Resolution::Pending { undecided } = self.resolution() {
             return Err(anyhow!("{undecided} hunks are still undecided"));
         }
-        apply_hunks(&self.old_text, &self.hunks, |hunk| {
+        apply_hunks(&self.old_text, &self.new_text, &self.hunks, |hunk| {
             hunk.decision == HunkDecision::Accepted
         })
     }
@@ -236,11 +247,13 @@ impl ProposedEdit {
             if earlier_hunk.decision == HunkDecision::Pending {
                 continue;
             }
+            let (old_text, new_text) = (&self.old_text, &self.new_text);
             let matching = self.hunks.iter_mut().find(|hunk| {
                 hunk.decision == HunkDecision::Pending
                     && hunk.old_rows == placed.old_rows
-                    && hunk.old_text == placed.old_text
-                    && hunk.new_text == placed.new_text
+                    && old_text[hunk.old_bytes.clone()] == old_text[placed.old_bytes.clone()]
+                    && new_text[hunk.new_bytes.clone()]
+                        == expected_new_text[placed.new_bytes.clone()]
             });
             if let Some(hunk) = matching {
                 hunk.decision = earlier_hunk.decision;
@@ -314,27 +327,35 @@ fn compute_hunks(old_text: &str, new_text: &str) -> Vec<Hunk> {
 /// Line hunks from Zed's line diff, or `None` when they would not reproduce the new text exactly
 /// (`line_diff` compares lines without their terminators, so newline-only changes are invisible to it).
 fn line_hunks(old_text: &str, new_text: &str) -> Option<Vec<Hunk>> {
-    let old_lines: Vec<&str> = old_text.split_inclusive('\n').collect();
-    let new_lines: Vec<&str> = new_text.split_inclusive('\n').collect();
+    let old_starts = line_starts(old_text);
+    let new_starts = line_starts(new_text);
+    let bytes = |starts: &[usize], rows: &Range<u32>| -> Option<Range<usize>> {
+        Some(*starts.get(rows.start as usize)?..*starts.get(rows.end as usize)?)
+    };
     let mut hunks = Vec::new();
     for (old_rows, new_rows) in language::line_diff(old_text, new_text) {
-        let old_hunk_text = old_lines
-            .get(old_rows.start as usize..old_rows.end as usize)?
-            .concat();
-        let new_hunk_text = new_lines
-            .get(new_rows.start as usize..new_rows.end as usize)?
-            .concat();
         hunks.push(Hunk {
+            old_bytes: bytes(&old_starts, &old_rows)?,
+            new_bytes: bytes(&new_starts, &new_rows)?,
             old_rows,
             new_rows,
-            old_text: old_hunk_text,
-            new_text: new_hunk_text,
             decision: HunkDecision::Pending,
             comment: None,
         });
     }
-    let reproduced = apply_hunks(old_text, &hunks, |_| true).ok()?;
+    let reproduced = apply_hunks(old_text, new_text, &hunks, |_| true).ok()?;
     (!hunks.is_empty() && reproduced == new_text).then_some(hunks)
+}
+
+/// The byte offset where each line starts, and the text's length at the end: line `n` is
+/// `starts[n]..starts[n + 1]`, its terminator included.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    if starts.last() != Some(&text.len()) {
+        starts.push(text.len());
+    }
+    starts
 }
 
 fn whole_text_hunk(old_text: &str, new_text: &str) -> Hunk {
@@ -342,16 +363,21 @@ fn whole_text_hunk(old_text: &str, new_text: &str) -> Hunk {
     Hunk {
         old_rows: 0..row_count(old_text),
         new_rows: 0..row_count(new_text),
-        old_text: old_text.to_string(),
-        new_text: new_text.to_string(),
+        old_bytes: 0..old_text.len(),
+        new_bytes: 0..new_text.len(),
         decision: HunkDecision::Pending,
         comment: None,
     }
 }
 
-fn apply_hunks(old_text: &str, hunks: &[Hunk], include: impl Fn(&Hunk) -> bool) -> Result<String> {
+fn apply_hunks(
+    old_text: &str,
+    new_text: &str,
+    hunks: &[Hunk],
+    include: impl Fn(&Hunk) -> bool,
+) -> Result<String> {
     let old_lines: Vec<&str> = old_text.split_inclusive('\n').collect();
-    let mut result = String::with_capacity(old_text.len());
+    let mut result = String::with_capacity(old_text.len().max(new_text.len()));
     let mut row = 0;
     for hunk in hunks {
         let start = hunk.old_rows.start as usize;
@@ -359,11 +385,12 @@ fn apply_hunks(old_text: &str, hunks: &[Hunk], include: impl Fn(&Hunk) -> bool) 
             .get(row..start)
             .context("hunks overlap or are out of order")?;
         result.extend(unchanged.iter().copied());
-        if include(hunk) {
-            result.push_str(&hunk.new_text);
+        let text = if include(hunk) {
+            new_text.get(hunk.new_bytes.clone())
         } else {
-            result.push_str(&hunk.old_text);
-        }
+            old_text.get(hunk.old_bytes.clone())
+        };
+        result.push_str(text.context("hunk outside its text")?);
         row = hunk.old_rows.end as usize;
     }
     let rest = old_lines
@@ -394,10 +421,9 @@ mod tests {
         let edit = edit(OLD, NEW);
         let hunks = edit.hunks();
         assert_eq!(hunks.len(), 2);
-        assert_eq!(hunks[0].old_text, "    one();\n");
-        assert_eq!(hunks[0].new_text, "    ONE();\n");
+        assert_eq!(edit.hunk_texts(0), Some(("    one();\n", "    ONE();\n")));
         assert_eq!(hunks[1].old_rows, 5..5);
-        assert_eq!(hunks[1].new_text, "    five();\n");
+        assert_eq!(edit.hunk_texts(1), Some(("", "    five();\n")));
         assert_eq!(edit.resolution(), Resolution::Pending { undecided: 2 });
         assert!(edit.apply_accepted().is_err());
         assert_eq!(edit.hunk_at_new_row(1), Some(0));
