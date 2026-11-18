@@ -992,6 +992,11 @@ impl Renderer<'_, '_> {
         let tooltip: Option<SharedString> = props
             .tooltip_text()
             .map(|text| SharedString::from(text.to_string()));
+        // Integration-5 A5: the accessible name is `accessible-label` (at most 256 bytes), else a
+        // non-empty label, else the tooltip, else the icon's name.
+        let accessible: Option<SharedString> = props
+            .accessible_label_text()
+            .map(|text| SharedString::from(text.to_string()));
         // Inside a row the whole row is the click target (`row-click`): row-local ids are not
         // surface ids, so a `click` on them would be ambiguous.
         let on_click = match scope {
@@ -1008,8 +1013,8 @@ impl Renderer<'_, '_> {
             && let Some(icon) = icon
         {
             // F16: an icon-only button is named by its tooltip, else by its icon.
-            let name: SharedString = tooltip
-                .clone()
+            let name: SharedString = accessible
+                .or_else(|| tooltip.clone())
                 .unwrap_or_else(|| format!("{icon:?}").into());
             IconButton::new(element_id, icon)
                 .icon_size(IconSize::Small)
@@ -1024,6 +1029,12 @@ impl Renderer<'_, '_> {
             Button::new(element_id, props.label.clone())
                 .style(style)
                 .disabled(props.disabled)
+                .when_some(
+                    accessible.or_else(|| {
+                        props.label.is_empty().then(|| tooltip.clone()).flatten()
+                    }),
+                    |this, name| this.aria_label(name),
+                )
                 .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(icon, |this, icon| {
                     this.start_icon(Icon::new(icon).size(IconSize::Small))
