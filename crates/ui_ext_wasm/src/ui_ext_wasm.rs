@@ -1220,6 +1220,9 @@ pub struct LoadOptions {
     /// `extension.toml`'s `version`, for the `user-agent` of `network:fetch`; set by
     /// [`UiExtension::load_checked`].
     pub extension_version: Option<String>,
+    /// Fyx's `proxy` setting for `network:fetch`, kept current by the host; `None` goes direct.
+    /// Environment proxies are never used.
+    pub proxy: Option<network::ProxySetting>,
     /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
     pub resolver: Option<Arc<dyn network::Resolve>>,
     /// `[[fyx_ui.processes]]`; [`UiExtension::load_checked`] sets it from the manifest. Applies
@@ -1286,6 +1289,7 @@ impl UiExtension {
             allow_staged,
             network_domains,
             extension_version,
+            proxy,
             resolver,
             processes,
             process_env,
@@ -1364,7 +1368,8 @@ impl UiExtension {
             let fetcher = network::Fetcher::new(
                 network::user_agent(&app_version, &extension_id, extension_version.as_deref()),
                 resolver,
-            );
+            )
+            .with_proxy(proxy.unwrap_or_default());
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
             // Only a 0.3 component has the `network` import.

@@ -357,3 +357,14 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   request with Zed's roots fails with `tls`.
 - Lock: ui_ext_wasm gains `http_client_tls` (dependency) and `rustls`, `tokio-rustls`
   (dev-dependencies), all already in the workspace.
+
+## 4.6 follow-up 6: Fyx's proxy setting (2026-11-18)
+
+- `network::ProxySetting`: a shared cell the host keeps current from Zed's `proxy` setting
+  (the raw value, not `ProxySettings::proxy_url()`, which falls back to the environment); each
+  request reads it. `http`, `https`, `socks5`, `socks5h` only; anything else goes direct.
+- `LoadOptions.proxy`; environment proxies stay off (`no_proxy()` first). The address checks
+  still run before a proxied request (the proxy resolves on its own); `localhost` is never
+  proxied. Tests: the CONNECT reaches the proxy, a private answer is refused before it,
+  `localhost` goes direct, clearing applies to the next request, the scheme rule.
+- For W3: set it in ui_ext_host from `ProxySettings::get_global(cx).proxy` and on each change.
