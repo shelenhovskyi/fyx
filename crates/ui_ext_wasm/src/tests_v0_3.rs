@@ -11,6 +11,8 @@ use super::*;
 
 const SURFACE: &str = "probe";
 
+mod edit_observe;
+
 fn probe_v0_3_wasm() -> Vec<u8> {
     crate::test_support::fixture_wasm("fyx_ui_test_probe_v0_3")
 }

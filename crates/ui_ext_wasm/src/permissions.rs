@@ -152,6 +152,25 @@ pub trait CapabilityCheck: Send + Sync + 'static {
     }
 }
 
+/// The broker when a T2 operation is applied (design.md §0.3 step 3, §7): `granted` goes
+/// ahead, `ask` waits for the prompt, anything else refuses. Without a broker, T2 is refused.
+pub(crate) async fn consent(
+    broker: Option<&Arc<dyn CapabilityCheck>>,
+    extension_id: &str,
+    capability: &str,
+) -> bool {
+    let Some(broker) = broker else {
+        return false;
+    };
+    match broker.state(extension_id, capability) {
+        PermissionState::Granted => true,
+        PermissionState::Ask => {
+            broker.request(extension_id, capability).await == PermissionState::Granted
+        }
+        PermissionState::Denied | PermissionState::Unavailable => false,
+    }
+}
+
 /// The check when the host gave none: T1 and T2 are denied (T0 needs no grant).
 pub(crate) fn check_without_broker(
     check: Option<&Arc<dyn CapabilityCheck>>,

@@ -42,6 +42,21 @@
 //!
 //! Outcomes: `output <id> <stdout|stderr> <text>`, `exited <id> <code|none> <killed>`,
 //! `spawn-failed <id> <denied|not-found|limit-exceeded|io>`.
+//!
+//! `workspace:edit`, by the same commands:
+//! - `edit [label=<label>] [expect=<version>] [create] <target>@<l>.<c>-<l>.<c>=<text>...`: one
+//!   `apply-edit`; each word is a text edit, consecutive words of one target make one file edit;
+//!   the target is a worktree-relative path, `#<n>` a document id; `_` in the text is a space and
+//!   an empty text deletes; reports the id or the error code;
+//! - `edit-trap <same>`: the edit, then a trap.
+//!
+//! Outcome: `edit-done <id> ok` or `edit-done <id> err <code>`.
+//!
+//! `agent:observe`: `observe start` (`done` or the error code), `observe stop` (`done`).
+//! Outcomes: `agent snapshot <reviews>`, `agent <opened|updated|resolved> <review> <session>
+//! <turn> <hunks> <truncated>`, `agent closed <review>`, `agent turn-ended <turn> <files>`,
+//! `agent unreviewed <turn> <files>`, `agent review-mode <on>`, where `<reviews>` is the
+//! comma-separated `<review>:<session>:<turn>:<hunks>:<truncated>` of each.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.3.0",
@@ -54,6 +69,7 @@ use fyx::ui::network;
 use fyx::ui::permissions;
 use fyx::ui::process;
 use fyx::ui::types::*;
+use fyx::ui::{agent_observe, documents, workspace_edit};
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(link_section = "fyx:ui-api-version")]
@@ -486,6 +502,16 @@ impl Guest for Probe {
                     ["kill", id] => vec![outcome(process::kill(
                         id.parse().map_err(|e| format!("{e}"))?,
                     ))],
+                    ["edit", rest @ ..] => vec![apply_edit(rest)?],
+                    ["edit-trap", rest @ ..] => {
+                        apply_edit(rest)?;
+                        panic!("trap after an edit")
+                    }
+                    ["observe", "start"] => vec![outcome(agent_observe::start())],
+                    ["observe", "stop"] => {
+                        agent_observe::stop();
+                        vec!["done".to_string()]
+                    }
                     _ => return Err(format!("no command {command:?}")),
                 };
                 Ok(Update::Replace(vec![text(1, &report.join(" | "))]))
@@ -569,6 +595,19 @@ impl Guest for Probe {
                     process::SpawnError::Io(_) => "io",
                 }
             ),
+            fyx::ui::io::IoEvent::EditDone((id, Ok(()))) => format!("edit-done {id} ok"),
+            fyx::ui::io::IoEvent::EditDone((id, Err(error))) => format!(
+                "edit-done {id} err {}",
+                match error {
+                    workspace_edit::EditError::Denied => "denied",
+                    workspace_edit::EditError::Conflict(_) => "conflict",
+                    workspace_edit::EditError::NotAllowed(_) => "not-allowed",
+                    workspace_edit::EditError::NotFound(_) => "not-found",
+                    workspace_edit::EditError::Invalid(_) => "invalid",
+                    workspace_edit::EditError::Cancelled => "cancelled",
+                }
+            ),
+            fyx::ui::io::IoEvent::Agent(event) => format!("agent {}", agent_report(&event)),
             fyx::ui::io::IoEvent::PermissionChanged((capability, state)) => {
                 format!("permission-changed {capability:?} {state:?}")
             }
@@ -616,6 +655,122 @@ impl Guest for Probe {
         _event: fyx::ui::requests::PickerSourceEvent,
     ) -> Result<(), String> {
         Err("unsupported".into())
+    }
+}
+
+fn position(text: &str) -> Result<documents::Position, String> {
+    let (line, column) = text
+        .split_once('.')
+        .ok_or("a position is <line>.<column>")?;
+    Ok(documents::Position {
+        line: line.parse().map_err(|e| format!("{e}"))?,
+        column: column.parse().map_err(|e| format!("{e}"))?,
+    })
+}
+
+/// The `edit` command: see the module doc.
+fn apply_edit(words: &[&str]) -> Result<String, String> {
+    let mut label = "Probe edit".to_string();
+    let mut expected_version = None;
+    let mut create = false;
+    let mut files: Vec<(String, workspace_edit::FileEdit)> = Vec::new();
+    for word in words {
+        if let Some(value) = word.strip_prefix("label=") {
+            label = value.replace('_', " ");
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("expect=") {
+            expected_version = Some(value.parse().map_err(|e| format!("{e}"))?);
+            continue;
+        }
+        if *word == "create" {
+            create = true;
+            continue;
+        }
+        let (target, edit) = word
+            .split_once('@')
+            .ok_or("an edit is <target>@<range>=<text>")?;
+        let (range, text) = edit
+            .split_once('=')
+            .ok_or("an edit is <target>@<range>=<text>")?;
+        let (start, end) = range.split_once('-').ok_or("a range is <start>-<end>")?;
+        let text_edit = workspace_edit::TextEdit {
+            range: documents::TextRange {
+                start: position(start)?,
+                end: position(end)?,
+            },
+            new_text: text.replace('_', " "),
+        };
+        match files.last_mut() {
+            Some((last, file)) if last == target => file.edits.push(text_edit),
+            _ => files.push((
+                target.to_string(),
+                workspace_edit::FileEdit {
+                    target: match target.strip_prefix('#') {
+                        Some(id) => workspace_edit::EditTarget::Document(
+                            id.parse().map_err(|e| format!("{e}"))?,
+                        ),
+                        None => workspace_edit::EditTarget::File(documents::FileRef {
+                            worktree: None,
+                            path: target.to_string(),
+                        }),
+                    },
+                    expected_version: None,
+                    create: false,
+                    edits: vec![text_edit],
+                },
+            )),
+        }
+    }
+    let files = files
+        .into_iter()
+        .map(|(_, mut file)| {
+            file.expected_version = expected_version;
+            file.create = create;
+            file
+        })
+        .collect();
+    Ok(
+        match workspace_edit::apply_edit(&workspace_edit::WorkspaceEdit { label, files }) {
+            Ok(id) => id.to_string(),
+            Err(error) => code(&error).to_string(),
+        },
+    )
+}
+
+fn review_report(info: &agent_observe::ReviewInfo) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        info.review,
+        info.session,
+        info.turn,
+        info.hunks.len(),
+        info.truncated
+    )
+}
+
+fn agent_report(event: &agent_observe::AgentEvent) -> String {
+    use agent_observe::AgentEvent;
+    match event {
+        AgentEvent::Snapshot(reviews) => format!(
+            "snapshot {}",
+            reviews
+                .iter()
+                .map(review_report)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        AgentEvent::Opened(info) => format!("opened {}", review_report(info).replace(':', " ")),
+        AgentEvent::Updated(info) => format!("updated {}", review_report(info).replace(':', " ")),
+        AgentEvent::Resolved(info) => {
+            format!("resolved {}", review_report(info).replace(':', " "))
+        }
+        AgentEvent::Closed(review) => format!("closed {review}"),
+        AgentEvent::TurnEnded((turn, files)) => format!("turn-ended {turn} {}", files.len()),
+        AgentEvent::UnreviewedChanges((turn, files)) => {
+            format!("unreviewed {turn} {}", files.len())
+        }
+        AgentEvent::ReviewMode(on) => format!("review-mode {on}"),
     }
 }
 

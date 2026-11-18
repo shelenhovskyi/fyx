@@ -18,7 +18,7 @@ use ui_ext::{
 use crate::{
     UiState,
     conversions::{self, unsupported},
-    network,
+    edit, network, observe,
     permissions::PermissionState,
     process,
 };
@@ -38,8 +38,9 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
-    notifications as wit_notifications, process as wit_process, types as wit,
+    agent_observe as wit_observe, documents as wit_documents, host as wit_host,
+    images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
+    process as wit_process, types as wit, workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(denied: wit_host::HostErrorCode::Denied);
@@ -124,24 +125,9 @@ impl wit_network::Host for UiState {
 }
 
 impl UiState {
-    /// The broker for `process:spawn` at every call: `ask` is accepted (the prompt comes when
-    /// the spawn is applied), `denied` and `unavailable` refuse.
+    /// The broker for `process:spawn` at every call (see [`UiState::permit_t2`]).
     fn permit_process(&self) -> Result<(), wit_host::HostError> {
-        if !self.api.declares(process::CAPABILITY_PROCESS) {
-            return Err(model::HostError {
-                code: model::HostErrorCode::NotPermitted,
-                message: format!("{:?} is not in the manifest", process::CAPABILITY_PROCESS),
-            }
-            .into());
-        }
-        match self.permission_state(process::CAPABILITY_PROCESS) {
-            PermissionState::Granted | PermissionState::Ask => Ok(()),
-            state => Err(model::HostError {
-                code: model::HostErrorCode::Denied,
-                message: format!("{} is {state:?}", process::CAPABILITY_PROCESS),
-            }
-            .into()),
-        }
+        self.permit_t2(process::CAPABILITY_PROCESS)
     }
 }
 
@@ -195,6 +181,204 @@ impl wit_process::Host for UiState {
     }
 }
 
+impl UiState {
+    /// The manifest and the broker for a T2 capability at every call: `ask` is accepted (the
+    /// prompt comes when the operation is applied), `denied` and `unavailable` refuse.
+    fn permit_t2(&self, capability: &str) -> Result<(), wit_host::HostError> {
+        if !self.api.declares(capability) {
+            return Err(model::HostError {
+                code: model::HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            }
+            .into());
+        }
+        match self.permission_state(capability) {
+            PermissionState::Granted | PermissionState::Ask => Ok(()),
+            state => Err(model::HostError {
+                code: model::HostErrorCode::Denied,
+                message: format!("{capability} is {state:?}"),
+            }
+            .into()),
+        }
+    }
+}
+
+fn file_ref(file: wit_documents::FileRef) -> process::FileRef {
+    process::FileRef {
+        worktree: file.worktree,
+        path: file.path,
+    }
+}
+
+fn wit_file_ref(file: process::FileRef) -> wit_documents::FileRef {
+    wit_documents::FileRef {
+        worktree: file.worktree,
+        path: file.path,
+    }
+}
+
+fn position(position: wit_documents::Position) -> edit::Position {
+    edit::Position {
+        line: position.line,
+        column: position.column,
+    }
+}
+
+impl wit_edit::Host for UiState {
+    fn apply_edit(
+        &mut self,
+        request: wit_edit::WorkspaceEdit,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        self.count_lifted_text(
+            request.label.len()
+                + request
+                    .files
+                    .iter()
+                    .map(|file| {
+                        let path = match &file.target {
+                            wit_edit::EditTarget::File(file) => file.path.len(),
+                            wit_edit::EditTarget::Document(_) => 0,
+                        };
+                        path + file
+                            .edits
+                            .iter()
+                            .map(|edit| edit.new_text.len())
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit_t2(edit::CAPABILITY_EDIT) {
+            return Ok(Err(error));
+        }
+        let request = edit::WorkspaceEdit {
+            label: request.label,
+            files: request
+                .files
+                .into_iter()
+                .map(|file| edit::FileEdit {
+                    target: match file.target {
+                        wit_edit::EditTarget::Document(id) => edit::EditTarget::Document(id),
+                        wit_edit::EditTarget::File(file) => edit::EditTarget::File(file_ref(file)),
+                    },
+                    expected_version: file.expected_version,
+                    create: file.create,
+                    edits: file
+                        .edits
+                        .into_iter()
+                        .map(|text_edit| edit::TextEdit {
+                            range: edit::TextRange {
+                                start: position(text_edit.range.start),
+                                end: position(text_edit.range.end),
+                            },
+                            new_text: text_edit.new_text,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        Ok(self.edit.apply(request).map_err(Into::into))
+    }
+}
+
+impl wit_observe::Host for UiState {
+    fn start(&mut self) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        if let Err(error) = self.permit_t2(observe::CAPABILITY_OBSERVE) {
+            return Ok(Err(error));
+        }
+        Ok(self.observe.start().map_err(Into::into))
+    }
+
+    fn stop(&mut self) -> wasmtime::Result<()> {
+        self.observe.stop();
+        Ok(())
+    }
+}
+
+fn resolution(resolution: observe::Resolution) -> wit_observe::Resolution {
+    match resolution {
+        observe::Resolution::Unchanged => wit_observe::Resolution::Unchanged,
+        observe::Resolution::Pending(count) => wit_observe::Resolution::Pending(count),
+        observe::Resolution::AcceptedAll => wit_observe::Resolution::AcceptedAll,
+        observe::Resolution::RejectedAll => wit_observe::Resolution::RejectedAll,
+        observe::Resolution::Partial(accepted, rejected) => {
+            wit_observe::Resolution::Partial((accepted, rejected))
+        }
+    }
+}
+
+fn rule(rule: observe::RuleKind) -> wit_observe::RuleKind {
+    match rule {
+        observe::RuleKind::AutoAccept => wit_observe::RuleKind::AutoAccept,
+        observe::RuleKind::AlwaysAsk => wit_observe::RuleKind::AlwaysAsk,
+        observe::RuleKind::Deny => wit_observe::RuleKind::Deny,
+    }
+}
+
+fn review_info(info: observe::ReviewInfo) -> wit_observe::ReviewInfo {
+    wit_observe::ReviewInfo {
+        review: info.review,
+        session: info.session,
+        turn: info.turn,
+        file: info.file.map(wit_file_ref),
+        source: match info.source {
+            observe::ReviewSource::Permission => wit_observe::ReviewSource::Permission,
+            observe::ReviewSource::Write => wit_observe::ReviewSource::Write,
+        },
+        rule: info.rule.map(rule),
+        resolution: resolution(info.resolution),
+        submitted: info.submitted,
+        hunks: info
+            .hunks
+            .into_iter()
+            .map(|hunk| wit_observe::HunkInfo {
+                old_start: hunk.old_start,
+                old_count: hunk.old_count,
+                new_start: hunk.new_start,
+                new_count: hunk.new_count,
+                old_text: hunk.old_text,
+                new_text: hunk.new_text,
+                decision: match hunk.decision {
+                    observe::HunkDecision::Pending => wit_observe::HunkDecision::Pending,
+                    observe::HunkDecision::Accepted => wit_observe::HunkDecision::Accepted,
+                    observe::HunkDecision::Rejected => wit_observe::HunkDecision::Rejected,
+                },
+                comment: hunk.comment,
+            })
+            .collect(),
+        truncated: info.truncated,
+    }
+}
+
+fn agent_event(event: observe::AgentEvent) -> wit_observe::AgentEvent {
+    match event {
+        observe::AgentEvent::Snapshot(reviews) => {
+            wit_observe::AgentEvent::Snapshot(reviews.into_iter().map(review_info).collect())
+        }
+        observe::AgentEvent::Opened(info) => wit_observe::AgentEvent::Opened(review_info(info)),
+        observe::AgentEvent::Updated(info) => wit_observe::AgentEvent::Updated(review_info(info)),
+        observe::AgentEvent::Resolved(info) => wit_observe::AgentEvent::Resolved(review_info(info)),
+        observe::AgentEvent::Closed(review) => wit_observe::AgentEvent::Closed(review),
+        observe::AgentEvent::TurnEnded(turn, files) => wit_observe::AgentEvent::TurnEnded((
+            turn,
+            files
+                .into_iter()
+                .map(|file| wit_observe::TurnFile {
+                    file: file.file.map(wit_file_ref),
+                    resolution: resolution(file.resolution),
+                    rule: file.rule.map(rule),
+                })
+                .collect(),
+        )),
+        observe::AgentEvent::UnreviewedChanges(turn, files) => {
+            wit_observe::AgentEvent::UnreviewedChanges((
+                turn,
+                files.into_iter().map(wit_file_ref).collect(),
+            ))
+        }
+        observe::AgentEvent::ReviewMode(on) => wit_observe::AgentEvent::ReviewMode(on),
+    }
+}
+
 /// An outcome for the `handle-io` export; `None` for a capability 0.3 has no name for.
 pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
     use bindings::fyx::ui::permissions as wit_permissions;
@@ -242,6 +426,18 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
                 },
             ))
         }
+        network::IoEvent::EditDone(id, result) => wit_io::IoEvent::EditDone((
+            id,
+            result.map_err(|error| match error {
+                edit::EditError::Denied => wit_edit::EditError::Denied,
+                edit::EditError::Conflict(why) => wit_edit::EditError::Conflict(why),
+                edit::EditError::NotAllowed(why) => wit_edit::EditError::NotAllowed(why),
+                edit::EditError::NotFound(why) => wit_edit::EditError::NotFound(why),
+                edit::EditError::Invalid(why) => wit_edit::EditError::Invalid(why),
+                edit::EditError::Cancelled => wit_edit::EditError::Cancelled,
+            }),
+        )),
+        network::IoEvent::Agent(event) => wit_io::IoEvent::Agent(agent_event(event)),
         network::IoEvent::FetchDone(id, result) => wit_io::IoEvent::FetchDone((
             id,
             result
@@ -302,13 +498,15 @@ conversions::conversions! {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 6] = [
+const LINKED_INTERFACES: [&str; 8] = [
     "types",
     "host",
     "images",
     "notifications",
     "network",
     "process",
+    "workspace-edit",
+    "agent-observe",
 ];
 
 /// Stubs the `fyx:ui` 0.3 interfaces `component` imports that this build does not implement yet,
@@ -497,5 +695,7 @@ pub(crate) fn add_to_linker(
     wit_notifications::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_network::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_process::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_edit::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_observe::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }
