@@ -5,7 +5,10 @@
 //! checks are `ui_ext::LiveIds`, which both use.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use ui_ext::image::{self, ImageFormat};
 
 use ui_ext::v0_2 as model;
 use ui_ext::{ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement};
@@ -54,6 +57,15 @@ pub enum HostEffect {
     },
     /// `remove-decoration`. No event.
     RemoveDecoration { id: String },
+    /// `images.add-image` (0.3): the bytes passed the size cap and the header checks of
+    /// `ui_ext::image::check_image_bytes`. `handle` never repeats within an instance.
+    AddImage {
+        handle: u32,
+        format: ImageFormat,
+        bytes: Arc<[u8]>,
+    },
+    /// `images.remove-image` of a live handle: nodes that show it fall back to their alt text.
+    RemoveImage { handle: u32 },
 }
 
 /// A transient activation (design.md, C): granted by `handle-event` for a click or Enter, it lasts
@@ -90,6 +102,9 @@ pub(crate) struct ApiState {
     pushes: usize,
     pushed_items: usize,
     decoration_effects: usize,
+    /// Live generated images (0.3), at most `ui_ext::image::MAX_GENERATED_IMAGES`.
+    images: BTreeSet<u32>,
+    next_image: u32,
 }
 
 impl ApiState {
@@ -106,6 +121,8 @@ impl ApiState {
             pushes: 0,
             pushed_items: 0,
             decoration_effects: 0,
+            images: BTreeSet::new(),
+            next_image: 1,
         }
     }
 
@@ -219,6 +236,7 @@ impl ApiState {
         update
             .check_caps(self.version.tree_limits())
             .map_err(|error| host_error(model::HostErrorCode::LimitExceeded, error.to_string()))?;
+        self.check_images(&surface_id, update_props(&update))?;
         let items = match &update {
             model::Update::Unchanged => 0,
             model::Update::Replace(nodes) => nodes.len(),
@@ -377,6 +395,107 @@ impl ApiState {
         self.decoration_effects += 1;
         self.effects.push(HostEffect::RemoveDecoration { id });
         Ok(())
+    }
+}
+
+impl ApiState {
+    /// `images.add-image` (0.3): declared `ui:images`, at most
+    /// `ui_ext::image::MAX_GENERATED_IMAGE_BYTES`, a PNG header within the side cap or a plain
+    /// SVG, and fewer than `MAX_GENERATED_IMAGES` live images. Handles are never reused.
+    pub(crate) fn add_image(
+        &mut self,
+        format: ImageFormat,
+        bytes: Vec<u8>,
+    ) -> Result<u32, model::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == image::CAPABILITY_IMAGES)
+        {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "images need {:?} in [fyx_ui].capabilities",
+                    image::CAPABILITY_IMAGES
+                ),
+            ));
+        }
+        image::check_image_bytes(format, &bytes, image::MAX_GENERATED_IMAGE_BYTES)
+            .map_err(|error| host_error(error.code(), error.to_string()))?;
+        if self.images.len() >= image::MAX_GENERATED_IMAGES {
+            let error = image::ImageError::TooManyImages;
+            return Err(host_error(error.code(), error.to_string()));
+        }
+        let handle = self.next_image;
+        self.next_image = handle.checked_add(1).ok_or_else(|| {
+            host_error(
+                model::HostErrorCode::LimitExceeded,
+                "this instance has used up its image handles",
+            )
+        })?;
+        self.images.insert(handle);
+        self.effects.push(HostEffect::AddImage {
+            handle,
+            format,
+            bytes: bytes.into(),
+        });
+        Ok(handle)
+    }
+
+    /// `images.remove-image`: unknown handles are ignored.
+    pub(crate) fn remove_image(&mut self, handle: u32) {
+        if self.images.remove(&handle) {
+            self.effects.push(HostEffect::RemoveImage { handle });
+        }
+    }
+
+    /// The `image` nodes among `props`, checked when an update or a reply for `surface_id` is
+    /// applied (design 0.3, section 12): the props rules, panels only, and a `generated` handle
+    /// that `add-image` returned earlier (decision D3). A handle removed since is fine: the
+    /// renderer draws the alt text for it (D2).
+    pub(crate) fn check_images<'a>(
+        &self,
+        surface_id: &str,
+        props: impl IntoIterator<Item = &'a model::Props>,
+    ) -> Result<(), model::HostError> {
+        for props in props {
+            let model::Props::Image(props) = props else {
+                continue;
+            };
+            image::check_image_props(props)
+                .and_then(|()| image::check_image_placement(self.live.surface_kind(surface_id)))
+                .map_err(|error| host_error(error.code(), error.to_string()))?;
+            if let image::ImageSource::Generated(handle) = props.source
+                && (handle == 0 || handle >= self.next_image)
+            {
+                return Err(host_error(
+                    model::HostErrorCode::InvalidArgument,
+                    format!("image handle {handle} was not returned by add-image"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `add-image` ever returned `handle` and it is still live.
+    pub(crate) fn image_is_live(&self, handle: u32) -> bool {
+        self.images.contains(&handle)
+    }
+}
+
+/// Every props value an update carries.
+pub(crate) fn update_props(update: &model::Update) -> Vec<&model::Props> {
+    match update {
+        model::Update::Unchanged => Vec::new(),
+        model::Update::Replace(nodes) => nodes.iter().map(|node| &node.props).collect(),
+        model::Update::Patches(patches) => patches
+            .iter()
+            .filter_map(|patch| match patch {
+                model::Patch::SetProps(_, props) => Some(props),
+                model::Patch::Insert(insert) => Some(&insert.node.props),
+                model::Patch::Remove(_) | model::Patch::InvalidateRows(_) => None,
+            })
+            .collect(),
     }
 }
 

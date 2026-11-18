@@ -92,7 +92,7 @@ pub fn check_loaded(
         Ok(bytes) => {
             inspect::check_component(&manifest, &bytes, &mut report);
             if depth == CheckDepth::Load && !report.has_errors() {
-                harness = run::load(&bytes, &mut report);
+                harness = run::load(&bytes, dir, &mut report);
                 if let Some(harness) = &harness {
                     run::check_surfaces(&manifest, harness, &mut report);
                 }

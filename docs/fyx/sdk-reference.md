@@ -186,9 +186,15 @@ checks nothing: the rules apply when a node goes into a tree.
 | `IconProps` | `IconProps::new(Icon)`: no colour; also `From<Icon>` | `.color(ColorToken)` |
 | `ListRow` | `list_row(index, build)` (below): indent 0 | `.with_indent(u8)`: nesting depth, at most 32 levels drawn |
 | `DiffViewProps` | `DiffViewProps::new(old_text, new_text)`: no language | `.language(name)` |
+| `ImageProps` (`fyx-ui-0-3`) | `ImageProps::asset(path, alt)`: a file of the package's `assets/` folder<br>`ImageProps::generated(GeneratedImage, alt)`: from `add_image`<br>both `ImageFit::Contain`, the image's own size, no tint | `.size(width, height)`, `.width(u32)`, `.height(u32)`, `.fit(ImageFit)`, `.tint(ColorToken)` (SVG only) |
 
-`From<XProps> for Props` exists for all eight records, so any function that takes
-`impl Into<Props>` accepts them directly.
+`From<XProps> for Props` exists for all eight records (nine with `ImageProps`), so any function
+that takes `impl Into<Props>` accepts them directly.
+
+An `image` node is for panels only. The host checks the path syntax, `alt` (1 to 256 bytes), the
+box (1 to 2048 per side) and that a generated handle came from `add_image`, when it applies the
+update. A missing or broken asset, a freed handle, or `tint` on a PNG is not an update error: the
+renderer draws the alt text (or the PNG untinted) and logs a warning.
 
 `Icon` is the frozen icon set of `fyx:ui` 0.2: `Icon::all()` lists all 101 in WIT order, and
 `icon.name()` is the WIT name, such as `arrow-up`. An extension exported as 0.1 sends the upstream
@@ -252,6 +258,8 @@ impl<'a> TreeBuilder<'a> {
     pub fn icon(&mut self, props: impl Into<IconProps>) -> NodeId;
     pub fn markdown(&mut self, source: impl Into<String>) -> NodeId;
     pub fn diff_view(&mut self, props: DiffViewProps) -> NodeId;
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn image(&mut self, props: ImageProps) -> NodeId;
     pub fn nodes(&self) -> &[Node];
     pub fn finish(self) -> Vec<Node>;
 }

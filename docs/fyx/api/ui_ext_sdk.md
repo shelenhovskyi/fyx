@@ -50,6 +50,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `IdAllocator::peek` | method | The id the next call to `IdAllocator::allocate` returns. |
 | `IdAllocator::starting_at` | method |  |
 | `ImageFormat` | re-export | `bindings::fyx::ui::images::ImageFormat` |
+| `ImageProps::asset` | method | A PNG or SVG file of the package's `assets/` folder, such as `assets/logo.svg`: scaled to fit its box (`contain`), with the image's own size and no tint. |
+| `ImageProps::fit` | method |  |
+| `ImageProps::generated` | method | An image registered with `add_image`(crate::add_image). |
+| `ImageProps::height` | method | Only the height; the width follows the aspect ratio. |
+| `ImageProps::size` | method | The box in logical pixels; the image keeps its aspect ratio inside it (`ImageProps::fit`). |
+| `ImageProps::tint` | method | SVG only: draw it as a one-colour mask in this theme colour, like the host's own icons. |
+| `ImageProps::width` | method | Only the width; the height follows the aspect ratio. |
 | `InputProps::new` | method |  |
 | `InputProps::placeholder` | method |  |
 | `InputProps::secret` | method | Masks the text on screen (passwords, tokens). The value still reaches the extension. |
@@ -111,6 +118,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeBuilder::finish` | method |  |
 | `TreeBuilder::flex` | method | Adds a flex node and the children `build_children` adds, and returns the node's id. Only flex nodes have children; the host rejects children under any other kind. |
 | `TreeBuilder::icon` | method |  |
+| `TreeBuilder::image` | method | `fyx:ui` 0.3: an image node (see `ImageProps`). |
 | `TreeBuilder::input` | method |  |
 | `TreeBuilder::list` | method | A virtualized list; the host pulls its rows with `list-rows`. |
 | `TreeBuilder::markdown` | method |  |

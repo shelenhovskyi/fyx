@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Builds the Fyx demo UI extensions for wasm32-wasip2 and copies each component next to its
 # extension.toml as fyx_ui.wasm, so each demo directory loads as a UI extension.
-# Usage: script/fyx-build-demos [--release] [--fyx-ui-0-2] [extra cargo build args, e.g. -j 2]
+# Usage: script/fyx-build-demos [--release] [--fyx-ui-0-2 | --fyx-ui-0-3] [extra cargo build args,
+# e.g. -j 2]
 #
 # --fyx-ui-0-2 builds every demo's fyx:ui 0.2 world (its `fyx-ui-0-2` feature) instead, for a dev
 # build whose host runs 0.2. It leaves the repository alone: each demo goes to
-# <target>/fyx-demos-v0_2/<demo>/, with fyx_ui.wasm and a copy of extension.toml whose api_version
-# is 0.2.0. The 0.2 builds use the target directory <target>/fyx-demos-v0_2/target, so they do not
-# overwrite the 0.1 ones.
+# <target>/fyx-demos-v0_2/<demo>/, with fyx_ui.wasm, a copy of extension.toml whose api_version
+# is 0.2.0, and a copy of its assets/ folder if it has one. The 0.2 builds use the target
+# directory <target>/fyx-demos-v0_2/target, so they do not overwrite the 0.1 ones.
+# --fyx-ui-0-3 does the same for the staged 0.3 world (`fyx-ui-0-3`, api_version 0.3.0) in
+# <target>/fyx-demos-v0_3/; dev builds run staged worlds.
 #
 # Then point the dev build at the directories it prints, e.g. on Windows:
 #   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;...
@@ -15,9 +18,10 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-demos=(fyx_demo_counter fyx_demo_todo fyx_demo_gallery fyx_demo_markdown fyx_demo_gitstatus fyx_demo_form fyx_demo_decorations)
+demos=(fyx_demo_counter fyx_demo_todo fyx_demo_gallery fyx_demo_markdown fyx_demo_gitstatus fyx_demo_form fyx_demo_decorations fyx_demo_images)
 profile=debug
-v0_2=false
+# The world to build: empty for the default 0.1, or 0_2 / 0_3.
+world=""
 cargo_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -26,8 +30,13 @@ while [[ $# -gt 0 ]]; do
             cargo_args+=(--release)
             shift
             ;;
-        --fyx-ui-0-2)
-            v0_2=true
+        --fyx-ui-0-2 | --fyx-ui-0-3)
+            if [[ -n "$world" ]]; then
+                echo "fyx-build-demos: pass at most one of --fyx-ui-0-2 and --fyx-ui-0-3" >&2
+                exit 1
+            fi
+            world=${1#--fyx-ui-}
+            world=${world/-/_}
             shift
             ;;
         *) break ;;
@@ -35,7 +44,7 @@ while [[ $# -gt 0 ]]; do
 done
 for demo in "${demos[@]}"; do
     cargo_args+=(-p "$demo")
-    if $v0_2; then cargo_args+=(--features "$demo/fyx-ui-0-2"); fi
+    if [[ -n "$world" ]]; then cargo_args+=(--features "$demo/fyx-ui-${world/_/-}"); fi
 done
 
 # Honors CARGO_TARGET_DIR and .cargo/config.toml; JSON escapes Windows backslashes, so turn
@@ -52,8 +61,8 @@ fi
 
 out_root=""
 build_dir="$target_dir"
-if $v0_2; then
-    out_root="$target_dir/fyx-demos-v0_2"
+if [[ -n "$world" ]]; then
+    out_root="$target_dir/fyx-demos-v$world"
     build_dir="$out_root/target"
     cargo_args+=(--target-dir "$build_dir")
 fi
@@ -64,13 +73,16 @@ separator=":"
 dirs=()
 for demo in "${demos[@]}"; do
     component="$build_dir/wasm32-wasip2/$profile/$demo.wasm"
-    if $v0_2; then
+    if [[ -n "$world" ]]; then
+        version="${world/_/.}.0"
         dir="$out_root/$demo"
         mkdir -p "$dir"
         cp "$component" "$dir/fyx_ui.wasm"
-        sed 's/^api_version = "0\.1\.0"$/api_version = "0.2.0"/' "extensions/$demo/extension.toml" \
+        rm -rf "$dir/assets"
+        if [[ -d "extensions/$demo/assets" ]]; then cp -R "extensions/$demo/assets" "$dir/assets"; fi
+        sed "s/^api_version = \"0\\.1\\.0\"\$/api_version = \"$version\"/" "extensions/$demo/extension.toml" \
             > "$dir/extension.toml"
-        if ! grep -q '^api_version = "0.2.0"$' "$dir/extension.toml"; then
+        if ! grep -q "^api_version = \"$version\"\$" "$dir/extension.toml"; then
             echo "fyx-build-demos: extensions/$demo/extension.toml has no api_version = \"0.1.0\" line" >&2
             exit 1
         fi

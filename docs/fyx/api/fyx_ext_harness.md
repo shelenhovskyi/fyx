@@ -30,13 +30,15 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::find` | method | The first node in tree order whose props match. |
 | `Harness::find_button` | method |  |
 | `Harness::find_text` | method |  |
-| `Harness::from_env` | method | Loads the component named by `FYX_EXT_COMPONENT`, which `fyx-ext test` sets. |
+| `Harness::from_env` | method | Loads what `fyx-ext test` names: the extension folder in `FYX_EXT_PACKAGE`, or else the component in `FYX_EXT_COMPONENT`. |
 | `Harness::handle_event_raw` | method | Calls `handle-event` without a mounted surface or applying the reply: what the host runtime does before the renderer applies anything. Pushes are applied and recorded as usual. `Err` means the call trapped or overran its budget, which disables the extension. |
 | `Harness::handle_event_raw_v0_2` | method | `Harness::handle_event_raw` in the 0.2 model, with every effect. |
+| `Harness::image_failures` | method | Image nodes the renderer would draw as their alt text, with the reason (design 0.3, section 12; decisions D1, D2, D4): an asset that is missing, outside the package, too large or not a valid PNG or SVG, a generated image that is no longer live, or `tint` on a PNG (drawn untinted). None of them is an update error. |
 | `Harness::is_shown` | method | Whether a modal is open: shown by the extension and not hidden, removed or dismissed. |
 | `Harness::limits` | method |  |
 | `Harness::load` | method | Compiles and instantiates a component with every capability (`ALL_CAPABILITIES`) and asks it for its surfaces. |
 | `Harness::load_file` | method |  |
+| `Harness::load_package` | method | Loads an extension folder as Fyx installs it: `extension.toml` (its `[fyx_ui]` `component` and `capabilities`), the component, and `assets/` for image nodes. |
 | `Harness::load_with_capabilities` | method | Like `Harness::load`, with the `[fyx_ui].capabilities` of a manifest. |
 | `Harness::logs` | method | Everything the extension logged so far, and the harness's own `warn` lines about what the renderer would have dropped. |
 | `Harness::mount` | method | Mounts a live surface or decoration (again, if it was mounted) and returns its validated tree. A modal mounts only while it is shown. |
@@ -52,6 +54,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::tick` | method | Runs the surface's pending tick, as the host does when it falls due, and applies its effects, then its reply. It fails without a call when no tick is pending, when the surface is not mounted, or after `MAX_CONSECUTIVE_TICK_ERRORS` failed ticks in a row until the next event on the surface. |
 | `Harness::tree` | method | The tree of a mounted surface or decoration, as the host holds it. |
 | `Harness::ui_api_version` | method |  |
+| `Harness::with_package_root` | method | Checks asset images against the extension folder `dir`, as `Harness::load_package` does, for a harness loaded from bytes. |
 | `HostEffect` | re-export | `api_state::HostEffect` |
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
 | `INSTANCES_LIMIT` | const |  |
@@ -70,6 +73,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Outcome::invalidated` | field | The reply's `invalidate-rows` patches, in order. |
 | `Outcome::touched` | field | Node ids the reply touched, including the targets of `invalidate-rows`. |
 | `Outcome::update` | field | The call's own reply, applied to the surface after the effects. For `dismissed` it is not applied: the modal has no tree any more. |
+| `PACKAGE_VARIABLE` | const | `fyx-ext test` sets it to the extension folder; `Harness::from_env` prefers it. |
 | `Pushed` | struct | An update the extension pushed during a call, in the 0.1 model. |
 | `Pushed::surface_id` | field |  |
 | `Pushed::update` | field |  |

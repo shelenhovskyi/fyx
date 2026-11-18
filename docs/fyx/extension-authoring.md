@@ -177,14 +177,18 @@ There are two levels, and `fyx-ext test` runs both.
 1. builds and checks the extension;
 2. mounts every surface and fetches the first 50 rows of every list and table, reporting what
    the host would reject, and reporting `log` errors as warnings;
-3. runs `cargo test` on the crate with `FYX_EXT_COMPONENT` set to the built component.
+3. runs `cargo test` on the crate with `FYX_EXT_COMPONENT` set to the built component and
+   `FYX_EXT_PACKAGE` to the extension folder.
 
-`Harness::from_env()` reads that variable, so headless tests skip under a plain `cargo test`.
+`Harness::from_env()` reads those variables (the folder first), so headless tests skip under a
+plain `cargo test`. `Harness::load_package(dir)` loads a folder as Fyx installs it: the
+`[fyx_ui]` component and capabilities of its `extension.toml`, and its `assets/` for image nodes.
 The harness API: `mount`, `event`, `click(surface, label)`, `rows`, `tree`, `text`, `find_text`,
 `find_button`, plus `pushed()`, `logs()` and `disabled()` for assertions. The full list is in the
 [harness reference](api/fyx_ext_harness.md).
 
-The harness runs `fyx:ui` 0.1 and 0.2 components. For 0.2, the `*_v0_2` methods (`event_v0_2`,
+The harness runs `fyx:ui` 0.1, 0.2 and staged 0.3 components. For 0.2 and 0.3, the `*_v0_2`
+methods (`event_v0_2`,
 `click_v0_2`, `rows_v0_2`, `props_v0_2`, `nodes_v0_2`, `surfaces_v0_2`) show the 0.2 model:
 tooltips, `secret`, `selected`, `indent` and `invalidate-rows`. Each returns an `Outcome` with the
 call's effects. On top of these:
@@ -195,6 +199,12 @@ call's effects. On top of these:
 - `decoration(id)` and `decorations()` list placed decorations; `tree(id)` holds their trees.
 - `effects()` records every host call's effect.
 - `Harness::load_with_capabilities` loads with a manifest's capabilities instead of all of them.
+- `image_failures()` (0.3) lists the image nodes the renderer would draw as alt text: an asset
+  that is missing, outside the package, over 2 MiB or not a valid PNG or SVG, a freed generated
+  image, and `tint` on a PNG. Each is also a `warn` log line, and `fyx-ext test` reports them as
+  warnings. Assets are only checked in a harness made by `load_package` (or `fyx-ext test`).
+- In 0.3, `canvas` nodes and picker surfaces are refused as not supported yet, and the 0.3
+  interfaces the host does not implement yet (`decorations` included) trap when called.
 
 The host's 0.2 rules apply: each import is checked when it is called, and its effect applies after
 the call. Showing a modal needs a click or Enter, a modal mounts when it is shown, and three failed
@@ -333,7 +343,9 @@ script/fyx-build-demos --release
 `script/fyx-build-demos --fyx-ui-0-2` builds every demo's `fyx:ui` 0.2 world instead, for a dev
 build whose host runs 0.2. It leaves the repository alone: each demo goes to
 `<target>/fyx-demos-v0_2/<demo>/`, with a copy of its `extension.toml` set to
-`api_version = "0.2.0"`, and the printed `FYX_UI_DEV_EXTENSIONS` line points there.
+`api_version = "0.2.0"` and of its `assets/` folder, and the printed `FYX_UI_DEV_EXTENSIONS` line
+points there. `--fyx-ui-0-3` does the same for the staged 0.3 world in
+`<target>/fyx-demos-v0_3/`.
 
 <!-- script/fyx-build-demos -->
 
@@ -839,6 +851,7 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
 | `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
+| `extensions/fyx_demo_images` | images (0.3): SVG and PNG assets, `tint`, `contain` and `cover`, a chart made at run time with `add_image` and swapped on Shuffle, a missing asset's alt text, thumbnails in list rows |
 
 `script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a
 headless test of the counter's contract; run it with
