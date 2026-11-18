@@ -12,7 +12,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 
-use crate::{DecorationLocation, HostError, ImageFormat, LogLevel, Node, Surface, Update};
+#[cfg(feature = "fyx-ui-0-3")]
+use crate::ImageFormat;
+use crate::{DecorationLocation, HostError, LogLevel, Node, Surface, Update};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
@@ -31,7 +33,9 @@ unsafe extern "Rust" {
         nodes: &[Node],
     ) -> Result<(), HostError>;
     safe fn __fyx_ui_remove_decoration(id: &str) -> Result<(), HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_add_image(format: ImageFormat, bytes: &[u8]) -> Result<u32, HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_remove_image(image: u32);
 }
 
@@ -60,20 +64,24 @@ pub enum HostEffect {
     },
     RemoveDecoration(String),
     /// `add_image`; the bytes are left out of the record, only their length is kept.
+    #[cfg(feature = "fyx-ui-0-3")]
     AddImage {
         image: GeneratedImage,
         format: ImageFormat,
         len: usize,
     },
+    #[cfg(feature = "fyx-ui-0-3")]
     RemoveImage(GeneratedImage),
 }
 
 /// A generated image from [`add_image`], for `ImageProps::generated`. `Copy` and without `Drop`:
 /// a handle outlives remounts, and freeing it with [`remove_image`] is the extension's decision,
 /// as removing a decoration is.
+#[cfg(feature = "fyx-ui-0-3")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GeneratedImage(u32);
 
+#[cfg(feature = "fyx-ui-0-3")]
 impl GeneratedImage {
     /// The handle as the WIT carries it, in `image-source::generated`.
     pub fn handle(self) -> u32 {
@@ -84,6 +92,7 @@ impl GeneratedImage {
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static EFFECTS: RefCell<Vec<HostEffect>> = const { RefCell::new(Vec::new()) };
+    #[cfg(feature = "fyx-ui-0-3")]
     static NEXT_IMAGE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
 }
 
@@ -247,6 +256,7 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError> {
 /// at once (the PNG header, or that an SVG is plain text) and decodes them after the call; until
 /// then, and if decoding fails, image nodes show their alt text. Off WASM it hands out handles
 /// 1, 2, … and records [`HostEffect::AddImage`].
+#[cfg(feature = "fyx-ui-0-3")]
 pub fn add_image(format: ImageFormat, bytes: &[u8]) -> Result<GeneratedImage, HostError> {
     #[cfg(target_arch = "wasm32")]
     return __fyx_ui_add_image(format, bytes).map(GeneratedImage);
@@ -264,6 +274,7 @@ pub fn add_image(format: ImageFormat, bytes: &[u8]) -> Result<GeneratedImage, Ho
 
 /// `fyx:ui` 0.3: frees a generated image; nodes that still show it show their alt text. An
 /// unknown handle is ignored.
+#[cfg(feature = "fyx-ui-0-3")]
 pub fn remove_image(image: GeneratedImage) {
     #[cfg(target_arch = "wasm32")]
     __fyx_ui_remove_image(image.0);
@@ -271,11 +282,16 @@ pub fn remove_image(image: GeneratedImage) {
     record(HostEffect::RemoveImage(image)).ok();
 }
 
-/// The `fyx:ui@0.3.0` implementations behind the shims of `register_extension!(T)`.
+/// The implementations behind the shims of `register_extension!(T)`: the SDK's own world, 0.2
+/// or (with `fyx-ui-0-3`) 0.3.
 #[doc(hidden)]
-pub mod v0_3 {
-    use crate::bindings::fyx::ui::{decorations, host, images};
-    use crate::{DecorationLocation, HostError, ImageFormat, LogLevel, Node, Surface, Update};
+pub mod newest {
+    #[cfg(feature = "fyx-ui-0-3")]
+    use crate::ImageFormat;
+    #[cfg(feature = "fyx-ui-0-3")]
+    use crate::bindings::fyx::ui::images;
+    use crate::bindings::fyx::ui::{decorations, host};
+    use crate::{DecorationLocation, HostError, LogLevel, Node, Surface, Update};
 
     pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION;
 
@@ -323,10 +339,12 @@ pub mod v0_3 {
         decorations::remove_decoration(id)
     }
 
+    #[cfg(feature = "fyx-ui-0-3")]
     pub fn add_image(format: ImageFormat, bytes: &[u8]) -> Result<u32, HostError> {
         images::add_image(format, bytes)
     }
 
+    #[cfg(feature = "fyx-ui-0-3")]
     pub fn remove_image(image: u32) {
         images::remove_image(image);
     }

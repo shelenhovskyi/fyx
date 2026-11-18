@@ -81,15 +81,7 @@ fn node(id: NodeId, parent: Option<NodeId>, props: impl Into<Props>) -> Node {
 fn outcome(result: Result<(), HostError>) -> String {
     match result {
         Ok(()) => "ok".into(),
-        Err(error) => match error.code {
-            HostErrorCode::UnknownSurface => "unknown-surface",
-            HostErrorCode::LimitExceeded => "limit-exceeded",
-            HostErrorCode::InvalidArgument => "invalid-argument",
-            HostErrorCode::NotPermitted => "not-permitted",
-            HostErrorCode::Unavailable => "unavailable",
-            HostErrorCode::Denied => "denied",
-        }
-        .into(),
+        Err(error) => error.code.name().into(),
     }
 }
 
@@ -100,12 +92,7 @@ fn set_status(status: &str) -> Update {
 }
 
 fn note_location() -> DecorationLocation {
-    DecorationLocation {
-        target: DecorationTarget::Path("src/lib.rs".into()),
-        line: 3,
-        placement: DecorationPlacement::Below,
-        height_lines: Some(2),
-    }
+    DecorationLocation::at("src/lib.rs", 3, DecorationPlacement::Below).height_lines(2)
 }
 
 fn note_tree() -> Vec<Node> {

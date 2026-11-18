@@ -412,9 +412,10 @@ impl Extension for FormPanel {
             UiEvent::Click(_)
             | UiEvent::RowClick(_)
             | UiEvent::RowSelected(_)
-            | UiEvent::Dismissed(_)
-            | UiEvent::Orphaned
-            | UiEvent::CanvasClick(_) => Ok(Update::Unchanged),
+            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
+            // The SDK's fyx-ui-0-3 feature adds events this demo never gets.
+            #[allow(unreachable_patterns)]
+            _ => Ok(Update::Unchanged),
         }
     }
 }

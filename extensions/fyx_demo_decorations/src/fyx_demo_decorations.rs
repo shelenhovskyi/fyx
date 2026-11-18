@@ -147,14 +147,7 @@ fn decoration_index(id: &str) -> Option<usize> {
 }
 
 fn host_error(error: HostError) -> String {
-    let code = match error.code {
-        HostErrorCode::UnknownSurface => "unknown-surface",
-        HostErrorCode::LimitExceeded => "limit-exceeded",
-        HostErrorCode::InvalidArgument => "invalid-argument",
-        HostErrorCode::NotPermitted => "not-permitted",
-        HostErrorCode::Unavailable => "unavailable",
-        HostErrorCode::Denied => "denied",
-    };
+    let code = error.code.name();
     format!("{code}: {}", error.message)
 }
 
@@ -218,12 +211,8 @@ impl Highlighter {
     }
 
     fn location(comment: &Comment) -> DecorationLocation {
-        DecorationLocation {
-            target: DecorationTarget::Path(comment.path.to_string()),
-            line: comment.line,
-            placement: DecorationPlacement::Above,
-            height_lines: Some(1),
-        }
+        DecorationLocation::at(comment.path, comment.line, DecorationPlacement::Above)
+            .height_lines(1)
     }
 
     /// Places or removes comment `index`'s decoration; `Err` is the host's refusal.

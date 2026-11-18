@@ -6,7 +6,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 
 | Item | Kind | Summary |
 |---|---|---|
-| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch). 0.3 is staged. |
+| `API_VERSION` | const |  |
+| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature. |
 | `API_VERSION_SECTION` | const | Name of the custom section `register_extension!` adds to every component, from which the host reads the version before instantiating it. |
 | `API_VERSION_SECTION_BYTES` | const | `API_VERSION` as stored in the section: three big-endian `u16`s, as in Zed's `zed:api-version`. |
 | `API_VERSION_V0_1` | const | The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1. |
@@ -18,6 +19,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `ButtonProps::new` | method |  |
 | `ButtonProps::style` | method |  |
 | `ButtonProps::tooltip` | method | Shown on hover; the host truncates text over 1024 bytes. |
+| `DecorationLocation::at` | method | A block above or below `line` (zero-based) of the worktree-relative `path`, with the height left to the host. The same code builds 0.2's `path` and 0.3's `target`. |
+| `DecorationLocation::height_lines` | method | The block's height in editor lines. |
 | `DiffViewProps::language` | method |  |
 | `DiffViewProps::new` | method |  |
 | `Extension` | trait | A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it from a single thread, one call at a time. |
@@ -36,6 +39,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FlexProps::row` | method | A row with no gap, no padding and children aligned to the start. |
 | `HostError` | re-export | `bindings::fyx::ui::host::HostError` |
 | `HostErrorCode` | re-export | `bindings::fyx::ui::host::HostErrorCode` |
+| `HostErrorCode::name` | method | The WIT case name, such as `not-permitted`. |
 | `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3). |
 | `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
@@ -129,6 +133,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeError::UpdateTooLarge` | variant |  |
 | `TreeLimits` | re-export | The host's caps on a surface, which `SurfaceTree` enforces before the host sees an update. |
 | `bindings` | module |  |
+| `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |
 | `host::*` | re-export | `host::*` |
 | `list_row` | fn | Builds one row of a virtualized list; its ids start at `ROW_NODE_ID_BASE`. `build` must add exactly one top-level node, the row's root, and the row must pass the host's own checks (`ui_ext::Tree::from_row`), or the host would reject the whole `list-rows` answer. |

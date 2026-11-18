@@ -61,10 +61,26 @@ use std::ops::Range;
 mod host;
 mod host_model;
 mod v0_1;
+#[cfg(feature = "fyx-ui-0-3")]
 mod v0_2;
 
 pub use host::*;
 
+/// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
+/// `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2
+/// component would list 0.3 interfaces.
+#[cfg(not(feature = "fyx-ui-0-3"))]
+pub mod bindings {
+    wit_bindgen::generate!({
+        path: "../ui_ext/wit/since_v0.2.0",
+        world: "ui-extension",
+        pub_export_macro: true,
+        default_bindings_module: "ui_ext_sdk::bindings",
+        additional_derives: [PartialEq, Eq],
+    });
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../ui_ext/wit/since_v0.3.0",
@@ -84,19 +100,24 @@ pub mod bindings {
 /// The `fyx:ui@0.1.0` bindings, for `register_extension!(T, v0_1)`.
 #[doc(hidden)]
 pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
-/// The `fyx:ui@0.2.0` bindings, for `register_extension!(T, v0_2)`.
+/// The `fyx:ui@0.2.0` bindings, for `register_extension!(T, v0_2)` when the SDK's own world is 0.3.
+#[cfg(feature = "fyx-ui-0-3")]
 #[doc(hidden)]
 pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
+#[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::images::ImageFormat;
 pub use bindings::fyx::ui::types::*;
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
-/// patch). 0.3 is staged.
+/// patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature.
+#[cfg(feature = "fyx-ui-0-3")]
 pub const API_VERSION: (u16, u16, u16) = (0, 3, 0);
+#[cfg(not(feature = "fyx-ui-0-3"))]
+pub const API_VERSION: (u16, u16, u16) = (0, 2, 0);
 
 /// The version `register_extension!(T, v0_2)` exports.
 pub const API_VERSION_V0_2: (u16, u16, u16) = (0, 2, 0);
@@ -235,69 +256,10 @@ macro_rules! register_extension {
                 })
             }
 
-            // The rest of the 0.3 world. The SDK has no API for these yet (plan 4.2 to 4.8), so
-            // they answer as an extension that provides nothing; the host only calls them for
-            // what the manifest declares.
-            fn handle_io(
-                _event: $crate::bindings::fyx::ui::io::IoEvent,
-            ) -> ::std::result::Result<(), ::std::string::String> {
-                Ok(())
-            }
-
-            fn handle_command(
-                command: ::std::string::String,
-                _argument: ::std::option::Option<::std::string::String>,
-                _context: $crate::bindings::fyx::ui::requests::CommandContext,
-            ) -> ::std::result::Result<(), ::std::string::String> {
-                Err(::std::format!("no command {command:?}"))
-            }
-
-            fn provide_decorations(
-                _request: $crate::bindings::fyx::ui::requests::DecorationRequest,
-            ) -> ::std::result::Result<
-                ::std::vec::Vec<$crate::bindings::fyx::ui::decorations::Decoration>,
-                ::std::string::String,
-            > {
-                Ok(::std::vec::Vec::new())
-            }
-
-            fn provide_hover(
-                _request: $crate::bindings::fyx::ui::requests::HoverRequest,
-            ) -> ::std::result::Result<
-                $crate::bindings::fyx::ui::requests::HoverReply,
-                ::std::string::String,
-            > {
-                Err("no hover provider".into())
-            }
-
-            fn provide_code_lenses(
-                _request: $crate::bindings::fyx::ui::requests::CodeLensRequest,
-            ) -> ::std::result::Result<
-                ::std::vec::Vec<$crate::bindings::fyx::ui::requests::CodeLens>,
-                ::std::string::String,
-            > {
-                Ok(::std::vec::Vec::new())
-            }
-
-            fn provide_virtual_document(
-                path: ::std::string::String,
-            ) -> ::std::result::Result<
-                $crate::bindings::fyx::ui::requests::VirtualDocument,
-                ::std::string::String,
-            > {
-                Err(::std::format!("no virtual document {path:?}"))
-            }
-
-            fn picker_source_event(
-                _source: ::std::string::String,
-                _session: u64,
-                _event: $crate::bindings::fyx::ui::requests::PickerSourceEvent,
-            ) -> ::std::result::Result<(), ::std::string::String> {
-                Ok(())
-            }
+            $crate::__fyx_v0_3_exports!();
         }
 
-        $crate::__fyx_host_shims!(v0_3);
+        $crate::__fyx_host_shims!(newest);
 
         // In the extension's own crate rather than the SDK's rlib, so the linker cannot drop it
         // as an unreferenced archive member.
@@ -309,84 +271,7 @@ macro_rules! register_extension {
         $crate::bindings::export!(__FyxUiExtension with_types_in $crate::bindings);
     };
     ($extension_type:ty, v0_2) => {
-        struct __FyxUiExtension;
-
-        fn __fyx_new_extension() -> ::std::boxed::Box<dyn $crate::Extension> {
-            ::std::boxed::Box::new(<$extension_type as $crate::Extension>::new())
-        }
-
-        impl $crate::bindings_v0_2::Guest for __FyxUiExtension {
-            fn surfaces() -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Surface> {
-                $crate::__private::with_extension(__fyx_new_extension, |extension| {
-                    $crate::__private::v0_2::surfaces(extension.surfaces())
-                })
-            }
-
-            fn mount(
-                surface_id: ::std::string::String,
-            ) -> ::std::result::Result<
-                ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Node>,
-                ::std::string::String,
-            > {
-                $crate::__private::with_extension(__fyx_new_extension, |extension| {
-                    extension
-                        .mount(&surface_id)
-                        .and_then(|nodes| $crate::__private::v0_2::nodes(&nodes))
-                })
-            }
-
-            fn handle_event(
-                surface_id: ::std::string::String,
-                event: $crate::bindings_v0_2::fyx::ui::types::UiEvent,
-            ) -> ::std::result::Result<
-                $crate::bindings_v0_2::fyx::ui::types::Update,
-                ::std::string::String,
-            > {
-                $crate::__private::with_extension(__fyx_new_extension, |extension| {
-                    extension
-                        .handle_event(&surface_id, $crate::__private::v0_2::event(event))
-                        .and_then(|update| $crate::__private::v0_2::update(&update))
-                })
-            }
-
-            fn list_rows(
-                surface_id: ::std::string::String,
-                list_node: $crate::NodeId,
-                start: u32,
-                count: u32,
-            ) -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::ListRow> {
-                $crate::__private::with_extension(__fyx_new_extension, |extension| {
-                    $crate::__private::v0_2::rows(extension.list_rows(
-                        &surface_id,
-                        list_node,
-                        start,
-                        count,
-                    ))
-                })
-            }
-
-            fn tick(
-                surface_id: ::std::string::String,
-            ) -> ::std::result::Result<
-                $crate::bindings_v0_2::fyx::ui::types::Update,
-                ::std::string::String,
-            > {
-                $crate::__private::with_extension(__fyx_new_extension, |extension| {
-                    extension
-                        .tick(&surface_id)
-                        .and_then(|update| $crate::__private::v0_2::update(&update))
-                })
-            }
-        }
-
-        $crate::__fyx_host_shims!(v0_2);
-
-        #[cfg(target_arch = "wasm32")]
-        #[unsafe(link_section = "fyx:ui-api-version")]
-        #[used]
-        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_V0_2_SECTION_BYTES;
-
-        $crate::bindings_v0_2::export!(__FyxUiExtension with_types_in $crate::bindings_v0_2);
+        $crate::__fyx_register_v0_2!($extension_type);
     };
     ($extension_type:ty, v0_1) => {
         struct __FyxUiExtension;
@@ -540,28 +425,218 @@ macro_rules! __fyx_host_shims {
                 $crate::__private::$world::remove_decoration(id)
             }
 
-            #[unsafe(no_mangle)]
-            fn __fyx_ui_add_image(
-                format: $crate::ImageFormat,
-                bytes: &[u8],
-            ) -> ::std::result::Result<u32, $crate::HostError> {
-                $crate::__private::$world::add_image(format, bytes)
-            }
-
-            #[unsafe(no_mangle)]
-            fn __fyx_ui_remove_image(image: u32) {
-                $crate::__private::$world::remove_image(image)
-            }
+            $crate::__fyx_image_shims!($world);
         };
     };
+}
+
+/// The 0.3 exports beyond 0.2's, inside `register_extension!(T)`'s `Guest` impl: the SDK has no
+/// API for them yet (plan 4.2 to 4.8), so they answer as an extension that provides nothing; the
+/// host only calls them for what the manifest declares. Empty without the `fyx-ui-0-3` feature.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_v0_3_exports {
+    () => {
+        fn handle_io(
+            _event: $crate::bindings::fyx::ui::io::IoEvent,
+        ) -> ::std::result::Result<(), ::std::string::String> {
+            Ok(())
+        }
+
+        fn handle_command(
+            command: ::std::string::String,
+            _argument: ::std::option::Option<::std::string::String>,
+            _context: $crate::bindings::fyx::ui::requests::CommandContext,
+        ) -> ::std::result::Result<(), ::std::string::String> {
+            Err(::std::format!("no command {command:?}"))
+        }
+
+        fn provide_decorations(
+            _request: $crate::bindings::fyx::ui::requests::DecorationRequest,
+        ) -> ::std::result::Result<
+            ::std::vec::Vec<$crate::bindings::fyx::ui::decorations::Decoration>,
+            ::std::string::String,
+        > {
+            Ok(::std::vec::Vec::new())
+        }
+
+        fn provide_hover(
+            _request: $crate::bindings::fyx::ui::requests::HoverRequest,
+        ) -> ::std::result::Result<
+            $crate::bindings::fyx::ui::requests::HoverReply,
+            ::std::string::String,
+        > {
+            Err("no hover provider".into())
+        }
+
+        fn provide_code_lenses(
+            _request: $crate::bindings::fyx::ui::requests::CodeLensRequest,
+        ) -> ::std::result::Result<
+            ::std::vec::Vec<$crate::bindings::fyx::ui::requests::CodeLens>,
+            ::std::string::String,
+        > {
+            Ok(::std::vec::Vec::new())
+        }
+
+        fn provide_virtual_document(
+            path: ::std::string::String,
+        ) -> ::std::result::Result<
+            $crate::bindings::fyx::ui::requests::VirtualDocument,
+            ::std::string::String,
+        > {
+            Err(::std::format!("no virtual document {path:?}"))
+        }
+
+        fn picker_source_event(
+            _source: ::std::string::String,
+            _session: u64,
+            _event: $crate::bindings::fyx::ui::requests::PickerSourceEvent,
+        ) -> ::std::result::Result<(), ::std::string::String> {
+            Ok(())
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-3"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_v0_3_exports {
+    () => {};
+}
+
+/// `register_extension!(T, v0_2)`. With the `fyx-ui-0-3` feature the SDK's types are 0.3's and are
+/// converted down; without it they are 0.2's, and this is `register_extension!(T)`.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_register_v0_2 {
+    ($extension_type:ty) => {
+        struct __FyxUiExtension;
+
+        fn __fyx_new_extension() -> ::std::boxed::Box<dyn $crate::Extension> {
+            ::std::boxed::Box::new(<$extension_type as $crate::Extension>::new())
+        }
+
+        impl $crate::bindings_v0_2::Guest for __FyxUiExtension {
+            fn surfaces() -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Surface> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_2::surfaces(extension.surfaces())
+                })
+            }
+
+            fn mount(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::Node>,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .mount(&surface_id)
+                        .and_then(|nodes| $crate::__private::v0_2::nodes(&nodes))
+                })
+            }
+
+            fn handle_event(
+                surface_id: ::std::string::String,
+                event: $crate::bindings_v0_2::fyx::ui::types::UiEvent,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_2::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .handle_event(&surface_id, $crate::__private::v0_2::event(event))
+                        .and_then(|update| $crate::__private::v0_2::update(&update))
+                })
+            }
+
+            fn list_rows(
+                surface_id: ::std::string::String,
+                list_node: $crate::NodeId,
+                start: u32,
+                count: u32,
+            ) -> ::std::vec::Vec<$crate::bindings_v0_2::fyx::ui::types::ListRow> {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    $crate::__private::v0_2::rows(extension.list_rows(
+                        &surface_id,
+                        list_node,
+                        start,
+                        count,
+                    ))
+                })
+            }
+
+            fn tick(
+                surface_id: ::std::string::String,
+            ) -> ::std::result::Result<
+                $crate::bindings_v0_2::fyx::ui::types::Update,
+                ::std::string::String,
+            > {
+                $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                    extension
+                        .tick(&surface_id)
+                        .and_then(|update| $crate::__private::v0_2::update(&update))
+                })
+            }
+        }
+
+        $crate::__fyx_host_shims!(v0_2);
+
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(link_section = "fyx:ui-api-version")]
+        #[used]
+        static __FYX_UI_API_VERSION: [u8; 6] = $crate::API_VERSION_V0_2_SECTION_BYTES;
+
+        $crate::bindings_v0_2::export!(__FyxUiExtension with_types_in $crate::bindings_v0_2);
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-3"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_register_v0_2 {
+    ($extension_type:ty) => {
+        $crate::register_extension!($extension_type);
+    };
+}
+
+/// The shims of the 0.3 `images` functions; none without the `fyx-ui-0-3` feature.
+#[cfg(feature = "fyx-ui-0-3")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_image_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_add_image(
+            format: $crate::ImageFormat,
+            bytes: &[u8],
+        ) -> ::std::result::Result<u32, $crate::HostError> {
+            $crate::__private::$world::add_image(format, bytes)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_remove_image(image: u32) {
+            $crate::__private::$world::remove_image(image)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-3"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_image_shims {
+    ($world:ident) => {};
 }
 
 #[doc(hidden)]
 pub mod __private {
     use super::*;
 
-    pub use crate::host::v0_3;
+    pub use crate::host::newest;
     pub use crate::v0_1::glue as v0_1;
+    #[cfg(feature = "fyx-ui-0-3")]
     pub use crate::v0_2::glue as v0_2;
 
     thread_local! {
@@ -1067,11 +1142,9 @@ impl SurfaceTree {
             UiEvent::InputChanged((id, _))
             | UiEvent::InputSubmitted((id, _))
             | UiEvent::RowSelected((id, _)) => *id,
-            UiEvent::Click(_)
-            | UiEvent::RowClick(_)
-            | UiEvent::Dismissed(_)
-            | UiEvent::Orphaned
-            | UiEvent::CanvasClick(_) => return,
+            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => return,
+            #[cfg(feature = "fyx-ui-0-3")]
+            UiEvent::Orphaned | UiEvent::CanvasClick(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
@@ -1100,11 +1173,9 @@ impl SurfaceTree {
                     list.selected = Some(*index);
                 }
             }
-            UiEvent::Click(_)
-            | UiEvent::RowClick(_)
-            | UiEvent::Dismissed(_)
-            | UiEvent::Orphaned
-            | UiEvent::CanvasClick(_) => {}
+            UiEvent::Click(_) | UiEvent::RowClick(_) | UiEvent::Dismissed(_) => {}
+            #[cfg(feature = "fyx-ui-0-3")]
+            UiEvent::Orphaned | UiEvent::CanvasClick(_) => {}
         }
     }
 
@@ -1501,6 +1572,43 @@ impl Icon {
     /// The WIT case name, such as `arrow-up`.
     pub fn name(self) -> &'static str {
         ui_ext::v0_2::Icon::ALL[self as usize].name()
+    }
+}
+
+impl DecorationLocation {
+    /// A block above or below `line` (zero-based) of the worktree-relative `path`, with the height
+    /// left to the host. The same code builds 0.2's `path` and 0.3's `target`.
+    pub fn at(path: impl Into<String>, line: u32, placement: DecorationPlacement) -> Self {
+        Self {
+            #[cfg(feature = "fyx-ui-0-3")]
+            target: DecorationTarget::Path(path.into()),
+            #[cfg(not(feature = "fyx-ui-0-3"))]
+            path: path.into(),
+            line,
+            placement,
+            height_lines: None,
+        }
+    }
+
+    /// The block's height in editor lines.
+    pub fn height_lines(mut self, lines: u16) -> Self {
+        self.height_lines = Some(lines);
+        self
+    }
+}
+
+impl HostErrorCode {
+    /// The WIT case name, such as `not-permitted`.
+    pub fn name(self) -> &'static str {
+        match self {
+            HostErrorCode::UnknownSurface => "unknown-surface",
+            HostErrorCode::LimitExceeded => "limit-exceeded",
+            HostErrorCode::InvalidArgument => "invalid-argument",
+            HostErrorCode::NotPermitted => "not-permitted",
+            HostErrorCode::Unavailable => "unavailable",
+            #[cfg(feature = "fyx-ui-0-3")]
+            HostErrorCode::Denied => "denied",
+        }
     }
 }
 
@@ -2168,14 +2276,18 @@ mod tests {
 
     #[test]
     fn api_versions_match_the_wit_packages() {
+        #[cfg(feature = "fyx-ui-0-3")]
         assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 3, 0, 0]);
+        #[cfg(not(feature = "fyx-ui-0-3"))]
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
         assert_eq!(API_VERSION_V0_2_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
         assert_eq!(API_VERSION_V0_1_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
+        #[cfg(feature = "fyx-ui-0-3")]
+        let newest = include_str!("../../ui_ext/wit/since_v0.3.0/fyx-ui.wit");
+        #[cfg(not(feature = "fyx-ui-0-3"))]
+        let newest = include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit");
         for (version, wit) in [
-            (
-                API_VERSION,
-                include_str!("../../ui_ext/wit/since_v0.3.0/fyx-ui.wit"),
-            ),
+            (API_VERSION, newest),
             (
                 API_VERSION_V0_2,
                 include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit"),
@@ -2359,12 +2471,7 @@ mod tests {
         let picker = Surface::modal("picker", "Pick", ModalWidth::Medium);
         add_surface(&picker).expect("add");
         show_surface("picker").expect("show");
-        let location = DecorationLocation {
-            target: DecorationTarget::Path("src/main.rs".into()),
-            line: 3,
-            placement: DecorationPlacement::Below,
-            height_lines: None,
-        };
+        let location = DecorationLocation::at("src/main.rs", 3, DecorationPlacement::Below);
         place_decoration("todo-3", &location, &[]).expect("place");
         assert_eq!(
             take_host_effects(),

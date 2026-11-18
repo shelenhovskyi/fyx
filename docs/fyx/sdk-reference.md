@@ -1,8 +1,8 @@
 # `ui_ext_sdk` reference
 
 `ui_ext_sdk` is the Rust guest SDK for Fyx UI extensions, built on `wit-bindgen` 0.41 over the
-`fyx:ui@0.3.0` world, which is staged (Dev and Nightly builds of Fyx run it); one source also
-exports 0.2 and 0.1. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
+`fyx:ui@0.2.0` world, or the staged `fyx:ui@0.3.0` world (Dev and Nightly builds of Fyx run it)
+with its `fyx-ui-0-3` feature; one source also exports the older worlds. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
 outside the GPL. It is not on crates.io yet, so depend on it by path (see
 [Project layout](extension-authoring.md#project-layout)).
 
@@ -72,10 +72,10 @@ Patch::Remove(id)
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `API_VERSION: (u16, u16, u16)` | `(0, 3, 0)` | The `fyx:ui` version the SDK is generated from, and what `register_extension!(T)` exports. A test checks it against the `package fyx:ui@…` line of the WIT. |
+| `API_VERSION: (u16, u16, u16)` | `(0, 2, 0)`, or `(0, 3, 0)` with `fyx-ui-0-3` | The `fyx:ui` version the SDK is generated from, and what `register_extension!(T)` exports. A test checks it against the `package fyx:ui@…` line of the WIT. |
 | `API_VERSION_V0_2`, `API_VERSION_V0_1` | `(0, 2, 0)`, `(0, 1, 0)` | What `register_extension!(T, v0_2)` and `(T, v0_1)` export. |
 | `API_VERSION_SECTION: &str` | `"fyx:ui-api-version"` | Name of the custom section `register_extension!` embeds. |
-| `API_VERSION_SECTION_BYTES: [u8; 6]` | `[0, 0, 0, 3, 0, 0]` | `API_VERSION` as three big-endian `u16`s, the same layout as Zed's `zed:api-version`; `API_VERSION_V0_2_SECTION_BYTES` and `API_VERSION_V0_1_SECTION_BYTES` likewise. |
+| `API_VERSION_SECTION_BYTES: [u8; 6]` | `[0, 0, 0, 2, 0, 0]` (or `3`) | `API_VERSION` as three big-endian `u16`s, the same layout as Zed's `zed:api-version`; `API_VERSION_V0_2_SECTION_BYTES` and `API_VERSION_V0_1_SECTION_BYTES` likewise. |
 | `ROW_NODE_ID_BASE: NodeId` | `0x8000_0000` | First id inside a list row, so row ids can never be mistaken for main-tree ids (which start at 1). |
 
 <!-- sdk:74-98, 1520-1526 -->
@@ -123,21 +123,26 @@ traps or panics disables the extension for the session.
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:62-71, 188-203, 476-495, 579-592 (mount validation), 620-660 (list-rows validation), 663-689 (Err → ReplyError, not fatal), 707-721 (disable on trap/budget); crates/ui_ext_host/src/registry.rs:76-83; crates/ui_ext_host/src/panel.rs:51-55; crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 357-402, 20 (ROW_OVERSCAN) -->
 
 ```rust
-register_extension!(MyExtension);        // exports fyx:ui 0.3 (staged: Dev and Nightly)
+register_extension!(MyExtension);        // exports the SDK's world: 0.2, or 0.3 with fyx-ui-0-3
 register_extension!(MyExtension, v0_2);  // exports fyx:ui 0.2
 register_extension!(MyExtension, v0_1);  // exports fyx:ui 0.1, for hosts that only run 0.1
 ```
 
-The SDK's types and functions are those of `fyx:ui@0.3.0` (`API_VERSION`); one extension source
-exports any of the three worlds. Call the macro once, at the root of your `cdylib` crate. It:
+The SDK's types and functions are those of its world (`API_VERSION`): `fyx:ui@0.2.0`, or the
+staged `fyx:ui@0.3.0` with the SDK's `fyx-ui-0-3` cargo feature. The feature is off by default,
+so that only a 0.3 build links the 0.3 world description; a 0.1 or 0.2 component then imports
+`fyx:ui` interfaces of its own version only. One extension source exports any world up to the
+SDK's. Code that must build both ways uses `DecorationLocation::at(path, line, placement)` and
+`HostErrorCode::name()`, which hide the two shapes 0.3 changed, and a wildcard arm for the
+events 0.3 adds. Call the macro once, at the root of your `cdylib` crate. It:
 
 - implements the chosen world's `Guest` trait by forwarding each export to your type. The 0.3
   exports the SDK has no API for yet (`handle-io`, `handle-command`, the providers and
   `picker-source-event`) answer as an extension that provides nothing.
-- With `v0_2`, values are converted at the boundary: what 0.2 cannot express is an error that
-  names 0.3. Image and canvas nodes make the call return `Err`, picker surfaces are left out of
-  `surfaces` (logged), and `add_image` and a decoration anchored to a document return
-  `unavailable`.
+- With `v0_2` and the `fyx-ui-0-3` feature, values are converted at the boundary: what 0.2
+  cannot express is an error that names 0.3. Image and canvas nodes make the call return `Err`,
+  picker surfaces are left out of `surfaces` (logged), and `add_image` and a decoration anchored
+  to a document return `unavailable`. Without the feature, `v0_2` is the same as no argument.
 - With `v0_1`, as with `v0_2`, and further: icons become upstream `IconName`s, and tooltips, list
   selection and row indents are dropped. What 0.1 cannot express is an error that names 0.2 (or
   0.3): modal surfaces are left out of `surfaces` (logged), and secret inputs, the `blank` icon
@@ -145,10 +150,7 @@ exports any of the three worlds. Call the macro once, at the root of your `cdyli
 - defines `extern "Rust"` shims through which the SDK's host functions reach that world's
   imports, so a 0.1 component imports only `fyx:ui/*@0.1.0` and a 0.2 component only `@0.2.0`. A
   0.2 or 0.3 component always imports `fyx:ui/decorations`, and a 0.3 one `fyx:ui/images`; the
-  host checks `ui:editor-decorations` and `ui:images` per call, not at import. A 0.1 or 0.2
-  component also lists some 0.3 interfaces that carry only types (no functions), because the
-  SDK's 0.3 world description gets linked with the SDK's code. A host links nothing for them, and
-  `fyx-ext check` ignores imports without functions.
+  host checks `ui:editor-decorations` and `ui:images` per call, not at import.
 - on `wasm32` only, adds a `#[used]` static in the `fyx:ui-api-version` link section holding
   `API_VERSION_SECTION_BYTES` (0.3), `API_VERSION_V0_2_SECTION_BYTES` or
   `API_VERSION_V0_1_SECTION_BYTES`. The static lives in your crate, so the linker cannot drop it
@@ -518,7 +520,8 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError>;
 pub fn take_host_effects() -> Vec<HostEffect>;
 ```
 
-`fyx:ui` 0.3 adds generated images (design 0.3, section 12), for `ImageSource::Generated`:
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds generated images (design 0.3, section 12), for
+`ImageSource::Generated`:
 
 ```rust
 pub fn add_image(format: ImageFormat, bytes: &[u8]) -> Result<GeneratedImage, HostError>;

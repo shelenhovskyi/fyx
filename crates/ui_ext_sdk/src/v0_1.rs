@@ -19,6 +19,7 @@ fn needs_0_2(what: &str) -> String {
     format!("{what} {NEEDS_0_2}")
 }
 
+#[cfg(feature = "fyx-ui-0-3")]
 fn needs_0_3(what: &str) -> String {
     format!("{what} needs fyx:ui 0.3; this extension is exported as 0.1")
 }
@@ -130,7 +131,9 @@ fn props(props: &Props) -> Result<v1::Props, String> {
             new_text: diff.new_text.clone(),
             language: diff.language.clone(),
         }),
+        #[cfg(feature = "fyx-ui-0-3")]
         Props::Image(_) => return Err(needs_0_3("an image node")),
+        #[cfg(feature = "fyx-ui-0-3")]
         Props::Canvas(_) => return Err(needs_0_3("a canvas node")),
     })
 }
@@ -212,6 +215,7 @@ pub mod glue {
                         );
                         return None;
                     }
+                    #[cfg(feature = "fyx-ui-0-3")]
                     SurfaceKind::Picker(_) => {
                         log(
                             LogLevel::Error,
@@ -326,6 +330,7 @@ pub mod glue {
         unavailable("remove_decoration")
     }
 
+    #[cfg(feature = "fyx-ui-0-3")]
     pub fn add_image(_format: crate::ImageFormat, _bytes: &[u8]) -> Result<u32, HostError> {
         Err(HostError {
             code: HostErrorCode::Unavailable,
@@ -334,6 +339,7 @@ pub mod glue {
     }
 
     /// Nothing to free: 0.1 has no generated images.
+    #[cfg(feature = "fyx-ui-0-3")]
     pub fn remove_image(_image: u32) {}
 }
 
