@@ -12,11 +12,17 @@ A Fyx UI extension for checking the consent flows of the four T2 capabilities of
 | Agent reviews | `agent:observe` | `Start` lists the open agent reviews (file and state) live; `Stop` ends the feed |
 
 Each section shows its permission state, read with `permissions.query` when the panel mounts
-and with every event: not asked yet, allowed, denied, or not available here.
+and with every event and outcome: not asked yet, allowed, denied, or not available here.
 - **Request:** the section's **Request …** button (enabled while the state is `ask`) shows Fyx's
   consent prompt with `permissions.request`. The first use of the action shows it too.
 - **While a prompt is open:** the section reads `waiting for an answer…`, then follows the
   `permission-changed` event Fyx sends.
+- **A prompt closed without an answer:** Fyx sends nothing. The next event reads the state again,
+  finds `ask`, and enables **Request …** again.
+- **Refusals with a reason:** an untrusted worktree reads `Trust this project to use git` (or to
+  edit its files), and no open worktree `Open a folder to use this`; trusting the project does
+  not change the permission. Any other refusal shows Fyx's message and the queried state, for
+  example `denied: network:fetch is Unavailable (permission: unavailable)`.
 - **Changing an answer:** a denied capability changes back only on the extensions page.
 
 **Build it for 0.3 only.** It needs `fyx:ui` 0.3, which dev builds run:

@@ -16,9 +16,13 @@
 //! - **Agent reviews** (`agent:observe`): `Start` shows the open agent reviews live, as list
 //!   rows of file and state; `Stop` ends the feed.
 //!
-//! The state comes from `query_permission` when the panel mounts and with every event, from the
-//! `permission-changed` the host sends when the user answers, and from outcomes: `waiting for an
-//! answer…` while an action waits for its prompt.
+//! The state comes from `query_permission` when the panel mounts and with every event and
+//! outcome, from the `permission-changed` the host sends when the user answers, and from outcomes:
+//! - `waiting for an answer…` lasts until the next event or outcome. A prompt closed without an
+//!   answer sends nothing, so the next query finds `ask` again and `Request …` is enabled again.
+//! - A refusal with a reason the demo knows says what to do: an untrusted worktree reads
+//!   `Trust this project to …`, no open worktree `Open a folder …`. Any other refusal shows the
+//!   host's message with the queried permission state next to it.
 
 use ui_ext_sdk::*;
 
@@ -46,10 +50,14 @@ mod t2 {
         Denied,
         Unavailable,
         NotDeclared,
+        /// Refused because the worktree is not trusted, whatever the permission says.
+        Untrusted,
+        /// Refused because no worktree is open.
+        NoWorktree,
     }
 
     impl Known {
-        fn label(self) -> &'static str {
+        fn label(self, capability: T2Capability) -> &'static str {
             match self {
                 Known::NotAsked => "Permission: not asked yet",
                 Known::Waiting => "Permission: waiting for an answer…",
@@ -57,6 +65,14 @@ mod t2 {
                 Known::Denied => "Permission: denied (change it on the extensions page)",
                 Known::Unavailable => "Permission: not available here",
                 Known::NotDeclared => "Permission: not declared in extension.toml",
+                Known::Untrusted => match capability {
+                    T2Capability::ProcessSpawn => "Trust this project to use git",
+                    T2Capability::WorkspaceEdit => "Trust this project to edit its files",
+                    T2Capability::NetworkFetch | T2Capability::AgentObserve => {
+                        "Trust this project to use this"
+                    }
+                },
+                Known::NoWorktree => "Open a folder to use this",
             }
         }
 
@@ -64,16 +80,37 @@ mod t2 {
             match self {
                 Known::Allowed => ColorToken::Success,
                 Known::Denied | Known::NotDeclared => ColorToken::Error,
-                Known::Unavailable => ColorToken::Warning,
+                Known::Unavailable | Known::Untrusted | Known::NoWorktree => ColorToken::Warning,
                 Known::NotAsked | Known::Waiting => ColorToken::TextMuted,
             }
         }
 
-        /// From an import's refusal: `denied` and `unavailable` are the broker's, the rest is
-        /// the call's own problem.
-        fn from_error(error: &HostError, before: Known) -> Known {
+        /// Whether this is a condition outside the permission, which a query cannot see.
+        fn is_condition(self) -> bool {
+            matches!(self, Known::Untrusted | Known::NoWorktree)
+        }
+
+        /// From an import's refusal. The host's reasons the demo knows (an untrusted worktree,
+        /// none open) say what to do; any other `denied` or `unavailable` is the queried state.
+        /// The rest is the call's own problem.
+        fn from_error(error: &HostError, queried: PermissionState, before: Known) -> Known {
             match error.code {
-                HostErrorCode::Denied => Known::Denied,
+                HostErrorCode::Denied | HostErrorCode::Unavailable
+                    if error.message.contains("not trusted") =>
+                {
+                    Known::Untrusted
+                }
+                HostErrorCode::Unavailable if error.message.starts_with("no worktree") => {
+                    Known::NoWorktree
+                }
+                HostErrorCode::Denied => match queried {
+                    PermissionState::Denied | PermissionState::Unavailable => {
+                        Known::from_state(queried)
+                    }
+                    // The broker allows it, so the refusal has a reason the demo does not know:
+                    // the result line shows it.
+                    PermissionState::Granted | PermissionState::Ask => Known::Denied,
+                },
                 HostErrorCode::Unavailable => Known::Unavailable,
                 HostErrorCode::NotPermitted => Known::NotDeclared,
                 _ => before,
@@ -158,6 +195,8 @@ mod t2 {
         edit_result: String,
         observing: bool,
         reviews: Vec<ReviewRow>,
+        /// The states the last query answered, in [`SECTIONS`] order.
+        queried: [PermissionState; 4],
         panel: SurfaceTree,
         nodes: Option<Nodes>,
     }
@@ -166,8 +205,27 @@ mod t2 {
         tree.text(TextProps::new(title).bold());
     }
 
-    fn state_text(known: Known) -> TextProps {
-        TextProps::new(known.label()).color(known.color())
+    fn state_text(known: Known, capability: T2Capability) -> TextProps {
+        TextProps::new(known.label(capability)).color(known.color())
+    }
+
+    fn state_name(state: PermissionState) -> &'static str {
+        match state {
+            PermissionState::Granted => "granted",
+            PermissionState::Denied => "denied",
+            PermissionState::Ask => "ask",
+            PermissionState::Unavailable => "unavailable",
+        }
+    }
+
+    /// An import's refusal for the result line, with the queried permission state next to it.
+    fn refusal(error: &HostError, queried: PermissionState) -> String {
+        format!(
+            "{}: {} (permission: {})",
+            error.code.name(),
+            error.message,
+            state_name(queried)
+        )
     }
 
     fn agent_button(observing: bool) -> ButtonProps {
@@ -216,35 +274,46 @@ mod t2 {
             }
         }
 
-        /// The host's states as of this call. A section waiting for its prompt keeps `waiting`
-        /// until the answer comes.
+        fn queried(&self, capability: T2Capability) -> PermissionState {
+            let index = SECTIONS.iter().position(|(known, _)| *known == capability);
+            index.map_or(PermissionState::Unavailable, |index| self.queried[index])
+        }
+
+        /// The host's states as of this call, at the start of every call.
+        /// - `waiting` from an earlier call ends here: a prompt closed without an answer sends
+        ///   nothing, and the query finds `ask` again.
+        /// - An untrusted or missing worktree stays while the permission would allow the action:
+        ///   the query cannot see it.
         fn query_states(&mut self) {
-            for (capability, _) in SECTIONS {
-                let known = Known::from_state(query_permission(capability));
-                let waiting = self.state(capability) == Known::Waiting;
-                if !(waiting && known == Known::NotAsked) {
-                    self.set_state(capability, known);
+            for (index, (capability, _)) in SECTIONS.into_iter().enumerate() {
+                let state = query_permission(capability);
+                self.queried[index] = state;
+                let allows = matches!(state, PermissionState::Granted | PermissionState::Ask);
+                if !(self.state(capability).is_condition() && allows) {
+                    self.set_state(capability, Known::from_state(state));
                 }
             }
         }
 
-        fn request_button(label: &str, known: Known) -> ButtonProps {
+        /// Enabled while the queried state is `ask`, also while a prompt may be open.
+        fn request_button(label: &str, queried: PermissionState) -> ButtonProps {
             ButtonProps::new(label)
                 .icon(Icon::Lock)
                 .style(ButtonStyle::Subtle)
-                .disabled(known != Known::NotAsked)
+                .disabled(queried != PermissionState::Ask)
                 .tooltip("Shows Fyx's permission prompt now")
         }
 
         fn request(&mut self, capability: T2Capability) {
+            let queried = self.queried(capability);
             match request_permission(capability) {
                 Ok(()) => {
-                    if self.state(capability) == Known::NotAsked {
+                    if queried == PermissionState::Ask {
                         self.set_state(capability, Known::Waiting);
                     }
                 }
                 Err(error) => {
-                    let known = Known::from_error(&error, self.state(capability));
+                    let known = Known::from_error(&error, queried, self.state(capability));
                     self.set_state(capability, known);
                 }
             }
@@ -271,22 +340,34 @@ mod t2 {
         fn refresh(&mut self, rows: bool) -> Result<(), String> {
             let nodes = self.nodes()?;
             let ids = [
-                (nodes.fetch_state, Props::from(state_text(self.fetch_state))),
+                (
+                    nodes.fetch_state,
+                    Props::from(state_text(self.fetch_state, T2Capability::NetworkFetch)),
+                ),
                 (
                     nodes.fetch_result,
                     TextProps::new(self.fetch_result.clone()).into(),
                 ),
-                (nodes.process_state, state_text(self.process_state).into()),
+                (
+                    nodes.process_state,
+                    state_text(self.process_state, T2Capability::ProcessSpawn).into(),
+                ),
                 (
                     nodes.process_result,
                     Props::Markdown(self.process_markdown()),
                 ),
-                (nodes.edit_state, state_text(self.edit_state).into()),
+                (
+                    nodes.edit_state,
+                    state_text(self.edit_state, T2Capability::WorkspaceEdit).into(),
+                ),
                 (
                     nodes.edit_result,
                     TextProps::new(self.edit_result.clone()).into(),
                 ),
-                (nodes.agent_state, state_text(self.agent_state).into()),
+                (
+                    nodes.agent_state,
+                    state_text(self.agent_state, T2Capability::AgentObserve).into(),
+                ),
                 (nodes.agent_toggle, agent_button(self.observing).into()),
                 (
                     nodes.agent_summary,
@@ -305,7 +386,7 @@ mod t2 {
                 self.panel.set_props(id, props)?;
             }
             for ((capability, label), id) in SECTIONS.into_iter().zip(requests) {
-                let props = Self::request_button(label, self.state(capability));
+                let props = Self::request_button(label, self.queried(capability));
                 self.panel.set_props(id, props)?;
             }
             if rows {
@@ -326,8 +407,9 @@ mod t2 {
                     self.fetch_result = "Fetching…".into();
                 }
                 Err(error) => {
-                    self.fetch_state = Known::from_error(&error, self.fetch_state);
-                    self.fetch_result = format!("{}: {}", error.code.name(), error.message);
+                    let queried = self.queried(T2Capability::NetworkFetch);
+                    self.fetch_state = Known::from_error(&error, queried, self.fetch_state);
+                    self.fetch_result = refusal(&error, queried);
                 }
             }
         }
@@ -342,8 +424,9 @@ mod t2 {
                     self.process_result = "Running `git status --short`…".into();
                 }
                 Err(error) => {
-                    self.process_state = Known::from_error(&error, self.process_state);
-                    self.process_result = format!("{}: {}", error.code.name(), error.message);
+                    let queried = self.queried(T2Capability::ProcessSpawn);
+                    self.process_state = Known::from_error(&error, queried, self.process_state);
+                    self.process_result = refusal(&error, queried);
                 }
             }
         }
@@ -359,8 +442,9 @@ mod t2 {
                     self.edit_result = format!("Editing {}…", self.edit_path);
                 }
                 Err(error) => {
-                    self.edit_state = Known::from_error(&error, self.edit_state);
-                    self.edit_result = format!("{}: {}", error.code.name(), error.message);
+                    let queried = self.queried(T2Capability::WorkspaceEdit);
+                    self.edit_state = Known::from_error(&error, queried, self.edit_state);
+                    self.edit_result = refusal(&error, queried);
                 }
             }
         }
@@ -378,7 +462,11 @@ mod t2 {
                         self.agent_state = Known::Waiting;
                     }
                 }
-                Err(error) => self.agent_state = Known::from_error(&error, self.agent_state),
+                Err(error) => {
+                    let queried = self.queried(T2Capability::AgentObserve);
+                    self.agent_state = Known::from_error(&error, queried, self.agent_state);
+                    log(LogLevel::Info, &refusal(&error, queried));
+                }
             }
         }
 
@@ -407,7 +495,7 @@ mod t2 {
         fn mount_panel(&mut self) -> Result<Vec<Node>, String> {
             self.query_states();
             let request_props = SECTIONS
-                .map(|(capability, label)| Self::request_button(label, self.state(capability)));
+                .map(|(capability, label)| Self::request_button(label, self.queried(capability)));
             let mut tree = std::mem::take(&mut self.panel);
             let mut nodes = Nodes::default();
             let path = self.edit_path.clone();
@@ -431,7 +519,7 @@ mod t2 {
                         let [fetch_request, process_request, edit_request, agent_request] =
                             request_props;
                         section_title(tree, "Fetch: api.github.com/zen");
-                        nodes.fetch_state = tree.text(state_text(fetch_state));
+                        nodes.fetch_state = tree.text(state_text(fetch_state, T2Capability::NetworkFetch));
                         nodes.requests[0] = tree.button(fetch_request);
                         nodes.fetch = tree.button(
                             ButtonProps::new("Fetch zen")
@@ -441,7 +529,7 @@ mod t2 {
                         nodes.fetch_result = tree.text(TextProps::new(fetch_result));
 
                         section_title(tree, "Process: git status --short");
-                        nodes.process_state = tree.text(state_text(process_state));
+                        nodes.process_state = tree.text(state_text(process_state, T2Capability::ProcessSpawn));
                         nodes.requests[1] = tree.button(process_request);
                         nodes.run = tree.button(
                             ButtonProps::new("Run git status")
@@ -451,7 +539,7 @@ mod t2 {
                         nodes.process_result = tree.markdown(process_markdown);
 
                         section_title(tree, "Edit: insert a header comment");
-                        nodes.edit_state = tree.text(state_text(edit_state));
+                        nodes.edit_state = tree.text(state_text(edit_state, T2Capability::WorkspaceEdit));
                         nodes.requests[2] = tree.button(edit_request);
                         nodes.edit_path = tree.input(
                             InputProps::new(path)
@@ -466,7 +554,7 @@ mod t2 {
                         nodes.edit_result = tree.text(TextProps::new(edit_result));
 
                         section_title(tree, "Agent reviews");
-                        nodes.agent_state = tree.text(state_text(agent_state));
+                        nodes.agent_state = tree.text(state_text(agent_state, T2Capability::AgentObserve));
                         nodes.requests[3] = tree.button(agent_request);
                         nodes.agent_toggle = tree.button(agent_button(observing));
                         nodes.agent_summary = tree.text(
@@ -498,6 +586,7 @@ mod t2 {
                 edit_result: String::new(),
                 observing: false,
                 reviews: Vec::new(),
+                queried: [PermissionState::Ask; 4],
                 panel: SurfaceTree::default(),
                 nodes: None,
             }
@@ -585,6 +674,7 @@ mod t2 {
 
         /// Outcomes update their section and are pushed to the panel.
         fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+            self.query_states();
             let mut rows = false;
             match event {
                 IoEvent::FetchDone((_, result)) => match result {
@@ -597,8 +687,10 @@ mod t2 {
                         };
                     }
                     Err(FetchError::Denied) => {
+                        let queried = self.queried(T2Capability::NetworkFetch);
                         self.fetch_state = Known::Denied;
-                        self.fetch_result = "Denied.".into();
+                        self.fetch_result =
+                            format!("Denied (permission: {}).", state_name(queried));
                     }
                     Err(error) => {
                         self.fetch_state = Known::Allowed;
@@ -621,10 +713,14 @@ mod t2 {
                     };
                 }
                 IoEvent::SpawnFailed((_, error)) => {
+                    let queried = self.queried(T2Capability::ProcessSpawn);
                     if error == SpawnError::Denied {
                         self.process_state = Known::Denied;
                     }
-                    self.process_result = format!("Could not start: {error}");
+                    self.process_result = format!(
+                        "Could not start: {error} (permission: {})",
+                        state_name(queried)
+                    );
                 }
                 IoEvent::EditDone((_, result)) => match result {
                     Ok(()) => {
@@ -635,8 +731,9 @@ mod t2 {
                         );
                     }
                     Err(EditError::Denied) => {
+                        let queried = self.queried(T2Capability::WorkspaceEdit);
                         self.edit_state = Known::Denied;
-                        self.edit_result = "Denied.".into();
+                        self.edit_result = format!("Denied (permission: {}).", state_name(queried));
                     }
                     Err(error) => {
                         self.edit_state = Known::Allowed;
@@ -667,6 +764,69 @@ mod t2 {
             }
             self.refresh(rows)?;
             self.panel.push(PANEL).map_err(|error| error.message)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn click(t2: &mut T2, label: &str) {
+            let id = t2
+                .button(label)
+                .unwrap_or_else(|| panic!("no button {label}"));
+            t2.handle_event(PANEL, UiEvent::Click(id)).expect("click");
+        }
+
+        #[test]
+        fn a_prompt_closed_without_an_answer_asks_again() {
+            take_host_effects();
+            let mut t2 = T2::new();
+            t2.mount(PANEL).expect("mount");
+            click(&mut t2, "Request fetch");
+            assert_eq!(t2.fetch_state, Known::Waiting);
+            // Closed without an answer: no event, and the next one finds `ask` again.
+            click(&mut t2, "Request edit");
+            assert_eq!(t2.fetch_state, Known::NotAsked);
+            let request = t2.button("Request fetch").expect("button");
+            assert!(matches!(
+                t2.panel.props(request),
+                Some(Props::Button(button)) if !button.disabled
+            ));
+        }
+
+        #[test]
+        fn refusals_say_why() {
+            let untrusted = HostError {
+                code: HostErrorCode::Denied,
+                message: "the worktree is restricted: it is not trusted".into(),
+            };
+            let known = Known::from_error(&untrusted, PermissionState::Granted, Known::Allowed);
+            assert_eq!(known, Known::Untrusted);
+            assert_eq!(
+                known.label(T2Capability::ProcessSpawn),
+                "Trust this project to use git"
+            );
+            let none_open = HostError {
+                code: HostErrorCode::Unavailable,
+                message: "no worktree is open".into(),
+            };
+            assert_eq!(
+                Known::from_error(&none_open, PermissionState::Granted, Known::Allowed),
+                Known::NoWorktree
+            );
+            let broker = HostError {
+                code: HostErrorCode::Denied,
+                message: "network:fetch is Unavailable".into(),
+            };
+            assert_eq!(
+                Known::from_error(&broker, PermissionState::Unavailable, Known::NotAsked),
+                Known::Unavailable
+            );
+            assert_eq!(
+                refusal(&broker, PermissionState::Unavailable),
+                "denied: network:fetch is Unavailable (permission: unavailable)"
+            );
         }
     }
 }
@@ -754,7 +914,8 @@ mod tests {
             ),
             "{effects:?}"
         );
-        assert_eq!(t2.fetch_state, Known::Waiting);
+        // Each click reads the states again, so only the last one still waits.
+        assert_eq!(t2.fetch_state, Known::NotAsked);
         assert_eq!(t2.agent_state, Known::Waiting);
     }
 
