@@ -36,6 +36,13 @@
 //! - `fetch-trap <url>`: a GET, then a trap, so the request is dropped with the call;
 //! - `cancel <id>`: `cancel-fetch`, reported as `done`.
 //!
+//! The canvas lift bench (plan 4.13) uses two more commands on `probe`:
+//! - `canvas <n>`: answers one `canvas` node (id 1) of `n` ops, `chart`'s six cycled;
+//! - `canvas-push <n>`: pushes that canvas to `probe` and reports the result.
+//!
+//! The canvas is built once per `n` and cloned, so the guest's own cost is the clone and the
+//! lowering.
+//!
 //! `handle-io` pushes the outcome to `probe` as one text node (id 1): `fetch-done <id> <status>
 //! <body>` or `fetch-done <id> err <error>`.
 //!
@@ -217,6 +224,22 @@ fn chart() -> CanvasProps {
         clickable: true,
         fit: CanvasFit::ScaleDown,
     }
+}
+
+/// `n` ops: `chart`'s six, cycled. Cached per `n` for the lift bench.
+fn mixed_canvas(n: usize) -> CanvasProps {
+    thread_local! {
+        static CACHED: std::cell::RefCell<Option<(usize, CanvasProps)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    CACHED.with_borrow_mut(|cached| {
+        if cached.as_ref().is_none_or(|(count, _)| *count != n) {
+            let mut canvas = chart();
+            canvas.ops = canvas.ops.iter().cycle().take(n).cloned().collect();
+            *cached = Some((n, canvas));
+        }
+        cached.as_ref().map(|(_, canvas)| canvas.clone()).unwrap_or_else(chart)
+    })
 }
 
 fn push_canvas(surface_id: &str, props: CanvasProps) -> String {
@@ -477,6 +500,14 @@ impl Guest for Probe {
         match event {
             UiEvent::InputChanged((_, command)) => {
                 let words: Vec<&str> = command.split_whitespace().collect();
+                if let ["canvas", count] = words.as_slice() {
+                    let count = count.parse().map_err(|e| format!("{e}"))?;
+                    return Ok(Update::Replace(vec![Node {
+                        id: 1,
+                        parent: None,
+                        props: Props::Canvas(mixed_canvas(count)),
+                    }]));
+                }
                 let fetch = |url: &str| match network::fetch(&network::HttpRequest {
                     method: network::HttpMethod::Get,
                     url: url.into(),
@@ -493,6 +524,10 @@ impl Guest for Probe {
                         fetch(url);
                         panic!("trap after a fetch")
                     }
+                    ["canvas-push", count] => vec![push_canvas(
+                        SURFACE_ID,
+                        mixed_canvas(count.parse().map_err(|e| format!("{e}"))?),
+                    )],
                     ["cancel", id] => {
                         network::cancel_fetch(id.parse().map_err(|e| format!("{e}"))?);
                         vec!["done".to_string()]

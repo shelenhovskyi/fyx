@@ -335,6 +335,96 @@ async fn test_v0_3_canvas_replies_and_clicks(cx: &mut TestAppContext) {
     );
 }
 
+/// Plan 4.13's lift bench: a guest answers or pushes a canvas of `n` mixed ops, and the host
+/// lifts, converts and checks it. Target: 1 ms per 10 000 ops in a release build. The round trip
+/// also holds the guest's clone and lowering and one event's dispatch, so it is an upper bound;
+/// `canvas 6` is the floor. Measured 2026-11-19 (W2c.md): 1.1–1.3 ms per 10 000 round trip, of
+/// which the host's convert and checks are 0.16 ms and the rest is the canonical-ABI lift and the
+/// guest's lowering; the 16384 cap stays. The assertion guards against a regression past 2 ms
+/// per 10 000. Run it with
+/// `cargo test -p ui_ext_wasm --release --lib canvas_lift_bench -- --ignored --nocapture`.
+#[gpui::test]
+#[ignore = "a bench: run it in release"]
+async fn test_canvas_lift_bench(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+
+    const RUNS: usize = 30;
+    fn median(mut times: Vec<Duration>) -> Duration {
+        times.sort();
+        times[times.len() / 2]
+    }
+
+    let extension = load(cx).await;
+    let mut lines = Vec::new();
+    let mut misses = Vec::new();
+    for count in [6usize, 1_000, 10_000, 16_384] {
+        let command = format!("canvas {count}");
+        let push_command = format!("canvas-push {count}");
+        let (mut replies, mut pushes, mut checks) = (Vec::new(), Vec::new(), Vec::new());
+        for run in 0..RUNS + 3 {
+            let start = Instant::now();
+            let reply = extension
+                .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, command.clone()))
+                .await
+                .expect("a canvas reply");
+            let reply_time = start.elapsed();
+            let Update::Replace(nodes) = &reply.value else {
+                panic!("not a canvas: {:?}", reply.value);
+            };
+            let Props::Canvas(canvas) = &nodes[0].props else {
+                panic!("not a canvas: {:?}", nodes[0].props);
+            };
+            assert_eq!(canvas.ops.len(), count);
+            let start = Instant::now();
+            assert_eq!(ui_ext::canvas::check_canvas_props(canvas), Ok(()));
+            let check_time = start.elapsed();
+
+            let start = Instant::now();
+            let pushed = extension
+                .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, push_command.clone()))
+                .await
+                .expect("a canvas push");
+            let push_time = start.elapsed();
+            assert!(
+                matches!(&pushed.value, Update::Replace(nodes)
+                if nodes[0].props == Props::Text(ui_ext::v0_2::TextProps {
+                    content: "ok".into(),
+                    ..Default::default()
+                })),
+                "{:?}",
+                pushed.value
+            );
+            // The first runs warm the guest's cache and the allocator.
+            if run >= 3 {
+                replies.push(reply_time);
+                pushes.push(push_time);
+                checks.push(check_time);
+            }
+        }
+        let (reply, push, check) = (median(replies), median(pushes), median(checks));
+        let per_10k = |time: Duration| time.as_secs_f64() * 1e3 * 10_000.0 / count as f64;
+        lines.push(format!(
+            "{count:>6} ops: reply {reply:>10.3?} ({:.3} ms/10k), push {push:>10.3?} ({:.3} ms/10k), check alone {check:>10.3?}",
+            per_10k(reply),
+            per_10k(push),
+        ));
+        if count >= 10_000 && per_10k(reply.max(push)) > 2.0 {
+            misses.push(count);
+        }
+    }
+    println!(
+        "canvas lift bench, median of {RUNS}:
+{}",
+        lines.join(
+            "
+"
+        )
+    );
+    if !cfg!(debug_assertions) {
+        assert!(misses.is_empty(), "over 2 ms per 10 000 ops at {misses:?}");
+    }
+}
+
 /// The smaller 0.3 (integration-5 A3) links every interface of its world: a 0.3 component keeps
 /// 0.2's `place-decoration`. WASI imports at a newer patch version than the host's (std's
 /// `HashMap` seed in the probe's `surfaces`) still resolve.
@@ -1387,9 +1477,9 @@ mod process_spawn {
         #[cfg(unix)]
         let (env_program, env_args, cat) = ("env", "", "cat");
         let mut setup = Setup::new(&[env_program, cat]);
-        setup.env = vec!["FYX_DECLARED".into(), "FYX_GUEST".into()];
+        setup.env = vec!["FORCE_COLOR".into(), "COLUMNS".into()];
         let mut base: Vec<(OsString, OsString)> = std::env::vars_os().collect();
-        base.push(("FYX_DECLARED".into(), "from-fyx".into()));
+        base.push(("FORCE_COLOR".into(), "from-fyx".into()));
         base.push(("FYX_SECRET".into(), "never".into()));
         setup.environment = Some(Arc::new(move || base.clone()));
         let extension = setup.load(cx).await;
@@ -1405,13 +1495,13 @@ mod process_spawn {
         );
         let id = command(
             &extension,
-            &format!("spawn env FYX_GUEST=from-guest -- {env_program} {env_args}"),
+            &format!("spawn env COLUMNS=from-guest -- {env_program} {env_args}"),
         )
         .await;
         let (stdout, end) = run_to_end(&extension, &mut events, &id).await;
         assert_eq!(end, format!("exited {id} 0 false"));
-        assert!(stdout.contains("FYX_DECLARED=from-fyx"), "{stdout}");
-        assert!(stdout.contains("FYX_GUEST=from-guest"), "{stdout}");
+        assert!(stdout.contains("FORCE_COLOR=from-fyx"), "{stdout}");
+        assert!(stdout.contains("COLUMNS=from-guest"), "{stdout}");
         assert!(!stdout.contains("FYX_SECRET"), "{stdout}");
 
         let id = command(&extension, &format!("spawn stdin -- {cat}")).await;

@@ -183,6 +183,7 @@ impl RegistryClient {
                 Err(error) => problems.push(error),
             }
         }
+        client.note_blocklist_sequence();
         (client, problems)
     }
 
@@ -262,6 +263,7 @@ impl RegistryClient {
             verified,
         });
         self.refused = None;
+        self.note_blocklist_sequence();
         self.recheck_blocklist();
         if unchanged {
             IndexRefresh::Unchanged
@@ -286,16 +288,50 @@ impl RegistryClient {
         let fetched = fetch_capped(fetch, &request)
             .await
             .map_err(|error| format!("{error:#}"));
-        let update = BlocklistCache::apply_fetch(
+        let update = BlocklistCache::apply_fetch_above(
             self.blocklist.as_ref(),
+            self.blocklist_floor(),
             fetched.as_deref().map_err(Clone::clone),
             &keyset,
             now,
         );
         if let CacheUpdate::Replace(cache) | CacheUpdate::Refresh(cache) = &update {
             self.blocklist = Some(cache.clone());
+            self.note_blocklist_sequence();
         }
         update
+    }
+
+    /// Whether the host may lift a block it applied earlier (re-enable an extension it disabled)
+    /// because the plan no longer has it: only while a block list is held and has not expired.
+    /// With no list, or a stale one past its `expires_at`, [`RegistryClient::plan_updates`]
+    /// shows no blocks, and that means "not known", never "nothing is blocked"
+    /// (integration-6 N4).
+    pub fn blocks_can_lift(&self, now: Timestamp) -> bool {
+        self.blocklist
+            .as_ref()
+            .is_some_and(|cache| now < cache.blocklist.expires_at())
+    }
+
+    /// The highest block-list sequence this client ever accepted, whether or not it still holds
+    /// that list.
+    pub fn blocklist_floor(&self) -> Option<u64> {
+        let cached = self
+            .blocklist
+            .as_ref()
+            .map(|cache| cache.blocklist.sequence());
+        let kept = self
+            .snapshot
+            .as_ref()
+            .and_then(VerifiedSnapshot::blocklist_floor);
+        cached.max(kept)
+    }
+
+    /// Keeps the held list's sequence in the snapshot state, which outlives the cache.
+    fn note_blocklist_sequence(&mut self) {
+        if let (Some(snapshot), Some(cache)) = (&mut self.snapshot, &self.blocklist) {
+            snapshot.raise_blocklist_floor(cache.blocklist.sequence());
+        }
     }
 
     /// Whether [`RegistryClient::refresh_blocklist`] is due: never tried since start, or the last
@@ -375,7 +411,8 @@ impl RegistryClient {
 
     /// Actions for the installed extensions ([`plan_updates`]). While installs and updates are
     /// stopped, only the block list acts: blocked versions are still rolled back or disabled, and
-    /// nothing updates or shows as held.
+    /// nothing updates or shows as held. A block that is no longer in the plan lifted only if
+    /// [`RegistryClient::blocks_can_lift`].
     pub fn plan_updates(
         &self,
         installed: &[InstalledExtension],
@@ -460,8 +497,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Action, InstalledVersion, Origin, Sha256Digest, Signed, Snapshot, Tier,
-        blocklist::test_support::{blocklist, entry, signed_json},
+        Action, Blocklist, InstalledVersion, Origin, Sha256Digest, Signed, Snapshot, Tier,
+        blocklist::test_support::{self, entry, signed_json},
         index::test_support::release,
         signing::test_keys::{keyset, registry_key, rotation_key},
     };
@@ -470,6 +507,14 @@ mod tests {
     const PUBLISHED: u64 = 1_000_000;
     /// Past the 24 h age gate of releases published at `PUBLISHED`.
     const NOW: Timestamp = Timestamp(PUBLISHED + 30 * HOUR);
+
+    /// A block list valid at `NOW`: one that has expired is refused with no cache to compare.
+    fn blocklist(sequence: u64, entries: Vec<crate::BlockEntry>) -> Blocklist {
+        let mut list = test_support::blocklist(sequence, entries);
+        list.generated_at = Timestamp(NOW.0 - HOUR + sequence);
+        list.expires_at = Timestamp(NOW.0 + 48 * HOUR);
+        list
+    }
 
     /// The futures here never wait: the fetcher answers at once.
     fn ready<T>(future: impl Future<Output = T>) -> T {
@@ -1103,6 +1148,12 @@ mod tests {
         ready(client.refresh_index(&files, NOW));
         ready(client.refresh_blocklist(&files, NOW));
         assert!(client.blocklist().is_some());
+        assert!(client.blocks_can_lift(NOW));
+        let expires_at = blocklist(1, Vec::new()).expires_at;
+        assert!(
+            !client.blocks_can_lift(expires_at),
+            "an expired list lifts nothing"
+        );
 
         files.put(
             RegistryFile::Snapshot,
@@ -1114,6 +1165,14 @@ mod tests {
             IndexRefresh::Updated
         );
         assert!(client.blocklist().is_none());
+        // integration-6 N4: no list is "not known", and the sequence outlives the cache, also
+        // across a restart.
+        assert!(!client.blocks_can_lift(NOW));
+        assert_eq!(client.blocklist_floor(), Some(1));
+        let (restored, problems) =
+            RegistryClient::restore(keyset(), &client.stored_state().expect("stored"));
+        assert_eq!(problems, []);
+        assert_eq!(restored.blocklist_floor(), Some(1));
         assert!(matches!(
             ready(client.refresh_blocklist(&files, NOW)),
             CacheUpdate::Keep(crate::KeepReason::Invalid(_))
