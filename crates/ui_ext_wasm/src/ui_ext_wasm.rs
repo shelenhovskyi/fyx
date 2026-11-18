@@ -307,6 +307,10 @@ pub struct UiManifest {
     /// it (the provenance line of notifications, design.md M.4).
     #[serde(skip)]
     pub name: Option<String>,
+    /// `version` from the top of `extension.toml`, unchecked; for the `user-agent` of
+    /// `network:fetch`.
+    #[serde(skip)]
+    pub version: Option<String>,
     /// 0.3, with `network:fetch`: the hosts the extension may fetch from (design.md §8).
     #[serde(default)]
     pub network: Option<NetworkManifest>,
@@ -469,6 +473,8 @@ struct ExtensionToml {
     id: Arc<str>,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
     fyx_ui: Option<UiManifest>,
 }
 
@@ -486,6 +492,7 @@ impl UiManifest {
             return Ok(None);
         };
         manifest.name = toml.name;
+        manifest.version = toml.version;
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
         let network_capable = manifest.api_version >= Version::new(0, 3, 0);
@@ -1287,6 +1294,9 @@ pub struct LoadOptions {
     /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
     /// Applies only to a 0.3 component that declares `network:fetch`.
     pub network_domains: Option<Vec<String>>,
+    /// `extension.toml`'s `version`, for the `user-agent` of `network:fetch`; set by
+    /// [`UiExtension::load_checked`].
+    pub extension_version: Option<String>,
     /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
     pub resolver: Option<Arc<dyn network::Resolve>>,
     /// `[[fyx_ui.processes]]`; [`UiExtension::load_checked`] sets it from the manifest. Applies
@@ -1352,6 +1362,7 @@ impl UiExtension {
             capabilities,
             allow_staged,
             network_domains,
+            extension_version,
             resolver,
             processes,
             process_env,
@@ -1426,8 +1437,11 @@ impl UiExtension {
 
         cx.spawn(async move |cx| {
             // Read here: `load_with_options` may be called while the app is borrowed.
-            let app_version = cx.update(|cx| release_channel::AppVersion::global(cx).to_string());
-            let fetcher = network::Fetcher::new(&extension_id, &app_version, resolver);
+            let app_version = cx.update(|cx| release_channel::AppVersion::global(cx));
+            let fetcher = network::Fetcher::new(
+                network::user_agent(&app_version, &extension_id, extension_version.as_deref()),
+                resolver,
+            );
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
             // Only a 0.3 component has the `network` import.
@@ -1663,6 +1677,7 @@ impl UiExtension {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
             network_domains: manifest.network.as_ref().map(|table| table.domains.clone()),
+            extension_version: manifest.version.clone(),
             processes: Some(manifest.processes.clone()),
             process_env: manifest.process.as_ref().map(|table| table.env.clone()),
             ..options
