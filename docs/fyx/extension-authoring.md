@@ -920,7 +920,7 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 |---|---|
 | `extensions/fyx_demo_counter` | the smallest complete extension: a mount, `set-props` replies, `list-rows` |
 | `extensions/fyx_demo_todo` | inputs without echo, filter buttons, `row-click`, rebuilding a list |
-| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows` and all 101 frozen icons |
+| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows`, all 101 frozen icons, and notifications and progress (`Notify`, `Run job`) |
 | `extensions/fyx_demo_markdown` | an input previewed live in a `markdown` node, clearing an input after Enter |
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
