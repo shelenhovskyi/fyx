@@ -41,9 +41,8 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 ## P3 registry
 
 **Status 2026-11-19.** The user created `shelenhovskyi/fyx-extensions`. It is **private**, and goes
-public at 1.0. Its seed is prepared as one initial commit of `tools/fyx-extensions-template/` from
-`fyx/main` `062d6c99cd`; it is done for 3.1 once that commit is pushed to the new repository's
-`main`. The user does the rest later: branch rules, Environments, keys, and the GitHub App behind
+public at 1.0. **3.1 is done:** its `main` holds one initial commit, `551cdc8`, of
+`tools/fyx-extensions-template/` from `fyx/main` `062d6c99cd` (pushed with the user's yes). The user does the rest later: branch rules, Environments, keys, and the GitHub App behind
 `AUTO_MERGE_TOKEN` ([registry-repo.md](registry-repo.md#bootstrap-task-31-then-32)).
 
 | # | Owner | Task | Depends on | Done when |
