@@ -48,8 +48,12 @@ refused before review, so it never opens a review pane.
   | `alt-c` | Comment on the hunk |
   | `ctrl-enter` | Submit |
 
-- Comments, and the hunks you rejected, go back to the agent when it wrote through Fyx: the write
-  fails with a message that lists them. An ACP permission answer carries no message.
+- Comments, and the hunks you rejected, go back to the agent.
+  - When the agent wrote through Fyx, the write fails with a message that lists them.
+  - An ACP permission answer carries no message. So when you partly accept a permission request (the
+    agent is answered "rejected" although Fyx wrote the accepted hunks) or comment on it, Fyx puts a
+    short "[Fyx review: …]" note in front of your next message in that thread. You see it in your
+    message.
 - If Fyx cannot write the hunks you accepted (for example, the text moved in the meantime), the
   review stays open with the reason. Submit again, or reject the file.
 - If the file has unsaved edits of yours, Fyx applies the accepted hunks but does not save the file.

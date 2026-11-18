@@ -407,6 +407,9 @@ pub struct AgentReview {
     panes: HashMap<TurnId, usize>,
     /// Live threads per session.
     session_threads: HashMap<acp_v2::SessionId, HashSet<EntityId>>,
+    /// What the agent should learn about reviews answered through a permission (which carries no
+    /// message): sent in front of the user's next prompt in the session.
+    prompt_notes: HashMap<acp_v2::SessionId, Vec<String>>,
 }
 
 /// How many ended turns keep their summary (decided files, unreviewed changes).
@@ -558,6 +561,16 @@ impl AgentReview {
         } else {
             false
         }
+    }
+
+    /// Takes the session's notes for the agent, as one block for the front of the next prompt.
+    pub fn take_prompt_notes(&mut self, session_id: &acp_v2::SessionId) -> Option<String> {
+        let notes = self.prompt_notes.remove(session_id)?;
+        Some(format!(
+            "[Fyx review: notes from the review of your earlier edits]\n{}\n[End of the review \
+             notes; the user's message follows.]",
+            notes.join("\n")
+        ))
     }
 
     pub(crate) fn pane_opened(&mut self, turn: TurnId) {
@@ -846,7 +859,11 @@ impl AgentReview {
         }
         review.responder = None;
         let (turn, edit, rule) = (review.turn, review.edit.clone(), review.rule.clone());
+        let session_id = review.session_id.clone();
         self.record(turn, &edit, rule);
+        if let Some(note) = permission_note(&edit, verdict) {
+            self.prompt_notes.entry(session_id).or_default().push(note);
+        }
         cx.emit(AgentReviewEvent::Resolved(id));
         // An allowed preview stays until the agent's write adopts its decisions; after a denial no
         // write follows.
@@ -1213,6 +1230,22 @@ fn strictest_rule(rules: &[Option<RuleMatch>]) -> Option<RuleMatch> {
         })
 }
 
+/// What the agent should learn about a permission it was answered: ACP's answer has no message, and
+/// "rejected" alone is false when the host wrote the accepted hunks, and loses the user's comments.
+fn permission_note(edit: &ProposedEdit, verdict: PermissionVerdict) -> Option<String> {
+    let has_comments = edit.hunks().iter().any(|hunk| hunk.comment.is_some());
+    let feedback = edit.feedback()?;
+    match verdict {
+        PermissionVerdict::ApplyAcceptedAndDeny => Some(format!(
+            "Your request to edit {} was answered \"rejected\", but Fyx wrote the hunks the user \
+             accepted. {feedback}",
+            edit.abs_path().display()
+        )),
+        PermissionVerdict::Deny | PermissionVerdict::Allow if has_comments => Some(feedback),
+        _ => None,
+    }
+}
+
 fn permission_verdict(resolution: Resolution) -> PermissionVerdict {
     match resolution {
         Resolution::Unchanged | Resolution::AcceptedAll => PermissionVerdict::Allow,
@@ -1244,6 +1277,11 @@ impl AgentWriteGate for WriteGate {
                 "Agent review is unavailable; the file is unchanged."
             ))),
         }
+    }
+
+    fn take_prompt_notes(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Option<String> {
+        let review = self.0.upgrade()?;
+        review.update(cx, |review, _| review.take_prompt_notes(session_id))
     }
 
     fn review_operation(
@@ -3206,6 +3244,100 @@ mod tests {
         assert_eq!(
             kind(&[rule(RuleKind::AutoAccept), rule(RuleKind::AutoAccept)]),
             Some(RuleKind::AutoAccept)
+        );
+    }
+
+    #[gpui::test]
+    async fn a_partly_accepted_permission_reaches_the_next_prompt(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(None, cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let (respond, _) = recording_responder();
+        let preview = ProposedEdit::new(PathBuf::from("/p/demo.txt"), OLD.into(), NEW.into());
+        let id = review
+            .update(cx, |review, cx| {
+                review.open_permission_preview(
+                    session(),
+                    new_request_id(),
+                    preview,
+                    respond,
+                    None,
+                    cx,
+                )
+            })
+            .unwrap();
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 0, HunkDecision::Accepted, cx)
+                .unwrap();
+            review
+                .set_decision(id, 1, HunkDecision::Rejected, cx)
+                .unwrap();
+            review
+                .set_comment(id, 1, Some("keep it lowercase".into()), cx)
+                .unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+
+        // The user's next prompt carries what the "rejected" answer could not.
+        let prompt = vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
+            "next step",
+        ))];
+        let sent = cx
+            .update(|cx| acp_thread::fyx_review::with_review_notes(&session(), prompt.clone(), cx));
+        assert_eq!(sent.len(), 2);
+        let acp_v2::ContentBlock::Text(note) = &sent[0] else {
+            panic!("the note comes first");
+        };
+        assert!(
+            note.text.contains("answered \"rejected\", but Fyx wrote"),
+            "{}",
+            note.text
+        );
+        assert!(note.text.contains("applied 1 of 2 hunks"), "{}", note.text);
+        assert!(note.text.contains("keep it lowercase"), "{}", note.text);
+        assert_eq!(sent[1], prompt[0]);
+
+        // Once only, and only for its session.
+        let again = cx
+            .update(|cx| acp_thread::fyx_review::with_review_notes(&session(), prompt.clone(), cx));
+        assert_eq!(again, prompt);
+    }
+
+    #[gpui::test]
+    async fn plain_answers_leave_no_note(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        for decision in [HunkDecision::Accepted, HunkDecision::Rejected] {
+            let (respond, _) = recording_responder();
+            let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+            let id = review
+                .update(cx, |review, cx| {
+                    review.open_permission_preview(
+                        session(),
+                        new_request_id(),
+                        preview,
+                        respond,
+                        None,
+                        cx,
+                    )
+                })
+                .unwrap();
+            review.update(cx, |review, cx| {
+                review.decide_all(id, decision, cx).unwrap();
+                review.submit(id, cx).unwrap();
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            review.update(cx, |review, _| review.take_prompt_notes(&session())),
+            None,
+            "an allow or a reject without comments says it all"
         );
     }
 

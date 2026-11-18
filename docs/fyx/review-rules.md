@@ -91,7 +91,8 @@ the diff.
 ## Limits
 
 - A rejected permission request carries no message in ACP. An agent whose edit is refused through
-  a permission request is only told "rejected". When the agent writes through Fyx
+  a permission request is told "rejected" at once; the rule and any comments reach it with your next
+  message only when the review left a note (a partial accept or comments). When the agent writes through Fyx
   (`fs/write_text_file`, or Zed's built-in agent), the write fails with the rule in the error
   message.
 - Rules apply to agent edits that reach Fyx: permission requests, `fs/write_text_file`, and the

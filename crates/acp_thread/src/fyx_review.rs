@@ -35,9 +35,18 @@ pub struct AgentWriteOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentFileOperation {
     /// `text` is the file's content, when it is a text file.
-    Delete { path: PathBuf, text: Option<String> },
-    Move { from: PathBuf, to: PathBuf },
-    Copy { from: PathBuf, to: PathBuf },
+    Delete {
+        path: PathBuf,
+        text: Option<String>,
+    },
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+    },
 }
 
 impl AgentFileOperation {
@@ -66,6 +75,12 @@ impl AgentFileOperation {
 
 pub trait AgentWriteGate: 'static {
     fn review_write(&self, write: AgentWrite, cx: &mut App) -> Task<Result<AgentWriteOutcome>>;
+
+    /// Notes for the agent that no answer could carry (a permission answer has no message), taken
+    /// once: they go in front of the user's next prompt in the session.
+    fn take_prompt_notes(&self, _session_id: &acp_v2::SessionId, _cx: &mut App) -> Option<String> {
+        None
+    }
 
     /// Resolves to an error, whose message is the feedback, when the operation must not happen.
     fn review_operation(
@@ -104,6 +119,24 @@ pub(crate) async fn gate_agent_write(
     }
     let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone())?;
     review_agent_edit(session_id, abs_path, buffer, snapshot.text(), new_text, cx).await
+}
+
+/// The user's prompt, with the host review's pending notes for the agent in front of it.
+pub fn with_review_notes(
+    session_id: &acp_v2::SessionId,
+    mut message: Vec<acp_v2::ContentBlock>,
+    cx: &mut App,
+) -> Vec<acp_v2::ContentBlock> {
+    let gate = cx
+        .try_global::<GlobalAgentWriteGate>()
+        .map(|gate| gate.0.clone());
+    if let Some(notes) = gate.and_then(|gate| gate.take_prompt_notes(session_id, cx)) {
+        message.insert(
+            0,
+            acp_v2::ContentBlock::Text(acp_v2::TextContent::new(notes)),
+        );
+    }
+    message
 }
 
 /// Reviews an agent's file operation; without a gate it may happen, as upstream.
