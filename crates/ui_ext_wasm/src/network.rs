@@ -96,6 +96,37 @@ impl Resolve for SystemResolver {
     }
 }
 
+/// Fyx's `proxy` setting as `network:fetch` uses it (decision 23): only the setting, never the
+/// `HTTP_PROXY`-style environment variables, which may carry credentials meant for other tools.
+/// The host keeps it current (`set` on every settings change); each request reads it.
+#[derive(Clone, Default)]
+pub struct ProxySetting(Arc<std::sync::RwLock<Option<Url>>>);
+
+impl ProxySetting {
+    /// The proxy a `proxy` setting names: `http`, `https`, `socks5` or `socks5h` with a host;
+    /// `None` for an empty or unusable value (the requests then go direct).
+    pub fn parse(setting: &str) -> Option<Url> {
+        let url = Url::parse(setting.trim()).ok()?;
+        (matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") && url.has_host())
+            .then_some(url)
+    }
+
+    /// Sets it from the setting's text; returns whether it names a usable proxy.
+    pub fn set(&self, setting: Option<&str>) -> bool {
+        let proxy = setting.and_then(Self::parse);
+        let usable = proxy.is_some();
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = proxy;
+        usable
+    }
+
+    pub fn get(&self) -> Option<Url> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The engine
 
@@ -107,26 +138,57 @@ pub struct Fetcher {
     /// Test only: which addresses count as global, so a test server on loopback can stand in
     /// for a public host.
     is_global: fn(IpAddr) -> bool,
+    /// Test only: a TLS configuration that trusts the test CA.
+    #[cfg(test)]
+    tls: Option<rustls::ClientConfig>,
+    proxy: ProxySetting,
 }
 
-/// The `user-agent` of an extension's requests: Fyx's own (as `zed::main` sends it) plus the
-/// extension id, so a server can tell extensions apart.
-pub fn user_agent(app_version: &str, extension_id: &str) -> String {
-    format!(
-        "Fyx/{app_version} ({}; {}) extension/{extension_id}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+/// The `user-agent` of an extension's requests (design.md §8): `Fyx/<major.minor> (extension
+/// <id>/<version>)`. Only Fyx's major and minor version, so it says little about the machine;
+/// the extension's version from `extension.toml` is left out unless it is a plain version
+/// string.
+pub fn user_agent(
+    app_version: &semver::Version,
+    extension_id: &str,
+    extension_version: Option<&str>,
+) -> String {
+    let fyx = format!("Fyx/{}.{}", app_version.major, app_version.minor);
+    match extension_version.filter(|version| {
+        !version.is_empty()
+            && version.len() <= 64
+            && version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+    }) {
+        Some(version) => format!("{fyx} (extension {extension_id}/{version})"),
+        None => format!("{fyx} (extension {extension_id})"),
+    }
 }
 
 impl Fetcher {
-    /// `app_version` is Fyx's (`release_channel::AppVersion`).
-    pub fn new(extension_id: &str, app_version: &str, resolver: Option<Arc<dyn Resolve>>) -> Self {
+    /// `user_agent` from [`user_agent`].
+    pub fn new(user_agent: String, resolver: Option<Arc<dyn Resolve>>) -> Self {
         Self {
             resolver: resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
-            user_agent: user_agent(app_version, extension_id),
+            user_agent,
             is_global,
+            #[cfg(test)]
+            tls: None,
+            proxy: ProxySetting::default(),
         }
+    }
+
+    /// Sends requests through Fyx's proxy setting; `localhost` never goes through it.
+    pub fn with_proxy(mut self, proxy: ProxySetting) -> Self {
+        self.proxy = proxy;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_tls(mut self, tls: rustls::ClientConfig) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     #[cfg(test)]
@@ -218,9 +280,17 @@ impl Fetcher {
         let mut builder = reqwest::Client::builder()
             .redirect_policy(reqwest::redirect::Policy::none())
             // No proxy from the environment: those can carry the user's credentials (decision
-            // 23). Fyx's own proxy setting is not applied yet.
+            // 23). Fyx's own proxy setting is applied below.
             .no_proxy()
-            .user_agent(self.user_agent.clone());
+            .user_agent(self.user_agent.clone())
+            // Zed's TLS, as its own client uses it: the platform verifier, or the bundled webpki
+            // roots where the platform's cannot be loaded (design.md §8). No extension CA.
+            .use_preconfigured_tls({
+                let tls = http_client_tls::tls_config();
+                #[cfg(test)]
+                let tls = self.tls.clone().unwrap_or(tls);
+                tls
+            });
         if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
             // Only `127.0.0.1` gets here (IP literals never match a domain pattern).
             if !allowed.loopback || !ip.is_loopback() {
@@ -254,13 +324,23 @@ impl Fetcher {
             };
             // Connect to the checked addresses only: reqwest does not resolve this name again.
             builder = builder.resolve_to_addrs(&host, &addrs);
+            // Through Fyx's proxy, if one is set. The addresses were still checked here, though
+            // the proxy resolves the name on its own; `localhost` is never proxied.
+            if !allowed.loopback
+                && let Some(proxy) = self.proxy.get()
+            {
+                builder = builder.proxy(
+                    reqwest::Proxy::all(proxy.as_str())
+                        .map_err(|error| FetchError::Other(format!("proxy: {error}")))?,
+                );
+            }
         }
         let client = builder
             .build()
             .map_err(|error| FetchError::Other(format!("{error}")))?;
         let mut request = client
             .request(reqwest_method(method), url.clone())
-            .header(reqwest::header::ACCEPT_ENCODING, "gzip");
+            .header(reqwest::header::ACCEPT_ENCODING, ACCEPT_ENCODING);
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -345,11 +425,23 @@ async fn read_response(
                 .map_err(|error| io::Error::other(error.to_string())),
         )
         .into_async_read();
+        use async_compression::futures::bufread;
+        let buffered = || futures::io::BufReader::new(raw);
         match encoding.as_deref() {
-            None | Some("") | Some("identity") => read_capped(raw).await?,
+            None | Some("") | Some("identity") => read_capped(buffered()).await?,
             Some("gzip") | Some("x-gzip") => {
-                read_capped(async_compression::futures::bufread::GzipDecoder::new(
-                    futures::io::BufReader::new(raw),
+                read_capped(bufread::GzipDecoder::new(buffered())).await?
+            }
+            // HTTP's `deflate` is the zlib format (RFC 9110 §8.4.1.2).
+            Some("deflate") => read_capped(bufread::ZlibDecoder::new(buffered())).await?,
+            Some("br") => read_capped(bufread::BrotliDecoder::new(buffered())).await?,
+            Some("zstd") => {
+                // A small window bounds the decoder's memory, whatever the frame asks for.
+                read_capped(bufread::ZstdDecoder::with_params(
+                    buffered(),
+                    &[async_compression::zstd::DParameter::window_log_max(
+                        ZSTD_WINDOW_LOG_MAX,
+                    )],
                 ))
                 .await?
             }
@@ -371,6 +463,15 @@ async fn read_response(
         url: url.to_string(),
     })
 }
+
+/// The encodings the host decodes, so the only ones it asks for; the guest cannot set the
+/// header (design.md §8).
+pub const ACCEPT_ENCODING: &str = "gzip, deflate, br, zstd";
+
+/// The largest zstd window the decoder accepts (8 MiB): RFC 8878 §3.1.1.1.2 recommends that
+/// decoders support at least this, and a larger one would let a frame make it allocate up to
+/// 128 MiB.
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 
 /// Reads to the end, failing with `too-large` as soon as the decoded body passes the cap, so a
 /// compression bomb never inflates past it.
@@ -799,8 +900,49 @@ async fn ask_consent(
     }
 }
 
+/// The test CA and its `localhost` certificate (`test_tls/README.md`).
+#[cfg(test)]
+pub(crate) mod test_tls {
+    use std::sync::Arc;
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    const CA: &[u8] = include_bytes!("test_tls/ca.der");
+    const LOCALHOST: &[u8] = include_bytes!("test_tls/localhost.der");
+    const LOCALHOST_KEY: &[u8] = include_bytes!("test_tls/localhost.key.der");
+
+    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    pub(crate) fn server_config() -> Arc<rustls::ServerConfig> {
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(provider())
+                .with_safe_default_protocol_versions()
+                .expect("protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(LOCALHOST)],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(LOCALHOST_KEY)),
+                )
+                .expect("the test certificate"),
+        )
+    }
+
+    /// A client configuration that trusts the test CA and nothing else.
+    pub(crate) fn client_config() -> rustls::ClientConfig {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(CA)).expect("the test CA");
+        rustls::ClientConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .expect("protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    }
+}
+
 /// A plain HTTP/1.1 server on loopback for the tests: each request gets the response its path
-/// names (`respond`), then the connection closes.
+/// names (`respond`), then the connection closes. [`test_server::start_tls`] serves it over TLS.
 #[cfg(test)]
 pub(crate) mod test_server {
     use std::sync::{
@@ -846,6 +988,27 @@ pub(crate) mod test_server {
     pub(crate) async fn start(
         respond: impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static,
     ) -> Server {
+        serve(respond, None).await
+    }
+
+    /// [`start`] over TLS, with the `localhost` certificate of the test CA
+    /// ([`super::test_tls`]).
+    pub(crate) async fn start_tls(
+        respond: impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Server {
+        serve(
+            respond,
+            Some(tokio_rustls::TlsAcceptor::from(
+                super::test_tls::server_config(),
+            )),
+        )
+        .await
+    }
+
+    async fn serve(
+        respond: impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static,
+        tls: Option<tokio_rustls::TlsAcceptor>,
+    ) -> Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("binds");
@@ -855,34 +1018,50 @@ pub(crate) mod test_server {
         tokio::spawn({
             let connections = connections.clone();
             async move {
-                while let Ok((mut stream, _)) = listener.accept().await {
+                while let Ok((stream, _)) = listener.accept().await {
                     connections.fetch_add(1, Ordering::SeqCst);
                     let respond = respond.clone();
+                    let tls = tls.clone();
                     tokio::spawn(async move {
-                        let mut request = Vec::new();
-                        let mut buffer = [0u8; 4096];
-                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                            match stream.read(&mut buffer).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(n) => request.extend_from_slice(&buffer[..n]),
-                            }
-                        }
-                        let text = String::from_utf8_lossy(&request);
-                        let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
-                        // Every server answers this path with the request head it got.
-                        let echoed = (path == "/echo-request").then(|| ok(text.as_bytes()));
-                        match echoed.or_else(|| respond(&path, port)) {
-                            Some(response) => {
-                                stream.write_all(&response).await.ok();
-                                stream.shutdown().await.ok();
-                            }
-                            None => tokio::time::sleep(std::time::Duration::from_secs(60)).await,
+                        match tls {
+                            Some(tls) => match tls.accept(stream).await {
+                                Ok(stream) => answer(stream, respond, port).await,
+                                // A client that refuses the certificate ends the handshake.
+                                Err(_) => {}
+                            },
+                            None => answer(stream, respond, port).await,
                         }
                     });
                 }
             }
         });
         Server { port, connections }
+    }
+
+    async fn answer(
+        mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+        respond: Arc<impl Fn(&str, u16) -> Option<Vec<u8>> + Send + Sync + 'static>,
+        port: u16,
+    ) {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buffer[..n]),
+            }
+        }
+        let text = String::from_utf8_lossy(&request);
+        let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
+        // Every server answers this path with the request head it got.
+        let echoed = (path == "/echo-request").then(|| ok(text.as_bytes()));
+        match echoed.or_else(|| respond(&path, port)) {
+            Some(response) => {
+                stream.write_all(&response).await.ok();
+                stream.shutdown().await.ok();
+            }
+            None => tokio::time::sleep(std::time::Duration::from_secs(60)).await,
+        }
     }
 
     pub(crate) fn ok(body: &[u8]) -> Vec<u8> {
@@ -931,7 +1110,7 @@ mod tests {
     }
 
     fn fetcher() -> Fetcher {
-        Fetcher::new("probe", "0.0.0", Some(Arc::new(PanicResolver)))
+        Fetcher::new("probe".into(), Some(Arc::new(PanicResolver)))
     }
 
     /// `localhost` never goes to DNS: a resolver call fails the test.
@@ -993,6 +1172,140 @@ mod tests {
             response.url,
             format!("http://localhost:{}/hello", server.port)
         );
+    }
+
+    async fn encode(encoding: &str, body: &[u8]) -> Vec<u8> {
+        use async_compression::futures::bufread;
+        let input = futures::io::Cursor::new(body.to_vec());
+        let mut compressed = Vec::new();
+        match encoding {
+            "gzip" => {
+                bufread::GzipEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            "deflate" => {
+                bufread::ZlibEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            "br" => {
+                bufread::BrotliEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            "zstd" => {
+                bufread::ZstdEncoder::new(input)
+                    .read_to_end(&mut compressed)
+                    .await
+            }
+            other => panic!("{other}"),
+        }
+        .expect("compresses");
+        compressed
+    }
+
+    /// Plan 4.6 follow-up: gzip, deflate, brotli and zstd bodies are decoded, each under the
+    /// 16 MiB cap of the decoded size; the request offers exactly these.
+    #[tokio::test]
+    async fn every_offered_encoding_is_decoded_under_the_cap() {
+        let encodings = ["gzip", "deflate", "br", "zstd"];
+        let mut bodies = std::collections::HashMap::new();
+        for encoding in encodings {
+            let hello = encode(encoding, b"hello, fyx").await;
+            let bomb = encode(encoding, &vec![0u8; 17 << 20]).await;
+            assert!(bomb.len() < 1 << 20, "{encoding}: {}", bomb.len());
+            bodies.insert(format!("/{encoding}/hello"), (encoding, hello));
+            bodies.insert(format!("/{encoding}/bomb"), (encoding, bomb));
+        }
+        let server = test_server::start(move |path, _| {
+            let (encoding, body) = bodies.get(path)?;
+            let mut response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-encoding: {encoding}\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            response.extend_from_slice(body);
+            Some(response)
+        })
+        .await;
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let url = |path: &str| format!("http://localhost:{}{path}", server.port);
+        for encoding in encodings {
+            let response = run(
+                &domains,
+                &fetcher(),
+                request(&url(&format!("/{encoding}/hello"))),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{encoding}: {error:?}"));
+            assert_eq!(response.body, b"hello, fyx", "{encoding}");
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .all(|(name, _)| name != "content-encoding" && name != "content-length"),
+                "{encoding}: {:?}",
+                response.headers
+            );
+            let bomb = run(
+                &domains,
+                &fetcher(),
+                request(&url(&format!("/{encoding}/bomb"))),
+            )
+            .await;
+            assert!(
+                matches!(bomb, Err(FetchError::TooLarge)),
+                "{encoding}: {bomb:?}"
+            );
+        }
+        let head = run(&domains, &fetcher(), request(&url("/echo-request")))
+            .await
+            .expect("echo");
+        let head = String::from_utf8_lossy(&head.body).to_ascii_lowercase();
+        assert!(
+            head.contains("accept-encoding: gzip, deflate, br, zstd\r\n"),
+            "{head}"
+        );
+    }
+
+    /// A zstd frame that asks for a window over 8 MiB is refused rather than allocated.
+    #[tokio::test]
+    async fn zstd_windows_are_bounded() {
+        let body = zstd_frame_with_window_log(27);
+        let server = test_server::start(move |path, _| {
+            (path == "/wide").then(|| {
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-encoding: zstd\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&body);
+                response
+            })
+        })
+        .await;
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let result = run(
+            &domains,
+            &fetcher(),
+            request(&format!("http://localhost:{}/wide", server.port)),
+        )
+        .await;
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// A zstd frame header declaring a `1 << window_log` window and no content size, followed by
+    /// one empty raw block: valid, but needs the large window.
+    fn zstd_frame_with_window_log(window_log: u8) -> Vec<u8> {
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+        // Frame header descriptor: no single segment, no checksum, no dictionary, no size.
+        frame.push(0x00);
+        // Window descriptor: exponent (window_log - 10), mantissa 0.
+        frame.push((window_log - 10) << 3);
+        // Last block, raw, size 0.
+        frame.extend_from_slice(&[0x01, 0x00, 0x00]);
+        frame
     }
 
     /// Plan 4.6, done: a 17 MiB response is cut off, by its length or while streaming, and so
@@ -1141,7 +1454,7 @@ mod tests {
                 later: Vec::new(),
                 calls: Default::default(),
             };
-            let fetcher = Fetcher::new("probe", "0.0.0", Some(Arc::new(resolver)));
+            let fetcher = Fetcher::new("probe".into(), Some(Arc::new(resolver)));
             let domains = list(&["api.example.com"]);
             let result = run(&domains, &fetcher, request("https://api.example.com/")).await;
             assert!(
@@ -1162,7 +1475,7 @@ mod tests {
             later: vec![SocketAddr::new("10.0.0.1".parse().unwrap(), server.port)],
             calls: Default::default(),
         });
-        let fetcher = Fetcher::new("probe", "0.0.0", Some(resolver.clone()))
+        let fetcher = Fetcher::new("probe".into(), Some(resolver.clone()))
             .with_address_rule(|ip| ip.is_loopback() || is_global(ip));
         let domains = list(&[&format!("api.example.com:{}", server.port)]);
         let mut request = request(&format!("https://api.example.com:{}/", server.port));
@@ -1173,11 +1486,133 @@ mod tests {
         assert_eq!(server.connections(), 1);
     }
 
+    /// Plan 4.6 follow-up: `https` end to end against a local TLS server, and its certificate is
+    /// checked: Zed's own roots do not know the test CA, so the same request fails with `tls`.
+    #[tokio::test]
+    async fn https_checks_the_certificate() {
+        let server = test_server::start_tls(|path, _| {
+            (path == "/hello").then(|| test_server::ok(b"over tls"))
+        })
+        .await;
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let url = format!("https://localhost:{}/hello", server.port);
+        let response = run(
+            &domains,
+            &fetcher().with_tls(test_tls::client_config()),
+            request(&url),
+        )
+        .await
+        .expect("https with the test CA");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"over tls");
+        assert_eq!(response.url, url);
+        let refused = run(&domains, &fetcher(), request(&url)).await;
+        assert!(matches!(refused, Err(FetchError::Tls(_))), "{refused:?}");
+    }
+
+    /// Answers every name with one public address.
+    struct Public;
+
+    impl Resolve for Public {
+        fn resolve(&self, _: &str, port: u16) -> BoxFuture<'static, io::Result<Vec<SocketAddr>>> {
+            futures::future::ready(Ok(vec![SocketAddr::new(
+                "93.184.216.34".parse().unwrap(),
+                port,
+            )]))
+            .boxed()
+        }
+    }
+
+    /// Plan 4.6 follow-up: requests go through Fyx's proxy setting (here a proxy that records
+    /// the `CONNECT` and refuses it), after the same address checks, and `localhost` goes
+    /// direct.
+    #[tokio::test]
+    async fn requests_use_the_proxy_setting() {
+        let tunnels = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let proxy_server = test_server::start({
+            let tunnels = tunnels.clone();
+            move |target, _| {
+                tunnels.lock().unwrap().push(target.to_string());
+                Some(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n".to_vec())
+            }
+        })
+        .await;
+        let proxy = ProxySetting::default();
+        assert!(proxy.set(Some(&format!(" http://127.0.0.1:{} ", proxy_server.port))));
+        let proxied =
+            Fetcher::new("probe".into(), Some(Arc::new(Public))).with_proxy(proxy.clone());
+        let domains = list(&["api.example.com"]);
+        let result = run(&domains, &proxied, request("https://api.example.com/v1")).await;
+        assert!(result.is_err(), "the proxy refused the tunnel: {result:?}");
+        assert_eq!(*tunnels.lock().unwrap(), ["api.example.com:443"]);
+
+        // A private answer is refused before the proxy is asked.
+        let private = Fetcher::new(
+            "probe".into(),
+            Some(Arc::new(Rebinding {
+                first: vec![SocketAddr::new("10.0.0.1".parse().unwrap(), 443)],
+                later: Vec::new(),
+                calls: Default::default(),
+            })),
+        )
+        .with_proxy(proxy.clone());
+        let result = run(&domains, &private, request("https://api.example.com/v1")).await;
+        assert!(
+            matches!(result, Err(FetchError::HostNotAllowed(_))),
+            "{result:?}"
+        );
+        assert_eq!(proxy_server.connections(), 1);
+
+        // `localhost` goes direct.
+        let target =
+            test_server::start(|path, _| (path == "/hello").then(|| test_server::ok(b"direct")))
+                .await;
+        let local = list(&[&format!("localhost:{}", target.port)]);
+        let response = run(
+            &local,
+            &fetcher().with_proxy(proxy.clone()),
+            request(&format!("http://localhost:{}/hello", target.port)),
+        )
+        .await
+        .expect("direct");
+        assert_eq!(response.body, b"direct");
+        assert_eq!(proxy_server.connections(), 1);
+
+        // Clearing the setting takes effect on the next request.
+        assert!(!proxy.set(None));
+        assert!(proxy.get().is_none());
+    }
+
+    #[test]
+    fn only_usable_proxy_settings_are_taken() {
+        for good in [
+            "http://proxy.corp:3128",
+            "https://user:pw@proxy.corp",
+            "socks5://127.0.0.1:1080",
+            "socks5h://proxy.corp:1080",
+        ] {
+            assert!(ProxySetting::parse(good).is_some(), "{good}");
+        }
+        for bad in [
+            "",
+            "   ",
+            "proxy.corp:3128",
+            "ftp://proxy.corp",
+            "file:///etc/x",
+            "http://",
+        ] {
+            assert!(ProxySetting::parse(bad).is_none(), "{bad}");
+        }
+    }
+
     /// Requests carry Fyx's version, the platform and the extension id.
     #[tokio::test]
     async fn requests_carry_the_fyx_user_agent() {
         let server = test_server::start(|_, _| None).await;
-        let fetcher = Fetcher::new("probe", "1.2.3+dev", None);
+        let fetcher = Fetcher::new(
+            user_agent(&"1.2.3+dev.abc".parse().unwrap(), "probe", Some("0.4.1")),
+            None,
+        );
         let domains = list(&[&format!("localhost:{}", server.port)]);
         let response = run(
             &domains,
@@ -1187,12 +1622,22 @@ mod tests {
         .await
         .expect("a response");
         let head = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
-        let expected = format!(
-            "user-agent: fyx/1.2.3+dev ({}; {}) extension/probe\r\n",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+        assert!(
+            head.contains("user-agent: fyx/1.2 (extension probe/0.4.1)\r\n"),
+            "{head}"
         );
-        assert!(head.contains(&expected), "{head}");
+        let version = "1.2.3".parse().unwrap();
+        assert_eq!(
+            user_agent(&version, "probe", None),
+            "Fyx/1.2 (extension probe)"
+        );
+        for odd in ["", "1.0 (evil)", "1.0\r\nx: y", &"9".repeat(65)] {
+            assert_eq!(
+                user_agent(&version, "probe", Some(odd)),
+                "Fyx/1.2 (extension probe)",
+                "{odd:?}"
+            );
+        }
     }
 
     #[test]
