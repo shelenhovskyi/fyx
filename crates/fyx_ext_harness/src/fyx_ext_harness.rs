@@ -85,6 +85,14 @@ pub const INIT_BUDGET: Duration = Duration::from_secs(2);
 pub const CALL_BUDGET: Duration = Duration::from_millis(200);
 pub const EPOCH_INTERVAL: Duration = Duration::from_millis(10);
 pub const MAX_PUSHES_PER_CALL: usize = 64;
+/// Patches plus nodes all of one call's 0.1 pushes may carry; past it the call traps.
+pub const MAX_PUSHED_ITEMS_PER_CALL: usize = 4096;
+/// String bytes all of one call's host-import arguments may carry together (`push-update`,
+/// `log`, and in 0.2 every other import); past it the call traps.
+pub const MAX_LIFTED_TEXT_PER_CALL: usize = 16 << 20;
+/// Longest `log` message kept; the rest is cut off. It still counts in full toward
+/// [`MAX_LIFTED_TEXT_PER_CALL`].
+pub const MAX_LOG_MESSAGE_LEN: usize = 16 << 10;
 /// Linear memory one component may grow to, and its other store caps: the host's
 /// (`ui_ext_wasm::UI_*_LIMIT`). Growing past one traps, which disables the extension.
 pub const MEMORY_LIMIT: usize = 256 << 20;
@@ -157,6 +165,10 @@ pub(crate) struct State {
     ctx: WasiCtx,
     /// 0.1 pushes of the running call.
     pushes: Vec<Pushed>,
+    /// Patches and nodes of the running call's 0.1 pushes.
+    pushed_items: usize,
+    /// String bytes the running call passed to host imports.
+    lifted_text: usize,
     /// 0.2 checks and effects.
     api: ApiState,
     logs: Vec<(ui_ext::LogLevel, String)>,
@@ -183,7 +195,41 @@ impl State {
         self.call_started = Instant::now();
         self.call_budget = budget;
         self.pushes.clear();
+        self.pushed_items = 0;
+        self.lifted_text = 0;
         self.api.begin_call();
+    }
+
+    /// The host's per-call text cap (`ui_ext_wasm`'s `count_lifted_text`).
+    pub(crate) fn count_lifted_text(&mut self, bytes: usize) -> wasmtime::Result<()> {
+        self.lifted_text = self.lifted_text.saturating_add(bytes);
+        if self.lifted_text > MAX_LIFTED_TEXT_PER_CALL {
+            wasmtime::bail!(
+                "passed more than {MAX_LIFTED_TEXT_PER_CALL} bytes of text to push-update and log \
+                 in one call"
+            );
+        }
+        Ok(())
+    }
+
+    /// `log` of either world: counted, cut at [`MAX_LOG_MESSAGE_LEN`], kept at once.
+    pub(crate) fn write_log(
+        &mut self,
+        level: ui_ext::LogLevel,
+        mut message: String,
+    ) -> wasmtime::Result<()> {
+        self.count_lifted_text(message.len())?;
+        if message.len() > MAX_LOG_MESSAGE_LEN {
+            let mut end = MAX_LOG_MESSAGE_LEN;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            let total = message.len();
+            message.truncate(end);
+            message.push_str(&format!("… ({total} bytes, cut)"));
+        }
+        self.logs.push((level, message));
+        Ok(())
     }
 
     /// The effects of the call that just returned: a 0.1 component's pushes or a 0.2
@@ -222,16 +268,65 @@ impl wit_host::Host for State {
         if self.pushes.len() >= MAX_PUSHES_PER_CALL {
             wasmtime::bail!("pushed more than {MAX_PUSHES_PER_CALL} updates in one call");
         }
-        self.pushes.push(Pushed {
-            surface_id,
-            update: update.into(),
-        });
+        let update: ui_ext::Update = update.into();
+        self.count_lifted_text(
+            surface_id.len() + update_text_len(&model::Update::from(update.clone())),
+        )?;
+        self.pushed_items += match &update {
+            ui_ext::Update::Unchanged => 0,
+            ui_ext::Update::Replace(nodes) => nodes.len(),
+            ui_ext::Update::Patches(patches) => patches.len(),
+        };
+        if self.pushed_items > MAX_PUSHED_ITEMS_PER_CALL {
+            wasmtime::bail!(
+                "pushed more than {MAX_PUSHED_ITEMS_PER_CALL} patches and nodes in one call"
+            );
+        }
+        self.pushes.push(Pushed { surface_id, update });
         Ok(())
     }
 
     fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
-        self.logs.push((level.into(), message));
-        Ok(())
+        self.write_log(level.into(), message)
+    }
+}
+
+/// String bytes of a node's props, as the host counts them: frozen icons carry none.
+pub(crate) fn props_text_len(props: &model::Props) -> usize {
+    let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+    let icon_len = |icon: &model::IconRef| match icon {
+        model::IconRef::Frozen(_) => 0,
+        model::IconRef::Upstream(name) => name.len(),
+    };
+    match props {
+        model::Props::Flex(_) | model::Props::List(_) => 0,
+        model::Props::Text(props) => props.content.len(),
+        model::Props::Button(props) => {
+            props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
+        }
+        model::Props::Input(props) => props.value.len() + props.placeholder.len(),
+        model::Props::Table(props) => props.columns.iter().map(String::len).sum(),
+        model::Props::Icon(props) => icon_len(&props.name),
+        model::Props::Markdown(text) => text.len(),
+        model::Props::DiffView(props) => {
+            props.old_text.len() + props.new_text.len() + option_len(&props.language)
+        }
+    }
+}
+
+/// String bytes an update carries.
+pub(crate) fn update_text_len(update: &model::Update) -> usize {
+    match update {
+        model::Update::Unchanged => 0,
+        model::Update::Replace(nodes) => nodes.iter().map(|node| props_text_len(&node.props)).sum(),
+        model::Update::Patches(patches) => patches
+            .iter()
+            .map(|patch| match patch {
+                model::Patch::SetProps(_, props) => props_text_len(props),
+                model::Patch::Insert(insert) => props_text_len(&insert.node.props),
+                model::Patch::Remove(_) | model::Patch::InvalidateRows(_) => 0,
+            })
+            .sum(),
     }
 }
 
@@ -598,6 +693,8 @@ impl Harness {
                 table: ResourceTable::new(),
                 ctx: wasi.build(),
                 pushes: Vec::new(),
+                pushed_items: 0,
+                lifted_text: 0,
                 api: ApiState::new(
                     ui_api_version,
                     capabilities.iter().map(ToString::to_string).collect(),

@@ -769,6 +769,15 @@ mod harness_conformance {
     #[test]
     fn limits_match() {
         assert_eq!(fyx_ext_harness::MAX_PUSHES_PER_CALL, MAX_PUSHES_PER_CALL);
+        assert_eq!(
+            fyx_ext_harness::MAX_PUSHED_ITEMS_PER_CALL,
+            MAX_PUSHED_ITEMS_PER_CALL
+        );
+        assert_eq!(
+            fyx_ext_harness::MAX_LIFTED_TEXT_PER_CALL,
+            MAX_LIFTED_TEXT_PER_CALL
+        );
+        assert_eq!(fyx_ext_harness::MAX_LOG_MESSAGE_LEN, MAX_LOG_MESSAGE_LEN);
         assert_eq!(fyx_ext_harness::CALL_BUDGET, UI_CALL_BUDGET);
         assert_eq!(fyx_ext_harness::INIT_BUDGET, UI_INIT_BUDGET);
         assert_eq!(fyx_ext_harness::EPOCH_INTERVAL, UI_EPOCH_INTERVAL);

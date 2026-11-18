@@ -56,6 +56,9 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
 | `INSTANCES_LIMIT` | const |  |
 | `MAX_CONSECUTIVE_TICK_ERRORS` | const | Consecutive `tick` errors after which a surface's ticks stop until an event on it. |
+| `MAX_LIFTED_TEXT_PER_CALL` | const | String bytes all of one call's host-import arguments may carry together (`push-update`, `log`, and in 0.2 every other import); past it the call traps. |
+| `MAX_LOG_MESSAGE_LEN` | const | Longest `log` message kept; the rest is cut off. It still counts in full toward `MAX_LIFTED_TEXT_PER_CALL`. |
+| `MAX_PUSHED_ITEMS_PER_CALL` | const | Patches plus nodes all of one call's 0.1 pushes may carry; past it the call traps. |
 | `MAX_PUSHED_ITEMS_PER_CALL_V0_2` | re-export | `api_state::MAX_PUSHED_ITEMS_PER_CALL_V0_2` |
 | `MAX_PUSHES_PER_CALL` | const |  |
 | `MAX_TICK_DELAY` | re-export | `api_state::MAX_TICK_DELAY` |
