@@ -207,6 +207,11 @@ On top of these:
   one is open.
 - `decoration(id)` and `decorations()` list placed decorations; `nodes(id)` holds their trees.
 - `effects()` records every host call's effect.
+- Notifications and progress (0.2, section M) run with the host's checks and caps.
+  `notifications()` and `progresses()` show what is open or running. A test plays the user with
+  `notification_action(id, action)`, `close_notification(id, reason)` and `cancel_progress(id)`,
+  which send the owner its event. The harness has no clock, so a notification closes only when
+  a test says so.
 - `Harness::load_with_capabilities` loads with a manifest's capabilities instead of all of them.
 - `image_failures()` (0.3) lists the image nodes the renderer would draw as alt text: an asset
   that is missing, outside the package, over 2 MiB or not a valid PNG or SVG, a freed generated

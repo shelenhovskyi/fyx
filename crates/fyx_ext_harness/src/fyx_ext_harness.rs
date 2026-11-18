@@ -56,6 +56,7 @@ use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
+mod notifications;
 mod v0_2;
 mod v0_3;
 
@@ -128,6 +129,16 @@ pub const ALL_CAPABILITIES: &[&str] = &[
     ui_ext::image::CAPABILITY_IMAGES,
     model::CAPABILITY_NOTIFICATIONS,
 ];
+
+/// A running progress as the renderer draws it (design.md M.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    pub options: model::notifications::ProgressOptions,
+    /// Indeterminate until the first `progress-update`.
+    pub value: model::notifications::ProgressValue,
+    /// The last message an update gave; an update without one keeps it.
+    pub message: Option<String>,
+}
 
 /// An update the extension pushed during a call, in the 0.1 model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,6 +733,9 @@ pub struct Harness {
     surfaces_v0_1: Vec<ui_ext::Surface>,
     mounted: HashMap<String, Mounted>,
     decorations: BTreeMap<String, model::DecorationLocation>,
+    /// What the renderer shows of §M: open notifications and running progresses, by id.
+    notifications: BTreeMap<u64, model::notifications::Notification>,
+    progresses: BTreeMap<u64, Progress>,
     shown_modals: BTreeSet<String>,
     pending_ticks: BTreeMap<String, Duration>,
     tick_errors: HashMap<String, u32>,
@@ -845,6 +859,8 @@ impl Harness {
             surfaces_v0_1: Vec::new(),
             mounted: HashMap::new(),
             decorations: BTreeMap::new(),
+            notifications: BTreeMap::new(),
+            progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
             pending_ticks: BTreeMap::new(),
             tick_errors: HashMap::new(),
@@ -1014,6 +1030,76 @@ impl Harness {
     /// Why the extension is disabled, after a trap or an overrun call.
     pub fn disabled(&self) -> Option<&str> {
         self.disabled.as_deref()
+    }
+
+    /// The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or
+    /// acted on. The harness has no clock, so `auto_dismiss` ones stay until
+    /// [`Harness::close_notification`].
+    pub fn notifications(&self) -> &BTreeMap<u64, model::notifications::Notification> {
+        &self.notifications
+    }
+
+    /// The running progresses (M.2), by id, with their last value and message.
+    pub fn progresses(&self) -> &BTreeMap<u64, Progress> {
+        &self.progresses
+    }
+
+    /// Clicks button `action` of an open notification, as the user would: the notification
+    /// closes and its owner, which must be mounted, gets `notification-action`. The click is a
+    /// gesture, like a button click.
+    pub fn notification_action(&mut self, id: u64, action: &str) -> Result<Outcome> {
+        let notification = self
+            .notifications
+            .get(&id)
+            .with_context(|| format!("notification {id} is not open"))?;
+        anyhow::ensure!(
+            notification
+                .actions
+                .iter()
+                .any(|button| button.id == action),
+            "notification {id} has no action {action:?}"
+        );
+        let owner = notification.owner.clone();
+        self.notifications.remove(&id);
+        self.event(
+            &owner,
+            model::UiEvent::NotificationAction(model::notifications::NotificationActionEvent {
+                notification: id,
+                action: action.to_string(),
+            }),
+        )
+    }
+
+    /// Closes an open notification as the user (`User`), its timer (`Expired`) or its window
+    /// (`WindowClosed`) would; its owner, which must be mounted, gets `notification-closed`.
+    pub fn close_notification(
+        &mut self,
+        id: u64,
+        reason: model::notifications::NotificationCloseReason,
+    ) -> Result<Outcome> {
+        let notification = self
+            .notifications
+            .remove(&id)
+            .with_context(|| format!("notification {id} is not open"))?;
+        self.event(
+            &notification.owner,
+            model::UiEvent::NotificationClosed(id, reason),
+        )
+    }
+
+    /// Clicks Cancel on a running cancellable progress; its owner, which must be mounted, gets
+    /// `progress-cancel-requested`. The progress keeps running until the extension ends it.
+    pub fn cancel_progress(&mut self, id: u64) -> Result<Outcome> {
+        let progress = self
+            .progresses
+            .get(&id)
+            .with_context(|| format!("progress {id} is not running"))?;
+        anyhow::ensure!(
+            progress.options.cancellable,
+            "progress {id} is not cancellable"
+        );
+        let owner = progress.options.owner.clone();
+        self.event(&owner, model::UiEvent::ProgressCancelRequested(id))
     }
 
     /// Mounts a live surface or decoration (again, if it was mounted) and returns its validated
@@ -1523,6 +1609,7 @@ impl Harness {
                     self.surfaces.retain(|surface| surface.id != *surface_id);
                     self.refresh_surfaces_v0_1();
                     self.forget(surface_id);
+                    self.forget_owner(surface_id);
                 }
                 HostEffect::ShowSurface { surface_id } => {
                     if self.is_modal(surface_id) && self.shown_modals.insert(surface_id.clone()) {
@@ -1555,6 +1642,34 @@ impl Harness {
                 HostEffect::RemoveDecoration { id } => {
                     self.decorations.remove(id);
                     self.mounted.remove(id);
+                    self.forget_owner(id);
+                }
+                HostEffect::Notify { id, notification } => {
+                    self.notifications.insert(*id, notification.clone());
+                }
+                HostEffect::DismissNotification { id } => {
+                    self.notifications.remove(id);
+                }
+                HostEffect::ProgressStart { id, options } => {
+                    self.progresses.insert(
+                        *id,
+                        Progress {
+                            options: options.clone(),
+                            value: model::notifications::ProgressValue::Indeterminate,
+                            message: None,
+                        },
+                    );
+                }
+                HostEffect::ProgressUpdate { id, value, message } => {
+                    if let Some(progress) = self.progresses.get_mut(id) {
+                        progress.value = *value;
+                        if message.is_some() {
+                            progress.message.clone_from(message);
+                        }
+                    }
+                }
+                HostEffect::ProgressEnd { id } => {
+                    self.progresses.remove(id);
                 }
             }
         }
@@ -1609,6 +1724,14 @@ impl Harness {
         self.shown_modals.remove(surface_id);
         self.pending_ticks.remove(surface_id);
         self.tick_errors.remove(surface_id);
+    }
+
+    /// The owner is gone: the renderer closes its notifications and ends its progresses.
+    fn forget_owner(&mut self, owner: &str) {
+        self.notifications
+            .retain(|_, notification| notification.owner != owner);
+        self.progresses
+            .retain(|_, progress| progress.options.owner != owner);
     }
 
     fn refresh_surfaces_v0_1(&mut self) {

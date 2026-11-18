@@ -18,8 +18,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `EventOutcome::update` | field | The call's own reply, applied to the event's surface after the pushes. |
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
 | `Harness::api_version` | method |  |
+| `Harness::cancel_progress` | method | Clicks Cancel on a running cancellable progress; its owner, which must be mounted, gets `progress-cancel-requested`. The progress keeps running until the extension ends it. |
 | `Harness::click` | method | Clicks the first button with this label. |
 | `Harness::click_v0_1` | method | `Harness::click` in the 0.1 model. |
+| `Harness::close_notification` | method | Closes an open notification as the user (`User`), its timer (`Expired`) or its window (`WindowClosed`) would; its owner, which must be mounted, gets `notification-closed`. |
 | `Harness::decoration` | method | Where a live decoration is placed; its tree is `Harness::nodes` of its id. |
 | `Harness::decorations` | method | The live decoration ids. |
 | `Harness::disabled` | method | Why the extension is disabled, after a trap or an overrun call. |
@@ -45,7 +47,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::mount` | method | Mounts a live surface or decoration (again, if it was mounted) and returns its validated tree, parents first. A modal mounts only while it is shown. |
 | `Harness::mount_v0_1` | method | `Harness::mount`, returning the tree in the 0.1 model. |
 | `Harness::nodes` | method | The tree of a mounted surface or decoration, parents first. |
+| `Harness::notification_action` | method | Clicks button `action` of an open notification, as the user would: the notification closes and its owner, which must be mounted, gets `notification-action`. The click is a gesture, like a button click. |
+| `Harness::notifications` | method | The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or acted on. The harness has no clock, so `auto_dismiss` ones stay until `Harness::close_notification`. |
 | `Harness::pending_tick` | method | The delay of the surface's pending tick, already clamped up to `MIN_TICK_DELAY`. |
+| `Harness::progresses` | method | The running progresses (M.2), by id, with their last value and message. |
 | `Harness::props` | method | The props of one node of a mounted surface or decoration. |
 | `Harness::pushed_v0_1` | method | Every update pushed so far, in order, in the 0.1 model; `Harness::effects` holds them in the newest one. |
 | `Harness::rows` | method | Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as the extension sent it. |
@@ -76,6 +81,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Outcome::touched` | field | Node ids the reply touched, including the targets of `invalidate-rows`. |
 | `Outcome::update` | field | The call's own reply, applied to the surface after the effects. For `dismissed` it is not applied: the modal has no tree any more. |
 | `PACKAGE_VARIABLE` | const | `fyx-ext test` sets it to the extension folder; `Harness::from_env` prefers it. |
+| `Progress` | struct | A running progress as the renderer draws it (design.md M.2). |
+| `Progress::message` | field | The last message an update gave; an update without one keeps it. |
+| `Progress::options` | field |  |
+| `Progress::value` | field | Indeterminate until the first `progress-update`. |
 | `Pushed` | struct | An update the extension pushed during a call, in the 0.1 model. |
 | `Pushed::surface_id` | field |  |
 | `Pushed::update` | field |  |

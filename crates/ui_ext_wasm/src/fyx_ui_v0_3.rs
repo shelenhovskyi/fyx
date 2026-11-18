@@ -17,6 +17,7 @@ use ui_ext::{
 use crate::{
     UiState,
     conversions::{self, unsupported},
+    network,
 };
 
 pub(crate) mod bindings {
@@ -34,10 +35,11 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    host as wit_host, images as wit_images, notifications as wit_notifications, types as wit,
+    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
+    notifications as wit_notifications, types as wit,
 };
 
-conversions::host_imports!();
+conversions::host_imports!(denied: wit_host::HostErrorCode::Denied);
 conversions::notification_imports!();
 
 impl wit_images::Host for UiState {
@@ -59,6 +61,90 @@ impl wit_images::Host for UiState {
     fn remove_image(&mut self, image: u32) -> wasmtime::Result<()> {
         self.api.remove_image(image);
         Ok(())
+    }
+}
+
+impl wit_network::Host for UiState {
+    fn fetch(
+        &mut self,
+        request: wit_network::HttpRequest,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        self.count_lifted_text(
+            request.url.len()
+                + request
+                    .headers
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum::<usize>(),
+        )?;
+        if !self.api.declares(network::CAPABILITY_NETWORK) {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::NotPermitted,
+                message: format!("{:?} is not in the manifest", network::CAPABILITY_NETWORK),
+            }
+            .into()));
+        }
+        // The broker at every call; a declared T2 capability it refuses is `denied`.
+        if let Err(denied) = self.check_capability(network::CAPABILITY_NETWORK) {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::Denied,
+                message: denied.to_string(),
+            }
+            .into()));
+        }
+        let request = network::FetchRequest {
+            method: match request.method {
+                wit_network::HttpMethod::Get => network::Method::Get,
+                wit_network::HttpMethod::Head => network::Method::Head,
+                wit_network::HttpMethod::Post => network::Method::Post,
+                wit_network::HttpMethod::Put => network::Method::Put,
+                wit_network::HttpMethod::Patch => network::Method::Patch,
+                wit_network::HttpMethod::Delete => network::Method::Delete,
+                wit_network::HttpMethod::Options => network::Method::Options,
+            },
+            url: request.url,
+            headers: request.headers,
+            body: request.body,
+            timeout_ms: request.timeout_ms,
+        };
+        Ok(self.network.fetch(request).map_err(Into::into))
+    }
+
+    fn cancel_fetch(&mut self, request: u64) -> wasmtime::Result<()> {
+        self.network.cancel(request);
+        Ok(())
+    }
+}
+
+/// An outcome for the `handle-io` export.
+pub(crate) fn io_event(event: network::IoEvent) -> wit_io::IoEvent {
+    match event {
+        network::IoEvent::FetchDone(id, result) => wit_io::IoEvent::FetchDone((
+            id,
+            result
+                .map(|response| wit_network::HttpResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                    url: response.url,
+                })
+                .map_err(|error| match error {
+                    network::FetchError::Denied => wit_network::FetchError::Denied,
+                    network::FetchError::HostNotAllowed(host) => {
+                        wit_network::FetchError::HostNotAllowed(host)
+                    }
+                    network::FetchError::RedirectNotAllowed(host) => {
+                        wit_network::FetchError::RedirectNotAllowed(host)
+                    }
+                    network::FetchError::Dns(error) => wit_network::FetchError::Dns(error),
+                    network::FetchError::Connect(error) => wit_network::FetchError::Connect(error),
+                    network::FetchError::Tls(error) => wit_network::FetchError::Tls(error),
+                    network::FetchError::Timeout => wit_network::FetchError::Timeout,
+                    network::FetchError::TooLarge => wit_network::FetchError::TooLarge,
+                    network::FetchError::Cancelled => wit_network::FetchError::Cancelled,
+                    network::FetchError::Other(error) => wit_network::FetchError::Other(error),
+                }),
+        )),
     }
 }
 
@@ -86,7 +172,7 @@ conversions::conversions! {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 4] = ["types", "host", "images", "notifications"];
+const LINKED_INTERFACES: [&str; 5] = ["types", "host", "images", "notifications", "network"];
 
 /// Stubs the `fyx:ui` 0.3 interfaces `component` imports that this build does not implement yet,
 /// as functions that trap when called, so a component that never calls them loads and runs.
@@ -144,5 +230,6 @@ pub(crate) fn add_to_linker(
     wit_host::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_images::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_notifications::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_network::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

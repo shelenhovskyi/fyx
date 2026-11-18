@@ -80,7 +80,9 @@ pub(crate) fn update_text_len(update: &model::Update) -> usize {
 /// `impl wit_host::Host for UiState`: the effectful imports of design.md A–F, checked against
 /// [`crate::effects::ApiState`].
 macro_rules! host_imports {
-    () => {
+    // `denied`: the version's code for model `denied` (0.3 has `denied`; 0.2 has none, and gets
+    // `not-permitted`, which no 0.2 import produces for a denial anyway).
+    (denied: $denied:expr) => {
         impl wit::Host for UiState {}
 
         fn result(
@@ -195,6 +197,7 @@ macro_rules! host_imports {
                         }
                         model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                         model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
+                        model::HostErrorCode::Denied => $denied,
                     },
                     message,
                 }

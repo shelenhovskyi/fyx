@@ -65,6 +65,7 @@ mod effects;
 mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 pub mod images;
+pub mod network;
 mod stderr;
 pub mod ticks;
 
@@ -293,6 +294,16 @@ pub struct UiManifest {
     /// it (the provenance line of notifications, design.md M.4).
     #[serde(skip)]
     pub name: Option<String>,
+    /// 0.3, with `network:fetch`: the hosts the extension may fetch from (design.md §8).
+    #[serde(default)]
+    pub network: Option<NetworkManifest>,
+}
+
+/// `[fyx_ui.network]`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkManifest {
+    pub domains: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -319,9 +330,34 @@ impl UiManifest {
         manifest.name = toml.name;
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
+        let network_capable = manifest.api_version >= Version::new(0, 3, 0);
         for capability in &manifest.capabilities {
+            // `network:fetch` is the first T2 capability this host provides, from 0.3 on.
+            if capability == network::CAPABILITY_NETWORK && network_capable {
+                continue;
+            }
             permissions::grantable_tier(capability)
                 .with_context(|| format!("extension {id}, in {path:?}"))?;
+        }
+        let declares_network = manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        match &manifest.network {
+            Some(table) => {
+                anyhow::ensure!(
+                    declares_network,
+                    "extension {id}: [fyx_ui.network] needs {:?} in capabilities",
+                    network::CAPABILITY_NETWORK
+                );
+                network::DomainList::parse(&table.domains)
+                    .with_context(|| format!("extension {id}, in {path:?}"))?;
+            }
+            None => anyhow::ensure!(
+                !declares_network,
+                "extension {id}: {:?} needs [fyx_ui.network] domains",
+                network::CAPABILITY_NETWORK
+            ),
         }
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
@@ -400,6 +436,8 @@ pub struct UiState {
     diagnostics: diagnostics::DiagnosticsBuffer,
     /// Live ids, declared capabilities, shown modals and the effect list of the 0.2 imports.
     api: effects::ApiState,
+    /// The 0.3 `network` import's ids, counters and the requests of the running call.
+    network: network::NetworkState,
 }
 
 impl UiState {
@@ -425,11 +463,13 @@ impl UiState {
         capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
         diagnostics: diagnostics::DiagnosticsBuffer,
         api: effects::ApiState,
+        network: network::NetworkState,
     ) -> Self {
         Self {
             capability_check,
             diagnostics,
             api,
+            network,
             extension_id,
             table: ResourceTable::new(),
             ctx,
@@ -867,6 +907,8 @@ pub struct UiExtension {
     diagnostics: diagnostics::DiagnosticsBuffer,
     /// `extension.toml`'s `name`, unchecked; `None` without a manifest.
     name: Option<Arc<str>>,
+    /// Starts `network.fetch` requests after their call and hands back the outcomes.
+    network: Arc<network::NetworkHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -972,6 +1014,13 @@ pub struct LoadOptions {
     /// Whether a staged version (0.2 until it is frozen) may load; `None` means
     /// [`staged_api_allowed_by_default`].
     pub allow_staged: Option<bool>,
+    /// The broker's T2 consent (design.md §7). Without it every T2 operation is denied.
+    pub t2_consent: Option<Arc<dyn permissions::T2Consent>>,
+    /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
+    /// Applies only to a 0.3 component that declares `network:fetch`.
+    pub network_domains: Option<Vec<String>>,
+    /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
+    pub resolver: Option<Arc<dyn network::Resolve>>,
 }
 
 impl UiExtension {
@@ -1020,6 +1069,9 @@ impl UiExtension {
             capability_check,
             capabilities,
             allow_staged,
+            t2_consent,
+            network_domains,
+            resolver,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1033,6 +1085,17 @@ impl UiExtension {
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
+        let declares_network = capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        let domains = match network_domains {
+            Some(domains) if declares_network => match network::DomainList::parse(&domains) {
+                Ok(domains) => domains,
+                Err(error) => return Task::ready(Err(error)),
+            },
+            _ => network::DomainList::default(),
+        };
+        let fetcher = network::Fetcher::new(&extension_id, resolver);
         let compile_task = cx.background_executor().spawn({
             let extension_id = extension_id.clone();
             async move {
@@ -1067,6 +1130,20 @@ impl UiExtension {
         cx.spawn(async move |cx| {
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
+            // Only a 0.3 component has the `network` import.
+            let domains = Arc::new(if ui_api_version == ApiVersion::V0_3_0 {
+                domains
+            } else {
+                network::DomainList::default()
+            });
+            let running = Arc::new(network::Running::default());
+            let network = Arc::new(network::NetworkHandle::new(
+                extension_id.clone(),
+                domains.clone(),
+                fetcher,
+                t2_consent,
+                running.clone(),
+            ));
 
             let instantiate = {
                 let extension_id = extension_id.clone();
@@ -1091,6 +1168,7 @@ impl UiExtension {
                             capability_check,
                             diagnostics.clone(),
                             effects::ApiState::new(ui_api_version, capabilities),
+                            network::NetworkState::new(domains, running),
                         ),
                     );
                     store.limiter(|state| &mut state.limits);
@@ -1175,6 +1253,7 @@ impl UiExtension {
                     from_precompiled,
                     diagnostics,
                     name: None,
+                    network,
                 },
                 pushed_rx,
             ))
@@ -1226,6 +1305,7 @@ impl UiExtension {
     ) -> Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)> {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
+            network_domains: manifest.network.as_ref().map(|table| table.domains.clone()),
             ..options
         };
         let (mut extension, pushed) =
@@ -1296,6 +1376,7 @@ impl UiExtension {
     {
         let (return_tx, return_rx) = oneshot::channel();
         let diagnostics = self.diagnostics.clone();
+        let network = self.network.clone();
         let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
@@ -1311,6 +1392,9 @@ impl UiExtension {
                         })
                         .await;
                         let effects = store.data_mut().finish_call();
+                        // The call's requests start now, after it returned, or are dropped with
+                        // its effects if it failed (design.md §0.3).
+                        network.start(store.data_mut().network.finish_call(result.is_ok()));
                         diagnostics.call(diagnostics::CallRecord {
                             kind,
                             surface_id,
