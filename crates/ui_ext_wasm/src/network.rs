@@ -395,9 +395,60 @@ pub(crate) struct Running {
     /// Where outcomes go; `None` once the instance is gone, so nothing delivers after that and
     /// no task keeps the channel open.
     events: Mutex<Option<futures::channel::mpsc::Sender<IoEvent>>>,
+    /// The Extension Inspector's record of each operation: started by the handles, finished here
+    /// when its outcome is delivered.
+    pub(crate) diagnostics: crate::diagnostics::DiagnosticsBuffer,
+}
+
+/// What the Inspector shows of a URL: no user info, query or fragment, which may hold secrets.
+pub(crate) fn redacted_url(url: &Url) -> String {
+    let mut shown = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
+    if let Some(port) = url.port() {
+        shown.push_str(&format!(":{port}"));
+    }
+    shown.push_str(url.path());
+    shown
+}
+
+/// The Inspector's outcome of a finished operation, by its capability and id.
+fn io_outcome(event: &IoEvent) -> Option<(&'static str, u64, String)> {
+    Some(match event {
+        IoEvent::FetchDone(id, Ok(response)) => (
+            CAPABILITY_NETWORK,
+            *id,
+            format!("{} ({} bytes)", response.status, response.body.len()),
+        ),
+        IoEvent::FetchDone(id, Err(error)) => (CAPABILITY_NETWORK, *id, format!("{error:?}")),
+        IoEvent::ProcessExited(exit) => (
+            crate::process::CAPABILITY_PROCESS,
+            exit.process,
+            match (exit.code, exit.killed) {
+                (_, true) => "killed".to_string(),
+                (Some(code), false) => format!("exited {code}"),
+                (None, false) => "ended by a signal".to_string(),
+            },
+        ),
+        IoEvent::SpawnFailed(id, error) => (
+            crate::process::CAPABILITY_PROCESS,
+            *id,
+            format!("not started: {error:?}"),
+        ),
+        IoEvent::EditDone(id, Ok(())) => (crate::edit::CAPABILITY_EDIT, *id, "applied".into()),
+        IoEvent::EditDone(id, Err(error)) => {
+            (crate::edit::CAPABILITY_EDIT, *id, format!("{error:?}"))
+        }
+        _ => return None,
+    })
 }
 
 impl Running {
+    pub(crate) fn new(diagnostics: crate::diagnostics::DiagnosticsBuffer) -> Self {
+        Self {
+            diagnostics,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn insert(&self, id: u64, handle: futures::future::AbortHandle) {
         self.lock().insert(id, handle);
     }
@@ -463,6 +514,9 @@ impl Running {
     }
 
     pub(crate) async fn deliver(&self, event: IoEvent) {
+        if let Some((capability, id, outcome)) = io_outcome(&event) {
+            self.diagnostics.io_finished(capability, id, outcome);
+        }
         let sender = self
             .events
             .lock()
@@ -667,6 +721,11 @@ impl NetworkHandle {
     pub(crate) fn start(&self, pending: Vec<PendingFetch>) {
         for fetch in pending {
             let id = fetch.id;
+            self.running.diagnostics.io_started(
+                CAPABILITY_NETWORK,
+                id,
+                format!("{:?} {}", fetch.request.method, redacted_url(&fetch.url)),
+            );
             let running = self.running.clone();
             if fetch.cancelled {
                 tokio::spawn(async move {
@@ -831,6 +890,16 @@ pub(crate) mod test_server {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_inspector_never_shows_url_secrets() {
+        let url =
+            super::Url::parse("https://user:pw@api.example.com:8443/v1/items?token=s3cret#frag")
+                .unwrap();
+        assert_eq!(
+            super::redacted_url(&url),
+            "https://api.example.com:8443/v1/items"
+        );
+    }
     use super::*;
 
     fn list(patterns: &[&str]) -> DomainList {

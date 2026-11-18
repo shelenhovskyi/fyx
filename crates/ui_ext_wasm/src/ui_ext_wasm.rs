@@ -1357,7 +1357,7 @@ impl UiExtension {
             } else {
                 network::DomainList::default()
             });
-            let running = Arc::new(network::Running::default());
+            let running = Arc::new(network::Running::new(diagnostics.clone()));
             let network = Arc::new(network::NetworkHandle::new(
                 extension_id.clone(),
                 domains.clone(),
