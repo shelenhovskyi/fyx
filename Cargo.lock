@@ -6856,6 +6856,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_charts"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_counter"
 version = "0.1.0"
 dependencies = [
@@ -19416,6 +19423,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "http_client",
+ "image",
  "language",
  "log",
  "markdown",
@@ -19423,6 +19431,7 @@ dependencies = [
  "paths",
  "project",
  "release_channel",
+ "resvg",
  "schemars 1.0.4",
  "semver",
  "serde",
@@ -19436,6 +19445,7 @@ dependencies = [
  "ui",
  "ui_ext",
  "ui_ext_wasm",
+ "usvg",
  "util",
  "workspace",
 ]

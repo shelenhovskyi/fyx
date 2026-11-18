@@ -183,28 +183,60 @@ There are two levels, and `fyx-ext test` runs both.
 `Harness::from_env()` reads those variables (the folder first), so headless tests skip under a
 plain `cargo test`. `Harness::load_package(dir)` loads a folder as Fyx installs it: the
 `[fyx_ui]` component and capabilities of its `extension.toml`, and its `assets/` for image nodes.
-The harness API: `mount`, `event`, `click(surface, label)`, `rows`, `tree`, `text`, `find_text`,
-`find_button`, plus `pushed()`, `logs()` and `disabled()` for assertions. The full list is in the
-[harness reference](api/fyx_ext_harness.md).
+The harness API: `mount`, `event`, `click(surface, label)`, `rows`, `nodes`, `props`, `text`,
+`find`, `find_text` and `find_button`, plus `effects()`, `logs()` and `disabled()` for
+assertions. The full list is in the [harness reference](api/fyx_ext_harness.md).
 
-The harness runs `fyx:ui` 0.1, 0.2 and staged 0.3 components. For 0.2 and 0.3, the `*_v0_2`
-methods (`event_v0_2`,
-`click_v0_2`, `rows_v0_2`, `props_v0_2`, `nodes_v0_2`, `surfaces_v0_2`) show the 0.2 model:
-tooltips, `secret`, `selected`, `indent` and `invalidate-rows`. Each returns an `Outcome` with the
-call's effects. On top of these:
+The harness runs `fyx:ui` 0.1, 0.2 and staged 0.3 components. Its methods show the newest model
+(`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data converts without
+loss: tooltips, `secret`, input labels, `selected`, `indent`, `invalidate-rows` and images.
+`event`, `click`, `tick` and `dismiss` return an `Outcome` with the call's effects. The same
+methods with a `_v0_1` suffix (`event_v0_1`, `click_v0_1`, `rows_v0_1`, `mount_v0_1`,
+`tree_v0_1`, `find_v0_1`, `surfaces_v0_1`, `pushed_v0_1`, `handle_event_raw_v0_1`) show the 0.1
+model, as the host's 0.1 view does.
+
+> **Renamed (decision D5, pre-1.0).** Before plan 4.12 the unsuffixed methods showed the 0.1
+> model and the newest one had a `_v0_2` suffix. Tests written then need `_v0_1` on the old
+> unsuffixed calls and no suffix on the `_v0_2` ones; `mount` now returns the nodes instead of
+> a `Tree`. The `_v0_2` names still work for now and will be removed.
+
+On top of these:
 - `tick(surface)` runs a pending tick; `pending_tick(surface)` shows its delay, since the harness
   has no clock.
 - `dismiss(modal, reason)` closes a shown modal as the user would; `is_shown(modal)` says whether
   one is open.
-- `decoration(id)` and `decorations()` list placed decorations; `tree(id)` holds their trees.
+- `decoration(id)` and `decorations()` list placed decorations; `nodes(id)` holds their trees.
 - `effects()` records every host call's effect.
+- Notifications and progress (0.2, section M) run with the host's checks and caps.
+  `notifications()` and `progresses()` show what is open or running. A test plays the user with
+  `notification_action(id, action)`, `close_notification(id, reason)` and `cancel_progress(id)`,
+  which send the owner its event. The harness has no clock, so a notification closes only when
+  a test says so.
 - `Harness::load_with_capabilities` loads with a manifest's capabilities instead of all of them.
 - `image_failures()` (0.3) lists the image nodes the renderer would draw as alt text: an asset
   that is missing, outside the package, over 2 MiB or not a valid PNG or SVG, a freed generated
   image, and `tint` on a PNG. Each is also a `warn` log line, and `fyx-ext test` reports them as
   warnings. Assets are only checked in a harness made by `load_package` (or `fyx-ext test`).
-- In 0.3, `canvas` nodes and picker surfaces are refused as not supported yet, and the 0.3
-  interfaces the host does not implement yet (`decorations` included) trap when called.
+- Canvases (0.3) are checked as the host checks them:
+  - the caps, finite coordinates, and panels only;
+  - none in list rows;
+  - at most 16 per surface.
+
+  `canvas(surface, id)` returns a canvas's draw list. `canvas_click(surface, id, x, y)` clicks
+  it as the renderer would. It fails without a call on a canvas that is not clickable, or at a
+  point outside the box.
+- `network:fetch` (0.3) runs the host's import checks: the capability, the domain list
+  (`[fyx_ui.network]`, or `with_network_domains`), `check_request`, and the in-flight and
+  per-minute caps.
+  - With no broker, `fetch` is `denied`, as in a host where the user has not allowed it.
+  - `set_broker(TestBroker::granted(respond))` lets requests reach a closure that answers them.
+    `TestBroker::asking(answer, respond)` prompts on the first delivery, and
+    `TestBroker::denied()` refuses at the import.
+  - Accepted requests wait in `pending_fetches()` until `deliver_io()` delivers each outcome
+    through `handle-io`. A cancelled request ends `cancelled`, and a call that traps drops its
+    requests.
+- In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
+  not implement yet (`decorations` included) trap when called.
 
 The host's 0.2 rules apply: each import is checked when it is called, and its effect applies after
 the call. Showing a modal needs a click or Enter, a modal mounts when it is shown, and three failed
@@ -301,11 +333,12 @@ are what upstream Zed's manifest parser expects.
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:151-155 (ExtensionToml { id, fyx_ui }) -->
 
-`[fyx_ui]` accepts exactly these three keys. Unknown keys are an error (`deny_unknown_fields`).
+`[fyx_ui]` accepts these keys, plus the `[fyx_ui.network]` table for `network:fetch` (0.3; see
+the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown_fields`).
 
 | Key | Rule |
 |---|---|
-| `api_version` | A semver string. It must be a version this build supports (exactly `0.1.0` today), and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). |
+| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0`. `0.2.0` and `0.3.0` are staged: dev builds load them (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. |
 
@@ -314,6 +347,20 @@ are what upstream Zed's manifest parser expects.
 The capability check runs only when Fyx loads the extension from its directory. A bare `.wasm`
 loaded for quick iteration (below) skips it. `fyx-ext check` applies all of these rules before
 Fyx does.
+
+`fyx-ext check` also looks at the PNG and SVG files in `assets/`, which `image` nodes can show
+(0.3). A file over 2 MiB is an error. These are warnings, because Fyx draws the image's alt text
+instead and does not fail the update:
+
+- a file that is not a valid PNG or SVG;
+- a PNG over 2048 px on a side;
+- an SVG that declares XML entities;
+- a name an image node cannot use.
+
+An SVG with `<image>`, `<script>` or `<foreignObject>` is also a warning, since Fyx drops those
+parts.
+
+<!-- crates/fyx_ext/src/assets.rs, crates/ui_ext/src/image.rs (check_asset_path, check_image_bytes) -->
 
 <!-- crates/ui_ext_host/src/registry.rs:330-350 -->
 
@@ -851,6 +898,7 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
 | `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
+| `extensions/fyx_demo_charts` | canvases (0.3): a clickable bar chart with click-to-select through `CanvasHits`, and a tick-driven sparkline with Pause and Resume |
 | `extensions/fyx_demo_images` | images (0.3): SVG and PNG assets, `tint`, `contain` and `cover`, a chart made at run time with `add_image` and swapped on Shuffle, a missing asset's alt text, thumbnails in list rows |
 
 `script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a

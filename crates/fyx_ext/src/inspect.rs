@@ -46,10 +46,16 @@ pub fn import_need(import: &str) -> ImportNeed {
     let interface = import.split('@').next().unwrap_or(import);
     match interface {
         "fyx:ui/types" | "fyx:ui/host" => ImportNeed::Nothing,
-        // fyx:ui 0.2, design.md section L: linked for every 0.2 component, with
-        // `ui:editor-decorations` checked per call, so importing it needs nothing. The SDK's 0.2
-        // export imports it whether or not the extension places decorations.
-        "fyx:ui/decorations" => ImportNeed::Nothing,
+        // Linked for every 0.2 or 0.3 component, with the capability (`ui:editor-decorations`,
+        // `ui:notifications`, `ui:images`, `network:fetch`) checked per call, so importing them
+        // needs nothing. The SDK imports them whether or not the extension calls them.
+        "fyx:ui/decorations" | "fyx:ui/notifications" | "fyx:ui/images" | "fyx:ui/network" => {
+            ImportNeed::Nothing
+        }
+        // The rest of the staged 0.3 world: the host links each interface it does not run yet
+        // with functions that trap, so a component loads, and the SDK's 0.3 build imports their
+        // types. A call traps, which `fyx-ext test` shows.
+        _ if interface.starts_with("fyx:ui/") => ImportNeed::Nothing,
         _ if interface.starts_with("wasi:filesystem/")
             || interface.starts_with("wasi:sockets/")
             || interface.starts_with("wasi:http/") =>
@@ -222,6 +228,16 @@ fn check_import_versions(manifest: &Manifest, info: &ComponentInfo, report: &mut
     }
 }
 
+/// Capabilities checked when their functions are called, not by an import: a component imports
+/// their interfaces anyway, so nothing here shows whether it uses them.
+const PER_CALL_CAPABILITIES: &[&str] = &[
+    "ui:editor-decorations",
+    "ui:notifications",
+    "ui:images",
+    "ui:canvas",
+    "network:fetch",
+];
+
 /// Declared capabilities against the imports that need them: an import whose capability is not
 /// declared is an error, a declared capability nothing uses is a warning (platform spec,
 /// decision 5).
@@ -250,7 +266,7 @@ pub fn check_capabilities(declared: &[String], imports: &[String], report: &mut 
         // Used by `surfaces()`, not by an import: checked by loading the component
         // (`CheckDepth::Load`).
         if SURFACE_CAPABILITIES.contains(&capability.as_str())
-            || capability == "ui:editor-decorations"
+            || PER_CALL_CAPABILITIES.contains(&capability.as_str())
         {
             continue;
         }
@@ -438,7 +454,7 @@ pub mod tests {
             "acme:secret/api@1.0.0".to_string(),
         ];
         let mut report = Report::default();
-        check_capabilities(&["network:fetch".into()], &imports, &mut report);
+        check_capabilities(&["ui:hover".into()], &imports, &mut report);
         assert!(
             report
                 .warnings

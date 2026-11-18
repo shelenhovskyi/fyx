@@ -58,12 +58,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
+#[cfg(feature = "fyx-ui-0-3")]
+mod canvas;
 mod host;
 mod host_model;
 mod v0_1;
 #[cfg(feature = "fyx-ui-0-3")]
 mod v0_2;
 
+#[cfg(feature = "fyx-ui-0-3")]
+pub use canvas::*;
 pub use host::*;
 
 /// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
@@ -108,6 +112,14 @@ pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::images::ImageFormat;
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::io::IoEvent;
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::network::{FetchError, HttpMethod, HttpRequest, HttpResponse};
+pub use bindings::fyx::ui::notifications::{
+    Notification, NotificationAction, NotificationLevel, ProgressLocation, ProgressOptions,
+    ProgressValue,
+};
 pub use bindings::fyx::ui::types::*;
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
@@ -189,6 +201,14 @@ pub trait Extension: 'static {
     /// reply. `fyx:ui` 0.1 has no ticks, so a `v0_1` extension never gets this call.
     fn tick(&mut self, _surface_id: &str) -> Result<Update, String> {
         Ok(Update::Unchanged)
+    }
+
+    /// `fyx:ui` 0.3: the outcome of work that ran outside a call, such as
+    /// `IoEvent::FetchDone((id, result))` for [`fetch`]. It belongs to no surface: update surfaces
+    /// with [`push_update`] or [`SurfaceTree::push`]. An `Err` is logged by the host.
+    #[cfg(feature = "fyx-ui-0-3")]
+    fn handle_io(&mut self, _event: IoEvent) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -425,6 +445,39 @@ macro_rules! __fyx_host_shims {
                 $crate::__private::$world::remove_decoration(id)
             }
 
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_notify(
+                notification: &$crate::Notification,
+            ) -> ::std::result::Result<u64, $crate::HostError> {
+                $crate::__private::$world::notify(notification)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_dismiss_notification(id: u64) {
+                $crate::__private::$world::dismiss_notification(id)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_progress_start(
+                options: &$crate::ProgressOptions,
+            ) -> ::std::result::Result<u64, $crate::HostError> {
+                $crate::__private::$world::progress_start(options)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_progress_update(
+                id: u64,
+                value: $crate::ProgressValue,
+                message: ::std::option::Option<&str>,
+            ) -> ::std::result::Result<(), $crate::HostError> {
+                $crate::__private::$world::progress_update(id, value, message)
+            }
+
+            #[unsafe(no_mangle)]
+            fn __fyx_ui_progress_end(id: u64) {
+                $crate::__private::$world::progress_end(id)
+            }
+
             $crate::__fyx_image_shims!($world);
         };
     };
@@ -438,10 +491,10 @@ macro_rules! __fyx_host_shims {
 #[macro_export]
 macro_rules! __fyx_v0_3_exports {
     () => {
-        fn handle_io(
-            _event: $crate::bindings::fyx::ui::io::IoEvent,
-        ) -> ::std::result::Result<(), ::std::string::String> {
-            Ok(())
+        fn handle_io(event: $crate::IoEvent) -> ::std::result::Result<(), ::std::string::String> {
+            $crate::__private::with_extension(__fyx_new_extension, |extension| {
+                extension.handle_io(event)
+            })
         }
 
         fn handle_command(
@@ -620,6 +673,18 @@ macro_rules! __fyx_image_shims {
         fn __fyx_ui_remove_image(image: u32) {
             $crate::__private::$world::remove_image(image)
         }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_fetch(
+            request: &$crate::HttpRequest,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::$world::fetch(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_cancel_fetch(request: u64) {
+            $crate::__private::$world::cancel_fetch(request)
+        }
     };
 }
 
@@ -784,6 +849,13 @@ impl<'a> TreeBuilder<'a> {
         self.node(props)
     }
 
+    /// `fyx:ui` 0.3: a canvas node (see [`CanvasProps`] and [`DrawList`]). Panels only, not in
+    /// list rows; at most 16 per surface.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn canvas(&mut self, props: CanvasProps) -> NodeId {
+        self.node(props)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -810,6 +882,14 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         TreeLimits::default(),
     )
     .map_err(TreeError::InvalidRow)?;
+    #[cfg(feature = "fyx-ui-0-3")]
+    if row
+        .nodes
+        .iter()
+        .any(|node| matches!(node.props, Props::Canvas(_)))
+    {
+        return Err(TreeError::CanvasInRow);
+    }
     Ok(row)
 }
 
@@ -954,6 +1034,21 @@ pub enum TreeError {
         node: NodeId,
         kind: &'static str,
     },
+    /// `fyx:ui` 0.3: a canvas the host would reject (`ui_ext::canvas::check_canvas_props`).
+    #[cfg(feature = "fyx-ui-0-3")]
+    InvalidCanvas {
+        node: NodeId,
+        error: ui_ext::canvas::CanvasError,
+    },
+    /// `fyx:ui` 0.3: more canvases on one surface than the host allows.
+    #[cfg(feature = "fyx-ui-0-3")]
+    TooManyCanvases {
+        count: usize,
+        max: usize,
+    },
+    /// `fyx:ui` 0.3: canvases are not allowed in list rows.
+    #[cfg(feature = "fyx-ui-0-3")]
+    CanvasInRow,
 }
 
 impl fmt::Display for TreeError {
@@ -981,11 +1076,31 @@ impl fmt::Display for TreeError {
                 formatter,
                 "node {node} is a {kind}; only a list or a table has rows to invalidate"
             ),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::InvalidCanvas { node, error } => write!(formatter, "canvas {node}: {error}"),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::TooManyCanvases { count, max } => write!(
+                formatter,
+                "the surface would have {count} canvases, the cap is {max}"
+            ),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::CanvasInRow => write!(formatter, "a canvas cannot be in a list row"),
         }
     }
 }
 
 impl std::error::Error for TreeError {}
+
+/// Whether `props` is a canvas; never without `fyx-ui-0-3`.
+fn is_canvas(props: &Props) -> bool {
+    #[cfg(feature = "fyx-ui-0-3")]
+    return matches!(props, Props::Canvas(_));
+    #[cfg(not(feature = "fyx-ui-0-3"))]
+    {
+        let _ = props;
+        false
+    }
+}
 
 impl From<TreeError> for String {
     fn from(error: TreeError) -> Self {
@@ -1051,6 +1166,7 @@ impl SurfaceTree {
         build(&mut tree);
         let nodes = tree.finish();
         self.check_tree_size(nodes.len())?;
+        self.check_canvases(nodes.iter().map(|node| (node.id, &node.props)), 0)?;
 
         self.nodes.clear();
         self.roots.clear();
@@ -1126,6 +1242,8 @@ impl SurfaceTree {
         }
         Self::check_container(id, node, &props)?;
         self.check_update_size(self.pending.len() + 1)?;
+        let others = self.canvas_count() - usize::from(is_canvas(&node.props));
+        self.check_canvases([(id, &props)], others)?;
 
         self.node_mut(id)?.props = props.clone();
         self.pending.set_props(id, props);
@@ -1223,6 +1341,10 @@ impl SurfaceTree {
         let nodes = tree.finish();
         self.check_update_size(self.pending.len() + nodes.len())?;
         self.check_tree_size(self.nodes.len() + nodes.len())?;
+        self.check_canvases(
+            nodes.iter().map(|node| (node.id, &node.props)),
+            self.canvas_count(),
+        )?;
         Ok(self.commit_insert(parent, position, before, nodes))
     }
 
@@ -1258,6 +1380,10 @@ impl SurfaceTree {
         let nodes = tree.finish();
         self.check_update_size(self.pending.len() + 1 + nodes.len())?;
         self.check_tree_size(self.nodes.len() - removed + nodes.len())?;
+        self.check_canvases(
+            nodes.iter().map(|node| (node.id, &node.props)),
+            self.canvas_count() - self.subtree_canvases(id),
+        )?;
 
         self.commit_remove(id);
         Ok(self.commit_insert(parent, position, next_sibling, nodes))
@@ -1396,6 +1522,56 @@ impl SurfaceTree {
                 }),
             None => Ok(siblings.len()),
         }
+    }
+
+    fn canvas_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|node| is_canvas(&node.props))
+            .count()
+    }
+
+    fn subtree_canvases(&self, id: NodeId) -> usize {
+        let mut count = 0;
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            count += self
+                .nodes
+                .get(&id)
+                .map_or(0, |node| usize::from(is_canvas(&node.props)));
+            stack.extend_from_slice(self.children(id));
+        }
+        count
+    }
+
+    /// The new nodes' canvases against the host's rules: each canvas's props, and at most 16 on
+    /// the surface with the `others` that stay. Nothing to check without `fyx-ui-0-3`.
+    #[cfg_attr(
+        not(feature = "fyx-ui-0-3"),
+        allow(clippy::unused_self, unused_variables)
+    )]
+    fn check_canvases<'a>(
+        &self,
+        nodes: impl IntoIterator<Item = (NodeId, &'a Props)>,
+        others: usize,
+    ) -> Result<(), TreeError> {
+        #[cfg(feature = "fyx-ui-0-3")]
+        {
+            let mut count = others;
+            for (node, props) in nodes {
+                let Props::Canvas(canvas) = props else {
+                    continue;
+                };
+                ui_ext::canvas::check_canvas_props(&canvas::host_canvas(canvas))
+                    .map_err(|error| TreeError::InvalidCanvas { node, error })?;
+                count += 1;
+            }
+            let max = ui_ext::canvas::MAX_CANVASES_PER_SURFACE;
+            if count > max {
+                return Err(TreeError::TooManyCanvases { count, max });
+            }
+        }
+        Ok(())
     }
 
     fn subtree_len(&self, id: NodeId) -> usize {
@@ -1797,6 +1973,159 @@ impl From<&str> for ButtonProps {
 impl From<String> for ButtonProps {
     fn from(label: String) -> Self {
         Self::new(label)
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl HttpRequest {
+    /// A request with no headers, no body and the host's 30 s timeout.
+    pub fn new(method: HttpMethod, url: impl Into<String>) -> Self {
+        Self {
+            method,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+            timeout_ms: None,
+        }
+    }
+
+    pub fn get(url: impl Into<String>) -> Self {
+        Self::new(HttpMethod::Get, url)
+    }
+
+    pub fn post(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
+        Self::new(HttpMethod::Post, url).body(body)
+    }
+
+    /// At most 64 headers, 16 KiB in total. The host sets `host`, `content-length`,
+    /// `accept-encoding` and the other framing headers itself and refuses them here.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// At most 4 MiB.
+    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// A JSON body with its `content-type`.
+    pub fn json(self, json: impl Into<String>) -> Self {
+        self.header("content-type", "application/json")
+            .body(json.into())
+    }
+
+    /// At most 30000 ms, the default.
+    pub fn timeout_ms(mut self, timeout_ms: u32) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl HttpResponse {
+    /// A 2xx status.
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// The first header with this name, ignoring ASCII case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The body as UTF-8 text.
+    pub fn text(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self.body)
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Denied => f.write_str("network access was denied"),
+            FetchError::HostNotAllowed(host) => write!(f, "host {host:?} is not allowed"),
+            FetchError::RedirectNotAllowed(host) => {
+                write!(f, "a redirect to {host:?} is not allowed")
+            }
+            FetchError::Dns(error) => write!(f, "DNS: {error}"),
+            FetchError::Connect(error) => write!(f, "connecting: {error}"),
+            FetchError::Tls(error) => write!(f, "TLS: {error}"),
+            FetchError::Timeout => f.write_str("the request timed out"),
+            FetchError::TooLarge => f.write_str("the response is too large"),
+            FetchError::Cancelled => f.write_str("the request was cancelled"),
+            FetchError::Other(error) => f.write_str(error),
+        }
+    }
+}
+
+impl Notification {
+    /// A notification whose events go to `owner`, a surface or decoration id: no body, no
+    /// buttons, and closed by the host after a while (6 s for `info` and `success`, 10 s for
+    /// `warning` and `error`). The title is 1 to 80 bytes on one line.
+    pub fn new(
+        owner: impl Into<String>,
+        level: NotificationLevel,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            level,
+            title: title.into(),
+            body: None,
+            actions: Vec::new(),
+            auto_dismiss: true,
+        }
+    }
+
+    /// Plain text, at most 500 bytes and 4 lines.
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// A button, at most 2; the first is the primary one. `id` (1 to 64 bytes of `[a-z0-9._-]`)
+    /// comes back in `UiEvent::NotificationAction`; `label` is 1 to 24 bytes.
+    pub fn action(mut self, id: impl Into<String>, label: impl Into<String>) -> Self {
+        self.actions.push(NotificationAction {
+            id: id.into(),
+            label: label.into(),
+        });
+        self
+    }
+
+    /// Stays until the user or [`dismiss_notification`] closes it.
+    pub fn sticky(mut self) -> Self {
+        self.auto_dismiss = false;
+        self
+    }
+}
+
+impl ProgressOptions {
+    /// A progress whose events go to `owner`, which must be a panel for
+    /// `ProgressLocation::Panel`; not cancellable. The title is 1 to 80 bytes on one line.
+    pub fn new(
+        owner: impl Into<String>,
+        title: impl Into<String>,
+        location: ProgressLocation,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            title: title.into(),
+            location,
+            cancellable: false,
+        }
+    }
+
+    /// Draws a Cancel button that sends `UiEvent::ProgressCancelRequested` to the owner.
+    pub fn cancellable(mut self) -> Self {
+        self.cancellable = true;
+        self
     }
 }
 
@@ -2578,6 +2907,87 @@ mod tests {
                     location,
                     nodes: Vec::new()
                 },
+            ]
+        );
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    #[test]
+    fn fetch_builds_and_records_requests() {
+        take_host_effects();
+        let request = HttpRequest::post("https://api.example.com/items", "x")
+            .json("{\"name\":\"a\"}")
+            .header("authorization", "Bearer t")
+            .timeout_ms(5000);
+        assert_eq!(request.method, HttpMethod::Post);
+        assert_eq!(request.body.as_deref(), Some(&b"{\"name\":\"a\"}"[..]));
+        assert_eq!(
+            request.headers,
+            [
+                ("content-type".to_string(), "application/json".to_string()),
+                ("authorization".to_string(), "Bearer t".to_string())
+            ]
+        );
+        let id = fetch(&request).expect("fetch");
+        cancel_fetch(id);
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::Fetch { id, request },
+                HostEffect::CancelFetch(id)
+            ]
+        );
+
+        let response = HttpResponse {
+            status: 201,
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: b"created".to_vec(),
+            url: "https://api.example.com/items".into(),
+        };
+        assert!(response.is_success());
+        assert_eq!(response.header("content-type"), Some("text/plain"));
+        assert_eq!(response.text(), Ok("created"));
+        assert_eq!(
+            FetchError::HostNotAllowed("evil.example".into()).to_string(),
+            "host \"evil.example\" is not allowed"
+        );
+    }
+
+    #[test]
+    fn notifications_and_progress_record_their_effects() {
+        take_host_effects();
+        let notification = Notification::new("panel", NotificationLevel::Warning, "Build failed")
+            .body("2 errors")
+            .action("open-log", "Open log")
+            .sticky();
+        assert_eq!(notification.actions.len(), 1);
+        assert!(!notification.auto_dismiss);
+        let shown = notify(&notification).expect("notify");
+        dismiss_notification(shown);
+        let options =
+            ProgressOptions::new("panel", "Indexing", ProgressLocation::Panel).cancellable();
+        let progress = progress_start(&options).expect("start");
+        assert_ne!(progress, shown, "ids are not reused across kinds");
+        progress_update(progress, ProgressValue::Percent(40), Some("3 of 8")).expect("update");
+        progress_end(progress);
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::Notify {
+                    id: shown,
+                    notification
+                },
+                HostEffect::DismissNotification(shown),
+                HostEffect::ProgressStart {
+                    id: progress,
+                    options
+                },
+                HostEffect::ProgressUpdate {
+                    id: progress,
+                    value: ProgressValue::Percent(40),
+                    message: Some("3 of 8".into())
+                },
+                HostEffect::ProgressEnd(progress),
             ]
         );
     }

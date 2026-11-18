@@ -1,0 +1,15 @@
+id = "fyx-demo-charts"
+name = "Charts demo"
+description = "Fyx UI demo: a clickable bar chart and a live sparkline on canvas nodes (needs fyx:ui 0.3)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Read by Fyx's extension host (`fyx_ui::UiManifest`); upstream ignores the table.
+# `script/fyx-build-demos` builds the component and copies it here as `fyx_ui.wasm`; that 0.1
+# build only says charts need 0.3. `script/fyx-build-demos --fyx-ui-0-3` builds the 0.3
+# component, which draws them.
+[fyx_ui]
+api_version = "0.1.0"
+component = "fyx_ui.wasm"
+capabilities = ["ui:panel", "ui:canvas"]

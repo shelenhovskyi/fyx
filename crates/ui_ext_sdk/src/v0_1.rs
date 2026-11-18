@@ -330,6 +330,28 @@ pub mod glue {
         unavailable("remove_decoration")
     }
 
+    pub fn notify(_notification: &crate::Notification) -> Result<u64, HostError> {
+        unavailable("notify").map(|()| 0)
+    }
+
+    /// Nothing to close: 0.1 has no notifications.
+    pub fn dismiss_notification(_id: u64) {}
+
+    pub fn progress_start(_options: &crate::ProgressOptions) -> Result<u64, HostError> {
+        unavailable("progress_start").map(|()| 0)
+    }
+
+    pub fn progress_update(
+        _id: u64,
+        _value: crate::ProgressValue,
+        _message: Option<&str>,
+    ) -> Result<(), HostError> {
+        unavailable("progress_update")
+    }
+
+    /// Nothing to end: 0.1 has no progress.
+    pub fn progress_end(_id: u64) {}
+
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn add_image(_format: crate::ImageFormat, _bytes: &[u8]) -> Result<u32, HostError> {
         Err(HostError {
@@ -341,6 +363,18 @@ pub mod glue {
     /// Nothing to free: 0.1 has no generated images.
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn remove_image(_image: u32) {}
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn fetch(_request: &crate::HttpRequest) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("fetch"),
+        })
+    }
+
+    /// Nothing to cancel: 0.1 has no network.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn cancel_fetch(_request: u64) {}
 }
 
 #[cfg(test)]
@@ -433,6 +467,19 @@ mod tests {
                 .contains("needs fyx:ui 0.2")
         );
         assert!(request_tick("x", 100).is_err());
+        let notification =
+            crate::Notification::new("panel", crate::NotificationLevel::Info, "Saved");
+        let error = notify(&notification).unwrap_err();
+        assert_eq!(error.code, HostErrorCode::Unavailable);
+        assert!(
+            error.message.contains("notify needs fyx:ui 0.2"),
+            "{}",
+            error.message
+        );
+        let options =
+            crate::ProgressOptions::new("panel", "Indexing", crate::ProgressLocation::StatusBar);
+        assert!(progress_start(&options).is_err());
+        assert!(progress_update(1, crate::ProgressValue::Indeterminate, None).is_err());
         let modal = Surface::modal("picker", "Pick", ModalWidth::Medium);
         let panel = Surface::panel(
             "panel",

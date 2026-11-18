@@ -5,12 +5,12 @@
 //! Apache-2.0, like the SDK, so extensions can use it as a dev-dependency, and host-only, so the
 //! SDK itself never pulls in wasmtime.
 //!
-//! It runs components of `fyx:ui` 0.1 and 0.2. Internally every value is the 0.2 model
-//! (`ui_ext::v0_2`), into which 0.1 data converts without loss. The `*_v0_2` methods and
-//! [`Outcome`] show the 0.2 model; the older methods show the 0.1 model, which is lossless for a
-//! 0.1 component and drops tooltips, `secret`, input labels, `selected`, `indent`,
-//! `invalidate-rows`, modals and every effect but pushes for a 0.2 one, as the host's 0.1 view
-//! does.
+//! It runs components of `fyx:ui` 0.1, 0.2 and the staged 0.3. Internally every value is the
+//! newest model (`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data
+//! converts without loss. The unsuffixed methods and [`Outcome`] show that model (decision D5);
+//! the `*_v0_1` methods show the 0.1 model, which is lossless for a 0.1 component and drops
+//! tooltips, `secret`, input labels, `selected`, `indent`, `invalidate-rows`, modals, images and
+//! every effect but pushes for a newer one, as the host's 0.1 view does.
 //!
 //! What it shares with Fyx and what it mirrors:
 //! - Trees, patches, id rules, caps and capability checks are `ui_ext`'s, the same model and
@@ -56,6 +56,7 @@ use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
+mod notifications;
 mod v0_2;
 mod v0_3;
 
@@ -112,13 +113,93 @@ pub const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 3;
 pub const COMPONENT_VARIABLE: &str = "FYX_EXT_COMPONENT";
 /// `fyx-ext test` sets it to the extension folder; [`Harness::from_env`] prefers it.
 pub const PACKAGE_VARIABLE: &str = "FYX_EXT_PACKAGE";
+
+/// Whether [`PACKAGE_VARIABLE`] or [`COMPONENT_VARIABLE`] is set, as under `fyx-ext test`. A
+/// headless test skips when neither is, and fails when [`Harness::from_env`] fails although one
+/// is.
+pub fn variables_set() -> bool {
+    std::env::var_os(PACKAGE_VARIABLE).is_some() || std::env::var_os(COMPONENT_VARIABLE).is_some()
+}
 /// What [`Harness::load`] grants: every `[fyx_ui].capabilities` entry a component can use.
 pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_PANEL,
     model::CAPABILITY_STATUS_BAR,
     model::CAPABILITY_MODAL,
     model::CAPABILITY_EDITOR_DECORATIONS,
+    ui_ext::image::CAPABILITY_IMAGES,
+    model::CAPABILITY_NOTIFICATIONS,
 ];
+
+/// What a test broker answers for one request it lets through.
+pub type FetchResponder = Box<
+    dyn FnMut(
+        &ui_ext::network::FetchRequest,
+    )
+        -> std::result::Result<ui_ext::network::FetchResponse, ui_ext::network::FetchError>,
+>;
+
+/// A stand-in for the user and the network, for `network:fetch` tests (0.3). Without one the
+/// harness grants no T2 capability, as the host without a broker: `fetch` returns `denied`.
+pub struct TestBroker {
+    /// The state at the import. `Ask` accepts the request and asks when it is delivered.
+    pub state: ui_ext::network::PermissionState,
+    /// How the user answers the prompt of an `Ask` state.
+    pub answer: ui_ext::network::PermissionState,
+    respond: FetchResponder,
+    prompts: usize,
+}
+
+impl TestBroker {
+    /// Granted: every request reaches `respond`.
+    pub fn granted(respond: FetchResponder) -> Self {
+        Self::asking(ui_ext::network::PermissionState::Granted, respond)
+    }
+
+    /// Not asked yet: the first delivered request prompts, and the user answers `answer`.
+    pub fn asking(answer: ui_ext::network::PermissionState, respond: FetchResponder) -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Ask,
+            answer,
+            respond,
+            prompts: 0,
+        }
+    }
+
+    /// Refused: `fetch` returns `denied` at the import.
+    pub fn denied() -> Self {
+        Self {
+            state: ui_ext::network::PermissionState::Denied,
+            answer: ui_ext::network::PermissionState::Denied,
+            respond: Box::new(|_| Err(ui_ext::network::FetchError::Denied)),
+            prompts: 0,
+        }
+    }
+
+    /// How many times the prompt was shown.
+    pub fn prompts(&self) -> usize {
+        self.prompts
+    }
+}
+
+impl std::fmt::Debug for TestBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestBroker")
+            .field("state", &self.state)
+            .field("answer", &self.answer)
+            .field("prompts", &self.prompts)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A running progress as the renderer draws it (design.md M.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Progress {
+    pub options: model::notifications::ProgressOptions,
+    /// Indeterminate until the first `progress-update`.
+    pub value: model::notifications::ProgressValue,
+    /// The last message an update gave; an update without one keeps it.
+    pub message: Option<String>,
+}
 
 /// An update the extension pushed during a call, in the 0.1 model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +409,7 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
                     ui_ext::image::ImageSource::Generated(_) => 0,
                 }
         }
+        model::Props::Canvas(props) => ui_ext::canvas::canvas_text_len(props),
     }
 }
 
@@ -539,6 +621,17 @@ impl Bindings {
                     ),
                 )
                 .map(|()| rows)
+            })
+            .and_then(|rows| {
+                // The host's row tree refuses canvases, as `ui_ext::v0_2::Tree::from_row` does.
+                match rows
+                    .iter()
+                    .flat_map(|row| &row.nodes)
+                    .find(|node| matches!(node.props, model::Props::Canvas(_)))
+                {
+                    Some(node) => Err(ui_ext::TreeError::CanvasInRow(node.id).to_string()),
+                    None => Ok(rows),
+                }
             }),
         })
     }
@@ -560,6 +653,20 @@ impl Bindings {
     }
 }
 
+impl Bindings {
+    /// `handle-io` (0.3 only).
+    fn handle_io(
+        &self,
+        store: &mut Store<State>,
+        event: &v0_3::bindings::fyx::ui::io::IoEvent,
+    ) -> wasmtime::Result<std::result::Result<(), String>> {
+        match self {
+            Self::V0_3(extension) => extension.call_handle_io(store, event),
+            Self::V0_1(_) | Self::V0_2(_) => Ok(Err("handle-io needs fyx:ui 0.3".into())),
+        }
+    }
+}
+
 /// A mounted surface or decoration: the tree in the 0.1 model, which `ui_ext::Tree` validates
 /// (the structure carries over exactly), and the full 0.2 props of every node.
 #[derive(Debug, Clone)]
@@ -575,20 +682,47 @@ struct Applied {
 }
 
 impl Mounted {
-    fn new(nodes: &[model::Node], limits: TreeLimits) -> Result<Self, ui_ext::TreeError> {
+    fn new(nodes: &[model::Node], limits: TreeLimits) -> Result<Self> {
         let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), limits)?;
-        Ok(Self {
+        let mounted = Self {
             tree,
             props: nodes
                 .iter()
                 .map(|node| (node.id, node.props.clone()))
                 .collect(),
-        })
+        };
+        mounted.check_canvas_count()?;
+        Ok(mounted)
     }
 
     /// Applies an update atomically, as the host's tree does. An `invalidate-rows` target must be
-    /// a list or table at that point of the update.
+    /// a list or table at that point of the update, and the surface keeps at most 16 canvases.
     fn apply(&mut self, update: &model::Update, limits: TreeLimits) -> Result<Applied> {
+        let before = self.clone();
+        let applied = self.apply_unchecked(update, limits);
+        let applied = applied.and_then(|applied| self.check_canvas_count().map(|()| applied));
+        if applied.is_err() {
+            *self = before;
+        }
+        applied
+    }
+
+    /// `ui_ext::canvas::MAX_CANVASES_PER_SURFACE`, which the host's tree enforces.
+    fn check_canvas_count(&self) -> Result<()> {
+        let count = self
+            .props
+            .values()
+            .filter(|props| matches!(props, model::Props::Canvas(_)))
+            .count();
+        anyhow::ensure!(
+            count <= ui_ext::canvas::MAX_CANVASES_PER_SURFACE,
+            "the surface would have {count} canvases, the cap is {}",
+            ui_ext::canvas::MAX_CANVASES_PER_SURFACE
+        );
+        Ok(())
+    }
+
+    fn apply_unchecked(&mut self, update: &model::Update, limits: TreeLimits) -> Result<Applied> {
         update.check_caps(limits)?;
         let mut applied = Applied::default();
         match update {
@@ -676,7 +810,8 @@ impl Mounted {
             | model::UiEvent::Dismissed(_)
             | model::UiEvent::NotificationAction(_)
             | model::UiEvent::NotificationClosed(..)
-            | model::UiEvent::ProgressCancelRequested(_) => {}
+            | model::UiEvent::ProgressCancelRequested(_)
+            | model::UiEvent::CanvasClick(_) => {}
         }
     }
 
@@ -713,6 +848,11 @@ pub struct Harness {
     surfaces_v0_1: Vec<ui_ext::Surface>,
     mounted: HashMap<String, Mounted>,
     decorations: BTreeMap<String, model::DecorationLocation>,
+    /// The permission broker for `network:fetch` (0.3); `None` grants nothing, as in the host.
+    broker: Option<TestBroker>,
+    /// What the renderer shows of §M: open notifications and running progresses, by id.
+    notifications: BTreeMap<u64, model::notifications::Notification>,
+    progresses: BTreeMap<u64, Progress>,
     shown_modals: BTreeSet<String>,
     pending_ticks: BTreeMap<String, Duration>,
     tick_errors: HashMap<String, u32>,
@@ -836,6 +976,9 @@ impl Harness {
             surfaces_v0_1: Vec::new(),
             mounted: HashMap::new(),
             decorations: BTreeMap::new(),
+            broker: None,
+            notifications: BTreeMap::new(),
+            progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
             pending_ticks: BTreeMap::new(),
             tick_errors: HashMap::new(),
@@ -893,6 +1036,20 @@ impl Harness {
             .with_context(|| format!("reading {component_path:?}"))?;
         let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
             .with_context(|| format!("loading {dir:?}"))?;
+        if let Some(domains) = table
+            .get("network")
+            .and_then(toml::Value::as_table)
+            .and_then(|network| network.get("domains"))
+            .and_then(toml::Value::as_array)
+        {
+            let domains = domains
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .collect::<Vec<_>>();
+            harness = harness
+                .with_network_domains(&domains)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
         Ok(harness)
@@ -935,37 +1092,39 @@ impl Harness {
         self.ui_api_version
     }
 
-    /// The live surfaces in the 0.1 model; a 0.2 component's modals are left out.
-    pub fn surfaces(&self) -> &[ui_ext::Surface] {
-        &self.surfaces_v0_1
+    /// The live surfaces: the static ones, then those `add-surface` added, minus removed ones.
+    pub fn surfaces(&self) -> &[model::Surface] {
+        &self.surfaces
     }
 
-    /// The live surfaces: the static ones, then those `add-surface` added, minus removed ones.
-    pub fn surfaces_v0_2(&self) -> &[model::Surface] {
-        &self.surfaces
+    /// [`Harness::surfaces`] in the 0.1 model; a 0.2 component's modals are left out.
+    pub fn surfaces_v0_1(&self) -> &[ui_ext::Surface] {
+        &self.surfaces_v0_1
     }
 
     pub fn limits(&self) -> TreeLimits {
         self.limits
     }
 
-    /// The tree of a mounted surface or decoration, as the host holds it.
-    pub fn tree(&self, surface_id: &str) -> Option<&Tree> {
-        self.mounted.get(surface_id).map(|mounted| &mounted.tree)
-    }
-
-    /// The tree of a mounted surface or decoration in the 0.2 model, parents first.
-    pub fn nodes_v0_2(&self, surface_id: &str) -> Option<Vec<model::Node>> {
+    /// The tree of a mounted surface or decoration, parents first.
+    pub fn nodes(&self, surface_id: &str) -> Option<Vec<model::Node>> {
         self.mounted.get(surface_id).map(Mounted::nodes)
     }
 
-    /// The 0.2 props of one node of a mounted surface or decoration.
-    pub fn props_v0_2(&self, surface_id: &str, id: NodeId) -> Option<&model::Props> {
+    /// The props of one node of a mounted surface or decoration.
+    pub fn props(&self, surface_id: &str, id: NodeId) -> Option<&model::Props> {
         self.mounted.get(surface_id)?.props.get(&id)
     }
 
-    /// Every update pushed so far, in order, in the 0.1 model.
-    pub fn pushed(&self) -> &[Pushed] {
+    /// The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds
+    /// it.
+    pub fn tree_v0_1(&self, surface_id: &str) -> Option<&Tree> {
+        self.mounted.get(surface_id).map(|mounted| &mounted.tree)
+    }
+
+    /// Every update pushed so far, in order, in the 0.1 model; [`Harness::effects`] holds them in
+    /// the newest one.
+    pub fn pushed_v0_1(&self) -> &[Pushed] {
         &self.pushed
     }
 
@@ -984,7 +1143,7 @@ impl Harness {
         self.shown_modals.contains(surface_id)
     }
 
-    /// Where a live decoration is placed; its tree is [`Harness::tree`] of its id.
+    /// Where a live decoration is placed; its tree is [`Harness::nodes`] of its id.
     pub fn decoration(&self, id: &str) -> Option<&model::DecorationLocation> {
         self.decorations.get(id)
     }
@@ -1005,9 +1164,208 @@ impl Harness {
         self.disabled.as_deref()
     }
 
+    /// The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them;
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn with_network_domains(mut self, domains: &[&str]) -> Result<Self> {
+        let domains = domains.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let list = ui_ext::network::DomainList::parse(&domains)
+            .map_err(|error| anyhow::anyhow!("[fyx_ui.network] domains: {error}"))?;
+        self.store.data_mut().api.set_network_domains(list);
+        Ok(self)
+    }
+
+    /// Installs the permission broker and network for `network:fetch`; see [`TestBroker`].
+    pub fn set_broker(&mut self, broker: TestBroker) {
+        self.store
+            .data_mut()
+            .api
+            .set_network_permission(broker.state);
+        self.broker = Some(broker);
+    }
+
+    pub fn broker(&self) -> Option<&TestBroker> {
+        self.broker.as_ref()
+    }
+
+    /// Requests `fetch` accepted that [`Harness::deliver_io`] has not delivered yet, oldest first.
+    pub fn pending_fetches(&self) -> Vec<(u64, ui_ext::network::FetchRequest)> {
+        self.store
+            .data()
+            .api
+            .queued_fetches()
+            .map(|(id, fetch)| (id, fetch.request.clone()))
+            .collect()
+    }
+
+    /// Delivers the outcome of every pending request through `handle-io`, oldest first, and
+    /// applies each call's effects. A cancelled one ends `cancelled`. Otherwise the broker
+    /// decides: an `Ask` state prompts once and takes the answer, a granted request gets the
+    /// responder's answer, and anything else ends `denied`. Returns each call's effects and the
+    /// extension's own result.
+    pub fn deliver_io(&mut self) -> Result<Vec<RawEffects<()>>> {
+        use ui_ext::network::{FetchError, IoEvent, PermissionState};
+        let mut delivered = Vec::new();
+        while let Some((id, fetch)) = self.store.data_mut().api.take_fetch() {
+            let result = if fetch.cancelled {
+                Err(FetchError::Cancelled)
+            } else {
+                match self.broker.as_mut() {
+                    Some(broker) => {
+                        if broker.state == PermissionState::Ask {
+                            broker.prompts += 1;
+                            broker.state = broker.answer;
+                            self.store
+                                .data_mut()
+                                .api
+                                .set_network_permission(broker.state);
+                        }
+                        if broker.state == PermissionState::Granted {
+                            (broker.respond)(&fetch.request)
+                        } else {
+                            Err(FetchError::Denied)
+                        }
+                    }
+                    None => Err(FetchError::Denied),
+                }
+            };
+            let Some(event) = v0_3::io_event(IoEvent::FetchDone(id, result)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        Ok(delivered)
+    }
+
+    /// The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or
+    /// acted on. The harness has no clock, so `auto_dismiss` ones stay until
+    /// [`Harness::close_notification`].
+    pub fn notifications(&self) -> &BTreeMap<u64, model::notifications::Notification> {
+        &self.notifications
+    }
+
+    /// The running progresses (M.2), by id, with their last value and message.
+    pub fn progresses(&self) -> &BTreeMap<u64, Progress> {
+        &self.progresses
+    }
+
+    /// Clicks button `action` of an open notification, as the user would: the notification
+    /// closes and its owner, which must be mounted, gets `notification-action`. The click is a
+    /// gesture, like a button click.
+    pub fn notification_action(&mut self, id: u64, action: &str) -> Result<Outcome> {
+        let notification = self
+            .notifications
+            .get(&id)
+            .with_context(|| format!("notification {id} is not open"))?;
+        anyhow::ensure!(
+            notification
+                .actions
+                .iter()
+                .any(|button| button.id == action),
+            "notification {id} has no action {action:?}"
+        );
+        let owner = notification.owner.clone();
+        self.notifications.remove(&id);
+        self.event(
+            &owner,
+            model::UiEvent::NotificationAction(model::notifications::NotificationActionEvent {
+                notification: id,
+                action: action.to_string(),
+            }),
+        )
+    }
+
+    /// Closes an open notification as the user (`User`), its timer (`Expired`) or its window
+    /// (`WindowClosed`) would; its owner, which must be mounted, gets `notification-closed`.
+    pub fn close_notification(
+        &mut self,
+        id: u64,
+        reason: model::notifications::NotificationCloseReason,
+    ) -> Result<Outcome> {
+        let notification = self
+            .notifications
+            .remove(&id)
+            .with_context(|| format!("notification {id} is not open"))?;
+        self.event(
+            &notification.owner,
+            model::UiEvent::NotificationClosed(id, reason),
+        )
+    }
+
+    /// Clicks Cancel on a running cancellable progress; its owner, which must be mounted, gets
+    /// `progress-cancel-requested`. The progress keeps running until the extension ends it.
+    pub fn cancel_progress(&mut self, id: u64) -> Result<Outcome> {
+        let progress = self
+            .progresses
+            .get(&id)
+            .with_context(|| format!("progress {id} is not running"))?;
+        anyhow::ensure!(
+            progress.options.cancellable,
+            "progress {id} is not cancellable"
+        );
+        let owner = progress.options.owner.clone();
+        self.event(&owner, model::UiEvent::ProgressCancelRequested(id))
+    }
+
+    /// The draw list of canvas node `id` on a mounted surface (0.3), for assertions.
+    pub fn canvas(&self, surface_id: &str, id: NodeId) -> Option<&ui_ext::canvas::CanvasProps> {
+        match self.props(surface_id, id)? {
+            model::Props::Canvas(canvas) => Some(canvas),
+            _ => None,
+        }
+    }
+
+    /// Clicks canvas `id` at `(x, y)` in canvas coordinates, as the renderer does: it sends
+    /// `canvas-click`, a gesture like a button click. It fails without a call when the node is
+    /// not a canvas, the canvas is not `clickable`, or the point lies outside its box, since the
+    /// renderer never sends those.
+    pub fn canvas_click(
+        &mut self,
+        surface_id: &str,
+        id: NodeId,
+        x: f32,
+        y: f32,
+    ) -> Result<Outcome> {
+        let canvas = self
+            .canvas(surface_id, id)
+            .with_context(|| format!("node {id} on {surface_id:?} is not a mounted canvas"))?;
+        anyhow::ensure!(
+            canvas.clickable,
+            "canvas {id} on {surface_id:?} is not clickable"
+        );
+        anyhow::ensure!(
+            (0.0..=canvas.width as f32).contains(&x) && (0.0..=canvas.height as f32).contains(&y),
+            "({x}, {y}) is outside canvas {id}, which is {} × {}",
+            canvas.width,
+            canvas.height
+        );
+        self.event(
+            surface_id,
+            model::UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                canvas: id,
+                x: x.into(),
+                y: y.into(),
+            }),
+        )
+    }
+
     /// Mounts a live surface or decoration (again, if it was mounted) and returns its validated
-    /// tree. A modal mounts only while it is shown.
-    pub fn mount(&mut self, surface_id: &str) -> Result<&Tree> {
+    /// tree, parents first. A modal mounts only while it is shown.
+    pub fn mount(&mut self, surface_id: &str) -> Result<Vec<model::Node>> {
+        self.mount_checked(surface_id)?;
+        Ok(self.mounted[surface_id].nodes())
+    }
+
+    /// [`Harness::mount`], returning the tree in the 0.1 model.
+    pub fn mount_v0_1(&mut self, surface_id: &str) -> Result<&Tree> {
+        self.mount_checked(surface_id)?;
+        Ok(&self.mounted[surface_id].tree)
+    }
+
+    fn mount_checked(&mut self, surface_id: &str) -> Result<()> {
         let live = self.store.data().api.live();
         anyhow::ensure!(
             live.surface_kind(surface_id).is_some() || live.is_decoration(surface_id),
@@ -1023,19 +1381,13 @@ impl Harness {
             );
         }
         self.mount_now(surface_id)?;
-        Ok(&self.mounted[surface_id].tree)
-    }
-
-    /// Sends one event to a mounted surface and applies what it pushed and replied (0.1 model).
-    pub fn event(&mut self, surface_id: &str, event: ui_ext::UiEvent) -> Result<EventOutcome> {
-        self.event_v0_2(surface_id, event.into())
-            .map(EventOutcome::from)
+        Ok(())
     }
 
     /// Sends one event to a mounted surface or decoration and applies its effects, then its reply.
     /// Typed text and a `row-selected` selection are written into the tree first. Use
     /// [`Harness::dismiss`] for `dismissed`.
-    pub fn event_v0_2(&mut self, surface_id: &str, event: model::UiEvent) -> Result<Outcome> {
+    pub fn event(&mut self, surface_id: &str, event: model::UiEvent) -> Result<Outcome> {
         anyhow::ensure!(
             !matches!(event, model::UiEvent::Dismissed(_)),
             "send dismissed with Harness::dismiss, which closes the modal first"
@@ -1049,23 +1401,15 @@ impl Harness {
         self.finish(surface_id, "handle-event", result, effects)
     }
 
-    /// Calls `handle-event` without a mounted surface or applying the reply: what the host
-    /// runtime does before the renderer applies anything. Pushes are applied and recorded as
-    /// usual. `Err` means the call trapped or overran its budget, which disables the extension.
-    pub fn handle_event_raw(
-        &mut self,
-        surface_id: &str,
-        event: ui_ext::UiEvent,
-    ) -> Result<RawReply<ui_ext::Update>> {
-        let raw = self.handle_event_raw_v0_2(surface_id, event.into())?;
-        Ok(RawReply {
-            pushed: shim::pushes(&raw.effects),
-            value: raw.value.map(shim::update),
-        })
+    /// [`Harness::event`] in the 0.1 model: the pushes and the reply only.
+    pub fn event_v0_1(&mut self, surface_id: &str, event: ui_ext::UiEvent) -> Result<EventOutcome> {
+        self.event(surface_id, event.into()).map(EventOutcome::from)
     }
 
-    /// [`Harness::handle_event_raw`] in the 0.2 model, with every effect.
-    pub fn handle_event_raw_v0_2(
+    /// Calls `handle-event` without a mounted surface or applying the reply: what the host
+    /// runtime does before the renderer applies anything. Effects are applied and recorded as
+    /// usual. `Err` means the call trapped or overran its budget, which disables the extension.
+    pub fn handle_event_raw(
         &mut self,
         surface_id: &str,
         event: model::UiEvent,
@@ -1074,6 +1418,19 @@ impl Harness {
         let follow_ups = self.apply_effects(&effects);
         self.run_follow_ups(follow_ups);
         Ok(RawEffects { effects, value })
+    }
+
+    /// [`Harness::handle_event_raw`] in the 0.1 model: the pushes and the reply only.
+    pub fn handle_event_raw_v0_1(
+        &mut self,
+        surface_id: &str,
+        event: ui_ext::UiEvent,
+    ) -> Result<RawReply<ui_ext::Update>> {
+        let raw = self.handle_event_raw(surface_id, event.into())?;
+        Ok(RawReply {
+            pushed: shim::pushes(&raw.effects),
+            value: raw.value.map(shim::update),
+        })
     }
 
     /// Closes a shown modal as the user would: its tree and pending tick go first, then
@@ -1134,24 +1491,9 @@ impl Harness {
         self.finish(surface_id, "tick", result, effects)
     }
 
-    /// Rows `start..start + count` of a list, each validated as a single-root tree (0.1 model).
-    pub fn rows(
-        &mut self,
-        surface_id: &str,
-        list: NodeId,
-        start: u32,
-        count: u32,
-    ) -> Result<Vec<(u32, Tree)>> {
-        Ok(self
-            .rows_checked(surface_id, list, start, count)?
-            .into_iter()
-            .map(|(row, tree)| (row.index, tree))
-            .collect())
-    }
-
     /// Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as
     /// the extension sent it.
-    pub fn rows_v0_2(
+    pub fn rows(
         &mut self,
         surface_id: &str,
         list: NodeId,
@@ -1165,17 +1507,44 @@ impl Harness {
             .collect())
     }
 
+    /// [`Harness::rows`] in the 0.1 model: each row's index and tree.
+    pub fn rows_v0_1(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<(u32, Tree)>> {
+        Ok(self
+            .rows_checked(surface_id, list, start, count)?
+            .into_iter()
+            .map(|(row, tree)| (row.index, tree))
+            .collect())
+    }
+
     /// The content of a text node.
     pub fn text(&self, surface_id: &str, id: NodeId) -> Option<&str> {
-        match self.tree(surface_id)?.get(id).map(TreeNode::props) {
-            Some(Props::Text(text)) => Some(&text.content),
+        match self.props(surface_id, id)? {
+            model::Props::Text(text) => Some(&text.content),
             _ => None,
         }
     }
 
     /// The first node in tree order whose props match.
-    pub fn find(&self, surface_id: &str, matches: impl Fn(&Props) -> bool) -> Option<NodeId> {
-        self.tree(surface_id)?
+    pub fn find(
+        &self,
+        surface_id: &str,
+        matches: impl Fn(&model::Props) -> bool,
+    ) -> Option<NodeId> {
+        self.nodes(surface_id)?
+            .into_iter()
+            .find(|node| matches(&node.props))
+            .map(|node| node.id)
+    }
+
+    /// [`Harness::find`] over the 0.1 model of the tree.
+    pub fn find_v0_1(&self, surface_id: &str, matches: impl Fn(&Props) -> bool) -> Option<NodeId> {
+        self.tree_v0_1(surface_id)?
             .to_nodes()
             .into_iter()
             .find(|node| matches(&node.props))
@@ -1185,28 +1554,76 @@ impl Harness {
     pub fn find_text(&self, surface_id: &str, content: &str) -> Option<NodeId> {
         self.find(
             surface_id,
-            |props| matches!(props, Props::Text(text) if text.content == content),
+            |props| matches!(props, model::Props::Text(text) if text.content == content),
         )
     }
 
     pub fn find_button(&self, surface_id: &str, label: &str) -> Option<NodeId> {
         self.find(
             surface_id,
-            |props| matches!(props, Props::Button(button) if button.label == label),
+            |props| matches!(props, model::Props::Button(button) if button.label == label),
         )
     }
 
-    /// Clicks the first button with this label (0.1 model).
-    pub fn click(&mut self, surface_id: &str, label: &str) -> Result<EventOutcome> {
-        self.click_v0_2(surface_id, label).map(EventOutcome::from)
-    }
-
     /// Clicks the first button with this label.
-    pub fn click_v0_2(&mut self, surface_id: &str, label: &str) -> Result<Outcome> {
+    pub fn click(&mut self, surface_id: &str, label: &str) -> Result<Outcome> {
         let button = self
             .find_button(surface_id, label)
             .with_context(|| format!("no button {label:?} on {surface_id:?}"))?;
-        self.event_v0_2(surface_id, model::UiEvent::Click(button))
+        self.event(surface_id, model::UiEvent::Click(button))
+    }
+
+    /// [`Harness::click`] in the 0.1 model.
+    pub fn click_v0_1(&mut self, surface_id: &str, label: &str) -> Result<EventOutcome> {
+        self.click(surface_id, label).map(EventOutcome::from)
+    }
+
+    // The names before decision D5, for callers outside this crate until they move to the
+    // unsuffixed ones (the newest model). Not part of the documented API; removed later.
+
+    #[doc(hidden)]
+    pub fn surfaces_v0_2(&self) -> &[model::Surface] {
+        self.surfaces()
+    }
+
+    #[doc(hidden)]
+    pub fn nodes_v0_2(&self, surface_id: &str) -> Option<Vec<model::Node>> {
+        self.nodes(surface_id)
+    }
+
+    #[doc(hidden)]
+    pub fn props_v0_2(&self, surface_id: &str, id: NodeId) -> Option<&model::Props> {
+        self.props(surface_id, id)
+    }
+
+    #[doc(hidden)]
+    pub fn event_v0_2(&mut self, surface_id: &str, event: model::UiEvent) -> Result<Outcome> {
+        self.event(surface_id, event)
+    }
+
+    #[doc(hidden)]
+    pub fn handle_event_raw_v0_2(
+        &mut self,
+        surface_id: &str,
+        event: model::UiEvent,
+    ) -> Result<RawEffects<model::Update>> {
+        self.handle_event_raw(surface_id, event)
+    }
+
+    #[doc(hidden)]
+    pub fn rows_v0_2(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<model::ListRow>> {
+        self.rows(surface_id, list, start, count)
+    }
+
+    #[doc(hidden)]
+    pub fn click_v0_2(&mut self, surface_id: &str, label: &str) -> Result<Outcome> {
+        self.click(surface_id, label)
     }
 
     fn call_handle_event(
@@ -1401,6 +1818,7 @@ impl Harness {
                 Ok((value, effects))
             }
             Err(error) => {
+                self.store.data_mut().api.abort_call();
                 let error = anyhow::Error::from(error);
                 self.disabled = Some(format!("{error:#}"));
                 Err(error.context("the call trapped or ran over its time budget"))
@@ -1442,6 +1860,7 @@ impl Harness {
                     self.surfaces.retain(|surface| surface.id != *surface_id);
                     self.refresh_surfaces_v0_1();
                     self.forget(surface_id);
+                    self.forget_owner(surface_id);
                 }
                 HostEffect::ShowSurface { surface_id } => {
                     if self.is_modal(surface_id) && self.shown_modals.insert(surface_id.clone()) {
@@ -1474,6 +1893,34 @@ impl Harness {
                 HostEffect::RemoveDecoration { id } => {
                     self.decorations.remove(id);
                     self.mounted.remove(id);
+                    self.forget_owner(id);
+                }
+                HostEffect::Notify { id, notification } => {
+                    self.notifications.insert(*id, notification.clone());
+                }
+                HostEffect::DismissNotification { id } => {
+                    self.notifications.remove(id);
+                }
+                HostEffect::ProgressStart { id, options } => {
+                    self.progresses.insert(
+                        *id,
+                        Progress {
+                            options: options.clone(),
+                            value: model::notifications::ProgressValue::Indeterminate,
+                            message: None,
+                        },
+                    );
+                }
+                HostEffect::ProgressUpdate { id, value, message } => {
+                    if let Some(progress) = self.progresses.get_mut(id) {
+                        progress.value = *value;
+                        if message.is_some() {
+                            progress.message.clone_from(message);
+                        }
+                    }
+                }
+                HostEffect::ProgressEnd { id } => {
+                    self.progresses.remove(id);
                 }
             }
         }
@@ -1528,6 +1975,14 @@ impl Harness {
         self.shown_modals.remove(surface_id);
         self.pending_ticks.remove(surface_id);
         self.tick_errors.remove(surface_id);
+    }
+
+    /// The owner is gone: the renderer closes its notifications and ends its progresses.
+    fn forget_owner(&mut self, owner: &str) {
+        self.notifications
+            .retain(|_, notification| notification.owner != owner);
+        self.progresses
+            .retain(|_, progress| progress.options.owner != owner);
     }
 
     fn refresh_surfaces_v0_1(&mut self) {
@@ -1587,6 +2042,11 @@ mod shim {
             // 0.3 only; 0.1 has no image, so its alt text stands in.
             model::Props::Image(image) => Props::Text(ui_ext::TextProps {
                 content: image.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
+            // As the host's 0.1 view: the description stands in for the drawing.
+            model::Props::Canvas(canvas) => Props::Text(ui_ext::TextProps {
+                content: canvas.description.clone(),
                 ..ui_ext::TextProps::default()
             }),
         }

@@ -850,21 +850,23 @@ mod harness_conformance {
         let wasm = demo_counter_wasm();
         let (host, _pushed) = load("fyx-demo-counter", wasm.clone(), cx).await;
         let mut harness = Harness::load(&wasm).expect("the harness loads the counter");
-        assert_eq!(host.surfaces(), harness.surfaces());
+        assert_eq!(host.surfaces(), harness.surfaces_v0_1());
 
         let mut tree = host.mount(SURFACE).await.expect("mount").value;
-        assert_eq!(&tree, harness.mount(SURFACE).expect("mount"));
+        assert_eq!(&tree, harness.mount_v0_1(SURFACE).expect("mount"));
 
         for id in [INCREMENT, INCREMENT, DECREMENT, RESET, ROOT, INCREMENT] {
             let reply = host
                 .handle_event(SURFACE, UiEvent::Click(id))
                 .await
                 .expect("event");
-            let outcome = harness.event(SURFACE, UiEvent::Click(id)).expect("event");
+            let outcome = harness
+                .event_v0_1(SURFACE, UiEvent::Click(id))
+                .expect("event");
             assert_eq!(pushes(&reply.pushed), outcome.pushed, "click {id}");
             assert_eq!(reply.value, outcome.update, "click {id}");
             tree.apply_update(reply.value).expect("apply");
-            assert_eq!(Some(&tree), harness.tree(SURFACE), "click {id}");
+            assert_eq!(Some(&tree), harness.tree_v0_1(SURFACE), "click {id}");
         }
 
         let host_rows = host
@@ -872,7 +874,7 @@ mod harness_conformance {
             .await
             .expect("rows")
             .value;
-        let harness_rows = harness.rows(SURFACE, LIST, 0, 10).expect("rows");
+        let harness_rows = harness.rows_v0_1(SURFACE, LIST, 0, 10).expect("rows");
         assert_eq!(host_rows, harness_rows);
         assert!(!host_rows.is_empty());
     }
@@ -882,7 +884,7 @@ mod harness_conformance {
         let wasm = probe_wasm();
         let (host, _pushed) = load("probe", wasm.clone(), cx).await;
         let mut harness = Harness::load(&wasm).expect("the harness loads the probe");
-        assert_eq!(host.surfaces(), harness.surfaces());
+        assert_eq!(host.surfaces(), harness.surfaces_v0_1());
 
         for id in [probe::PUSH, probe::PUSH_THEN_PATCH, probe::PUSH_THEN_FAIL] {
             let event = UiEvent::Click(id);
@@ -897,7 +899,7 @@ mod harness_conformance {
                     }
                 };
             let reply = harness
-                .handle_event_raw(probe::SURFACE, event)
+                .handle_event_raw_v0_1(probe::SURFACE, event)
                 .expect("no trap");
             assert_eq!(host_pushed, reply.pushed, "click {id}");
             assert_eq!(host_value, reply.value.map_err(|_| ()), "click {id}");
@@ -909,7 +911,11 @@ mod harness_conformance {
                 .await
                 .is_err()
         );
-        assert!(harness.handle_event_raw(probe::SURFACE, flood).is_err());
+        assert!(
+            harness
+                .handle_event_raw_v0_1(probe::SURFACE, flood)
+                .is_err()
+        );
         let next = UiEvent::Click(probe::PUSH);
         assert!(
             host.handle_event(probe::SURFACE, next.clone())
@@ -918,7 +924,7 @@ mod harness_conformance {
             "disabled"
         );
         assert!(
-            harness.handle_event_raw(probe::SURFACE, next).is_err(),
+            harness.handle_event_raw_v0_1(probe::SURFACE, next).is_err(),
             "disabled"
         );
     }

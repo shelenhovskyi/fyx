@@ -25,11 +25,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `DiffViewProps::new` | method |  |
 | `Extension` | trait | A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it from a single thread, one call at a time. |
 | `Extension::handle_event` | method |  |
+| `Extension::handle_io` | method | `fyx:ui` 0.3: the outcome of work that ran outside a call, such as `IoEvent::FetchDone((id, result))` for `fetch`. It belongs to no surface: update surfaces with `push_update` or `SurfaceTree::push`. An `Err` is logged by the host. |
 | `Extension::list_rows` | method | Rows `start..start + count` of the virtualized list `list_node`. `list_rows` clamps the range to the list's length and builds each row. |
 | `Extension::mount` | method | The whole tree of `surface_id`, parents first. `SurfaceTree::mount` builds one. |
 | `Extension::new` | method |  |
 | `Extension::surfaces` | method | The static surfaces, called once after instantiation. `add_surface` adds more later. |
 | `Extension::tick` | method | The tick `request_tick` asked for. The update applies to `surface_id`, like an event's reply. `fyx:ui` 0.1 has no ticks, so a `v0_1` extension never gets this call. |
+| `FetchError` | re-export | `bindings::fyx::ui::network::FetchError` |
 | `FlexProps::align` | method |  |
 | `FlexProps::background` | method |  |
 | `FlexProps::column` | method | A column with no gap, no padding and children aligned to the start. |
@@ -40,6 +42,19 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostError` | re-export | `bindings::fyx::ui::host::HostError` |
 | `HostErrorCode` | re-export | `bindings::fyx::ui::host::HostErrorCode` |
 | `HostErrorCode::name` | method | The WIT case name, such as `not-permitted`. |
+| `HttpMethod` | re-export | `bindings::fyx::ui::network::HttpMethod` |
+| `HttpRequest` | re-export | `bindings::fyx::ui::network::HttpRequest` |
+| `HttpRequest::body` | method | At most 4 MiB. |
+| `HttpRequest::get` | method |  |
+| `HttpRequest::header` | method | At most 64 headers, 16 KiB in total. The host sets `host`, `content-length`, `accept-encoding` and the other framing headers itself and refuses them here. |
+| `HttpRequest::json` | method | A JSON body with its `content-type`. |
+| `HttpRequest::new` | method | A request with no headers, no body and the host's 30 s timeout. |
+| `HttpRequest::post` | method |  |
+| `HttpRequest::timeout_ms` | method | At most 30000 ms, the default. |
+| `HttpResponse` | re-export | `bindings::fyx::ui::network::HttpResponse` |
+| `HttpResponse::header` | method | The first header with this name, ignoring ASCII case. |
+| `HttpResponse::is_success` | method | A 2xx status. |
+| `HttpResponse::text` | method | The body as UTF-8 text. |
 | `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3). |
 | `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
@@ -61,10 +76,18 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `InputProps::new` | method |  |
 | `InputProps::placeholder` | method |  |
 | `InputProps::secret` | method | Masks the text on screen (passwords, tokens). The value still reaches the extension. |
+| `IoEvent` | re-export | `bindings::fyx::ui::io::IoEvent` |
 | `ListProps::new` | method |  |
 | `ListProps::selected` | method | The highlighted row, scrolled into view. |
 | `ListRow::with_indent` | method | Nesting depth, drawn by the host as indentation (tree views); at most 32 levels. |
 | `LogLevel` | re-export | `bindings::fyx::ui::host::LogLevel` |
+| `Notification` | re-export | `bindings::fyx::ui::notifications::Notification` |
+| `Notification::action` | method | A button, at most 2; the first is the primary one. `id` (1 to 64 bytes of `[a-z0-9._-]`) comes back in `UiEvent::NotificationAction`; `label` is 1 to 24 bytes. |
+| `Notification::body` | method | Plain text, at most 500 bytes and 4 lines. |
+| `Notification::new` | method | A notification whose events go to `owner`, a surface or decoration id: no body, no buttons, and closed by the host after a while (6 s for `info` and `success`, 10 s for `warning` and `error`). The title is 1 to 80 bytes on one line. |
+| `Notification::sticky` | method | Stays until the user or `dismiss_notification` closes it. |
+| `NotificationAction` | re-export | `bindings::fyx::ui::notifications::NotificationAction` |
+| `NotificationLevel` | re-export | `bindings::fyx::ui::notifications::NotificationLevel` |
 | `PatchSet` | struct | An ordered batch of patches, turned into an `update` with `PatchSet::into_update`. |
 | `PatchSet::insert` | method | Inserts one node under `node.parent`, before the sibling `before` or at the end. |
 | `PatchSet::insert_subtree` | method | Inserts a subtree in parents-first order, such as one built with `TreeBuilder::under`. Its top-level nodes (those whose parent is outside `nodes`) go before `before`, keeping their order; deeper nodes are appended to their new parents. |
@@ -76,6 +99,11 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `PatchSet::patches` | method |  |
 | `PatchSet::remove` | method | Removes the node and its whole subtree. |
 | `PatchSet::set_props` | method |  |
+| `ProgressLocation` | re-export | `bindings::fyx::ui::notifications::ProgressLocation` |
+| `ProgressOptions` | re-export | `bindings::fyx::ui::notifications::ProgressOptions` |
+| `ProgressOptions::cancellable` | method | Draws a Cancel button that sends `UiEvent::ProgressCancelRequested` to the owner. |
+| `ProgressOptions::new` | method | A progress whose events go to `owner`, which must be a panel for `ProgressLocation::Panel`; not cancellable. The title is 1 to 80 bytes on one line. |
+| `ProgressValue` | re-export | `bindings::fyx::ui::notifications::ProgressValue` |
 | `ROW_NODE_ID_BASE` | const | First id handed out inside a `ListRow` subtree. |
 | `Surface::modal` | method | A modal, closed until `show_surface` opens it. Needs `ui:modal`. |
 | `Surface::panel` | method |  |
@@ -114,6 +142,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TextProps::new` | method |  |
 | `TreeBuilder` | struct | Builds a flat node list from nested code. Flex nodes take a closure that builds their children; every node gets a fresh id and its parent's id, and parents precede children. |
 | `TreeBuilder::button` | method |  |
+| `TreeBuilder::canvas` | method | `fyx:ui` 0.3: a canvas node (see `CanvasProps` and `DrawList`). Panels only, not in list rows; at most 16 per surface. |
 | `TreeBuilder::column` | method |  |
 | `TreeBuilder::diff_view` | method |  |
 | `TreeBuilder::finish` | method |  |
@@ -131,12 +160,15 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeBuilder::text` | method |  |
 | `TreeBuilder::under` | method | A builder whose top-level nodes are children of `parent`, for inserting into a live tree. |
 | `TreeError` | enum |  |
+| `TreeError::CanvasInRow` | variant | `fyx:ui` 0.3: canvases are not allowed in list rows. |
+| `TreeError::InvalidCanvas` | variant | `fyx:ui` 0.3: a canvas the host would reject (`ui_ext::canvas::check_canvas_props`). |
 | `TreeError::InvalidRow` | variant | A list row the host would reject, reported by `ui_ext::Tree::from_row`. |
 | `TreeError::IsRoot` | variant |  |
 | `TreeError::NotAChild` | variant |  |
 | `TreeError::NotAContainer` | variant | Only flex nodes have children: inserting under `node`, or giving it props of `kind` while it has children, would be rejected by the host. |
 | `TreeError::NotAList` | variant | `invalidate-rows` names a node that is not a list or a table. |
 | `TreeError::NotMounted` | variant |  |
+| `TreeError::TooManyCanvases` | variant | `fyx:ui` 0.3: more canvases on one surface than the host allows. |
 | `TreeError::TreeTooLarge` | variant |  |
 | `TreeError::UnknownNode` | variant |  |
 | `TreeError::UpdateTooLarge` | variant |  |
@@ -144,6 +176,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `bindings` | module |  |
 | `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |
+| `canvas::*` | re-export | `canvas::*` |
 | `host::*` | re-export | `host::*` |
 | `list_row` | fn | Builds one row of a virtualized list; its ids start at `ROW_NODE_ID_BASE`. `build` must add exactly one top-level node, the row's root, and the row must pass the host's own checks (`ui_ext::Tree::from_row`), or the host would reject the whole `list-rows` answer. |
 | `list_rows` | fn | Answers a `list-rows(start, count)` request for a list of `row_count` rows by calling `build_row` for each row that exists. See `list_row`; a row the host would reject is logged and left out, so the other rows still show. |

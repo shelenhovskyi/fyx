@@ -4,13 +4,15 @@
 //! own value. It mirrors the host runtime (`ui_ext_wasm`); the id rules, caps and capability
 //! checks are `ui_ext::LiveIds`, which both use.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ui_ext::image::{self, ImageFormat};
 
+use ui_ext::network::{self as net, DomainList, FetchCounters, FetchRequest, PermissionState};
 use ui_ext::v0_2 as model;
+use ui_ext::v0_2::notifications::{self as notify, Notification, ProgressOptions, ProgressValue};
 use ui_ext::{ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement};
 
 use crate::MAX_PUSHES_PER_CALL;
@@ -66,6 +68,21 @@ pub enum HostEffect {
     },
     /// `images.remove-image` of a live handle: nodes that show it fall back to their alt text.
     RemoveImage { handle: u32 },
+    /// `notifications.notify` (design.md M.1): shown in the active window; its events go to
+    /// `notification.owner`.
+    Notify { id: u64, notification: Notification },
+    /// `dismiss-notification` of an open notification: closed, with no event.
+    DismissNotification { id: u64 },
+    /// `progress-start` (M.2), indeterminate until the first update.
+    ProgressStart { id: u64, options: ProgressOptions },
+    /// `progress-update` of a running progress; `None` keeps the previous message.
+    ProgressUpdate {
+        id: u64,
+        value: ProgressValue,
+        message: Option<String>,
+    },
+    /// `progress-end` of a running progress, with no event.
+    ProgressEnd { id: u64 },
 }
 
 /// A transient activation (design.md, C): granted by `handle-event` for a click or Enter, it lasts
@@ -105,6 +122,31 @@ pub(crate) struct ApiState {
     /// Live generated images (0.3), at most `ui_ext::image::MAX_GENERATED_IMAGES`.
     images: BTreeSet<u32>,
     next_image: u32,
+    /// Open notifications and running progresses by id, with their owners (§M), and the
+    /// accepted `notify` and `progress-start` calls of the rolling window.
+    open_notifications: BTreeMap<u64, String>,
+    running_progresses: BTreeMap<u64, String>,
+    next_notification: u64,
+    next_progress: u64,
+    notify_times: VecDeque<Instant>,
+    progress_start_times: VecDeque<Instant>,
+    /// `notify` effects and `progress-update` calls of the running call.
+    notification_effects: usize,
+    progress_updates: usize,
+    /// `network:fetch` (0.3): the manifest's domains, the host's counters, accepted requests not
+    /// delivered yet, the ones the running call made, and the broker's state at the import.
+    network_domains: DomainList,
+    fetch_counters: FetchCounters,
+    fetches: BTreeMap<u64, QueuedFetch>,
+    call_fetches: Vec<u64>,
+    network_permission: PermissionState,
+}
+
+/// A request `fetch` accepted, waiting for `Harness::deliver_io`.
+#[derive(Clone, Debug)]
+pub(crate) struct QueuedFetch {
+    pub(crate) request: FetchRequest,
+    pub(crate) cancelled: bool,
 }
 
 impl ApiState {
@@ -123,6 +165,20 @@ impl ApiState {
             decoration_effects: 0,
             images: BTreeSet::new(),
             next_image: 1,
+            open_notifications: BTreeMap::new(),
+            running_progresses: BTreeMap::new(),
+            next_notification: 1,
+            next_progress: 1,
+            notify_times: VecDeque::new(),
+            progress_start_times: VecDeque::new(),
+            notification_effects: 0,
+            progress_updates: 0,
+            network_domains: DomainList::default(),
+            fetch_counters: FetchCounters::default(),
+            fetches: BTreeMap::new(),
+            call_fetches: Vec::new(),
+            // As the host without a broker: no T2 capability is granted.
+            network_permission: PermissionState::Unavailable,
         }
     }
 
@@ -153,6 +209,9 @@ impl ApiState {
         self.pushes = 0;
         self.pushed_items = 0;
         self.decoration_effects = 0;
+        self.notification_effects = 0;
+        self.progress_updates = 0;
+        self.call_fetches.clear();
         if let Activation::Until(until) = self.activation
             && Instant::now() >= until
         {
@@ -166,17 +225,31 @@ impl ApiState {
         match event {
             model::UiEvent::Click(_)
             | model::UiEvent::RowClick(..)
-            | model::UiEvent::InputSubmitted(..) => self.activation = Activation::DuringCall,
+            | model::UiEvent::InputSubmitted(..)
+            | model::UiEvent::CanvasClick(_) => self.activation = Activation::DuringCall,
             model::UiEvent::Dismissed(_) => {
                 self.shown_modals.remove(surface_id);
             }
-            // §M: a clicked notification action is a gesture, as in the host.
-            model::UiEvent::NotificationAction(_) => self.activation = Activation::DuringCall,
+            // §M: a clicked notification action is a gesture, and it, like a closed
+            // notification, frees the notification's open slot.
+            model::UiEvent::NotificationAction(action) => {
+                self.activation = Activation::DuringCall;
+                self.open_notifications.remove(&action.notification);
+            }
+            model::UiEvent::NotificationClosed(id, _) => {
+                self.open_notifications.remove(id);
+            }
             model::UiEvent::InputChanged(..)
             | model::UiEvent::RowSelected(..)
-            | model::UiEvent::NotificationClosed(..)
             | model::UiEvent::ProgressCancelRequested(_) => {}
         }
+    }
+
+    /// The owner is gone: its notifications close and its progresses end, without events.
+    fn forget_owner(&mut self, owner: &str) {
+        self.open_notifications.retain(|_, open| open != owner);
+        self.running_progresses
+            .retain(|_, running| running != owner);
     }
 
     /// After a call: its effects, in order. An activation it granted starts counting down.
@@ -301,6 +374,7 @@ impl ApiState {
     pub(crate) fn remove_surface(&mut self, surface_id: String) -> Result<(), model::HostError> {
         self.live.remove_surface(&surface_id).map_err(api_error)?;
         self.shown_modals.remove(&surface_id);
+        self.forget_owner(&surface_id);
         self.effects.push(HostEffect::RemoveSurface { surface_id });
         Ok(())
     }
@@ -392,6 +466,7 @@ impl ApiState {
         self.live
             .remove_decoration(&id, &self.capabilities)
             .map_err(api_error)?;
+        self.forget_owner(&id);
         self.decoration_effects += 1;
         self.effects.push(HostEffect::RemoveDecoration { id });
         Ok(())
@@ -459,6 +534,14 @@ impl ApiState {
         props: impl IntoIterator<Item = &'a model::Props>,
     ) -> Result<(), model::HostError> {
         for props in props {
+            if let model::Props::Canvas(canvas) = props {
+                ui_ext::canvas::check_canvas_props(canvas)
+                    .and_then(|()| {
+                        ui_ext::canvas::check_canvas_placement(self.live.surface_kind(surface_id))
+                    })
+                    .map_err(|error| host_error(error.code(), error.to_string()))?;
+                continue;
+            }
             let model::Props::Image(props) = props else {
                 continue;
             };
@@ -496,6 +579,273 @@ pub(crate) fn update_props(update: &model::Update) -> Vec<&model::Props> {
                 model::Patch::Remove(_) | model::Patch::InvalidateRows(_) => None,
             })
             .collect(),
+    }
+}
+
+/// Notifications and progress (design.md M), as the host checks them (`ui_ext_wasm`'s
+/// `ApiState`), with the shared rules of `ui_ext::v0_2::notifications`.
+impl ApiState {
+    fn require_notifications(&self) -> Result<(), model::HostError> {
+        if self
+            .capabilities
+            .iter()
+            .any(|capability| capability == notify::CAPABILITY_NOTIFICATIONS)
+        {
+            Ok(())
+        } else {
+            Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "notifications and progress need {:?} in [fyx_ui].capabilities",
+                    notify::CAPABILITY_NOTIFICATIONS
+                ),
+            ))
+        }
+    }
+
+    /// A live surface or decoration of the extension.
+    fn require_owner(&self, owner: &str) -> Result<(), model::HostError> {
+        if self.live.surface_kind(owner).is_some() || self.live.is_decoration(owner) {
+            Ok(())
+        } else {
+            Err(api_error(ApiError::UnknownSurface {
+                id: owner.to_owned(),
+            }))
+        }
+    }
+
+    /// Drops the times that left the rolling window and says whether another one fits.
+    fn window_has_room(times: &mut VecDeque<Instant>, max: usize) -> bool {
+        let now = Instant::now();
+        while times
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= notify::RATE_WINDOW)
+        {
+            times.pop_front();
+        }
+        times.len() < max
+    }
+
+    /// `notify`: the capability, the owner, the text rules, the per-call cap, the open cap, the
+    /// rate cap. Past a cap the error is `limit-exceeded`.
+    pub(crate) fn notify(&mut self, notification: Notification) -> Result<u64, model::HostError> {
+        self.require_notifications()?;
+        self.require_owner(&notification.owner)?;
+        notification
+            .validate()
+            .map_err(|error| host_error(model::HostErrorCode::InvalidArgument, error.0))?;
+        let limit = |message: String| host_error(model::HostErrorCode::LimitExceeded, message);
+        if self.notification_effects >= notify::MAX_NOTIFICATION_EFFECTS_PER_CALL {
+            return Err(limit(format!(
+                "at most {} notifications per call",
+                notify::MAX_NOTIFICATION_EFFECTS_PER_CALL
+            )));
+        }
+        if self.open_notifications.len() >= notify::MAX_OPEN_NOTIFICATIONS {
+            return Err(limit(format!(
+                "at most {} open notifications per extension",
+                notify::MAX_OPEN_NOTIFICATIONS
+            )));
+        }
+        if !Self::window_has_room(&mut self.notify_times, notify::MAX_NOTIFY_PER_WINDOW) {
+            return Err(limit(format!(
+                "at most {} notifications per {} s per extension",
+                notify::MAX_NOTIFY_PER_WINDOW,
+                notify::RATE_WINDOW.as_secs()
+            )));
+        }
+        let id = self.next_notification;
+        self.next_notification += 1;
+        self.notify_times.push_back(Instant::now());
+        self.notification_effects += 1;
+        self.open_notifications
+            .insert(id, notification.owner.clone());
+        self.effects.push(HostEffect::Notify { id, notification });
+        Ok(id)
+    }
+
+    /// `dismiss-notification`: unknown or closed ids are ignored.
+    pub(crate) fn dismiss_notification(&mut self, id: u64) {
+        if self.open_notifications.remove(&id).is_some() {
+            self.effects.push(HostEffect::DismissNotification { id });
+        }
+    }
+
+    /// `progress-start`: the capability, the owner (a panel for `panel`), the title, the running
+    /// cap, the rate cap.
+    pub(crate) fn progress_start(
+        &mut self,
+        options: ProgressOptions,
+    ) -> Result<u64, model::HostError> {
+        self.require_notifications()?;
+        self.require_owner(&options.owner)?;
+        if options.location == notify::ProgressLocation::Panel
+            && !matches!(
+                self.live.surface_kind(&options.owner),
+                Some(model::SurfaceKind::Panel(_))
+            )
+        {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!(
+                    "a `panel` progress needs a panel as its owner, and {:?} is not one",
+                    options.owner
+                ),
+            ));
+        }
+        options
+            .validate()
+            .map_err(|error| host_error(model::HostErrorCode::InvalidArgument, error.0))?;
+        if self.running_progresses.len() >= notify::MAX_RUNNING_PROGRESSES {
+            return Err(host_error(
+                model::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} running progresses per extension",
+                    notify::MAX_RUNNING_PROGRESSES
+                ),
+            ));
+        }
+        if !Self::window_has_room(
+            &mut self.progress_start_times,
+            notify::MAX_PROGRESS_STARTS_PER_WINDOW,
+        ) {
+            return Err(host_error(
+                model::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} progress starts per {} s per extension",
+                    notify::MAX_PROGRESS_STARTS_PER_WINDOW,
+                    notify::RATE_WINDOW.as_secs()
+                ),
+            ));
+        }
+        let id = self.next_progress;
+        self.next_progress += 1;
+        self.progress_start_times.push_back(Instant::now());
+        self.running_progresses.insert(id, options.owner.clone());
+        self.effects.push(HostEffect::ProgressStart { id, options });
+        Ok(id)
+    }
+
+    /// `progress-update`: a running id, a valid value and message, at most
+    /// `MAX_PROGRESS_UPDATES_PER_CALL` per call.
+    pub(crate) fn progress_update(
+        &mut self,
+        id: u64,
+        value: ProgressValue,
+        message: Option<String>,
+    ) -> Result<(), model::HostError> {
+        self.require_notifications()?;
+        if !self.running_progresses.contains_key(&id) {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!("progress {id} is not running"),
+            ));
+        }
+        notify::check_progress_update(value, message.as_deref())
+            .map_err(|error| host_error(model::HostErrorCode::InvalidArgument, error.0))?;
+        if self.progress_updates >= notify::MAX_PROGRESS_UPDATES_PER_CALL {
+            return Err(host_error(
+                model::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} progress updates per call",
+                    notify::MAX_PROGRESS_UPDATES_PER_CALL
+                ),
+            ));
+        }
+        self.progress_updates += 1;
+        self.effects
+            .push(HostEffect::ProgressUpdate { id, value, message });
+        Ok(())
+    }
+
+    /// `progress-end`: unknown or ended ids are ignored.
+    pub(crate) fn progress_end(&mut self, id: u64) {
+        if self.running_progresses.remove(&id).is_some() {
+            self.effects.push(HostEffect::ProgressEnd { id });
+        }
+    }
+}
+
+/// `network:fetch` (design.md §8), as the host's import checks it: the capability, the broker's
+/// state, the domain list, `ui_ext::network::check_request`, then the shared counters.
+impl ApiState {
+    pub(crate) fn set_network_domains(&mut self, domains: DomainList) {
+        self.network_domains = domains;
+    }
+
+    pub(crate) fn set_network_permission(&mut self, state: PermissionState) {
+        self.network_permission = state;
+    }
+
+    pub(crate) fn fetch(&mut self, request: FetchRequest) -> Result<u64, model::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == net::CAPABILITY_NETWORK)
+        {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{:?} is not in the manifest", net::CAPABILITY_NETWORK),
+            ));
+        }
+        // `ask` is accepted: the prompt comes when the request is applied.
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => {}
+            state @ (PermissionState::Denied | PermissionState::Unavailable) => {
+                return Err(host_error(
+                    model::HostErrorCode::Denied,
+                    format!("{} is {state:?}", net::CAPABILITY_NETWORK),
+                ));
+            }
+        }
+        if self.network_domains.is_empty() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "fetch needs {:?} and [fyx_ui.network] domains in the manifest",
+                    net::CAPABILITY_NETWORK
+                ),
+            ));
+        }
+        net::check_request(&request, &self.network_domains)?;
+        let id = self.fetch_counters.start(Instant::now())?;
+        self.fetches.insert(
+            id,
+            QueuedFetch {
+                request,
+                cancelled: false,
+            },
+        );
+        self.call_fetches.push(id);
+        Ok(id)
+    }
+
+    /// `cancel-fetch`: unknown or delivered ids are ignored; a waiting one ends `cancelled`.
+    pub(crate) fn cancel_fetch(&mut self, id: u64) {
+        if let Some(fetch) = self.fetches.get_mut(&id) {
+            fetch.cancelled = true;
+        }
+    }
+
+    /// A call that trapped or ran over: its requests are dropped without an outcome, and they
+    /// do not count, as in the host.
+    pub(crate) fn abort_call(&mut self) {
+        for id in std::mem::take(&mut self.call_fetches) {
+            self.fetches.remove(&id);
+            self.fetch_counters.finished(id);
+        }
+    }
+
+    pub(crate) fn queued_fetches(&self) -> impl Iterator<Item = (u64, &QueuedFetch)> {
+        self.fetches.iter().map(|(id, fetch)| (*id, fetch))
+    }
+
+    /// The oldest accepted request, for delivery; it stops counting as in flight, as the host
+    /// does before `handle-io`.
+    pub(crate) fn take_fetch(&mut self) -> Option<(u64, QueuedFetch)> {
+        let (id, fetch) = self.fetches.pop_first()?;
+        self.fetch_counters.finished(id);
+        Some((id, fetch))
     }
 }
 

@@ -98,6 +98,11 @@ pub trait Extension: 'static {
     fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
         Ok(Update::Unchanged)
     }
+    /// fyx:ui 0.3 (`fyx-ui-0-3` feature): the outcome of work that ran outside a call, such as
+    /// `IoEvent::FetchDone((id, result))`. Tied to no surface: push updates yourself.
+    fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+        Ok(())
+    }
 }
 ```
 
@@ -149,8 +154,9 @@ events 0.3 adds. Call the macro once, at the root of your `cdylib` crate. It:
   node and `invalidate-rows` patches make the call return `Err`. `tick` is never called.
 - defines `extern "Rust"` shims through which the SDK's host functions reach that world's
   imports, so a 0.1 component imports only `fyx:ui/*@0.1.0` and a 0.2 component only `@0.2.0`. A
-  0.2 or 0.3 component always imports `fyx:ui/decorations`, and a 0.3 one `fyx:ui/images`; the
-  host checks `ui:editor-decorations` and `ui:images` per call, not at import.
+  0.2 or 0.3 component always imports `fyx:ui/decorations` and `fyx:ui/notifications`, and a
+  0.3 one `fyx:ui/images`; the host checks `ui:editor-decorations`, `ui:notifications` and
+  `ui:images` per call, not at import.
 - on `wasm32` only, adds a `#[used]` static in the `fyx:ui-api-version` link section holding
   `API_VERSION_SECTION_BYTES` (0.3), `API_VERSION_V0_2_SECTION_BYTES` or
   `API_VERSION_V0_1_SECTION_BYTES`. The static lives in your crate, so the linker cannot drop it
@@ -528,6 +534,30 @@ pub fn remove_decoration(id: &str) -> Result<(), HostError>;
 pub fn take_host_effects() -> Vec<HostEffect>;
 ```
 
+Notifications and progress (`fyx:ui` 0.2, design.md section M; `ui:notifications`):
+
+```rust
+pub fn notify(notification: &Notification) -> Result<u64, HostError>;
+pub fn dismiss_notification(id: u64);
+pub fn progress_start(options: &ProgressOptions) -> Result<u64, HostError>;
+pub fn progress_update(id: u64, value: ProgressValue, message: Option<&str>)
+    -> Result<(), HostError>;
+pub fn progress_end(id: u64);
+```
+
+- **Building the values:** `Notification::new(owner, level, title)` (no body, no buttons,
+  auto-dismissed) with `.body(text)`, `.action(id, label)` (at most 2) and `.sticky()`.
+  `ProgressOptions::new(owner, title, ProgressLocation)` with `.cancellable()`.
+- **Events:** they come to the owner's `handle_event` as `UiEvent::NotificationAction`,
+  `NotificationClosed` and `ProgressCancelRequested`.
+- **Caps:**
+  - notifications: 5 accepted `notify` calls per rolling 60 s and 3 open per extension;
+  - progress: 4 running, 30 starts per 60 s, and 64 updates per export call.
+
+  Past a cap the call returns `limit-exceeded`.
+- **Off WASM:** ids are 1, 2, …, and the calls record `HostEffect::Notify`, `DismissNotification`,
+  `ProgressStart`, `ProgressUpdate` and `ProgressEnd`.
+
 With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds generated images (design 0.3, section 12), for
 `ImageSource::Generated`:
 
@@ -540,9 +570,90 @@ pub fn remove_image(image: GeneratedImage);
 `add_image` needs `ui:images`, takes at most 1 MiB and at most 32 live images; off WASM it hands
 out handles 1, 2, … and records `HostEffect::AddImage { image, format, len }`.
 
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `network:fetch` (design 0.3, section 8; plan
+4.6):
+
+```rust
+pub fn fetch(request: &HttpRequest) -> Result<u64, HostError>;
+pub fn cancel_fetch(request: u64);
+```
+
+- **Building a request:** `HttpRequest::get(url)`, `HttpRequest::post(url, body)` or
+  `HttpRequest::new(HttpMethod, url)`, with `.header(name, value)`, `.body(bytes)`,
+  `.json(text)` (which also sets the JSON content type) and `.timeout_ms(ms)` (at most 30000, the
+  default).
+- **The outcome:** it comes to `Extension::handle_io` as `IoEvent::FetchDone((id, result))`.
+  `HttpResponse` has `is_success()`, `header(name)` (ignoring case) and `text()`. `FetchError`
+  implements `Display`.
+- **The manifest** declares `network:fetch`, `api_version = "0.3.0"` and the hosts:
+
+  ```toml
+  [fyx_ui.network]
+  domains = ["api.example.com", "*.example.org", "localhost:8080"]
+  ```
+
+  Only `https://` URLs on those hosts are allowed; `http://` only for a listed `localhost` or
+  `127.0.0.1` with its port.
+- **Consent:** `network:fetch` is a T2 capability. The first fetch asks the user, and the request
+  waits for the answer. Until they allow it, and if they refuse, the outcome is
+  `FetchError::Denied`.
+- **Caps:**
+  - at most 8 requests in flight and 120 started per minute;
+  - request headers: 64 and 16 KiB;
+  - request body: 4 MiB;
+  - response: 16 MiB decoded.
+- **Off WASM:** `fetch` hands out ids and records `HostEffect::Fetch { id, request }`;
+  `cancel_fetch` records `HostEffect::CancelFetch`.
+
+## Canvases (`fyx-ui-0-3`)
+
+A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
+generated records: `Point`, `Rect`, `Paint`, `Stroke`, `DrawOp` and the rest. The SDK adds
+builders on top:
+
+```rust
+let mut draw = DrawList::new();
+for (day, value) in values.iter().enumerate() {
+    draw.rect(bar(day, *value), Some(Paint::data(DataColor::cycle(day))), None);
+}
+draw.path(Path::polyline(points).stroke(Stroke::new(Paint::token(ColorToken::TextAccent), 1.5)));
+draw.text_with(pt(140.0, 132.0), "Week", Paint::token(ColorToken::TextMuted),
+    TextStyle::default().anchor(TextAnchor::Middle));
+let canvas = CanvasProps::new(280, 140, "Commits per day").draw(draw).clickable()
+    .fit(CanvasFit::ScaleDown);
+tree.canvas(canvas);
+```
+
+- **Values:**
+  - `pt(x, y)`, `Rect::new(x, y, w, h)` and `rect.contains(x, y)`;
+  - `Paint::token(ColorToken)` and `Paint::data(DataColor)`, opaque, with `.opacity(percent)`;
+  - `Stroke::new(paint, width)`;
+  - `DataColor::cycle(index)`, the eight series colours repeating.
+- **`DrawList`:** a `&mut` builder with `line`, `rect`, `rounded_rect`, `circle`, `path`,
+  `text` and `text_with(…, TextStyle)`. `len()`, `segments()` and `text_bytes()` show how close
+  it is to the caps. Extensions cannot measure text: place labels with `TextAnchor`.
+- **`Path`:** `move_to`, `line_to`, `quad_to`, `cubic_to`, `close`, then `fill` and/or `stroke`.
+  `Path::polyline(points)` is a polyline.
+- **`CanvasProps::new(width, height, description)`:** not clickable, `CanvasFit::Clip`. Setters:
+  `.draw(list)`, `.clickable()` and `.fit(..)`. Also `TreeBuilder::canvas` and
+  `From<CanvasProps> for Props`.
+- **`CanvasHits<V>`:**
+  - `add(rect, value)` records a region next to the draw list;
+  - `at(x, y)` returns the topmost region's value for a `UiEvent::CanvasClick`, since
+    hit-testing is the extension's job;
+  - a click is a gesture, like a button click.
+- **Checks before the host:** `SurfaceTree` and `list_row` run the host's rules
+  (`ui_ext::canvas`). These are `TreeError::InvalidCanvas` (caps, finite coordinates within
+  ±32768, strokes 0.5 to 16, description 1 to 1024 bytes), `TooManyCanvases` (16 per surface)
+  and `CanvasInRow`. The host also allows canvases in panels only.
+- **The whole draw list is sent in every `set-props`.** A tick-driven chart re-sends it at most
+  every 100 ms.
+
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
-`unavailable` ("needs fyx:ui 0.2"), and `cancel_tick` does nothing; with `v0_1` or `v0_2`,
-`add_image` returns `unavailable` ("needs fyx:ui 0.3") and `remove_image` does nothing. `push_update` converts the update to 0.1 and
+`unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
+`progress_end` do nothing; with `v0_1` or `v0_2`,
+`add_image` and `fetch` return `unavailable` ("needs fyx:ui 0.3"), and `remove_image` and
+`cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.
 

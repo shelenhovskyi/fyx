@@ -36,7 +36,7 @@ pub fn load(bytes: &[u8], dir: &Path, report: &mut Report) -> Option<Harness> {
 /// surface capability no surface uses is a warning. Every live surface counts, in the newest
 /// model: modals, and surfaces added with `add-surface` during `surfaces()`, too.
 pub fn check_surfaces(manifest: &Manifest, harness: &Harness, report: &mut Report) {
-    let surfaces = harness.surfaces_v0_2();
+    let surfaces = harness.surfaces();
     for surface in surfaces {
         let needed = capability_for(&surface.kind);
         if !manifest
@@ -56,11 +56,7 @@ pub fn check_surfaces(manifest: &Manifest, harness: &Harness, report: &mut Repor
             .any(|surface| capability_for(&surface.kind) == capability);
         if SURFACE_CAPABILITIES.contains(&capability.as_str())
             && !used
-            && crate::manifest::KNOWN_CAPABILITIES
-                .iter()
-                .any(|(name, status)| {
-                    name == capability && *status == crate::manifest::CapabilityStatus::Available
-                })
+            && crate::manifest::capability_available(capability, manifest.api_version.as_ref())
         {
             report.warning(format!(
                 "{capability:?} is declared but no surface needs it"
@@ -83,7 +79,7 @@ pub struct SmokeSummary {
 /// when the user opens them. Problems the host would hit become errors.
 pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
     let mut summary = SmokeSummary::default();
-    for surface in harness.surfaces().to_vec() {
+    for surface in harness.surfaces_v0_1().to_vec() {
         let tree = match harness.mount(&surface.id) {
             Ok(tree) => tree,
             Err(error) => {
@@ -94,7 +90,7 @@ pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
         summary.surfaces += 1;
         summary.nodes += tree.len();
         warn_about_unnamed_controls(harness, &surface.id, report);
-        let Some(tree) = harness.tree(&surface.id) else {
+        let Some(tree) = harness.tree_v0_1(&surface.id) else {
             continue;
         };
         let lists = tree
@@ -111,7 +107,7 @@ pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
             if count == 0 {
                 continue;
             }
-            match harness.rows(&surface.id, list, 0, count) {
+            match harness.rows_v0_1(&surface.id, list, 0, count) {
                 Ok(rows) if rows.is_empty() => report.warning(format!(
                     "list {list} on {:?} has {row_count} rows, but list-rows(0, {count}) returned none",
                     surface.id
@@ -140,7 +136,7 @@ pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
 /// none without a label or a placeholder (ux-1 F16). Tooltips and input labels arrived with
 /// fyx:ui 0.2, so a 0.1 component is told to add a button label or a placeholder instead.
 fn warn_about_unnamed_controls(harness: &Harness, surface_id: &str, report: &mut Report) {
-    let Some(nodes) = harness.nodes_v0_2(surface_id) else {
+    let Some(nodes) = harness.nodes(surface_id) else {
         return;
     };
     let fix = if harness.ui_api_version() == ui_ext::ApiVersion::V0_1_0 {
