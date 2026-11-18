@@ -118,6 +118,7 @@ pub struct DecorationTarget {
 pub struct DecorationId(u64);
 
 /// The extension that placed a decoration, and the id it gave it.
+#[derive(Clone)]
 struct Owner {
     extension_id: Arc<str>,
     id: String,
@@ -356,12 +357,21 @@ impl Decorations {
         cx.observe(&state, move |this, state, cx| {
             // An extension decoration that cannot be mounted is removed, not shown as an error.
             if owned && let Phase::Failed { message, .. } = state.read(cx).phase() {
-                if let Some(owner) = this.decoration(id).and_then(|d| d.owner.as_ref()) {
+                if let Some(owner) = this.decoration(id).and_then(|d| d.owner.clone()) {
                     log::warn!(
                         "fyx:ui {}/{}: decoration removed: {message}",
                         owner.extension_id,
                         owner.id
                     );
+                    // The host side forgets it too, so it no longer counts toward the cap and
+                    // its notifications do not outlive it (integration-5 M2).
+                    cx.defer(move |cx| {
+                        if let Some(registry) = crate::UiExtensionRegistry::global(cx) {
+                            registry.update(cx, |registry, cx| {
+                                registry.decoration_closed(&owner.extension_id, &owner.id, cx)
+                            });
+                        }
+                    });
                 }
                 this.remove(id, cx);
             }
