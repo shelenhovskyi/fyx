@@ -1,6 +1,6 @@
 # День ручної перевірки Fyx
 
-Один прохід на одній збірці `fyx.exe`, приблизно **50 хвилин** (і ще 6 хвилин на необов'язковий блок 5). Блоки йдуть у такому порядку, щоб
+Один прохід на одній збірці `fyx.exe`, приблизно **45 хвилин** (і ще 6 хвилин на необов'язковий блок 5). Блоки йдуть у такому порядку, щоб
 жоден не зіпсував стан для наступного. Назви команд, кнопок і повідомлень наведено англійською, як
 у Fyx. Ключі, паролі та входи в акаунти вводите лише ви, ніколи не агент.
 
@@ -9,7 +9,7 @@
 | 0 | Підготовка: збірка, профіль, матеріали | 5 |
 | 1 | Приватність: нуль мережі на старті; бренд | 7 |
 | 2 | UI-розширення (W3): пакети, dev, hot reload, згода, Restart, Inspector | 14 |
-| 3 | Огляд змін агента (W5) зі справжніми агентами; моделі при першому використанні | 17 |
+| 3 | Огляд змін агента (W5) зі справжнім Claude Agent; моделі при першому використанні | 12 |
 | 4 | Режими безпеки (W9): audit і shield | 5 |
 | 5 | Необов'язково: демо `fyx:ui` 0.2 (gallery-next, picker, clock, TODO-декорації) | 6 |
 
@@ -217,11 +217,11 @@ for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912 6a256
 | 9 | Crash → **Restart extension** | |
 | 10 | Inspector: дерево, події, час | |
 
-## 3. Огляд змін агента (17 хв)
+## 3. Огляд змін агента (12 хв)
 
-W5 уже перевірив сценарний огляд зі скриптовим агентом (`tasks/progress/W5.md`, 2026-11-18 00:39).
-У застосунку не перевірено таке: справжній Claude Agent, вбудований агент, картка **Open review**,
-рядок «changed without review» на екрані. Цей блок перевіряє саме це.
+Скриптова перевірка W5 на `6c82da02f3` уже пройшла (`tasks/progress/W5.md`). Цей блок перевіряє
+те, що скрипт не може: справжні клавіші, toast, закриття вкладки та роботу зі справжнім Claude
+Agent.
 
 ### 3a. Ключ і моделі при першому використанні (3 хв)
 
@@ -264,34 +264,40 @@ W5 уже перевірив сценарний огляд зі скриптов
 2. Створіть новий тред з **Claude Agent**. Перше встановлення завантажує агента, це 1–2 хв. Увійдіть
    так, як він просить, самостійно.
 
-| # | Промпт | Що зробити | Очікується |
-|---|---|---|---|
-| R1 | *In a.txt change bravo to BRAVO, and in b.txt change delta to DELTA. Make no other change.* | Нічого не натискайте 5 с. Потім подивіться на картку запиту в треді, натисніть **Review** у toast. Потім **ctrl-k shift-y**, а в запиті **Accept All in Turn** | Фокус і активна вкладка не змінились самі; з'явився toast з **Review**. Картка в треді: `Fyx is reviewing this edit to … hunk by hunk; decide it in the review pane.` і **Open review** замість Allow / Reject. У рядку стану `Review: N waiting`. **Review** відкриває одну панель на хід з обома файлами. ctrl-k shift-y питає `Accept all 2 waiting files?`; після підтвердження `git -C D:\fyx-user-check\review-project diff` показує обидві зміни. |
-| R2 | *In a.txt change charlie to CHARLIE and foxtrot to FOXTROT.* | Закрийте вкладку огляду (ctrl-w), потім **ctrl-k y**. Перший фрагмент **alt-y**, другий **alt-n**, тоді **ctrl-enter** | Після закриття вкладки файл на диску не змінено (`git diff a.txt` порожній), знову є toast. ctrl-k y повертає панель. Після рішення `git diff a.txt` показує `CHARLIE`, а `foxtrot` не змінено. |
-| R3 | *In b.txt change echo to ECHO, and add the line TOKEN=abc to .env.* | Прийміть `b.txt` | `.env` не змінено (`git diff .env` порожній). У панелі для `.env` рядок `by rule deny = "*.env" in …\.fyx\review.toml`. Агент отримав відмову. (Якщо Claude Agent сам відмовиться писати в `.env`, позначте це й ідіть далі.) |
-| R4 | *Add the line "Run tests before committing." to AGENTS.md, and in b.txt change foxtrot to FOXTROT.* | **ctrl-k shift-y**, підтвердьте | `b.txt` прийнято. `AGENTS.md` **лишається** на огляді, з підписом `Fyx's defaults (agent instruction files)`. Відхиліть його (**Reject file**) і перевірте, що `git diff AGENTS.md` порожній. |
-| R5 | *In a.txt change golf to GOLF, then run this in the terminal: echo hello > c.txt* | Дозвольте команду в треді, прийміть `a.txt` | У панелі ходу рядок `1 file changed without review` з `c.txt`. Клік відкриває файл. Нічого не заблоковано. |
-
-3. Новий тред з **вбудованим агентом** (у списку він підписаний як Fyx Agent чи Zed Agent).
-   Модель Anthropic.
+Скриптова перевірка W5 на `6c82da02f3` уже пройшла і покрила правила (`deny`, `auto_accept`),
+частковий accept, список «changed without review» і delete/move вбудованого агента. Тут лишилося
+те, чого скрипт не може: справжні клавіші в контексті `AgentReview`, закриття вкладки, toast і
+`ctrl-k y`, і відчуття від роботи зі справжнім Claude Agent.
 
 | # | Промпт | Що зробити | Очікується |
 |---|---|---|---|
-| R6 | *In b.txt change golf to GOLF. Then delete c.txt and rename a.txt to a2.txt.* | Відкрийте огляд через toast, прийміть фрагмент `b.txt`. На видалення й перейменування натисніть Allow | Редагування `b.txt` чекає огляду (до рішення файл на диску не змінено). Видалення й перейменування питають звичайний дозвіл, як у Zed, без панелі огляду. |
+| R1 | *In a.txt change bravo to BRAVO, and in b.txt change delta to DELTA. Make no other change.* | 5 с нічого не натискайте. Подивіться на картку запиту в треді. Натисніть **Review** у toast. Потім **ctrl-k shift-y** і в запиті **Accept All in Turn** | Фокус і активна вкладка самі не змінились, з'явився toast з **Review**. Картка в треді: `Fyx is reviewing this edit to … hunk by hunk; decide it in the review pane.` і **Open review** замість Allow / Reject. У рядку стану `Review: N waiting`. **Review** відкриває одну панель на хід з обома файлами. ctrl-k shift-y питає `Accept all 2 waiting files?`; після підтвердження `git -C D:\fyx-user-check\review-project diff` показує обидві зміни. |
+| R2 | *In a.txt change charlie to CHARLIE, and in b.txt change echo to ECHO.* | Відкрийте огляд, закрийте його вкладку (**ctrl-w**). Потім **ctrl-k y**. Потім **ctrl-k shift-n**, у запиті спершу **Cancel**, тоді ще раз **ctrl-k shift-n** і **Reject All in Turn** | Після закриття вкладки нічого не записано (`git diff` показує лише зміни R1), і знову є toast. ctrl-k y повертає ту саму панель. Перше ctrl-k shift-n питає `Reject all 2 waiting files?`; після **Cancel** нічого не вирішено. Після **Reject All in Turn** обидва файли без змін. |
+| R3 | *Add the line "Run tests before committing." to AGENTS.md, and in b.txt change foxtrot to FOXTROT.* | **ctrl-k shift-y**, підтвердьте | `b.txt` прийнято. `AGENTS.md` **лишається** на огляді, з підписом `Fyx's defaults (agent instruction files)`. Відхиліть його (**Reject file**) і перевірте, що `git diff AGENTS.md` порожній. |
 
-4. Журнал (`zed: open log`): немає `panic`, є рядки `fyx: agent review:`.
+Наостанок запишіть два-три речення про відчуття: чи не заважає toast, чи зрозуміло, що робити далі,
+чи не губиться огляд.
+
+**Необов'язково** (скрипт W5 це вже перевірив; робіть, лише якщо лишився час):
+
+| # | Промпт | Очікується |
+|---|---|---|
+| O1 | *In b.txt change golf to GOLF, and add the line TOKEN=abc to .env.* | `.env` не змінено; у панелі `by rule deny = "*.env" in …\.fyx\review.toml`. |
+| O2 | *In a.txt change golf to GOLF, then run in the terminal: echo hello > c.txt* | У панелі ходу `1 file changed without review` з `c.txt`. |
+| O3 | Вбудований агент: *delete c.txt and rename a.txt to a2.txt* | Звичайний дозвіл, як у Zed, без панелі огляду. |
+
+Журнал (`zed: open log`): немає `panic`, є рядки `fyx: agent review:`.
 
 | Крок | Що | Так / ні, примітка |
 |---|---|---|
 | 3a | Counter на місці після перезапуску | |
 | 3a | з ключем і папкою: 30 с без мережі | |
 | 3a | мережа лише після відкриття вибору моделі | |
-| R1 | фокус не забрано; toast **Review**; картка **Open review**; запит перед accept all | |
-| R2 | закриття вкладки тримає правки; `ctrl-k y`; частковий accept | |
-| R3 | `deny` для `.env` з назвою правила | |
-| R4 | `AGENTS.md` на огляді навіть після accept all | |
-| R5 | «changed without review» | |
-| R6 | вбудований агент: редагування в огляді; delete і move через дозвіл | |
+| R1 | фокус не забрано; toast **Review**; картка **Open review**; `ctrl-k shift-y` питає підтвердження | |
+| R2 | ctrl-w тримає правки; `ctrl-k y`; `ctrl-k shift-n` з Cancel і з підтвердженням | |
+| R3 | `AGENTS.md` на огляді навіть після accept all | |
+| — | відчуття від роботи зі справжнім Claude Agent (кілька речень) | |
+| O1–O3 | необов'язкові кроки (якщо робили) | |
 | — | журнал без panic | |
 
 ## 4. Режими безпеки (5 хв)
