@@ -109,11 +109,22 @@ pub struct Fetcher {
     is_global: fn(IpAddr) -> bool,
 }
 
+/// The `user-agent` of an extension's requests: Fyx's own (as `zed::main` sends it) plus the
+/// extension id, so a server can tell extensions apart.
+pub fn user_agent(app_version: &str, extension_id: &str) -> String {
+    format!(
+        "Fyx/{app_version} ({}; {}) extension/{extension_id}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
 impl Fetcher {
-    pub fn new(extension_id: &str, resolver: Option<Arc<dyn Resolve>>) -> Self {
+    /// `app_version` is Fyx's (`release_channel::AppVersion`).
+    pub fn new(extension_id: &str, app_version: &str, resolver: Option<Arc<dyn Resolve>>) -> Self {
         Self {
             resolver: resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
-            user_agent: format!("Fyx (extension {extension_id})"),
+            user_agent: user_agent(app_version, extension_id),
             is_global,
         }
     }
@@ -858,7 +869,9 @@ pub(crate) mod test_server {
                         }
                         let text = String::from_utf8_lossy(&request);
                         let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
-                        match respond(&path, port) {
+                        // Every server answers this path with the request head it got.
+                        let echoed = (path == "/echo-request").then(|| ok(text.as_bytes()));
+                        match echoed.or_else(|| respond(&path, port)) {
                             Some(response) => {
                                 stream.write_all(&response).await.ok();
                                 stream.shutdown().await.ok();
@@ -918,7 +931,7 @@ mod tests {
     }
 
     fn fetcher() -> Fetcher {
-        Fetcher::new("probe", Some(Arc::new(PanicResolver)))
+        Fetcher::new("probe", "0.0.0", Some(Arc::new(PanicResolver)))
     }
 
     /// `localhost` never goes to DNS: a resolver call fails the test.
@@ -1128,7 +1141,7 @@ mod tests {
                 later: Vec::new(),
                 calls: Default::default(),
             };
-            let fetcher = Fetcher::new("probe", Some(Arc::new(resolver)));
+            let fetcher = Fetcher::new("probe", "0.0.0", Some(Arc::new(resolver)));
             let domains = list(&["api.example.com"]);
             let result = run(&domains, &fetcher, request("https://api.example.com/")).await;
             assert!(
@@ -1149,7 +1162,7 @@ mod tests {
             later: vec![SocketAddr::new("10.0.0.1".parse().unwrap(), server.port)],
             calls: Default::default(),
         });
-        let fetcher = Fetcher::new("probe", Some(resolver.clone()))
+        let fetcher = Fetcher::new("probe", "0.0.0", Some(resolver.clone()))
             .with_address_rule(|ip| ip.is_loopback() || is_global(ip));
         let domains = list(&[&format!("api.example.com:{}", server.port)]);
         let mut request = request(&format!("https://api.example.com:{}/", server.port));
@@ -1158,6 +1171,28 @@ mod tests {
         assert!(result.is_err(), "no TLS on the test server: {result:?}");
         assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(server.connections(), 1);
+    }
+
+    /// Requests carry Fyx's version, the platform and the extension id.
+    #[tokio::test]
+    async fn requests_carry_the_fyx_user_agent() {
+        let server = test_server::start(|_, _| None).await;
+        let fetcher = Fetcher::new("probe", "1.2.3+dev", None);
+        let domains = list(&[&format!("localhost:{}", server.port)]);
+        let response = run(
+            &domains,
+            &fetcher,
+            request(&format!("http://localhost:{}/echo-request", server.port)),
+        )
+        .await
+        .expect("a response");
+        let head = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
+        let expected = format!(
+            "user-agent: fyx/1.2.3+dev ({}; {}) extension/probe\r\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        assert!(head.contains(&expected), "{head}");
     }
 
     #[test]
