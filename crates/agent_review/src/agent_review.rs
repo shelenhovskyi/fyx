@@ -18,12 +18,15 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
 };
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, PermissionRequestId, SelectedPermissionOutcome, ThreadStatus,
     ToolCallContent,
-    fyx_review::{AgentWrite, AgentWriteGate, AgentWriteOutcome, set_agent_write_gate},
+    fyx_review::{
+        AgentFileOperation, AgentWrite, AgentWriteGate, AgentWriteOutcome, set_agent_write_gate,
+    },
 };
 use action_log::ActionLog;
 use agent_client_protocol::v2::schema as acp_v2;
@@ -53,55 +56,60 @@ pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
 /// What review mode covers, for the status bar and the docs.
 pub const COVERAGE: &str = "Agent review covers edits that ACP agents propose with a diff (v1 \
     permission requests and single-file v2 patches), writes through Fyx (fs/write_text_file), and the \
-    edit and write tools of Zed's built-in agent. Not reviewed: shell and terminal commands (files \
-    they change during a turn are listed as changed without review), the built-in agent's delete, \
-    move and copy tools (they ask permission as in Zed), and edits whose diff Fyx cannot read (a \
-    notification says so).";
+    edit, write, delete, move and copy tools of Zed's built-in agent. Not reviewed: shell and \
+    terminal commands (files they change during a turn are listed as changed without review), and \
+    edits whose diff Fyx cannot read (a notification says so).";
 
 /// The short form, under every review pane.
 pub const NOT_REVIEWED: &str = "Not reviewed: terminal commands (files they change are listed above), \
-    the built-in agent's delete, move and copy tools, edits Fyx cannot show as a diff.";
+    edits Fyx cannot show as a diff.";
 
 /// Remembers the review rules the user agreed to, per worktree, across restarts.
 pub trait RulesMemory {
     fn save(&self, records: HashMap<String, String>, cx: &App);
 }
 
-/// The JSON file in Fyx's data directory that holds the confirmed rules.
-struct FileRulesMemory(PathBuf);
+/// The JSON file in Fyx's data directory that holds the confirmed rules, through the app's `Fs`.
+struct FileRulesMemory {
+    fs: Arc<dyn Fs>,
+    path: PathBuf,
+}
 
 impl FileRulesMemory {
-    fn path() -> PathBuf {
-        paths::data_dir()
-            .join("agent_review")
-            .join("confirmed_rules.json")
+    fn new(fs: Arc<dyn Fs>) -> Self {
+        Self {
+            fs,
+            path: paths::data_dir()
+                .join("agent_review")
+                .join("confirmed_rules.json"),
+        }
     }
 
     /// An unreadable record counts as none: the files on disk then apply as they are, which can only
     /// add restrictions.
-    fn load(path: &Path) -> HashMap<String, String> {
-        let Ok(text) = std::fs::read_to_string(path) else {
+    async fn load(&self) -> HashMap<String, String> {
+        let Ok(text) = self.fs.load(&self.path).await else {
             return HashMap::default();
         };
         serde_json::from_str(&text)
-            .inspect_err(|error| log::error!("fyx: {}: {error}", path.display()))
+            .inspect_err(|error| log::error!("fyx: {}: {error}", self.path.display()))
             .unwrap_or_default()
     }
 }
 
 impl RulesMemory for FileRulesMemory {
     fn save(&self, records: HashMap<String, String>, cx: &App) {
-        let path = self.0.clone();
-        cx.background_spawn(async move {
-            let result = serde_json::to_string_pretty(&records)
-                .map_err(anyhow::Error::from)
-                .and_then(|text| {
-                    if let Some(directory) = path.parent() {
-                        std::fs::create_dir_all(directory)?;
-                    }
-                    std::fs::write(&path, text)?;
-                    anyhow::Ok(())
-                });
+        let fs = self.fs.clone();
+        let path = self.path.clone();
+        cx.spawn(async move |_| {
+            let result = async {
+                let text = serde_json::to_string_pretty(&records)?;
+                if let Some(directory) = path.parent() {
+                    fs.create_dir(directory).await?;
+                }
+                fs.atomic_write(path, text).await
+            }
+            .await;
             if let Err(error) = result {
                 log::error!("fyx: could not remember the confirmed review rules: {error:#}");
             }
@@ -176,7 +184,8 @@ pub fn review_mode_menu_entry(menu: ContextMenu, cx: &App) -> ContextMenu {
     )
 }
 
-pub fn init(cx: &mut App) {
+/// `fs` is the app's file system, where confirmed review rules are remembered across restarts.
+pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
     let review = cx.new(|cx| AgentReview {
         enabled: review_mode(cx),
         ..AgentReview::default()
@@ -185,11 +194,18 @@ pub fn init(cx: &mut App) {
     review.update(cx, |review, cx| {
         review.user_auto_accept = user_auto_accept(cx)
     });
-    let memory_path = FileRulesMemory::path();
-    let records = FileRulesMemory::load(&memory_path);
-    review.update(cx, |review, _| {
-        review.set_rules_memory(Rc::new(FileRulesMemory(memory_path)), records)
-    });
+    // Without the app's file system (tests), confirmed rules last for the run only.
+    if let Some(fs) = fs {
+        let memory = Rc::new(FileRulesMemory::new(fs));
+        let review = review.downgrade();
+        cx.spawn(async move |cx| {
+            let records = memory.load().await;
+            review
+                .update(cx, |review, _| review.set_rules_memory(memory, records))
+                .ok();
+        })
+        .detach();
+    }
     cx.observe_global::<SettingsStore>({
         let review = review.downgrade();
         move |cx| {
@@ -212,7 +228,11 @@ pub fn init(cx: &mut App) {
         if let Some(review) = AgentReview::global(cx) {
             let session_id = thread.session_id().clone();
             let thread_id = cx.entity_id();
-            review.update(cx, |review, _| review.thread_opened(session_id, thread_id));
+            let thread = cx.weak_entity();
+            review.update(cx, |review, _| {
+                review.thread_opened(session_id.clone(), thread_id);
+                review.threads.insert(session_id, thread);
+            });
         }
         let project = thread.project().clone();
         reload_rules(&project, cx);
@@ -314,6 +334,8 @@ pub struct Review {
     applying: bool,
     /// Why the last submit could not be carried out; the review stays open.
     error: Option<String>,
+    /// For a delete, move or copy: what happens when it is accepted.
+    operation: Option<String>,
 }
 
 impl Review {
@@ -351,6 +373,11 @@ impl Review {
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
+
+    /// For a file operation review (delete, move, copy): what accepting it does.
+    pub fn operation(&self) -> Option<&str> {
+        self.operation.as_deref()
+    }
 }
 
 /// Open reviews of agent edits. Review mode is off by default: while it is off, agent writes and
@@ -384,6 +411,11 @@ pub struct AgentReview {
     panes: HashMap<TurnId, usize>,
     /// Live threads per session.
     session_threads: HashMap<acp_v2::SessionId, HashSet<EntityId>>,
+    /// The latest thread of each session.
+    threads: HashMap<acp_v2::SessionId, WeakEntity<AcpThread>>,
+    /// What the agent should learn about reviews answered through a permission (which carries no
+    /// message): sent in front of the user's next prompt in the session.
+    prompt_notes: HashMap<acp_v2::SessionId, Vec<String>>,
 }
 
 /// How many ended turns keep their summary (decided files, unreviewed changes).
@@ -523,6 +555,11 @@ impl AgentReview {
             .insert(thread_id);
     }
 
+    /// The live thread of a session, if any.
+    pub fn thread_for_session(&self, session_id: &acp_v2::SessionId) -> Option<Entity<AcpThread>> {
+        self.threads.get(session_id)?.upgrade()
+    }
+
     /// Returns whether it was the session's last thread.
     fn thread_released(&mut self, session_id: &acp_v2::SessionId, thread_id: EntityId) -> bool {
         let Some(threads) = self.session_threads.get_mut(session_id) else {
@@ -531,10 +568,21 @@ impl AgentReview {
         threads.remove(&thread_id);
         if threads.is_empty() {
             self.session_threads.remove(session_id);
+            self.threads.remove(session_id);
             true
         } else {
             false
         }
+    }
+
+    /// Takes the session's notes for the agent, as one block for the front of the next prompt.
+    pub fn take_prompt_notes(&mut self, session_id: &acp_v2::SessionId) -> Option<String> {
+        let notes = self.prompt_notes.remove(session_id)?;
+        Some(format!(
+            "[Fyx review: notes from the review of your earlier edits]\n{}\n[End of the review \
+             notes; the user's message follows.]",
+            notes.join("\n")
+        ))
     }
 
     pub(crate) fn pane_opened(&mut self, turn: TurnId) {
@@ -823,7 +871,11 @@ impl AgentReview {
         }
         review.responder = None;
         let (turn, edit, rule) = (review.turn, review.edit.clone(), review.rule.clone());
+        let session_id = review.session_id.clone();
         self.record(turn, &edit, rule);
+        if let Some(note) = permission_note(&edit, verdict) {
+            self.prompt_notes.entry(session_id).or_default().push(note);
+        }
         cx.emit(AgentReviewEvent::Resolved(id));
         // An allowed preview stays until the agent's write adopts its decisions; after a denial no
         // write follows.
@@ -894,6 +946,7 @@ impl AgentReview {
             responder: Some(responder),
             applying: false,
             error: None,
+            operation: None,
         });
         cx.emit(AgentReviewEvent::Opened(id));
         cx.notify();
@@ -1067,6 +1120,144 @@ impl AgentReview {
     }
 }
 
+impl AgentReview {
+    /// Reviews a delete, move or copy of Zed's built-in agent. It is shown as a one-hunk review: a
+    /// deleted text file as its removed content, anything else as a one-line description. Rules apply
+    /// to every path the operation touches, and the strictest wins.
+    pub fn review_operation(
+        &mut self,
+        session_id: acp_v2::SessionId,
+        operation: AgentFileOperation,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let rules = operation
+            .paths()
+            .into_iter()
+            .map(|path| self.rule_for(path))
+            .collect::<Vec<_>>();
+        let rule = strictest_rule(&rules);
+        let rule_kind = rule.as_ref().map(|rule| rule.kind);
+        let strict_rule = matches!(rule_kind, Some(RuleKind::Deny | RuleKind::AlwaysAsk));
+        if !self.enabled && !strict_rule {
+            return Task::ready(Ok(()));
+        }
+        let description = operation.describe();
+        let mut edit = match &operation {
+            AgentFileOperation::Delete {
+                path,
+                text: Some(text),
+            } => ProposedEdit::new(path.clone(), text.clone(), String::new()),
+            AgentFileOperation::Delete { path, text: None } => {
+                ProposedEdit::new(path.clone(), format!("{description}\n"), String::new())
+            }
+            AgentFileOperation::Move { from, .. } => {
+                ProposedEdit::new(from.clone(), String::new(), format!("{description}\n"))
+            }
+            AgentFileOperation::Copy { to, .. } => {
+                ProposedEdit::new(to.clone(), String::new(), format!("{description}\n"))
+            }
+        };
+        let turn = self.turn_for(&session_id);
+        if let Some(rule) = rule.clone().filter(|rule| rule.kind == RuleKind::Deny) {
+            edit.decide_all(HunkDecision::Rejected);
+            self.record(turn, &edit, Some(rule.clone()));
+            cx.notify();
+            return Task::ready(Err(anyhow!(
+                "The project's review rules deny this ({}): {description} did not happen. Do not \
+                 retry it, ask the user instead.",
+                rule.describe()
+            )));
+        }
+        let decision = match rule_kind {
+            Some(RuleKind::AutoAccept) => Some(HunkDecision::Accepted),
+            Some(RuleKind::AlwaysAsk) => None,
+            _ => self.turn_decision(turn),
+        };
+        if let Some(decision) = decision {
+            edit.decide_pending(decision);
+            self.record(turn, &edit, rule);
+            cx.notify();
+            return Task::ready(operation_outcome(&edit, &description));
+        }
+        let (sender, receiver) = oneshot::channel();
+        let id = self.insert(
+            session_id,
+            ReviewSource::Write,
+            edit,
+            Responder::Write(sender),
+            rule,
+            cx,
+        );
+        if let Some(review) = self.reviews.iter_mut().find(|review| review.id == id) {
+            review.operation = Some(description.clone());
+        }
+        cx.spawn(async move |_, _| {
+            let outcome = receiver
+                .await
+                .map_err(|_| anyhow!("The review was closed: {description} did not happen."))?;
+            match outcome.content {
+                Some(_) => Ok(()),
+                None => Err(anyhow!(
+                    "The user rejected this: {description} did not happen.{}",
+                    outcome
+                        .feedback
+                        .map(|feedback| format!(" {feedback}"))
+                        .unwrap_or_default()
+                )),
+            }
+        })
+    }
+}
+
+fn operation_outcome(edit: &ProposedEdit, description: &str) -> Result<()> {
+    match edit.resolution() {
+        Resolution::RejectedAll => Err(anyhow!(
+            "The user rejected this: {description} did not happen."
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The strictest of the rules for the paths of one operation: any `deny`, else any `always_ask`,
+/// else `auto_accept` only when every path is auto-accepted.
+fn strictest_rule(rules: &[Option<RuleMatch>]) -> Option<RuleMatch> {
+    let of_kind = |kind: RuleKind| {
+        rules
+            .iter()
+            .flatten()
+            .find(|rule| rule.kind == kind)
+            .cloned()
+    };
+    of_kind(RuleKind::Deny)
+        .or_else(|| of_kind(RuleKind::AlwaysAsk))
+        .or_else(|| {
+            rules
+                .iter()
+                .all(|rule| {
+                    rule.as_ref()
+                        .is_some_and(|rule| rule.kind == RuleKind::AutoAccept)
+                })
+                .then(|| of_kind(RuleKind::AutoAccept))
+                .flatten()
+        })
+}
+
+/// What the agent should learn about a permission it was answered: ACP's answer has no message, and
+/// "rejected" alone is false when the host wrote the accepted hunks, and loses the user's comments.
+fn permission_note(edit: &ProposedEdit, verdict: PermissionVerdict) -> Option<String> {
+    let has_comments = edit.hunks().iter().any(|hunk| hunk.comment.is_some());
+    let feedback = edit.feedback()?;
+    match verdict {
+        PermissionVerdict::ApplyAcceptedAndDeny => Some(format!(
+            "Your request to edit {} was answered \"rejected\", but Fyx wrote the hunks the user \
+             accepted. {feedback}",
+            edit.abs_path().display()
+        )),
+        PermissionVerdict::Deny | PermissionVerdict::Allow if has_comments => Some(feedback),
+        _ => None,
+    }
+}
+
 fn permission_verdict(resolution: Resolution) -> PermissionVerdict {
     match resolution {
         Resolution::Unchanged | Resolution::AcceptedAll => PermissionVerdict::Allow,
@@ -1096,6 +1287,27 @@ impl AgentWriteGate for WriteGate {
             Some(review) => review.update(cx, |review, cx| review.review_write(write, cx)),
             None => Task::ready(Err(anyhow!(
                 "Agent review is unavailable; the file is unchanged."
+            ))),
+        }
+    }
+
+    fn take_prompt_notes(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Option<String> {
+        let review = self.0.upgrade()?;
+        review.update(cx, |review, _| review.take_prompt_notes(session_id))
+    }
+
+    fn review_operation(
+        &self,
+        session_id: acp_v2::SessionId,
+        operation: AgentFileOperation,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        match self.0.upgrade() {
+            Some(review) => review.update(cx, |review, cx| {
+                review.review_operation(session_id, operation, cx)
+            }),
+            None => Task::ready(Err(anyhow!(
+                "Agent review is unavailable; nothing was changed."
             ))),
         }
     }
@@ -2088,7 +2300,7 @@ mod tests {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -2309,7 +2521,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -2496,7 +2708,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         let fs = project::FakeFs::new(cx.executor());
@@ -2665,7 +2877,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -2754,7 +2966,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -2838,7 +3050,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -2932,7 +3144,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -2955,6 +3167,193 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn file_operations_are_reviewed_like_edits(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let delete = || AgentFileOperation::Delete {
+            path: PathBuf::from("/p/a.txt"),
+            text: Some(OLD.into()),
+        };
+        let operate = |operation: AgentFileOperation, cx: &mut TestAppContext| {
+            review.update(cx, |review, cx| {
+                review.review_operation(session(), operation, cx)
+            })
+        };
+
+        // Review mode off, no rule: as upstream.
+        operate(delete(), cx).await.unwrap();
+
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let held = operate(delete(), cx);
+        let id = review.read_with(cx, |review, _| {
+            let held = &review.reviews()[0];
+            assert_eq!(held.operation(), Some("Delete /p/a.txt"));
+            assert_eq!(held.edit().old_text(), OLD, "the content that would go");
+            assert_eq!(held.edit().new_text(), "");
+            held.id()
+        });
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        let error = held.await.unwrap_err();
+        assert!(format!("{error:#}").contains("did not happen"), "{error:#}");
+
+        let held = operate(
+            AgentFileOperation::Move {
+                from: PathBuf::from("/p/a.txt"),
+                to: PathBuf::from("/p/b.txt"),
+            },
+            cx,
+        );
+        let id = review.read_with(cx, |review, _| review.reviews()[0].id());
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        held.await.unwrap();
+
+        // A rule on any path of the operation decides it; deny wins even with review mode off.
+        review.update(cx, |review, cx| review.set_enabled(false, cx));
+        set_test_rules(&review, r#"deny = ["*.env"]"#, cx);
+        let error = operate(
+            AgentFileOperation::Copy {
+                from: PathBuf::from("/p/.env"),
+                to: PathBuf::from("/p/public.txt"),
+            },
+            cx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("deny = \"*.env\""),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_strictest_rule_of_an_operation_wins() {
+        let rule = |kind: RuleKind| {
+            Some(RuleMatch {
+                kind,
+                pattern: kind.key().into(),
+                source: "test".into(),
+            })
+        };
+        let kind = |rules: &[Option<RuleMatch>]| strictest_rule(rules).map(|rule| rule.kind);
+        assert_eq!(
+            kind(&[rule(RuleKind::AutoAccept), rule(RuleKind::Deny)]),
+            Some(RuleKind::Deny)
+        );
+        assert_eq!(
+            kind(&[rule(RuleKind::AlwaysAsk), rule(RuleKind::AutoAccept)]),
+            Some(RuleKind::AlwaysAsk)
+        );
+        assert_eq!(
+            kind(&[rule(RuleKind::AutoAccept), None]),
+            None,
+            "one path is not auto-accepted"
+        );
+        assert_eq!(
+            kind(&[rule(RuleKind::AutoAccept), rule(RuleKind::AutoAccept)]),
+            Some(RuleKind::AutoAccept)
+        );
+    }
+
+    #[gpui::test]
+    async fn a_partly_accepted_permission_reaches_the_next_prompt(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(None, cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let (respond, _) = recording_responder();
+        let preview = ProposedEdit::new(PathBuf::from("/p/demo.txt"), OLD.into(), NEW.into());
+        let id = review
+            .update(cx, |review, cx| {
+                review.open_permission_preview(
+                    session(),
+                    new_request_id(),
+                    preview,
+                    respond,
+                    None,
+                    cx,
+                )
+            })
+            .unwrap();
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 0, HunkDecision::Accepted, cx)
+                .unwrap();
+            review
+                .set_decision(id, 1, HunkDecision::Rejected, cx)
+                .unwrap();
+            review
+                .set_comment(id, 1, Some("keep it lowercase".into()), cx)
+                .unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        cx.run_until_parked();
+
+        // The user's next prompt carries what the "rejected" answer could not.
+        let prompt = vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
+            "next step",
+        ))];
+        let sent = cx
+            .update(|cx| acp_thread::fyx_review::with_review_notes(&session(), prompt.clone(), cx));
+        assert_eq!(sent.len(), 2);
+        let acp_v2::ContentBlock::Text(note) = &sent[0] else {
+            panic!("the note comes first");
+        };
+        assert!(
+            note.text.contains("answered \"rejected\", but Fyx wrote"),
+            "{}",
+            note.text
+        );
+        assert!(note.text.contains("applied 1 of 2 hunks"), "{}", note.text);
+        assert!(note.text.contains("keep it lowercase"), "{}", note.text);
+        assert_eq!(sent[1], prompt[0]);
+
+        // Once only, and only for its session.
+        let again = cx
+            .update(|cx| acp_thread::fyx_review::with_review_notes(&session(), prompt.clone(), cx));
+        assert_eq!(again, prompt);
+    }
+
+    #[gpui::test]
+    async fn plain_answers_leave_no_note(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        for decision in [HunkDecision::Accepted, HunkDecision::Rejected] {
+            let (respond, _) = recording_responder();
+            let preview = ProposedEdit::new(PathBuf::from("/p/a.txt"), OLD.into(), NEW.into());
+            let id = review
+                .update(cx, |review, cx| {
+                    review.open_permission_preview(
+                        session(),
+                        new_request_id(),
+                        preview,
+                        respond,
+                        None,
+                        cx,
+                    )
+                })
+                .unwrap();
+            review.update(cx, |review, cx| {
+                review.decide_all(id, decision, cx).unwrap();
+                review.submit(id, cx).unwrap();
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            review.update(cx, |review, _| review.take_prompt_notes(&session())),
+            None,
+            "an allow or a reject without comments says it all"
+        );
+    }
+
+    #[gpui::test]
     async fn review_mode_follows_the_setting(cx: &mut TestAppContext) {
         if review_mode_override().is_some() {
             // FYX_AGENT_REVIEW in the test environment overrides the setting.
@@ -2963,7 +3362,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         assert!(
@@ -3000,7 +3399,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         cx.update(|cx| {
             SettingsStore::update_global(cx, |store, cx| {
@@ -3036,7 +3435,7 @@ mod tests {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let set_enabled = |enabled: bool, cx: &mut TestAppContext| {
             cx.update(|cx| {

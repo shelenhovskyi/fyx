@@ -828,6 +828,13 @@ impl ReviewPane {
             let review = self.review.read(cx).review(id)?;
             Some(format!("Asked by rule {}", review.rule()?.describe()))
         });
+        let operation = self.current_review_id().and_then(|id| {
+            let review = self.review.read(cx).review(id)?;
+            Some(format!(
+                "{}: Accept lets it happen, Reject stops it.",
+                review.operation()?
+            ))
+        });
         let can_submit = resolution.is_some_and(|resolution| !resolution.is_pending());
         let error = self.current_review_id().and_then(|id| {
             let review = self.review.read(cx).review(id)?;
@@ -869,6 +876,11 @@ impl ReviewPane {
                             .disabled(!can_submit),
                     ),
             )
+            .children(operation.map(|operation| {
+                Label::new(operation)
+                    .size(LabelSize::Small)
+                    .color(Color::Accent)
+            }))
             .children(
                 error.map(|error| Label::new(error).size(LabelSize::Small).color(Color::Error)),
             )
@@ -1183,7 +1195,7 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));
@@ -1252,7 +1264,7 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            crate::init(cx);
+            crate::init(None, cx);
         });
         let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
         review.update(cx, |review, cx| review.set_enabled(true, cx));

@@ -7207,6 +7207,8 @@ impl AcpThread {
         message: Vec<acp_v2::ContentBlock>,
         cx: &mut Context<Self>,
     ) -> Submission {
+        // fyx: the host review's notes for the agent go in front of the user's next prompt.
+        let message = fyx_review::with_review_notes(self.session_id(), message, cx);
         self.submit(message, true, cx)
     }
 

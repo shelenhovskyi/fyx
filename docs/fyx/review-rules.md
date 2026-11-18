@@ -91,11 +91,13 @@ the diff.
 ## Limits
 
 - A rejected permission request carries no message in ACP. An agent whose edit is refused through
-  a permission request is only told "rejected". When the agent writes through Fyx
+  a permission request is told "rejected" at once; the rule and any comments reach it with your next
+  message only when the review left a note (a partial accept or comments). When the agent writes through Fyx
   (`fs/write_text_file`, or Zed's built-in agent), the write fails with the rule in the error
   message.
 - Rules apply to agent edits that reach Fyx: permission requests, `fs/write_text_file`, and the
-  edit and write tools of Zed's built-in agent.
+  edit, write, delete, move and copy tools of Zed's built-in agent. For a move or copy, the
+  strictest rule of its two paths decides: copying a denied file elsewhere is denied too.
   - An agent that changes files another way, for example with a shell command, bypasses them.
   - The turn's review pane lists such files as "changed without review", including a rewritten
     `.fyx/review.toml`. Nothing is blocked.
