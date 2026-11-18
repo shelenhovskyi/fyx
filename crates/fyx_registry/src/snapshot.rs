@@ -646,7 +646,7 @@ mod tests {
             );
             let release = KeyId::new("rel-a").expect("valid");
             let more = verify(signed_by(&second, 10, &["rel-a"]), Some(&daily)).expect("verifies");
-            assert_eq!(more.revoked_keys(), [snap_a.clone(), release].into());
+            assert_eq!(more.revoked_keys(), [snap_a, release].into());
 
             // Only the rotation key lifts one.
             let lifted = verify(
