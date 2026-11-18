@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use ui_ext::image::{self, ImageFormat};
 
 use ui_ext::network::{self as net, DomainList, FetchCounters, FetchRequest, PermissionState};
+use ui_ext::process::{self as proc, ProcessCounters, ProcessPolicy, SpawnCheck, SpawnRequest};
 use ui_ext::v0_2 as model;
 use ui_ext::v0_2::notifications::{self as notify, Notification, ProgressOptions, ProgressValue};
 use ui_ext::{ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement};
@@ -139,7 +140,29 @@ pub(crate) struct ApiState {
     fetch_counters: FetchCounters,
     fetches: BTreeMap<u64, QueuedFetch>,
     call_fetches: Vec<u64>,
+    /// The broker's state at the import, for every T2 capability.
     network_permission: PermissionState,
+    /// `process:spawn` (0.3): the manifest's programs and environment names, the host's
+    /// counters, the processes not finished yet, and the ones the running call spawned. The
+    /// harness has one worktree, trusted unless a test says otherwise.
+    process_policy: ProcessPolicy,
+    process_counters: ProcessCounters,
+    processes: BTreeMap<u64, FakeProcess>,
+    call_spawns: Vec<u64>,
+    worktree: Option<bool>,
+}
+
+/// A process `spawn` accepted, until its `process-exited` or `spawn-failed` is delivered.
+#[derive(Clone, Debug)]
+pub(crate) struct FakeProcess {
+    pub(crate) request: SpawnRequest,
+    /// The program is not in the manifest: the outcome is `spawn-failed(not-found)`.
+    pub(crate) not_declared: bool,
+    /// Started by `Harness::deliver_io`, which ran it once stdin is closed.
+    pub(crate) started: bool,
+    pub(crate) stdin_open: bool,
+    pub(crate) stdin: Vec<u8>,
+    pub(crate) killed: bool,
 }
 
 /// A request `fetch` accepted, waiting for `Harness::deliver_io`.
@@ -179,6 +202,11 @@ impl ApiState {
             call_fetches: Vec::new(),
             // As the host without a broker: no T2 capability is granted.
             network_permission: PermissionState::Unavailable,
+            process_policy: ProcessPolicy::default(),
+            process_counters: ProcessCounters::default(),
+            processes: BTreeMap::new(),
+            call_spawns: Vec::new(),
+            worktree: Some(true),
         }
     }
 
@@ -212,6 +240,7 @@ impl ApiState {
         self.notification_effects = 0;
         self.progress_updates = 0;
         self.call_fetches.clear();
+        self.call_spawns.clear();
         if let Activation::Until(until) = self.activation
             && Instant::now() >= until
         {
@@ -834,6 +863,10 @@ impl ApiState {
             self.fetches.remove(&id);
             self.fetch_counters.finished(id);
         }
+        for id in std::mem::take(&mut self.call_spawns) {
+            self.processes.remove(&id);
+            self.process_counters.finished(id);
+        }
     }
 
     pub(crate) fn queued_fetches(&self) -> impl Iterator<Item = (u64, &QueuedFetch)> {
@@ -846,6 +879,159 @@ impl ApiState {
         let (id, fetch) = self.fetches.pop_first()?;
         self.fetch_counters.finished(id);
         Some((id, fetch))
+    }
+}
+
+/// `process:spawn` (design.md §9), as the host's import checks it: the capability and the
+/// broker's state, the manifest's programs, `ui_ext::process::check_spawn`, the worktree, then the
+/// shared counters.
+impl ApiState {
+    pub(crate) fn set_process_policy(&mut self, policy: ProcessPolicy) {
+        self.process_policy = policy;
+    }
+
+    /// `None`: no worktree is open; `Some(trusted)`.
+    pub(crate) fn set_worktree(&mut self, worktree: Option<bool>) {
+        self.worktree = worktree;
+    }
+
+    fn permit_process(&self) -> Result<(), model::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == proc::CAPABILITY_PROCESS)
+        {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{:?} is not in the manifest", proc::CAPABILITY_PROCESS),
+            ));
+        }
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => Ok(()),
+            state => Err(host_error(
+                model::HostErrorCode::Denied,
+                format!("{} is {state:?}", proc::CAPABILITY_PROCESS),
+            )),
+        }
+    }
+
+    pub(crate) fn spawn(&mut self, request: SpawnRequest) -> Result<u64, model::HostError> {
+        self.permit_process()?;
+        if self.process_policy.programs.is_empty() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!(
+                    "spawn needs {:?} and [[fyx_ui.processes]] in the manifest",
+                    proc::CAPABILITY_PROCESS
+                ),
+            ));
+        }
+        let not_declared = matches!(
+            proc::check_spawn(&request, &self.process_policy)?,
+            SpawnCheck::NotDeclared
+        );
+        match self.worktree {
+            None => {
+                return Err(host_error(
+                    model::HostErrorCode::Unavailable,
+                    "no worktree is open",
+                ));
+            }
+            Some(false) => {
+                return Err(host_error(
+                    model::HostErrorCode::Denied,
+                    "the worktree is not trusted",
+                ));
+            }
+            Some(true) => {}
+        }
+        let id = self.process_counters.start()?;
+        self.processes.insert(
+            id,
+            FakeProcess {
+                stdin_open: request.stdin,
+                request,
+                not_declared,
+                started: false,
+                stdin: Vec::new(),
+                killed: false,
+            },
+        );
+        self.call_spawns.push(id);
+        Ok(id)
+    }
+
+    pub(crate) fn write_stdin(&mut self, id: u64, data: Vec<u8>) -> Result<(), model::HostError> {
+        self.permit_process()?;
+        if data.len() > proc::MAX_STDIN_WRITE_BYTES {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!(
+                    "at most {} bytes per write-stdin",
+                    proc::MAX_STDIN_WRITE_BYTES
+                ),
+            ));
+        }
+        let process = self.live_process(id)?;
+        if !process.stdin_open {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!(
+                    "process {id} has no stdin open (spawn it with stdin, and do not close it)"
+                ),
+            ));
+        }
+        if process.stdin.len() + data.len() > proc::MAX_STDIN_QUEUED_BYTES {
+            return Err(host_error(
+                model::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} bytes queued for stdin",
+                    proc::MAX_STDIN_QUEUED_BYTES
+                ),
+            ));
+        }
+        process.stdin.extend(data);
+        Ok(())
+    }
+
+    pub(crate) fn close_stdin(&mut self, id: u64) -> Result<(), model::HostError> {
+        self.live_process(id)?.stdin_open = false;
+        Ok(())
+    }
+
+    /// An id that exited (or never was) is `invalid-argument`.
+    pub(crate) fn kill(&mut self, id: u64) -> Result<(), model::HostError> {
+        if !self.process_counters.is_live(id) {
+            return Err(host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!("process {id} has exited"),
+            ));
+        }
+        self.live_process(id)?.killed = true;
+        Ok(())
+    }
+
+    fn live_process(&mut self, id: u64) -> Result<&mut FakeProcess, model::HostError> {
+        self.processes.get_mut(&id).ok_or_else(|| {
+            host_error(
+                model::HostErrorCode::InvalidArgument,
+                format!("process {id} has exited"),
+            )
+        })
+    }
+
+    pub(crate) fn processes(&self) -> impl Iterator<Item = (u64, &FakeProcess)> {
+        self.processes.iter().map(|(id, process)| (*id, process))
+    }
+
+    pub(crate) fn process_mut(&mut self, id: u64) -> Option<&mut FakeProcess> {
+        self.processes.get_mut(&id)
+    }
+
+    /// Its `process-exited` or `spawn-failed` is about to be delivered.
+    pub(crate) fn process_finished(&mut self, id: u64) -> Option<FakeProcess> {
+        self.process_counters.finished(id);
+        self.processes.remove(&id)
     }
 }
 

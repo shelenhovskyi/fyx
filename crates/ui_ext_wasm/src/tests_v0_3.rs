@@ -1668,3 +1668,242 @@ mod harness_conformance_fetch {
         assert!(harness.pending_fetches().is_empty());
     }
 }
+
+/// `process:spawn` (plan 4.7) in the host and the harness: the import's checks, ids and caps,
+/// and the outcome of a program that cannot start. The programs are declared but do not exist,
+/// so the host runs nothing; the harness runs no real processes at all.
+mod harness_conformance_process {
+    use fyx_ext_harness::{FakeRun, Harness, TestBroker};
+
+    use super::*;
+    use crate::{
+        permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
+        process::{ProcessSpec, Workspace, WorktreeRoot},
+    };
+
+    const MISSING: &str = "fyx-harness-no-such-program";
+
+    struct GrantAll;
+
+    impl CapabilityCheck for GrantAll {
+        fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+            Ok(())
+        }
+
+        fn state(&self, _: &str, _: &str) -> PermissionState {
+            PermissionState::Granted
+        }
+    }
+
+    struct Worktrees(Vec<WorktreeRoot>);
+
+    impl Workspace for Worktrees {
+        fn worktrees(&self) -> Vec<WorktreeRoot> {
+            self.0.clone()
+        }
+    }
+
+    fn debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
+        values.iter().map(|value| format!("{value:?}")).collect()
+    }
+
+    fn programs() -> Vec<ProcessSpec> {
+        vec![
+            ProcessSpec {
+                name: MISSING.into(),
+                args: vec!["status".into(), "**".into()],
+                path: None,
+            },
+            ProcessSpec {
+                name: format!("{MISSING}-2"),
+                args: Vec::new(),
+                path: None,
+            },
+        ]
+    }
+
+    fn capabilities() -> Vec<String> {
+        vec![
+            CAPABILITY_PANEL.into(),
+            ui_ext::v0_2::CAPABILITY_STATUS_BAR.into(),
+            ui_ext::v0_2::CAPABILITY_MODAL.into(),
+            "process:spawn".into(),
+        ]
+    }
+
+    async fn both(
+        broker: Option<Arc<dyn CapabilityCheck>>,
+        worktree: Option<&tempfile::TempDir>,
+        cx: &mut TestAppContext,
+    ) -> (UiExtension, Harness) {
+        let host = load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(capabilities()),
+                processes: Some(programs()),
+                process_env: Some(vec!["FYX_TEST".into()]),
+                capability_check: broker.clone(),
+                workspace: worktree.map(|worktree| {
+                    Arc::new(Worktrees(vec![WorktreeRoot {
+                        id: 1,
+                        root: worktree.path().to_path_buf(),
+                        trusted: true,
+                    }])) as Arc<dyn Workspace>
+                }),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let capabilities = capabilities();
+        let capabilities = capabilities.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
+            .and_then(|harness| harness.with_processes(programs(), &["FYX_TEST"]))
+            .expect("the harness loads the 0.3 probe");
+        if broker.is_some() {
+            harness.set_broker(TestBroker::granted(Box::new(|_| {
+                Err(ui_ext::network::FetchError::Denied)
+            })));
+        }
+        if worktree.is_none() {
+            harness.set_worktree(None);
+        }
+        (host, harness)
+    }
+
+    /// Runs probe command `command` in both; the results and effects must match.
+    async fn command(host: &UiExtension, harness: &mut Harness, command: &str) -> String {
+        let event = UiEvent::InputChanged(1, command.into());
+        let reply = host
+            .handle_event_v0_2(SURFACE, event.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+        let raw = harness
+            .handle_event_raw(SURFACE, event)
+            .unwrap_or_else(|error| panic!("{command}: the harness trapped: {error:#}"));
+        assert_eq!(debug(&reply.effects), debug(&raw.effects), "{command}");
+        let host_value = format!("{:?}", reply.value);
+        assert_eq!(
+            host_value,
+            format!("{:?}", raw.value.expect("a report")),
+            "{command}"
+        );
+        host_value
+    }
+
+    #[gpui::test]
+    async fn test_spawn_checks_match_the_harness(cx: &mut TestAppContext) {
+        let worktree = tempfile::tempdir().expect("a worktree");
+        let (host, mut harness) = both(Some(Arc::new(GrantAll)), Some(&worktree), cx).await;
+        let mut events = host.take_io_events().expect("once");
+        for command_text in [
+            format!("spawn -- {MISSING} log"),
+            format!("spawn env NODE_OPTIONS=x -- {MISSING} status"),
+            format!("spawn env OTHER=1 -- {MISSING} status"),
+            "write 99 x".to_string(),
+            "kill 99".to_string(),
+            "close 99".to_string(),
+            "spawn -- undeclared-program".to_string(),
+            format!("spawn env FYX_TEST=1 -- {MISSING} status --short"),
+            format!("spawn stdin -- {MISSING}-2 a b"),
+            format!("spawn -- {MISSING}-2"),
+            format!("spawn -- {MISSING}-2"),
+        ] {
+            command(&host, &mut harness, &command_text).await;
+        }
+        // Four accepted: the undeclared one and three that cannot start. Their outcomes are
+        // `spawn-failed(not-found)` in both, which the probe pushes.
+        let mut harness_effects = harness
+            .deliver_io()
+            .expect("deliver")
+            .iter()
+            .map(|delivered| debug(&delivered.effects))
+            .collect::<Vec<_>>();
+        assert_eq!(harness_effects.len(), 4, "{harness_effects:?}");
+        let mut host_effects = Vec::new();
+        for _ in 0..4 {
+            let event = futures::StreamExt::next(&mut events)
+                .await
+                .expect("an outcome");
+            let reply = host.handle_io(event).await.expect("handle-io");
+            host_effects.push(debug(&reply.effects));
+        }
+        harness_effects.sort();
+        host_effects.sort();
+        assert_eq!(host_effects, harness_effects);
+        assert!(
+            host_effects
+                .iter()
+                .flatten()
+                .all(|effect| effect.contains("not-found")),
+            "{host_effects:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_without_a_broker_or_a_worktree_alike(cx: &mut TestAppContext) {
+        let worktree = tempfile::tempdir().expect("a worktree");
+        let (host, mut harness) = both(None, Some(&worktree), cx).await;
+        let report = command(&host, &mut harness, &format!("spawn -- {MISSING}-2")).await;
+        assert!(report.contains("denied"), "{report}");
+        let (host, mut harness) = both(Some(Arc::new(GrantAll)), None, cx).await;
+        let report = command(&host, &mut harness, &format!("spawn -- {MISSING}-2")).await;
+        assert!(report.contains("unavailable"), "{report}");
+    }
+
+    /// The harness's fake programs: stdin, output, the exit code, a kill.
+    #[test]
+    fn test_fake_programs_run_in_the_harness() {
+        let capabilities = capabilities();
+        let capabilities = capabilities.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
+            .and_then(|harness| harness.with_processes(programs(), &[]))
+            .expect("loads");
+        harness.set_broker(TestBroker::granted(Box::new(|_| {
+            Err(ui_ext::network::FetchError::Denied)
+        })));
+        harness.fake_program(&format!("{MISSING}-2"), |request, stdin| {
+            FakeRun::ok(format!(
+                "{}_{}",
+                request.args.join(","),
+                String::from_utf8_lossy(stdin)
+            ))
+        });
+        let run = |harness: &mut Harness, command: &str| {
+            format!(
+                "{:?}",
+                harness
+                    .handle_event_raw(SURFACE, UiEvent::InputChanged(1, command.into()))
+                    .expect("no trap")
+                    .value
+            )
+        };
+        let lines = |delivered: &[fyx_ext_harness::RawEffects<()>]| {
+            delivered
+                .iter()
+                .map(|delivered| format!("{:?}", delivered.effects))
+                .collect::<Vec<_>>()
+        };
+        let spawned = run(&mut harness, &format!("spawn stdin -- {MISSING}-2 a"));
+        assert!(spawned.contains("\"1\""), "{spawned}");
+        run(&mut harness, "write 1 hello");
+        // Stdin is open: it starts, and waits.
+        assert!(harness.deliver_io().expect("deliver").is_empty());
+        run(&mut harness, "close 1");
+        let delivered = lines(&harness.deliver_io().expect("deliver"));
+        assert_eq!(delivered.len(), 2, "{delivered:?}");
+        assert!(
+            delivered[0].contains("output 1 stdout a_hello"),
+            "{delivered:?}"
+        );
+        assert!(delivered[1].contains("exited 1 0 false"), "{delivered:?}");
+        assert!(run(&mut harness, "kill 1").contains("invalid-argument"));
+
+        run(&mut harness, &format!("spawn stdin -- {MISSING}-2"));
+        run(&mut harness, "kill 2");
+        let delivered = lines(&harness.deliver_io().expect("deliver"));
+        assert!(delivered[0].contains("exited 2 none true"), "{delivered:?}");
+        assert!(harness.processes().is_empty());
+    }
+}

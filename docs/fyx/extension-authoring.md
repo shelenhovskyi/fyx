@@ -235,6 +235,15 @@ On top of these:
   - Accepted requests wait in `pending_fetches()` until `deliver_io()` delivers each outcome
     through `handle-io`. A cancelled request ends `cancelled`, and a call that traps drops its
     requests.
+- `process:spawn` (0.3) runs the host's import checks too: the capability, the programs
+  (`[[fyx_ui.processes]]`, or `with_processes`), `check_spawn`, the worktree, and the 4-process
+  cap. The broker decides as for `fetch`.
+  - Real programs never run. `fake_program(name, |request, stdin| FakeRun::ok(..))` stands in for
+    one, and `deliver_io()` delivers its output and exit once its stdin is closed.
+  - A kill ends with `killed`, and a declared program with no fake ends `spawn-failed`
+    (`not-found`).
+  - `set_worktree(None)` or `set_worktree(Some(false))` tests the unavailable and untrusted
+    cases.
 - In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
   not implement yet (`decorations` included) trap when called.
 

@@ -109,6 +109,8 @@ pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
 #[doc(hidden)]
 pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::documents::FileRef;
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::images::ImageFormat;
@@ -119,6 +121,10 @@ pub use bindings::fyx::ui::network::{FetchError, HttpMethod, HttpRequest, HttpRe
 pub use bindings::fyx::ui::notifications::{
     Notification, NotificationAction, NotificationLevel, ProgressLocation, ProgressOptions,
     ProgressValue,
+};
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::process::{
+    OutputStream, ProcessExit, ProcessOutput, SpawnError, SpawnRequest,
 };
 pub use bindings::fyx::ui::types::*;
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
@@ -684,6 +690,31 @@ macro_rules! __fyx_image_shims {
         #[unsafe(no_mangle)]
         fn __fyx_ui_cancel_fetch(request: u64) {
             $crate::__private::$world::cancel_fetch(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_spawn(
+            request: &$crate::SpawnRequest,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::$world::spawn(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_write_stdin(
+            process: u64,
+            data: &[u8],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::write_stdin(process, data)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_close_stdin(process: u64) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::close_stdin(process)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_kill(process: u64) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::kill(process)
         }
     };
 }
@@ -2024,6 +2055,73 @@ impl HttpRequest {
 }
 
 #[cfg(feature = "fyx-ui-0-3")]
+impl SpawnRequest {
+    /// `program` as the manifest's `[[fyx_ui.processes]]` names it (never a path): no
+    /// arguments, the first worktree's root, no environment, stdin closed.
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            stdin: false,
+        }
+    }
+
+    /// At most 256 arguments, 128 KiB in total; they must fit the manifest's patterns.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// A directory relative to the root of the one worktree that has it.
+    pub fn cwd(mut self, path: impl Into<String>) -> Self {
+        self.cwd = Some(FileRef {
+            worktree: None,
+            path: path.into(),
+        });
+        self
+    }
+
+    /// Only names the manifest lists in `[fyx_ui.process] env`; at most 32.
+    pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+
+    /// Keeps stdin open for [`write_stdin`] until [`close_stdin`].
+    pub fn stdin(mut self) -> Self {
+        self.stdin = true;
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl ProcessOutput {
+    /// The chunk as text; a chunk may end inside a UTF-8 character, so this is lossy.
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.data)
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpawnError::Denied => f.write_str("running programs was denied"),
+            SpawnError::NotFound(program) => write!(f, "program not found: {program}"),
+            SpawnError::LimitExceeded => f.write_str("too many processes"),
+            SpawnError::Io(error) => write!(f, "starting the program failed: {error}"),
+        }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
 impl HttpResponse {
     /// A 2xx status.
     pub fn is_success(&self) -> bool {
@@ -2908,6 +3006,59 @@ mod tests {
                     nodes: Vec::new()
                 },
             ]
+        );
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    #[test]
+    fn spawn_builds_and_records_requests() {
+        take_host_effects();
+        let request = SpawnRequest::new("cargo")
+            .arg("check")
+            .args(["--message-format", "short"])
+            .cwd("crates/app")
+            .env("CARGO_TERM_COLOR", "never")
+            .stdin();
+        assert_eq!(request.args, ["check", "--message-format", "short"]);
+        assert_eq!(
+            request.cwd,
+            Some(FileRef {
+                worktree: None,
+                path: "crates/app".into()
+            })
+        );
+        assert!(request.stdin);
+        let id = spawn(&request).expect("spawn");
+        write_stdin(
+            id, b"y
+",
+        )
+        .expect("write");
+        close_stdin(id).expect("close");
+        kill(id).expect("kill");
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::Spawn { id, request },
+                HostEffect::WriteStdin {
+                    process: id,
+                    data: b"y
+"
+                    .to_vec()
+                },
+                HostEffect::CloseStdin(id),
+                HostEffect::Kill(id),
+            ]
+        );
+        let output = ProcessOutput {
+            process: id,
+            stream: OutputStream::Stdout,
+            data: b"ok".to_vec(),
+        };
+        assert_eq!(output.text(), "ok");
+        assert_eq!(
+            SpawnError::NotFound("cargo".into()).to_string(),
+            "program not found: cargo"
         );
     }
 

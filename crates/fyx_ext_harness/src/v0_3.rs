@@ -56,7 +56,52 @@ pub(crate) fn add_to_linker(
     wit_images::add_to_linker::<_, State>(linker, |state| state)?;
     wit_notifications::add_to_linker::<_, State>(linker, |state| state)?;
     wit_network::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_process::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
+}
+
+impl wit_process::Host for State {
+    fn spawn(
+        &mut self,
+        request: wit_process::SpawnRequest,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        self.count_lifted_text(
+            request.program.len()
+                + request.args.iter().map(String::len).sum::<usize>()
+                + request
+                    .env
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum::<usize>(),
+        )?;
+        let request = ui_ext::process::SpawnRequest {
+            program: request.program,
+            args: request.args,
+            cwd: request.cwd.map(|cwd| ui_ext::process::FileRef {
+                worktree: cwd.worktree,
+                path: cwd.path,
+            }),
+            env: request.env,
+            stdin: request.stdin,
+        };
+        Ok(self.api.spawn(request).map_err(Into::into))
+    }
+
+    fn write_stdin(
+        &mut self,
+        process: u64,
+        data: Vec<u8>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self.api.write_stdin(process, data).map_err(Into::into))
+    }
+
+    fn close_stdin(&mut self, process: u64) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self.api.close_stdin(process).map_err(Into::into))
+    }
+
+    fn kill(&mut self, process: u64) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self.api.kill(process).map_err(Into::into))
+    }
 }
 
 impl wit_network::Host for State {
@@ -163,7 +208,14 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 5] = ["types", "host", "images", "notifications", "network"];
+const LINKED_INTERFACES: [&str; 6] = [
+    "types",
+    "host",
+    "images",
+    "notifications",
+    "network",
+    "process",
+];
 
 /// The resource type of a stubbed interface; no value of it is ever made.
 struct Unlinked;

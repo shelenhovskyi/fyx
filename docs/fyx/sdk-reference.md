@@ -605,6 +605,45 @@ pub fn cancel_fetch(request: u64);
 - **Off WASM:** `fetch` hands out ids and records `HostEffect::Fetch { id, request }`;
   `cancel_fetch` records `HostEffect::CancelFetch`.
 
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `process:spawn` (design 0.3, section 9; plan
+4.7):
+
+```rust
+pub fn spawn(request: &SpawnRequest) -> Result<u64, HostError>;
+pub fn write_stdin(process: u64, data: &[u8]) -> Result<(), HostError>;
+pub fn close_stdin(process: u64) -> Result<(), HostError>;
+pub fn kill(process: u64) -> Result<(), HostError>;
+```
+
+- **Building a request:** `SpawnRequest::new(program)` (a name the manifest declares, never a
+  path), with `.arg(a)`, `.args(..)`, `.cwd(path)` (relative to the worktree root), `.env(name,
+  value)` (only names in `[fyx_ui.process] env`) and `.stdin()` (keep stdin open).
+- **Outcomes:** they come to `Extension::handle_io`.
+  - Output arrives as `IoEvent::ProcessOutput` (`ProcessOutput::text()` gives it as lossy text).
+  - Then exactly one `IoEvent::ProcessExited` follows (`code`, and `killed` for a kill).
+  - A process that cannot start gets one `IoEvent::SpawnFailed` instead (`SpawnError`
+    implements `Display`). A program the manifest does not name gets an id, then
+    `SpawnError::NotFound`.
+- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with optional
+  argument patterns, and the environment names:
+
+  ```toml
+  [[fyx_ui.processes]]
+  name = "git"
+  args = ["status", "**"]
+
+  [fyx_ui.process]
+  env = ["GIT_DIR"]
+  ```
+
+- **Consent and limits:**
+  - `process:spawn` is T2: the first spawn asks the user, and a refusal ends
+    `SpawnError::Denied`;
+  - a spawn needs an open, trusted worktree;
+  - at most 4 processes, 256 arguments (128 KiB), 32 environment pairs;
+  - stdin: 1 MiB per write and 4 MiB queued.
+- **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
+
 ## Canvases (`fyx-ui-0-3`)
 
 A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
@@ -652,8 +691,8 @@ tree.canvas(canvas);
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,
-`add_image` and `fetch` return `unavailable` ("needs fyx:ui 0.3"), and `remove_image` and
-`cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
+`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin` and `kill` return `unavailable`
+("needs fyx:ui 0.3"), and `remove_image` and `cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.
 
