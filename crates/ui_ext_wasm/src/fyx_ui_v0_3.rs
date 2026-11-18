@@ -1,5 +1,5 @@
 //! Host side of the staged `fyx:ui@0.3.0` world (`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`),
-//! as far as it is built: what 0.3 copies forward from 0.2 (`types`, `host`), and the `images`
+//! as far as it is built: what 0.3 copies forward from 0.2 (`types`, `host`, `notifications`), and the `images`
 //! interface of design.md section 12 (plan 4.10). Every other 0.3 interface is linked as a trap
 //! until its plan task lands (`UiBindings::instantiate`), so a component that never calls them
 //! loads and runs.
@@ -32,9 +32,12 @@ pub(crate) mod bindings {
 }
 
 pub(crate) use bindings::UiExtension;
-use bindings::fyx::ui::{host as wit_host, images as wit_images, types as wit};
+use bindings::fyx::ui::{
+    host as wit_host, images as wit_images, notifications as wit_notifications, types as wit,
+};
 
 conversions::host_imports!();
+conversions::notification_imports!();
 
 impl wit_images::Host for UiState {
     fn add_image(
@@ -75,5 +78,6 @@ pub(crate) fn add_to_linker(
     wit::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_host::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_images::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_notifications::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

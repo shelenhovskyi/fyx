@@ -116,3 +116,20 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   - UX F16 (an accessible `label` next to `button-props.tooltip`) and PERF 6/12 (`Arc` props,
     in-place apply) change `ui_ext::v0_2` types and `v0_2::tree`, which W3 is moving the
     renderer onto (plan 2.3); held until 2.3 lands, per the coordinator.
+
+## §M notifications and progress, host side (2026-11-18)
+
+- WIT: design.md M.6 applied to `since_v0.2.0` (replaces its TODO) and copied into the staged
+  `since_v0.3.0`, as 0.3's own design says. Both parse; a dummy 0.2 component validates.
+- Model: `ui_ext::v0_2::notifications` (types, caps as constants, `Notification::validate`,
+  `ProgressOptions::validate`, `check_progress_update`: the registry's text rules) and three
+  `v0_2::UiEvent` cases.
+- Host: `notifications` linked for 0.2 and 0.3 (one macro); `ui:notifications` checked against the
+  manifest and the broker; owner = a live surface or decoration (a panel for `panel` progress);
+  caps 5 notify/60 s, 3 open, 4 per call, 4 running, 30 starts/60 s, 64 updates per call; refused
+  notifications are logged with their title; `notification-action` is a gesture and frees its slot,
+  `notification-closed` frees its slot, owner removal forgets both kinds; effects
+  `Notify`, `DismissNotification`, `ProgressStart`, `ProgressUpdate`, `ProgressEnd`.
+- Minimal fallout fixes in other streams' code: the SDK mirror and four demos (W4) and the harness
+  (W4, notifications refused there for now) match the new events; the renderer (W3) logs and
+  ignores the new effects until it draws them.

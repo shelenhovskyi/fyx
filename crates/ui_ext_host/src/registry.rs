@@ -1157,6 +1157,14 @@ impl UiExtensionRegistry {
                     "fyx:ui: {extension_id}: image {handle} ignored (no image renderer yet)"
                 )
             }
+            // §M (design.md M): drawn by the renderer's notification and progress views (W3).
+            HostEffect::Notify { .. }
+            | HostEffect::DismissNotification { .. }
+            | HostEffect::ProgressStart { .. }
+            | HostEffect::ProgressUpdate { .. }
+            | HostEffect::ProgressEnd { .. } => {
+                log::debug!("fyx:ui: {extension_id}: {effect:?} ignored (no notification view yet)")
+            }
         }
     }
 

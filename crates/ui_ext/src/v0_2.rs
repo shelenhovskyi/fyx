@@ -11,7 +11,13 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod notifications;
 pub mod tree;
+
+pub use notifications::{
+    CAPABILITY_NOTIFICATIONS, Notification, NotificationAction, NotificationActionEvent,
+    NotificationCloseReason, NotificationLevel, ProgressLocation, ProgressOptions, ProgressValue,
+};
 
 use crate::api_version::{ApiError, ApiVersion, MAX_INDENT_LEVELS, MAX_TOOLTIP_BYTES};
 use crate::tree::{TreeError, TreeLimits};
@@ -411,6 +417,13 @@ pub enum UiEvent {
     RowSelected(NodeId, u32),
     /// A modal was closed by the user; it has no tree any more.
     Dismissed(DismissReason),
+    /// §M. An action button of a notification the surface owns was clicked; a gesture, like
+    /// `click`.
+    NotificationAction(NotificationActionEvent),
+    /// §M. A notification the surface owns closed without the extension asking.
+    NotificationClosed(u64, NotificationCloseReason),
+    /// §M. Cancel was pressed on a cancellable progress the surface owns.
+    ProgressCancelRequested(u64),
 }
 
 impl UiEvent {
@@ -422,7 +435,10 @@ impl UiEvent {
             | UiEvent::InputSubmitted(id, _)
             | UiEvent::RowClick(id, _)
             | UiEvent::RowSelected(id, _) => Some(*id),
-            UiEvent::Dismissed(_) => None,
+            UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(..)
+            | UiEvent::ProgressCancelRequested(_) => None,
         }
     }
 }
@@ -665,6 +681,11 @@ impl TryFrom<UiEvent> for v0_1::UiEvent {
             UiEvent::RowClick(id, row) => Ok(v0_1::UiEvent::RowClick(id, row)),
             UiEvent::RowSelected(..) => Err(not_in_v0_1("the row-selected event")),
             UiEvent::Dismissed(_) => Err(not_in_v0_1("the dismissed event")),
+            UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(..)
+            | UiEvent::ProgressCancelRequested(_) => {
+                Err(not_in_v0_1("notification and progress events"))
+            }
         }
     }
 }
