@@ -79,41 +79,15 @@ pub fn check_assets(dir: &Path, report: &mut Report) {
                     dropped.join(", ")
                 ));
             }
-            if style_uses_url(&text) {
+            // The host's scan before it parses: reference bombs and cycles, url(…) inside
+            // <style>, chains and nesting past the caps.
+            if let Err(error) = image::prescan_svg(&String::from_utf8_lossy(&bytes)) {
                 report.warning(format!(
-                    "{path} uses url(…) inside <style>, which Fyx refuses: it draws the alt text \
-                     instead. Set fill or style on the element"
+                    "{path}: {error}; Fyx refuses it and draws the alt text instead"
                 ));
             }
         }
     }
-}
-
-/// Whether a `<style>` element of this lowercase SVG text uses `url(`. The host's scan before it
-/// parses an SVG refuses that, since it cannot count what the selectors reference.
-fn style_uses_url(text: &str) -> bool {
-    let mut rest = text;
-    while let Some(start) = rest.find("<style") {
-        rest = &rest[start + "<style".len()..];
-        // Another name that only starts with `style`.
-        if !rest.starts_with(|c: char| c == '>' || c == '/' || c.is_ascii_whitespace()) {
-            continue;
-        }
-        let Some(open_end) = rest.find('>') else {
-            return false;
-        };
-        if rest[..open_end].ends_with('/') {
-            rest = &rest[open_end..];
-            continue;
-        }
-        let body = &rest[open_end + 1..];
-        let end = body.find("</style").unwrap_or(body.len());
-        if body[..end].contains("url(") {
-            return true;
-        }
-        rest = &body[end..];
-    }
-    false
 }
 
 /// `assets/...` with `/` separators, as an image node names the file.
@@ -206,15 +180,22 @@ mod tests {
     }
 
     #[test]
-    fn url_counts_only_inside_style() {
-        assert!(style_uses_url("<svg><style>a{fill:url(#g)}</style></svg>"));
-        assert!(!style_uses_url(
-            "<svg><style>a{fill:red}</style><rect fill=\"url(#g)\"/></svg>"
-        ));
-        assert!(!style_uses_url(
-            "<svg><style/><rect style=\"fill:url(#g)\"/></svg>"
-        ));
-        assert!(!style_uses_url("<svg><stylesheet>url(</stylesheet></svg>"));
+    fn the_host_prescan_refuses_reference_bombs() {
+        let mut bomb = String::from(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><g id=\"a0\"><rect/></g>",
+        );
+        for level in 1..=8 {
+            let previous = level - 1;
+            bomb.push_str(&format!("<g id=\"a{level}\">"));
+            for _ in 0..10 {
+                bomb.push_str(&format!("<use href=\"#a{previous}\"/>"));
+            }
+            bomb.push_str("</g>");
+        }
+        bomb.push_str("</defs><use href=\"#a8\"/></svg>");
+        let report = check(&[("assets/bomb.svg", bomb.as_bytes())]);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].contains("assets/bomb.svg"));
     }
 
     #[test]

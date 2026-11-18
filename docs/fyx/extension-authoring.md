@@ -394,7 +394,8 @@ instead and does not fail the update:
 - a file that is not a valid PNG or SVG (a compressed `.svgz` is not one);
 - a PNG over 2048 px on a side;
 - an SVG that declares XML entities;
-- an SVG whose `<style>` uses `url(…)`;
+- an SVG that Fyx's scan before parsing refuses (`ui_ext::image::prescan_svg`): `url(…)` inside
+  `<style>`, references that expand past the caps or form a cycle, nesting past 256;
 - a name an image node cannot use.
 
 An SVG with `<image>`, `<script>` or `<foreignObject>` is also a warning, since Fyx drops those
