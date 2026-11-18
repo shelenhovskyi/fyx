@@ -944,3 +944,48 @@ async fn test_v0_2_broker_is_asked_at_every_call(cx: &mut TestAppContext) {
     let checks = extension.diagnostics();
     assert!(format!("{checks:?}").contains("revoked"), "{checks:?}");
 }
+
+/// async-1 #5: [`with_budget`] counts only time the call waits on the host. A call that is ready
+/// but not polled (the tokio workers are busy with other work) spends none of its budget.
+#[test]
+fn test_budget_ignores_time_spent_waiting_for_a_worker() {
+    use std::task::{Context, Poll};
+
+    let budget = Duration::from_millis(100);
+    let polls = std::sync::atomic::AtomicUsize::new(0);
+    let mut call = Box::pin(with_budget(
+        budget,
+        futures::future::poll_fn(|cx| {
+            if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // Ready to run on, as a guest that yields at an epoch is.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }),
+    ));
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(call.as_mut().poll(&mut cx).is_pending());
+    // Not polled for three times the budget, as on a starved worker.
+    std::thread::sleep(budget * 3);
+    assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+
+    // A call that waits on the host and is not woken is cut off once the budget is spent.
+    let mut blocked = Box::pin(with_budget(
+        budget,
+        futures::future::pending::<Result<()>>(),
+    ));
+    let started = Instant::now();
+    let error = loop {
+        if let Poll::Ready(result) = blocked.as_mut().poll(&mut cx) {
+            break result.unwrap_err();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(started.elapsed() >= budget, "{:?}", started.elapsed());
+    assert!(
+        format!("{error:#}").contains("blocked in a host call"),
+        "{error:#}"
+    );
+}
