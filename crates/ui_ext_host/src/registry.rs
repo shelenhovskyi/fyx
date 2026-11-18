@@ -351,6 +351,16 @@ impl UiExtensionRegistry {
         Ok(())
     }
 
+    /// After an uninstall: the consent record and first-use answers go (integration-5 S5).
+    pub fn forget_consent(&mut self, extension_id: &str, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        if let Some((path, text)) = self.consent.forget(extension_id) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        log::info!("fyx:ui: forgot the permissions of {extension_id}");
+        cx.notify();
+    }
+
     /// The broker's check, as host imports get it.
     pub fn capability_check(&self) -> Arc<dyn ui_ext_wasm::permissions::CapabilityCheck> {
         self.consent.checker()

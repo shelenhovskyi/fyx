@@ -725,6 +725,15 @@ fn store_change(
                     }
                     StoreChange::Uninstall => {
                         store.uninstall(&id, fs.as_ref()).await?;
+                        let fs = fs.clone();
+                        let forgotten = id.clone();
+                        cx.update(|_, cx| {
+                            if let Some(registry) = UiExtensionRegistry::global(cx) {
+                                registry.update(cx, |registry, cx| {
+                                    registry.forget_consent(&forgotten, fs, cx)
+                                });
+                            }
+                        })?;
                         format!("Uninstalled {id}")
                     }
                 })

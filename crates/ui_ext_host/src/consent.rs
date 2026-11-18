@@ -316,18 +316,23 @@ impl ConsentStore {
 
     /// Whether an extension may load as it is now (the reconciliation of spec decision 21 and
     /// integration-4 #3): it needs a record (an install dialog, or one "Enable"); a dev folder's
-    /// record must name the same folder; every T1 capability it declares must have been granted.
-    /// T0 capabilities and the component itself may change freely (updates that add only T0 load
-    /// silently).
+    /// record must name the same folder, and a dev folder's record does not count for a regular
+    /// install of the same id (integration-5 S5); every T1 capability it declares must have been
+    /// granted. T0 capabilities and the component itself may change freely within one install
+    /// (updates that add only T0 load silently); an uninstall forgets the record ([`Self::forget`]).
     pub fn state(&self, extension_id: &str, current: &ConsentRecord) -> ConsentState {
         let shared = self.lock();
         let Some(record) = shared.records.get(extension_id) else {
             return ConsentState::NotEnabled;
         };
-        if let Grant::DevFolder { path } = &current.grant
-            && record.grant != (Grant::DevFolder { path: path.clone() })
-        {
-            return ConsentState::NotEnabled;
+        match (&current.grant, &record.grant) {
+            (Grant::DevFolder { path }, granted)
+                if *granted != (Grant::DevFolder { path: path.clone() }) =>
+            {
+                return ConsentState::NotEnabled;
+            }
+            (Grant::Component { .. }, Grant::DevFolder { .. }) => return ConsentState::NotEnabled,
+            _ => {}
         }
         let new_capabilities: Vec<String> = current
             .capabilities
@@ -341,6 +346,40 @@ impl ConsentStore {
         } else {
             ConsentState::NeedsApproval { new_capabilities }
         }
+    }
+
+    /// An uninstall: the extension's record and first-use answers go, so a later extension with
+    /// the same id starts with nothing (integration-5 S5). Requests waiting on a prompt for it
+    /// resolve `Denied`. Returns the file contents to write when anything was forgotten.
+    pub fn forget(&mut self, extension_id: &str) -> Option<(PathBuf, String)> {
+        let (forgotten, waiting) = {
+            let mut shared = self.lock();
+            let record = shared.records.remove(extension_id).is_some();
+            let answers = shared.t2.remove(extension_id);
+            let capabilities: Vec<String> = answers
+                .iter()
+                .flat_map(|answers| answers.keys().cloned())
+                .collect();
+            for capability in &capabilities {
+                shared.notify(extension_id, capability);
+            }
+            let keys: Vec<(String, String)> = shared
+                .waiting
+                .keys()
+                .filter(|(id, _)| id == extension_id)
+                .cloned()
+                .collect();
+            let waiting: Vec<_> = keys
+                .iter()
+                .filter_map(|key| shared.waiting.remove(key))
+                .flatten()
+                .collect();
+            (record || answers.is_some(), waiting)
+        };
+        for waiter in waiting {
+            waiter.send(PermissionState::Denied).ok();
+        }
+        forgotten.then(|| self.file_contents()).flatten()
     }
 
     /// Records consent and returns the file contents to write, if the store has a file.
@@ -858,6 +897,50 @@ mod tests {
         assert!(check.check("ext", "workspace:read-buffers").is_err());
         assert!(store.revoke("ext", "workspace:read-buffers").is_err());
         assert!(store.revocable().is_empty());
+    }
+
+    /// integration-5 S5: an uninstall forgets the record and the first-use answers, so a new
+    /// extension with the same id inherits nothing; a dev folder's record does not count for a
+    /// regular install of that id.
+    #[test]
+    fn test_uninstall_forgets_and_sources_do_not_mix() {
+        let mut store = ConsentStore::default();
+        let checker = store.checker();
+        store.declare("ext", vec!["ui:panel".into(), "network:fetch".into()]);
+        let installed = record(&["ui:panel", "workspace:diagnostics"], component());
+        store.grant("ext", installed.clone());
+        store.set_t2("ext", "network:fetch", true);
+        assert_eq!(store.state("ext", &installed), ConsentState::Allowed);
+        assert_eq!(
+            checker.state("ext", "network:fetch"),
+            PermissionState::Granted
+        );
+        let mut changes = checker.changes("ext");
+
+        store.forget("ext");
+        assert_eq!(store.state("ext", &installed), ConsentState::NotEnabled);
+        assert_eq!(checker.state("ext", "network:fetch"), PermissionState::Ask);
+        assert_eq!(
+            futures::FutureExt::now_or_never(futures::StreamExt::next(&mut changes)).flatten(),
+            Some(("network:fetch".to_string(), PermissionState::Ask)),
+            "subscribers hear that it is no longer granted"
+        );
+        assert!(store.revocable().is_empty());
+
+        store.grant(
+            "foo",
+            record(
+                &["ui:panel"],
+                Grant::DevFolder {
+                    path: "C:/dev/foo".into(),
+                },
+            ),
+        );
+        assert_eq!(
+            store.state("foo", &record(&["ui:panel"], component())),
+            ConsentState::NotEnabled,
+            "a dev folder's consent is not a regular install's"
+        );
     }
 
     /// Spec decision 21 with integration-4 #3: a record is needed; then only new T1 capabilities
