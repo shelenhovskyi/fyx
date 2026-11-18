@@ -8,6 +8,8 @@
 mod api_version;
 pub mod canvas;
 pub mod image;
+#[cfg(feature = "network")]
+pub mod network;
 mod tree;
 mod types;
 pub mod v0_2;

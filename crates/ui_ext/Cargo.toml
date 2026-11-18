@@ -16,6 +16,13 @@ doctest = false
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
+# Only with the `network` feature: the host and the harness need it, guests do not.
+url = { workspace = true, optional = true }
+
+[features]
+# `ui_ext::network`: the pure part of fyx:ui 0.3 `network:fetch` (limits, types, the domain list,
+# the import checks), shared by `ui_ext_wasm`, `fyx_ext_harness` and `fyx_registry`.
+network = ["dep:url"]
 
 [dev-dependencies]
 proptest.workspace = true
