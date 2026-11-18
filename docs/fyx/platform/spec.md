@@ -80,8 +80,17 @@ line decorations, code lenses, read-only documents, network and processes behind
     own owners, as the PR's author or by an approving review. Any release that is **T2** needs the
     owner of the registry, for every version. So does anything that adds a T2 capability, a network
     domain or a process name. The owner also approves every `urgent` flag. An owner change needs
-    an existing owner of the entry. Design:
-    [registry-repo.md](registry-repo.md#review-rules).
+    an existing owner of the entry. Every entry PR also gets an **agent review** (owner,
+    2026-11-18), a CI job that can only escalate.
+    - **What it reviews:** the diff and the built package, for capabilities against code,
+      obfuscation, network and process use, and dubious assets.
+    - **Isolation:** no signing keys or write token, and the PR content is untrusted data. Text in
+      the PR that addresses the reviewer is itself a concern.
+    - **Verdict:** a structured verdict with reasons, posted as a comment. `concern` adds the
+      `needs-owner` label and blocks auto-merge until the owner approves. `pass` counts toward T0–T1
+      auto-merge and never approves anything.
+
+    Design: [registry-repo.md](registry-repo.md#review-rules).
 17. Client: the Extensions page gets a Fyx tab with search, install, update, uninstall,
     enable/disable, **pin version**, **roll back**, capability list in plain language, publisher,
     source link. Auto-update is on, but a new version installs only when it is **at least 24 h
