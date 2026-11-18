@@ -81,6 +81,66 @@ fn convert_reply<T, U>(
     }
 }
 
+/// What a stopped surface keeps in place of its instance: every call fails, so nothing reaches a
+/// dead instance and its `Store` is freed (triage-3, ASYNC 7). The last diagnostics stay, for
+/// the Extension Inspector.
+pub(crate) struct DeadBackend {
+    extension_id: String,
+    version: Version,
+    diagnostics: Option<ui_ext_wasm::diagnostics::Diagnostics>,
+}
+
+impl DeadBackend {
+    pub(crate) fn of(backend: &dyn UiBackend) -> Self {
+        Self {
+            extension_id: backend.extension_id().to_string(),
+            version: backend.api_version(),
+            diagnostics: backend.diagnostics(),
+        }
+    }
+
+    fn error<T: 'static>(&self) -> LocalBoxFuture<'static, Result<T>> {
+        let error = anyhow::anyhow!("{} is not running", self.extension_id);
+        async move { Err(error) }.boxed_local()
+    }
+}
+
+impl UiBackend for DeadBackend {
+    fn extension_id(&self) -> &str {
+        &self.extension_id
+    }
+
+    fn api_version(&self) -> Version {
+        self.version.clone()
+    }
+
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        self.error()
+    }
+
+    fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.error()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<Row>>>> {
+        self.error()
+    }
+
+    fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.error()
+    }
+
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        self.diagnostics.clone()
+    }
+}
+
 /// One loaded UI extension. Every call is asynchronous and runs off the frame; the renderer never
 /// awaits one inside `render()`.
 pub trait UiBackend: 'static {

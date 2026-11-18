@@ -363,6 +363,8 @@ package"), from Zed's installed-extensions directory, and from the environment v
   folder, that folder). Asking for more capabilities, or a different component, asks again on the
   next start.
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
+  It works in dev builds only (ignored, with a log line, in Preview and Stable), and every window
+  shows a banner while it is set.
 
 ### Extension Inspector
 

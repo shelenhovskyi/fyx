@@ -441,7 +441,11 @@ async fn test_dead_instance_can_restart(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(backend.restarts.get(), 1);
 
-    state.update(cx, |state, cx| state.retry(cx));
+    // The registry answers a restart with a new instance (here the same fake).
+    let surface = state.read_with(cx, |state, _| state.surface().clone());
+    state.update(cx, |state, cx| {
+        state.replace_backend(backend.clone(), surface, cx)
+    });
     cx.run_until_parked();
     state.update(cx, |state, cx| {
         state.show_reload_error("Reload failed: broken".into(), cx)
@@ -801,6 +805,18 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
     vcx.simulate_click(bounds.center(), Modifiers::none());
     vcx.run_until_parked();
     assert_eq!(props_of(&state, LABEL, vcx), text("Count: 1"));
+
+    // Triage-3, ASYNC 8: a panel that goes away (its workspace closed) stops showing the
+    // surface, so its ticks wait.
+    panel.update_in(vcx, |panel, window, cx| {
+        use workspace::Panel as _;
+        panel.set_active(true, window, cx)
+    });
+    assert!(state.read_with(vcx, |state, _| state.is_visible()));
+    drop(panel);
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert!(!state.read_with(vcx, |state, _| state.is_visible()));
 }
 
 #[test]
@@ -984,11 +1000,54 @@ async fn test_a_dead_instance_stops_the_extension(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(backend.calls(), [], "a stopped surface makes no calls");
-
+    // Triage-3, ASYNC 7: the surface let the instance go; only the test's handles remain.
+    assert_eq!(Rc::strong_count(&backend), 2, "the test and its link");
     state.update(cx, |state, cx| state.retry(cx));
+    cx.run_until_parked();
+    assert_eq!(backend.calls(), [], "even a forced retry does not reach it");
+    assert_eq!(
+        failure(&state, cx).as_deref(),
+        Some("fake crashed. Restart the extension to try again.")
+    );
+
+    // A restart hands over a new instance.
+    let surface = state.read_with(cx, |state, _| state.surface().clone());
+    state.update(cx, |state, cx| {
+        state.replace_backend(backend.clone(), surface, cx)
+    });
     cx.run_until_parked();
     assert_eq!(backend.take_calls(), [Call::Mount]);
     assert_eq!(failure(&state, cx), None);
+}
+
+/// Triage-3, ASYNC 12: typing still in its pause is sent when the view goes away.
+#[gpui::test]
+async fn test_pending_typing_is_sent_when_the_view_closes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    backend.take_calls();
+    let editor = view.read_with(vcx, |view, _| {
+        view.inputs
+            .get(&INPUT)
+            .map(|input| input.editor.clone())
+            .expect("input has an editor")
+    });
+    vcx.update(|window, cx| editor.focus_handle(cx).focus(window, cx));
+    vcx.run_until_parked();
+    vcx.simulate_input("hi");
+    vcx.run_until_parked();
+    assert_eq!(backend.events(), []);
+
+    drop(view);
+    drop(editor);
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [UiEvent::InputChanged(INPUT, "hi".into())]
+    );
 }
 
 /// Finding 6: short answers for two ranges (measuring and visible, or two windows) do not make
@@ -2049,6 +2108,52 @@ async fn test_stale_instance_results_are_dropped(cx: &mut TestAppContext) {
     }
     cx.run_until_parked();
     assert_eq!(failure(&state, cx).as_deref(), Some("stopped"));
+}
+
+/// Triage-3 (ASYNC 10): a guest that never answers cannot make the queue grow without end.
+#[gpui::test]
+async fn test_event_queue_is_bounded(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(GatedBackend::default());
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| SurfaceState::new(dyn_backend, panel_surface("p", "P"), None, cx));
+    backend
+        .mounts
+        .borrow_mut()
+        .remove(0)
+        .send(gated_tree("t"))
+        .ok();
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        for _ in 0..(crate::surface::MAX_QUEUED_EVENTS + 20) {
+            state.dispatch(UiEvent::Click(3), cx);
+        }
+    });
+    cx.run_until_parked();
+    // One is in flight; the rest wait, at most the cap.
+    let queued = state.read_with(cx, |state, _| state.queued_events().len());
+    assert!(
+        queued <= crate::surface::MAX_QUEUED_EVENTS,
+        "{queued} queued"
+    );
+}
+
+/// Triage-3 (BUG 31): a reinstall's new title reaches the registry's surface info.
+#[gpui::test]
+async fn test_reinstall_takes_the_new_title(cx: &mut TestAppContext) {
+    init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let backend: Rc<dyn UiBackend> = Rc::new(FakeBackend::default());
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel_surface("main", "Old")], cx)
+    });
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend, &[panel_surface("main", "New")], cx)
+    });
+    let title = registry.read_with(cx, |registry, _| {
+        registry.surface_of("fake", "main").unwrap().info.title
+    });
+    assert_eq!(title, "New");
 }
 
 /// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).

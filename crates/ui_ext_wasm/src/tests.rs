@@ -862,3 +862,34 @@ mod harness_conformance {
         );
     }
 }
+
+/// Triage-3, PERF 7: the epoch thread parks while no guest call runs and ticks during one.
+#[test]
+fn test_epoch_thread_parks_without_calls() {
+    ui_runtime().expect("runtime");
+    std::thread::sleep(UI_EPOCH_INTERVAL * 5);
+    let idle = EPOCH_TICKS.load(Ordering::Relaxed);
+    std::thread::sleep(UI_EPOCH_INTERVAL * 10);
+    assert_eq!(
+        EPOCH_TICKS.load(Ordering::Relaxed),
+        idle,
+        "no ticks while idle"
+    );
+
+    // A call waiting on the epoch thread's clock finishes, so the thread woke for it.
+    futures::executor::block_on(with_budget(Duration::from_secs(5), async {
+        // Pending without waking itself: only the epoch thread polls it again.
+        let until = Instant::now() + UI_EPOCH_INTERVAL * 5;
+        futures::future::poll_fn(|_| {
+            if Instant::now() >= until {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        anyhow::Ok(())
+    }))
+    .expect("the call finishes in its budget");
+    assert!(EPOCH_TICKS.load(Ordering::Relaxed) > idle);
+}

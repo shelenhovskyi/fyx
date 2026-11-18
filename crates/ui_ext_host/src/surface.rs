@@ -53,6 +53,9 @@ enum Next {
     Tick,
 }
 
+/// Events a surface queues for its extension before it drops new ones.
+pub const MAX_QUEUED_EVENTS: usize = 64;
+
 /// Remounts in a row caused by updates that did not fit, with no user input between them, before
 /// the surface gives up (judge review w3-deep-1, finding 4).
 const MAX_REMOUNTS_WITHOUT_INPUT: u32 = 3;
@@ -548,6 +551,11 @@ impl SurfaceState {
     /// Stops the surface: no events, no rows, the message in place of the tree. `retry` mounts
     /// again when `retryable`.
     pub fn fail(&mut self, message: SharedString, retryable: bool, cx: &mut Context<Self>) {
+        if !retryable {
+            // The instance will not be called again: let it go (a restart or reinstall brings a
+            // new one through `replace_backend`).
+            self.backend = Rc::new(crate::backend::DeadBackend::of(&*self.backend));
+        }
         self.phase = Phase::Failed { message, retryable };
         self.events.clear();
         // A failed surface drops its tick (design.md, B) and its mount in flight, so it does not
@@ -654,6 +662,17 @@ impl SurfaceState {
         }
         // A user event lets ticks resume after errors stopped them.
         self.tick_errors.on_user_event();
+        // A guest that never answers must not let the queue grow without end (triage-3, ASYNC 10).
+        if self.events.len() >= MAX_QUEUED_EVENTS {
+            log::warn!(
+                "fyx:ui {}/{}: {} events are waiting; dropping {:?}",
+                self.extension_id(),
+                self.surface.id,
+                self.events.len(),
+                self.redacted(&event)
+            );
+            return;
+        }
         let row_generation = match &event {
             // The generation of the row the user saw, which may be older than the list's
             // current one while its replacement is on the way (integration-3 finding 9).
@@ -819,7 +838,7 @@ impl SurfaceState {
         }
     }
 
-    fn is_visible(&self) -> bool {
+    pub(crate) fn is_visible(&self) -> bool {
         matches!(self.surface.kind, SurfaceKind::StatusItem(_)) || !self.visible_in.is_empty()
     }
 

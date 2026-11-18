@@ -128,6 +128,9 @@ pub struct UiExtensionRegistry {
     active_workspace: Option<gpui::EntityId>,
     /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
     load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
+    /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
+    /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
+    dev_reloads: HashMap<PathBuf, Task<()>>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -195,6 +198,8 @@ struct Found {
     source: ExtensionSource,
     /// For store installs: where the precompiled component goes.
     cache: Option<PrecompiledCache>,
+    /// The manifest as read by this scan; the load uses this one, not a second read.
+    manifest: UiManifest,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -482,9 +487,15 @@ impl UiExtensionRegistry {
             surface,
             FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
         );
-        if let Some(loaded) = self.surface_of(backend.extension_id(), &surface.id) {
+        if let Some(index) = self.surfaces.iter().position(|loaded| {
+            loaded.extension_id.as_ref() == backend.extension_id()
+                && loaded.surface_id.as_ref() == surface.id
+        }) {
             log::info!("fyx:ui: reloading surface {}", info.key);
-            loaded.state.update(cx, |state, cx| {
+            // The new instance's title and icon (triage-3, BUG 31); containers made from now on
+            // use them.
+            self.surfaces[index].info = Rc::new(info);
+            self.surfaces[index].state.update(cx, |state, cx| {
                 state.replace_backend(backend.clone(), surface.clone(), cx)
             });
             return;
@@ -673,22 +684,44 @@ impl UiExtensionRegistry {
                     this.update(cx, |this, _| this.consent.set_loaded(records))
                         .ok();
                 }
+                // Check each extension in turn (consent may ask), then load them all at once: each
+                // compiles on the background executor, so the loads overlap (triage-3, PERF 8).
+                let mut ready = Vec::new();
                 for found in to_load {
                     let trusted = this
                         .update(cx, |this, _| this.trust_installed)
                         .unwrap_or(false);
+                    // One read of the component: the consent check and the load use the same
+                    // bytes, as they use the same manifest (triage-3, SEC T1).
+                    let mut bytes = match fs.load_bytes(&found.component).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            log::error!(
+                                "fyx:ui: cannot read {}: {error:#}",
+                                found.component.display()
+                            );
+                            this.update(cx, |this, _| {
+                                this.report_load(&found.extension_id, Err(format!("{error:#}")))
+                            })
+                            .ok();
+                            continue;
+                        }
+                    };
                     if !trusted {
-                        let record = match ConsentRecord::current(
+                        let record = match ConsentRecord::for_bytes(
                             &found.dir,
                             &found.capabilities,
-                            &found.component,
+                            bytes,
                             found.is_dev,
                             fs.as_ref(),
                             &cx.background_executor(),
                         )
                         .await
                         {
-                            Ok(record) => record,
+                            Ok((record, same_bytes)) => {
+                                bytes = same_bytes;
+                                record
+                            }
                             Err(error) => {
                                 log::error!(
                                     "fyx:ui: not loading {}: {error:#}",
@@ -711,18 +744,26 @@ impl UiExtensionRegistry {
                         }
                     }
                     let checker = this.update(cx, |this, _| this.consent.checker()).ok();
-                    let loaded = UiExtension::load_from_dir_with_options(
-                        &found.dir,
-                        LoadOptions {
-                            cache: found.cache.clone(),
-                            capability_check: checker,
-                            allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
-                            ..LoadOptions::default()
-                        },
-                        fs.clone(),
+                    let options = LoadOptions {
+                        cache: found.cache.clone(),
+                        capability_check: checker,
+                        allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
+                        ..LoadOptions::default()
+                    };
+                    ready.push((found, bytes, options));
+                }
+                let loads = ready.into_iter().map(|(found, bytes, options)| {
+                    let load = UiExtension::load_checked(
+                        found.extension_id.clone(),
+                        found.manifest.clone(),
+                        bytes,
+                        options,
                         cx,
-                    )
-                    .await;
+                    );
+                    async move { (found, load.await.map(Some)) }
+                });
+                let results = futures::future::join_all(loads).await;
+                for (found, loaded) in results {
                     match loaded {
                         Ok(Some((extension, pushed))) => {
                             log::info!(
@@ -843,7 +884,8 @@ impl UiExtensionRegistry {
             // The scan compares the component's fingerprint and loads it again if it changed.
             Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
             Reload::DevPath(path) => {
-                cx.spawn(async move |this, cx| {
+                let key = path.clone();
+                let task = cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
                             "fyx:ui: failed to reload dev extension {}: {error:#}",
@@ -864,8 +906,8 @@ impl UiExtensionRegistry {
                         })
                         .ok();
                     }
-                })
-                .detach();
+                });
+                self.dev_reloads.insert(key, task);
             }
         }
     }
@@ -978,8 +1020,10 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
-        // The instance is gone (trap, disabled, uninstalled): so are its decorations.
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations, and the
+        // registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
+        self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
@@ -1264,6 +1308,7 @@ async fn found_at(
             capabilities: manifest.capabilities.clone(),
             source,
             cache,
+            manifest,
         }),
         Ok(None) | Err(_) => {
             log::error!(
@@ -1385,9 +1430,23 @@ pub fn init(cx: &mut App) {
     })
     .detach();
 
-    load_dev_extensions(cx);
+    // FYX_UI_DEV_EXTENSIONS loads without consent, so only dev builds honour it (triage-3).
+    if dev_build(cx) {
+        load_dev_extensions(cx);
+    } else if !dev_extension_paths().is_empty() {
+        log::warn!(
+            "fyx:ui: {DEV_EXTENSIONS_ENV} is ignored outside dev builds; use \
+             fyx_ui: install dev UI extension"
+        );
+    }
     follow_dev_paths_setting(cx);
     watch_installed_extensions(cx);
+}
+
+/// A dev build: the Dev release channel (also when none is set, as in tests).
+fn dev_build(cx: &App) -> bool {
+    release_channel::ReleaseChannel::try_global(cx)
+        .is_none_or(|channel| channel == release_channel::ReleaseChannel::Dev)
 }
 
 /// Whether a staged `fyx:ui` version (0.2 before it is frozen) may load (migration.md §2): on Dev
@@ -1575,6 +1634,18 @@ fn attach_to_workspace(
     })
     .detach();
 
+    // A banner while FYX_UI_DEV_EXTENSIONS is in use: those load without consent (triage-3).
+    if dev_build(cx) && !dev_extension_paths().is_empty() {
+        let message = format!(
+            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent.              Unset it to stop."
+        );
+        workspace.show_notification(
+            NotificationId::named("fyx-ui-dev-extensions-env".into()),
+            cx,
+            move |cx| cx.new(|cx| MessageNotification::new(message, cx)),
+        );
+    }
+
     // Modals open in the window the user was in last.
     let workspace_id = cx.entity_id();
     registry.update(cx, |registry, _| {
@@ -1591,6 +1662,25 @@ fn attach_to_workspace(
                     registry.set_active_workspace(workspace_id)
                 });
             }
+        }
+    })
+    .detach();
+
+    // A closed workspace lets its containers go at once: the registry's observers hold
+    // `surfaces` until its next notify (triage-3, ASYNC 8).
+    cx.on_release({
+        let surfaces = surfaces.clone();
+        let registry = registry.downgrade();
+        move |_, cx| {
+            let released = std::mem::take(&mut *surfaces.borrow_mut());
+            drop(released);
+            registry
+                .update(cx, |registry, _| {
+                    if registry.active_workspace == Some(workspace_id) {
+                        registry.active_workspace = None;
+                    }
+                })
+                .ok();
         }
     })
     .detach();
