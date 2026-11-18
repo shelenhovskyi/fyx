@@ -7,7 +7,7 @@ use std::{collections::VecDeque, ops::Range, rc::Rc};
 
 use collections::HashMap;
 use gpui::{App, Context, SharedString, Task};
-use ui_ext::{NodeId, Patch, Props, Surface, Tree, UiEvent, Update};
+use ui_ext::v0_2::{NodeId, Patch, Props, Surface, UiEvent, Update, tree::Tree};
 
 use crate::backend::{PushedUpdate, Reply, ReplyError, UiBackend};
 
@@ -112,7 +112,26 @@ pub struct SurfaceState {
     next_row_generation: u64,
     /// Recent events and updates, for the Extension Inspector.
     history: VecDeque<HistoryEntry>,
+    /// What differs by the component's `fyx:ui` version.
+    rules: ApiRules,
     _mount: Option<Task<()>>,
+}
+
+/// The renderer's behaviour by the component's `fyx:ui` version (migration.md §3), decided once
+/// when the surface is created, so no version comparisons are scattered through the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiRules {
+    /// 0.2: rows are fetched again only as design G says; 0.1: every touched list refetches.
+    pub precise_row_refetch: bool,
+}
+
+impl ApiRules {
+    pub fn for_version(version: &semver::Version) -> Self {
+        let v0_2 = *version >= semver::Version::new(0, 2, 0);
+        Self {
+            precise_row_refetch: v0_2,
+        }
+    }
 }
 
 /// Entries of a surface's history the Extension Inspector keeps.
@@ -142,15 +161,24 @@ pub fn summarize_update(update: &Update) -> String {
             let parts: Vec<String> = patches
                 .iter()
                 .map(|patch| match patch {
-                    ui_ext::Patch::SetProps(id, props) => {
+                    Patch::SetProps(id, props) => {
                         format!("set-props {id} ({})", props.kind_name())
                     }
-                    ui_ext::Patch::Insert(insert) => format!(
+                    Patch::Insert(insert) => format!(
                         "insert {} ({})",
                         insert.node.id,
                         insert.node.props.kind_name()
                     ),
-                    ui_ext::Patch::Remove(id) => format!("remove {id}"),
+                    Patch::Remove(id) => format!("remove {id}"),
+                    Patch::InvalidateRows(op) => match op.rows {
+                        Some(range) => format!(
+                            "invalidate-rows {} {}..{}",
+                            op.target,
+                            range.start,
+                            range.start + range.count
+                        ),
+                        None => format!("invalidate-rows {}", op.target),
+                    },
                 })
                 .collect();
             format!("patches: {}", parts.join(", "))
@@ -165,6 +193,7 @@ impl SurfaceState {
         link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let backend_version = backend.api_version();
         let mut this = Self {
             backend,
             surface,
@@ -182,6 +211,7 @@ impl SurfaceState {
             remounts_without_input: 0,
             next_row_generation: 0,
             history: VecDeque::new(),
+            rules: ApiRules::for_version(&backend_version),
             _mount: None,
         };
         this.mount(cx);
@@ -382,7 +412,7 @@ impl SurfaceState {
         let Some(tree) = self.tree() else {
             return;
         };
-        if !tree.contains(event.target()) {
+        if event.target().is_some_and(|target| !tree.contains(target)) {
             log::debug!("fyx:ui: dropping {event:?}, its node is gone");
             return;
         }
@@ -452,7 +482,7 @@ impl SurfaceState {
         {
             let still_there = self
                 .tree()
-                .is_some_and(|tree| tree.contains(event.target()));
+                .is_some_and(|tree| event.target().is_none_or(|target| tree.contains(target)));
             let same_rows = match (&event, row_generation) {
                 (UiEvent::RowClick(list, _), Some(generation)) => {
                     self.row_generation(*list) == generation
@@ -603,19 +633,35 @@ impl SurfaceState {
             Ok(touched) if touched.is_empty() => true,
             Ok(touched) => {
                 let tree = &*tree;
-                for id in touched {
-                    match tree.get(id).map(|node| node.props()) {
-                        // The WIT has no "rows changed" patch: a touched list (its row count,
-                        // usually) has its rows fetched again, once, for the visible range.
-                        Some(Props::List(_) | Props::Table(_)) => {
-                            if let Some(cache) = self.lists.get_mut(&id) {
-                                self.next_row_generation += 1;
-                                cache.invalidate(self.next_row_generation);
-                            }
-                        }
-                        // Set, inserted or replaced by the extension: the views write the value.
-                        Some(Props::Input(_)) => *self.input_sets.entry(id).or_default() += 1,
-                        _ => {}
+                // Which lists fetch their rows again (migration.md §3): a 0.1 component has no
+                // `invalidate-rows`, so every touched list refetches; a 0.2 component refetches
+                // only what design G names (`Touched::rows`). Either way only the visible range
+                // is fetched, once.
+                let refetch: Vec<NodeId> = if self.rules.precise_row_refetch {
+                    touched.rows.keys().copied().collect()
+                } else {
+                    touched
+                        .nodes
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            matches!(
+                                tree.get(*id).map(|node| node.props()),
+                                Some(Props::List(_) | Props::Table(_))
+                            )
+                        })
+                        .collect()
+                };
+                for id in refetch {
+                    if let Some(cache) = self.lists.get_mut(&id) {
+                        self.next_row_generation += 1;
+                        cache.invalidate(self.next_row_generation);
+                    }
+                }
+                for id in &touched.nodes {
+                    // Set, inserted or replaced by the extension: the views write the value.
+                    if let Some(Props::Input(_)) = tree.get(*id).map(|node| node.props()) {
+                        *self.input_sets.entry(*id).or_default() += 1;
                     }
                 }
                 self.lists.retain(|id, _| {

@@ -1,9 +1,9 @@
-//! Buffer decorations (layer 4, stretch): a retained `fyx:ui` tree drawn as an editor block above
-//! or below a buffer line.
+//! Buffer decorations (layer 4): a retained `fyx:ui` tree drawn as an editor block above or below
+//! a buffer line.
 //!
-//! `fyx:ui@0.1.0` has no decoration API, so for the sprint this is a host-side Rust API
-//! ([`Decorations`]) plus a dev-only data source ([`DEV_DECORATIONS_ENV`]). The WIT shape proposed
-//! for 0.2 is in `tasks/wit-0.2.md`.
+//! Three sources feed [`Decorations`]: extensions through `fyx:ui@0.2.0`'s `decorations` interface
+//! ([`Decorations::place_extension`], design.md §L), host code ([`Decorations::add`],
+//! [`Decorations::add_tree`]) and a dev-only data source ([`DEV_DECORATIONS_ENV`]).
 //!
 //! - A decoration names a file and a line. The first time a buffer for that file shows up in an
 //!   editor, the line becomes a CRDT anchor in that buffer, kept for the decoration's lifetime:
@@ -12,6 +12,10 @@
 //!   opened.
 //! - The tree lives in a [`SurfaceState`] and is drawn by a [`SurfaceView`], the same renderer as
 //!   panels, so it uses theme tokens only and never calls an extension while rendering.
+//! - Extension decorations live in a namespace per extension (`"<extension>/<id>"`), at most
+//!   [`ui_ext::MAX_DECORATIONS`] each. Their paths are worktree-relative and matched exactly, so an
+//!   extension cannot probe for files outside the open worktrees. The block's events and rows go
+//!   to the extension as `handle-event(id, ..)` and `list-rows(id, ..)`.
 //! - Editors are found with `observe_new::<Editor>` and use the editor's public block API, so no
 //!   upstream edit is needed.
 
@@ -35,14 +39,16 @@ use gpui::{
 };
 use language::{Bias, BufferId, Point};
 use serde::Deserialize;
-use ui_ext::{
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
     Align, ColorToken, FlexDirection, FlexProps, Node, NodeId, Props, StatusBarSide,
-    StatusItemDescriptor, Surface, SurfaceKind, TextProps, Tree, TreeLimits, UiEvent, Update,
+    StatusItemDescriptor, Surface, SurfaceKind, TextProps, UiEvent, Update, tree::Tree,
 };
 
 use crate::{
-    SurfaceState, SurfaceView,
+    Phase, SurfaceState, SurfaceView,
     backend::{Reply, UiBackend},
+    surface::SurfaceLink,
 };
 
 /// Dev-only data source for the sprint: the path of a JSON file (comments allowed) holding a list
@@ -65,11 +71,42 @@ pub enum DecorationPlacement {
     Below,
 }
 
+impl From<ui_ext::v0_2::DecorationPlacement> for DecorationPlacement {
+    fn from(placement: ui_ext::v0_2::DecorationPlacement) -> Self {
+        match placement {
+            ui_ext::v0_2::DecorationPlacement::Above => Self::Above,
+            ui_ext::v0_2::DecorationPlacement::Below => Self::Below,
+        }
+    }
+}
+
+/// How a decoration names its file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecorationPath {
+    /// Host and dev decorations: absolute (compared with the file's absolute path), or a suffix of
+    /// the worktree-qualified path by whole components (`"scratch/notes.txt"`, `"notes.txt"`).
+    Host(PathBuf),
+    /// Extension decorations (design.md §L): exactly this worktree-relative, `/`-separated path,
+    /// in any worktree of any open workspace. Checked with [`ui_ext::check_decoration_path`].
+    Worktree(String),
+}
+
+impl From<&str> for DecorationPath {
+    fn from(path: &str) -> Self {
+        Self::Host(path.into())
+    }
+}
+
+impl From<PathBuf> for DecorationPath {
+    fn from(path: PathBuf) -> Self {
+        Self::Host(path)
+    }
+}
+
 /// Where a decoration goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecorationTarget {
-    /// Absolute, or a suffix of the worktree-qualified path (compared by components).
-    pub path: PathBuf,
+    pub path: DecorationPath,
     /// Zero-based buffer row. Clipped to the last row of the buffer.
     pub row: u32,
     pub placement: DecorationPlacement,
@@ -80,8 +117,15 @@ pub struct DecorationTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DecorationId(u64);
 
+/// The extension that placed a decoration, and the id it gave it.
+struct Owner {
+    extension_id: Arc<str>,
+    id: String,
+}
+
 struct Decoration {
     id: DecorationId,
+    owner: Option<Owner>,
     target: DecorationTarget,
     state: Entity<SurfaceState>,
     /// Set for trees given by the host ([`Decorations::add_tree`]): updates are written back into
@@ -125,7 +169,7 @@ impl Decorations {
         surface: Surface,
         cx: &mut Context<Self>,
     ) -> DecorationId {
-        self.insert(target, backend, surface, None, cx)
+        self.insert(target, backend, surface, None, None, None, cx)
     }
 
     /// A decoration showing a host-supplied tree. Events are dropped.
@@ -149,24 +193,187 @@ impl Decorations {
                 priority: 0,
             }),
         };
-        Ok(self.insert(target, backend.clone(), surface, Some(backend), cx))
+        Ok(self.insert(
+            target,
+            backend.clone(),
+            surface,
+            Some(backend),
+            None,
+            None,
+            cx,
+        ))
     }
 
+    /// Applies an extension's `place-decoration(id, location, nodes)` effect (design.md §L).
+    ///
+    /// The host checked the call (capability, id rule, path rule, caps); the path and the
+    /// per-extension cap are checked here again, so no other caller can get around them. A live
+    /// id moves: the old decoration, its blocks and its queued events are dropped, and the line is
+    /// anchored anew. A tree that does not fit is not shown; the extension is asked for
+    /// `mount(id)` instead, and a decoration whose mount fails too is removed with one warning.
+    ///
+    /// `backend` is the extension's: calls for the decoration use `id` as the surface id. `link`
+    /// routes what those calls push for other surfaces back to the registry.
+    pub fn place_extension(
+        &mut self,
+        extension_id: &str,
+        id: &str,
+        location: &ui_ext::v0_2::DecorationLocation,
+        nodes: Vec<Node>,
+        backend: Rc<dyn UiBackend>,
+        link: Option<Rc<dyn SurfaceLink>>,
+        cx: &mut Context<Self>,
+    ) -> Result<DecorationId> {
+        ui_ext::check_decoration_path(&location.path)?;
+        let existing = self.extension_decoration(extension_id, id);
+        if existing.is_none() && self.count_of(extension_id) >= ui_ext::MAX_DECORATIONS {
+            anyhow::bail!(
+                "{extension_id} already has {} decorations",
+                ui_ext::MAX_DECORATIONS
+            );
+        }
+        if let Some(existing) = existing {
+            self.remove(existing, cx);
+        }
+        let placed = match Tree::from_nodes(nodes, TreeLimits::default()) {
+            Ok(tree) => Some(tree),
+            Err(error) => {
+                log::warn!(
+                    "fyx:ui {extension_id}/{id}: placed tree does not fit ({error}), mounting"
+                );
+                None
+            }
+        };
+        let backend = Rc::new(PlacedBackend {
+            inner: backend,
+            placed: RefCell::new(placed),
+        });
+        // Decorations are not surfaces; `SurfaceState` never reads `kind`.
+        let surface = Surface {
+            id: id.to_string(),
+            title: id.to_string(),
+            kind: SurfaceKind::StatusItem(StatusItemDescriptor {
+                side: StatusBarSide::Left,
+                priority: 0,
+            }),
+        };
+        let target = DecorationTarget {
+            path: DecorationPath::Worktree(location.path.clone()),
+            row: location.line,
+            placement: location.placement.into(),
+            lines: location.height_lines.map(u32::from),
+        };
+        let owner = Owner {
+            extension_id: extension_id.into(),
+            id: id.to_string(),
+        };
+        Ok(self.insert(target, backend, surface, None, Some(owner), link, cx))
+    }
+
+    /// Applies `remove-decoration(id)`. Returns whether the decoration was live.
+    pub fn remove_extension_decoration(
+        &mut self,
+        extension_id: &str,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.extension_decoration(extension_id, id) {
+            Some(decoration) => {
+                self.remove(decoration, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Removes every decoration of an extension: it was disabled, unloaded or is being reloaded.
+    /// Returns how many there were.
+    pub fn remove_extension(&mut self, extension_id: &str, cx: &mut Context<Self>) -> usize {
+        let len = self.decorations.len();
+        self.decorations
+            .retain(|decoration| !decoration.is_owned_by(extension_id));
+        let removed = len - self.decorations.len();
+        if removed > 0 {
+            cx.notify();
+        }
+        removed
+    }
+
+    /// Applies a `push-update(id, ..)` aimed at a decoration. Returns `false` when the extension
+    /// has no live decoration with that id.
+    pub fn push(
+        &mut self,
+        extension_id: &str,
+        id: &str,
+        update: Update,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(state) = self
+            .extension_decoration(extension_id, id)
+            .and_then(|decoration| self.state(decoration))
+            .cloned()
+        else {
+            return false;
+        };
+        state.update(cx, |state, cx| state.apply_pushed_update(update, cx));
+        true
+    }
+
+    /// The live decoration an extension placed with this id.
+    pub fn extension_decoration(&self, extension_id: &str, id: &str) -> Option<DecorationId> {
+        self.decorations
+            .iter()
+            .find(|decoration| {
+                decoration
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| &*owner.extension_id == extension_id && owner.id == id)
+            })
+            .map(|decoration| decoration.id)
+    }
+
+    /// How many live decorations an extension has.
+    pub fn count_of(&self, extension_id: &str) -> usize {
+        self.decorations
+            .iter()
+            .filter(|decoration| decoration.is_owned_by(extension_id))
+            .count()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         target: DecorationTarget,
         backend: Rc<dyn UiBackend>,
         surface: Surface,
         static_backend: Option<Rc<StaticBackend>>,
+        owner: Option<Owner>,
+        link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> DecorationId {
         let id = DecorationId(self.next_id);
         self.next_id += 1;
-        let state = cx.new(|cx| SurfaceState::new(backend, surface, None, cx));
-        // A mounted tree can change the estimated height.
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        let state = cx.new(|cx| SurfaceState::new(backend, surface, link, cx));
+        let owned = owner.is_some();
+        cx.observe(&state, move |this, state, cx| {
+            // An extension decoration that cannot be mounted is removed, not shown as an error.
+            if owned && let Phase::Failed { message, .. } = state.read(cx).phase() {
+                if let Some(owner) = this.decoration(id).and_then(|d| d.owner.as_ref()) {
+                    log::warn!(
+                        "fyx:ui {}/{}: decoration removed: {message}",
+                        owner.extension_id,
+                        owner.id
+                    );
+                }
+                this.remove(id, cx);
+            }
+            // A mounted tree can change the estimated height.
+            cx.notify();
+        })
+        .detach();
         self.decorations.push(Decoration {
             id,
+            owner,
             target,
             state,
             static_backend,
@@ -225,6 +432,14 @@ impl Decorations {
         self.decorations
             .iter()
             .find(|decoration| decoration.id == id)
+    }
+}
+
+impl Decoration {
+    fn is_owned_by(&self, extension_id: &str) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| &*owner.extension_id == extension_id)
     }
 }
 
@@ -297,11 +512,18 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
             let Some(file) = buffer.file() else {
                 continue;
             };
+            let worktree_path = file.path().as_unix_str();
             let full_path = file.full_path(cx);
             let abs_path = file.as_local().map(|file| file.abs_path(cx));
             let buffer_id = buffer.remote_id();
             for decoration in &decorations.decorations {
-                if !path_matches(&decoration.target.path, &full_path, abs_path.as_deref()) {
+                let matches = match &decoration.target.path {
+                    DecorationPath::Host(path) => {
+                        path_matches(path, &full_path, abs_path.as_deref())
+                    }
+                    DecorationPath::Worktree(path) => worktree_path_matches(path, worktree_path),
+                };
+                if !matches {
                     continue;
                 }
                 let anchor = match decoration.anchors.get(&buffer_id) {
@@ -429,6 +651,13 @@ pub(crate) fn path_matches(wanted: &Path, full_path: &Path, abs_path: Option<&Pa
     }
 }
 
+/// An extension's worktree-relative path names exactly the file at that path in its worktree. A
+/// buffer outside every worktree (a single-file worktree has an empty relative path) never
+/// matches.
+pub(crate) fn worktree_path_matches(wanted: &str, worktree_path: &str) -> bool {
+    !worktree_path.is_empty() && wanted == worktree_path
+}
+
 /// A rough height in editor lines: columns add their children, rows take the tallest. Padding
 /// and gaps are ignored; a tree taller than its block scrolls inside it.
 pub(crate) fn estimate_lines(tree: &Tree) -> u32 {
@@ -506,6 +735,54 @@ impl UiBackend for StaticBackend {
     }
 }
 
+/// An extension's backend for one decoration: the first mount answers with the placed tree
+/// without calling the extension; later mounts (a resync after a misfit) are `mount(id)` calls.
+struct PlacedBackend {
+    inner: Rc<dyn UiBackend>,
+    placed: RefCell<Option<Tree>>,
+}
+
+impl UiBackend for PlacedBackend {
+    fn extension_id(&self) -> &str {
+        self.inner.extension_id()
+    }
+
+    fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        match self.placed.borrow_mut().take() {
+            Some(value) => async move {
+                Ok(Reply {
+                    pushed: Vec::new(),
+                    value,
+                })
+            }
+            .boxed_local(),
+            None => self.inner.mount(surface_id),
+        }
+    }
+
+    fn handle_event(
+        &self,
+        surface_id: &str,
+        event: UiEvent,
+    ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.inner.handle_event(surface_id, event)
+    }
+
+    fn list_rows(
+        &self,
+        surface_id: &str,
+        list_node: NodeId,
+        start: u32,
+        count: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+        self.inner.list_rows(surface_id, list_node, start, count)
+    }
+
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        self.inner.diagnostics()
+    }
+}
+
 /// One entry of the [`DEV_DECORATIONS_ENV`] file.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -531,7 +808,7 @@ impl DevDecoration {
             _ => anyhow::bail!("give exactly one of `text` and `nodes`"),
         };
         let target = DecorationTarget {
-            path: self.path,
+            path: DecorationPath::Host(self.path),
             row: self.line.saturating_sub(1),
             placement: self.placement,
             lines: self.lines,

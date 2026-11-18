@@ -184,8 +184,8 @@ impl VsCodeSettings {
             agent: self.agent_settings_content(),
             agent_servers: None,
             agent_review: None, // fyx: agent_review
-            fyx: None,          // fyx: settings of Fyx crates
             fyx_security: None, // fyx: fyx_guard
+            fyx: None,          // fyx: settings of Fyx crates
             audio: None,
             auto_update: None,
             base_keymap: Some(BaseKeymapContent::VSCode),

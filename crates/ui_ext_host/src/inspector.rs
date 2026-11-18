@@ -18,7 +18,7 @@ use ui::{
     Button, ButtonCommon as _, ButtonStyle, Clickable as _, Color, IconName, Label,
     LabelCommon as _, LabelSize, h_flex, v_flex,
 };
-use ui_ext::{NodeId, Props, Tree};
+use ui_ext::v0_2::{NodeId, Props, tree::Tree};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::{
@@ -96,7 +96,10 @@ fn describe_props(props: &Props) -> String {
         Props::Input(input) => format!("{kind} {}", short(&input.value)),
         Props::List(list) => format!("{kind} {} rows", list.row_count),
         Props::Table(table) => format!("{kind} {} rows", table.row_count),
-        Props::Icon(icon) => format!("{kind} {}", icon.name),
+        Props::Icon(icon) => match &icon.name {
+            ui_ext::v0_2::IconRef::Frozen(frozen) => format!("{kind} {}", frozen.name()),
+            ui_ext::v0_2::IconRef::Upstream(name) => format!("{kind} {name} (0.1)"),
+        },
         Props::Markdown(source) => format!("{kind} {}", short(source)),
         Props::DiffView(diff) => format!(
             "{kind} {} → {} bytes",

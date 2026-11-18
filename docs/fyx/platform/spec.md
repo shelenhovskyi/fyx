@@ -86,17 +86,32 @@ line decorations, code lenses, read-only documents, network and processes behind
     enable/disable, **pin version**, **roll back**, capability list in plain language, publisher,
     source link. Auto-update is on, but a new version installs only when it is **at least 24 h
     old** in the index (security fixes flagged `urgent` skip the wait).
-18. Signatures: releases and the block list are signed by **separate keys**, held apart (owner,
-    2026-11-18). The client compiles in two keysets: release keys and block-list keys, each with a
-    current key and one rotation key. It verifies each document only against its own keyset, so a
-    stolen release key cannot forge a block list. A package from the registry with a bad signature
-    is refused. A `.fyxext` file installed from disk is allowed
-    with an "Unsigned, not from the registry" badge and never auto-updates.
-19. Block list: `blocklist.json` (id, version range, reason, `urgent`), signed with the block-list
-    key (decision 18), fetched at startup
+18. Signatures: releases, the snapshot and the block list are signed by **separate keys**, one role
+    each (`release`, `snapshot`, `blocklist`). Separate release and block-list keys were decided by
+    the owner on 2026-11-18; the snapshot role came with the format hardening of triage-3.
+    - **Three keysets.** The client compiles in three keysets, one per role, each with a current
+      key and one rotation key. It verifies each document only against the keys of its role, so a
+      stolen release key cannot forge a block list.
+    - **Where the keys live.** The release and snapshot keys are in the release-signing
+      environment, and the block-list key is in its own environment.
+    - **The snapshot.** `snapshot.json` pins `index.json` by size and SHA-256, has a `sequence`
+      that never goes down and an `expires_at` at most 7 days out, and can revoke keys. CI
+      re-signs it on every publish and every 12 h, for 48 h, so it never lapses. An expired or
+      rolled-back snapshot stops installs and updates from the index, and installed extensions
+      keep running.
+    - **Bad signatures.** A package from the registry with a bad signature is refused.
+    - **Files from disk.** A `.fyxext` file installed from disk is allowed with an "Unsigned, not
+      from the registry" badge and never auto-updates.
+    - Formats are in [registry-format.md](registry-format.md), keys and CI in
+      [registry-repo.md](registry-repo.md#keys).
+19. Block list: `blocklist.json` (id, version range or package hash, reason, `urgent`), signed with
+    the block-list key (decision 18) for 48 h at a time (`expires_at`, at most 7 days) and
+    re-signed every 12 h. It is fetched at startup
     and every **6 h**. A matching installed version is **disabled at once**, the user gets a
     notification, and if the kept previous version is not blocked the host rolls back to it. The
-    last good block list is cached; a fetch failure never disables anything.
+    last good block list is cached; a fetch failure never disables anything. A list whose signed
+    `generated_at` is 7 days old, or whose `expires_at` has passed, is shown as stale and still
+    applies.
 20. Zed's extension registry API is not called by Fyx code added in this milestone.
 
 ### Permissions and isolation (security)

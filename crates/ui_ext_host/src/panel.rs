@@ -12,17 +12,13 @@ use gpui::{
 };
 use theme::ActiveTheme as _;
 use ui::{IconName, h_flex, v_flex};
-use ui_ext::{DockPosition as SurfaceDockPosition, StatusBarSide, SurfaceKind};
+use ui_ext::v0_2::{DockPosition as SurfaceDockPosition, StatusBarSide, SurfaceKind};
 use workspace::{
     HideStatusItem, ItemHandle, StatusItemView, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-use crate::{
-    ToggleExtensionPanel,
-    surface::SurfaceState,
-    view::{SurfaceView, icon_name},
-};
+use crate::{ToggleExtensionPanel, surface::SurfaceState, view::SurfaceView};
 
 /// Panel types with a name of their own. `Panel::persistent_name` and `Panel::panel_key` are
 /// static (the dock calls them without a context), so a name per panel needs a type per panel:
@@ -90,10 +86,14 @@ pub struct SurfaceInfo {
 }
 
 impl SurfaceInfo {
-    pub fn new(extension_id: &str, surface: &ui_ext::Surface, activation_priority: u32) -> Self {
+    pub fn new(
+        extension_id: &str,
+        surface: &ui_ext::v0_2::Surface,
+        activation_priority: u32,
+    ) -> Self {
         let (icon, position, default_size) = match &surface.kind {
             SurfaceKind::Panel(panel) => (
-                icon_name(&panel.icon),
+                crate::icons::resolve_icon(&panel.icon).static_name(),
                 match panel.position {
                     SurfaceDockPosition::Left => DockPosition::Left,
                     SurfaceDockPosition::Right => DockPosition::Right,
@@ -101,7 +101,9 @@ impl SurfaceInfo {
                 },
                 px(panel.default_size.clamp(120, 2000) as f32),
             ),
-            SurfaceKind::StatusItem(_) => (IconName::Blocks, DockPosition::Right, px(320.)),
+            SurfaceKind::StatusItem(_) | SurfaceKind::Modal(_) => {
+                (IconName::Blocks, DockPosition::Right, px(320.))
+            }
         };
         let title = if surface.title.is_empty() {
             &surface.id
@@ -111,7 +113,7 @@ impl SurfaceInfo {
         let key = format!("{extension_id}/{}", surface.id);
         let slot = match surface.kind {
             SurfaceKind::Panel(_) => Some(panel_slot(&key)),
-            SurfaceKind::StatusItem(_) => None,
+            SurfaceKind::StatusItem(_) | SurfaceKind::Modal(_) => None,
         };
         Self {
             key: key.into(),

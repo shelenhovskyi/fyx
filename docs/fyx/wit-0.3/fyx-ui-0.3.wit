@@ -221,8 +221,17 @@ interface types {
     variant image-source {
         /// A PNG or SVG file in the extension package's `assets/` folder: a relative path with
         /// `/` separators and no `..`, such as `assets/logo.svg`. At most 2 MiB on disk.
+        ///
+        /// The path's syntax is checked when the update is applied; a bad path rejects the whole
+        /// update. Whether the file exists, its size and its dimensions are checked when it is
+        /// decoded; a failure there shows the alt text and logs one line, and the update stands.
         asset(string),
         /// An image the extension made at run time, from `images.add-image`.
+        ///
+        /// Effects apply in call order, so a handle that `add-image` returned earlier in the same
+        /// call can be used. A handle that was never returned, or is only returned later in the
+        /// call, is a reference error: the update is rejected. A handle that was removed shows the
+        /// alt text and logs one line, with no trap.
         generated(u32),
     }
 
@@ -248,7 +257,8 @@ interface types {
         height: option<u32>,
         fit: image-fit,
         /// SVG only: draw the image as a one-colour mask in this theme colour, like the host's
-        /// own icons. `none` keeps the SVG's colours.
+        /// own icons. `none` keeps the SVG's colours. On a PNG it is ignored and logged, and
+        /// `fyx-ext check` warns.
         tint: option<color-token>,
     }
 
