@@ -309,6 +309,15 @@ race.
 2. **Sign and publish**, in a separate job in the GitHub Environment `release-signing`. Only this
    job and `refresh.yml` can read the release and snapshot keys. It runs no extension code: it
    receives the package and the unsigned release as artifacts.
+   0. **Check the keyset**, before any key is read:
+      `fyx-registry verify keyset keys/keyset.json --online-snapshot-key "$SNAPSHOT_KEY_ID"`.
+      `SNAPSHOT_KEY_ID` is a repository variable, not a secret: the key id of `SNAPSHOT_KEY`. It is
+      a repository variable rather than an Environment one so that `pr.yml` can run the same check
+      (accepted 2026-11-18). The step fails, and nothing is signed, in three cases:
+      - a key with two signing roles;
+      - `blocklist-revocation` on a key without `snapshot`;
+      - the online snapshot key missing from the keyset, without `snapshot`, or with
+        `blocklist-revocation`.
    1. **Sign the release.** Set `published_at` to now. Run
       `fyx-registry sign release release.json --package <pkg> --out signed.json`, with the release
       key in `FYX_REGISTRY_SIGNING_KEY` for this step only.
@@ -335,8 +344,10 @@ A snapshot expires at most 7 days after it is signed, and the block list too. Fy
 for 48 h and refreshes them on a schedule, so neither ever lapses while the registry is quiet.
 
 - **Trigger:** `schedule` every 12 h (`cron: "17 */12 * * *"`), and `workflow_dispatch`.
-- **Snapshot job**, in `release-signing`. Re-sign the snapshot of the **unchanged** published
-  index: same `index_sha256`, `sequence` + 1, new `generated_at` and `expires_at`, and the same
+- **Snapshot job**, in `release-signing`. First the same keyset check as publish.yml step 0
+  (`fyx-registry verify keyset keys/keyset.json --online-snapshot-key "$SNAPSHOT_KEY_ID"`), so a
+  rotation that put the wrong key into `SNAPSHOT_KEY` stops the refresh too. Then re-sign the
+  snapshot of the **unchanged** published index: same `index_sha256`, `sequence` + 1, new `generated_at` and `expires_at`, and the same
   release and snapshot revocations (`--revoke`). Block-list revocations carry over in the client
   without being repeated. Verify it with `verify index --snapshot`, then upload it.
 - **Block-list job**, in `blocklist-signing`. Re-sign the published list's entries with
@@ -420,7 +431,12 @@ tests is a placeholder or is generated per test run.
   - Each key has exactly one signing role: `release`, `snapshot` or `blocklist`.
   - The offline snapshot rotation key also has `blocklist-revocation`. That role signs no
     document; it lets the key's snapshots revoke block-list keys.
-  - A CI check refuses a key with two signing roles, and `blocklist-revocation` on any other key.
+  - `fyx-registry verify keyset keys/keyset.json --online-snapshot-key <id of SNAPSHOT_KEY>`
+    enforces this. It runs as the first step of publish.yml and of refresh.yml's snapshot job, and
+    in `pr.yml` for any PR that touches `keys/`. It refuses three things:
+    - a key with two signing roles;
+    - `blocklist-revocation` on a key without `snapshot`;
+    - an online snapshot key that has `blocklist-revocation` or is not a `snapshot` key.
   - The client compiles in the whole keyset, and every verify call checks the role of its
     document (`WrongRole` otherwise): a release key cannot sign a block list or a snapshot, and the
     other way round.

@@ -405,13 +405,7 @@ mod tests {
         ));
         // The same snapshot again is fine; the same sequence with other contents is not.
         assert!(
-            VerifiedSnapshot::verify(
-                current,
-                &keyset(),
-                Timestamp(2_000),
-                Some(&accepted)
-            )
-            .is_ok()
+            VerifiedSnapshot::verify(current, &keyset(), Timestamp(2_000), Some(&accepted)).is_ok()
         );
         let conflicting = snapshot(&index, 5, &["test-rotation"]);
         assert!(matches!(

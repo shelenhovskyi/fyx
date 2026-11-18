@@ -342,6 +342,10 @@ fyx-registry verify index index.json --keyset keyset.json --snapshot snapshot.js
 fyx-registry verify blocklist blocklist.json --keyset keyset.json
 ```
 
+```bash
+fyx-registry verify keyset keyset.json --online-snapshot-key fyx-snap-2026-a
+```
+
 - `sign release` takes the unsigned release (the `signed` part above), validates it, checks it
   against the package file (`--package`, required), and writes the envelope.
 - `sign blocklist` takes the unsigned block list and writes the envelope.
@@ -351,6 +355,12 @@ fyx-registry verify blocklist blocklist.json --keyset keyset.json
 - `verify release|index|blocklist|snapshot` checks signatures and contents; `verify release
   --package` also checks the package file, `verify index --snapshot` that the snapshot names this
   index. Any failure exits non-zero.
+- `verify keyset` checks the registry's role separation (registry-repo.md, "Keys and roles"): it
+  refuses a key with two signing roles (`release`, `blocklist`, `snapshot`) and
+  `blocklist-revocation` on a key without `snapshot`. With `--online-snapshot-key <id>`, the key in
+  `SNAPSHOT_KEY`, it also refuses that key unless it has `snapshot` and not
+  `blocklist-revocation`, so a rotation cannot put that role into CI by accident. Clients do not
+  apply this check.
 - `index add` verifies the whole existing index and the new release, refuses a version that is
   already there, keeps releases sorted by id and version, sets `generated_at` (now, or
   `--generated-at`), and replaces the file atomically. A missing index is created.
