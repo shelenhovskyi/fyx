@@ -5,9 +5,11 @@
 name: publish
 
 on:
-  push:
-    branches: [main]
-    paths: ["extensions/**"]
+  # push:
+  #   branches: [main]
+  #   paths: ["extensions/**"]
+# Paused until launch (plan 3.2, 2026-11-19): Actions minutes on this private repository cost
+# money, so nothing runs on its own. Restore the trigger above with the owner's go-ahead.
   workflow_dispatch:
     inputs:
       first_run:

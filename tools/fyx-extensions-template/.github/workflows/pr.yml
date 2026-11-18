@@ -47,6 +47,18 @@ jobs:
           name: pr
           path: pr/
 
+  # The policy script's own tests (scripts/test_registry.py, scripts/test_published.py), on every
+  # PR: standard library only, no network, well under a minute.
+  policy-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        working-directory: scripts
+        run: python3 -m unittest -v test_registry test_published
+
   entry:
     needs: changes
     if: needs.changes.outputs.entries != '[]'
@@ -139,6 +151,11 @@ jobs:
           EXTENSION_PATH: ${{ steps.entry.outputs.path }}
         run: |
           package=$(ls out/*.fyxext)
+          # A package with a Zed extension (`extension.wasm`) is accepted as tier T2 (0.3 design
+          # Q1, decided 2026-11-19): the owner approves it, it never auto-merges.
+          if unzip -Z1 "$package" | grep -qiE '(^|[/\])extension\.wasm[. ]*$'; then
+            echo "::warning title=Unrestricted Zed extension::This package runs an unrestricted Zed extension (extension.wasm): its network and process access bypasses Fyx's permission checks. The release is tier T2 and needs the registry owner."
+          fi
           python3 scripts/registry.py release --entry entry.json \
             --manifest "source/$EXTENSION_PATH/extension.toml" --package "$package" > out/release.json
           sha256sum "$package" > out/package.sha256
