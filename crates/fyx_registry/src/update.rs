@@ -108,6 +108,10 @@ pub struct Permissions {
     pub capabilities: BTreeSet<String>,
     pub network_domains: BTreeSet<String>,
     pub processes: BTreeSet<String>,
+    /// The user accepted a package that also runs as a Zed extension (owner's Q1). Absent in
+    /// `state.json` written before integration-6: such an install has not accepted it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zed_extension: bool,
 }
 
 impl Permissions {
@@ -117,6 +121,7 @@ impl Permissions {
             capabilities: release.capabilities.clone(),
             network_domains: release.network_domains.clone(),
             processes: release.processes.clone(),
+            zed_extension: release.zed_extension,
         }
     }
 
@@ -148,6 +153,7 @@ impl Permissions {
                 .difference(&self.processes)
                 .cloned()
                 .collect(),
+            zed_extension: release.zed_extension && !self.zed_extension,
         }
     }
 
@@ -159,6 +165,7 @@ impl Permissions {
         self.network_domains
             .extend(release.network_domains.iter().cloned());
         self.processes.extend(release.processes.iter().cloned());
+        self.zed_extension |= release.zed_extension;
     }
 }
 
@@ -168,6 +175,9 @@ pub struct Additions {
     pub capabilities: BTreeSet<String>,
     pub network_domains: BTreeSet<String>,
     pub processes: BTreeSet<String>,
+    /// The release newly runs as a Zed extension (owner's Q1, W3 dfdb6b0023): an already-T2
+    /// install that gains a Zed `extension.wasm` is held for approval like a new capability.
+    pub zed_extension: bool,
 }
 
 impl Additions {
@@ -176,6 +186,7 @@ impl Additions {
             && self.capabilities.is_empty()
             && self.network_domains.is_empty()
             && self.processes.is_empty()
+            && !self.zed_extension
     }
 }
 
@@ -754,6 +765,37 @@ mod tests {
         );
     }
 
+    /// W3 dfdb6b0023: an update of an approved T2 install that newly runs as a Zed extension is
+    /// held for approval, and installs once approved.
+    #[test]
+    fn a_new_zed_extension_is_held() {
+        let t2 = |version: &str, zed_extension: bool| {
+            let mut release = todo(version);
+            release.tier = Tier::T2;
+            release.capabilities.insert("network:fetch".into());
+            release.zed_extension = zed_extension;
+            release
+        };
+        let index = index(vec![t2("1.0.0", false), t2("1.1.0", true)]);
+        let mut extension = installed("1.0.0", None);
+        extension.approved = Permissions::of(&t2("1.0.0", false));
+        assert_eq!(
+            actions(&extension, &index, None, LATER),
+            vec![Action::Hold {
+                version: version("1.1.0"),
+                reasons: vec![HoldReason::NeedsApproval(Additions {
+                    zed_extension: true,
+                    ..Additions::default()
+                })],
+            }]
+        );
+        extension.approved.approve(&t2("1.1.0", true));
+        assert_eq!(
+            actions(&extension, &index, None, LATER),
+            vec![update("1.1.0")]
+        );
+    }
+
     #[test]
     fn new_domains_programs_and_unknown_capabilities_are_held() {
         let mut current = todo("1.0.0");
@@ -782,6 +824,7 @@ mod tests {
                     capabilities: ["ui:from-the-future".to_string()].into(),
                     network_domains: ["cdn.example.com".to_string()].into(),
                     processes: ["rg".to_string()].into(),
+                    zed_extension: false,
                 })],
             }]
         );
@@ -922,6 +965,7 @@ mod tests {
                         capabilities: ["network:fetch".to_string()].into(),
                         network_domains: ["example.com".to_string()].into(),
                         processes: BTreeSet::new(),
+                        zed_extension: false,
                     })],
                 },
             ]
