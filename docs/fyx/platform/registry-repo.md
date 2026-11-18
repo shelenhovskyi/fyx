@@ -311,8 +311,9 @@ race.
    receives the package and the unsigned release as artifacts.
    0. **Check the keyset**, before any key is read:
       `fyx-registry verify keyset keys/keyset.json --online-snapshot-key "$SNAPSHOT_KEY_ID"`.
-      `SNAPSHOT_KEY_ID` is a plain variable of the `release-signing` Environment, not a secret: the
-      key id of `SNAPSHOT_KEY`. The step fails, and nothing is signed, in three cases:
+      `SNAPSHOT_KEY_ID` is a repository variable, not a secret: the key id of `SNAPSHOT_KEY`. It is
+      a repository variable rather than an Environment one so that `pr.yml` can run the same check
+      (accepted 2026-11-18). The step fails, and nothing is signed, in three cases:
       - a key with two signing roles;
       - `blocklist-revocation` on a key without `snapshot`;
       - the online snapshot key missing from the keyset, without `snapshot`, or with
