@@ -21,6 +21,7 @@ mod install;
 pub mod install_store;
 mod keyboard;
 mod modal;
+pub mod notifications;
 mod panel;
 mod registry;
 mod store_actions;

@@ -2352,3 +2352,237 @@ fn test_markdown_links_are_filtered() {
         assert!(!link_is_allowed(refused), "{refused}");
     }
 }
+
+mod notification_tests {
+    use super::*;
+    use crate::notifications::{ExtensionNotification, provenance_name};
+    use ui_ext::v0_2::{
+        Notification, NotificationAction, NotificationActionEvent, NotificationCloseReason,
+        NotificationLevel, notifications::BUTTON_CLICK_GUARD,
+    };
+
+    fn notification(auto_dismiss: bool) -> Notification {
+        Notification {
+            owner: "counter".into(),
+            level: NotificationLevel::Info,
+            title: "Build finished".into(),
+            body: Some("3 problems".into()),
+            actions: vec![NotificationAction {
+                id: "open".into(),
+                label: "Open".into(),
+            }],
+            auto_dismiss,
+        }
+    }
+
+    /// A registry with the fake extension's "counter" panel mounted and a workspace to show in.
+    fn setup(cx: &mut TestAppContext) -> (Rc<FakeBackend>, Entity<crate::UiExtensionRegistry>) {
+        init_test(cx);
+        let backend = Rc::new(FakeBackend::default());
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        let workspace = cx.new(|_| ()).entity_id();
+        registry.update(cx, |registry, cx| {
+            let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+            registry.register_backend(dyn_backend, &[panel_surface("counter", "Counter")], cx);
+            registry.set_active_workspace(workspace);
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        (backend, registry)
+    }
+
+    /// What the workspace does on `ShowNotification`: the view, in a window of its own.
+    fn show<'a>(
+        registry: &Entity<crate::UiExtensionRegistry>,
+        id: u64,
+        notification: Notification,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<ExtensionNotification>, &'a mut VisualTestContext) {
+        registry.update(cx, |registry, cx| {
+            registry.apply_effect("fake", HostEffect::Notify { id, notification }, cx)
+        });
+        let (name, notification) = registry
+            .update(cx, |registry, _| {
+                registry.take_pending_notification("fake", id)
+            })
+            .expect("pending");
+        let weak = registry.downgrade();
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            ExtensionNotification::new(id, "fake".into(), name, notification, weak, window, cx)
+        });
+        vcx.update(|window, _| window.activate_window());
+        registry.update(vcx, |registry, _| {
+            registry.set_notification_view("fake", id, view.downgrade())
+        });
+        vcx.run_until_parked();
+        // The test window's pointer starts over the card.
+        view.update(vcx, |view, cx| view.set_hovered(false, cx));
+        (view, vcx)
+    }
+
+    #[test]
+    fn test_provenance_name_follows_the_registry_rule() {
+        assert_eq!(provenance_name(Some("Todo Tools"), "todo"), "Todo Tools");
+        assert_eq!(provenance_name(None, "todo"), "todo");
+        assert_eq!(provenance_name(Some(""), "todo"), "todo");
+        assert_eq!(provenance_name(Some("Fyx\u{202e}"), "todo"), "todo", "bidi");
+        assert_eq!(provenance_name(Some("a\nb"), "todo"), "todo");
+        assert_eq!(provenance_name(Some(&"x".repeat(65)), "todo"), "todo");
+        assert_eq!(provenance_name(Some(" padded"), "todo"), "todo");
+    }
+
+    /// M.1: auto-dismiss expires with `notification-closed(expired)` after the level's time,
+    /// paused while hovered and while the window is in the background.
+    #[gpui::test]
+    async fn test_notification_expires_and_pauses_on_hover(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(true), cx);
+        vcx.executor().advance_clock(Duration::from_secs(3));
+        view.update(vcx, |view, cx| view.set_hovered(true, cx));
+        vcx.executor().advance_clock(Duration::from_secs(10));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "paused while hovered");
+        view.update(vcx, |view, cx| view.set_hovered(false, cx));
+        // In the background it waits too.
+        vcx.deactivate_window();
+        vcx.executor().advance_clock(Duration::from_secs(10));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "paused in the background");
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(Duration::from_secs(2));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "3 s of 6 were left");
+        vcx.executor().advance_clock(Duration::from_secs(2));
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                1,
+                NotificationCloseReason::Expired
+            ))]
+        );
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_notifications("fake")),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// M.1: a button click inside the guard is ignored; after it, `notification-action` goes to
+    /// the owner and no `notification-closed` follows. The close button works at once.
+    #[gpui::test]
+    async fn test_notification_buttons_and_close(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(false), cx);
+        vcx.executor().advance_clock(Duration::from_millis(500));
+        view.update(vcx, |view, cx| view.click_action("open", cx));
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "inside the click guard");
+        vcx.executor().advance_clock(BUTTON_CLICK_GUARD);
+        view.update(vcx, |view, cx| view.click_action("open", cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationAction(
+                NotificationActionEvent {
+                    notification: 1,
+                    action: "open".into()
+                }
+            ))]
+        );
+        drop(view);
+
+        // Another one, closed by the user at once.
+        registry.update(vcx, |registry, cx| {
+            registry.apply_effect(
+                "fake",
+                HostEffect::Notify {
+                    id: 2,
+                    notification: notification(false),
+                },
+                cx,
+            )
+        });
+        let (name, pending) = registry
+            .update(vcx, |registry, _| {
+                registry.take_pending_notification("fake", 2)
+            })
+            .expect("pending");
+        let weak = registry.downgrade();
+        let second = vcx.update(|window, cx| {
+            cx.new(|cx| {
+                ExtensionNotification::new(2, "fake".into(), name, pending, weak, window, cx)
+            })
+        });
+        second.update(vcx, |view, cx| {
+            view.close(NotificationCloseReason::User, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                2,
+                NotificationCloseReason::User
+            ))]
+        );
+    }
+
+    /// M.1: `dismiss-notification` and the owner's removal close without events, and the
+    /// window going away sends `window-closed`.
+    #[gpui::test]
+    async fn test_notifications_close_without_events(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(false), cx);
+        registry.update(vcx, |registry, cx| {
+            registry.apply_effect("fake", HostEffect::DismissNotification { id: 1 }, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "no event on dismiss-notification");
+        // The view is gone with its window: nothing more is sent.
+        drop(view);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), []);
+
+        registry.update(vcx, |registry, cx| {
+            registry.apply_effect(
+                "fake",
+                HostEffect::Notify {
+                    id: 2,
+                    notification: notification(false),
+                },
+                cx,
+            );
+            registry.apply_effect(
+                "fake",
+                HostEffect::RemoveSurface {
+                    surface_id: "counter".into(),
+                },
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        assert_eq!(backend.events(), [], "no event when the owner goes");
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_notifications("fake")),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// M.1: an open notification whose window goes away tells its owner `window-closed`.
+    #[gpui::test]
+    async fn test_notification_window_closes(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx);
+        let (view, vcx) = show(&registry, 1, notification(false), cx);
+        drop(view);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Event(UiEvent::NotificationClosed(
+                1,
+                NotificationCloseReason::WindowClosed
+            ))]
+        );
+    }
+}

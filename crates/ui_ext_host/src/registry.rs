@@ -37,7 +37,10 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity, Window,
 };
 use settings::Settings as _;
-use ui_ext::v0_2::{StatusBarSide, Surface, SurfaceKind, Update};
+use ui_ext::v0_2::{
+    NotificationActionEvent, NotificationCloseReason, StatusBarSide, Surface, SurfaceKind, UiEvent,
+    Update,
+};
 use ui_ext_wasm::{
     CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, UiExtension,
     UiManifest,
@@ -128,6 +131,8 @@ pub struct UiExtensionRegistry {
     active_workspace: Option<gpui::EntityId>,
     /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
     load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
+    /// Open extension notifications, by extension and the id its instance gave them.
+    notifications: HashMap<(Arc<str>, u64), OpenNotification>,
     /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
     /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
     dev_reloads: HashMap<PathBuf, Task<()>>,
@@ -148,6 +153,21 @@ pub enum RegistryEvent {
     },
     /// The extension closed a modal (`hide-surface`, `remove-surface`): no `dismissed`.
     CloseModal(SharedString),
+    /// `notify` (design.md M.1): the workspace named shows it (the active window's).
+    ShowNotification {
+        extension_id: Arc<str>,
+        id: u64,
+        workspace: gpui::EntityId,
+    },
+}
+
+/// An extension notification from `notify` until it closes (design.md M.1).
+struct OpenNotification {
+    /// The surface or decoration that gets its events.
+    owner: String,
+    /// Until the workspace takes it to draw.
+    pending: Option<ui_ext::v0_2::Notification>,
+    view: Option<WeakEntity<crate::notifications::ExtensionNotification>>,
 }
 
 impl gpui::EventEmitter<RegistryEvent> for UiExtensionRegistry {}
@@ -450,6 +470,8 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
+        // A new instance (a reload) starts with none of the old one's notifications.
+        self.close_notifications_of(backend.extension_id(), None, cx);
         // A reload starts without decorations; the new instance places its own.
         remove_decorations(backend.extension_id(), cx);
         for loaded in self.surfaces_of(backend.extension_id()) {
@@ -537,6 +559,183 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// `notify`: shown in the active window, or with none dropped and the owner told
+    /// (`notification-closed(window-closed)`, M.1).
+    fn show_notification(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        notification: ui_ext::v0_2::Notification,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = notification.owner.clone();
+        let Some(workspace) = self.active_workspace else {
+            log::info!(
+                "fyx:ui: {extension_id}: no workspace window for the notification {}",
+                ui_ext::sanitize_for_log(&notification.title)
+            );
+            self.send_to_owner(
+                extension_id,
+                &owner,
+                UiEvent::NotificationClosed(id, NotificationCloseReason::WindowClosed),
+                cx,
+            );
+            return;
+        };
+        let extension_id: Arc<str> = extension_id.into();
+        self.notifications.insert(
+            (extension_id.clone(), id),
+            OpenNotification {
+                owner,
+                pending: Some(notification),
+                view: None,
+            },
+        );
+        cx.emit(RegistryEvent::ShowNotification {
+            extension_id,
+            id,
+            workspace,
+        });
+    }
+
+    /// For the workspace drawing a notification: what to draw, and the provenance name.
+    pub(crate) fn take_pending_notification(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+    ) -> Option<(SharedString, ui_ext::v0_2::Notification)> {
+        let notification = self
+            .notifications
+            .get_mut(&(Arc::from(extension_id), id))?
+            .pending
+            .take()?;
+        let name = crate::notifications::provenance_name(
+            self.backends
+                .get(extension_id)
+                .and_then(|backend| backend.display_name()),
+            extension_id,
+        );
+        Some((name, notification))
+    }
+
+    pub(crate) fn set_notification_view(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        view: WeakEntity<crate::notifications::ExtensionNotification>,
+    ) {
+        if let Some(open) = self.notifications.get_mut(&(Arc::from(extension_id), id)) {
+            open.view = Some(view);
+        }
+    }
+
+    /// `dismiss-notification`: closed without an event (D's rule).
+    fn dismiss_notification(&mut self, extension_id: &str, id: u64, cx: &mut Context<Self>) {
+        if let Some(open) = self.notifications.remove(&(Arc::from(extension_id), id)) {
+            close_notification_view(open, cx);
+        }
+    }
+
+    /// The user or the timer closed a notification, or its window went away.
+    pub(crate) fn notification_closed(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        reason: NotificationCloseReason,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(open) = self.notifications.remove(&(Arc::from(extension_id), id)) {
+            self.send_to_owner(
+                extension_id,
+                &open.owner,
+                UiEvent::NotificationClosed(id, reason),
+                cx,
+            );
+        }
+    }
+
+    /// A button of a notification was clicked (after the click guard): it closes, and only
+    /// `notification-action` goes to the owner.
+    pub(crate) fn notification_action(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        action: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(open) = self.notifications.remove(&(Arc::from(extension_id), id)) {
+            self.send_to_owner(
+                extension_id,
+                &open.owner,
+                UiEvent::NotificationAction(NotificationActionEvent {
+                    notification: id,
+                    action,
+                }),
+                cx,
+            );
+        }
+    }
+
+    /// Closes the notifications of an extension (`owner: None`) or of one of its owners, without
+    /// events: the owner is gone, or the instance is.
+    fn close_notifications_of(
+        &mut self,
+        extension_id: &str,
+        owner: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let closing: Vec<(Arc<str>, u64)> = self
+            .notifications
+            .iter()
+            .filter(|((id, _), open)| {
+                id.as_ref() == extension_id && owner.is_none_or(|owner| open.owner == owner)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in closing {
+            if let Some(open) = self.notifications.remove(&key) {
+                close_notification_view(open, cx);
+            }
+        }
+    }
+
+    /// The open notifications of an extension, for tests and the Inspector.
+    pub fn open_notifications(&self, extension_id: &str) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .notifications
+            .keys()
+            .filter(|(id, _)| id.as_ref() == extension_id)
+            .map(|(_, id)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// An event for a notification or progress, to its owner surface or decoration.
+    fn send_to_owner(
+        &mut self,
+        extension_id: &str,
+        owner: &str,
+        event: UiEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(surface) = self.surface_of(extension_id, owner) {
+            surface
+                .state
+                .update(cx, |state, cx| state.dispatch(event, cx));
+            return;
+        }
+        let state = Decorations::global(cx).and_then(|decorations| {
+            let decorations = decorations.read(cx);
+            let id = decorations.extension_decoration(extension_id, owner)?;
+            decorations.state(id).cloned()
+        });
+        match state {
+            Some(state) => state.update(cx, |state, cx| state.dispatch(event, cx)),
+            None => log::debug!("fyx:ui: {extension_id}: no owner {owner:?} for {event:?}"),
+        }
+    }
+
     /// The workspace whose window became active; modals open there.
     pub fn set_active_workspace(&mut self, workspace: gpui::EntityId) {
         self.active_workspace = Some(workspace);
@@ -581,6 +780,8 @@ impl UiExtensionRegistry {
     /// `remove-surface`: its containers close in every workspace; its tree, queued events and
     /// tick go with its state. No event reaches the extension.
     fn remove_surface(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        // Nothing outlives its owner, and its removal sends no events (design.md M).
+        self.close_notifications_of(extension_id, Some(surface_id), cx);
         let before = self.surfaces.len();
         self.surfaces.retain(|surface| {
             !(surface.extension_id.as_ref() == extension_id
@@ -1020,9 +1221,10 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
-        // The instance is gone (trap, disabled, uninstalled): so are its decorations, and the
-        // registry's handle on it (triage-3, ASYNC 7).
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations, its
+        // notifications, and the registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
+        self.close_notifications_of(extension_id, None, cx);
         self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
@@ -1150,7 +1352,9 @@ impl UiExtensionRegistry {
                         decorations.remove_extension_decoration(extension_id, &id, cx)
                     })
                 });
-                if !removed {
+                if removed {
+                    self.close_notifications_of(extension_id, Some(&id), cx);
+                } else {
                     log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
                 }
             }
@@ -1161,10 +1365,14 @@ impl UiExtensionRegistry {
                     "fyx:ui: {extension_id}: image {handle} ignored (no image renderer yet)"
                 )
             }
-            // §M (design.md M): drawn by the renderer's notification and progress views (W3).
-            HostEffect::Notify { .. }
-            | HostEffect::DismissNotification { .. }
-            | HostEffect::ProgressStart { .. }
+            HostEffect::Notify { id, notification } => {
+                self.show_notification(extension_id, id, notification, cx)
+            }
+            HostEffect::DismissNotification { id } => {
+                self.dismiss_notification(extension_id, id, cx)
+            }
+            // §M progress (design.md M.2): drawn by the renderer's progress views (W3).
+            HostEffect::ProgressStart { .. }
             | HostEffect::ProgressUpdate { .. }
             | HostEffect::ProgressEnd { .. } => {
                 log::debug!("fyx:ui: {extension_id}: {effect:?} ignored (no notification view yet)")
@@ -1594,6 +1802,23 @@ fn attach_to_workspace(
                     }
                     return;
                 }
+                RegistryEvent::ShowNotification {
+                    extension_id,
+                    id,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        show_extension_notification(
+                            workspace,
+                            &registry,
+                            extension_id.clone(),
+                            *id,
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
                 RegistryEvent::CloseModal(key) => {
                     if let Some(modal) = workspace.active_modal::<ExtensionModal>(cx)
                         && modal.read(cx).key() == key
@@ -1690,6 +1915,49 @@ fn attach_to_workspace(
         add_missing_surfaces(workspace, &registry, &surfaces, window, cx);
         offer_consent(workspace, &registry, &surfaces, cx);
     });
+}
+
+/// Draws an extension notification in this workspace's notification stack (design.md M.1).
+fn show_extension_notification(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: Arc<str>,
+    id: u64,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some((name, notification)) = registry.update(cx, |registry, _| {
+        registry.take_pending_notification(&extension_id, id)
+    }) else {
+        return;
+    };
+    let view = cx.new(|cx| {
+        crate::notifications::ExtensionNotification::new(
+            id,
+            extension_id.clone(),
+            name,
+            notification,
+            registry.downgrade(),
+            window,
+            cx,
+        )
+    });
+    registry.update(cx, |registry, _| {
+        registry.set_notification_view(&extension_id, id, view.downgrade())
+    });
+    workspace.show_notification(
+        NotificationId::composite::<crate::notifications::ExtensionNotification>(
+            SharedString::from(format!("{extension_id}/{id}")),
+        ),
+        cx,
+        |_| view,
+    );
+}
+
+fn close_notification_view(open: OpenNotification, cx: &mut App) {
+    if let Some(view) = open.view.and_then(|view| view.upgrade()) {
+        view.update(cx, |view, cx| view.close_by_host(cx));
+    }
 }
 
 /// One notification per installed extension waiting for consent, once per workspace: what it
