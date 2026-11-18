@@ -82,6 +82,8 @@ pub struct SurfaceView {
     /// The state's `mount_count` at the last sync.
     synced_mount: u64,
     _observe_state: Subscription,
+    /// Redraws when an image this view may show finishes decoding (plan 4.11).
+    _observe_images: Option<Subscription>,
 }
 
 impl SurfaceView {
@@ -124,6 +126,8 @@ impl SurfaceView {
             synced_mount: 0,
             synced_props: HashMap::default(),
             _observe_state: observe_state,
+            _observe_images: crate::images::ImageCache::global(cx)
+                .map(|images| cx.observe(&images, |_, _, cx| cx.notify())),
         };
         this.sync(window, cx);
         // Typing still waiting for its pause goes out when the view closes (a panel removed, a
@@ -826,6 +830,17 @@ impl Render for SurfaceView {
             .on_action(cx.listener(Self::cancel_input))
             .child(body)
             .when(!compact, |this| this.children(error))
+            .on_children_prepainted({
+                // Images the frame lacked are decoded after it, never inside it (§12).
+                let images = crate::images::ImageCache::global(cx);
+                move |_, _, cx| {
+                    if let Some(images) = &images
+                        && images.read(cx).has_wanted()
+                    {
+                        images.update(cx, |images, cx| images.request_wanted(cx));
+                    }
+                }
+            })
     }
 }
 
@@ -916,7 +931,7 @@ impl Renderer<'_, '_> {
             Props::Icon(props) => self.icon(props),
             Props::Markdown(source) => self.markdown(id, source, scope),
             Props::DiffView(props) => self.diff_view(id, props, scope),
-            Props::Image(props) => self.image_placeholder(props),
+            Props::Image(props) => self.image(props),
             Props::Canvas(props) => self.canvas_placeholder(props),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
@@ -1245,7 +1260,63 @@ impl Renderer<'_, '_> {
 
     /// A 0.3 `image` node as the muted box with its alt text that design.md §12 draws
     /// while an image loads or when it fails. Decoding comes with plan 4.11.
-    fn image_placeholder(&self, props: &ui_ext::image::ImageProps) -> AnyElement {
+    /// An image node (plan 4.11): the decoded picture clipped to its box, or its alt text while it
+    /// decodes, and with a warning icon when it failed.
+    fn image(&self, props: &ui_ext::image::ImageProps) -> AnyElement {
+        let Some(cache) = crate::images::ImageCache::global(self.cx) else {
+            return self.image_placeholder(props, false);
+        };
+        let extension_id = self.state.extension_id().to_string();
+        let scale = self.window.scale_factor();
+        let side = |logical: Option<u32>| {
+            (logical.unwrap_or(DEFAULT_IMAGE_SIDE) as f32 * scale).round() as u32
+        };
+        let tint = props.tint.map(|token| {
+            let color = text_color(token, self.cx).color(self.cx).to_rgb();
+            let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u32;
+            channel(color.r) << 24
+                | channel(color.g) << 16
+                | channel(color.b) << 8
+                | channel(color.a)
+        });
+        let cache = cache.read(self.cx);
+        let Some(key) = cache.key_for(
+            &extension_id,
+            &props.source,
+            None,
+            (side(props.width), side(props.height)),
+            tint,
+        ) else {
+            // A generated handle that is gone: the alt text.
+            return self.image_placeholder(props, true);
+        };
+        match cache.get(&extension_id, &key) {
+            crate::images::ImageState::Ready(image) => div()
+                .when_some(props.width, |this, width| this.w(px(width as f32)))
+                .when_some(props.height, |this, height| this.h(px(height as f32)))
+                .when(props.width.is_none(), |this| {
+                    this.w(px(DEFAULT_IMAGE_SIDE as f32))
+                })
+                .when(props.height.is_none(), |this| {
+                    this.h(px(DEFAULT_IMAGE_SIDE as f32))
+                })
+                .max_w_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(gpui::ImageSource::Render(image))
+                        .size_full()
+                        .object_fit(match props.fit {
+                            ui_ext::image::ImageFit::Contain => gpui::ObjectFit::Contain,
+                            ui_ext::image::ImageFit::Cover => gpui::ObjectFit::Cover,
+                        }),
+                )
+                .into_any_element(),
+            crate::images::ImageState::Pending => self.image_placeholder(props, false),
+            crate::images::ImageState::Failed => self.image_placeholder(props, true),
+        }
+    }
+
+    fn image_placeholder(&self, props: &ui_ext::image::ImageProps, failed: bool) -> AnyElement {
         div()
             .when_some(props.width, |this, width| this.w(px(width as f32)))
             .when_some(props.height, |this, height| this.h(px(height as f32)))
@@ -1260,6 +1331,14 @@ impl Renderer<'_, '_> {
             .border_1()
             .border_color(self.cx.theme().colors().border_variant)
             .bg(self.cx.theme().colors().element_background)
+            .gap_1()
+            .when(failed, |this| {
+                this.child(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
             .child(
                 Label::new(props.alt.clone())
                     .size(LabelSize::Small)
@@ -1611,6 +1690,9 @@ pub(crate) fn button_style(style: ButtonStyle) -> UiButtonStyle {
 
 /// Text and icon colours: the `ui` crate's semantic colours where one exists, otherwise the
 /// theme's own token. Never a raw colour from the extension.
+/// The side an image without `width` or `height` takes, in logical pixels.
+const DEFAULT_IMAGE_SIDE: u32 = 128;
+
 pub(crate) fn text_color(token: ColorToken, cx: &App) -> Color {
     match token {
         ColorToken::Text => Color::Default,

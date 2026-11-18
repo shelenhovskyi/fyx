@@ -28,12 +28,14 @@ futures.workspace = true
 fyx_registry.workspace = true
 gpui.workspace = true
 http_client.workspace = true
+image.workspace = true
 language.workspace = true
 log.workspace = true
 markdown.workspace = true
 menu.workspace = true
 paths.workspace = true
 release_channel.workspace = true
+resvg.workspace = true
 schemars.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -45,6 +47,7 @@ toml.workspace = true
 ui.workspace = true
 ui_ext.workspace = true
 ui_ext_wasm.workspace = true
+usvg.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
