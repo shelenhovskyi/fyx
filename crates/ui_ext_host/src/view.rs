@@ -1030,9 +1030,8 @@ impl Renderer<'_, '_> {
                 .style(style)
                 .disabled(props.disabled)
                 .when_some(
-                    accessible.or_else(|| {
-                        props.label.is_empty().then(|| tooltip.clone()).flatten()
-                    }),
+                    accessible
+                        .or_else(|| props.label.is_empty().then(|| tooltip.clone()).flatten()),
                     |this, name| this.aria_label(name),
                 )
                 .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))

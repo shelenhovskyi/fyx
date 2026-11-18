@@ -607,7 +607,6 @@ pub fn decode_svg(
     Ok((RenderImage::new(vec![frame]), bytes))
 }
 
-
 /// §12: at most [`MAX_SVG_NODES`] nodes (nested `<use>` and patterns count where they are drawn),
 /// and blurs of at most [`MAX_SVG_BLUR_STD_DEVIATION`].
 fn check_svg_tree(root: &usvg::Group) -> Result<()> {

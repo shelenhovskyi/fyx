@@ -354,6 +354,7 @@ impl RegistryHub {
                 };
                 let actions = client.plan_updates(&installed, time);
                 let freshness = client.blocklist_freshness(time);
+                let blocks_checked = lifts_blocks(&client, time);
                 // The releases the actions name, while the index is at hand.
                 let releases: Vec<Release> = match client.index(time) {
                     Ok(index) => actions
@@ -380,8 +381,15 @@ impl RegistryHub {
                         })
                         .cloned()
                         .collect();
-                    applied =
-                        apply_plan(&registry, store, fs.as_ref(), &automatic, &releases).await;
+                    applied = apply_plan(
+                        &registry,
+                        store,
+                        fs.as_ref(),
+                        &automatic,
+                        &releases,
+                        blocks_checked,
+                    )
+                    .await;
                     if let Ok(state) = store.state(fs.as_ref()).await {
                         disabled = state
                             .extensions
@@ -478,13 +486,18 @@ pub struct PlanOutcome {
     pub blocks: Vec<BlockNotice>,
 }
 
-/// Carries out what the update check may do by itself.
+/// Carries out what the update check may do by itself. `blocks_checked` says the actions were
+/// planned against a verified block list that is fresh ([`lifts_blocks`]): only then does a
+/// disabled extension that nothing blocks any more load again. Without one (never fetched, the
+/// cache dropped because a rotation revoked its key, or offline for days), blocked extensions
+/// stay disabled (integration-6 N4).
 pub(crate) async fn apply_plan(
     registry: &Registry,
     store: &crate::install_store::InstallStore,
     fs: &dyn Fs,
     actions: &[PlannedAction],
     updates: &[Release],
+    blocks_checked: bool,
 ) -> PlanOutcome {
     let mut applied = Vec::new();
     let mut blocks = Vec::new();
@@ -507,6 +520,14 @@ pub(crate) async fn apply_plan(
                 else {
                     continue;
                 };
+                // The owner's Q1 warning is shown before a release starts running a Zed
+                // extension, so such an update waits for the page's Update and its dialog.
+                if newly_runs_zed_extension(store, id, release, fs).await {
+                    note(format!(
+                        "{id} {to} also runs a Zed extension; update it from the extensions page"
+                    ));
+                    continue;
+                }
                 let result = async {
                     let bytes = registry.download(release).await?;
                     store
@@ -550,8 +571,9 @@ pub(crate) async fn apply_plan(
             Action::Hold { .. } => {}
         }
     }
-    // A block that lifted enables the extension again.
-    if let Ok(state) = store.state(fs).await {
+    // A block that lifted enables the extension again, but only a fresh, verified list says so:
+    // "no list" is never "nothing blocked".
+    if blocks_checked && let Ok(state) = store.state(fs).await {
         for (id, entry) in state.extensions {
             if entry.disabled.is_some() && !disabled_now.contains(&id) {
                 if store.set_disabled(&id, None, fs).await.is_ok() {
@@ -564,6 +586,36 @@ pub(crate) async fn apply_plan(
         lines: applied,
         blocks,
     }
+}
+
+/// Whether `release` (an update of the installed `id`) runs a Zed extension that the active
+/// version does not (owner's Q1): its update must show the warning first. With nothing installed
+/// it is a fresh install, which always confirms.
+pub(crate) async fn newly_runs_zed_extension(
+    store: &crate::install_store::InstallStore,
+    id: &str,
+    release: &Release,
+    fs: &dyn Fs,
+) -> bool {
+    if !release.zed_extension {
+        return false;
+    }
+    let Ok(state) = store.state(fs).await else {
+        return true;
+    };
+    let Some(entry) = state.extensions.get(id) else {
+        return true;
+    };
+    !crate::install::has_zed_extension(&store.version_dir(id, &entry.active), fs).await
+}
+
+/// Whether the client holds a verified block list that is fresh, so that an extension it no
+/// longer blocks may be enabled again (integration-6 N4).
+pub(crate) fn lifts_blocks(
+    client: &fyx_registry::RegistryClient,
+    now: fyx_registry::Timestamp,
+) -> bool {
+    client.blocklist().is_some() && client.blocklist_freshness(now) == Freshness::Fresh
 }
 
 /// What a confirmation lists: the capabilities, domains and programs a release adds.
@@ -643,10 +695,19 @@ fn install_release(
                 let base = approved_before.clone().unwrap_or_default();
                 let additions = base.additions(&release);
                 let asks = describe_additions(&additions);
-                if !asks.is_empty() {
+                // An update that starts running a Zed extension asks too, for the warning
+                // (owner's Q1), even when it adds no permission.
+                let zed_news = matches!(mode, InstallMode::Update(_))
+                    && newly_runs_zed_extension(&store, release.id.as_str(), &release, fs.as_ref())
+                        .await;
+                if !asks.is_empty() || zed_news {
                     let detail = format!(
-                        "It asks for:\n{}\n{}\nFrom the Fyx registry, published by {}.\nSource: {} at {}",
-                        asks.join("\n"),
+                        "{}{}From the Fyx registry, published by {}.\nSource: {} at {}",
+                        if asks.is_empty() {
+                            String::new()
+                        } else {
+                            format!("It asks for:\n{}\n", asks.join("\n"))
+                        },
                         // The signed release says it also runs a Zed extension (owner's Q1);
                         // `verify_package` refuses a download that has one it does not declare.
                         if release.zed_extension {

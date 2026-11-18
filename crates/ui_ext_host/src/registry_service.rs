@@ -350,17 +350,16 @@ impl Registry {
             .last_blocklist_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blocklist = if blocklist_now
-            || fyx_registry::BlocklistCache::fetch_due(last_attempt, now)
-        {
-            *self
-                .last_blocklist_attempt
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
-            Some(client.refresh_blocklist(&self.fetch, now).await)
-        } else {
-            None
-        };
+        let blocklist =
+            if blocklist_now || fyx_registry::BlocklistCache::fetch_due(last_attempt, now) {
+                *self
+                    .last_blocklist_attempt
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
+                Some(client.refresh_blocklist(&self.fetch, now).await)
+            } else {
+                None
+            };
         let changed = matches!(index, IndexRefresh::Updated)
             || matches!(
                 blocklist,

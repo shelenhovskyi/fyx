@@ -149,6 +149,43 @@ async fn test_several_files_and_undo(cx: &mut TestAppContext) {
     assert_eq!(text(&c, cx), "c\n");
 }
 
+/// Q5: the Show/Undo card is for an edit of several files or of a file no editor shows; an edit
+/// of the one file the user has open needs none.
+#[gpui::test]
+async fn test_card_only_for_several_or_unopened_files(cx: &mut TestAppContext) {
+    let (_, project) = setup(true, cx).await;
+    let (workspace, vcx) =
+        cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+    let one = |text: &str| edit(vec![file("a.txt", &[(at(0, 0), at(0, 3), text)])]);
+    let card = |applied: &Applied, vcx: &mut gpui::VisualTestContext| {
+        workspace.read_with(vcx, |workspace, cx| {
+            needs_card(&applied.transaction, workspace, cx)
+        })
+    };
+
+    let applied = run(one("ONE"), vcx).await.unwrap();
+    assert!(card(&applied, vcx), "a file no editor shows");
+
+    let a = buffer(&project, "a.txt", vcx).await;
+    workspace.update_in(vcx, |workspace, window, cx| {
+        let editor = cx.new(|cx| Editor::for_buffer(a, Some(project.clone()), window, cx));
+        workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+    });
+    let applied = run(one("Uno"), vcx).await.unwrap();
+    assert!(!card(&applied, vcx), "the open file");
+
+    let applied = run(
+        edit(vec![
+            file("a.txt", &[(at(0, 0), at(0, 3), "one")]),
+            file("b.txt", &[(at(0, 0), at(0, 1), "y")]),
+        ]),
+        vcx,
+    )
+    .await
+    .unwrap();
+    assert!(card(&applied, vcx), "several files, one of them open");
+}
+
 /// One refused file refuses the whole edit: nothing is applied to the others.
 #[gpui::test]
 async fn test_a_private_file_refuses_the_whole_edit(cx: &mut TestAppContext) {

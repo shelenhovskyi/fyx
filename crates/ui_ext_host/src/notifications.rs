@@ -4,13 +4,16 @@
 //! - **Provenance:** a first line with a puzzle icon, the extension's name and its id, that no
 //!   field of the notification can change (M.4). A name that fails the registry's `name` rule
 //!   shows as the id.
-//! - **Buttons:** at most two, ignored for [`BUTTON_CLICK_GUARD`] after the card appears; the close
+//! - **Buttons:** at most two, ignored for [`CLICK_GUARD`] after the card appears; the close
 //!   button works at once.
 //! - **Auto-dismiss:** the level's time, paused while the pointer is over the card and while the
 //!   window is in the background, so an expired card was on screen for all of it.
 //! - **Events** go to the owner through the registry: `notification-action` for a button,
 //!   `notification-closed` with `user`, `expired` or `window-closed`. A dismiss by the extension
 //!   or the owner's removal sends none.
+//!
+//! [`PermissionCard`] is the T2 first-use prompt in the same stack (decision Q10): non-modal,
+//! with the same provenance line and click guard, and no keyboard answer.
 
 use std::{
     sync::Arc,
@@ -32,6 +35,56 @@ use ui_ext::v0_2::{
 use workspace::notifications::SuppressEvent;
 
 use crate::UiExtensionRegistry;
+
+/// How long after a card appears its buttons ignore clicks, so that a click meant for what was
+/// there before cannot answer it (M.1's click-jacking guard; decision Q10's 1 s for consent).
+/// Every extension card uses it, so it is never shorter than 0.2's guard.
+pub(crate) const CLICK_GUARD: Duration = Duration::from_secs(1);
+const _: () = assert!(CLICK_GUARD.as_millis() >= BUTTON_CLICK_GUARD.as_millis());
+
+/// When a card appeared, and a repaint once its buttons take clicks.
+struct ClickGuard {
+    shown_at: Instant,
+    _arm: Task<()>,
+}
+
+impl ClickGuard {
+    fn new<T: 'static>(cx: &mut Context<T>) -> Self {
+        Self {
+            shown_at: cx.background_executor().now(),
+            _arm: cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(CLICK_GUARD).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }),
+        }
+    }
+
+    fn armed(&self, cx: &App) -> bool {
+        cx.background_executor()
+            .now()
+            .saturating_duration_since(self.shown_at)
+            >= CLICK_GUARD
+    }
+}
+
+/// The first line of every extension card: drawn by the host only, from the manifest; nothing the
+/// extension sends reaches it (M.4).
+fn provenance_line(name: SharedString, extension_id: &str) -> impl IntoElement {
+    h_flex()
+        .id("fyx-ui-notification-provenance")
+        .gap_1()
+        .child(
+            Icon::new(IconName::Blocks)
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(Label::new(name).size(LabelSize::XSmall))
+        .child(
+            Label::new(format!("· {extension_id}"))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+}
 
 /// The name in the provenance line: `name` if it passes the registry's rule (letters, digits and
 /// plain punctuation, at most 64 characters), otherwise the id (M.4).
@@ -59,7 +112,7 @@ pub struct ExtensionNotification {
     name: SharedString,
     notification: Notification,
     registry: WeakEntity<UiExtensionRegistry>,
-    shown_at: Instant,
+    guard: ClickGuard,
     /// Time left before it expires; `None` when it stays until closed.
     remaining: Option<Duration>,
     running_since: Option<Instant>,
@@ -70,8 +123,6 @@ pub struct ExtensionNotification {
     closed: bool,
     focus_handle: FocusHandle,
     _window_activation: gpui::Subscription,
-    /// Draws the buttons as enabled once the click guard lifts.
-    _arm: Task<()>,
 }
 
 impl ExtensionNotification {
@@ -100,7 +151,7 @@ impl ExtensionNotification {
             name,
             notification,
             registry,
-            shown_at: cx.background_executor().now(),
+            guard: ClickGuard::new(cx),
             remaining,
             running_since: None,
             hovered: false,
@@ -111,10 +162,6 @@ impl ExtensionNotification {
             _window_activation: cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 this.update_timer(cx);
-            }),
-            _arm: cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(BUTTON_CLICK_GUARD).await;
-                this.update(cx, |_, cx| cx.notify()).ok();
             }),
         };
         this.update_timer(cx);
@@ -184,10 +231,7 @@ impl ExtensionNotification {
 
     /// Whether the buttons take clicks yet (M.1's guard against click-jacking).
     pub(crate) fn buttons_armed(&self, cx: &App) -> bool {
-        cx.background_executor()
-            .now()
-            .saturating_duration_since(self.shown_at)
-            >= BUTTON_CLICK_GUARD
+        self.guard.armed(cx)
     }
 
     pub(crate) fn click_action(&mut self, action: &str, cx: &mut Context<Self>) {
@@ -248,24 +292,7 @@ impl Render for ExtensionNotification {
             .p_3()
             .gap_2()
             .elevation_3(cx)
-            // M.4: drawn by the host only, from the manifest; nothing the extension sends
-            // reaches this line.
-            .child(
-                h_flex()
-                    .id("fyx-ui-notification-provenance")
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::Blocks)
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(Label::new(self.name.clone()).size(LabelSize::XSmall))
-                    .child(
-                        Label::new(format!("· {}", self.extension_id))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
-            )
+            .child(provenance_line(self.name.clone(), &self.extension_id))
             .child(
                 h_flex()
                     .gap_2()
@@ -303,5 +330,162 @@ impl Render for ExtensionNotification {
                     }),
                 ))
             })
+    }
+}
+
+/// The T2 first-use prompt (plan 4.5, decision Q10): a card in the notification stack of the
+/// active window, never a modal, and it never takes focus. Allow and Don't Allow ignore clicks
+/// for [`CLICK_GUARD`]; nothing answers it from the keyboard (no Enter default, no Escape). The
+/// close button, or the window closing, answers nothing: the request is denied this time and
+/// nothing is recorded.
+pub struct PermissionCard {
+    extension_id: Arc<str>,
+    name: SharedString,
+    capability: SharedString,
+    title: SharedString,
+    detail: SharedString,
+    registry: WeakEntity<UiExtensionRegistry>,
+    guard: ClickGuard,
+    answered: bool,
+    focus_handle: FocusHandle,
+}
+
+impl PermissionCard {
+    pub(crate) fn new(
+        extension_id: Arc<str>,
+        capability: SharedString,
+        registry: &gpui::Entity<UiExtensionRegistry>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (title, detail, name) = {
+            let registry = registry.read(cx);
+            let (title, detail) = registry.permission_prompt_text(&extension_id, &capability);
+            (title, detail, registry.provenance_name(&extension_id))
+        };
+        cx.on_release(|this: &mut Self, cx| {
+            if !this.answered {
+                this.tell_registry(None, cx);
+            }
+        })
+        .detach();
+        Self {
+            extension_id,
+            name,
+            capability,
+            title: title.into(),
+            detail: detail.into(),
+            registry: registry.downgrade(),
+            guard: ClickGuard::new(cx),
+            answered: false,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    pub(crate) fn buttons_armed(&self, cx: &App) -> bool {
+        self.guard.armed(cx)
+    }
+
+    fn tell_registry(&mut self, answer: Option<bool>, cx: &mut App) {
+        self.answered = true;
+        let (extension_id, capability) = (self.extension_id.clone(), self.capability.clone());
+        self.registry
+            .update(cx, |registry, cx| {
+                registry.answer_permission(&extension_id, &capability, answer, false, cx)
+            })
+            .ok();
+    }
+
+    /// Allow or Don't Allow; ignored inside the click guard.
+    pub(crate) fn answer(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if self.answered || !self.buttons_armed(cx) {
+            return;
+        }
+        self.tell_registry(Some(allow), cx);
+        cx.emit(DismissEvent);
+    }
+
+    /// The close button: no answer, so nothing is recorded.
+    pub(crate) fn close(&mut self, cx: &mut Context<Self>) {
+        if self.answered {
+            return;
+        }
+        self.tell_registry(None, cx);
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for PermissionCard {}
+impl EventEmitter<SuppressEvent> for PermissionCard {}
+
+impl Focusable for PermissionCard {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl workspace::notifications::Notification for PermissionCard {}
+
+impl Render for PermissionCard {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let armed = self.buttons_armed(cx);
+        let button = |id: &'static str, label: &'static str, style, allow: bool| {
+            Button::new(id, label)
+                .style(style)
+                .label_size(LabelSize::Small)
+                // Looks pressable only once it is (the click guard).
+                .disabled(!armed)
+                .on_click(cx.listener(move |this, _, _, cx| this.answer(allow, cx)))
+        };
+        let deny = button(
+            "fyx-ui-permission-deny",
+            "Don't Allow",
+            ButtonStyle::Subtle,
+            false,
+        );
+        let allow = button(
+            "fyx-ui-permission-allow",
+            "Allow",
+            ButtonStyle::Filled,
+            true,
+        );
+        // No key handlers: a keystroke never answers it.
+        v_flex()
+            .id("fyx-ui-permission")
+            .occlude()
+            .p_3()
+            .gap_2()
+            .elevation_3(cx)
+            .child(provenance_line(self.name.clone(), &self.extension_id))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                Icon::new(IconName::Warning)
+                                    .size(IconSize::Small)
+                                    .color(Color::Warning),
+                            )
+                            .child(Label::new(self.title.clone())),
+                    )
+                    .child(
+                        IconButton::new("fyx-ui-permission-close", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Close without answering"))
+                            .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                    ),
+            )
+            .when(!self.detail.is_empty(), |this| {
+                this.child(
+                    Label::new(self.detail.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+            })
+            .child(h_flex().gap_1().justify_end().child(deny).child(allow))
     }
 }

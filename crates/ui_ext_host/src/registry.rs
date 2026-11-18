@@ -2448,10 +2448,10 @@ fn attach_to_workspace(
                 } => {
                     if *target == cx.entity_id() {
                         ask_permission(
+                            workspace,
                             &registry,
                             extension_id.clone(),
                             capability.clone(),
-                            window,
                             cx,
                         );
                     }
@@ -2651,39 +2651,24 @@ fn show_extension_notification(
     );
 }
 
-/// The first-use prompt of a T2 capability (plan 4.5): Allow or Don't Allow; closing it answers
-/// nothing.
+/// The T2 first-use prompt (decision Q10): a [`crate::notifications::PermissionCard`] in the
+/// workspace's notification stack, one per extension and capability; never a modal dialog.
 fn ask_permission(
+    workspace: &mut Workspace,
     registry: &Entity<UiExtensionRegistry>,
     extension_id: Arc<str>,
     capability: SharedString,
-    window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let (title, detail) = registry
-        .read(cx)
-        .permission_prompt_text(&extension_id, &capability);
-    let answer = window.prompt(
-        gpui::PromptLevel::Warning,
-        &title,
-        Some(&detail),
-        &["Allow", "Don't Allow"],
-        cx,
-    );
-    let registry = registry.downgrade();
-    cx.spawn(async move |_, cx| {
-        let answer = match answer.await {
-            Ok(0) => Some(true),
-            Ok(1) => Some(false),
-            _ => None,
-        };
-        registry
-            .update(cx, |registry, cx| {
-                registry.answer_permission(&extension_id, &capability, answer, false, cx)
-            })
-            .ok();
-    })
-    .detach();
+    let id = NotificationId::composite::<crate::notifications::PermissionCard>(SharedString::from(
+        format!("{extension_id}/{capability}"),
+    ));
+    let registry = registry.clone();
+    workspace.show_notification(id, cx, move |cx| {
+        cx.new(|cx| {
+            crate::notifications::PermissionCard::new(extension_id, capability, &registry, cx)
+        })
+    });
 }
 
 /// Where an extension's image assets are (plan 4.11).

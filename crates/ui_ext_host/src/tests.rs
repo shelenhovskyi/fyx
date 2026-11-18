@@ -2229,7 +2229,10 @@ async fn test_modal_lifecycle(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         backend.take_calls(),
-        [Call::Event(UiEvent::Dismissed(DismissReason::Escape)), Call::Mount]
+        [
+            Call::Event(UiEvent::Dismissed(DismissReason::Escape)),
+            Call::Mount
+        ]
     );
     assert!(state.read_with(cx, |state, _| state.tree().is_some()));
 }
@@ -2499,7 +2502,7 @@ mod notification_tests {
     use crate::notifications::{ExtensionNotification, provenance_name};
     use ui_ext::v0_2::{
         Notification, NotificationAction, NotificationActionEvent, NotificationCloseReason,
-        NotificationLevel, notifications::BUTTON_CLICK_GUARD,
+        NotificationLevel,
     };
 
     fn notification(auto_dismiss: bool) -> Notification {
@@ -2619,7 +2622,8 @@ mod notification_tests {
         view.update(vcx, |view, cx| view.click_action("open", cx));
         vcx.run_until_parked();
         assert_eq!(backend.events(), [], "inside the click guard");
-        vcx.executor().advance_clock(BUTTON_CLICK_GUARD);
+        vcx.executor()
+            .advance_clock(crate::notifications::CLICK_GUARD);
         view.update(vcx, |view, cx| view.click_action("open", cx));
         vcx.run_until_parked();
         assert_eq!(
@@ -2757,6 +2761,81 @@ mod notification_tests {
                 NotificationCloseReason::WindowClosed
             ))]
         );
+    }
+    /// integration-6 N2 (decision Q10): the T2 first-use prompt is a card, not a modal. Its
+    /// buttons ignore clicks for 1 s; no key answers it, even with the card focused; Allow then
+    /// grants. Closing it answers nothing: this request is denied and nothing is recorded.
+    #[gpui::test]
+    async fn test_permission_card_guard_and_no_keyboard_answer(cx: &mut TestAppContext) {
+        use crate::notifications::{CLICK_GUARD, PermissionCard};
+        use futures::FutureExt as _;
+        use ui_ext_wasm::permissions::PermissionState;
+        init_test(cx);
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        let workspace = cx.new(|_| ()).entity_id();
+        let checker = registry.update(cx, |registry, cx| {
+            registry.start_permission_prompts(cx);
+            registry.set_active_workspace(workspace);
+            registry.consent_mut().declare(
+                "demo",
+                vec![
+                    "network:fetch".into(),
+                    "network:fetch@api.example.com".into(),
+                ],
+            );
+            registry.capability_check()
+        });
+        let state = |registry: &Entity<crate::UiExtensionRegistry>, cx: &mut TestAppContext| {
+            registry.read_with(cx, |registry, _| registry.t2_state("demo", "network:fetch"))
+        };
+
+        // Closed without an answer: denied this time, still asked next time.
+        let request = checker.request("demo", "network:fetch");
+        cx.run_until_parked();
+        let (card, vcx) = cx.add_window_view(|_, cx| {
+            PermissionCard::new("demo".into(), "network:fetch".into(), &registry, cx)
+        });
+        card.update(vcx, |card, cx| card.close(cx));
+        vcx.run_until_parked();
+        assert_eq!(request.now_or_never(), Some(PermissionState::Denied));
+        assert_eq!(
+            state(&registry, vcx),
+            PermissionState::Ask,
+            "nothing recorded"
+        );
+        vcx.update(|window, _| window.remove_window());
+
+        let request = checker.request("demo", "network:fetch");
+        cx.run_until_parked();
+        let (card, vcx) = cx.add_window_view(|_, cx| {
+            PermissionCard::new("demo".into(), "network:fetch".into(), &registry, cx)
+        });
+        let armed = card.read_with(vcx, |card, cx| card.buttons_armed(cx));
+        assert!(!armed, "not armed when shown");
+        vcx.executor()
+            .advance_clock(CLICK_GUARD - Duration::from_millis(1));
+        card.update(vcx, |card, cx| card.answer(true, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            state(&registry, vcx),
+            PermissionState::Ask,
+            "inside the guard"
+        );
+
+        vcx.executor().advance_clock(Duration::from_millis(1));
+        vcx.update(|window, cx| gpui::Focusable::focus_handle(card.read(cx), cx).focus(window, cx));
+        vcx.simulate_keystrokes("enter space escape");
+        vcx.run_until_parked();
+        assert_eq!(
+            state(&registry, vcx),
+            PermissionState::Ask,
+            "keys answer nothing"
+        );
+
+        card.update(vcx, |card, cx| card.answer(true, cx));
+        vcx.run_until_parked();
+        assert_eq!(state(&registry, vcx), PermissionState::Granted);
+        assert_eq!(request.now_or_never(), Some(PermissionState::Granted));
     }
 }
 

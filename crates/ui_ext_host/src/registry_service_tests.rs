@@ -494,8 +494,17 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
                     .collect(),
                 Err(_) => Vec::new(),
             };
+            let blocks_checked = crate::fyx_extensions_page::lifts_blocks(&client, now());
             drop(client);
-            let applied = apply_plan(&registry, &store, fs.as_ref(), &actions, &updates).await;
+            let applied = apply_plan(
+                &registry,
+                &store,
+                fs.as_ref(),
+                &actions,
+                &updates,
+                blocks_checked,
+            )
+            .await;
             drop(state);
             applied
         }
@@ -576,6 +585,17 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
     let applied = check(&test_registry).await.lines;
     assert_eq!(applied, ["enabled demo again: no longer blocked"]);
     assert_eq!(active(&store, &fs).await.1, None);
+
+    // integration-6 N4: with no verified list (here none can be fetched; the same as a cache
+    // dropped after a key rotation), "no list" is not "nothing blocked": it stays disabled.
+    store
+        .set_disabled("demo", Some("blocked: test".into()), fs.as_ref())
+        .await
+        .unwrap();
+    std::fs::remove_file(test_registry.dir.path().join("blocklist.json")).unwrap();
+    let applied = check(&test_registry).await.lines;
+    assert!(applied.is_empty(), "{applied:?}");
+    assert!(active(&store, &fs).await.1.is_some(), "still disabled");
 }
 
 /// Plan 3.4: a block that changes an installed extension is shown in the active window, with
@@ -746,7 +766,7 @@ async fn test_spec_failure_1_held_t2_update_then_blocked(cx: &mut gpui::TestAppC
             .any(|action| matches!(action.action, fyx_registry::Action::Update { .. })),
         "never upgraded to the held version: {actions:?}"
     );
-    let outcome = apply_plan(&registry, &store, fs.as_ref(), &actions, &[]).await;
+    let outcome = apply_plan(&registry, &store, fs.as_ref(), &actions, &[], true).await;
     assert_eq!(outcome.blocks[0].what, "disabled");
     let entry = store.state(fs.as_ref()).await.unwrap().extensions["demo"].clone();
     assert_eq!(entry.active, Version::new(1, 0, 0), "not upgraded");
