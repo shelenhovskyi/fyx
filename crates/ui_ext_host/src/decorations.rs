@@ -133,6 +133,9 @@ struct Decoration {
     static_backend: Option<Rc<StaticBackend>>,
     /// The line as a CRDT anchor, per buffer it was found in.
     anchors: HashMap<BufferId, language::Anchor>,
+    /// Block height in editor lines, kept current as the tree changes. Editors resync only when
+    /// it changes (triage 3, PERF 10): a repaint inside the block needs no editor work.
+    lines: u32,
 }
 
 /// One block a decoration has in one editor.
@@ -362,10 +365,17 @@ impl Decorations {
                 }
                 this.remove(id, cx);
             }
-            // A mounted tree can change the estimated height.
-            cx.notify();
+            // A new tree can change the estimated height; only then do editors resize blocks.
+            if let Some(decoration) = this.decorations.iter_mut().find(|d| d.id == id) {
+                let lines = block_lines(&decoration.target, &state, cx);
+                if decoration.lines != lines {
+                    decoration.lines = lines;
+                    cx.notify();
+                }
+            }
         })
         .detach();
+        let lines = block_lines(&target, &state, cx);
         self.decorations.push(Decoration {
             id,
             owner,
@@ -373,6 +383,7 @@ impl Decorations {
             state,
             static_backend,
             anchors: HashMap::default(),
+            lines,
         });
         cx.notify();
         id
@@ -493,6 +504,13 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
         return;
     };
     let editor_id = cx.entity_id();
+    {
+        // Nothing to place and nothing placed: no editor-wide work (triage 3, PERF 10).
+        let decorations = decorations.read(cx);
+        if decorations.decorations.is_empty() && !decorations.editors.contains_key(&editor_id) {
+            return;
+        }
+    }
     let multibuffer = editor.buffer().read(cx);
     let buffers: Vec<_> = multibuffer.all_buffers_iter().collect();
     let snapshot = multibuffer.snapshot(cx);
@@ -536,11 +554,7 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
                 let Some(anchor) = snapshot.anchor_in_excerpt(anchor) else {
                     continue;
                 };
-                let lines = decoration
-                    .target
-                    .lines
-                    .unwrap_or_else(|| decoration.state.read(cx).tree().map_or(1, estimate_lines))
-                    .clamp(1, MAX_BLOCK_LINES);
+                let lines = decoration.lines;
                 wanted.push((
                     (decoration.id, buffer_id),
                     anchor,
@@ -634,6 +648,14 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
             decorations.editors.insert(editor_id, placed);
         }
     });
+}
+
+/// The block height for a decoration: the one it asked for, or estimated from its tree.
+fn block_lines(target: &DecorationTarget, state: &Entity<SurfaceState>, cx: &App) -> u32 {
+    target
+        .lines
+        .unwrap_or_else(|| state.read(cx).tree().map_or(1, estimate_lines))
+        .clamp(1, MAX_BLOCK_LINES)
 }
 
 /// `wanted` is absolute (compared with the file's absolute path) or a suffix of the

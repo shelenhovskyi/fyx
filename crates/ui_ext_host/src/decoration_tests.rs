@@ -974,3 +974,32 @@ b
         0
     );
 }
+
+/// Triage 3, PERF 10: a tree update that keeps the block's height repaints the block only;
+/// editors are not resynced. One that changes the height is.
+#[gpui::test]
+async fn test_same_height_updates_do_not_resync_editors(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let id = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("notes.txt", 0), text_tree("one"), cx)
+        })
+        .expect("valid tree");
+    cx.run_until_parked();
+    let notified = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let notified = notified.clone();
+        cx.observe(&decorations, move |_, _| notified.set(notified.get() + 1))
+            .detach();
+    });
+    let set_text = |text: &str, cx: &mut TestAppContext| {
+        let update = Update::Patches(vec![Patch::SetProps(2, label(text))]);
+        decorations.update(cx, |decorations, cx| decorations.update(id, update, cx));
+        cx.run_until_parked();
+    };
+
+    set_text("still one line", cx);
+    assert_eq!(notified.get(), 0, "same height: no resync");
+    set_text("two\nlines", cx);
+    assert_eq!(notified.get(), 1, "taller: one resync");
+}
