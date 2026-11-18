@@ -136,8 +136,18 @@ What `check` reports, as errors unless marked:
 
 - **Manifest:** the rules of the [`[fyx_ui]` table](#extensiontoml), the id (lower-case letters
   and digits joined by single `-`, at most 64 characters), a semantic `version`, and known
-  capability names. A capability the current world does not provide yet is a warning; a typo is
-  an error. A missing `name` or a `schema_version` other than 1 is a warning.
+  capability names (a typo is an error). Each world takes its own capabilities, as the host's
+  `UiManifest::check_world` does:
+  - **0.1** takes `ui:panel` and `ui:status-bar`, plus `ui:modal` and `ui:editor-decorations`
+    unused (a warning), so a manifest can declare them before its component moves to 0.2.
+  - **0.2** adds `ui:modal`, `ui:editor-decorations` and `ui:notifications`.
+  - **0.3** takes every known capability, T1 and T2 included. One that is not built yet is a
+    warning.
+  - Anything else is an error. So are the 0.3 tables (`[fyx_ui.network]`,
+    `[[fyx_ui.processes]]`, `[fyx_ui.process]`, `[[fyx_ui.commands]]`,
+    `[[fyx_ui.picker_sources]]`) in a manifest that targets 0.1 or 0.2.
+
+  A missing `name` or a `schema_version` other than 1 is a warning.
 - **Component:** it must be a valid component (not a core module) and at most 32 MiB. It must
   carry exactly one `fyx:ui-api-version` section, equal to `api_version` (no section is a
   warning), and export `surfaces`, `mount`, `handle-event` and `list-rows`.
@@ -365,9 +375,11 @@ the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown
 
 | Key | Rule |
 |---|---|
-| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0`. `0.2.0` and `0.3.0` are staged: dev builds load them (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. |
+| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
-| `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. |
+| `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. Each `api_version` takes its own capabilities (see [the `fyx-ext` commands](#the-fyx-ext-commands)); a capability the world does not take fails the load with `<capability> needs fyx:ui 0.3; this extension targets <version>`. |
+| `[[fyx_ui.commands]]` (0.3) | `id` (1 to 64 of `a-z 0-9 . _ -`, none twice) and `title` (one line, at most 128 bytes); at most 64. |
+| `[[fyx_ui.picker_sources]]` (0.3) | `id` (the same rule) and `picker = "<extension>/<picker surface>"`; at most 64. Both tables refuse unknown keys. |
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:139-149 (UiManifest, deny_unknown_fields, capabilities default), 171-183 (version supported, component path: all components Normal), 188-203 (check_surfaces), 551-557 (manifest version == component version, check_surfaces) -->
 
@@ -421,6 +433,18 @@ build whose host runs 0.2. It leaves the repository alone: each demo goes to
 `api_version = "0.2.0"` and of its `assets/` folder, and the printed `FYX_UI_DEV_EXTENSIONS` line
 points there. `--fyx-ui-0-3` does the same for the staged 0.3 world in
 `<target>/fyx-demos-v0_3/`.
+
+A demo whose newer build needs capabilities that 0.1 refuses keeps the 0.1 list in
+`extension.toml` and adds a comment line for the newer world. In the copy for that world, the
+script uses it in place of the `capabilities` line:
+
+```toml
+capabilities = ["ui:panel", "ui:status-bar", "ui:modal"]
+# fyx-ui-0-2: capabilities = ["ui:panel", "ui:status-bar", "ui:modal", "ui:notifications"]
+```
+
+A `# fyx-ui-0-2:` line is used in the 0.2 and 0.3 copies. A `# fyx-ui-0-3:` line is used in
+the 0.3 copy.
 
 <!-- script/fyx-build-demos -->
 
@@ -478,7 +502,7 @@ Every capability in `[fyx_ui].capabilities` has a tier:
 |---|---|---|
 | T0 | `ui:panel`, `ui:status-bar` (and the 0.2+ UI ones: `ui:modal`, `ui:notifications`, …) | no prompt; listed in the install dialog and on the extension's chips |
 | T1 | `workspace:read-buffers`, `workspace:read-files`, `workspace:diagnostics` | once, in the install dialog; `fyx_ui: revoke UI extension permission` takes it back |
-| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | not available yet: a manifest that asks for one is refused |
+| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | 0.3 only: the first use asks, and the extensions page changes the answer; a manifest for 0.1 or 0.2 that asks for one is refused |
 
 An unknown capability is refused at load, with its name in the error. An update that adds only
 T0 capabilities (or only changes the component) loads silently; one that adds a T1 capability is
@@ -766,8 +790,9 @@ The macro implements the generated WIT exports for your type and embeds the
 
 The SDK's API is that of `fyx:ui@0.2.0`, and `register_extension!(Counter)` exports 0.2. Fyx runs
 0.1 today, so `v0_1` exports the same code as 0.1. Icons become upstream names, and the 0.2-only
-features fail with an error that says they need 0.2. Switch to `register_extension!(Counter)`, and
-`api_version = "0.2.0"` in `extension.toml`, once your Fyx runs 0.2. The demos build both: 0.1 by
+features fail with an error that says they need 0.2. Releases run 0.2 from its freeze on:
+switch to `register_extension!(Counter)` and `api_version = "0.2.0"` in `extension.toml` once you
+no longer need older Fyx builds, which run only 0.1. The demos build both: 0.1 by
 default, 0.2 with `--features fyx-ui-0-2`. The [SDK reference](sdk-reference.md#extension-and-register_extension)
 lists what each world allows.
 
@@ -936,8 +961,9 @@ headless test of the counter's contract; run it with
 
 ## Newer worlds: `fyx:ui` 0.2 and the staged 0.3
 
-Releases of Fyx run `fyx:ui` 0.1. The 0.2 and 0.3 worlds are staged: dev builds load them (debug
-builds, or with `FYX_UI_DEV_EXTENSIONS` set), and `fyx-ext check` warns that they are staged.
+Releases of Fyx run `fyx:ui` 0.1 and 0.2, which is frozen. The 0.3 world is staged: dev builds
+load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS` set), and `fyx-ext check` warns that it is
+staged.
 Every snippet below is taken from a demo in `extensions/` that builds and is tested.
 
 ### Choosing a world
