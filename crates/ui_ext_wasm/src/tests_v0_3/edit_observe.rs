@@ -132,6 +132,8 @@ impl WorkspaceEdits for FakeEdits {
 struct FakeReviews {
     snapshot: Vec<ReviewInfo>,
     feeds: Mutex<Vec<mpsc::UnboundedSender<AgentEvent>>>,
+    /// Events the host side has taken from its streams.
+    read: Arc<AtomicUsize>,
 }
 
 impl FakeReviews {
@@ -150,7 +152,15 @@ impl AgentReviews for FakeReviews {
     ) {
         let (sender, receiver) = mpsc::unbounded();
         self.feeds.lock().unwrap().push(sender);
-        (self.snapshot.clone(), receiver.boxed())
+        let read = self.read.clone();
+        (
+            self.snapshot.clone(),
+            receiver
+                .inspect(move |_| {
+                    read.fetch_add(1, Ordering::SeqCst);
+                })
+                .boxed(),
+        )
     }
 }
 
@@ -660,7 +670,9 @@ async fn test_updates_coalesce_while_the_guest_lags(cx: &mut TestAppContext) {
     }
     feed.unbounded_send(AgentEvent::Updated(review(100, 5)))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    // The feed has taken every event (each is queued in the same step it is read).
+    wait_until(|| reviews.read.load(Ordering::SeqCst) == 1001);
+    std::thread::sleep(Duration::from_millis(50));
     drop(feed);
     let mut delivered = Vec::new();
     while let Some(Some(event)) = events.next().now_or_never() {

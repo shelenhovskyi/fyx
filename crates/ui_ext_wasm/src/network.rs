@@ -109,22 +109,34 @@ pub struct Fetcher {
     is_global: fn(IpAddr) -> bool,
 }
 
-/// The `user-agent` of an extension's requests: Fyx's own (as `zed::main` sends it) plus the
-/// extension id, so a server can tell extensions apart.
-pub fn user_agent(app_version: &str, extension_id: &str) -> String {
-    format!(
-        "Fyx/{app_version} ({}; {}) extension/{extension_id}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+/// The `user-agent` of an extension's requests (design.md §8): `Fyx/<major.minor> (extension
+/// <id>/<version>)`. Only Fyx's major and minor version, so it says little about the machine;
+/// the extension's version from `extension.toml` is left out unless it is a plain version
+/// string.
+pub fn user_agent(
+    app_version: &semver::Version,
+    extension_id: &str,
+    extension_version: Option<&str>,
+) -> String {
+    let fyx = format!("Fyx/{}.{}", app_version.major, app_version.minor);
+    match extension_version.filter(|version| {
+        !version.is_empty()
+            && version.len() <= 64
+            && version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+    }) {
+        Some(version) => format!("{fyx} (extension {extension_id}/{version})"),
+        None => format!("{fyx} (extension {extension_id})"),
+    }
 }
 
 impl Fetcher {
-    /// `app_version` is Fyx's (`release_channel::AppVersion`).
-    pub fn new(extension_id: &str, app_version: &str, resolver: Option<Arc<dyn Resolve>>) -> Self {
+    /// `user_agent` from [`user_agent`].
+    pub fn new(user_agent: String, resolver: Option<Arc<dyn Resolve>>) -> Self {
         Self {
             resolver: resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
-            user_agent: user_agent(app_version, extension_id),
+            user_agent,
             is_global,
         }
     }
@@ -931,7 +943,7 @@ mod tests {
     }
 
     fn fetcher() -> Fetcher {
-        Fetcher::new("probe", "0.0.0", Some(Arc::new(PanicResolver)))
+        Fetcher::new("probe".into(), Some(Arc::new(PanicResolver)))
     }
 
     /// `localhost` never goes to DNS: a resolver call fails the test.
@@ -1141,7 +1153,7 @@ mod tests {
                 later: Vec::new(),
                 calls: Default::default(),
             };
-            let fetcher = Fetcher::new("probe", "0.0.0", Some(Arc::new(resolver)));
+            let fetcher = Fetcher::new("probe".into(), Some(Arc::new(resolver)));
             let domains = list(&["api.example.com"]);
             let result = run(&domains, &fetcher, request("https://api.example.com/")).await;
             assert!(
@@ -1162,7 +1174,7 @@ mod tests {
             later: vec![SocketAddr::new("10.0.0.1".parse().unwrap(), server.port)],
             calls: Default::default(),
         });
-        let fetcher = Fetcher::new("probe", "0.0.0", Some(resolver.clone()))
+        let fetcher = Fetcher::new("probe".into(), Some(resolver.clone()))
             .with_address_rule(|ip| ip.is_loopback() || is_global(ip));
         let domains = list(&[&format!("api.example.com:{}", server.port)]);
         let mut request = request(&format!("https://api.example.com:{}/", server.port));
@@ -1177,7 +1189,10 @@ mod tests {
     #[tokio::test]
     async fn requests_carry_the_fyx_user_agent() {
         let server = test_server::start(|_, _| None).await;
-        let fetcher = Fetcher::new("probe", "1.2.3+dev", None);
+        let fetcher = Fetcher::new(
+            user_agent(&"1.2.3+dev.abc".parse().unwrap(), "probe", Some("0.4.1")),
+            None,
+        );
         let domains = list(&[&format!("localhost:{}", server.port)]);
         let response = run(
             &domains,
@@ -1187,12 +1202,22 @@ mod tests {
         .await
         .expect("a response");
         let head = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
-        let expected = format!(
-            "user-agent: fyx/1.2.3+dev ({}; {}) extension/probe\r\n",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+        assert!(
+            head.contains("user-agent: fyx/1.2 (extension probe/0.4.1)\r\n"),
+            "{head}"
         );
-        assert!(head.contains(&expected), "{head}");
+        let version = "1.2.3".parse().unwrap();
+        assert_eq!(
+            user_agent(&version, "probe", None),
+            "Fyx/1.2 (extension probe)"
+        );
+        for odd in ["", "1.0 (evil)", "1.0\r\nx: y", &"9".repeat(65)] {
+            assert_eq!(
+                user_agent(&version, "probe", Some(odd)),
+                "Fyx/1.2 (extension probe)",
+                "{odd:?}"
+            );
+        }
     }
 
     #[test]
