@@ -429,3 +429,9 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   `[[fyx_ui.commands]]` (`id`, `title` ≤ 128, ≤ 64) and `[[fyx_ui.picker_sources]]` (`id`,
   `picker = "<extension>/<surface>"`, ≤ 64) are accepted and checked; nothing uses them yet.
   If the scope decision moves them to 0.4, only the version gate changes.
+- **A6**: doc comments only, in both WIT files where the text is copied forward (so 0.2 and 0.3
+  stay identical there): depth 64 and 8 MiB of tree text (`update`), 32768 pushed items
+  (`push-update`), 24 h tick delay (`request-tick`), 512 decoration calls (`place-decoration`),
+  4 notify/dismiss calls (`notify`), `notification-action` as a gesture (`show-surface`); 0.3
+  only: `canvas-click` as a gesture, the protected paths of `edit-error.not-allowed`, the asset
+  path rule. `docs/fyx/api/*.md` regenerated.
