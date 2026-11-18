@@ -9,6 +9,7 @@ mod blocklist;
 mod canonical;
 mod client;
 mod index;
+mod package;
 mod signing;
 mod snapshot;
 mod text;
@@ -31,6 +32,10 @@ pub use client::{
 pub use index::{
     INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
     RejectedRelease, Release, Source, VerifiedIndex,
+};
+pub use package::{
+    RUNS_ZED_EXTENSION_WARNING, ZED_EXTENSION_WASM, entry_names, is_zed_extension_wasm,
+    runs_zed_extension,
 };
 pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
 pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};

@@ -172,6 +172,113 @@ fn glob(pattern: &[u8], text: &[u8]) -> bool {
     }
 }
 
+/// Programs that run whatever code they are given: shells, interpreters and launchers (owner's
+/// Q2, 2026-11-19). The manifest may name them, with `args` patterns like any program, but a grant
+/// of one means "any program", and the consent prompt says so ([`RUNS_ANY_CODE_PROMPT`]). Names
+/// are compared case-insensitively, without a Windows executable extension.
+pub const RUNS_ANY_CODE: &[&str] = &[
+    // Shells.
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "mksh",
+    "csh",
+    "tcsh",
+    "nu",
+    "elvish",
+    "xonsh",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "osascript",
+    "wscript",
+    "cscript",
+    "mshta",
+    // Interpreters and runtimes.
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "npx",
+    "bunx",
+    "python",
+    "python2",
+    "python3",
+    "py",
+    "pypy",
+    "pypy3",
+    "perl",
+    "ruby",
+    "irb",
+    "php",
+    "lua",
+    "luajit",
+    "tclsh",
+    "wish",
+    "rscript",
+    "julia",
+    "java",
+    "jshell",
+    "dotnet",
+    "awk",
+    "gawk",
+    "mawk",
+    "nawk",
+    // Programs that run another program.
+    "env",
+    "xargs",
+    "sudo",
+    "doas",
+    "runas",
+    "nohup",
+    "nice",
+    "time",
+    "timeout",
+    "watch",
+    "busybox",
+    "start",
+];
+
+/// What the consent prompt says about a program in [`RUNS_ANY_CODE`] (owner's Q2).
+pub const RUNS_ANY_CODE_PROMPT: &str = "can run any program on your computer";
+
+/// Whether granting `spec` means "any program" (owner's Q2): a program in [`RUNS_ANY_CODE`], or
+/// `git` with options before the subcommand that can set its configuration (`-c`,
+/// `--config-env`, `--exec-path`, or a wildcard), since a config value can name a command git runs.
+pub fn runs_any_code(spec: &ProcessSpec) -> bool {
+    let base = spec
+        .path
+        .as_deref()
+        .unwrap_or(&spec.name)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let program = [".exe", ".cmd", ".bat", ".com", ".ps1"]
+        .iter()
+        .find_map(|extension| base.strip_suffix(extension))
+        .unwrap_or(&base);
+    if RUNS_ANY_CODE.contains(&program) {
+        return true;
+    }
+    // Git's own options come before the subcommand: one of them that sets configuration, or a
+    // wildcard there (which could be one), makes a config value name a command git runs.
+    program == "git"
+        && spec
+            .args
+            .iter()
+            .take_while(|pattern| pattern.starts_with('-') || pattern.contains('*'))
+            .any(|pattern| {
+                pattern.contains('*')
+                    || pattern.starts_with("-c")
+                    || pattern.starts_with("--config-env")
+                    || pattern.starts_with("--exec-path")
+            })
+}
+
 /// A file or directory in a worktree: the WIT `file-ref`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileRef {
@@ -350,6 +457,34 @@ impl ProcessCounters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner's Q2: interpreters and shells may be named, and count as "any program".
+    #[test]
+    fn interpreters_and_shells_run_any_code() {
+        let spec = |name: &str, args: &[&str]| ProcessSpec {
+            name: name.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            path: None,
+        };
+        for name in [
+            "bash", "Python3", "node.exe", "PWSH.EXE", "cmd", "env", "npx.cmd",
+        ] {
+            assert!(runs_any_code(&spec(name, &["**"])), "{name}");
+            assert!(runs_any_code(&spec(name, &[])), "{name} without arguments");
+        }
+        let mut local = spec("lint", &[]);
+        local.path = Some("tools/python.exe".into());
+        assert!(runs_any_code(&local));
+        for name in ["rustfmt", "eslint", "prettier", "hostname", "pythonic"] {
+            assert!(!runs_any_code(&spec(name, &["**"])), "{name}");
+        }
+        assert!(!runs_any_code(&spec("git", &["status", "--porcelain"])));
+        assert!(!runs_any_code(&spec("git", &["log", "**"])));
+        assert!(runs_any_code(&spec("git", &["**"])));
+        assert!(runs_any_code(&spec("git", &["-c", "*", "**"])));
+        assert!(runs_any_code(&spec("git", &["*"])));
+        assert_eq!(RUNS_ANY_CODE_PROMPT, "can run any program on your computer");
+    }
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
