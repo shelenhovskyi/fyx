@@ -118,6 +118,28 @@ class Entries(unittest.TestCase):
         with self.assertRaises(registry.Refused):
             registry.derive_release(entry(), 'id = "other"\nversion = "1.0.0"\n', b"", POLICY)
 
+    def test_a_zed_extension_package_is_t2_and_says_so(self):
+        """Owner's Q1: accepted, flagged, and T2 whatever it declares."""
+        import io
+        import zipfile
+
+        def package(*names):
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w") as archive:
+                for name in names:
+                    archive.writestr(name, b"x")
+            return out.getvalue()
+
+        manifest = 'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\ncapabilities = ["ui:panel"]\n'
+        plain = registry.derive_release(entry(), manifest, package("extension.toml", "fyx_ui.wasm"), POLICY)
+        self.assertEqual(plain["tier"], "t0")
+        self.assertNotIn("zed_extension", plain)
+        for name in ["extension.wasm", "lib/Extension.WASM"]:
+            with self.subTest(name):
+                zed = registry.derive_release(entry(), manifest, package("extension.toml", name), POLICY)
+                self.assertEqual(zed["tier"], "t2")
+                self.assertIs(zed["zed_extension"], True)
+
 
 class Decisions(unittest.TestCase):
     def test_a_new_t0_extension_auto_merges(self):

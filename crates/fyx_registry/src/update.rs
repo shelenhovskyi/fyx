@@ -690,10 +690,17 @@ mod tests {
         // A re-signed package is a new release: same version, new hash.
         let mut repacked = new.clone();
         repacked.package.sha256 = crate::Sha256Digest([7; 32]);
-        seen.record(&index(vec![repacked.clone()]), later.saturating_add(std::time::Duration::from_secs(HOUR)), false);
+        seen.record(
+            &index(vec![repacked.clone()]),
+            later.saturating_add(std::time::Duration::from_secs(HOUR)),
+            false,
+        );
         assert_eq!(seen.get(&old), None);
         assert_eq!(seen.get(&new), None);
-        assert_eq!(seen.get(&repacked), Some(later.saturating_add(std::time::Duration::from_secs(HOUR))));
+        assert_eq!(
+            seen.get(&repacked),
+            Some(later.saturating_add(std::time::Duration::from_secs(HOUR)))
+        );
     }
 
     #[test]
