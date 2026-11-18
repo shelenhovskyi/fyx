@@ -10,10 +10,10 @@ use futures::{FutureExt as _, future::LocalBoxFuture};
 use gpui::{Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 use language::{Buffer, Point};
 use project::Project;
-use ui_ext::{
-    ButtonProps, FlexDirection, FlexProps, Node, NodeId, Patch, Props, TextProps, Tree, TreeLimits,
-    UiEvent, Update,
-    v0_2::{self, DecorationLocation},
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
+    self, ButtonProps, DecorationLocation, FlexDirection, FlexProps, Node, NodeId, Patch, Props,
+    TextProps, UiEvent, Update, tree::Tree,
 };
 use util::path;
 

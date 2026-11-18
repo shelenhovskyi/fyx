@@ -39,9 +39,10 @@ use gpui::{
 };
 use language::{Bias, BufferId, Point};
 use serde::Deserialize;
-use ui_ext::{
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
     Align, ColorToken, FlexDirection, FlexProps, Node, NodeId, Props, StatusBarSide,
-    StatusItemDescriptor, Surface, SurfaceKind, TextProps, Tree, TreeLimits, UiEvent, Update,
+    StatusItemDescriptor, Surface, SurfaceKind, TextProps, UiEvent, Update, tree::Tree,
 };
 
 use crate::{

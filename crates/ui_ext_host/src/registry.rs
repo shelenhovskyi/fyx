@@ -37,10 +37,10 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity, Window,
 };
 use settings::Settings as _;
-use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
+use ui_ext::v0_2::{StatusBarSide, Surface, SurfaceKind, Update};
 use ui_ext_wasm::{
-    CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, PushedUpdate,
-    UiExtension, UiManifest,
+    CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, UiExtension,
+    UiManifest,
     permissions::{Tier, tier_of},
 };
 use workspace::{
@@ -50,6 +50,7 @@ use workspace::{
 
 use crate::{
     ToggleExtensionPanel,
+    backend::PushedUpdate,
     backend::UiBackend,
     consent::{self, ConsentRecord, ConsentState, ConsentStore},
     install_store::InstallStore,
@@ -466,11 +467,16 @@ impl UiExtensionRegistry {
     pub fn register_extension(
         &mut self,
         extension: UiExtension,
-        mut pushed: mpsc::UnboundedReceiver<PushedUpdate>,
+        mut pushed: mpsc::UnboundedReceiver<ui_ext_wasm::PushedUpdate>,
         cx: &mut Context<Self>,
     ) {
         let extension_id = extension.extension_id().clone();
-        let surfaces = extension.surfaces().to_vec();
+        let surfaces: Vec<Surface> = extension
+            .surfaces()
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
         self.register_backend(Rc::new(extension), &surfaces, cx);
         cx.spawn(async move |this, cx| {
             while let Some(first) = pushed.next().await {
@@ -479,7 +485,8 @@ impl UiExtensionRegistry {
                     batch.push(next);
                 }
                 let applied = this.update(cx, |this, cx| {
-                    for PushedUpdate { surface_id, update } in batch {
+                    for pushed in batch {
+                        let PushedUpdate { surface_id, update } = pushed.into();
                         this.apply_pushed(&extension_id, &surface_id, update, cx);
                     }
                 });
@@ -1183,6 +1190,8 @@ fn add_missing_surfaces(
         .collect();
     for (info, state, kind) in loaded {
         match kind {
+            // Modals are shown on request (`show-surface`), not docked.
+            SurfaceKind::Modal(_) => {}
             SurfaceKind::Panel(_) => {
                 if surfaces.borrow().panels.contains_key(&info.key) {
                     continue;
