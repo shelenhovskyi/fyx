@@ -234,6 +234,7 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "ui:editor-decorations",
     "ui:notifications",
     "ui:images",
+    "ui:canvas",
     "network:fetch",
 ];
 

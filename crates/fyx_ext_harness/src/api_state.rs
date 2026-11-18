@@ -512,6 +512,14 @@ impl ApiState {
         props: impl IntoIterator<Item = &'a model::Props>,
     ) -> Result<(), model::HostError> {
         for props in props {
+            if let model::Props::Canvas(canvas) = props {
+                ui_ext::canvas::check_canvas_props(canvas)
+                    .and_then(|()| {
+                        ui_ext::canvas::check_canvas_placement(self.live.surface_kind(surface_id))
+                    })
+                    .map_err(|error| host_error(error.code(), error.to_string()))?;
+                continue;
+            }
             let model::Props::Image(props) = props else {
                 continue;
             };

@@ -560,6 +560,17 @@ impl Bindings {
                     ),
                 )
                 .map(|()| rows)
+            })
+            .and_then(|rows| {
+                // The host's row tree refuses canvases, as `ui_ext::v0_2::Tree::from_row` does.
+                match rows
+                    .iter()
+                    .flat_map(|row| &row.nodes)
+                    .find(|node| matches!(node.props, model::Props::Canvas(_)))
+                {
+                    Some(node) => Err(ui_ext::TreeError::CanvasInRow(node.id).to_string()),
+                    None => Ok(rows),
+                }
             }),
         })
     }
@@ -596,20 +607,47 @@ struct Applied {
 }
 
 impl Mounted {
-    fn new(nodes: &[model::Node], limits: TreeLimits) -> Result<Self, ui_ext::TreeError> {
+    fn new(nodes: &[model::Node], limits: TreeLimits) -> Result<Self> {
         let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), limits)?;
-        Ok(Self {
+        let mounted = Self {
             tree,
             props: nodes
                 .iter()
                 .map(|node| (node.id, node.props.clone()))
                 .collect(),
-        })
+        };
+        mounted.check_canvas_count()?;
+        Ok(mounted)
     }
 
     /// Applies an update atomically, as the host's tree does. An `invalidate-rows` target must be
-    /// a list or table at that point of the update.
+    /// a list or table at that point of the update, and the surface keeps at most 16 canvases.
     fn apply(&mut self, update: &model::Update, limits: TreeLimits) -> Result<Applied> {
+        let before = self.clone();
+        let applied = self.apply_unchecked(update, limits);
+        let applied = applied.and_then(|applied| self.check_canvas_count().map(|()| applied));
+        if applied.is_err() {
+            *self = before;
+        }
+        applied
+    }
+
+    /// `ui_ext::canvas::MAX_CANVASES_PER_SURFACE`, which the host's tree enforces.
+    fn check_canvas_count(&self) -> Result<()> {
+        let count = self
+            .props
+            .values()
+            .filter(|props| matches!(props, model::Props::Canvas(_)))
+            .count();
+        anyhow::ensure!(
+            count <= ui_ext::canvas::MAX_CANVASES_PER_SURFACE,
+            "the surface would have {count} canvases, the cap is {}",
+            ui_ext::canvas::MAX_CANVASES_PER_SURFACE
+        );
+        Ok(())
+    }
+
+    fn apply_unchecked(&mut self, update: &model::Update, limits: TreeLimits) -> Result<Applied> {
         update.check_caps(limits)?;
         let mut applied = Applied::default();
         match update {
@@ -1102,6 +1140,48 @@ impl Harness {
         );
         let owner = progress.options.owner.clone();
         self.event(&owner, model::UiEvent::ProgressCancelRequested(id))
+    }
+
+    /// The draw list of canvas node `id` on a mounted surface (0.3), for assertions.
+    pub fn canvas(&self, surface_id: &str, id: NodeId) -> Option<&ui_ext::canvas::CanvasProps> {
+        match self.props(surface_id, id)? {
+            model::Props::Canvas(canvas) => Some(canvas),
+            _ => None,
+        }
+    }
+
+    /// Clicks canvas `id` at `(x, y)` in canvas coordinates, as the renderer does: it sends
+    /// `canvas-click`, a gesture like a button click. It fails without a call when the node is
+    /// not a canvas, the canvas is not `clickable`, or the point lies outside its box, since the
+    /// renderer never sends those.
+    pub fn canvas_click(
+        &mut self,
+        surface_id: &str,
+        id: NodeId,
+        x: f32,
+        y: f32,
+    ) -> Result<Outcome> {
+        let canvas = self
+            .canvas(surface_id, id)
+            .with_context(|| format!("node {id} on {surface_id:?} is not a mounted canvas"))?;
+        anyhow::ensure!(
+            canvas.clickable,
+            "canvas {id} on {surface_id:?} is not clickable"
+        );
+        anyhow::ensure!(
+            (0.0..=canvas.width as f32).contains(&x) && (0.0..=canvas.height as f32).contains(&y),
+            "({x}, {y}) is outside canvas {id}, which is {} × {}",
+            canvas.width,
+            canvas.height
+        );
+        self.event(
+            surface_id,
+            model::UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                canvas: id,
+                x: x.into(),
+                y: y.into(),
+            }),
+        )
     }
 
     /// Mounts a live surface or decoration (again, if it was mounted) and returns its validated

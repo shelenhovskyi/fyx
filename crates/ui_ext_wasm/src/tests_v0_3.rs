@@ -894,6 +894,25 @@ mod harness_conformance_v0_3 {
         }
     }
 
+    /// Canvases (plan 4.13, 4.15): the checks of a push (caps, NaN, placement), replies on each
+    /// surface kind, and a `canvas-click`, alike in the host and the harness.
+    #[gpui::test]
+    async fn test_canvases_match_the_harness(cx: &mut TestAppContext) {
+        let host = load(cx).await;
+        let mut harness = harness();
+        compare(&host, &mut harness, SURFACE, UiEvent::Click(8)).await;
+        for surface in ["status", "modal", SURFACE] {
+            compare(&host, &mut harness, surface, UiEvent::Click(9)).await;
+        }
+        let click = UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+            canvas: 1,
+            x: 12.5.into(),
+            y: 3.0.into(),
+        });
+        compare(&host, &mut harness, SURFACE, click).await;
+        assert!(harness.disabled().is_none());
+    }
+
     #[gpui::test]
     async fn test_image_replies_match_the_harness(cx: &mut TestAppContext) {
         let host = load(cx).await;

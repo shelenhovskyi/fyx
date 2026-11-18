@@ -19,6 +19,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
 | `Harness::api_version` | method |  |
 | `Harness::cancel_progress` | method | Clicks Cancel on a running cancellable progress; its owner, which must be mounted, gets `progress-cancel-requested`. The progress keeps running until the extension ends it. |
+| `Harness::canvas` | method | The draw list of canvas node `id` on a mounted surface (0.3), for assertions. |
+| `Harness::canvas_click` | method | Clicks canvas `id` at `(x, y)` in canvas coordinates, as the renderer does: it sends `canvas-click`, a gesture like a button click. It fails without a call when the node is not a canvas, the canvas is not `clickable`, or the point lies outside its box, since the renderer never sends those. |
 | `Harness::click` | method | Clicks the first button with this label. |
 | `Harness::click_v0_1` | method | `Harness::click` in the 0.1 model. |
 | `Harness::close_notification` | method | Closes an open notification as the user (`User`), its timer (`Expired`) or its window (`WindowClosed`) would; its owner, which must be mounted, gets `notification-closed`. |

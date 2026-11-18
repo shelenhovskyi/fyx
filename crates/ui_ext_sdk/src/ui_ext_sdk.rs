@@ -58,12 +58,16 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
+#[cfg(feature = "fyx-ui-0-3")]
+mod canvas;
 mod host;
 mod host_model;
 mod v0_1;
 #[cfg(feature = "fyx-ui-0-3")]
 mod v0_2;
 
+#[cfg(feature = "fyx-ui-0-3")]
+pub use canvas::*;
 pub use host::*;
 
 /// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
@@ -845,6 +849,13 @@ impl<'a> TreeBuilder<'a> {
         self.node(props)
     }
 
+    /// `fyx:ui` 0.3: a canvas node (see [`CanvasProps`] and [`DrawList`]). Panels only, not in
+    /// list rows; at most 16 per surface.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn canvas(&mut self, props: CanvasProps) -> NodeId {
+        self.node(props)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -871,6 +882,14 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         TreeLimits::default(),
     )
     .map_err(TreeError::InvalidRow)?;
+    #[cfg(feature = "fyx-ui-0-3")]
+    if row
+        .nodes
+        .iter()
+        .any(|node| matches!(node.props, Props::Canvas(_)))
+    {
+        return Err(TreeError::CanvasInRow);
+    }
     Ok(row)
 }
 
@@ -1015,6 +1034,21 @@ pub enum TreeError {
         node: NodeId,
         kind: &'static str,
     },
+    /// `fyx:ui` 0.3: a canvas the host would reject (`ui_ext::canvas::check_canvas_props`).
+    #[cfg(feature = "fyx-ui-0-3")]
+    InvalidCanvas {
+        node: NodeId,
+        error: ui_ext::canvas::CanvasError,
+    },
+    /// `fyx:ui` 0.3: more canvases on one surface than the host allows.
+    #[cfg(feature = "fyx-ui-0-3")]
+    TooManyCanvases {
+        count: usize,
+        max: usize,
+    },
+    /// `fyx:ui` 0.3: canvases are not allowed in list rows.
+    #[cfg(feature = "fyx-ui-0-3")]
+    CanvasInRow,
 }
 
 impl fmt::Display for TreeError {
@@ -1042,11 +1076,31 @@ impl fmt::Display for TreeError {
                 formatter,
                 "node {node} is a {kind}; only a list or a table has rows to invalidate"
             ),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::InvalidCanvas { node, error } => write!(formatter, "canvas {node}: {error}"),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::TooManyCanvases { count, max } => write!(
+                formatter,
+                "the surface would have {count} canvases, the cap is {max}"
+            ),
+            #[cfg(feature = "fyx-ui-0-3")]
+            Self::CanvasInRow => write!(formatter, "a canvas cannot be in a list row"),
         }
     }
 }
 
 impl std::error::Error for TreeError {}
+
+/// Whether `props` is a canvas; never without `fyx-ui-0-3`.
+fn is_canvas(props: &Props) -> bool {
+    #[cfg(feature = "fyx-ui-0-3")]
+    return matches!(props, Props::Canvas(_));
+    #[cfg(not(feature = "fyx-ui-0-3"))]
+    {
+        let _ = props;
+        false
+    }
+}
 
 impl From<TreeError> for String {
     fn from(error: TreeError) -> Self {
@@ -1112,6 +1166,7 @@ impl SurfaceTree {
         build(&mut tree);
         let nodes = tree.finish();
         self.check_tree_size(nodes.len())?;
+        self.check_canvases(nodes.iter().map(|node| (node.id, &node.props)), 0)?;
 
         self.nodes.clear();
         self.roots.clear();
@@ -1187,6 +1242,8 @@ impl SurfaceTree {
         }
         Self::check_container(id, node, &props)?;
         self.check_update_size(self.pending.len() + 1)?;
+        let others = self.canvas_count() - usize::from(is_canvas(&node.props));
+        self.check_canvases([(id, &props)], others)?;
 
         self.node_mut(id)?.props = props.clone();
         self.pending.set_props(id, props);
@@ -1284,6 +1341,10 @@ impl SurfaceTree {
         let nodes = tree.finish();
         self.check_update_size(self.pending.len() + nodes.len())?;
         self.check_tree_size(self.nodes.len() + nodes.len())?;
+        self.check_canvases(
+            nodes.iter().map(|node| (node.id, &node.props)),
+            self.canvas_count(),
+        )?;
         Ok(self.commit_insert(parent, position, before, nodes))
     }
 
@@ -1319,6 +1380,10 @@ impl SurfaceTree {
         let nodes = tree.finish();
         self.check_update_size(self.pending.len() + 1 + nodes.len())?;
         self.check_tree_size(self.nodes.len() - removed + nodes.len())?;
+        self.check_canvases(
+            nodes.iter().map(|node| (node.id, &node.props)),
+            self.canvas_count() - self.subtree_canvases(id),
+        )?;
 
         self.commit_remove(id);
         Ok(self.commit_insert(parent, position, next_sibling, nodes))
@@ -1457,6 +1522,56 @@ impl SurfaceTree {
                 }),
             None => Ok(siblings.len()),
         }
+    }
+
+    fn canvas_count(&self) -> usize {
+        self.nodes
+            .values()
+            .filter(|node| is_canvas(&node.props))
+            .count()
+    }
+
+    fn subtree_canvases(&self, id: NodeId) -> usize {
+        let mut count = 0;
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            count += self
+                .nodes
+                .get(&id)
+                .map_or(0, |node| usize::from(is_canvas(&node.props)));
+            stack.extend_from_slice(self.children(id));
+        }
+        count
+    }
+
+    /// The new nodes' canvases against the host's rules: each canvas's props, and at most 16 on
+    /// the surface with the `others` that stay. Nothing to check without `fyx-ui-0-3`.
+    #[cfg_attr(
+        not(feature = "fyx-ui-0-3"),
+        allow(clippy::unused_self, unused_variables)
+    )]
+    fn check_canvases<'a>(
+        &self,
+        nodes: impl IntoIterator<Item = (NodeId, &'a Props)>,
+        others: usize,
+    ) -> Result<(), TreeError> {
+        #[cfg(feature = "fyx-ui-0-3")]
+        {
+            let mut count = others;
+            for (node, props) in nodes {
+                let Props::Canvas(canvas) = props else {
+                    continue;
+                };
+                ui_ext::canvas::check_canvas_props(&canvas::host_canvas(canvas))
+                    .map_err(|error| TreeError::InvalidCanvas { node, error })?;
+                count += 1;
+            }
+            let max = ui_ext::canvas::MAX_CANVASES_PER_SURFACE;
+            if count > max {
+                return Err(TreeError::TooManyCanvases { count, max });
+            }
+        }
+        Ok(())
     }
 
     fn subtree_len(&self, id: NodeId) -> usize {
