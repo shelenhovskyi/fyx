@@ -8,7 +8,7 @@ components coexist is in [`migration.md`](migration.md).
 
 Sources:
 - [Platform 1 spec](../platform/spec.md) decisions 21–30 and [plan](../platform/plan.md) tasks
-  4.1–4.8, as revised for the 0.2 decisions (branch `claude/fyx-w4-sdk-demos-5d1497`, `5f0ef15`).
+  4.1–4.8 (4.10–4.15 for §12 and §13, added 2026-11-18), as revised for the 0.2 decisions (branch `claude/fyx-w4-sdk-demos-5d1497`, `5f0ef15`).
 - [`wit-0.2/design.md`](../wit-0.2/design.md) with its "Decisions (2026-11-17)" (same branch,
   `de4b2c0`; `integration` still has the undecided draft).
 - [`docs/vscode-coverage.md`](../../vscode-coverage.md), "Schema gaps" and "API gaps".
@@ -37,8 +37,11 @@ Sources:
 | 9 | `process:spawn` | 4.7 | `process:spawn`, T2 | **Q1, Q2** |
 | 10 | `workspace:edit` as one undoable step | 4.8 | `workspace:edit`, T2 | **Q5** |
 | 11 | `agent:observe`, read-only | 4.8 | `agent:observe`, T2 | Q8 |
+| 12 | `image` node: PNG and SVG from the package or generated, decoded off the main thread, panels only | 4.10–4.12 | `ui:images`, T0 | Q13 |
+| 13 | `canvas` node: a static vector draw list with theme and data colours, `canvas-click`. **Last in P4**: moves to 0.4 if P4 slips | 4.13–4.15 | `ui:canvas`, T0 | Q14 |
 
-Not changed from 0.2: the flat retained tree, theme tokens (one exception, §1 `color-swatch`),
+Not changed from 0.2: the flat retained tree, theme tokens (exceptions: §1 `color-swatch` and the
+pixels of §12 images; §13 adds a fixed data palette),
 the effect rule (A), ticks (B), modals (C, D), runtime surfaces (E), push results (F), row
 invalidation (G), the frozen icons (I), the caps of 2048 patches per update, 16384 nodes per tree
 and 2048 per row, 32 surfaces and 512 block decorations per extension. No WASM call ever runs
@@ -892,6 +895,256 @@ review pane shows is not drawn there; revoking stops events at once (plan 4.8's 
 3. *Changing the rules* through `.fyx/review.toml`: protected path.
 4. *Correlating sessions across extensions*: opaque per-extension ids.
 
+## 12. Images (plan 4.10–4.12)
+
+Added 2026-11-18 at the owner's request ("Давай заплануємо те що ти пропонуєш"). It ranks below
+the rest of P4: if P4 slips, images stay in 0.3 and canvas (§13) moves to 0.4 (spec decision 28).
+
+**What.** An `image` node shows a PNG or SVG from the extension's package. The most common uses
+are a logo, a preview of an image file, and a diagram the extension generated.
+
+```wit
+record image-props {
+    source: image-source,      // asset("assets/logo.svg") or generated(handle)
+    alt: string,               // required, 1–256 bytes
+    width: option<u32>,        // logical px, 1–2048
+    height: option<u32>,
+    fit: image-fit,            // contain | cover
+    tint: option<color-token>, // SVG drawn as a one-colour mask, like host icons
+}
+```
+
+**Sources.**
+
+- **Package assets.** `assets/` files only: the path is relative, uses `/`, contains no `..`, and
+  resolves inside the installed version folder (canonicalized, like `component`). Assets are
+  covered by the package hash and the registry signature, and they change only with an update.
+- **Generated.** `images.add-image(format, bytes)` takes at most **1 MiB** and returns a `u32`
+  handle. `remove-image` frees it, and a reload or disable frees every handle. At most **32**
+  live generated images per extension.
+- **No other source.** No URLs, no `file:` paths, no `data:` URIs in `asset`. There is no network
+  at all: the component has none (`deny_network`), and neither do the decoders (below).
+
+**Limits.**
+
+| Limit | Value | Why |
+|---|---|---|
+| Encoded file | 2 MiB (asset), 1 MiB (generated) | Package cap is 50 MiB; a panel image larger than this is a mistake |
+| Decoded size | at most 2048 × 2048 pixels, after the device scale factor | 16 MiB RGBA, the most one image can cost |
+| Decoded pixels per extension | **64 MiB** (proposed) | Four full-size images or about a thousand 64 × 64 thumbnails. Past it, new images show their alt text with "image limit reached" in the log |
+| Formats | PNG (first frame of an APNG), SVG | `png` 0.18 and `resvg`/`usvg` 0.46 are already in `Cargo.lock` (GPUI uses them); JPEG, GIF and WebP later, additively |
+| Concurrent decodes | 2 per extension, 4 in total | Bounds transient memory (below) |
+| Where | panel trees and panel list rows | Not status items, modals, pickers or decorations: those sit next to host UI and would be easy to spoof (threats). An `image` there rejects the update (`invalid-argument` for a push) |
+
+**Decoding.** Decoding never happens on the main thread and never inside `render()`.
+
+1. The first time a node needs an image at a given size and scale, the host queues a decode on
+   the background executor. Until it finishes, the node draws a muted box of its size with the
+   alt text.
+2. Decoded images are cached per extension, by (source, pixel size). An LRU evicts images that
+   are not on screen once the 64 MiB budget is reached.
+3. A decode that fails, or takes longer than **250 ms**, leaves the alt text and an error icon.
+   One log line names the file and the reason.
+
+**PNG.** Read the IHDR first and refuse anything over 2048 × 2048 before allocating. Decode with
+`png::Limits { bytes: 16 MiB }`. APNG: first frame only. Interlaced and 16-bit images are
+converted to 8-bit RGBA.
+
+**SVG.** Parse with `usvg` using these `Options`:
+
+- an `image_href_resolver` that refuses every `<image>` href (external files, URLs and `data:`);
+- no resource directory;
+- fonts only from Fyx's bundled fonts, so a system font list cannot be probed.
+
+Then check the parsed tree before rendering: at most 100 000 nodes, at most 16 nesting levels of
+`<use>`, and blur filters with a standard deviation of at most 64. Render with `resvg` into a
+pixmap of the target size. usvg runs no scripts and does no network, and the resolver above
+closes the file path. An SVG with an external reference, or a `<script>`, `<foreignObject>` or
+CSS `@import`, is still drawn without that part, and the log says so.
+
+**Memory math.**
+
+- Steady state: decoded RGBA is width × height × 4 bytes. One image is at most 16 MiB, and one
+  extension at most 64 MiB.
+- Transient, per decode: about 2 MiB of encoded input, plus the 16 MiB output buffer, plus one row
+  of zlib and filter state for PNG, or the usvg tree for SVG (bounded by the 100 000-node cap,
+  roughly 20 MiB). That is at most about 40 MiB.
+- With 4 concurrent decodes, the worst case is about 160 MiB for under a second. It is not
+  charged to the component's 256 MiB, because decoding runs in the host.
+
+**Theme.** An image has its own colours, the second exception to the theme-token rule after
+§1 `color-swatch`. `tint` lets icon-like SVGs follow the theme. The design accepts the exception:
+a picture of a file cannot be made of tokens.
+
+**Threats.**
+
+1. **Decoder bombs.** The dimension check runs before allocation. The output byte limit, the
+   node, depth and filter caps, the 250 ms time cap and the 2 of 4 concurrency limit bound CPU and
+   memory. A crash in a decoder is a host bug, so the decoders run inside `catch_unwind`, and a
+   panic counts as a failed decode.
+2. **Spoofing host UI.** An image could draw a fake "Allow" button, a fake review pane or a fake
+   Fyx dialog. Three things limit this:
+   - Images exist only inside the extension's own panel, under the panel header that names the
+     extension, and they are clipped to their box.
+   - They are not in status items, modals or pickers.
+   - They are never interactive.
+
+   Host prompts (consent, review, security) are host modals, which an extension cannot draw.
+   Registry review (decision 16) does not look at assets, so the block list is the remedy for a
+   phishing extension.
+3. **Tracking and exfiltration.** No network, and no remote references in SVG, so an image cannot
+   phone home or carry data out in a URL.
+4. **Path tricks.** `asset` paths are checked like `component` (no `..`, no root, no drive, no
+   backslash). They are resolved and canonicalized, and must stay inside the version folder,
+   which also stops a link out of it.
+5. **Resource exhaustion through churn.** Calling `add-image` and `remove-image` in a loop is
+   bounded by the 32 live handles, the 64 pushes per call, and the decode queue. A full queue
+   makes `add-image` return `limit-exceeded`.
+
+**Capability.** `ui:images`, tier **T0**: it shows pixels in the extension's own panel and reads
+nothing. The extensions page lists it as "shows images".
+
+**Tests.**
+
+- `ui_ext` validation: the alt text is required; sizes and paths are checked; an `image` in a
+  status item, modal, picker or decoration tree is rejected; 0.1 and 0.2 components never see
+  these props (version gating).
+- Decoder fixtures in `crates/ui_ext_host/tests/images/`, each checked to be refused or capped
+  without a large allocation:
+  - a 1 KiB PNG whose IHDR says 65535 × 65535;
+  - a zlib bomb inside a 2048 × 2048 PNG;
+  - a truncated PNG and a 100-frame APNG;
+  - an SVG with nested entity expansion ("billion laughs") and one with 17 levels of `<use>`;
+  - an SVG with `<image href>` set to `http://`, `file:///C:/Windows/win.ini` and `data:` (none is
+    loaded);
+  - an SVG with `<script>`, and one with a 10 000 px blur (the time cap).
+
+  A test also asserts that the decoder module has no HTTP client in reach: it takes no
+  `HttpClient`, and its resolver is fixed.
+- Budget: 5 images of 2048 × 2048 leave the fifth as alt text once the LRU cannot evict.
+- Renderer: the placeholder shows before decoding, the image after; `contain` and `cover`
+  rectangles are right; nothing is drawn outside the box; `tint` recolours.
+- Harness (W4): `fyx_ext_harness` records image nodes and `add-image` calls. Its asset checks
+  match the host's.
+
+## 13. Canvas (plan 4.13–4.15)
+
+Ranked last in P4: if P4 slips, the canvas moves to 0.4 and §12 stays (spec decision 28).
+
+**What.** A `canvas` node holds a static vector draw list, for charts, sparklines, gauges and
+small diagrams. It is retained like every node: the host keeps the list and paints it, with no
+WASM call inside `render()`.
+
+```wit
+record canvas-props {
+    width: u32, height: u32,   // logical px, 1–4096
+    description: string,       // required, 1–1024 bytes
+    ops: list<draw-op>,        // line, rect, rounded-rect, circle, path, text
+    clickable: bool,
+    fit: canvas-fit,           // clip | scale-down
+}
+```
+
+**Colours.** Every paint is `token(color-token)` or `data(data-color)`, with an `opacity` of 0 to
+100 %:
+
+- `data-color` is a fixed palette of eight series colours. The host picks a light and a dark
+  variant of each, so they stay distinct on the active theme and under common colour-vision
+  deficiencies.
+- No raw colours. A theme change repaints the canvas with no call to the extension.
+
+**Ops and caps.**
+
+| Op | Fields |
+|---|---|
+| `line` | from, to, stroke |
+| `rect`, `rounded-rect` | bounds (+ radius), optional fill, optional stroke |
+| `circle` | center, radius, optional fill, optional stroke |
+| `path` | segments (`move-to`, `line-to`, `quad-to`, `cubic-to`, `close`), fill (non-zero) and/or stroke |
+| `text` | baseline point, one line of at most 256 bytes, paint, size (`small`, `medium`, `large`: the host's UI font sizes), anchor, monospace |
+
+- Strokes are 0.5 to 16 logical px.
+- Every coordinate must be finite and within ±32768. A NaN or an infinity rejects the update.
+- Per canvas: **16384 ops**, 65 536 path segments, and 256 KiB of text.
+- Per surface: 16 canvases.
+- Canvases appear in panel trees only: not in list rows, status items, modals, pickers or
+  decorations.
+
+**Updates.** The whole draw list is sent again in every `set-props`, so there are no op patches
+in 0.3. That is simple, and cheap enough:
+
+- **Transfer.** An op lifts as about 40 to 60 bytes of canonical ABI. 10 000 ops are about
+  500 KiB, and lifting them into host types and validating them costs **about 1 ms** in a release
+  build (target; the bench below measures it). A full 16384-op canvas is about 1.6 ms, well
+  inside the 200 ms call budget.
+- **Retained memory.** About 48 bytes per op in the host, so about 0.8 MiB for a full canvas plus
+  its text. The worst case for one surface is 16 × (0.8 + 0.25) MiB, about 17 MiB.
+- **Paint.** One GPUI `canvas` element per node:
+  - quads (`paint_quad`) for rectangles and rounded rectangles;
+  - `PathBuilder` paths for lines, circles and paths;
+  - shaped lines for text (cached by text, size and font).
+  - Target: 16384 ops in under 4 ms per frame on the dev machine. If the bench misses it, the host
+    rasterizes the list into a texture on update and paints the texture (Q14).
+
+**Animation.** Only through ticks: `request-tick` already has a 100 ms floor (10 frames per
+second) and 1 s in the background. A full canvas re-sent every tick costs about 16 ms per second
+of host time. There are no host-driven animations, transitions or timers.
+
+**Input.** On a `clickable` canvas, a click sends `canvas-click { canvas, x, y }` in canvas
+coordinates. These are mapped back through `scale-down` and the panel's scroll, so they match the
+draw list. Hit-testing is the extension's job. A click grants the click-or-Enter activation, like
+`click` (§0.4).
+
+**Not in 0.3, planned for 0.4:**
+
+- pointer-move and hover (`canvas-pointer-moved`), coalesced to at most **30 per second**;
+- drag (`canvas-drag` start, move, end) at the same rate;
+- wheel and zoom.
+
+Each needs one more `ui-event` case, which is additive.
+
+**Clipping and size.** The canvas paints only inside its `width` × `height` box, and that box
+only inside the panel. With `clip`, a narrower parent clips the right edge. With `scale-down`,
+the drawing shrinks to the parent's width, keeping its aspect ratio, and never grows.
+
+**Accessibility.** `description` is required. It is the tooltip and the accessible label, and the
+host shows it instead of the drawing when the canvas is rejected or the extension is stopped.
+
+**Threats.**
+
+1. **Paint and transfer cost.** This is bounded by the caps above, the 100 ms tick floor, one call
+   per input event, and the paint bench.
+2. **Spoofing.** The same limits as images: panels only, clipped, under the panel header, not in
+   status items or modals. Clicks go only to the extension's own handler, never to host actions.
+3. **Text shaping cost.** At most 256 bytes per text op and 256 KiB per canvas, with a shaping
+   cache.
+4. **Float tricks.** NaN, infinities and huge values are rejected at validation, so no NaN reaches
+   GPUI's layout or path tessellation.
+
+**Capability.** `ui:canvas`, tier **T0**, listed as "draws charts and diagrams".
+
+**Tests.**
+
+- `ui_ext` validation:
+  - each cap at its limit and one past it (16385 ops, 65537 segments, 256 KiB + 1 of text, a
+    17th canvas);
+  - NaN, infinities and ±32769 coordinates;
+  - a missing `description`;
+  - a canvas in a list row, status item or modal;
+  - paths with only `move-to`, and `close` without a `move-to`.
+- Bench (`cargo bench -p ui_ext_wasm`): lifting and validating 10 000 and 16384 ops from a guest,
+  target ≤ 1 ms per 10 000 ops. The renderer paints 16384 mixed ops, target ≤ 4 ms. Results go
+  into `limits-and-gotchas.md`.
+- Renderer: snapshots of each op kind with tokens and data colours in a light and a dark theme;
+  nothing drawn outside the box; `scale-down`.
+- Hit-test mapping: a click at a known point gives the expected canvas coordinates with
+  `scale-down` and with the panel scrolled; a non-clickable canvas sends nothing.
+- Ticks: an animated canvas at 100 ms keeps one pending tick and pauses while its panel is hidden
+  (0.2 §B).
+- Harness and SDK (W4): `fyx_ext_harness` can send `canvas-click` and assert draw lists. The SDK
+  has typed builders (`Canvas::new(w, h, "…").rect(…).path(…)`) and a `data-color` helper. The
+  demo is a bar-chart panel with click-to-select and a tick-driven sparkline.
+
 ## Changes by component (file level)
 
 Paths assume W3's `crates/ui_ext_wasm` (`be53175`); if that move does not land, read
@@ -919,7 +1172,13 @@ Paths assume W3's `crates/ui_ext_wasm` (`be53175`); if that move does not land, 
 | SDK | `crates/ui_ext_sdk/src/ui_ext_sdk.rs`, `host_model.rs` | a `v0_3` bindings module and default world, wrappers for every import, default no-op exports, `PickerSession`, `take_host_effects` for the new effects (migration.md §4) |
 | TS SDK | `sdks/ts` (P2.5) | the same surface; parity test covers the new imports and exports (spec decision 3) |
 | Demos | `extensions/fyx_demo_*` | TODO highlighter (§1), shared picker with two sources (§2), hover and lens (§3), virtual document (§4), commands (§5), a fetch demo against a local server, a `git status` panel (§9) |
-| Docs | `docs/fyx/sdk-reference.md`, `extension-authoring.md`, `limits-and-gotchas.md`, `docs/vscode-coverage.md` | new APIs, the limits of §1–§11, consent, coverage updates |
+| Model | `crates/ui_ext/src/types.rs`, `tree.rs` | `Props::Image`, `Props::Canvas`, `DrawOp` and friends, `UiEvent::CanvasClick`; validation of §12–§13 caps and of where the nodes may appear (§12, §13) |
+| Host | `crates/ui_ext_wasm/src/since_v0_3_0.rs` | `images` import (`add-image`, `remove-image`), generated-image store and caps, conversions of the canvas types (§12, §13) |
+| Renderer | new `crates/ui_ext_host/src/images.rs` | asset resolution, decode queue on the background executor, PNG and SVG decoders with the limits of §12, per-extension LRU cache (§12) |
+| Renderer | new `crates/ui_ext_host/src/canvas.rs`, `view.rs` | the `image` and `canvas` elements, placeholder, clipping, `scale-down`, hit-test mapping for `canvas-click` (§12, §13) |
+| SDK, harness | `crates/ui_ext_sdk`, `crates/fyx_ext_harness` | builders for `image` and `canvas`, `add_image`, harness support and asset checks (§12, §13) |
+| Demos | `extensions/fyx_demo_*` | an image gallery panel (asset PNG and SVG, a generated SVG), a bar-chart and sparkline canvas (§12, §13) |
+| Docs | `docs/fyx/sdk-reference.md`, `extension-authoring.md`, `limits-and-gotchas.md`, `docs/vscode-coverage.md` | new APIs, the limits of §1–§13, consent, coverage updates |
 
 ## Open questions for the owner
 
@@ -974,6 +1233,13 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
     items; a "Search everywhere" host picker made only of contributions is not in 0.3.
 12. **Default key bindings in the manifest.** *Recommended:* not in 0.3; users bind commands
     themselves. Suggested keys would need conflict rules against the user's and upstream's keymaps.
+13. **Image budget per extension (§12).** *Recommended:* 64 MiB of decoded pixels, 32 live
+    generated images, 2 concurrent decodes per extension (4 in total). Lower values break image
+    previews; higher ones let one extension hold a large share of host memory.
+14. **Canvas paint strategy (§13).** *Recommended:* paint the draw list directly with GPUI each
+    frame and switch to a texture cached per update only if the 16384-op bench misses 4 ms. A
+    texture costs width × height × 4 × scale² of memory per canvas (up to 256 MiB at 4096 × 4096
+    on a 2× screen), which is why it is not the default.
 
 ## Not in 0.3
 
@@ -991,7 +1257,10 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
 | Completion, definition, references, symbols, document links, semantic tokens, inlay-hint providers | Coverage API gaps with one or two users each; `inline-text` covers drawing inlays |
 | `row-node-click` (0.2 §H, "revisit in 0.3") | Still needs hit-testing inside `uniform_list` rows; the host picker (§2) covers QuickPick items, whose buttons were the main consumer |
 | `update-surface`, panel `visibility-changed` | 0.2 deferrals; no new consumer |
-| Extension SVG icons, raw colours beyond `color-swatch` | 0.2 §I and the theme-token rule; accents (§1) cover the coverage gap |
+| Extension SVG icons in host chrome (buttons, tabs, the dock), raw colours beyond `color-swatch` | 0.2 §I and the theme-token rule; §12 images are content inside a panel, not icons for host chrome |
+| Canvas pointer-move, hover, drag and wheel | §13: 0.4, coalesced to at most 30 per second |
+| Images in status items, modals, pickers and decorations; clickable images | §12, spoofing; wrap the image in a flex next to a button instead |
+| JPEG, GIF, WebP; animated images | §12; additive later. Animation goes through ticks |
 | Accepting, rejecting or commenting on agent edits; agent thread content | §11; agent review policy stays with W5 (spec §5) |
 | Edits in collaboration guest projects | §10 |
 | A "Search everywhere" host picker | Q11 |

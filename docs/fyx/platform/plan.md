@@ -60,7 +60,17 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | 4.6 | W2c | `network:fetch` host import with domain list and caps [23] | 4.5 | undeclared domain → `denied`; 17 MiB response cut |
 | 4.7 | W2c | `process:spawn`: PATH outside worktree, filtered env, job objects [24] | 4.5 | spec §4 failure 4 passes; reload kills the process tree |
 | 4.8 | W2c | `workspace:edit` (undoable transactions), `agent:observe` read-only sessions | 4.5 | an edit undoes with one ctrl-z; observe cannot accept or reject |
-| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8 | review file in `tasks/reviews/` |
+| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8, and 4.10–4.15 unless cut | review file in `tasks/reviews/` |
+| 4.10 | W2c | Images, host side ([design §12](../wit-0.3/design.md#12-images-plan-410412)): `image` props and validation (alt, sizes, asset paths, panels only), the `images` import with the 1 MiB and 32-handle caps, `ui:images` (T0) [28] | 4.1 | the image bomb and path fixtures are refused; a 0.2 component cannot send `image` |
+| 4.11 | W3 | Images, renderer: decode queue off the main thread, PNG and SVG decoders with the §12 limits, 64 MiB LRU per extension, placeholder with alt text, clipping [28] | 4.10 | logo, file preview and generated SVG show in a panel; the decoder fixtures fail without a large allocation |
+| 4.12 | W4 | Images, SDK and harness: builders, `add_image`, harness asset checks; an image gallery demo [28] | 4.10 | demo runs in Fyx and headless in `fyx-ext test` |
+| 4.13 | W2c | Canvas, host side ([design §13](../wit-0.3/design.md#13-canvas-plan-413415)): draw-op types, caps (16384 ops, segments, text, 16 per surface), float checks, `canvas-click`, `ui:canvas` (T0) [28] | 4.10 | the cap and NaN cases are refused; the lift bench is at most 1 ms per 10 000 ops |
+| 4.14 | W3 | Canvas, renderer: GPUI paint of the draw list with tokens and the data palette, clipping, `scale-down`, hit-test mapping [28] | 4.13 | the 16384-op paint bench is at most 4 ms; click coordinates are right when scaled and scrolled |
+| 4.15 | W4 | Canvas, SDK and harness: typed builders, `canvas-click` in the harness; a bar-chart and sparkline demo [28] | 4.13 | demo runs in Fyx and headless |
+
+**Priority within P4 (owner's rule, 2026-11-18):** P4 is the first candidate to cut. Tasks 4.10–4.15
+rank below every other P4 task. If P4 slips, 4.10–4.12 (images) stay and 4.13–4.15 (canvas) move
+to 0.4.
 
 ## Deferred after 1.0
 
