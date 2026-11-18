@@ -151,6 +151,9 @@ impl ObserveHandle {
         {
             return;
         }
+        self.running
+            .diagnostics
+            .io_note(CAPABILITY_OBSERVE, "start".into(), "observing".into());
         let (abort, registration) = AbortHandle::new_pair();
         let live = Arc::new(AtomicBool::new(true));
         *observing = Some(Observing {
@@ -181,6 +184,9 @@ impl ObserveHandle {
             .take()
         {
             observing.abort.abort();
+            self.running
+                .diagnostics
+                .io_note(CAPABILITY_OBSERVE, "stop".into(), "stopped".into());
         }
     }
 }

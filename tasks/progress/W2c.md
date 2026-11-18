@@ -323,3 +323,12 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   takes an argument, and unit tests of the rules and the queue.
 - **For W3:** implement both traits in ui_ext_host (contract in their doc comments).
 - **Not done:** the real implementations (W3 with W5's read API), the Inspector line.
+
+## 4.6 follow-up 1: Inspector lines for T2 operations (2026-11-18)
+
+- `Diagnostics.io: VecDeque<IoRecord>` (200 kept): capability, id, `what`, outcome (`None` while
+  running), duration. Started by each handle after its call, finished in `Running::deliver`
+  when the outcome is delivered; the agent feed notes start and stop.
+- `what` holds no secrets: a URL without user info, query or fragment; a program and its
+  argument count; an edit's label and file count.
+- Rendering it in the Inspector is W3's (ui_ext_host/src/inspector.rs).
