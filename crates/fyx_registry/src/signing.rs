@@ -3,8 +3,12 @@
 //! A signature names the key that made it (`key_id`). A client holds a [`Keyset`]: the registry
 //! key and one rotation key are compiled in (decision 18), so the registry can move to the
 //! rotation key without a client release that changes how verification works.
+//!
+//! Every key has roles (security-2 T9): a key may only sign the documents of its roles, so a
+//! leaked block-list key cannot publish a release. A signed snapshot can revoke keys
+//! ([`crate::VerifiedSnapshot::effective_keyset`]).
 
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair as _, UnparsedPublicKey};
@@ -70,13 +74,45 @@ pub struct Signature {
     pub ed25519: [u8; 64],
 }
 
-/// A public key and its id, as listed in a keyset file.
+/// What a key may sign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyRole {
+    /// One release of one extension.
+    Release,
+    /// `blocklist.json`.
+    Blocklist,
+    /// `snapshot.json`: the index as a whole, and key revocations.
+    Snapshot,
+}
+
+impl KeyRole {
+    pub const ALL: [KeyRole; 3] = [KeyRole::Release, KeyRole::Blocklist, KeyRole::Snapshot];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyRole::Release => "release",
+            KeyRole::Blocklist => "blocklist",
+            KeyRole::Snapshot => "snapshot",
+        }
+    }
+}
+
+impl fmt::Display for KeyRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A public key, its id and its roles, as listed in a keyset file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicKey {
     pub key_id: KeyId,
     #[serde(with = "base64_array")]
     pub ed25519: [u8; 32],
+    /// At least one; a key signs nothing outside its roles.
+    pub roles: BTreeSet<KeyRole>,
 }
 
 /// The public keys a client or the registry CI accepts signatures from.
@@ -97,6 +133,9 @@ impl Keyset {
             return Err(Error::Invalid("a keyset needs at least one key".into()));
         }
         for (index, key) in keys.iter().enumerate() {
+            if key.roles.is_empty() {
+                return Err(Error::Invalid(format!("key {} has no roles", key.key_id)));
+            }
             if keys[..index].iter().any(|other| other.key_id == key.key_id) {
                 return Err(Error::Invalid(format!(
                     "key id {} appears twice in the keyset",
@@ -119,7 +158,24 @@ impl Keyset {
         &self.keys
     }
 
-    pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), Error> {
+    /// This keyset without the revoked keys; `None` if no key would be left.
+    pub fn without(&self, revoked: &BTreeSet<KeyId>) -> Option<Self> {
+        let keys: Vec<PublicKey> = self
+            .keys
+            .iter()
+            .filter(|key| !revoked.contains(&key.key_id))
+            .cloned()
+            .collect();
+        (!keys.is_empty()).then_some(Self { keys })
+    }
+
+    /// Checks a signature by a key of this keyset that has `role`.
+    pub fn verify(
+        &self,
+        message: &[u8],
+        signature: &Signature,
+        role: KeyRole,
+    ) -> Result<(), Error> {
         let key = self
             .keys
             .iter()
@@ -127,6 +183,12 @@ impl Keyset {
             .ok_or_else(|| Error::UnknownKey {
                 key_id: signature.key_id.to_string(),
             })?;
+        if !key.roles.contains(&role) {
+            return Err(Error::WrongRole {
+                key_id: signature.key_id.to_string(),
+                role,
+            });
+        }
         UnparsedPublicKey::new(&ED25519, key.ed25519)
             .verify(message, &signature.ed25519)
             .map_err(|_| Error::BadSignature {
@@ -186,12 +248,14 @@ impl SigningKey {
         &self.key_id
     }
 
-    pub fn public_key(&self) -> PublicKey {
+    /// The public key entry for a keyset file, with the roles it is trusted for.
+    pub fn public_key(&self, roles: impl IntoIterator<Item = KeyRole>) -> PublicKey {
         let mut ed25519 = [0; 32];
         ed25519.copy_from_slice(self.key_pair.public_key().as_ref());
         PublicKey {
             key_id: self.key_id.clone(),
             ed25519,
+            roles: roles.into_iter().collect(),
         }
     }
 
@@ -256,8 +320,8 @@ pub(crate) mod test_keys {
 
     pub(crate) fn keyset() -> Keyset {
         Keyset::new(vec![
-            registry_key().public_key(),
-            rotation_key().public_key(),
+            registry_key().public_key(KeyRole::ALL),
+            rotation_key().public_key(KeyRole::ALL),
         ])
         .expect("distinct key ids")
     }
@@ -278,7 +342,7 @@ mod tests {
                 .expect("32 bytes");
         let key = SigningKey::from_seed(KeyId::new("rfc").expect("valid"), &seed).expect("seed");
         assert_eq!(
-            hex::encode(key.public_key().ed25519),
+            hex::encode(key.public_key(KeyRole::ALL).ed25519),
             "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
         );
         assert_eq!(
@@ -293,7 +357,10 @@ mod tests {
         let keyset = keyset();
         for key in [registry_key(), rotation_key()] {
             let signature = key.sign(b"message");
-            assert_eq!(keyset.verify(b"message", &signature), Ok(()));
+            assert_eq!(
+                keyset.verify(b"message", &signature, KeyRole::Release),
+                Ok(())
+            );
         }
     }
 
@@ -302,7 +369,7 @@ mod tests {
         let keyset = keyset();
         let stranger = signing_key("stranger", 9);
         assert_eq!(
-            keyset.verify(b"message", &stranger.sign(b"message")),
+            keyset.verify(b"message", &stranger.sign(b"message"), KeyRole::Release),
             Err(Error::UnknownKey {
                 key_id: "stranger".into()
             })
@@ -311,7 +378,7 @@ mod tests {
         let mut mislabelled = rotation_key().sign(b"message");
         mislabelled.key_id = registry_key().key_id().clone();
         assert_eq!(
-            keyset.verify(b"message", &mislabelled),
+            keyset.verify(b"message", &mislabelled, KeyRole::Release),
             Err(Error::BadSignature {
                 key_id: "test-registry".into()
             })
@@ -324,10 +391,11 @@ mod tests {
         assert_eq!(Keyset::from_json(&json), Ok(keyset()));
 
         let duplicate = Keyset::new(vec![
-            registry_key().public_key(),
-            registry_key().public_key(),
+            registry_key().public_key(KeyRole::ALL),
+            registry_key().public_key(KeyRole::ALL),
         ]);
         assert!(duplicate.is_err());
+        assert!(Keyset::new(vec![registry_key().public_key([])]).is_err());
         assert!(Keyset::from_json(br#"{"keys": []}"#).is_err());
         assert!(Keyset::from_json(br#"{"keys": [], "extra": 1}"#).is_err());
     }
@@ -372,7 +440,7 @@ mod tests {
             let signature = registry_key().sign(&message);
             let mut tampered = message.clone();
             tampered[position.index(message.len())] ^= 1 << bit;
-            prop_assert!(keyset.verify(&tampered, &signature).is_err());
+            prop_assert!(keyset.verify(&tampered, &signature, KeyRole::Release).is_err());
         }
 
         #[test]
@@ -384,7 +452,38 @@ mod tests {
             let keyset = keyset();
             let mut signature = registry_key().sign(&message);
             signature.ed25519[position] ^= 1 << bit;
-            prop_assert!(keyset.verify(&message, &signature).is_err());
+            prop_assert!(keyset.verify(&message, &signature, KeyRole::Release).is_err());
         }
+    }
+
+    #[test]
+    fn keys_sign_only_for_their_roles() {
+        let keyset = Keyset::new(vec![
+            registry_key().public_key([KeyRole::Release]),
+            rotation_key().public_key([KeyRole::Blocklist, KeyRole::Snapshot]),
+        ])
+        .expect("valid");
+        let release = registry_key().sign(b"m");
+        assert_eq!(keyset.verify(b"m", &release, KeyRole::Release), Ok(()));
+        assert_eq!(
+            keyset.verify(b"m", &release, KeyRole::Blocklist),
+            Err(Error::WrongRole {
+                key_id: "test-registry".into(),
+                role: KeyRole::Blocklist
+            })
+        );
+
+        let revoked = [registry_key().key_id().clone()].into();
+        let remaining = keyset.without(&revoked).expect("one key left");
+        assert!(matches!(
+            remaining.verify(b"m", &release, KeyRole::Release),
+            Err(Error::UnknownKey { .. })
+        ));
+        let all = [
+            registry_key().key_id().clone(),
+            rotation_key().key_id().clone(),
+        ]
+        .into();
+        assert_eq!(keyset.without(&all), None);
     }
 }
