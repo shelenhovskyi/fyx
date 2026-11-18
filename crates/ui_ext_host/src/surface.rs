@@ -158,6 +158,8 @@ pub struct SurfaceState {
     history: VecDeque<HistoryEntry>,
     /// What differs by the component's `fyx:ui` version.
     rules: ApiRules,
+    /// The raw error of the failure that stopped the extension, behind "Copy Error Details".
+    failure_detail: Option<SharedString>,
     /// Bumped when the surface moves to a new instance (`replace_backend`): a result of a call
     /// made on an older instance is dropped, so an old instance can neither patch the new tree
     /// nor fail a healthy extension (triage-3 #4).
@@ -403,6 +405,7 @@ impl SurfaceState {
             history: VecDeque::new(),
             rules: ApiRules::for_version(&backend_version),
             backend_epoch: 0,
+            failure_detail: None,
             _mount: None,
         }
     }
@@ -532,6 +535,7 @@ impl SurfaceState {
 
     /// Mounts again after a failure, at the user's request.
     pub fn retry(&mut self, cx: &mut Context<Self>) {
+        self.failure_detail = None;
         self.remounts_without_input = 0;
         self.last_error = None;
         self.reload_failed = false;
@@ -561,12 +565,18 @@ impl SurfaceState {
     /// An error without a `ReplyError` means the instance is gone (trap, time budget, or disabled
     /// by an earlier failure): this surface and every other surface of the extension stop.
     fn fail_extension(&mut self, error: &anyhow::Error, cx: &mut Context<Self>) {
-        let message: SharedString =
-            format!("{} stopped: {error:#}", self.backend.extension_id()).into();
+        let message: SharedString = stopped_message(self.backend.extension_id(), error).into();
         if let Some(link) = self.link.clone() {
             link.extension_failed(&self.surface.id, message.clone(), cx);
         }
         self.fail(message, false, cx);
+        // The raw error, for "Copy Error Details" (triage-3 #7).
+        self.failure_detail = Some(format!("{error:#}").into());
+    }
+
+    /// The raw error behind a stopped surface, if this surface saw it.
+    pub fn failure_detail(&self) -> Option<&SharedString> {
+        self.failure_detail.as_ref()
     }
 
     /// Applies the tree a `mount` returned: every mount is one the host started (the first one, a
@@ -1313,6 +1323,24 @@ impl RowCache {
         self.generation = generation;
         self.failed_generation = None;
     }
+}
+
+/// What a stopped extension shows, in plain words: what happened and what to do. The raw
+/// error is the detail.
+fn stopped_message(extension_id: &str, error: &anyhow::Error) -> String {
+    let raw = format!("{error:#}").to_lowercase();
+    let what = if raw.contains("time budget") || raw.contains("interrupt") {
+        "took too long to answer and was stopped"
+    } else if raw.contains("memory") {
+        "ran out of memory and was stopped"
+    } else if raw.contains("disabled after an earlier failure") {
+        "is stopped after an earlier failure"
+    } else if raw.contains("shut down") {
+        "is no longer running"
+    } else {
+        "crashed"
+    };
+    format!("{extension_id} {what}. Restart the extension to try again.")
 }
 
 /// The pushes a rejected call carries, or `None` when the error is not a rejection: then the

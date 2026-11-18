@@ -146,7 +146,7 @@ pub(crate) fn prompt_and_install(
         prompt: Some("Install Dev UI Extension".into()),
     });
     cx.spawn_in(window, async move |workspace, cx| {
-        let result: Result<Option<Arc<str>>> = async {
+        let result: Result<Option<crate::store_actions::Outcome>> = async {
             let Some(source) = paths.await??.and_then(|paths| paths.into_iter().next()) else {
                 return Ok(None);
             };
@@ -181,6 +181,7 @@ pub(crate) fn prompt_and_install(
                 cx.background_executor(),
             )
             .await?;
+            let waiter = cx.update(|_, cx| crate::store_actions::expect_load(&extension_id, cx))?;
             cx.update(|_, cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
                     registry.update(cx, |registry, cx| {
@@ -202,16 +203,26 @@ pub(crate) fn prompt_and_install(
                     }
                 });
             })?;
-            Ok(Some(extension_id))
+            // The settings change starts the load; report after it has an outcome.
+            let loaded = crate::store_actions::load_outcome(waiter, cx).await;
+            Ok(Some(crate::store_actions::installed_outcome(
+                format!("Installed the dev UI extension {extension_id}"),
+                loaded,
+            )))
         }
         .await;
-        let message = match result {
+        let outcome = match result {
             Ok(None) => return,
-            Ok(Some(extension_id)) => format!("Installed the dev UI extension {extension_id}"),
-            Err(error) => format!("Could not install the dev UI extension: {error:#}"),
+            Ok(Some(outcome)) => outcome,
+            Err(error) => crate::store_actions::Outcome {
+                message: format!("Could not install the dev UI extension: {error:#}"),
+                failed: true,
+            },
         };
         workspace
-            .update(cx, |workspace, cx| toast(workspace, message, cx))
+            .update(cx, |workspace, cx| {
+                crate::store_actions::show_outcome(workspace, outcome, cx)
+            })
             .ok();
     })
     .detach();
