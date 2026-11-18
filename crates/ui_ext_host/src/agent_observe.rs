@@ -211,9 +211,10 @@ struct Files {
 impl Files {
     fn event(&self, event: FeedEvent) -> AgentEvent {
         match event {
-            FeedEvent::Snapshot(reviews) => {
-                AgentEvent::Snapshot(reviews.iter().map(|review| self.review(review)).collect())
-            }
+            FeedEvent::Snapshot(reviews) => AgentEvent::Snapshot {
+                reviews: reviews.iter().map(|review| self.review(review)).collect(),
+                older_dropped: false,
+            },
             FeedEvent::Observed(event) => match event {
                 ObservedEvent::Opened(review) => AgentEvent::Opened(self.review(&review)),
                 ObservedEvent::Updated(review) => AgentEvent::Updated(self.review(&review)),
@@ -435,7 +436,10 @@ mod tests {
         });
         assert_eq!(received[0], AgentEvent::ReviewMode(false));
         assert_eq!(received[1], AgentEvent::ReviewMode(true));
-        let AgentEvent::Snapshot(snapshot) = &received[2] else {
+        let AgentEvent::Snapshot {
+            reviews: snapshot, ..
+        } = &received[2]
+        else {
             panic!("{:?}", received[2]);
         };
         assert_eq!(

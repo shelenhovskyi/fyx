@@ -938,19 +938,16 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
     cx.executor().allow_parking();
     crate::tests::init_test(cx);
-    let capabilities = ["ui:status-bar", "workspace:diagnostics"];
+    // 0.3 has no T1 capabilities (W2c A3), so the revoked one is T2.
+    let capabilities = ["ui:status-bar", "workspace:edit"];
     let mut test_registry = TestRegistry::new();
     let package = zip(&[
         (
             "extension.toml",
             // T1 capabilities are 0.3's (W2c A4).
-            manifest(
-                "demo",
-                "1.0.0",
-                "\"ui:status-bar\", \"workspace:diagnostics\"",
-            )
-            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
-            .as_bytes(),
+            manifest("demo", "1.0.0", "\"ui:status-bar\", \"workspace:edit\"")
+                .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+                .as_bytes(),
         ),
         ("fyx_ui.wasm", b"component"),
     ])
@@ -992,8 +989,16 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
             fs.clone(),
             cx,
         );
+        // A T2 capability is granted at first use; allowed, it can be revoked. The answer is
+        // saved through the global file system.
+        <dyn fs::Fs>::set_global(fs.clone(), cx);
+        // As a load declares them.
         registry
-            .revoke("demo", "workspace:diagnostics", fs.clone(), cx)
+            .consent_mut()
+            .declare("demo", capabilities.iter().map(|c| c.to_string()).collect());
+        registry.allow_t2("demo", "workspace:edit", cx);
+        registry
+            .revoke("demo", "workspace:edit", fs.clone(), cx)
             .expect("revoked");
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1003,7 +1008,7 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
         if !installed[0]
             .approved
             .capabilities
-            .contains("workspace:diagnostics")
+            .contains("workspace:edit")
         {
             assert!(installed[0].approved.capabilities.contains("ui:status-bar"));
             break;
