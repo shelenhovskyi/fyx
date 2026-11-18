@@ -16,6 +16,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `EventOutcome::pushed` | field | Pushed during the call, applied first, in order. |
 | `EventOutcome::touched` | field | Node ids the reply touched in the event's surface (see `ui_ext::Tree::apply_update`). |
 | `EventOutcome::update` | field | The call's own reply, applied to the event's surface after the pushes. |
+| `FakeProgram` | type | What a fake program does when it runs: it sees the request and everything written to its stdin, and returns its output and exit code. |
+| `FakeRun` | struct | The run of a fake program: its whole stdout and stderr, and its exit code. |
+| `FakeRun::code` | field | `None` as for a program ended by a signal. |
+| `FakeRun::fail` | method | Prints `stderr` and exits with `code`. |
+| `FakeRun::ok` | method | Prints `stdout` and exits with 0. |
+| `FakeRun::stderr` | field |  |
+| `FakeRun::stdout` | field |  |
 | `FetchResponder` | type | What a test broker answers for one request it lets through. |
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
 | `Harness::api_version` | method |  |
@@ -34,6 +41,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::effects` | method | Every effect so far, in order, including those of loading. |
 | `Harness::event` | method | Sends one event to a mounted surface or decoration and applies its effects, then its reply. Typed text and a `row-selected` selection are written into the tree first. Use `Harness::dismiss` for `dismissed`. |
 | `Harness::event_v0_1` | method | `Harness::event` in the 0.1 model: the pushes and the reply only. |
+| `Harness::fake_program` | method | Runs `program` for spawns of `name` instead of a real program. A declared program with no fake ends `spawn-failed(not-found)`. |
 | `Harness::find` | method | The first node in tree order whose props match. |
 | `Harness::find_button` | method |  |
 | `Harness::find_text` | method |  |
@@ -56,12 +64,14 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::notifications` | method | The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or acted on. The harness has no clock, so `auto_dismiss` ones stay until `Harness::close_notification`. |
 | `Harness::pending_fetches` | method | Requests `fetch` accepted that `Harness::deliver_io` has not delivered yet, oldest first. |
 | `Harness::pending_tick` | method | The delay of the surface's pending tick, already clamped up to `MIN_TICK_DELAY`. |
+| `Harness::processes` | method | Processes `spawn` accepted that have not finished, oldest first. |
 | `Harness::progresses` | method | The running progresses (M.2), by id, with their last value and message. |
 | `Harness::props` | method | The props of one node of a mounted surface or decoration. |
 | `Harness::pushed_v0_1` | method | Every update pushed so far, in order, in the 0.1 model; `Harness::effects` holds them in the newest one. |
 | `Harness::rows` | method | Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as the extension sent it. |
 | `Harness::rows_v0_1` | method | `Harness::rows` in the 0.1 model: each row's index and tree. |
 | `Harness::set_broker` | method | Installs the permission broker and network for `network:fetch`; see `TestBroker`. |
+| `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |
 | `Harness::text` | method | The content of a text node. |
@@ -70,6 +80,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::ui_api_version` | method |  |
 | `Harness::with_network_domains` | method | The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them; `Harness::load_package` reads them from the manifest. |
 | `Harness::with_package_root` | method | Checks asset images against the extension folder `dir`, as `Harness::load_package` does, for a harness loaded from bytes. |
+| `Harness::with_processes` | method | The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env` declare them; `Harness::load_package` reads them from the manifest. |
 | `HostEffect` | re-export | `api_state::HostEffect` |
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
 | `INSTANCES_LIMIT` | const |  |
@@ -105,7 +116,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SUPPORTED_API_VERSIONS` | const | The `fyx:ui` versions the harness runs, the same as the host's supported range. |
 | `TABLES_LIMIT` | const |  |
 | `TABLE_ELEMENTS_LIMIT` | const |  |
-| `TestBroker` | struct | A stand-in for the user and the network, for `network:fetch` tests (0.3). Without one the harness grants no T2 capability, as the host without a broker: `fetch` returns `denied`. |
+| `TestBroker` | struct | A stand-in for the user and the network, for `network:fetch` and `process:spawn` tests (0.3); its state is the state of every T2 capability. Without one the harness grants no T2 capability, as the host without a broker: `fetch` returns `denied`. |
 | `TestBroker::answer` | field | How the user answers the prompt of an `Ask` state. |
 | `TestBroker::asking` | method | Not asked yet: the first delivered request prompts, and the user answers `answer`. |
 | `TestBroker::denied` | method | Refused: `fetch` returns `denied` at the import. |

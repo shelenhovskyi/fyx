@@ -375,6 +375,38 @@ pub mod glue {
     /// Nothing to cancel: 0.1 has no network.
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn cancel_fetch(_request: u64) {}
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn spawn(_request: &crate::SpawnRequest) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("spawn"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn write_stdin(_process: u64, _data: &[u8]) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("write_stdin"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn close_stdin(_process: u64) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("close_stdin"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn kill(_process: u64) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("kill"),
+        })
+    }
 }
 
 #[cfg(test)]

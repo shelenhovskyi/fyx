@@ -496,6 +496,34 @@ pub mod glue {
 
     /// Nothing to cancel: 0.2 has no network.
     pub fn cancel_fetch(_request: u64) {}
+
+    pub fn spawn(_request: &crate::SpawnRequest) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("spawn"),
+        })
+    }
+
+    pub fn write_stdin(_process: u64, _data: &[u8]) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("write_stdin"),
+        })
+    }
+
+    pub fn close_stdin(_process: u64) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("close_stdin"),
+        })
+    }
+
+    pub fn kill(_process: u64) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("kill"),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +593,13 @@ mod tests {
             "{}",
             error.message
         );
+        let error = spawn(&crate::SpawnRequest::new("git")).unwrap_err();
+        assert!(
+            error.message.contains("spawn needs fyx:ui 0.3"),
+            "{}",
+            error.message
+        );
+        assert!(kill(1).is_err() && close_stdin(1).is_err() && write_stdin(1, b"x").is_err());
     }
 
     #[test]
