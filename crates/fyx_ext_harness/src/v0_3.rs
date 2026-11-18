@@ -22,8 +22,9 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
-    notifications as wit_notifications, process as wit_process, types as wit,
+    agent_observe as wit_observe, documents as wit_documents, host as wit_host,
+    images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
+    process as wit_process, types as wit, workspace_edit as wit_edit,
 };
 
 /// What the host says for a value its model cannot hold yet.
@@ -202,8 +203,118 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                 ui_ext::process::SpawnError::Io(error) => wit_process::SpawnError::Io(error),
             },
         ))),
+        net::IoEvent::EditDone(id, result) => Some(wit_io::IoEvent::EditDone((
+            id,
+            result.map_err(|error| {
+                use ui_ext::edit::EditError;
+                match error {
+                    EditError::Denied => wit_edit::EditError::Denied,
+                    EditError::Conflict(why) => wit_edit::EditError::Conflict(why),
+                    EditError::NotAllowed(why) => wit_edit::EditError::NotAllowed(why),
+                    EditError::NotFound(why) => wit_edit::EditError::NotFound(why),
+                    EditError::Invalid(why) => wit_edit::EditError::Invalid(why),
+                    EditError::Cancelled => wit_edit::EditError::Cancelled,
+                }
+            }),
+        ))),
+        net::IoEvent::Agent(event) => Some(wit_io::IoEvent::Agent(agent_event(event))),
         // The harness changes no permission on its own.
         net::IoEvent::PermissionChanged(..) => None,
+    }
+}
+
+fn wit_file_ref(file: ui_ext::process::FileRef) -> wit_documents::FileRef {
+    wit_documents::FileRef {
+        worktree: file.worktree,
+        path: file.path,
+    }
+}
+
+fn resolution(resolution: ui_ext::observe::Resolution) -> wit_observe::Resolution {
+    use ui_ext::observe::Resolution;
+    match resolution {
+        Resolution::Unchanged => wit_observe::Resolution::Unchanged,
+        Resolution::Pending(count) => wit_observe::Resolution::Pending(count),
+        Resolution::AcceptedAll => wit_observe::Resolution::AcceptedAll,
+        Resolution::RejectedAll => wit_observe::Resolution::RejectedAll,
+        Resolution::Partial(accepted, rejected) => {
+            wit_observe::Resolution::Partial((accepted, rejected))
+        }
+    }
+}
+
+fn rule(rule: ui_ext::observe::RuleKind) -> wit_observe::RuleKind {
+    use ui_ext::observe::RuleKind;
+    match rule {
+        RuleKind::AutoAccept => wit_observe::RuleKind::AutoAccept,
+        RuleKind::AlwaysAsk => wit_observe::RuleKind::AlwaysAsk,
+        RuleKind::Deny => wit_observe::RuleKind::Deny,
+    }
+}
+
+fn review_info(info: ui_ext::observe::ReviewInfo) -> wit_observe::ReviewInfo {
+    use ui_ext::observe::{HunkDecision, ReviewSource};
+    wit_observe::ReviewInfo {
+        review: info.review,
+        session: info.session,
+        turn: info.turn,
+        file: info.file.map(wit_file_ref),
+        source: match info.source {
+            ReviewSource::Permission => wit_observe::ReviewSource::Permission,
+            ReviewSource::Write => wit_observe::ReviewSource::Write,
+        },
+        rule: info.rule.map(rule),
+        resolution: resolution(info.resolution),
+        submitted: info.submitted,
+        hunks: info
+            .hunks
+            .into_iter()
+            .map(|hunk| wit_observe::HunkInfo {
+                old_start: hunk.old_start,
+                old_count: hunk.old_count,
+                new_start: hunk.new_start,
+                new_count: hunk.new_count,
+                old_text: hunk.old_text,
+                new_text: hunk.new_text,
+                decision: match hunk.decision {
+                    HunkDecision::Pending => wit_observe::HunkDecision::Pending,
+                    HunkDecision::Accepted => wit_observe::HunkDecision::Accepted,
+                    HunkDecision::Rejected => wit_observe::HunkDecision::Rejected,
+                },
+                comment: hunk.comment,
+            })
+            .collect(),
+        truncated: info.truncated,
+    }
+}
+
+/// An agent-review event for `handle-io`, as the host converts it.
+fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
+    use ui_ext::observe::AgentEvent;
+    match event {
+        AgentEvent::Snapshot(reviews) => {
+            wit_observe::AgentEvent::Snapshot(reviews.into_iter().map(review_info).collect())
+        }
+        AgentEvent::Opened(info) => wit_observe::AgentEvent::Opened(review_info(info)),
+        AgentEvent::Updated(info) => wit_observe::AgentEvent::Updated(review_info(info)),
+        AgentEvent::Resolved(info) => wit_observe::AgentEvent::Resolved(review_info(info)),
+        AgentEvent::Closed(review) => wit_observe::AgentEvent::Closed(review),
+        AgentEvent::TurnEnded(turn, files) => wit_observe::AgentEvent::TurnEnded((
+            turn,
+            files
+                .into_iter()
+                .map(|file| wit_observe::TurnFile {
+                    file: file.file.map(wit_file_ref),
+                    resolution: resolution(file.resolution),
+                    rule: file.rule.map(rule),
+                })
+                .collect(),
+        )),
+        AgentEvent::UnreviewedChanges(turn, files) => wit_observe::AgentEvent::UnreviewedChanges((
+            turn,
+            files.into_iter().map(wit_file_ref).collect(),
+        )),
+        AgentEvent::ReviewMode(on) => wit_observe::AgentEvent::ReviewMode(on),
     }
 }
 

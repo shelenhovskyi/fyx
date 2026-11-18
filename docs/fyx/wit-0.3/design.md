@@ -589,13 +589,28 @@ result<http-response, fetch-error>)`. A host import, not WASI sockets (spec deci
   domain list, HTTPS and certificate checks still hold. The extensions page says so.
 - **TLS.** The system roots plus webpki roots; no extension-supplied CA, no client certificates,
   no TLS bypass.
-- **Headers.** The guest may set any header except the hop-by-hop and framing set (WIT comment)
-  and `proxy-*`. The host sets `user-agent: Fyx/<major.minor> (extension <id>/<version>)`
+- **Headers.** The guest may set any header except the hop-by-hop and framing set (WIT comment),
+  `proxy-*` and `accept-encoding`. `accept-encoding` is host-owned because the host decodes the
+  body and applies the cap to the decoded size: it sends only the encodings it can decode (W2c,
+  0213dd3cc7: `gzip` today). The host sets `user-agent: Fyx/<major.minor> (extension <id>/<version>)`
   unless the guest sets one, and adds no cookie, no authorization and no editor token. There is no
   cookie jar; `set-cookie` is returned to the guest as a header.
 - **Decompression.** gzip, deflate, brotli and zstd are decoded by the host, and the 16 MiB cap
   applies to the decoded body, counted while streaming (a compression bomb ends with `too-large`).
-  A `content-length` above 16 MiB fails before the body is read.
+  A `content-length` above 16 MiB fails before the body is read. W2c's first cut (0213dd3cc7)
+  decodes gzip only; any other `content-encoding` gives `other` until the rest land (plan 4.6
+  follow-ups).
+- **WIT comment fix (for the gatekeeper).** The `headers` comment in
+  `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit` does not list `accept-encoding` yet. One line, at
+  line 1011 on `origin/integration` (1014 on W2c's branch):
+
+  ```diff
+  @@ -1011 +1011 @@
+  -        /// header are set by the host and rejected here.
+  +        /// header, and `accept-encoding`, are set by the host and rejected here.
+  ```
+
+  The same change is already in this folder's `fyx-ui-0.3.wit`.
 - **Timeout.** 30 s for the whole request, redirects included; the guest may ask for less.
 
 **Limits.** 8 in flight (decision 23), 120 started per minute (token bucket), request body 4 MiB,

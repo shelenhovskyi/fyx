@@ -26,6 +26,8 @@ url = { workspace = true, optional = true }
 t2 = ["dep:url"]
 network = ["t2"]
 process = ["t2"]
+edit = ["t2"]
+observe = ["t2"]
 
 [dev-dependencies]
 proptest.workspace = true

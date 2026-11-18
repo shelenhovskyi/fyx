@@ -971,7 +971,60 @@ impl FyxExtensionsPage {
                     .into_iter()
                     .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
+            .children(t2_rows(&id, cx))
     }
+}
+
+/// The T2 capabilities an installed extension declared, with their first-use state and the one
+/// way to change it: Revoke when allowed, Allow when refused (plan 4.5; only this page changes a
+/// refusal back).
+fn t2_rows(extension_id: &str, cx: &App) -> Vec<gpui::AnyElement> {
+    use ui_ext_wasm::permissions::PermissionState;
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return Vec::new();
+    };
+    let registry_read = registry.read(cx);
+    registry_read
+        .declared_capabilities(extension_id)
+        .into_iter()
+        .filter(|(_, tier, _)| *tier == ui_ext_wasm::permissions::Tier::T2)
+        .map(|(capability, _, _)| {
+            let state = registry_read.t2_state(extension_id, &capability);
+            let label = capability_chip_label(&capability);
+            let (text, action) = match state {
+                PermissionState::Granted => (format!("{label}: allowed"), Some("Revoke")),
+                PermissionState::Denied => (format!("{label}: not allowed"), Some("Allow")),
+                PermissionState::Ask => (format!("{label}: asks the first time"), None),
+                PermissionState::Unavailable => (format!("{label}: not available"), None),
+            };
+            let (id, registry) = (extension_id.to_string(), registry.clone());
+            h_flex()
+                .gap_2()
+                .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
+                .when_some(action, |this, action| {
+                    this.child(
+                        Button::new(
+                            SharedString::from(format!("fyx-t2-{id}-{capability}")),
+                            action,
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::Small)
+                        .on_click(move |_, _, cx| {
+                            let fs = <dyn Fs>::global(cx);
+                            registry.update(cx, |registry, cx| {
+                                if action == "Allow" {
+                                    registry.allow_t2(&id, &capability, cx);
+                                } else if let Err(error) = registry.revoke(&id, &capability, fs, cx)
+                                {
+                                    log::error!("fyx:ui: {error:#}");
+                                }
+                            })
+                        }),
+                    )
+                })
+                .into_any_element()
+        })
+        .collect()
 }
 
 impl Render for FyxExtensionsPage {

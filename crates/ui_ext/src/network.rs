@@ -121,6 +121,10 @@ pub enum IoEvent {
     ProcessExited(crate::process::ProcessExit),
     /// Instead of any output and exit: the process never started.
     SpawnFailed(u64, crate::process::SpawnError),
+    /// `workspace:edit`: the outcome of one edit, applied all or nothing.
+    EditDone(u64, Result<(), crate::edit::EditError>),
+    /// `agent:observe`: one event, after `start`, beginning with a snapshot.
+    Agent(crate::observe::AgentEvent),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).

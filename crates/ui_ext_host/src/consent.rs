@@ -11,6 +11,13 @@
 //! from the current grants, so a revocation applies at once. `FYX_UI_DEV_EXTENSIONS` entries are
 //! not checked at load: setting the variable is the opt-in (their T1 calls are still checked).
 //!
+//! T2 capabilities (plan 4.5, spec decision 21) are asked at first use: the record holds the
+//! approved declaration (an update adding one is held like T1), and the user's answer to the
+//! first-use prompt is kept beside it ([`ConsentStore::set_t2`]). The checker serves
+//! `CapabilityCheck::{state, request, changes}`: `request` joins an open prompt or asks the host
+//! to show one ([`ConsentStore::set_prompter`]); a revocation sets `Denied`, and only the
+//! extensions page allows it again.
+//!
 //! Records live in `<data dir>/fyx-ui-consent.json`.
 
 use std::{
@@ -21,10 +28,15 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use fs::Fs;
+use futures::{
+    FutureExt as _,
+    channel::{mpsc, oneshot},
+    future::BoxFuture,
+};
 use gpui::BackgroundExecutor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use ui_ext_wasm::permissions::{CapabilityCheck, CapabilityDenied, Tier, tier_of};
+use ui_ext_wasm::permissions::{CapabilityCheck, CapabilityDenied, PermissionState, Tier, tier_of};
 
 /// What the user agreed to for one extension.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +134,16 @@ impl ConsentRecord {
 #[derive(Default, Serialize, Deserialize)]
 struct ConsentFile {
     extensions: BTreeMap<String, ConsentRecord>,
+    /// The answers to first-use prompts: per extension, T2 capability → allowed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    t2: BTreeMap<String, BTreeMap<String, bool>>,
+}
+
+/// A first-use prompt the host should show (`CapabilityCheck::request` in state `Ask`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptRequest {
+    pub extension_id: String,
+    pub capability: String,
 }
 
 #[derive(Default)]
@@ -129,6 +151,43 @@ struct Shared {
     records: BTreeMap<String, ConsentRecord>,
     /// The capabilities each loaded extension declared, by id.
     declared: HashMap<String, Vec<String>>,
+    t2: BTreeMap<String, BTreeMap<String, bool>>,
+    /// Requests waiting for an open prompt's answer, by (extension, capability).
+    waiting: HashMap<(String, String), Vec<oneshot::Sender<PermissionState>>>,
+    prompter: Option<mpsc::UnboundedSender<PromptRequest>>,
+    subscribers: HashMap<String, Vec<mpsc::UnboundedSender<(String, PermissionState)>>>,
+}
+
+impl Shared {
+    fn t2_state(&self, extension_id: &str, capability: &str) -> PermissionState {
+        let declared = self
+            .declared
+            .get(extension_id)
+            .is_some_and(|declared| declared.iter().any(|c| c == capability));
+        if !declared {
+            return PermissionState::Unavailable;
+        }
+        match self
+            .t2
+            .get(extension_id)
+            .and_then(|answers| answers.get(capability))
+        {
+            Some(true) => PermissionState::Granted,
+            Some(false) => PermissionState::Denied,
+            None => PermissionState::Ask,
+        }
+    }
+
+    fn notify(&mut self, extension_id: &str, capability: &str) {
+        let state = self.t2_state(extension_id, capability);
+        if let Some(subscribers) = self.subscribers.get_mut(extension_id) {
+            subscribers.retain(|subscriber| {
+                subscriber
+                    .unbounded_send((capability.to_string(), state))
+                    .is_ok()
+            });
+        }
+    }
 }
 
 /// The consent records (the permission broker's grants), kept in memory and, when it has a path,
@@ -177,7 +236,11 @@ impl ConsentStore {
         self.path.clone()
     }
 
-    pub fn set_loaded(&mut self, records: BTreeMap<String, ConsentRecord>) {
+    pub fn set_loaded(
+        &mut self,
+        records: BTreeMap<String, ConsentRecord>,
+        t2: BTreeMap<String, BTreeMap<String, bool>>,
+    ) {
         if !self.loaded {
             self.loaded = true;
             let mut shared = self.lock();
@@ -185,7 +248,70 @@ impl ConsentStore {
             for (id, record) in records {
                 shared.records.entry(id).or_insert(record);
             }
+            for (id, answers) in t2 {
+                let entry = shared.t2.entry(id).or_default();
+                for (capability, allowed) in answers {
+                    entry.entry(capability).or_insert(allowed);
+                }
+            }
         }
+    }
+
+    /// Where first-use prompts go. Without one, a request in state `Ask` resolves `Ask`.
+    pub fn set_prompter(&mut self, prompter: mpsc::UnboundedSender<PromptRequest>) {
+        self.lock().prompter = Some(prompter);
+    }
+
+    /// Records the answer to a first-use prompt (`Some`), or resolves the waiting requests
+    /// without recording one (`None`: the prompt was closed, or there was no window to show it
+    /// in; they get `Denied` and `Ask`). Returns the file contents to write when it recorded.
+    pub fn answer_prompt(
+        &mut self,
+        extension_id: &str,
+        capability: &str,
+        answer: Option<bool>,
+        no_window: bool,
+    ) -> Option<(PathBuf, String)> {
+        let waiting = {
+            let mut shared = self.lock();
+            if let Some(allowed) = answer {
+                shared
+                    .t2
+                    .entry(extension_id.to_string())
+                    .or_default()
+                    .insert(capability.to_string(), allowed);
+                shared.notify(extension_id, capability);
+            }
+            shared
+                .waiting
+                .remove(&(extension_id.to_string(), capability.to_string()))
+                .unwrap_or_default()
+        };
+        let resolved = match answer {
+            Some(true) => PermissionState::Granted,
+            Some(false) => PermissionState::Denied,
+            None if no_window => PermissionState::Ask,
+            None => PermissionState::Denied,
+        };
+        for waiter in waiting {
+            waiter.send(resolved).ok();
+        }
+        answer.and_then(|_| self.file_contents())
+    }
+
+    /// Sets a T2 answer from the extensions page (allow again, or revoke).
+    pub fn set_t2(
+        &mut self,
+        extension_id: &str,
+        capability: &str,
+        allowed: bool,
+    ) -> Option<(PathBuf, String)> {
+        self.answer_prompt(extension_id, capability, Some(allowed), false)
+    }
+
+    /// The first-use state of a T2 capability for an extension.
+    pub fn t2_state(&self, extension_id: &str, capability: &str) -> PermissionState {
+        self.lock().t2_state(extension_id, capability)
     }
 
     /// Whether an extension may load as it is now (the reconciliation of spec decision 21 and
@@ -234,6 +360,12 @@ impl ConsentStore {
         extension_id: &str,
         capability: &str,
     ) -> Result<Option<(PathBuf, String)>> {
+        if tier_of(capability) == Some(Tier::T2) {
+            if self.t2_state(extension_id, capability) != PermissionState::Granted {
+                anyhow::bail!("{extension_id} does not hold {capability}");
+            }
+            return Ok(self.set_t2(extension_id, capability, false));
+        }
         {
             let mut shared = self.lock();
             let Some(record) = shared.records.get_mut(extension_id) else {
@@ -248,19 +380,24 @@ impl ConsentStore {
         Ok(self.file_contents())
     }
 
-    /// Granted capabilities that can be revoked (T1 and up), as (extension id, capability).
+    /// Granted capabilities that can be revoked, as (extension id, capability): T1 grants, and T2
+    /// capabilities allowed at first use.
     pub fn revocable(&self) -> Vec<(String, String)> {
-        self.lock()
-            .records
-            .iter()
-            .flat_map(|(id, record)| {
-                record
-                    .capabilities
-                    .iter()
-                    .filter(|capability| tier_of(capability) != Some(Tier::T0))
-                    .map(move |capability| (id.clone(), capability.clone()))
-            })
-            .collect()
+        let shared = self.lock();
+        let t1 = shared.records.iter().flat_map(|(id, record)| {
+            record
+                .capabilities
+                .iter()
+                .filter(|capability| tier_of(capability) == Some(Tier::T1))
+                .map(move |capability| (id.clone(), capability.clone()))
+        });
+        let t2 = shared.t2.iter().flat_map(|(id, answers)| {
+            answers
+                .iter()
+                .filter(|(_, allowed)| **allowed)
+                .map(move |(capability, _)| (id.clone(), capability.clone()))
+        });
+        t1.chain(t2).collect()
     }
 
     /// Whether `capability` is granted to `extension_id` (T0 needs no grant).
@@ -295,8 +432,12 @@ impl ConsentStore {
 
     fn file_contents(&self) -> Option<(PathBuf, String)> {
         let path = self.path.clone()?;
-        let file = ConsentFile {
-            extensions: self.lock().records.clone(),
+        let file = {
+            let shared = self.lock();
+            ConsentFile {
+                extensions: shared.records.clone(),
+                t2: shared.t2.clone(),
+            }
         };
         match serde_json::to_string_pretty(&file) {
             Ok(text) => Some((path, text)),
@@ -337,23 +478,99 @@ impl CapabilityCheck for Checker {
                     .is_some_and(|record| record.capabilities.iter().any(|c| c == capability));
                 if granted { Ok(()) } else { deny("not granted") }
             }
-            Some(Tier::T2) => deny("T2 capabilities are not available yet"),
+            Some(Tier::T2) => match shared.t2_state(extension_id, capability) {
+                PermissionState::Granted => Ok(()),
+                PermissionState::Ask => deny("ask"),
+                PermissionState::Denied => deny("denied"),
+                PermissionState::Unavailable => deny("unavailable"),
+            },
             None => deny("unknown capability"),
         }
+    }
+
+    fn state(&self, extension_id: &str, capability: &str) -> PermissionState {
+        let shared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match tier_of(capability) {
+            Some(Tier::T2) => shared.t2_state(extension_id, capability),
+            _ => {
+                drop(shared);
+                match self.check(extension_id, capability) {
+                    Ok(()) => PermissionState::Granted,
+                    Err(_) => PermissionState::Denied,
+                }
+            }
+        }
+    }
+
+    fn request(&self, extension_id: &str, capability: &str) -> BoxFuture<'static, PermissionState> {
+        let mut shared = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = match tier_of(capability) {
+            Some(Tier::T2) => shared.t2_state(extension_id, capability),
+            _ => {
+                drop(shared);
+                return futures::future::ready(self.state(extension_id, capability)).boxed();
+            }
+        };
+        if state != PermissionState::Ask {
+            return futures::future::ready(state).boxed();
+        }
+        let Some(prompter) = shared.prompter.clone() else {
+            return futures::future::ready(PermissionState::Ask).boxed();
+        };
+        let (sender, receiver) = oneshot::channel();
+        let key = (extension_id.to_string(), capability.to_string());
+        let first = !shared.waiting.contains_key(&key);
+        shared.waiting.entry(key).or_default().push(sender);
+        if first
+            && prompter
+                .unbounded_send(PromptRequest {
+                    extension_id: extension_id.to_string(),
+                    capability: capability.to_string(),
+                })
+                .is_err()
+        {
+            shared
+                .waiting
+                .remove(&(extension_id.to_string(), capability.to_string()));
+            return futures::future::ready(PermissionState::Ask).boxed();
+        }
+        // A prompt that never answers (its host gone) resolves `Ask`.
+        receiver
+            .map(|answer| answer.unwrap_or(PermissionState::Ask))
+            .boxed()
+    }
+
+    fn changes(&self, extension_id: &str) -> mpsc::UnboundedReceiver<(String, PermissionState)> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .subscribers
+            .entry(extension_id.to_string())
+            .or_default()
+            .push(sender);
+        receiver
     }
 }
 
 /// The records in the consent file. A missing file means no consent yet; a broken one is logged
 /// and treated the same, so the user is asked again rather than an extension let through.
-pub async fn read_records(path: &Path, fs: &dyn Fs) -> BTreeMap<String, ConsentRecord> {
+/// The records and the first-use answers.
+pub async fn read_file(
+    path: &Path,
+    fs: &dyn Fs,
+) -> (
+    BTreeMap<String, ConsentRecord>,
+    BTreeMap<String, BTreeMap<String, bool>>,
+) {
     let Ok(text) = fs.load(path).await else {
-        return BTreeMap::new();
+        return Default::default();
     };
     match serde_json::from_str::<ConsentFile>(&text) {
-        Ok(file) => file.extensions,
+        Ok(file) => (file.extensions, file.t2),
         Err(error) => {
             log::error!("fyx:ui: ignoring {}: {error}", path.display());
-            BTreeMap::new()
+            Default::default()
         }
     }
 }
@@ -392,6 +609,124 @@ mod tests {
         Grant::Component {
             sha256: "abc".into(),
         }
+    }
+
+    /// Plan 4.5: T2 at first use. `Ask` until answered; concurrent requests share one prompt; the
+    /// answer is recorded and streamed to `changes`; a closed prompt records nothing and gives
+    /// `Denied` to the waiting requests; a revoke is `Denied` until the page allows it again; the
+    /// answers survive in the consent file.
+    #[test]
+    fn test_t2_first_use() {
+        use futures::{FutureExt as _, StreamExt as _};
+        let mut store = ConsentStore::default();
+        let checker = store.checker();
+        store.declare(
+            "ext",
+            vec![
+                "ui:panel".into(),
+                "network:fetch".into(),
+                "network:fetch@api.example.com".into(),
+            ],
+        );
+        assert_eq!(checker.state("ext", "network:fetch"), PermissionState::Ask);
+        assert_eq!(
+            checker.state("ext", "process:spawn"),
+            PermissionState::Unavailable,
+            "undeclared"
+        );
+        assert_eq!(
+            checker.state("other", "network:fetch"),
+            PermissionState::Unavailable
+        );
+        assert!(checker.check("ext", "network:fetch").is_err());
+        // No prompter (no host UI): it stays Ask.
+        assert_eq!(
+            checker.request("ext", "network:fetch").now_or_never(),
+            Some(PermissionState::Ask)
+        );
+
+        let (prompter, mut prompts) = futures::channel::mpsc::unbounded();
+        store.set_prompter(prompter);
+        let mut changes = checker.changes("ext");
+        let first = checker.request("ext", "network:fetch");
+        let second = checker.request("ext", "network:fetch");
+        assert_eq!(
+            prompts.next().now_or_never().flatten(),
+            Some(PromptRequest {
+                extension_id: "ext".into(),
+                capability: "network:fetch".into()
+            })
+        );
+        assert!(
+            prompts.next().now_or_never().is_none(),
+            "one prompt for both"
+        );
+
+        // Closed without an answer: both denied, nothing recorded.
+        assert!(
+            store
+                .answer_prompt("ext", "network:fetch", None, false)
+                .is_none()
+        );
+        assert_eq!(first.now_or_never(), Some(PermissionState::Denied));
+        assert_eq!(second.now_or_never(), Some(PermissionState::Denied));
+        assert_eq!(checker.state("ext", "network:fetch"), PermissionState::Ask);
+
+        // Allowed.
+        let third = checker.request("ext", "network:fetch");
+        store.answer_prompt("ext", "network:fetch", Some(true), false);
+        assert_eq!(third.now_or_never(), Some(PermissionState::Granted));
+        assert_eq!(
+            checker.state("ext", "network:fetch"),
+            PermissionState::Granted
+        );
+        assert!(checker.check("ext", "network:fetch").is_ok());
+        assert_eq!(
+            changes.next().now_or_never().flatten(),
+            Some(("network:fetch".to_string(), PermissionState::Granted))
+        );
+        assert_eq!(
+            checker.request("ext", "network:fetch").now_or_never(),
+            Some(PermissionState::Granted),
+            "no prompt once answered"
+        );
+        assert!(
+            store
+                .revocable()
+                .contains(&("ext".into(), "network:fetch".into()))
+        );
+
+        // Revoked: denied at once, and streamed.
+        store.revoke("ext", "network:fetch").unwrap();
+        assert_eq!(
+            checker.state("ext", "network:fetch"),
+            PermissionState::Denied
+        );
+        assert_eq!(
+            changes.next().now_or_never().flatten(),
+            Some(("network:fetch".to_string(), PermissionState::Denied))
+        );
+        assert_eq!(
+            checker.request("ext", "network:fetch").now_or_never(),
+            Some(PermissionState::Denied),
+            "a refusal is not asked again"
+        );
+        assert!(store.revoke("ext", "network:fetch").is_err());
+        // The page allows it again.
+        store.set_t2("ext", "network:fetch", true);
+        assert_eq!(
+            checker.state("ext", "network:fetch"),
+            PermissionState::Granted
+        );
+
+        // The answers are kept in the consent file.
+        let mut stored = ConsentStore::at(std::path::PathBuf::from("consent.json"));
+        stored.declare("ext", vec!["network:fetch".into()]);
+        let (_, text) = stored
+            .set_t2("ext", "network:fetch", false)
+            .expect("file contents");
+        let file: ConsentFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(file.t2["ext"]["network:fetch"], false);
     }
 
     /// Plan 4.5: the manifest's domains, programs, argument patterns and environment names are

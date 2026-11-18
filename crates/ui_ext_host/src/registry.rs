@@ -167,6 +167,12 @@ pub enum RegistryEvent {
         message: SharedString,
         workspace: gpui::EntityId,
     },
+    /// A T2 capability's first use (plan 4.5): the workspace named asks the user.
+    PermissionPrompt {
+        extension_id: Arc<str>,
+        capability: SharedString,
+        workspace: gpui::EntityId,
+    },
     /// `notify` (design.md M.1): the workspace named shows it (the active window's).
     ShowNotification {
         extension_id: Arc<str>,
@@ -690,6 +696,131 @@ impl UiExtensionRegistry {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn consent_mut(&mut self) -> &mut ConsentStore {
+        &mut self.consent
+    }
+
+    /// Routes the broker's first-use prompts (plan 4.5) to the active window. Called once when
+    /// the registry is set up; without it a first use stays `Ask`.
+    pub fn start_permission_prompts(&mut self, cx: &mut Context<Self>) {
+        let (sender, mut requests) = futures::channel::mpsc::unbounded();
+        self.consent.set_prompter(sender);
+        cx.spawn(async move |this, cx| {
+            while let Some(request) = requests.next().await {
+                if this
+                    .update(cx, |this, cx| this.show_permission_prompt(request, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn show_permission_prompt(
+        &mut self,
+        request: crate::consent::PromptRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.active_workspace else {
+            log::info!(
+                "fyx:ui: {} asks for {} with no window to ask in",
+                request.extension_id,
+                request.capability
+            );
+            self.answer_permission(&request.extension_id, &request.capability, None, true, cx);
+            return;
+        };
+        cx.emit(RegistryEvent::PermissionPrompt {
+            extension_id: request.extension_id.into(),
+            capability: request.capability.into(),
+            workspace,
+        });
+    }
+
+    /// The user's answer to a first-use prompt: `Some` is recorded (Allow, Don't Allow); `None`
+    /// (closed, or no window) is not, and the waiting requests get `denied`.
+    pub(crate) fn answer_permission(
+        &mut self,
+        extension_id: &str,
+        capability: &str,
+        answer: Option<bool>,
+        no_window: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((path, text)) =
+            self.consent
+                .answer_prompt(extension_id, capability, answer, no_window)
+        {
+            let fs = <dyn Fs>::global(cx);
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        if let Some(allowed) = answer {
+            log::info!(
+                "fyx:ui: {extension_id}: {capability} {}",
+                if allowed { "allowed" } else { "refused" }
+            );
+        }
+        cx.notify();
+    }
+
+    /// Allows a T2 capability again from the extensions page (after Don't Allow or a revoke).
+    pub fn allow_t2(&mut self, extension_id: &str, capability: &str, cx: &mut Context<Self>) {
+        self.answer_permission(extension_id, capability, Some(true), false, cx);
+    }
+
+    /// The first-use state of a declared T2 capability, for the extensions page.
+    pub fn t2_state(
+        &self,
+        extension_id: &str,
+        capability: &str,
+    ) -> ui_ext_wasm::permissions::PermissionState {
+        self.consent.t2_state(extension_id, capability)
+    }
+
+    /// What a first-use prompt says: the title, and the hosts or programs it would use.
+    pub(crate) fn permission_prompt_text(
+        &self,
+        extension_id: &str,
+        capability: &str,
+    ) -> (String, String) {
+        let name = self.provenance_name(extension_id);
+        let declared = self.consent.declared(extension_id);
+        let listed = |prefix: &str| -> Vec<String> {
+            declared
+                .iter()
+                .filter_map(|item| item.strip_prefix(prefix))
+                .map(str::to_string)
+                .collect()
+        };
+        let (title, detail) = match capability {
+            "network:fetch" => (
+                format!("Allow {name} to connect to the internet?"),
+                format!("Hosts: {}", listed("network:fetch@").join(", ")),
+            ),
+            "process:spawn" => (
+                format!("Allow {name} to run programs?"),
+                format!("Programs: {}", listed("process:spawn@").join(", ")),
+            ),
+            "workspace:edit" => (
+                format!("Allow {name} to edit files in your projects?"),
+                String::new(),
+            ),
+            "agent:observe" => (
+                format!("Allow {name} to watch agent sessions?"),
+                String::new(),
+            ),
+            other => (format!("Allow {name} to use {other}?"), String::new()),
+        };
+        let detail = format!(
+            "{detail}\n\n{name} · {extension_id}. You can revoke this on the extensions page."
+        );
+        (title, detail.trim_start().to_string())
+    }
+
     /// Tells the user, in the active window, that a block changed an installed extension. With
     /// no window it stays in the log (the update check logged it already).
     pub(crate) fn notify_block(
@@ -1094,8 +1225,8 @@ impl UiExtensionRegistry {
                     return;
                 };
                 if let Some(path) = consent_file {
-                    let records = consent::read_records(&path, fs.as_ref()).await;
-                    this.update(cx, |this, _| this.consent.set_loaded(records))
+                    let (records, t2) = consent::read_file(&path, fs.as_ref()).await;
+                    this.update(cx, |this, _| this.consent.set_loaded(records, t2))
                         .ok();
                 }
                 // Check each extension in turn (consent may ask), then load them all at once: each
@@ -1856,6 +1987,7 @@ pub fn init(cx: &mut App) {
         UiExtensionRegistry::new(ConsentStore::default_path())
             .with_store(InstallStore::new(InstallStore::default_root()))
     });
+    registry.update(cx, |registry, cx| registry.start_permission_prompts(cx));
     cx.set_global(GlobalRegistry(registry));
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
@@ -2048,6 +2180,22 @@ fn attach_to_workspace(
                     }
                     return;
                 }
+                RegistryEvent::PermissionPrompt {
+                    extension_id,
+                    capability,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        ask_permission(
+                            &registry,
+                            extension_id.clone(),
+                            capability.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
                 RegistryEvent::HostNotice {
                     id,
                     title,
@@ -2211,6 +2359,41 @@ fn show_extension_notification(
         cx,
         |_| view,
     );
+}
+
+/// The first-use prompt of a T2 capability (plan 4.5): Allow or Don't Allow; closing it answers
+/// nothing.
+fn ask_permission(
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: Arc<str>,
+    capability: SharedString,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let (title, detail) = registry
+        .read(cx)
+        .permission_prompt_text(&extension_id, &capability);
+    let answer = window.prompt(
+        gpui::PromptLevel::Warning,
+        &title,
+        Some(&detail),
+        &["Allow", "Don't Allow"],
+        cx,
+    );
+    let registry = registry.downgrade();
+    cx.spawn(async move |_, cx| {
+        let answer = match answer.await {
+            Ok(0) => Some(true),
+            Ok(1) => Some(false),
+            _ => None,
+        };
+        registry
+            .update(cx, |registry, cx| {
+                registry.answer_permission(&extension_id, &capability, answer, false, cx)
+            })
+            .ok();
+    })
+    .detach();
 }
 
 fn close_notification_view(open: OpenNotification, cx: &mut App) {
