@@ -88,3 +88,7 @@ The owner:
    `auto-merge`.
 4. Makes the keys (registry-repo.md, "Creating the keys") and sets `SNAPSHOT_KEY_ID`.
 5. Builds the builder image and puts its digest into `policy/builder.toml`.
+6. Runs `blocklist` and then `publish` once by hand (Actions, "Run workflow") with `first_run`
+   checked, so the first block list and snapshot start at sequence 1. After that, every run
+   needs the published documents: a failed download fails the job rather than restarting the
+   sequence (integration-5 R6).

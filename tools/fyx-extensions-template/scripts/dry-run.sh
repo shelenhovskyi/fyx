@@ -54,7 +54,7 @@ check() { # check FILE JQ-FILTER MESSAGE
 }
 
 step "policy script tests"
-(cd "$template/scripts" && "$py" -m unittest -q test_registry)
+(cd "$template/scripts" && "$py" -m unittest -q test_registry test_published)
 
 step "throwaway test keys (never real ones)"
 keyset_entries=()

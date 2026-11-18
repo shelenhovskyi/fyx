@@ -435,3 +435,7 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   4 notify/dismiss calls (`notify`), `notification-action` as a gesture (`show-surface`); 0.3
   only: `canvas-click` as a gesture, the protected paths of `edit-error.not-allowed`, the asset
   path rule. `docs/fyx/api/*.md` regenerated.
+
+## R8 (integration-5): age gate from first sight
+
+The 24 h gate counts from the later of `published_at` and when this client first saw the release (`FirstSeen`, kept in the snapshot state, carried across snapshots). The first index a client ever accepts records `published_at`. A backdated release from a leaked release key still waits 24 h.
