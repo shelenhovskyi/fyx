@@ -348,6 +348,7 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
                     ui_ext::image::ImageSource::Generated(_) => 0,
                 }
         }
+        model::Props::Canvas(props) => ui_ext::canvas::canvas_text_len(props),
     }
 }
 
@@ -696,7 +697,8 @@ impl Mounted {
             | model::UiEvent::Dismissed(_)
             | model::UiEvent::NotificationAction(_)
             | model::UiEvent::NotificationClosed(..)
-            | model::UiEvent::ProgressCancelRequested(_) => {}
+            | model::UiEvent::ProgressCancelRequested(_)
+            | model::UiEvent::CanvasClick(_) => {}
         }
     }
 
@@ -1791,6 +1793,11 @@ mod shim {
             // 0.3 only; 0.1 has no image, so its alt text stands in.
             model::Props::Image(image) => Props::Text(ui_ext::TextProps {
                 content: image.alt.clone(),
+                ..ui_ext::TextProps::default()
+            }),
+            // As the host's 0.1 view: the description stands in for the drawing.
+            model::Props::Canvas(canvas) => Props::Text(ui_ext::TextProps {
+                content: canvas.description.clone(),
                 ..ui_ext::TextProps::default()
             }),
         }

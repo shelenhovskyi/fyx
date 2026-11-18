@@ -486,6 +486,16 @@ pub mod glue {
 
     /// Nothing to free: 0.2 has no generated images.
     pub fn remove_image(_image: u32) {}
+
+    pub fn fetch(_request: &crate::HttpRequest) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("fetch"),
+        })
+    }
+
+    /// Nothing to cancel: 0.2 has no network.
+    pub fn cancel_fetch(_request: u64) {}
 }
 
 #[cfg(test)]
@@ -543,6 +553,17 @@ mod tests {
         assert_eq!(
             event(v2::UiEvent::Dismissed(v2::DismissReason::Escape)),
             UiEvent::Dismissed(DismissReason::Escape)
+        );
+    }
+
+    #[test]
+    fn fetch_needs_0_3() {
+        let error = fetch(&crate::HttpRequest::get("https://example.com")).unwrap_err();
+        assert_eq!(error.code, HostErrorCode::Unavailable);
+        assert!(
+            error.message.contains("fetch needs fyx:ui 0.3"),
+            "{}",
+            error.message
         );
     }
 

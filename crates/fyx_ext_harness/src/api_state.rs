@@ -203,7 +203,8 @@ impl ApiState {
         match event {
             model::UiEvent::Click(_)
             | model::UiEvent::RowClick(..)
-            | model::UiEvent::InputSubmitted(..) => self.activation = Activation::DuringCall,
+            | model::UiEvent::InputSubmitted(..)
+            | model::UiEvent::CanvasClick(_) => self.activation = Activation::DuringCall,
             model::UiEvent::Dismissed(_) => {
                 self.shown_modals.remove(surface_id);
             }

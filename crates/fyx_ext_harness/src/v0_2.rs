@@ -396,6 +396,9 @@ impl From<model::UiEvent> for wit::UiEvent {
                 },
             )),
             model::UiEvent::ProgressCancelRequested(id) => Self::ProgressCancelRequested(id),
+            // 0.2 has no canvas; the host maps the event to a click on the node, but never sends
+            // it, since a 0.2 tree cannot hold a canvas.
+            model::UiEvent::CanvasClick(click) => Self::Click(click.canvas),
         }
     }
 }
