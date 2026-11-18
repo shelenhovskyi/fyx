@@ -79,30 +79,46 @@ pub fn describe_capabilities(manifest: &UiManifest) -> Vec<String> {
     describe_capability_ids(&manifest.capabilities)
 }
 
+/// What a capability lets an extension do, in plain words (triage-3, UX F17). The manifest
+/// name follows in brackets for authors.
 pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
     if capabilities.is_empty() {
-        return vec!["none".into()];
+        return vec!["Nothing beyond its own UI".into()];
     }
     capabilities
         .iter()
         .map(|capability| match capability.as_str() {
-            CAPABILITY_PANEL => format!("{capability}: add dock panels"),
-            CAPABILITY_STATUS_BAR => format!("{capability}: add status bar items"),
+            CAPABILITY_PANEL => format!("Adds panels to your docks ({capability})"),
+            CAPABILITY_STATUS_BAR => format!("Adds items to the status bar ({capability})"),
+            "ui:modal" => format!("Opens dialogs after you click or press Enter ({capability})"),
             "workspace:read-buffers" => {
-                format!("{capability}: read your open buffers (T1: approved here, revocable)")
+                format!("Reads your open files (asks once, here; you can revoke it) ({capability})")
             }
-            "workspace:read-files" => {
-                format!("{capability}: read files in your worktrees (T1: approved here, revocable)")
-            }
-            "workspace:diagnostics" => {
-                format!("{capability}: read diagnostics (T1: approved here, revocable)")
-            }
+            "workspace:read-files" => format!(
+                "Reads files in your projects (asks once, here; you can revoke it) ({capability})"
+            ),
+            "workspace:diagnostics" => format!(
+                "Reads errors and warnings (asks once, here; you can revoke it) ({capability})"
+            ),
             other => match tier_of(other) {
-                Some(tier) => format!("{other}: {tier}, not used by this version"),
-                None => format!("{other}: unknown to this version"),
+                Some(_) => format!("Not used by this version of Fyx ({other})"),
+                None => format!("Unknown to this version of Fyx ({other})"),
             },
         })
         .collect()
+}
+
+/// A capability as a short chip label.
+pub fn capability_chip_label(capability: &str) -> String {
+    match capability {
+        CAPABILITY_PANEL => "Panels".into(),
+        CAPABILITY_STATUS_BAR => "Status Bar Items".into(),
+        "ui:modal" => "Dialogs".into(),
+        "workspace:read-buffers" => "Reads Open Files".into(),
+        "workspace:read-files" => "Reads Project Files".into(),
+        "workspace:diagnostics" => "Reads Diagnostics".into(),
+        other => other.to_string(),
+    }
 }
 
 /// Checks that `source` is a UI extension with a built component: its `extension.toml` has a

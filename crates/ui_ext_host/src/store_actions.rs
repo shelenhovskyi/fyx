@@ -33,6 +33,8 @@ actions!(
         RestartUiExtension,
         /// Takes back a permission (T1) granted to a UI extension.
         RevokeUiExtensionPermission,
+        /// Opens one of the extension panels, picked by title.
+        OpenExtensionPanel,
     ]
 );
 
@@ -53,6 +55,56 @@ pub(crate) fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &RevokeUiExtensionPermission, window, cx| {
         prompt_revoke(workspace, window, cx)
     });
+    workspace
+        .register_action(|_, _: &OpenExtensionPanel, window, cx| prompt_open_panel(window, cx));
+}
+
+/// Picks an extension panel by its title and opens it (triage-3, UX F15): the command palette
+/// cannot fill `ToggleExtensionPanel`'s key, so this asks.
+fn prompt_open_panel(window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return;
+    };
+    let panels: Vec<(String, String)> = registry
+        .read(cx)
+        .surfaces()
+        .iter()
+        .filter(|surface| {
+            matches!(
+                surface.state.read(cx).surface().kind,
+                ui_ext::v0_2::SurfaceKind::Panel(_)
+            )
+        })
+        .map(|surface| (surface.info.title.to_string(), surface.info.key.to_string()))
+        .take(MAX_PICKER_CHOICES)
+        .collect();
+    if panels.is_empty() {
+        return;
+    }
+    let mut answers: Vec<&str> = panels.iter().map(|(title, _)| title.as_str()).collect();
+    answers.push("Cancel");
+    let answer = window.prompt(
+        PromptLevel::Info,
+        "Open which extension panel?",
+        None,
+        &answers,
+        cx,
+    );
+    cx.spawn_in(window, async move |_, cx| {
+        let Ok(choice) = answer.await else {
+            return;
+        };
+        if let Some((_, key)) = panels.get(choice) {
+            cx.update(|window, cx| {
+                window.dispatch_action(
+                    Box::new(crate::ToggleExtensionPanel { key: key.clone() }),
+                    cx,
+                )
+            })
+            .ok();
+        }
+    })
+    .detach();
 }
 
 /// Picks a granted T1 permission and revokes it.
