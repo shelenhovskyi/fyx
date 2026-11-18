@@ -185,7 +185,7 @@ impl Keyset {
         (!keys.is_empty()).then_some(Self { keys })
     }
 
-    /// The registry's role separation (registry-repo.md, "Keys and roles"), for the keyset the
+    /// The registry's role separation (registry-repo.md, "Keys"), for the keyset the
     /// registry repository publishes. Clients do not apply it: they only check that a signature
     /// comes from a key with the right role.
     ///

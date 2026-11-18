@@ -1,11 +1,13 @@
 //! Client-side core of the Fyx extension registry (Platform 1, decisions 14–21).
 //!
-//! Pure functions only: no network, no file system, no clock. Callers pass in the bytes they
-//! fetched and the current time, and get back verified documents and decisions. The formats are
-//! documented in `docs/fyx/platform/registry-format.md`.
+//! No network, no file system, no clock. Callers pass in the bytes they (or a [`Fetch`] they
+//! supply) fetched and the current time, and get back verified documents and decisions; the
+//! [`RegistryClient`] ties them together in the order of trust. The formats are documented in
+//! `docs/fyx/platform/registry-format.md`.
 
 mod blocklist;
 mod canonical;
+mod client;
 mod index;
 mod signing;
 mod snapshot;
@@ -21,6 +23,10 @@ pub use blocklist::{
     BLOCKLIST_FETCH_INTERVAL, BLOCKLIST_SCHEMA, BLOCKLIST_STALE_AFTER, BlockEntry, Blocklist,
     BlocklistCache, CacheUpdate, Comparator, ComparatorOp, Freshness, KeepReason,
     MAX_BLOCK_ENTRIES, MAX_BLOCKLIST_SIZE, MAX_BLOCKLIST_VALIDITY, VerifiedBlocklist, VersionRange,
+};
+pub use client::{
+    DownloadError, Fetch, FetchRequest, IndexRefresh, InstallError, InstallPlan, RegistryClient,
+    RegistryFile, StoredState, Unavailable,
 };
 pub use index::{
     INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
