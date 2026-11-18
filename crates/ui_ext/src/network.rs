@@ -115,6 +115,12 @@ pub enum IoEvent {
     /// A T2 capability's state changed (the prompt was answered, or the extensions page
     /// changed it); in-flight work of a revoked one was cancelled first.
     PermissionChanged(String, PermissionState),
+    /// `process:spawn`: up to 64 KiB of a process's output, in order.
+    ProcessOutput(crate::process::ProcessOutput),
+    /// After its last output; exactly one per started process.
+    ProcessExited(crate::process::ProcessExit),
+    /// Instead of any output and exit: the process never started.
+    SpawnFailed(u64, crate::process::SpawnError),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).

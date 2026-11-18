@@ -248,3 +248,48 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   is a re-export.
 - `ui_ext_wasm` no longer depends on `fyx_registry`.
 
+
+## Plan 4.7: `process:spawn`, host side (2026-11-18)
+
+- **Pure part** (`crates/ui_ext/src/process.rs`, feature `process`; `t2` gates it and `network`):
+  - `ProcessSpec`, which `UiManifest` re-exports;
+  - the limits;
+  - `SpawnRequest`, `FileRef`, `ProcessOutput`, `ProcessExit`, `SpawnError`;
+  - `args_match` (literal, `*` within an argument, a final `**`), `is_forbidden_env` and
+    `check_env_name` (the loader now refuses `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `GIT_SSH*`, …);
+  - `check_spawn` (caps, declared environment names, patterns, the `cwd` rule; an undeclared
+    program gets an id and `spawn-failed(not-found)`);
+  - `ProcessCounters` (4 live).
+  - `IoEvent` gains `ProcessOutput`, `ProcessExited` and `SpawnFailed`.
+- **Host** (`crates/ui_ext_wasm/src/process.rs`):
+  - `resolve_on_path`: skips empty, relative and in-worktree entries; on Windows `.exe` and
+    `.com` only, `.bat` and `.cmd` refused; the absolute path is spawned;
+  - `resolve_in_worktree` for `path` programs, trusted worktrees only, no link out;
+  - `resolve_cwd`;
+  - `program_environment`: cleared, then the base names, `LC_*`, the declared names, and the
+    guest's declared pairs.
+  - The tree dies with the program. On Windows the child is created suspended, assigned to a
+    `KILL_ON_JOB_CLOSE` job, then resumed. On Unix it gets its own process group, and on Linux
+    `PR_SET_PDEATHSIG`. Kill is SIGTERM, then SIGKILL after 2 s.
+  - Output goes in ≤ 64 KiB chunks through the shared `handle-io` queue (backpressure); stdin is
+    a queue (1 MiB per write, 4 MiB queued); `process-exited.killed` is set for host kills.
+- **Kills** on `kill`, revocation (`changes()`), a trap, and dropping the instance (reload,
+  disable).
+- **Broker:** `state()` at every import (Ask accepted); `request()` when applied. An untrusted
+  worktree is `denied` without a prompt; no worktree is `unavailable`.
+- **LoadOptions:** `processes`, `process_env` (set by `load_checked`), `workspace`
+  (`process::Workspace`, the host's worktrees with `trusted`), and `process_environment` (tests).
+- **Tests:**
+  - spec §4 failure 4, end to end: a planted `hostname` in the worktree with the worktree and
+    `.` first on PATH, and the system one runs;
+  - a reload kills the tree, checked by the grandchild's pid;
+  - the 4-process cap, kill, `kill` on an exited id;
+  - undeclared and `.cmd` programs → `not-found`;
+  - revocation kills, and a refused prompt never starts;
+  - untrusted → `denied`, no worktree → `unavailable`;
+  - the filtered environment, and stdin;
+  - plus unit tests of resolution and the environment.
+- **Not done:**
+  - Linux `PR_SET_CHILD_SUBREAPER`;
+  - the Inspector line;
+  - the Unix variants of the tests have not been run (no Linux runner for the full crate).
