@@ -289,11 +289,17 @@ pub struct UiManifest {
     /// 0.2 [`CAPABILITY_MODAL`] and [`CAPABILITY_EDITOR_DECORATIONS`].
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// `name` from the top of `extension.toml`, as its author wrote it: check it before showing
+    /// it (the provenance line of notifications, design.md M.4).
+    #[serde(skip)]
+    pub name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ExtensionToml {
     id: Arc<str>,
+    #[serde(default)]
+    name: Option<String>,
     fyx_ui: Option<UiManifest>,
 }
 
@@ -307,9 +313,10 @@ impl UiManifest {
             .with_context(|| format!("reading {path:?}"))?;
         let toml: ExtensionToml =
             toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
-        let Some(manifest) = toml.fyx_ui else {
+        let Some(mut manifest) = toml.fyx_ui else {
             return Ok(None);
         };
+        manifest.name = toml.name;
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
         for capability in &manifest.capabilities {
@@ -858,6 +865,8 @@ pub struct UiExtension {
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
     from_precompiled: bool,
     diagnostics: diagnostics::DiagnosticsBuffer,
+    /// `extension.toml`'s `name`, unchecked; `None` without a manifest.
+    name: Option<Arc<str>>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1165,6 +1174,7 @@ impl UiExtension {
                     _task: Arc::new(task),
                     from_precompiled,
                     diagnostics,
+                    name: None,
                 },
                 pushed_rx,
             ))
@@ -1218,7 +1228,7 @@ impl UiExtension {
             capabilities: Some(manifest.capabilities.clone()),
             ..options
         };
-        let (extension, pushed) =
+        let (mut extension, pushed) =
             Self::load_with_options(extension_id.clone(), wasm_bytes, options, cx)
                 .await
                 .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
@@ -1228,11 +1238,17 @@ impl UiExtension {
             manifest.api_version,
             extension.api_version,
         );
+        extension.name = manifest.name.map(Arc::from);
         Ok((extension, pushed))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {
         &self.extension_id
+    }
+
+    /// `extension.toml`'s `name` as its author wrote it (check it before showing it).
+    pub fn display_name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     pub fn api_version(&self) -> &Version {
