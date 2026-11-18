@@ -128,6 +128,9 @@ pub struct UiExtensionRegistry {
     active_workspace: Option<gpui::EntityId>,
     /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
     load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
+    /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
+    /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
+    dev_reloads: HashMap<PathBuf, Task<()>>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -881,7 +884,8 @@ impl UiExtensionRegistry {
             // The scan compares the component's fingerprint and loads it again if it changed.
             Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
             Reload::DevPath(path) => {
-                cx.spawn(async move |this, cx| {
+                let key = path.clone();
+                let task = cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
                             "fyx:ui: failed to reload dev extension {}: {error:#}",
@@ -902,8 +906,8 @@ impl UiExtensionRegistry {
                         })
                         .ok();
                     }
-                })
-                .detach();
+                });
+                self.dev_reloads.insert(key, task);
             }
         }
     }
@@ -1658,6 +1662,25 @@ fn attach_to_workspace(
                     registry.set_active_workspace(workspace_id)
                 });
             }
+        }
+    })
+    .detach();
+
+    // A closed workspace lets its containers go at once: the registry's observers hold
+    // `surfaces` until its next notify (triage-3, ASYNC 8).
+    cx.on_release({
+        let surfaces = surfaces.clone();
+        let registry = registry.downgrade();
+        move |_, cx| {
+            let released = std::mem::take(&mut *surfaces.borrow_mut());
+            drop(released);
+            registry
+                .update(cx, |registry, _| {
+                    if registry.active_workspace == Some(workspace_id) {
+                        registry.active_workspace = None;
+                    }
+                })
+                .ok();
         }
     })
     .detach();

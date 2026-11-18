@@ -18,7 +18,10 @@ use std::{
     ops::RangeInclusive,
     path::{Component as PathComponent, Path, PathBuf},
     pin::pin,
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
@@ -578,7 +581,13 @@ impl UiState {
             message.truncate(end);
             message.push_str(&format!("… ({total} bytes, cut)"));
         }
-        log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        log::log!(
+            target: "fyx_ui",
+            level,
+            "{}: {}",
+            self.extension_id,
+            ui_ext::sanitize_for_log(&message)
+        );
         self.diagnostics.log(level, &message);
         Ok(())
     }
@@ -673,11 +682,19 @@ fn build_ui_runtime() -> Result<UiRuntime> {
         .name("fyx-ui-epoch".into())
         .spawn(move || {
             loop {
+                // Nothing to interrupt or time out while no guest call runs: park instead of
+                // waking 100 times a second for the whole process (triage-3, PERF 7).
+                drop(
+                    CALLS_STARTED
+                        .wait_while(lock_active_calls(), |active| *active == 0)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
                 std::thread::sleep(UI_EPOCH_INTERVAL);
                 let Some(engine) = weak_engine.upgrade() else {
                     break;
                 };
                 engine.increment_epoch();
+                EPOCH_TICKS.fetch_add(1, Ordering::Relaxed);
                 wake_deadlines();
             }
         })
@@ -700,6 +717,38 @@ fn build_ui_runtime() -> Result<UiRuntime> {
         linker_v0_2,
         linker_v0_3,
     })
+}
+
+/// Guest calls running now (instantiation included): the epoch thread ticks only while there
+/// are any.
+static ACTIVE_CALLS: Mutex<usize> = Mutex::new(0);
+static CALLS_STARTED: Condvar = Condvar::new();
+/// Epoch ticks so far, for tests.
+static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+
+fn lock_active_calls() -> std::sync::MutexGuard<'static, usize> {
+    ACTIVE_CALLS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One running guest call, counted in [`ACTIVE_CALLS`] while it lives.
+struct ActiveCall;
+
+impl ActiveCall {
+    fn begin() -> Self {
+        let mut active = lock_active_calls();
+        *active += 1;
+        if *active == 1 {
+            CALLS_STARTED.notify_all();
+        }
+        ActiveCall
+    }
+}
+
+impl Drop for ActiveCall {
+    fn drop(&mut self) {
+        let mut active = lock_active_calls();
+        *active = active.saturating_sub(1);
+    }
 }
 
 /// Wakers of calls waiting in [`with_budget`], woken on every epoch tick.
@@ -747,6 +796,9 @@ impl std::task::Wake for RecordingWaker {
 /// a busy tokio worker spends neither, so other work on the shared runtime, or other UI
 /// extensions, cannot get a healthy extension disabled.
 async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
+    // Every guest call runs in here, so this is what keeps the epoch thread ticking (triage-3,
+    // PERF 7); a call waiting on the host counts too, since the epoch thread polls it again.
+    let _active = ActiveCall::begin();
     let limit = budget + UI_DEADLINE_SLACK;
     let mut call = pin!(call);
     let mut blocked = Duration::ZERO;

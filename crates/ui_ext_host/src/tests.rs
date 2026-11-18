@@ -805,6 +805,18 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
     vcx.simulate_click(bounds.center(), Modifiers::none());
     vcx.run_until_parked();
     assert_eq!(props_of(&state, LABEL, vcx), text("Count: 1"));
+
+    // Triage-3, ASYNC 8: a panel that goes away (its workspace closed) stops showing the
+    // surface, so its ticks wait.
+    panel.update_in(vcx, |panel, window, cx| {
+        use workspace::Panel as _;
+        panel.set_active(true, window, cx)
+    });
+    assert!(state.read_with(vcx, |state, _| state.is_visible()));
+    drop(panel);
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert!(!state.read_with(vcx, |state, _| state.is_visible()));
 }
 
 #[test]
@@ -1167,6 +1179,50 @@ fn focus_surface(view: &Entity<SurfaceView>, cx: &mut VisualTestContext) {
 fn key(keys: &str, cx: &mut VisualTestContext) {
     cx.simulate_keystrokes(keys);
     cx.run_until_parked();
+}
+
+/// Triage-3, UX F6 and F21: the host's own buttons are in the Tab order and take Enter and
+/// Space; the error footer has a Dismiss.
+#[gpui::test]
+async fn test_host_controls_take_the_keyboard(cx: &mut TestAppContext) {
+    use crate::view::HostControl;
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    focus_surface(&view, vcx);
+    let host_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| view.read(cx).focused_host_control(window))
+    };
+
+    // A footer error: after the surface's nodes come Retry and Dismiss.
+    state.update(vcx, |state, cx| {
+        state.show_reload_error("Reload failed: broken".into(), cx)
+    });
+    vcx.run_until_parked();
+    key("shift-tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::DismissError));
+    key("shift-tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::ReloadRetry));
+    key("shift-tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST), "back into the surface");
+    key("tab", vcx);
+    key("tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::DismissError));
+    key("space", vcx);
+    assert_eq!(
+        state.read_with(vcx, |state, _| state.last_error().cloned()),
+        None
+    );
+
+    // A failed surface: Retry, reached by Tab, retries on Enter.
+    state.update(vcx, |state, cx| state.fail("broken".into(), true, cx));
+    vcx.run_until_parked();
+    backend.take_calls();
+    key("tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::Retry));
+    key("enter", vcx);
+    assert_eq!(backend.take_calls(), [Call::Mount]);
 }
 
 #[gpui::test]
@@ -2161,6 +2217,25 @@ async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {
         "no mount: {:?}",
         backend.calls()
     );
+}
+
+/// Triage-3, SEC T8: extension markdown never forms an image, so `data:` images are not decoded.
+#[test]
+fn test_markdown_images_are_not_parsed() {
+    use crate::view::without_images;
+    assert_eq!(
+        without_images("a ![x](data:image/png;base64,AAAA) b"),
+        r"a \![x](data:image/png;base64,AAAA) b"
+    );
+    assert_eq!(without_images("![r][ref]"), r"\![r][ref]");
+    // Already escaped: left alone. Two backslashes are an escaped backslash: escaped again.
+    assert_eq!(without_images(r"\![x](y)"), r"\![x](y)");
+    assert_eq!(without_images(r"\\![x](y)"), r"\\\![x](y)");
+    assert_eq!(
+        without_images("Hi! [link](https://zed.dev)"),
+        "Hi! [link](https://zed.dev)"
+    );
+    assert_eq!(without_images("!!["), r"!\![");
 }
 
 /// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
