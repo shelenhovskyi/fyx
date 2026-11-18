@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
 use fs::Fs;
-use gpui::{AsyncWindowContext, Context, PathPromptOptions, PromptLevel, Window, actions};
+use gpui::{AsyncWindowContext, Context, PathPromptOptions, Window, actions};
 use workspace::{Toast, Workspace, notifications::NotificationId};
 
 use crate::{
@@ -53,7 +53,9 @@ pub(crate) fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &UninstallUiExtension, window, cx| {
         run(workspace, window, cx, StoreCommand::Uninstall)
     });
-    workspace.register_action(|_, _: &RestartUiExtension, window, cx| prompt_restart(window, cx));
+    workspace.register_action(|workspace, _: &RestartUiExtension, window, cx| {
+        prompt_restart(workspace, window, cx)
+    });
     workspace.register_action(|_, _: &ShowHiddenStatusItems, _, cx| {
         crate::install::set_status_item_hidden(None, cx)
     });
@@ -61,12 +63,14 @@ pub(crate) fn register(workspace: &mut Workspace) {
         prompt_revoke(workspace, window, cx)
     });
     workspace
-        .register_action(|_, _: &OpenExtensionPanel, window, cx| prompt_open_panel(window, cx));
+        .register_action(|workspace, _: &OpenExtensionPanel, window, cx| {
+            prompt_open_panel(workspace, window, cx)
+        });
 }
 
 /// Picks an extension panel by its title and opens it (triage-3, UX F15): the command palette
 /// cannot fill `ToggleExtensionPanel`'s key, so this asks.
-fn prompt_open_panel(window: &mut Window, cx: &mut Context<Workspace>) {
+fn prompt_open_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
     };
@@ -81,18 +85,17 @@ fn prompt_open_panel(window: &mut Window, cx: &mut Context<Workspace>) {
             )
         })
         .map(|surface| (surface.info.title.to_string(), surface.info.key.to_string()))
-        .take(MAX_PICKER_CHOICES)
         .collect();
     if panels.is_empty() {
         return;
     }
-    let mut answers: Vec<&str> = panels.iter().map(|(title, _)| title.as_str()).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    // In the window, filterable: any number of panels (W10 item 8).
+    let answer = crate::choice::choose(
+        workspace,
         "Open which extension panel?",
         None,
-        &answers,
+        panels.iter().map(|(title, _)| title.clone()).collect(),
+        window,
         cx,
     );
     cx.spawn_in(window, async move |_, cx| {
@@ -121,7 +124,6 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
         .read(cx)
         .revocable()
         .into_iter()
-        .take(MAX_PICKER_CHOICES)
         .collect();
     if grants.is_empty() {
         toast(
@@ -135,13 +137,12 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
         .iter()
         .map(|(id, capability)| format!("{id}: {capability}"))
         .collect();
-    let mut answers: Vec<&str> = labels.iter().map(String::as_str).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    let answer = crate::choice::choose(
+        workspace,
         "Revoke which permission?",
         Some("The extension is denied it from its next call, and asks again on its next load."),
-        &answers,
+        labels,
+        window,
         cx,
     );
     let fs = workspace.app_state().fs.clone();
@@ -167,7 +168,7 @@ fn prompt_revoke(workspace: &mut Workspace, window: &mut Window, cx: &mut Contex
 }
 
 /// Picks a loaded extension and restarts it.
-fn prompt_restart(window: &mut Window, cx: &mut Context<Workspace>) {
+fn prompt_restart(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
     };
@@ -179,17 +180,15 @@ fn prompt_restart(window: &mut Window, cx: &mut Context<Workspace>) {
         .collect();
     ids.sort();
     ids.dedup();
-    ids.truncate(MAX_PICKER_CHOICES);
     if ids.is_empty() {
         return;
     }
-    let mut answers: Vec<&str> = ids.iter().map(|id| id.as_ref()).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    let answer = crate::choice::choose(
+        workspace,
         "Restart which UI extension?",
         Some("It loads again on a fresh instance and its panels and status items remount."),
-        &answers,
+        ids.iter().map(|id| id.to_string()).collect(),
+        window,
         cx,
     );
     cx.spawn(async move |_, cx| {
@@ -379,12 +378,13 @@ fn install_package(
                 describe_capability_ids(&info.manifest.consent_items()).join("\n"),
                 package.display(),
             );
-            let answer = workspace.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Info,
+            let answer = workspace.update_in(cx, |workspace, window, cx| {
+                crate::choice::confirm(
+                    workspace,
                     &format!("Install {} {}?", info.extension_id, info.version),
                     Some(&detail),
                     &["Install", "Cancel"],
+                    window,
                     cx,
                 )
             })?;
@@ -447,9 +447,6 @@ impl StoreCommand {
     }
 }
 
-/// Most extensions a picker offers; the prompt is a stopgap until the Extensions page tab.
-const MAX_PICKER_CHOICES: usize = 8;
-
 fn run(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -467,7 +464,6 @@ fn run(
                 .extensions
                 .keys()
                 .filter(|id| command.applies(&state, id))
-                .take(MAX_PICKER_CHOICES)
                 .cloned()
                 .collect();
             if ids.is_empty() {
@@ -496,17 +492,9 @@ fn run(
                     StoreCommand::Uninstall => format!("{id} {}", entry.active),
                 }
             };
-            let detail = ids.iter().map(describe).collect::<Vec<_>>().join("\n");
-            let mut answers: Vec<&str> = ids.iter().map(String::as_str).collect();
-            answers.push("Cancel");
-            let answer = workspace.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Info,
-                    command.title(),
-                    Some(&detail),
-                    &answers,
-                    cx,
-                )
+            let entries = ids.iter().map(describe).collect::<Vec<_>>();
+            let answer = workspace.update_in(cx, |workspace, window, cx| {
+                crate::choice::choose(workspace, command.title(), None, entries, window, cx)
             })?;
             let Ok(choice) = answer.await else {
                 return Ok(None);

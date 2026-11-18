@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use fs::Fs;
-use gpui::{App, Context, PathPromptOptions, PromptLevel, Window, actions};
+use gpui::{App, Context, PathPromptOptions, Window, actions};
 use settings::{RegisterSetting, Settings};
 use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest, permissions::tier_of};
 use workspace::{Toast, Workspace, notifications::NotificationId};
@@ -268,12 +268,13 @@ pub(crate) fn prompt_and_install(
                 manifest.component,
                 source.display()
             );
-            let answer = workspace.update_in(cx, |_, window, cx| {
-                window.prompt(
-                    PromptLevel::Info,
+            let answer = workspace.update_in(cx, |workspace, window, cx| {
+                crate::choice::confirm(
+                    workspace,
                     &format!("Install the dev UI extension {extension_id}?"),
                     Some(&detail),
                     &["Install", "Cancel"],
+                    window,
                     cx,
                 )
             })?;
@@ -337,9 +338,6 @@ pub(crate) fn prompt_and_install(
     .detach();
 }
 
-/// Most folders the removal prompt offers; the prompt is a stopgap until the Extensions page tab.
-const MAX_PICKER_CHOICES: usize = 8;
-
 /// The action: pick one of the dev paths and take it off the list.
 pub(crate) fn prompt_and_remove(
     workspace: &mut Workspace,
@@ -347,10 +345,7 @@ pub(crate) fn prompt_and_remove(
     cx: &mut Context<Workspace>,
 ) {
     let fs = workspace.app_state().fs.clone();
-    let paths: Vec<PathBuf> = dev_paths_setting(cx)
-        .into_iter()
-        .take(MAX_PICKER_CHOICES)
-        .collect();
+    let paths: Vec<PathBuf> = dev_paths_setting(cx);
     if paths.is_empty() {
         toast(
             workspace,
@@ -359,26 +354,12 @@ pub(crate) fn prompt_and_remove(
         );
         return;
     }
-    let names: Vec<String> = paths
-        .iter()
-        .map(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string())
-        })
-        .collect();
-    let detail = paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut answers: Vec<&str> = names.iter().map(String::as_str).collect();
-    answers.push("Cancel");
-    let answer = window.prompt(
-        PromptLevel::Info,
+    let answer = crate::choice::choose(
+        workspace,
         "Remove which dev UI extension?",
-        Some(&detail),
-        &answers,
+        None,
+        paths.iter().map(|path| path.display().to_string()).collect(),
+        window,
         cx,
     );
     cx.spawn_in(window, async move |workspace, cx| {
