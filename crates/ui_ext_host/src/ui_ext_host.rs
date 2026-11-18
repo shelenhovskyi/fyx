@@ -41,8 +41,8 @@ use serde::Deserialize;
 
 pub use backend::UiBackend;
 pub use decorations::{
-    DEV_DECORATIONS_ENV, DecorationId, DecorationPlacement, DecorationTarget, Decorations,
-    text_tree,
+    DEV_DECORATIONS_ENV, DecorationId, DecorationPath, DecorationPlacement, DecorationTarget,
+    Decorations, text_tree,
 };
 pub use inspector::{ExtensionInspector, InspectorSnapshot, ToggleExtensionInspector};
 pub use install::{
