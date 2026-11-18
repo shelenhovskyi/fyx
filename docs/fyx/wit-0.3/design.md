@@ -1250,11 +1250,10 @@ and its kind (product or technical), for the full 0.3 and for the smaller 0.3 of
    for files inside the worktrees, nothing for files outside, opaque ids (§11); the alternative,
    metadata only (paths and counts), makes review dashboards possible but not review-aware linters.
 9. **Version lifetime once 1.0 follows 0.3.** Decision 29 removes 0.1 "in 0.4", which never ships.
-   **Decided 2026-11-18** (integration-5 decision 4, matching the owner's rule in decision 29):
-   0.1 and 0.2 keep loading through 1.x, and their removal is stated as "two minor versions after
-   1.0". 0.3 stays as long as 1.0, since it is the same world under another package version. This
-   replaces the earlier recommendation (0.1 removed in 1.0, 0.2 in 1.1). See
-   [open-questions.md](open-questions.md#already-decided) for the one wording point to confirm.
+   **Open, the owner's decision.** The owner's rule, applied as written, removes 0.1 in 1.0 and 0.2
+   in 1.1. Integration-5 (decision 4) recommends keeping both through all of 1.x. 0.3 stays as long
+   as 1.0, since it is the same world under another package version. The options are in
+   [open-questions.md](open-questions.md#q9-version-lifetime-open-the-owners-decision).
 10. **Consent prompt form.** *Recommended:* the non-modal notification of §7 with the 1 s guard and
     no keyboard answer; a modal dialog would interrupt typing and be answered by reflex.
 11. **Picker contributions across extensions.** *Recommended:* only into pickers that opt in

@@ -28,21 +28,30 @@ no breaking change, then `fyx:ui@1.0.0`) cannot start while Q1–Q12 are open. I
 
 | Q | Decision | Source |
 |---|---|---|
-| Q9 | **Version lifetime** (integration-5 decision 4; decided 2026-11-18, matching the owner's earlier rule in spec decision 29). See the note below. | spec decision 29, integration-5 decision 4 |
 | Q13 | **Image budget and error semantics.** 64 MiB of decoded pixels per extension, 32 live generated images, 2 concurrent decodes per extension and 4 in total. The error rules are as in design §12, "Errors". | design.md Q13 (decided 2026-11-18) |
 
-**Q9 in detail.** This replaces design.md's earlier Q9 recommendation, "0.1 removed in 1.0, 0.2 in
-1.1".
-- **What was decided:**
-  - 0.1 and 0.2 keep loading through 1.x;
-  - their removal is stated as "two minor versions after 1.0", which is spec decision 29's
-    two-version rule counted from 1.0 instead of from 0.4. 0.4 never ships if 1.0 follows 0.3.
-  - 0.3 is the same world as 1.0 under another package version, so it loads as long as 1.0 does.
-- **To confirm:** the two clauses differ only if 1.x reaches 1.3 or later. "Through all of 1.x"
-  keeps 0.1 and 0.2 until 2.0; "two minor versions after 1.0" allows removing them from 1.2.
-  Nothing changes before 1.2 either way, and the code keeps `MIN_VERSION = 0.1.0`
-  (`ui_ext_wasm.rs:130`).
-- **Consequence:** the TypeScript SDK, which targets 0.1 only, keeps a supported target through 1.x.
+## Q9: version lifetime (open, the owner's decision)
+
+**The conflict.**
+- **The owner's rule** (spec decision 29): each `fyx:ui` version stays supported until two later
+  minor versions have shipped. It names 0.4 as the release that removes 0.1, but 0.4 never ships
+  if 1.0 follows 0.3.
+- **Integration-5 decision 4** recommends that 0.1 and 0.2 keep loading through all of 1.x.
+- The two give different answers. Integration-5 also says "two minor versions after 1.0", which
+  matches neither.
+
+Whatever is chosen:
+- 0.3 is the same world as 1.0 under another package version, so it loads as long as 1.0 does.
+- The code keeps `MIN_VERSION = 0.1.0` (`ui_ext_wasm.rs:130`) until the first removal is due.
+
+| Option | 0.1 removed in | 0.2 removed in | For | Against |
+|---|---|---|---|---|
+| **A. The owner's rule, applied as written.** 1.0 counts as the next minor after 0.3. | 1.0 (0.2 and 0.3 shipped after it) | 1.1 (0.3 and 1.0 shipped after it) | Keeps the rule the owner set, and the host carries the fewest worlds. | Extensions built for 0.1 stop at 1.0, the release users are told is stable. The TypeScript SDK targets 0.1 only, so it has no supported target from 1.0 until it is ported. |
+| **B. Through all of 1.x** (integration-5 decision 4) | 2.0 | 2.0 | Nothing that loads in 1.0 stops loading within 1.x, so 1.x makes one promise. The TypeScript SDK keeps its target. | The host carries three dispatch paths (0.1, 0.2, 1.0) for all of 1.x. It overrides the owner's rule. |
+| **C. The rule, counted from 1.0** (integration-5's "two minor versions after 1.0") | 1.2 | 1.2 | A grace period past 1.0 that still ends within 1.x. | Breaks extensions inside a stable major version. It is neither the rule as written nor B. |
+
+The coordinator is asking the owner. Until the owner answers, design.md Q9 and spec decision 29 say
+this question is open.
 
 ## (a) Full 0.3
 
@@ -56,14 +65,14 @@ no breaking change, then `fyx:ui@1.0.0`) cannot start while Q1–Q12 are open. I
 | Q6 | Accept four upstream hooks in hot editor files? They are `HighlightKey::FyxExtension`, `InlayId::Extension`, gutter-sign painting and the code-lens merge, plus the palette hook for commands. | (1) Accept all. (2) Skip the code-lens hook and draw lenses as §L blocks. (3) Drop the features that need hooks. | **(1).** Each hook is small and marked `fyx:`. Without the code-lens hook, a line with a language-server lens shows two lens lines. The cost is merge conflicts on upstream syncs, which the rebase report tracks. | Technical (upstream-diff budget) |
 | Q7 | Memory cap for 0.3 components? | (1) 32 MiB. (2) 256 MiB for 0.3 and 32 MiB for 0.1/0.2. (3) 256 MiB for all. | **(3), as the code already does** (`UI_MEMORY_LIMIT = 256 MiB` for every version, `ui_ext_wasm.rs:174`). A 16 MiB response or an 8 MiB virtual document needs a copy in guest memory. The figure is a cap, not a reservation, and spec decision 25 says 256 MiB. A separate 32 MiB cap for old worlds would add a second limit to test and buy little. | Technical |
 | Q8 | How much of a review does `agent:observe` see? | (1) Full hunk text and comments for files inside the worktrees, with opaque ids. (2) Metadata only: paths and counts. | **(1).** It makes review-aware linters possible, not only dashboards. Files outside the worktrees show nothing (§11). The capability is T2 and asked at first use, so the prompt is where the user agrees to it. | Product (privacy of agent work) |
-| Q9 | Version lifetime after 1.0 | — | **Decided**; see above. | — |
+| Q9 | Version lifetime once 1.0 follows 0.3 | A, B or C ([Q9 above](#q9-version-lifetime-open-the-owners-decision)) | **Open:** the owner decides. Integration-5 recommends B. | Product (a promise to extension authors) |
 | Q10 | Consent prompt form for T2 at first use? | (1) A non-modal notification with a 1 s click guard and no keyboard answer. (2) A modal dialog. | **(1).** A modal interrupts typing and is answered by reflex. The guard stops a click meant for something else from granting. | Product (UX) |
 | Q11 | Picker contributions across extensions? | (1) Only into pickers that opt in (`open-to-sources`). (2) Into any picker. (3) None in 0.3. | **(1).** Contributors see the query of dynamic pickers, and the owner never sees their items. A "Search everywhere" picker made only of contributions is not in 0.3. | Technical (API shape) |
 | Q12 | Default key bindings in the manifest? | (1) Not in 0.3. (2) Suggested keys with conflict rules. | **(1).** Users bind commands themselves. Suggested keys would need conflict rules against the user's and upstream's keymaps. Additive later. | Product (small) |
 | Q13 | Image budget | — | **Decided**; see above. | — |
 | Q14 | Canvas paint strategy? | (1) Paint the draw list each frame, and cache a texture only if the bench misses. (2) A texture per update by default. | **(1).** It switches to a texture cached per update only if the 16384-op paint bench misses 4 ms. A texture costs width × height × 4 × scale² per canvas, up to 256 MiB at 4096 × 4096 on a 2× screen. It does not change the WIT. | Technical (renderer only, no ABI) |
 
-Under (a), the owner answers **7 product questions**: Q1, Q2, Q3, Q5, Q8, Q10 and Q12. Q4, Q6, Q7,
+Under (a), the owner answers **8 product questions**: Q1, Q2, Q3, Q5, Q8, Q9, Q10 and Q12. Q4, Q6, Q7,
 Q11 and Q14 are technical.
 
 ## (b) Smaller 0.3: images, canvas, T2 imports, notifications
@@ -80,14 +89,14 @@ The recommended answers and reasons are those of (a) unless the row says otherwi
 | Q6 | **Vanishes.** Every hook serves a moved feature: extension highlights, inlays and gutter signs (§1), code lens (§3), the palette (§5). Images, canvas and the T2 imports need no new upstream hook. | — | — |
 | Q7 | Stays, with a weaker reason: only the 16 MiB fetch response needs the room, since virtual documents move. | (3), as in (a), already in the code | Technical |
 | Q8 | Stays: `agent:observe` ships. | (1), as in (a) | Product |
-| Q9 | **Decided.** | — | — |
+| Q9 | Stays: open, as in (a). It does not depend on the scope. | A, B or C | Product |
 | Q10 | Stays: T2 consent ships. | (1), as in (a) | Product |
 | Q11 | **Vanishes.** The picker goes to 0.4. | — | — |
 | Q12 | **Vanishes.** Commands go to 0.4. | — | — |
 | Q13 | **Decided.** | — | — |
 | Q14 | Stays: canvas ships. | (1), as in (a) | Technical |
 
-Under (b), the owner answers **5 product questions**: Q1, Q2, Q5, Q8 and Q10. Q4, Q7 and Q14 are
+Under (b), the owner answers **6 product questions**: Q1, Q2, Q5, Q8, Q9 and Q10. Q4, Q7 and Q14 are
 technical.
 
 **What else (b) changes** (from integration-5, A3):
