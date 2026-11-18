@@ -1932,6 +1932,47 @@ async fn test_runtime_surfaces(cx: &mut TestAppContext) {
     });
 }
 
+/// integration-5 H1: a shown modal ticks, and stops when it goes.
+#[gpui::test]
+async fn test_modal_ticks_while_shown(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let ticks = |backend: &FakeBackend| {
+        backend
+            .calls()
+            .iter()
+            .filter(|call| **call == Call::Tick)
+            .count()
+    };
+    let (modal, vcx) = cx.add_window_view(|window, cx| {
+        crate::modal::ExtensionModal::new(
+            "fake/modal".into(),
+            state.clone(),
+            gpui::WeakEntity::new_invalid(),
+            window,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    state.update(vcx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    vcx.executor().advance_clock(Duration::from_millis(1050));
+    vcx.run_until_parked();
+    assert_eq!(ticks(&backend), 1, "the shown modal ticked");
+
+    vcx.update(|window, _| window.remove_window());
+    drop(modal);
+    vcx.run_until_parked();
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(100), cx)
+    });
+    cx.executor().advance_clock(Duration::from_millis(5000));
+    cx.run_until_parked();
+    assert_eq!(ticks(&backend), 1, "a closed modal is not ticked");
+}
+
 /// Plan 2.3, design B: a requested tick fires once after its delay (at least 1 s while no window
 /// is active, as in tests), replaces an earlier one, repeats when the tick asks again, waits while
 /// the panel is hidden, stops after 3 errors in a row until a user event, and goes when cancelled.
