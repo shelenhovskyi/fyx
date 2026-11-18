@@ -403,3 +403,13 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - **S1**: `fyx_guard::extension_read_denial` (private_files + `.fyx/security.toml`,
   mode-independent; repo policies now load in every mode) for W3's observe feed; as a floor,
   `ui_ext::observe::cut_review` drops the path and hunks of Zed's default private files.
+- **S4**: with Fyx's proxy set, `network:fetch` to a declared domain is refused (`other`,
+  "does not go through proxies yet"): reqwest cannot CONNECT to the checked address and keep
+  the name for SNI, so the proxy would resolve again. Proxy URLs with credentials are never used.
+  `localhost` still goes direct. Revisit with a hand-made CONNECT tunnel if proxied fetches matter.
+- **S6**: more forbidden names (git's programs and dirs, pagers and editors, Java/.NET/Perl/Node/
+  Lua/PowerShell module paths, `RUSTC*`, `NPM_CONFIG_*`, `YARN_*`, `CARGO_*`, `COR_*`, `PATH`,
+  `PATHEXT`, `ComSpec`); the program's PATH drops empty, relative and worktree entries; no
+  `args` patterns now means no arguments (`["**"]` for any).
+- **S7**: `authorization`, `cookie`, `proxy-authorization` are dropped on a cross-origin
+  redirect.

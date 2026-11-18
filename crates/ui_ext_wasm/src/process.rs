@@ -215,7 +215,24 @@ fn same_name(a: &str, b: &str) -> bool {
     }
 }
 
-/// The environment of a spawned program (design.md §9, "Environment").
+/// `PATH` without the entries the host never resolves programs from: empty, relative, or inside a
+/// worktree (integration-5 S6), so the program does not find planted tools there either.
+pub fn filtered_path(path: &OsStr, worktree_roots: &[PathBuf]) -> OsString {
+    let kept: Vec<PathBuf> = std::env::split_paths(path)
+        .filter(|dir| {
+            !dir.as_os_str().is_empty()
+                && dir.is_absolute()
+                && !canonical(dir)
+                    .is_some_and(|dir| worktree_roots.iter().any(|root| dir.starts_with(root)))
+                && !worktree_roots.iter().any(|root| dir.starts_with(root))
+        })
+        .collect();
+    std::env::join_paths(kept).unwrap_or_default()
+}
+
+/// The environment of a spawned program (design.md §9, "Environment"): a few of Fyx's own
+/// variables (with `PATH` as [`filtered_path`] makes it), the declared ones, and the guest's
+/// values for declared names. A forbidden name ([`is_forbidden_env`]) is never declared or set.
 pub fn program_environment(
     fyx: &[(OsString, OsString)],
     declared: &BTreeSet<String>,
@@ -239,10 +256,10 @@ pub fn program_environment(
         let Some(text) = name.to_str() else {
             continue;
         };
-        let wanted = base.iter().any(|base| same_name(base, text))
-            || text.starts_with("LC_")
-            || declared.iter().any(|declared| same_name(declared, text));
-        if wanted && !is_forbidden_env(text) {
+        let base = base.iter().any(|base| same_name(base, text)) || text.starts_with("LC_");
+        let declared =
+            !is_forbidden_env(text) && declared.iter().any(|declared| same_name(declared, text));
+        if base || declared {
             env.push((name.clone(), value.clone()));
         }
     }
@@ -787,8 +804,22 @@ async fn start(
         }
     }
     .map_err(SpawnError::NotFound)?;
+    let roots: Vec<PathBuf> = worktrees
+        .iter()
+        .filter_map(|worktree| canonical(&worktree.root))
+        .collect();
     let environment =
-        program_environment(&fyx_environment, &context.declared_env, &spawn.request.env);
+        program_environment(&fyx_environment, &context.declared_env, &spawn.request.env)
+            .into_iter()
+            .map(|(name, value)| {
+                if name.to_str().is_some_and(|name| same_name(name, "PATH")) {
+                    let value = filtered_path(&value, &roots);
+                    (name, value)
+                } else {
+                    (name, value)
+                }
+            })
+            .collect::<Vec<_>>();
 
     let mut command = tokio::process::Command::new(&program);
     command
@@ -1018,11 +1049,33 @@ mod tests {
             .iter()
             .map(|(name, _)| name.to_string_lossy().into_owned())
             .collect();
+        // `GIT_DIR` is declared but forbidden (integration-5 S6), so neither Fyx's value nor the
+        // guest's reaches the program.
         assert_eq!(
             names,
-            ["GIT_DIR", "HOME", "LANG", "LC_ALL", "NO_COLOR", "PATH"]
+            ["HOME", "LANG", "LC_ALL", "NO_COLOR", "PATH"]
                 .map(String::from)
                 .into()
         );
+    }
+
+    /// integration-5 S6: the program's PATH has no empty, relative or worktree entries.
+    #[test]
+    fn the_programs_path_leaves_out_the_worktrees() {
+        let worktree = tempfile::tempdir().expect("a worktree");
+        let outside = tempfile::tempdir().expect("a directory");
+        let root = canonical(worktree.path()).expect("canonical");
+        let bin = worktree.path().join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let path = std::env::join_paths([
+            bin,
+            PathBuf::from("relative"),
+            outside.path().to_path_buf(),
+            PathBuf::new(),
+        ])
+        .expect("joins");
+        let filtered = filtered_path(&path, &[root]);
+        let kept: Vec<PathBuf> = std::env::split_paths(&filtered).collect();
+        assert_eq!(kept, [outside.path().to_path_buf()]);
     }
 }
