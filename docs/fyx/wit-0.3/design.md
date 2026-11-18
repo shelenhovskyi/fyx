@@ -146,11 +146,12 @@ domains = ["api.example.com", "*.cdn.example.com", "localhost:8080"]
 
 [[fyx_ui.processes]]
 name = "git"                       # resolved on PATH outside the worktrees
-args = ["status", "--porcelain=v2", "**"]   # optional argument patterns (Q2)
+args = ["status", "--porcelain=v2", "**"]   # argument patterns (Q2); no args = no arguments
 
 [[fyx_ui.processes]]
 name = "eslint"
 path = "node_modules/.bin/eslint"  # worktree-relative: needs a trusted worktree
+args = ["**"]                      # any arguments
 
 [fyx_ui.process]
 env = ["NO_COLOR", "GIT_DIR"]
@@ -161,12 +162,28 @@ title = "Next TODO"
 
 [[fyx_ui.picker_sources]]
 id = "todos"
-picker = "acme.find/everything"    # "<extension>/<picker surface>"
+picker = "acme-find/everything"    # "<extension>/<picker surface>"; extension ids have no dots
 ```
 
-`UiManifest` (`ui_ext_wasm.rs:197-207`) has `deny_unknown_fields`, so a 0.2 host would fail a 0.3
-manifest with "unknown field `network`" before it reports the version. migration.md §2 reads
-`api_version` first.
+`UiManifest` has `deny_unknown_fields`, so a 0.2 host would fail a 0.3 manifest with "unknown
+field `network`" before it reports the version. migration.md §2 reads `api_version` first.
+
+**What the host checks today** (W2c, d65c68a2fc; integration-5 A4):
+- **Version first.** `UiManifest::read` reads `api_version` first, so a manifest for a version
+  this build lacks says "targets fyx:ui 0.4.0, this build supports 0.1.0, 0.2.0 and 0.3.0 (staged)", not
+  "unknown field".
+- **Per-world checks.** `UiManifest::check_world` then applies migration.md §2's table:
+  - capabilities per version, an error and not a warning;
+  - the tables `network`, `processes`, `process`, `commands` and `picker_sources` only from 0.3.
+- **`[[fyx_ui.commands]]`** is accepted and checked. At most 64 (`MAX_COMMANDS`). `id` follows the
+  surface-id rule (§0.5) and is unique among the extension's commands and sources. `title` is one
+  line of 1 to 128 bytes (`MAX_COMMAND_TITLE_BYTES`).
+- **`[[fyx_ui.picker_sources]]`** is accepted and checked. At most 64 (`MAX_PICKER_SOURCES`). `id`
+  follows the surface-id rule. `picker` must be `"<extension>/<picker surface>"`: an extension id
+  (registry id rules, no dots), a `/`, and a surface id.
+- **Nothing uses them yet.** No palette entries, no `handle-command`, no picker contributions
+  (§2, §5). If the owner's scope decision moves commands and the picker to 0.4
+  ([open-questions.md](open-questions.md), version (b)), only the version gate changes.
 
 Every capability, domain, program, environment name and command is listed on the extensions page.
 An update that adds a T1 or T2 capability, a domain, a program, an argument pattern or an
@@ -444,7 +461,7 @@ one tab per path).
 They appear in the command palette as "<extension name>: <title>" and can be bound in the keymap:
 
 ```json
-{ "context": "Workspace", "bindings": { "ctrl-alt-t": ["fyx_ui::RunExtensionCommand", { "command": "acme.todo/todo.next" }] } }
+{ "context": "Workspace", "bindings": { "ctrl-alt-t": ["fyx_ui::RunExtensionCommand", { "command": "acme-todo/todo.next" }] } }
 ```
 
 Running one calls `handle-command(id, argument, context)` with the gesture (§0.4). `context` has
