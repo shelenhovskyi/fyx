@@ -1486,6 +1486,7 @@ impl Render for ExtensionsPage {
                             .gap_1p5()
                             .justify_between()
                             .child(Headline::new("Extensions").size(HeadlineSize::Large))
+                            .child(ui_ext_host::fyx_extensions_button()) // fyx: Fyx registry page
                             .child(
                                 Button::new("install-dev-extension", "Install Dev Extension")
                                     .style(ButtonStyle::Outlined)

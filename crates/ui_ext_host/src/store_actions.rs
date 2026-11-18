@@ -211,7 +211,7 @@ fn store(cx: &gpui::App) -> Option<InstallStore> {
 }
 
 /// Records consent for the version now active and rescans, so it loads.
-async fn grant_and_rescan(
+pub(crate) async fn grant_and_rescan(
     store: &InstallStore,
     extension_id: &str,
     fs: Arc<dyn Fs>,

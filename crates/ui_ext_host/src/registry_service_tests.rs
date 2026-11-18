@@ -348,3 +348,56 @@ async fn test_block_list_from_a_directory_registry(cx: &mut gpui::TestAppContext
         refreshed.blocklist
     );
 }
+
+/// Plan 3.5: the page's hub opens the registry from `fyx.extensions.registry_url` on first use
+/// and lists the index with what the installed extensions may do.
+#[gpui::test]
+async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
+    use crate::fyx_extensions_page::RegistryHub;
+    cx.executor().allow_parking();
+    crate::tests::init_test(cx);
+    let mut test_registry = TestRegistry::new();
+    let package = crate::install_store::test_support::package("demo", "1.0.0", b"component").await;
+    test_registry.publish("demo", "1.0.0", &package, &["ui:status-bar"]);
+    let url = format!("file:///{}", test_registry.dir.path().display()).replace('\\', "/");
+    cx.update(|cx| {
+        gpui::BorrowAppContext::update_global::<settings::SettingsStore, _>(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings
+                    .fyx
+                    .get_or_insert_default()
+                    .extensions
+                    .get_or_insert_default()
+                    .registry_url = Some(url.clone())
+            })
+        });
+        crate::fyx_extensions_page::init(cx);
+        let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.background_executor().clone());
+        <dyn fs::Fs>::set_global(fs, cx);
+    });
+    let hub = cx.update(|cx| RegistryHub::global(cx).expect("hub"));
+    let state = tempfile::tempdir().unwrap();
+    hub.update(cx, |hub, _| {
+        hub.set_state_dir(RegistryStateDir(state.path().to_path_buf()))
+    });
+    hub.read_with(cx, |hub, _| {
+        assert!(hub.listing.is_empty(), "nothing before first use")
+    });
+
+    hub.update(cx, |hub, cx| hub.refresh(cx));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while hub.read_with(cx, |hub, _| hub.is_refreshing()) && std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    hub.read_with(cx, |hub, _| {
+        assert_eq!(hub.off_reason(), None);
+        assert_eq!(hub.unavailable, None);
+        let ids: Vec<&str> = hub
+            .listing
+            .iter()
+            .map(|release| release.id.as_str())
+            .collect();
+        assert_eq!(ids, ["demo"]);
+    });
+}
