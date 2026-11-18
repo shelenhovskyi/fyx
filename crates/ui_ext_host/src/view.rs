@@ -22,7 +22,7 @@ use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle as UiButtonStyle, Clickable as _, Color,
     CommonAnimationExt as _, Disableable as _, Icon, IconButton, IconName, IconSize, Label,
-    LabelCommon as _, LabelSize, TintColor, WithScrollbar as _, h_flex, v_flex,
+    LabelCommon as _, LabelSize, TintColor, Tooltip, WithScrollbar as _, h_flex, v_flex,
 };
 use ui_ext::v0_2::{
     Align, ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps,
@@ -363,6 +363,8 @@ impl SurfaceView {
                 let mut editor = Editor::single_line(window, cx);
                 editor.set_placeholder_text(&props.placeholder, window, cx);
                 editor.set_text(props.value.as_str(), window, cx);
+                // Design K: a secret input is masked.
+                editor.set_masked(props.secret, cx);
                 editor
             });
             let sets_seen = self.state.read(cx).input_set_count(id);
@@ -389,6 +391,9 @@ impl SurfaceView {
             return;
         };
 
+        input
+            .editor
+            .update(cx, |editor, cx| editor.set_masked(props.secret, cx));
         if input.placeholder != props.placeholder {
             input.editor.update(cx, |editor, cx| {
                 editor.set_placeholder_text(&props.placeholder, window, cx)
@@ -763,6 +768,10 @@ impl Renderer<'_, '_> {
             .as_ref()
             .map(|icon| crate::icons::resolve_icon(icon).static_name());
         let style = button_style(props.style);
+        // Design J: at most 256 bytes, cut at a character boundary by the model.
+        let tooltip: Option<SharedString> = props
+            .tooltip_text()
+            .map(|text| SharedString::from(text.to_string()));
         // Inside a row the whole row is the click target (`row-click`): row-local ids are not
         // surface ids, so a `click` on them would be ambiguous.
         let on_click = match scope {
@@ -782,6 +791,9 @@ impl Renderer<'_, '_> {
                 .icon_size(IconSize::Small)
                 .style(style)
                 .disabled(props.disabled)
+                .when_some(tooltip, |this, text| {
+                    this.tooltip(Tooltip::text(text))
+                })
                 .when_some(focus, |this, focus| this.track_focus(focus))
                 .when_some(on_click, |this, on_click| this.on_click(on_click))
                 .into_any_element()
@@ -789,6 +801,7 @@ impl Renderer<'_, '_> {
             Button::new(element_id, props.label.clone())
                 .style(style)
                 .disabled(props.disabled)
+                .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(icon, |this, icon| {
                     this.start_icon(Icon::new(icon).size(IconSize::Small))
                 })

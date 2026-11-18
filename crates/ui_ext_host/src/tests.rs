@@ -1896,6 +1896,42 @@ async fn test_modal_lifecycle(cx: &mut TestAppContext) {
     assert!(backend.calls().is_empty(), "{:?}", backend.calls());
 }
 
+/// Design K: the text of a secret input reaches the extension, but never the history the
+/// Extension Inspector shows (nor the logs, which use the same redaction).
+#[gpui::test]
+async fn test_secret_input_is_redacted(cx: &mut TestAppContext) {
+    init_test(cx);
+    const SECRET: NodeId = 41;
+    let backend = Rc::new(FakeBackend::default());
+    let tree = Tree::from_nodes(
+        vec![node(
+            SECRET,
+            None,
+            Props::Input(InputProps {
+                value: String::new(),
+                placeholder: "Token".into(),
+                secret: true,
+            }),
+        )],
+        TreeLimits::default(),
+    )
+    .expect("valid tree");
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state =
+        cx.new(|cx| SurfaceState::with_tree(dyn_backend, panel_surface("p", "P"), None, tree, cx));
+    state.update(cx, |state, cx| {
+        state.dispatch(UiEvent::InputSubmitted(SECRET, "hunter2".into()), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        backend.events(),
+        [UiEvent::InputSubmitted(SECRET, "hunter2".into())]
+    );
+    let history = state.read_with(cx, |state, _| format!("{:?}", state.history()));
+    assert!(!history.contains("hunter2"), "{history}");
+    assert!(history.contains("<secret>"), "{history}");
+}
+
 /// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).
 #[gpui::test]
 async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {

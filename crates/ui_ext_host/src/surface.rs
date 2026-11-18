@@ -602,12 +602,16 @@ impl SurfaceState {
             return;
         };
         if event.target().is_some_and(|target| !tree.contains(target)) {
-            log::debug!("fyx:ui: dropping {event:?}, its node is gone");
+            log::debug!(
+                "fyx:ui: dropping {:?}, its node is gone",
+                self.redacted(&event)
+            );
             return;
         }
+        let shown = self.redacted(&event);
         self.record(HistoryEntry::Event {
             at: std::time::SystemTime::now(),
-            event: event.clone(),
+            event: shown,
         });
         if let UiEvent::InputChanged(id, value) | UiEvent::InputSubmitted(id, value) = &event {
             self.set_input_locally(*id, value);
@@ -706,7 +710,10 @@ impl SurfaceState {
             if still_there && same_rows {
                 return Some(Next::Event(event));
             }
-            log::debug!("fyx:ui: dropping {event:?}, an earlier reply changed its target");
+            log::debug!(
+                "fyx:ui: dropping {:?}, an earlier reply changed its target",
+                self.redacted(&event)
+            );
         }
         None
     }
@@ -873,6 +880,26 @@ impl SurfaceState {
         }
     }
 
+    /// The event with a secret input's text replaced (design K): what logs and the Extension
+    /// Inspector may show.
+    pub fn redacted(&self, event: &UiEvent) -> UiEvent {
+        let secret = |id: NodeId| {
+            matches!(
+                self.tree().and_then(|tree| tree.get(id)).map(|node| node.props()),
+                Some(Props::Input(input)) if input.secret
+            )
+        };
+        match event {
+            UiEvent::InputChanged(id, _) if secret(*id) => {
+                UiEvent::InputChanged(*id, "<secret>".into())
+            }
+            UiEvent::InputSubmitted(id, _) if secret(*id) => {
+                UiEvent::InputSubmitted(*id, "<secret>".into())
+            }
+            event => event.clone(),
+        }
+    }
+
     fn row_generation(&self, list: NodeId) -> u64 {
         self.lists.get(&list).map_or(0, |cache| cache.generation)
     }
@@ -911,9 +938,10 @@ impl SurfaceState {
             }
             Err(error) => {
                 log::error!(
-                    "fyx:ui {}/{}: handle-event({event:?}) failed: {error:#}",
+                    "fyx:ui {}/{}: handle-event({:?}) failed: {error:#}",
                     self.extension_id(),
-                    self.surface.id
+                    self.surface.id,
+                    self.redacted(event)
                 );
                 match reply_error_effects(&error) {
                     Some(effects) => {
