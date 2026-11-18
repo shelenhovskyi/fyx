@@ -244,6 +244,24 @@ On top of these:
     (`not-found`).
   - `set_worktree(None)` or `set_worktree(Some(false))` tests the unavailable and untrusted
     cases.
+- `workspace:edit` and `agent:observe` (0.3) follow the host too: the capability and the
+  broker, then `check_edit` and the in-flight cap. When an edit is applied, `check_targets`
+  refuses protected paths and overlaps.
+  - Allowed edits apply unless `set_edit_answer` says otherwise, and `applied_edits()` lists
+    them.
+  - `set_agent_reviews(Some(reviews))` is the snapshot `start` sends; `None` makes `start`
+    unavailable.
+  - `agent_event(event)` feeds a running feed with the host's ids, and the harness maps them to
+    opaque ones as the host does.
+  - `deliver_io()` delivers `edit-done` and the agent events.
+- `permissions` (0.3) follows the host:
+  - `query` answers `unavailable` for an undeclared capability, otherwise the broker's state,
+    fixed for the call by its first query;
+  - `request` needs a click and uses it up, and prompts only from `ask`, once per capability per
+    call. The broker answers after the call, and `deliver_io()` delivers the answer as
+    `permission-changed`;
+  - `TestBroker::granted` starts granted, and `TestBroker::asking(answer, …)` starts at `ask`.
+    The broker's state is the state of every T2 capability.
 - In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
   not implement yet (`decorations` included) trap when called.
 
@@ -361,9 +379,10 @@ Fyx does.
 (0.3). A file over 2 MiB is an error. These are warnings, because Fyx draws the image's alt text
 instead and does not fail the update:
 
-- a file that is not a valid PNG or SVG;
+- a file that is not a valid PNG or SVG (a compressed `.svgz` is not one);
 - a PNG over 2048 px on a side;
 - an SVG that declares XML entities;
+- an SVG whose `<style>` uses `url(…)`;
 - a name an image node cannot use.
 
 An SVG with `<image>`, `<script>` or `<foreignObject>` is also a warning, since Fyx drops those
@@ -902,15 +921,16 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 |---|---|
 | `extensions/fyx_demo_counter` | the smallest complete extension: a mount, `set-props` replies, `list-rows` |
 | `extensions/fyx_demo_todo` | inputs without echo, filter buttons, `row-click`, rebuilding a list |
-| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows` and all 101 frozen icons |
+| `extensions/fyx_demo_gallery` | every node kind, and a status item; its 0.2 build adds a modal picker with keyboard selection, a clock status item that ticks, tooltips, `indent`, a secret input, `invalidate-rows`, all 101 frozen icons, and notifications and progress (`Notify`, `Run job`) |
 | `extensions/fyx_demo_markdown` | an input previewed live in a `markdown` node, clearing an input after Enter |
 | `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
 | `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
 | `extensions/fyx_demo_decorations` | editor decorations (0.2): a block above each TODO comment, placed and removed from a panel and from the block itself |
 | `extensions/fyx_demo_charts` | canvases (0.3): a clickable bar chart with click-to-select through `CanvasHits`, and a tick-driven sparkline with Pause and Resume |
+| `extensions/fyx_demo_t2` | the T2 capabilities (0.3 only): fetch `api.github.com/zen`, run `git status --short`, insert a header as one undoable edit, and list agent reviews live, each with its permission state and first-use prompt |
 | `extensions/fyx_demo_images` | images (0.3): SVG and PNG assets, `tint`, `contain` and `cover`, a chart made at run time with `add_image` and swapped on Shuffle, a missing asset's alt text, thumbnails in list rows |
 
-`script/fyx-build-demos` builds all of them. `extensions/fyx_demo_counter/tests/headless.rs` is a
+`script/fyx-build-demos` builds all of them; `fyx_demo_t2` only with `--fyx-ui-0-3`. `extensions/fyx_demo_counter/tests/headless.rs` is a
 headless test of the counter's contract; run it with
 `fyx-ext test --path extensions/fyx_demo_counter`.
 
@@ -996,6 +1016,14 @@ remove_image(old_chart);
 - **A bad image is not an update error:** a missing or broken asset, or a freed handle, draws the
   alt text and logs a warning. `fyx-ext check` reports assets over 2 MiB, invalid files, and SVGs
   whose parts Fyx drops.
+- **SVGs that Fyx refuses** (it draws the alt text instead):
+  - `url(…)` inside `<style>`: set `fill` or `style` on the element instead;
+  - compressed `.svgz` files;
+  - XML entity declarations;
+  - `<use>` and `url(#…)` references that expand past 100 000 nodes or 16 levels, or form a cycle;
+  - elements nested over 256 deep.
+
+  Fyx checks these before it parses, for assets and for `add_image` bytes alike.
 - **The demo:** `extensions/fyx_demo_images`.
 
 ### Canvases (0.3)
@@ -1082,7 +1110,7 @@ name = "git"
 args = ["status", "**"]
 
 [fyx_ui.process]
-env = ["GIT_DIR"]
+env = ["NO_COLOR"]
 ```
 
 ```rust
@@ -1102,10 +1130,41 @@ fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
 - **Permissions:** the first spawn asks the user, and it needs an open, trusted worktree.
 - **Limits:**
   - at most 4 processes;
-  - the arguments must fit the declared patterns;
-  - only the declared environment names, and never names that load code into a program (such
-    as `LD_*` or `NODE_OPTIONS`).
+  - the arguments must fit the declared patterns: one per position, a literal, `*` inside one
+    for any text, or `**` last for any rest;
+  - a program without `args` runs with no arguments only. Any arguments need `args = ["**"]`,
+    which the consent prompt shows. `fyx-ext check` warns about a program without `args`;
+  - only the declared environment names. Fyx never passes names that load code into a program
+    or redirect it, such as `LD_*`, `NODE_OPTIONS`, git's `GIT_DIR` and editors, `CARGO_*` or
+    `PATH`; the manifest check refuses them (`ui_ext::process::is_forbidden_env`).
 - **Stdin:** `.stdin()` keeps it open for `write_stdin` until `close_stdin`.
+
+### Editing files and watching agent reviews (0.3)
+
+Declare `workspace:edit` and `agent:observe`. Both ask the user on first use.
+
+```rust
+let edit = WorkspaceEdit::new("Sort imports").file(
+    FileEdit::path("src/main.rs")
+        .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), "use a;\nuse b;\n")
+        .expected_version(version),
+);
+let id = apply_edit(&edit)?;
+start_observing()?;
+
+fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+    match event {
+        IoEvent::EditDone((id, Err(error))) => { /* error.to_string(): "the file changed: …" */ }
+        IoEvent::Agent(AgentEvent::Snapshot(reviews)) => { /* the open reviews */ }
+        IoEvent::Agent(AgentEvent::Opened(review)) => { /* review.file, review.hunks */ }
+        _ => {}
+    }
+    Ok(())
+}
+```
+
+An edit applies all its files or none, as one undo step per buffer, and nothing is saved.
+Protected paths such as `.git/` are refused. The agent feed is read-only.
 
 ### Testing 0.3 features headless
 

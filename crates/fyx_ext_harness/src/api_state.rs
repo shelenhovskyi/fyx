@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use ui_ext::image::{self, ImageFormat};
 
+use ui_ext::edit::{EditCounters, WorkspaceEdit};
 use ui_ext::network::{self as net, DomainList, FetchCounters, FetchRequest, PermissionState};
 use ui_ext::process::{self as proc, ProcessCounters, ProcessPolicy, SpawnCheck, SpawnRequest};
 use ui_ext::v0_2 as model;
@@ -150,6 +151,18 @@ pub(crate) struct ApiState {
     processes: BTreeMap<u64, FakeProcess>,
     call_spawns: Vec<u64>,
     worktree: Option<bool>,
+    /// `workspace:edit` (0.3): edits accepted and not delivered yet, and the running call's.
+    edit_counters: EditCounters,
+    edits: BTreeMap<u64, WorkspaceEdit>,
+    call_edits: Vec<u64>,
+    /// `agent:observe` (0.3): whether the host has agent reviews here, and what the running call
+    /// asked for (`Some(true)` start, `Some(false)` stop), applied after it.
+    agent_reviews_available: bool,
+    observe_op: Option<bool>,
+    /// `permissions` (0.3): the states the running call saw (the first query of a capability
+    /// fixes its answer for the call), and the prompts it asked for.
+    permission_mirror: BTreeMap<&'static str, PermissionState>,
+    permission_requests: Vec<&'static str>,
 }
 
 /// A process `spawn` accepted, until its `process-exited` or `spawn-failed` is delivered.
@@ -207,6 +220,13 @@ impl ApiState {
             processes: BTreeMap::new(),
             call_spawns: Vec::new(),
             worktree: Some(true),
+            edit_counters: EditCounters::default(),
+            edits: BTreeMap::new(),
+            call_edits: Vec::new(),
+            agent_reviews_available: true,
+            observe_op: None,
+            permission_mirror: BTreeMap::new(),
+            permission_requests: Vec::new(),
         }
     }
 
@@ -241,6 +261,10 @@ impl ApiState {
         self.progress_updates = 0;
         self.call_fetches.clear();
         self.call_spawns.clear();
+        self.call_edits.clear();
+        self.observe_op = None;
+        self.permission_mirror.clear();
+        self.permission_requests.clear();
         if let Activation::Until(until) = self.activation
             && Instant::now() >= until
         {
@@ -867,6 +891,12 @@ impl ApiState {
             self.processes.remove(&id);
             self.process_counters.finished(id);
         }
+        for id in std::mem::take(&mut self.call_edits) {
+            self.edits.remove(&id);
+            self.edit_counters.finished(id);
+        }
+        self.observe_op = None;
+        self.permission_requests.clear();
     }
 
     pub(crate) fn queued_fetches(&self) -> impl Iterator<Item = (u64, &QueuedFetch)> {
@@ -1032,6 +1062,127 @@ impl ApiState {
     pub(crate) fn process_finished(&mut self, id: u64) -> Option<FakeProcess> {
         self.process_counters.finished(id);
         self.processes.remove(&id)
+    }
+}
+
+/// `workspace:edit` and `agent:observe` (design.md §10, §11), as the host checks them: the
+/// capability and the broker's state, then `ui_ext::edit::check_edit` and the in-flight cap, or
+/// whether agent reviews exist here.
+impl ApiState {
+    fn permit_t2(&self, capability: &str) -> Result<(), model::HostError> {
+        if !self.capabilities.iter().any(|name| name == capability) {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{capability:?} is not in the manifest"),
+            ));
+        }
+        match self.network_permission {
+            PermissionState::Granted | PermissionState::Ask => Ok(()),
+            state => Err(host_error(
+                model::HostErrorCode::Denied,
+                format!("{capability} is {state:?}"),
+            )),
+        }
+    }
+
+    pub(crate) fn apply_edit(&mut self, edit: WorkspaceEdit) -> Result<u64, model::HostError> {
+        self.permit_t2(ui_ext::edit::CAPABILITY_EDIT)?;
+        if self.worktree.is_none() {
+            return Err(host_error(
+                model::HostErrorCode::Unavailable,
+                "no workspace is open",
+            ));
+        }
+        ui_ext::edit::check_edit(&edit)?;
+        let id = self.edit_counters.start()?;
+        self.edits.insert(id, edit);
+        self.call_edits.push(id);
+        Ok(id)
+    }
+
+    /// The oldest accepted edit, for delivery; it stops counting as in flight.
+    pub(crate) fn take_edit(&mut self) -> Option<(u64, WorkspaceEdit)> {
+        let (id, edit) = self.edits.pop_first()?;
+        self.edit_counters.finished(id);
+        Some((id, edit))
+    }
+
+    pub(crate) fn set_agent_reviews_available(&mut self, available: bool) {
+        self.agent_reviews_available = available;
+    }
+
+    pub(crate) fn observe_start(&mut self) -> Result<(), model::HostError> {
+        self.permit_t2(ui_ext::observe::CAPABILITY_OBSERVE)?;
+        if !self.agent_reviews_available {
+            return Err(host_error(
+                model::HostErrorCode::Unavailable,
+                "agent reviews are not available here",
+            ));
+        }
+        self.observe_op = Some(true);
+        Ok(())
+    }
+
+    pub(crate) fn observe_stop(&mut self) {
+        self.observe_op = Some(false);
+    }
+
+    /// `permissions.query`: `unavailable` for an undeclared capability, else the broker's
+    /// state as of the first query of the call.
+    pub(crate) fn query_permission(&mut self, capability: &'static str) -> PermissionState {
+        if !self.capabilities.iter().any(|name| name == capability) {
+            return PermissionState::Unavailable;
+        }
+        *self
+            .permission_mirror
+            .entry(capability)
+            .or_insert(self.network_permission)
+    }
+
+    /// `permissions.request`: declared, and the click-or-Enter activation, which it uses up.
+    /// Only `ask` has a prompt, shown after the call, once per capability per call.
+    pub(crate) fn request_permission(
+        &mut self,
+        capability: &'static str,
+    ) -> Result<(), model::HostError> {
+        if !self.capabilities.iter().any(|name| name == capability) {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                format!("{capability:?} is not in the manifest"),
+            ));
+        }
+        if !self.take_activation() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                "permissions.request needs a click or Enter: during handle-event for click, \
+                 row-click or input-submitted, a command or an accepted picker item, or shortly \
+                 after it, once",
+            ));
+        }
+        if self.query_permission(capability) == PermissionState::Ask
+            && !self.permission_requests.contains(&capability)
+        {
+            self.permission_requests.push(capability);
+        }
+        Ok(())
+    }
+
+    /// The prompts the call that just finished asked for.
+    pub(crate) fn take_permission_requests(&mut self) -> Vec<&'static str> {
+        std::mem::take(&mut self.permission_requests)
+    }
+
+    fn take_activation(&mut self) -> bool {
+        let had = self.has_activation();
+        if had {
+            self.activation = Activation::None;
+        }
+        had
+    }
+
+    /// What the call that just finished asked of the agent feed.
+    pub(crate) fn take_observe_op(&mut self) -> Option<bool> {
+        self.observe_op.take()
     }
 }
 

@@ -10,7 +10,14 @@
 //!   - a `Refresh rows` button that answers `invalidate-rows` on the tree list, whose rows then
 //!     read `(scan N)`;
 //!   - a tree list of 10 rows whose `indent` is the depth;
-//!   - a list of all 101 frozen icons, each row an icon and its WIT name.
+//!   - a list of all 101 frozen icons, each row an icon and its WIT name;
+//!   - notifications and progress (design.md §M.8):
+//!     - `Notify` shows a sticky info notification with `Open` and `Later` buttons, and a warning
+//!       that closes by itself;
+//!     - `Run job` starts a cancellable progress in the status bar and one in this panel, and a
+//!       tick every half second moves both by 10 %;
+//!     - the text `Notifications: …` reports the ids, a button pressed or a close, and
+//!       `Job: …` the progress, `done` at 100 % or `cancelled` after Cancel.
 //! - Modal `"gallery-picker"` (medium, title "Pick a fruit"): a filter input, a list of the
 //!   matching fruits whose `selected` row follows `row-selected` (arrow keys), and a hint. Enter
 //!   or a row click picks the selected fruit: the modal hides itself and pushes `Picked: <fruit>`
@@ -25,6 +32,7 @@ pub(crate) const PANEL: &str = "gallery-next";
 pub(crate) const PICKER: &str = "gallery-picker";
 pub(crate) const CLOCK: &str = "gallery-clock";
 pub(crate) const CLOCK_INTERVAL_MS: u32 = 1000;
+pub(crate) const JOB_TICK_MS: u32 = 500;
 
 const ROW_HEIGHT: u16 = 24;
 
@@ -89,6 +97,18 @@ struct PanelNodes {
     refresh: NodeId,
     tree_list: NodeId,
     icon_list: NodeId,
+    notify: NodeId,
+    run_job: NodeId,
+    notifications: NodeId,
+    job: NodeId,
+}
+
+/// A running job: its status-bar progress, its panel progress, and how far it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Job {
+    pub(crate) status_bar: u64,
+    pub(crate) panel: Option<u64>,
+    pub(crate) percent: u8,
 }
 
 struct PickerNodes {
@@ -110,6 +130,9 @@ pub(crate) struct Next {
     picker_nodes: Option<PickerNodes>,
     clock: SurfaceTree,
     clock_text: Option<NodeId>,
+    notifications: String,
+    job: Option<Job>,
+    job_text: String,
 }
 
 pub(crate) fn surfaces() -> [Surface; 3] {
@@ -163,6 +186,122 @@ impl Next {
             "Last action: {}",
             self.last_action.unwrap_or("none")
         ))
+    }
+
+    fn notifications_label(&self) -> TextProps {
+        let text = if self.notifications.is_empty() {
+            "none yet"
+        } else {
+            &self.notifications
+        };
+        TextProps::new(format!("Notifications: {text}"))
+    }
+
+    fn job_label(&self) -> TextProps {
+        let text = match (&self.job, self.job_text.as_str()) {
+            (Some(job), _) => format!("{} %", job.percent),
+            (None, "") => "not started".to_string(),
+            (None, text) => text.to_string(),
+        };
+        TextProps::new(format!("Job: {text}"))
+    }
+
+    /// `Notify`: a sticky info notification with two buttons, and a warning that closes itself.
+    fn notify(&mut self) {
+        let info = Notification::new(PANEL, NotificationLevel::Info, "Gallery says hello")
+            .body("A demo notification from the gallery's 0.2 build.")
+            .action("open", "Open")
+            .action("later", "Later")
+            .sticky();
+        let warning = Notification::new(
+            PANEL,
+            NotificationLevel::Warning,
+            "This one closes by itself",
+        );
+        let ids = [notify(&info), notify(&warning)]
+            .into_iter()
+            .map(|result| match result {
+                Ok(id) => format!("#{id}"),
+                Err(error) => error.code.name().to_string(),
+            })
+            .collect::<Vec<_>>();
+        self.notifications = format!("shown {}", ids.join(" and "));
+    }
+
+    /// `Run job`: a cancellable progress in the status bar and one in this panel, moved by ticks.
+    fn run_job(&mut self) {
+        if self.job.is_some() {
+            return;
+        }
+        let status_bar =
+            ProgressOptions::new(PANEL, "Gallery job", ProgressLocation::StatusBar).cancellable();
+        let status_bar = match progress_start(&status_bar) {
+            Ok(id) => id,
+            Err(error) => {
+                self.job_text = format!("could not start ({})", error.code.name());
+                return;
+            }
+        };
+        let panel = progress_start(&ProgressOptions::new(
+            PANEL,
+            "Gallery job",
+            ProgressLocation::Panel,
+        ))
+        .ok();
+        self.job = Some(Job {
+            status_bar,
+            panel,
+            percent: 0,
+        });
+        if let Err(error) = request_tick(PANEL, JOB_TICK_MS) {
+            log(
+                LogLevel::Warn,
+                &format!("the job cannot tick: {}", error.message),
+            );
+        }
+    }
+
+    fn end_job(&mut self, text: &str) {
+        if let Some(job) = self.job.take() {
+            progress_end(job.status_bar);
+            if let Some(panel) = job.panel {
+                progress_end(panel);
+            }
+        }
+        cancel_tick(PANEL);
+        self.job_text = text.to_string();
+    }
+
+    /// One tick of the job: 10 % more on both progresses, `done` at 100 %.
+    fn job_tick(&mut self) -> Result<Update, String> {
+        let Some(job) = self.job.as_mut() else {
+            return Ok(Update::Unchanged);
+        };
+        job.percent = (job.percent + 10).min(100);
+        let job = *job;
+        if job.percent >= 100 {
+            self.end_job("done");
+        } else {
+            let message = format!("Step {} of 10", job.percent / 10);
+            for id in std::iter::once(job.status_bar).chain(job.panel) {
+                progress_update(id, ProgressValue::Percent(job.percent), Some(&message))
+                    .map_err(|error| error.message)?;
+            }
+            request_tick(PANEL, JOB_TICK_MS).map_err(|error| error.message)?;
+        }
+        self.refresh_notices()?;
+        Ok(self.panel.take_update())
+    }
+
+    fn refresh_notices(&mut self) -> Result<(), String> {
+        let Some(nodes) = &self.panel_nodes else {
+            return Err(TreeError::NotMounted.into());
+        };
+        let (notifications, job) = (nodes.notifications, nodes.job);
+        self.panel
+            .set_props(notifications, self.notifications_label())?;
+        self.panel.set_props(job, self.job_label())?;
+        Ok(())
     }
 
     fn token_label(&self) -> TextProps {
@@ -233,6 +372,20 @@ impl Next {
                     let tree_list = tree.list(ListProps::new(FILE_TREE.len() as u32, ROW_HEIGHT));
                     caption(tree, "All 101 frozen icons");
                     let icon_list = tree.list(ListProps::new(Icon::all().len() as u32, ROW_HEIGHT));
+                    caption(tree, "Notifications and progress");
+                    let mut notify = 0;
+                    let mut run_job = 0;
+                    tree.flex(FlexProps::row().gap(4), |tree| {
+                        notify = tree.button(ButtonProps::new("Notify").icon(Icon::Bell).tooltip(
+                            "An info notification with buttons, and a warning that closes itself",
+                        ));
+                        run_job =
+                            tree.button(ButtonProps::new("Run job").icon(Icon::Play).tooltip(
+                                "A cancellable progress in the status bar and in this panel",
+                            ));
+                    });
+                    let notifications = tree.text(self.notifications_label());
+                    let job = tree.text(self.job_label());
                     nodes = Some(PanelNodes {
                         pick,
                         picked,
@@ -243,6 +396,10 @@ impl Next {
                         refresh,
                         tree_list,
                         icon_list,
+                        notify,
+                        run_job,
+                        notifications,
+                        job,
                     });
                 },
             );
@@ -330,6 +487,31 @@ impl Next {
                 self.scans += 1;
                 let list = nodes.tree_list;
                 self.panel.invalidate_rows(list, None)?;
+            }
+            UiEvent::Click(id) if id == nodes.notify => {
+                self.notify();
+                self.refresh_notices()?;
+            }
+            UiEvent::Click(id) if id == nodes.run_job => {
+                self.run_job();
+                self.refresh_notices()?;
+            }
+            UiEvent::NotificationAction(action) => {
+                self.notifications = format!("#{} pressed {}", action.notification, action.action);
+                self.refresh_notices()?;
+            }
+            UiEvent::NotificationClosed((id, reason)) => {
+                let reason = match reason {
+                    NotificationCloseReason::User => "by you",
+                    NotificationCloseReason::Expired => "by itself",
+                    NotificationCloseReason::WindowClosed => "with the window",
+                };
+                self.notifications = format!("#{id} closed {reason}");
+                self.refresh_notices()?;
+            }
+            UiEvent::ProgressCancelRequested(_) => {
+                self.end_job("cancelled");
+                self.refresh_notices()?;
             }
             UiEvent::Click(id) => {
                 if let Some(&(_, label)) = nodes.actions.iter().find(|(button, _)| *button == id) {
@@ -470,6 +652,9 @@ impl Next {
     }
 
     pub(crate) fn tick(&mut self, surface_id: &str) -> Result<Update, String> {
+        if surface_id == PANEL {
+            return self.job_tick();
+        }
         if surface_id != CLOCK {
             return Err(format!("no ticks for {surface_id:?}"));
         }
@@ -479,5 +664,74 @@ impl Next {
         self.clock.set_props(text, TextProps::new(clock_text()))?;
         request_tick(CLOCK, CLOCK_INTERVAL_MS).map_err(|error| error.message)?;
         Ok(self.clock.take_update())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mounted() -> Next {
+        take_host_effects();
+        let mut next = Next::default();
+        next.mount(PANEL).expect("mount");
+        next
+    }
+
+    fn click(next: &mut Next, label: &str) {
+        let id = next
+            .panel
+            .to_nodes()
+            .into_iter()
+            .find(|node| matches!(&node.props, Props::Button(button) if button.label == label))
+            .map(|node| node.id)
+            .unwrap_or_else(|| panic!("no button {label}"));
+        next.handle_event(PANEL, UiEvent::Click(id)).expect("click");
+    }
+
+    #[test]
+    fn notify_shows_two_notifications() {
+        let mut next = mounted();
+        click(&mut next, "Notify");
+        let effects = take_host_effects();
+        assert!(
+            matches!(
+                &effects[..],
+                [
+                    HostEffect::Notify { notification: info, .. },
+                    HostEffect::Notify { notification: warning, .. },
+                ] if info.actions.len() == 2 && !info.auto_dismiss
+                    && warning.level == NotificationLevel::Warning && warning.auto_dismiss
+            ),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_job_runs_on_ticks_and_ends() {
+        let mut next = mounted();
+        click(&mut next, "Run job");
+        let effects = take_host_effects();
+        assert!(
+            matches!(
+                &effects[..],
+                [
+                    HostEffect::ProgressStart { options: bar, .. },
+                    HostEffect::ProgressStart { options: panel, .. },
+                    HostEffect::RequestTick { .. },
+                ] if bar.cancellable && bar.location == ProgressLocation::StatusBar
+                    && panel.location == ProgressLocation::Panel
+            ),
+            "{effects:?}"
+        );
+        for _ in 0..10 {
+            next.tick(PANEL).expect("tick");
+        }
+        assert!(next.job.is_none(), "done at 100 %");
+        let ends = take_host_effects()
+            .into_iter()
+            .filter(|effect| matches!(effect, HostEffect::ProgressEnd(_)))
+            .count();
+        assert_eq!(ends, 2);
     }
 }

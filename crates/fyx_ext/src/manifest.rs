@@ -29,6 +29,13 @@ pub const MAX_NETWORK_DOMAINS: usize = 64;
 
 const NETWORK_FETCH: &str = "network:fetch";
 const PROCESS_SPAWN: &str = "process:spawn";
+/// The T2 capabilities the host refuses at load for an `api_version` before they arrive.
+const T2_CAPABILITIES: &[&str] = &[
+    NETWORK_FETCH,
+    PROCESS_SPAWN,
+    "workspace:edit",
+    "agent:observe",
+];
 
 /// Capabilities a manifest may declare (platform spec, decision 21). Ones the current world does
 /// not provide yet are accepted with a warning, so a manifest can be written ahead of the host.
@@ -72,7 +79,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     ),
     (
         "workspace:edit",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
     (
         PROCESS_SPAWN,
@@ -80,7 +87,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     ),
     (
         "agent:observe",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
 ];
 
@@ -275,8 +282,7 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
             Some((_, CapabilityStatus::Since(since))) => match &api_version {
                 // The host refuses a T2 capability it cannot grant at that version.
                 Some(version)
-                    if version < since
-                        && (capability == NETWORK_FETCH || capability == PROCESS_SPAWN) =>
+                    if version < since && T2_CAPABILITIES.contains(&capability.as_str()) =>
                 {
                     report.error(format!(
                         "capability {capability:?} needs [fyx_ui].api_version {since} or newer"
@@ -369,6 +375,13 @@ fn check_processes(table: &FyxUiTable, report: &mut Report) {
             report.error(format!(
                 "[[fyx_ui.processes]] {index}: name {:?} must be a program name, not a path \
                  (use `path` for a program in the worktree)",
+                spec.name
+            ));
+        }
+        if spec.args.is_empty() {
+            report.warning(format!(
+                "[[fyx_ui.processes]] {:?} has no `args`, so it may only run with no arguments; \
+                 `args = [\"**\"]` allows any",
                 spec.name
             ));
         }
@@ -607,10 +620,31 @@ capabilities = ["ui:panel"]
             "{report:?}"
         );
         let declared = format!(
-            "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"status\", \"**\"]\n\n[fyx_ui.process]\nenv = [\"GIT_DIR\"]\n"
+            "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"status\", \"**\"]\n\n[fyx_ui.process]\nenv = [\"NO_COLOR\"]\n"
         );
         let (_, report) = check(&declared);
         assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings.iter().all(|w| !w.contains("no `args`")),
+            "{report:?}"
+        );
+
+        // Without `args` a program runs with no arguments only (integration-5 S6).
+        let bare = format!("{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\n");
+        let (_, report) = check(&bare);
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            report.warnings.iter().any(|w| w.contains("no `args`")),
+            "{report:?}"
+        );
+        // git's directories and PATH are never passed.
+        for name in ["GIT_DIR", "PATH", "CARGO_HOME"] {
+            let env = format!(
+                "{spawn}\n[[fyx_ui.processes]]\nname = \"git\"\nargs = [\"**\"]\n\n[fyx_ui.process]\nenv = [\"{name}\"]\n"
+            );
+            let (_, report) = check(&env);
+            assert_eq!(report.errors.len(), 1, "{name}: {report:?}");
+        }
 
         let bad = format!(
             "{spawn}\n[[fyx_ui.processes]]\nname = \"bin/tool\"\nargs = [\"**\", \"x\"]\n\n[fyx_ui.process]\nenv = [\"LD_PRELOAD\"]\n"

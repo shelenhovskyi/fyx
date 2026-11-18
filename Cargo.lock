@@ -7016,6 +7016,7 @@ dependencies = [
  "serde_json",
  "settings",
  "toml 0.9.8",
+ "ui_ext",
  "util",
 ]
 

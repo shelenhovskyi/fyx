@@ -524,6 +524,35 @@ pub mod glue {
             message: needs_0_3("kill"),
         })
     }
+
+    pub fn apply_edit(_edit: &crate::WorkspaceEdit) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("apply_edit"),
+        })
+    }
+
+    pub fn observe_start() -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("start_observing"),
+        })
+    }
+
+    /// Nothing to stop: this world has no agent feed.
+    pub fn observe_stop() {}
+
+    /// This world has no T2 capabilities.
+    pub fn query_permission(_capability: crate::T2Capability) -> crate::PermissionState {
+        crate::PermissionState::Unavailable
+    }
+
+    pub fn request_permission(_capability: crate::T2Capability) -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("request_permission"),
+        })
+    }
 }
 
 #[cfg(test)]

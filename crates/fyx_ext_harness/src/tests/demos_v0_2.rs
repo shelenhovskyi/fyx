@@ -354,3 +354,53 @@ fn the_todo_highlighter_reports_refused_decorations() {
     let status = text_starting(&harness, HIGHLIGHTS, "unavailable:").expect("status");
     assert!(status.contains("0.2"), "{status}");
 }
+
+/// §M.8 in the gallery's 0.2 build: two notifications, a button pressed, and a job that runs on
+/// ticks and can be cancelled.
+#[test]
+fn the_gallery_notifies_and_runs_a_job() {
+    use ui_ext::v0_2::notifications::ProgressLocation;
+    let mut harness = Harness::load(&gallery_v0_2_wasm()).expect("load");
+    harness.mount(gallery::PANEL).expect("mount");
+
+    harness.click(gallery::PANEL, "Notify").expect("notify");
+    assert_eq!(harness.notifications().len(), 2);
+    let (&info, _) = harness
+        .notifications()
+        .iter()
+        .find(|(_, notification)| notification.actions.len() == 2)
+        .expect("the info notification");
+    harness.notification_action(info, "open").expect("open");
+    assert_eq!(
+        text_starting(&harness, gallery::PANEL, "Notifications:").as_deref(),
+        Some(format!("Notifications: #{info} pressed open").as_str())
+    );
+
+    harness.click(gallery::PANEL, "Run job").expect("run");
+    let locations = harness
+        .progresses()
+        .values()
+        .map(|progress| progress.options.location)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        locations,
+        [ProgressLocation::StatusBar, ProgressLocation::Panel]
+    );
+    harness.tick(gallery::PANEL).expect("tick");
+    assert_eq!(
+        text_starting(&harness, gallery::PANEL, "Job:").as_deref(),
+        Some("Job: 10 %")
+    );
+    let (&bar, _) = harness
+        .progresses()
+        .iter()
+        .find(|(_, progress)| progress.options.cancellable)
+        .expect("the status-bar progress");
+    harness.cancel_progress(bar).expect("cancel");
+    assert!(harness.progresses().is_empty());
+    assert_eq!(
+        text_starting(&harness, gallery::PANEL, "Job:").as_deref(),
+        Some("Job: cancelled")
+    );
+    assert_eq!(harness.pending_tick(gallery::PANEL), None);
+}

@@ -5,6 +5,9 @@ use std::path::{Component, Path};
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
+// The agent-config rules live in `ui_ext::protected`, so `workspace:edit` applies the same list
+// to extensions.
+use ui_ext::protected::protected_config_in;
 use util::{
     paths::{PathMatcher, PathStyle},
     rel_path::RelPath,
@@ -12,31 +15,6 @@ use util::{
 
 /// A repository's own tightening, relative to a worktree root.
 pub const SECURITY_FILE: &str = ".fyx/security.toml";
-
-/// Directories agents may not write into, at any depth. All of `.git/`, not only `hooks/`: `config`
-/// (`core.hooksPath`, `core.fsmonitor`), `info/`, a submodule's `modules/*/config` and a linked
-/// worktree's `commondir` each make the next `git` run start a program. A `.git` file redirects git to
-/// another directory, so the name is protected as a file too.
-///
-/// Other agents' configs and Fyx's task sources are protected too (security-2 T2): `.gemini/`,
-/// `.agents/` and `.cursor/` hold agent settings and hooks, and `.zed/` holds tasks.
-const PROTECTED_DIRS: &[&str] = &[
-    ".claude", ".codex", ".gemini", ".agents", ".cursor", ".zed", ".fyx", ".git",
-];
-/// Files agents may not write, at any depth: MCP server lists, and agent rules files, which steer
-/// every later agent run (decided 2026-11-18: read-only under shield).
-const PROTECTED_FILES: &[&str] = &[
-    ".mcp.json",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "GEMINI.md",
-    ".rules",
-    ".cursorrules",
-];
-/// Files agents may not write inside a directory of this name, at any depth: VS Code's task and
-/// launch configs run programs.
-const PROTECTED_FILES_IN_DIR: &[(&str, &str)] =
-    &[(".vscode", "tasks.json"), (".vscode", "launch.json")];
 
 /// Variables that look like secrets. `*` matches any run of characters; names are compared in
 /// ASCII upper case.
@@ -100,29 +78,6 @@ pub fn protected_config(path: &Path) -> Option<String> {
 pub fn protected_config_rel(path: &RelPath) -> Option<String> {
     let names = path.components().map(str::to_string).collect::<Vec<_>>();
     protected_config_in(&names)
-}
-
-fn protected_config_in(names: &[String]) -> Option<String> {
-    // Case-insensitive file systems (macOS, Windows) resolve `.Claude` to `.claude`.
-    let is = |name: &str, protected: &str| name.eq_ignore_ascii_case(protected);
-    for (index, name) in names.iter().enumerate() {
-        let is_last = index + 1 == names.len();
-        if let Some(dir) = PROTECTED_DIRS.iter().find(|dir| is(name, dir)) {
-            return Some(format!("{dir}/"));
-        }
-        if is_last && let Some(file) = PROTECTED_FILES.iter().find(|file| is(name, file)) {
-            return Some((*file).to_string());
-        }
-        if is_last
-            && index > 0
-            && let Some((dir, file)) = PROTECTED_FILES_IN_DIR
-                .iter()
-                .find(|(dir, file)| is(&names[index - 1], dir) && is(name, file))
-        {
-            return Some(format!("{dir}/{file}"));
-        }
-    }
-    None
 }
 
 /// Whether `path` is `dir` or inside it, after resolving `.` and `..`, ignoring ASCII case.

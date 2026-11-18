@@ -624,7 +624,7 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - A process that cannot start gets one `IoEvent::SpawnFailed` instead (`SpawnError`
     implements `Display`). A program the manifest does not name gets an id, then
     `SpawnError::NotFound`.
-- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with optional
+- **The manifest** declares `process:spawn`, `api_version = "0.3.0"`, the programs with their
   argument patterns, and the environment names:
 
   ```toml
@@ -633,8 +633,13 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   args = ["status", "**"]
 
   [fyx_ui.process]
-  env = ["GIT_DIR"]
+  env = ["NO_COLOR"]
   ```
+
+  - **Arguments:** a program without `args` runs with no arguments only; `args = ["**"]` allows
+    any.
+  - **Environment names:** names that load code or redirect a program (`LD_*`, `GIT_DIR`,
+    `CARGO_*`, `PATH`, …) are refused (`ui_ext::process::is_forbidden_env`).
 
 - **Consent and limits:**
   - `process:spawn` is T2: the first spawn asks the user, and a refusal ends
@@ -643,6 +648,63 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - at most 4 processes, 256 arguments (128 KiB), 32 environment pairs;
   - stdin: 1 MiB per write and 4 MiB queued.
 - **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `workspace:edit` and `agent:observe` (design
+0.3, sections 10 and 11; plan 4.8):
+
+```rust
+pub fn apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError>;
+pub fn start_observing() -> Result<(), HostError>;
+pub fn stop_observing();
+```
+
+- **Building an edit:** `WorkspaceEdit::new(label).file(FileEdit::path("src/main.rs")
+  .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), text).insert(at, text))`.
+  - `FileEdit::document(id)` targets an open document instead of a path.
+  - `.expected_version(v)` makes the edit fail with `EditError::Conflict` if the file changed.
+  - `.create()` creates a missing file.
+- **How an edit applies:**
+  - all its files or none, as one undo step per buffer;
+  - nothing is saved: edited buffers stay dirty;
+  - the outcome arrives in `handle_io` as `IoEvent::EditDone((id, result))`, and `EditError`
+    implements `Display`;
+  - protected paths (`.git/`, `.fyx/`, `.zed/`, `.vscode/`, `.idea/`) are refused with
+    `NotAllowed`, and overlapping edits with `Invalid`.
+- **Limits:**
+  - at most 4 edits in flight;
+  - 64 files and 4096 text edits each;
+  - 4 MiB of new text;
+  - a label of 1 to 128 bytes.
+- **The agent feed:** after `start_observing`, `handle_io` gets `IoEvent::Agent`. A `Snapshot`
+  of the open reviews comes first, then `Opened`, `Updated`, `Resolved`, `Closed`, `TurnEnded`,
+  `UnreviewedChanges` and `ReviewMode`.
+  - The ids are opaque to the extension, and long hunks are cut (`truncated`).
+  - The feed is read-only: nothing in the API can accept, reject or comment.
+- **Consent:** both capabilities are T2. The first use asks the user.
+- **Off WASM:** the calls record `HostEffect::ApplyEdit`, `StartObserving` and `StopObserving`.
+
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `permissions` for the T2 capabilities
+(`network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe`; design 0.3, section 7):
+
+```rust
+pub fn query_permission(capability: T2Capability) -> PermissionState;
+pub fn request_permission(capability: T2Capability) -> Result<(), HostError>;
+```
+
+- **`query_permission`:** the state as of the start of the current call. The first query of a
+  capability fixes the answer for the rest of the call.
+  - `Granted` or `Denied`: the user answered.
+  - `Ask`: not asked yet; the first use, or a request, shows the prompt.
+  - `Unavailable`: not declared in the manifest, or the worktree is not trusted.
+- **`request_permission`:** shows the prompt after the call, and only in the `Ask` state. In any
+  other state it is `Ok` and nothing happens.
+  - It needs the click-or-Enter activation, so call it from a button click; it uses the
+    activation up. Without one, or for an undeclared capability, it is `not-permitted`.
+  - The answer arrives in `handle_io` as `IoEvent::PermissionChanged((capability, state))`, as
+    does every later change on the extensions page.
+- **Off WASM:** `query_permission` answers `Ask` unless a test called
+  `set_permission_state(capability, state)`, and `request_permission` records
+  `HostEffect::RequestPermission`.
 
 ## Canvases (`fyx-ui-0-3`)
 
@@ -691,7 +753,9 @@ tree.canvas(canvas);
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,
-`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin` and `kill` return `unavailable`
+`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin`, `kill`, `apply_edit`,
+`start_observing` and `request_permission` return `unavailable`, `query_permission` answers
+`Unavailable`,
 ("needs fyx:ui 0.3"), and `remove_image` and `cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.

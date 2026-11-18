@@ -19,8 +19,9 @@ pub const MAX_EDITS_IN_FLIGHT: usize = 4;
 /// Files larger than this are refused (by the host, which knows their size).
 pub const MAX_FILE_BYTES: u64 = 16 << 20;
 
-/// Top-level directories no extension may write into (design.md §10): repository internals and
-/// hooks, Fyx's agent review rules, editor settings and tasks (code execution).
+/// Directories no extension may write into, at any depth (design.md §10, integration-5 S2):
+/// repository internals and hooks, Fyx's agent review rules, editor settings and tasks (code
+/// execution). Agent configs ([`crate::protected`]) are refused as well, whatever the shield mode.
 pub const PROTECTED_DIRECTORIES: &[&str] = &[".git", ".fyx", ".zed", ".vscode", ".idea"];
 
 /// Zero-based line, and a column in UTF-8 bytes.
@@ -137,13 +138,24 @@ pub fn check_edit(edit: &WorkspaceEdit) -> Result<(), HostError> {
     Ok(())
 }
 
-/// Whether a worktree-relative path is under a [`PROTECTED_DIRECTORIES`] entry. ASCII case does
-/// not matter, so `.GIT/config` is protected on case-insensitive file systems too.
+/// The rule a worktree-relative path falls under, if any: a [`PROTECTED_DIRECTORIES`] entry at
+/// any depth, or an agent config ([`crate::protected::protected_config_in`]: `.claude/`, `.codex/`,
+/// `.mcp.json`, `AGENTS.md`, ...). ASCII case does not matter, so `.GIT/config` is protected on
+/// case-insensitive file systems too.
+pub fn protected_rule(path: &str) -> Option<String> {
+    let names: Vec<&str> = path.split('/').collect();
+    if let Some(dir) = names.iter().find_map(|name| {
+        PROTECTED_DIRECTORIES
+            .iter()
+            .find(|protected| name.eq_ignore_ascii_case(protected))
+    }) {
+        return Some(format!("{dir}/"));
+    }
+    crate::protected::protected_config_in(&names)
+}
+
 pub fn is_protected_path(path: &str) -> bool {
-    let first = path.split('/').next().unwrap_or_default();
-    PROTECTED_DIRECTORIES
-        .iter()
-        .any(|protected| first.eq_ignore_ascii_case(protected))
+    protected_rule(path).is_some()
 }
 
 /// The checks before the host resolves anything, when the edit is applied: overlapping edits in
@@ -155,9 +167,9 @@ pub fn check_targets(edit: &WorkspaceEdit) -> Result<(), EditError> {
         let key = match &file.target {
             EditTarget::Document(id) => format!("document:{id}"),
             EditTarget::File(file_ref) => {
-                if is_protected_path(&file_ref.path) {
+                if let Some(rule) = protected_rule(&file_ref.path) {
                     return Err(EditError::NotAllowed(format!(
-                        "{} is a protected path",
+                        "{} is protected ({rule}): it can make a program run",
                         file_ref.path
                     )));
                 }
@@ -320,6 +332,24 @@ mod tests {
         }
         assert!(!is_protected_path("src/.git-like/x"));
         assert!(!is_protected_path("docs/.zed.md"));
+        // integration-5 S2: at any depth, and agent configs, whatever the shield mode.
+        for path in [
+            "sub/.zed/settings.json",
+            "pkg/.vscode/tasks.json",
+            "a/.idea/workspace.xml",
+            ".claude/settings.json",
+            "tools/.codex/config.toml",
+            ".cursor/rules/x.mdc",
+            ".mcp.json",
+            "sub/.mcp.json",
+            "AGENTS.md",
+            "docs/CLAUDE.md",
+            "vendor/lib/.git/config",
+        ] {
+            assert!(is_protected_path(path), "{path}");
+        }
+        assert!(!is_protected_path("notes/mcp.json"));
+        assert!(!is_protected_path("src/agents.rs"));
         let overlapping = edit(vec![file(
             "a.rs",
             vec![

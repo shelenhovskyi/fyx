@@ -110,7 +110,11 @@ pub use ui_ext_sdk_v0_1::bindings as bindings_v0_1;
 pub use ui_ext_sdk_v0_2::bindings as bindings_v0_2;
 
 #[cfg(feature = "fyx-ui-0-3")]
-pub use bindings::fyx::ui::documents::FileRef;
+pub use bindings::fyx::ui::agent_observe::{
+    AgentEvent, HunkDecision, HunkInfo, Resolution, ReviewInfo, ReviewSource, RuleKind, TurnFile,
+};
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::documents::{FileRef, Position, TextRange};
 pub use bindings::fyx::ui::host::{HostError, HostErrorCode, LogLevel};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::images::ImageFormat;
@@ -122,11 +126,18 @@ pub use bindings::fyx::ui::notifications::{
     Notification, NotificationAction, NotificationLevel, ProgressLocation, ProgressOptions,
     ProgressValue,
 };
+/// The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them.
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::permissions::{PermissionState, T2Capability};
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::process::{
     OutputStream, ProcessExit, ProcessOutput, SpawnError, SpawnRequest,
 };
 pub use bindings::fyx::ui::types::*;
+#[cfg(feature = "fyx-ui-0-3")]
+pub use bindings::fyx::ui::workspace_edit::{
+    EditError, EditTarget, FileEdit, TextEdit, WorkspaceEdit,
+};
 /// The host's caps on a surface, which [`SurfaceTree`] enforces before the host sees an update.
 pub use ui_ext::TreeLimits;
 
@@ -715,6 +726,35 @@ macro_rules! __fyx_image_shims {
         #[unsafe(no_mangle)]
         fn __fyx_ui_kill(process: u64) -> ::std::result::Result<(), $crate::HostError> {
             $crate::__private::$world::kill(process)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_apply_edit(
+            edit: &$crate::WorkspaceEdit,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::$world::apply_edit(edit)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_observe_start() -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::observe_start()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_observe_stop() {
+            $crate::__private::$world::observe_stop()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_query_permission(capability: $crate::T2Capability) -> $crate::PermissionState {
+            $crate::__private::$world::query_permission(capability)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_request_permission(
+            capability: $crate::T2Capability,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::$world::request_permission(capability)
         }
     };
 }
@@ -2102,6 +2142,103 @@ impl SpawnRequest {
 }
 
 #[cfg(feature = "fyx-ui-0-3")]
+impl WorkspaceEdit {
+    /// An edit named `label` (1 to 128 bytes, one line): the undo step's name.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            files: Vec::new(),
+        }
+    }
+
+    /// Edits of one file; at most 64 files per edit, each named once.
+    pub fn file(mut self, file: FileEdit) -> Self {
+        self.files.push(file);
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl FileEdit {
+    /// Edits of the file at `path`, relative to the root of the one worktree that has it.
+    pub fn path(path: impl Into<String>) -> Self {
+        Self::target(EditTarget::File(FileRef {
+            worktree: None,
+            path: path.into(),
+        }))
+    }
+
+    /// Edits of an open document, by its `documents` id.
+    pub fn document(id: u64) -> Self {
+        Self::target(EditTarget::Document(id))
+    }
+
+    fn target(target: EditTarget) -> Self {
+        Self {
+            target,
+            expected_version: None,
+            create: false,
+            edits: Vec::new(),
+        }
+    }
+
+    /// Replaces `range` with `new_text`. Ranges are half-open and must not overlap.
+    pub fn replace(mut self, range: TextRange, new_text: impl Into<String>) -> Self {
+        self.edits.push(TextEdit {
+            range,
+            new_text: new_text.into(),
+        });
+        self
+    }
+
+    /// Inserts `text` at `at`.
+    pub fn insert(self, at: Position, text: impl Into<String>) -> Self {
+        self.replace(TextRange { start: at, end: at }, text)
+    }
+
+    /// Fails the whole edit with `EditError::Conflict` if the document changed since `version`.
+    pub fn expected_version(mut self, version: u64) -> Self {
+        self.expected_version = Some(version);
+        self
+    }
+
+    /// Creates the file (empty) first if it does not exist; its directory must.
+    pub fn create(mut self) -> Self {
+        self.create = true;
+        self
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl Position {
+    /// Zero-based line, and a column in UTF-8 bytes from the start of the line.
+    pub fn new(line: u32, column: u32) -> Self {
+        Self { line, column }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl TextRange {
+    pub fn new(start: Position, end: Position) -> Self {
+        Self { start, end }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditError::Denied => f.write_str("editing files was denied"),
+            EditError::Conflict(why) => write!(f, "the file changed: {why}"),
+            EditError::NotAllowed(why) => write!(f, "not allowed: {why}"),
+            EditError::NotFound(why) => write!(f, "not found: {why}"),
+            EditError::Invalid(why) => write!(f, "invalid edit: {why}"),
+            EditError::Cancelled => f.write_str("the edit was cancelled"),
+        }
+    }
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
 impl ProcessOutput {
     /// The chunk as text; a chunk may end inside a UTF-8 character, so this is lossy.
     pub fn text(&self) -> std::borrow::Cow<'_, str> {
@@ -3006,6 +3143,44 @@ mod tests {
                     nodes: Vec::new()
                 },
             ]
+        );
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    #[test]
+    fn edits_and_the_agent_feed_record_their_effects() {
+        take_host_effects();
+        let edit = WorkspaceEdit::new("Sort imports").file(
+            FileEdit::path("src/main.rs")
+                .replace(
+                    TextRange::new(Position::new(0, 0), Position::new(2, 0)),
+                    "use a;
+use b;
+",
+                )
+                .insert(
+                    Position::new(5, 4),
+                    "// sorted
+",
+                )
+                .expected_version(7),
+        );
+        assert_eq!(edit.files[0].edits.len(), 2);
+        assert_eq!(edit.files[0].expected_version, Some(7));
+        let id = apply_edit(&edit).expect("apply");
+        start_observing().expect("start");
+        stop_observing();
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::ApplyEdit { id, edit },
+                HostEffect::StartObserving,
+                HostEffect::StopObserving,
+            ]
+        );
+        assert_eq!(
+            EditError::NotAllowed(".git/config is a protected path".into()).to_string(),
+            "not allowed: .git/config is a protected path"
         );
     }
 
