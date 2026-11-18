@@ -19487,6 +19487,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "http_proxy",
+ "libc",
  "log",
  "moka",
  "semver",
@@ -19500,6 +19501,7 @@ dependencies = [
  "wasmparser 0.254.2",
  "wasmtime",
  "wasmtime-wasi",
+ "windows 0.62.2",
  "zed-reqwest",
 ]
 

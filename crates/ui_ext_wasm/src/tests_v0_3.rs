@@ -830,6 +830,499 @@ mod network_fetch {
     }
 }
 
+/// `process:spawn` end to end (design.md §9, plan 4.7): spec §4 failure 4, the tree dies on
+/// reload, the caps, kill, stdin, the filtered environment, consent and the worktree rules. The
+/// rules alone are tested in `process.rs` and `ui_ext::process`.
+mod process_spawn {
+    use std::{
+        collections::HashMap,
+        ffi::OsString,
+        path::PathBuf,
+        sync::Mutex,
+        time::{Duration, Instant},
+    };
+
+    use super::*;
+    use crate::{
+        network::IoEvent,
+        permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
+        process::{Environment, ProcessSpec, Workspace, WorktreeRoot},
+    };
+
+    struct Broker {
+        state: Mutex<PermissionState>,
+        answer: PermissionState,
+        subscribers: Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, PermissionState)>>>,
+    }
+
+    impl Broker {
+        fn new(state: PermissionState, answer: PermissionState) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(state),
+                answer,
+                subscribers: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn revoke(&self) {
+            *self.state.lock().unwrap() = PermissionState::Denied;
+            for subscriber in self.subscribers.lock().unwrap().iter() {
+                subscriber
+                    .unbounded_send(("process:spawn".into(), PermissionState::Denied))
+                    .ok();
+            }
+        }
+    }
+
+    impl CapabilityCheck for Broker {
+        fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+            Ok(())
+        }
+
+        fn state(&self, _: &str, capability: &str) -> PermissionState {
+            if capability == "process:spawn" {
+                *self.state.lock().unwrap()
+            } else {
+                PermissionState::Unavailable
+            }
+        }
+
+        fn request(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> futures::future::BoxFuture<'static, PermissionState> {
+            *self.state.lock().unwrap() = self.answer;
+            futures::future::ready(self.answer).boxed()
+        }
+
+        fn changes(
+            &self,
+            _: &str,
+        ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+            let (sender, receiver) = futures::channel::mpsc::unbounded();
+            self.subscribers.lock().unwrap().push(sender);
+            receiver
+        }
+    }
+
+    struct Worktrees(Vec<WorktreeRoot>);
+
+    impl Workspace for Worktrees {
+        fn worktrees(&self) -> Vec<WorktreeRoot> {
+            self.0.clone()
+        }
+    }
+
+    fn spec(name: &str) -> ProcessSpec {
+        ProcessSpec {
+            name: name.into(),
+            args: Vec::new(),
+            path: None,
+        }
+    }
+
+    struct Setup {
+        broker: Arc<Broker>,
+        worktree: tempfile::TempDir,
+        trusted: bool,
+        programs: Vec<ProcessSpec>,
+        env: Vec<String>,
+        environment: Option<Environment>,
+    }
+
+    impl Setup {
+        fn new(programs: &[&str]) -> Self {
+            Self {
+                broker: Broker::new(PermissionState::Granted, PermissionState::Granted),
+                worktree: tempfile::tempdir().expect("a worktree"),
+                trusted: true,
+                programs: programs.iter().map(|name| spec(name)).collect(),
+                env: Vec::new(),
+                environment: None,
+            }
+        }
+
+        async fn load(&self, cx: &mut TestAppContext) -> UiExtension {
+            load_with(
+                LoadOptions {
+                    allow_staged: Some(true),
+                    capabilities: Some(vec![
+                        CAPABILITY_PANEL.to_string(),
+                        ui_ext::v0_2::CAPABILITY_STATUS_BAR.to_string(),
+                        ui_ext::v0_2::CAPABILITY_MODAL.to_string(),
+                        "process:spawn".into(),
+                    ]),
+                    processes: Some(self.programs.clone()),
+                    process_env: Some(self.env.clone()),
+                    capability_check: Some(self.broker.clone()),
+                    workspace: Some(Arc::new(Worktrees(vec![WorktreeRoot {
+                        id: 1,
+                        root: self.worktree.path().to_path_buf(),
+                        trusted: self.trusted,
+                    }]))),
+                    process_environment: self.environment.clone(),
+                    ..LoadOptions::default()
+                },
+                cx,
+            )
+            .await
+            .expect("loads")
+        }
+    }
+
+    async fn command(extension: &UiExtension, command: &str) -> String {
+        let reply = extension
+            .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, command.into()))
+            .await
+            .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+        match &reply.value {
+            Update::Replace(nodes) => match &nodes[0].props {
+                Props::Text(text) => text.content.clone(),
+                other => panic!("not a report: {other:?}"),
+            },
+            other => panic!("not a report: {other:?}"),
+        }
+    }
+
+    /// Delivers outcomes until `id` exits or fails; returns its stdout and the final line.
+    async fn run_to_end(
+        extension: &UiExtension,
+        events: &mut futures::channel::mpsc::Receiver<IoEvent>,
+        id: &str,
+    ) -> (String, String) {
+        let mut stdout = String::new();
+        loop {
+            let event = events.next().await.expect("an outcome");
+            let reply = extension.handle_io(event).await.expect("handle-io");
+            let Some(HostEffect::Push {
+                update: Update::Replace(nodes),
+                ..
+            }) = reply.effects.first()
+            else {
+                continue;
+            };
+            let Props::Text(text) = &nodes[0].props else {
+                continue;
+            };
+            let line = text.content.clone();
+            if let Some(rest) = line.strip_prefix(&format!("output {id} stdout ")) {
+                stdout.push_str(rest);
+            } else if line.starts_with(&format!("exited {id} "))
+                || line.starts_with(&format!("spawn-failed {id} "))
+            {
+                return (stdout, line);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn system32() -> PathBuf {
+        PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot")).join("System32")
+    }
+
+    /// Spec §4 failure 4, end to end: the worktree plants `hostname`, and the worktree and `.`
+    /// come first on PATH. The system program runs.
+    // The reference `hostname` runs blocking, in the test thread.
+    #[allow(clippy::disallowed_methods)]
+    #[gpui::test]
+    async fn test_failure_4_the_planted_program_never_runs(cx: &mut TestAppContext) {
+        let mut setup = Setup::new(&["hostname"]);
+        #[cfg(windows)]
+        let (system, planted) = {
+            std::fs::copy(
+                system32().join("whoami.exe"),
+                setup.worktree.path().join("hostname.exe"),
+            )
+            .expect("plants");
+            (system32(), "whoami")
+        };
+        #[cfg(unix)]
+        let (system, planted) = {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = setup.worktree.path().join("hostname");
+            std::fs::write(&path, "#!/bin/sh\necho planted\n").expect("plants");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            (PathBuf::from("/bin"), "planted")
+        };
+        let path = std::env::join_paths([
+            setup.worktree.path().to_path_buf(),
+            PathBuf::from("."),
+            system,
+            PathBuf::from("/usr/bin"),
+        ])
+        .expect("PATH");
+        let mut base: Vec<(OsString, OsString)> = std::env::vars_os()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("PATH"))
+            .collect();
+        base.push(("PATH".into(), path));
+        setup.environment = Some(Arc::new(move || base.clone()));
+        let extension = setup.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let id = command(&extension, "spawn -- hostname").await;
+        assert_eq!(id, "1");
+        let (stdout, end) = run_to_end(&extension, &mut events, &id).await;
+        assert_eq!(end, "exited 1 0 false");
+        let real = std::process::Command::new("hostname")
+            .output()
+            .expect("runs");
+        assert_eq!(stdout.trim(), String::from_utf8_lossy(&real.stdout).trim());
+        assert!(
+            !stdout.contains(planted) || stdout.trim() == planted,
+            "{stdout}"
+        );
+    }
+
+    /// Plan 4.7, done: a reload kills the whole tree, grandchildren included.
+    #[gpui::test]
+    async fn test_reload_kills_the_process_tree(cx: &mut TestAppContext) {
+        #[cfg(windows)]
+        let (program, script) = (
+            "powershell",
+            "-NoProfile -Command $p=Start-Process_ping_-ArgumentList_'-n','60','127.0.0.1'_-PassThru_-WindowStyle_Hidden;Write-Output_$p.Id;Start-Sleep_60",
+        );
+        #[cfg(unix)]
+        let (program, script) = ("sh", "-c sleep_60_&_echo_$!;_sleep_60");
+        let setup = Setup::new(&[program]);
+        let extension = setup.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let id = command(&extension, &format!("spawn -- {program} {script}")).await;
+        assert_eq!(id, "1");
+        // The grandchild's pid, from its parent's first line.
+        let mut stdout = String::new();
+        let grandchild: u32 = loop {
+            let event = events.next().await.expect("an outcome");
+            if let IoEvent::ProcessOutput(output) = &event {
+                stdout.push_str(&String::from_utf8_lossy(&output.data));
+            }
+            extension.handle_io(event).await.expect("handle-io");
+            if let Some(line) = stdout.lines().next().filter(|_| stdout.contains('\n'))
+                && let Ok(pid) = line.trim().parse()
+            {
+                break pid;
+            }
+        };
+        assert!(
+            is_running(grandchild),
+            "the grandchild runs before the reload"
+        );
+        drop(extension);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while is_running(grandchild) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !is_running(grandchild),
+            "the grandchild died with the instance"
+        );
+    }
+
+    // A blocking `tasklist`, in the test thread.
+    #[cfg(windows)]
+    #[allow(clippy::disallowed_methods)]
+    fn is_running(pid: u32) -> bool {
+        let output = std::process::Command::new(system32().join("tasklist.exe"))
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .expect("tasklist");
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    }
+
+    #[cfg(unix)]
+    fn is_running(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    #[gpui::test]
+    async fn test_kill_caps_and_not_found(cx: &mut TestAppContext) {
+        #[cfg(windows)]
+        let (sleeper, sleep) = ("ping", "-n 60 127.0.0.1");
+        #[cfg(unix)]
+        let (sleeper, sleep) = ("sleep", "60");
+        let mut setup = Setup::new(&[sleeper]);
+        setup.programs.push(spec("tool.cmd"));
+        let extension = setup.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        // Four at most, counted until they exit.
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            ids.push(command(&extension, &format!("spawn -- {sleeper} {sleep}")).await);
+        }
+        assert_eq!(ids, ["1", "2", "3", "4"]);
+        assert_eq!(
+            command(&extension, &format!("spawn -- {sleeper} {sleep}")).await,
+            "limit-exceeded"
+        );
+        for id in &ids {
+            assert_eq!(command(&extension, &format!("kill {id}")).await, "done");
+        }
+        let mut exited = 0;
+        while exited < 4 {
+            let event = events.next().await.expect("an outcome");
+            if let IoEvent::ProcessExited(exit) = &event {
+                assert!(exit.killed);
+                exited += 1;
+            }
+            extension.handle_io(event).await.expect("handle-io");
+        }
+        assert_eq!(
+            command(&extension, "kill 1").await,
+            "invalid-argument",
+            "exited"
+        );
+        // Undeclared, and a batch script: not found, without starting anything.
+        let undeclared = command(&extension, "spawn -- rm -rf").await;
+        assert_eq!(undeclared, "5");
+        let (_, end) = run_to_end(&extension, &mut events, &undeclared).await;
+        assert_eq!(end, "spawn-failed 5 not-found");
+        let script = command(&extension, "spawn -- tool.cmd").await;
+        let (_, end) = run_to_end(&extension, &mut events, &script).await;
+        assert_eq!(end, format!("spawn-failed {script} not-found"));
+    }
+
+    #[gpui::test]
+    async fn test_kill_reports_killed(cx: &mut TestAppContext) {
+        #[cfg(windows)]
+        let (sleeper, sleep) = ("ping", "-n 60 127.0.0.1");
+        #[cfg(unix)]
+        let (sleeper, sleep) = ("sleep", "60");
+        let setup = Setup::new(&[sleeper]);
+        let extension = setup.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let id = command(&extension, &format!("spawn -- {sleeper} {sleep}")).await;
+        // Let it start before killing it.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(command(&extension, &format!("kill {id}")).await, "done");
+        let (_, end) = run_to_end(&extension, &mut events, &id).await;
+        assert_eq!(end, format!("exited {id} none true"));
+    }
+
+    /// Revoking `process:spawn` kills running processes; a refused prompt never starts one.
+    #[gpui::test]
+    async fn test_consent_and_revocation(cx: &mut TestAppContext) {
+        #[cfg(windows)]
+        let (sleeper, sleep) = ("ping", "-n 60 127.0.0.1");
+        #[cfg(unix)]
+        let (sleeper, sleep) = ("sleep", "60");
+        let setup = Setup::new(&[sleeper]);
+        let extension = setup.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let id = command(&extension, &format!("spawn -- {sleeper} {sleep}")).await;
+        std::thread::sleep(Duration::from_millis(300));
+        setup.broker.revoke();
+        let mut outcomes = HashMap::new();
+        while outcomes.len() < 2 {
+            let event = events.next().await.expect("an outcome");
+            let kind = match &event {
+                IoEvent::ProcessExited(exit) => Some(("exited", exit.killed)),
+                IoEvent::PermissionChanged(..) => Some(("permission", true)),
+                _ => None,
+            };
+            extension.handle_io(event).await.expect("handle-io");
+            if let Some((kind, killed)) = kind {
+                outcomes.insert(kind, killed);
+            }
+        }
+        assert_eq!(outcomes.get("exited"), Some(&true), "killed on revoke");
+        assert_eq!(
+            command(&extension, &format!("spawn -- {sleeper} {sleep}")).await,
+            "denied"
+        );
+        let _ = id;
+
+        let mut refused = Setup::new(&[sleeper]);
+        refused.broker = Broker::new(PermissionState::Ask, PermissionState::Denied);
+        let extension = refused.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        let id = command(&extension, &format!("spawn -- {sleeper} {sleep}")).await;
+        let (_, end) = run_to_end(&extension, &mut events, &id).await;
+        assert_eq!(end, format!("spawn-failed {id} denied"));
+    }
+
+    /// Decision 26: an untrusted worktree is `denied` without a prompt; no worktree is
+    /// `unavailable`.
+    #[gpui::test]
+    async fn test_worktree_rules(cx: &mut TestAppContext) {
+        let mut setup = Setup::new(&["hostname"]);
+        setup.trusted = false;
+        let extension = setup.load(cx).await;
+        assert_eq!(command(&extension, "spawn -- hostname").await, "denied");
+        let none = load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(vec![
+                    CAPABILITY_PANEL.to_string(),
+                    ui_ext::v0_2::CAPABILITY_STATUS_BAR.to_string(),
+                    ui_ext::v0_2::CAPABILITY_MODAL.to_string(),
+                    "process:spawn".into(),
+                ]),
+                processes: Some(vec![spec("hostname")]),
+                capability_check: Some(setup.broker.clone()),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        assert_eq!(command(&none, "spawn -- hostname").await, "unavailable");
+    }
+
+    /// The child sees only the filtered environment, and stdin reaches it.
+    #[gpui::test]
+    async fn test_environment_and_stdin(cx: &mut TestAppContext) {
+        #[cfg(windows)]
+        let (env_program, env_args, cat) = ("cmd", "/c set", "sort");
+        #[cfg(unix)]
+        let (env_program, env_args, cat) = ("env", "", "cat");
+        let mut setup = Setup::new(&[env_program, cat]);
+        setup.env = vec!["FYX_DECLARED".into(), "FYX_GUEST".into()];
+        let mut base: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        base.push(("FYX_DECLARED".into(), "from-fyx".into()));
+        base.push(("FYX_SECRET".into(), "never".into()));
+        setup.environment = Some(Arc::new(move || base.clone()));
+        let extension = setup.load(cx).await;
+        let mut events = extension.take_io_events().expect("once");
+        assert_eq!(
+            command(
+                &extension,
+                &format!("spawn env FYX_SECRET=x -- {env_program} {env_args}")
+            )
+            .await,
+            "invalid-argument",
+            "an undeclared name"
+        );
+        let id = command(
+            &extension,
+            &format!("spawn env FYX_GUEST=from-guest -- {env_program} {env_args}"),
+        )
+        .await;
+        let (stdout, end) = run_to_end(&extension, &mut events, &id).await;
+        assert_eq!(end, format!("exited {id} 0 false"));
+        assert!(stdout.contains("FYX_DECLARED=from-fyx"), "{stdout}");
+        assert!(stdout.contains("FYX_GUEST=from-guest"), "{stdout}");
+        assert!(!stdout.contains("FYX_SECRET"), "{stdout}");
+
+        let id = command(&extension, &format!("spawn stdin -- {cat}")).await;
+        assert_eq!(
+            command(&extension, &format!("write {id} beta")).await,
+            "done"
+        );
+        assert_eq!(
+            command(&extension, &format!("write {id} alpha")).await,
+            "done"
+        );
+        assert_eq!(command(&extension, &format!("close {id}")).await, "done");
+        let (stdout, end) = run_to_end(&extension, &mut events, &id).await;
+        assert_eq!(end, format!("exited {id} 0 false"));
+        let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+        #[cfg(windows)]
+        assert_eq!(lines, ["alpha", "beta"]);
+        #[cfg(unix)]
+        assert_eq!(lines, ["beta", "alpha"]);
+    }
+}
+
 /// The harness (`fyx_ext_harness`) against the host on the same 0.3 probe: every case's effects,
 /// in `Debug` form, and its reply must match (plan 4.12).
 mod harness_conformance_v0_3 {
