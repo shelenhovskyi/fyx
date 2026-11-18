@@ -6895,6 +6895,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_images"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_markdown"
 version = "0.1.0"
 dependencies = [
@@ -6935,6 +6942,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "semver",
+ "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",
  "wasmtime",
