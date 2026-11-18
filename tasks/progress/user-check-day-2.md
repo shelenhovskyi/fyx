@@ -40,7 +40,8 @@
 
 ### Збірка
 
-Потрібна **debug-збірка**: світ 0.3 поки staged, і його вантажать лише dev-збірки.
+Потрібна **debug-збірка** з `6bc8a1c12b` або пізніша: світ 0.3 поки staged, і його вантажать
+лише dev-збірки. Демо зібрані з `6bc8a1c12b`; зі старішою збіркою вони не завантажаться.
 
 - **Коміт:** «ЗАПОВНИТИ: коміт `fyx/main`».
 - **Файл:** «ЗАПОВНИТИ: шлях, наприклад `D:\fyx-builds\<коміт>\fyx.exe`».
@@ -93,12 +94,13 @@ for c in 4ecf7ef885 9cd5a28180 f5a3b863fc 885f563c50 f868421052 27e6220906 6bc8a
 Демо вже готові. W4 зібрав їх з `integration` `6bc8a1c12b` (debug, `wasm32-wasip2`), і кожне
 проходить `fyx-ext check`. Я перевірив теки й маніфести 2026-11-18.
 
-- **Демо 0.2:**
-  - `D:\fyx-user-check\demos-0.2-next\fyx_demo_gallery\`: перезібрана, з **Notify** і
-    **Run job**, просить `ui:panel`, `ui:status-bar`, `ui:modal` і `ui:notifications`. Тека
-    першого дня `demos-0.2\fyx_demo_gallery\` лишається старою, для першого дня.
-  - `D:\fyx-user-check\demos-0.2\fyx_demo_decorations\`: та сама, що в перший день, просить
-    `ui:panel` і `ui:editor-decorations`.
+- **Демо 0.2** у `D:\fyx-user-check\demos-0.2-next\`:
+  - `fyx_demo_gallery\`: з **Notify** і **Run job**, просить `ui:panel`, `ui:status-bar`,
+    `ui:modal` і `ui:notifications`;
+  - `fyx_demo_decorations\`: просить `ui:panel` і `ui:editor-decorations`.
+- **Тека першого дня `D:\fyx-user-check\demos-0.2\` сьогодні не підходить.** Її зібрано з
+  `6c82da02f3`, а staged ABI 0.2 відтоді змінився (поле `label` у `input`). Збірка цього дня її
+  відмовить вантажити. Беріть лише `demos-0.2-next\` і `demos-0.3\`.
 - **Демо 0.3** у `D:\fyx-user-check\demos-0.3\`, кожне з `api_version = "0.3.0"`:
   - `fyx_demo_images\`: з `assets\` (`logo.svg`, `sample.png`, `kinds\`), просить `ui:panel` і
     `ui:images`;
@@ -136,7 +138,7 @@ for c in 4ecf7ef885 9cd5a28180 f5a3b863fc 885f563c50 f868421052 27e6220906 6bc8a
        "developer_mode": true,
        "dev_paths": [
          "D:\\fyx-user-check\\demos-0.2-next\\fyx_demo_gallery",
-         "D:\\fyx-user-check\\demos-0.2\\fyx_demo_decorations",
+         "D:\\fyx-user-check\\demos-0.2-next\\fyx_demo_decorations",
          "D:\\fyx-user-check\\demos-0.3\\fyx_demo_images",
          "D:\\fyx-user-check\\demos-0.3\\fyx_demo_charts",
          "D:\\fyx-user-check\\demos-0.3\\fyx_demo_t2"
