@@ -5,7 +5,7 @@
 
 use std::{ops::Range, sync::Arc, time::Duration};
 
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::{
     Editor, EditorEvent, EditorMode, HiddenUnstagedDiffHunkRenderer, MinimapVisibility,
     SizingBehavior,
@@ -271,18 +271,25 @@ impl SurfaceView {
         }
         self.focus_order = focus_order;
 
-        self.button_focus.retain(|id, _| buttons.contains(id));
+        // Sets for the membership checks below: with lists they were quadratic in the number of
+        // nodes (triage-3, PERF 5).
+        let button_ids: HashSet<NodeId> = buttons.iter().copied().collect();
+        let list_ids: HashSet<NodeId> = lists.iter().map(|(id, _)| *id).collect();
+        let input_ids: HashSet<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let markdown_ids: HashSet<NodeId> = markdown.iter().map(|(id, _)| *id).collect();
+        let row_counts: HashMap<NodeId, u32> = lists.iter().copied().collect();
+
+        self.button_focus.retain(|id, _| button_ids.contains(id));
         for id in buttons {
             self.button_focus
                 .entry(id)
                 .or_insert_with(|| cx.focus_handle());
         }
-        self.list_focus
-            .retain(|id, _| lists.iter().any(|(list, _)| list == id));
+        self.list_focus.retain(|id, _| list_ids.contains(id));
         self.selection.retain(|id, selected| {
-            lists
-                .iter()
-                .any(|(list, row_count)| list == id && *selected < *row_count)
+            row_counts
+                .get(id)
+                .is_some_and(|row_count| *selected < *row_count)
         });
         for (id, _) in &lists {
             self.list_focus
@@ -302,11 +309,12 @@ impl SurfaceView {
             .copied()
             .collect();
         let new_inputs: Vec<NodeId> = inputs.iter().map(|(id, _)| *id).collect();
+        let old_input_ids: HashSet<NodeId> = old_inputs.iter().copied().collect();
         let carried: Vec<(usize, String, bool)> = old_inputs
             .iter()
             .enumerate()
             .filter(|_| remounted)
-            .filter(|(_, id)| !new_inputs.contains(id))
+            .filter(|(_, id)| !input_ids.contains(id))
             .filter_map(|(position, id)| {
                 let input = self.inputs.get(id)?;
                 let focused = focused_before == Some(*id);
@@ -315,8 +323,7 @@ impl SurfaceView {
             })
             .collect();
 
-        self.inputs
-            .retain(|id, _| inputs.iter().any(|(input, _)| input == id));
+        self.inputs.retain(|id, _| input_ids.contains(id));
         for (id, props) in inputs {
             self.sync_input(id, props, window, cx);
         }
@@ -324,7 +331,7 @@ impl SurfaceView {
             let Some(&id) = new_inputs.get(position) else {
                 continue;
             };
-            if old_inputs.contains(&id) {
+            if old_input_ids.contains(&id) {
                 continue;
             }
             let Some(input) = self.inputs.get_mut(&id) else {
@@ -341,19 +348,22 @@ impl SurfaceView {
             }
         }
 
-        self.diffs.retain(|id, diff| {
-            diffs
-                .iter()
-                .any(|(node, props)| node == id && *props == diff.props)
-        });
+        {
+            let diff_props: HashMap<NodeId, &DiffViewProps> =
+                diffs.iter().map(|(id, props)| (*id, props)).collect();
+            self.diffs.retain(|id, diff| {
+                diff_props
+                    .get(id)
+                    .is_some_and(|props| **props == diff.props)
+            });
+        }
         for (id, props) in diffs {
             if let collections::hash_map::Entry::Vacant(entry) = self.diffs.entry(id) {
                 entry.insert(DiffEditor::new(props, window, cx));
             }
         }
 
-        self.markdown
-            .retain(|id, _| markdown.iter().any(|(node, _)| node == id));
+        self.markdown.retain(|id, _| markdown_ids.contains(id));
         for (id, source) in markdown {
             let source = without_images(&source);
             match self.markdown.get(&id) {
@@ -369,12 +379,13 @@ impl SurfaceView {
             }
         }
 
-        self.scroll_handles.retain(|id, _| lists.contains(id));
+        self.scroll_handles.retain(|id, _| list_ids.contains(id));
         for id in &lists {
             self.scroll_handles.entry(*id).or_default();
         }
         // A `selected` the extension (or the keyboard) moved is scrolled into view (design C).
-        self.scrolled_selection.retain(|id, _| lists.contains(id));
+        self.scrolled_selection
+            .retain(|id, _| list_ids.contains(id));
         for (id, selected) in selections {
             if self.scrolled_selection.insert(id, selected) != Some(selected)
                 && let Some(handle) = self.scroll_handles.get(&id)
