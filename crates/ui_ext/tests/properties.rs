@@ -1800,14 +1800,20 @@ proptest! {
     fn v0_1_values_convert_into_v0_2_losslessly(
         props in arb_props(),
         update in arb_update(),
+    ) {
+        prop_assert_eq!(props_to_v0_1(v0_2::Props::from(props.clone())), Some(props));
+        prop_assert_eq!(update_to_v0_1(v0_2::Update::from(update.clone())), Some(update));
+    }
+
+    /// The rest of the 0.1 values, in a test of their own: with every strategy in one test, the
+    /// generator overflowed the 1 MiB stack of a Windows debug test thread.
+    #[test]
+    fn v0_1_rows_events_surfaces_convert_into_v0_2_losslessly(
         row in (any::<u32>(), prop::collection::vec(arb_any_node(), 0..6))
             .prop_map(|(index, nodes)| ListRow { index, nodes }),
         event in arb_ui_event(),
         surface in arb_surface(),
     ) {
-        prop_assert_eq!(props_to_v0_1(v0_2::Props::from(props.clone())), Some(props));
-        prop_assert_eq!(update_to_v0_1(v0_2::Update::from(update.clone())), Some(update));
-
         let converted = v0_2::ListRow::from(row.clone());
         prop_assert_eq!(converted.indent, 0);
         prop_assert_eq!(converted.index, row.index);

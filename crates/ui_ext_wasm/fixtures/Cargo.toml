@@ -2,7 +2,7 @@
 # (`ui_ext_wasm::test_support`). Not part of Fyx's workspace: one workspace and one lockfile of
 # their own, shared by `ui_ext_wasm`'s and `ui_ext_host`'s tests.
 [workspace]
-members = ["probe", "status_item"]
+members = ["probe", "probe_v0_2", "status_item"]
 resolver = "3"
 
 [profile.release]
