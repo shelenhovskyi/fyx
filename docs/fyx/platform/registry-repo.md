@@ -238,6 +238,11 @@ artifacts.
       block, except for an advisory against `wit-bindgen` or the SDK.
    5. Write the unsigned release JSON (the `signed` part of a release, without `published_at`)
       and the package's SHA-256 as artifacts.
+      - **A Zed extension** (`extension.wasm` in the package) makes the release T2 and adds a
+        warning. The trusted decision has no package: it sees a Zed extension only in the source
+        file list at `source.commit` and in `[fyx_ui].component`. So a package `extension.wasm`
+        that neither shows fails the build (`registry.py zed-check`, integration-6 N3). The file
+        list and `extension.toml` are read from git before any PR code runs.
    6. Write the review inputs as artifacts, as text: the entry diff, the source diff, the package
       file list, `extension.toml`, the WIT imports `fyx-ext check` found, and the assets.
 
@@ -312,6 +317,11 @@ It **never checks out or runs PR code**.
    agent and no PR code. It only reads the artifacts and the PR's reviews through the API:
    - **Decide.** It runs the `policy` decision (above) and sets the commit statuses `policy` and
      `agent-review` on the head commit.
+     - It also sets `policy-tier`, which is informational and never required:
+       `tier=<t0|t1|t2> zed_extension=<true|false> owner_approved=<true|false>`. `publish.yml`
+       checks the rebuilt release against it.
+     - The decision sees a Zed extension in the source file list and in `[fyx_ui].component`
+       (integration-6 N3), so a gitignored `component = "extension.wasm"` is rated T2.
    - **Report.** It posts or updates one PR comment with the tier, the changes against the last
      release, who must approve, and the agent's verdict with its reasons. The reasons are quoted
      as plain text, with `@` mentions, links and HTML escaped, so a reason cannot ping anyone or
@@ -352,6 +362,12 @@ race.
    - The mismatch becomes a failure once the builds are shown to be reproducible (open question
      1).
    - This job also has no secrets.
+   - **A T2 or `zed_extension` release** is refused unless the PR merged as this commit has a
+     `policy-tier` status from `review.yml` (creator `github-actions[bot]`, the newest one) that
+     rated it T2, saw the Zed extension if the release has one, and had the owner's approval,
+     and the owner's approval is still on the PR (`registry.py publish-check`, integration-6
+     N3). The rebuilt release decides, not the PR run: an `extension.wasm` that only the build
+     makes is caught here even if `pr.yml` were changed.
 2. **Sign and publish**, in a separate job in the GitHub Environment `release-signing`. Only this
    job and `refresh.yml` can read the release and snapshot keys. It runs no extension code: it
    receives the package and the unsigned release as artifacts.
@@ -493,7 +509,7 @@ tests is a placeholder or is generated per test run.
     such entries are ignored, and the client reports them (`ignored_revocations`). So a leaked
     `release-signing` environment cannot take the block list or the rotation key out of play.
   - **Snapshots signed by the offline rotation key** may revoke block-list keys. Those revocations
-    carry over to every later snapshot, including the online key's daily ones, until another
+    carry over to every later snapshot, including the online key's 12-hourly ones, until another
     rotation-key snapshot lists different ones. Clients keep them across restarts. See
     Compromise.
 - **The client decides.** Only a client release decides which keys are trusted. Changing

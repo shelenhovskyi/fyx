@@ -170,6 +170,9 @@ jobs:
           status policy "$policy" "$(jq -r '[.failures[], (.required[] | select(.satisfied | not) | "needs " + .who)] | join("; ") | .[0:139]' data/decision.json)"
           agent=$(jq -r .agent_review data/decision.json)
           status agent-review "$agent" "$(jq -r '.verdict.verdict' data/decision.json)"
+          # The tier, the Zed extension and the owner's approval as decided, for publish.yml to
+          # check against the rebuilt release (integration-6 N3). Informational, never required.
+          status policy-tier success "$(python3 scripts/registry.py tier-status data/decision.json)"
           # One comment, updated in place.
           comment=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
             --jq '[.[] | select(.body | startswith("<!-- fyx-registry-policy -->"))][0].id // empty')

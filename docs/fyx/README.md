@@ -26,10 +26,12 @@ branch are listed under [Coming](#coming).
 - [platform/registry-repo.md](platform/registry-repo.md): design of the future `shelenhovskyi/fyx-extensions` repository: layout, entry format, review rules, CI, keys and the block-list process (plan 3.1, 3.2).
 - [wit-0.2/design.md](wit-0.2/design.md): `fyx:ui@0.2.0` design and the decisions of 2026-11-17.
 - [wit-0.2/migration.md](wit-0.2/migration.md): 0.1 → 0.2 coexistence, version gating, SDK and test plan. The 0.2 WIT itself is in `crates/ui_ext/wit/since_v0.2.0/`.
-- [wit-0.3/design.md](wit-0.3/design.md): `fyx:ui@0.3.0` design draft, for review.
-- [wit-0.3/fyx-ui-0.3.wit](wit-0.3/fyx-ui-0.3.wit): the draft 0.3 WIT world.
+- [wit-0.3/design.md](wit-0.3/design.md): `fyx:ui@0.3.0` design, decided 2026-11-19 (the smaller 0.3), staged, not frozen.
+- The 0.3 WIT world is staged in
+  [`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`](../../crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit)
+  (the docs copy was removed: one source).
 - [wit-0.3/open-questions.md](wit-0.3/open-questions.md): Q1–Q14 with options, recommended answers
-  and kind, for the full and the smaller 0.3; Q13 decided, Q9 (version lifetime) open.
+  and kind, for the full and the smaller 0.3; all answered (2026-11-19).
 - [wit-0.3/migration.md](wit-0.3/migration.md): 0.2 → 0.3 coexistence, version gating, SDK and test plan.
 
 ## Development

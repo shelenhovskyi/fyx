@@ -1,6 +1,7 @@
 # `fyx:ui` 0.3: open questions for the owner
 
-Status: **answered** (owner, 2026-11-19), apart from the technical Q4, Q7 and Q14. Drafted
+Status: **all answered** (2026-11-19): the product questions by the owner, the technical Q4, Q7
+and Q14 by the coordinator. Drafted
 2026-11-18. Each question here is one of the "Open questions
 for the owner" in [design.md](design.md#open-questions-for-the-owner) (Q1–Q14).
 
@@ -49,7 +50,21 @@ no breaking change, then `fyx:ui@1.0.0`) cannot start while Q1–Q12 are open. I
 - **Q8 → (1):** `agent:observe` sees full hunk text and comments for files inside the worktrees.
 - **Q10 → (1):** the T2 consent prompt is non-modal, with a 1 s guard and no keyboard answer.
 
-Still open, all technical (the coordinator decides): Q4, Q7 and Q14.
+**Decided by the coordinator, 2026-11-19** (the technical questions, under the decision mandate;
+none changes the WIT):
+
+- **Q4 → (2):** `localhost` and `127.0.0.1` only with an explicit port in the manifest. Other
+  private addresses, and a public-looking domain that resolves to one, only from the user setting
+  `fyx.extensions.network.private_hosts`, never by the manifest alone. The loopback part is built
+  (W2c's `network:fetch`). The setting is additive and not built yet.
+- **Q7 → (3):** 256 MiB for every world, as the code already does (`UI_MEMORY_LIMIT`).
+- **Q14 → (1):** paint the draw list each frame. Cache a texture per update only if the
+  16384-op paint bench misses 4 ms. Renderer only.
+
+**The freeze waits for the canvas benches.** The 0.3 freeze clock starts only after W2c's lift
+bench (plan 4.13, at most 1 ms per 10 000 ops) and W3's paint bench (plan 4.14, at most 4 ms for
+16384 ops) have run (integration-6, clock-start condition 2). The 16384-op cap is in the WIT, so a
+lift miss is settled before the clock, not after.
 
 ## Already decided (before 2026-11-19)
 
