@@ -132,6 +132,11 @@ pub struct UiExtensionRegistry {
     active_workspace: Option<gpui::EntityId>,
     /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
     load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
+    /// The instance whose 0.3 I/O outcomes (`handle-io`) are being delivered, per extension, with
+    /// the epoch its delivery loop was started for. A reload or a stop replaces or removes it,
+    /// which ends the old loop and lets the old instance go.
+    io_instances: HashMap<Arc<str>, (u64, UiExtension)>,
+    next_io_epoch: u64,
     /// Open extension notifications, by extension and the id its instance gave them.
     notifications: HashMap<(Arc<str>, u64), OpenNotification>,
     /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
@@ -929,6 +934,11 @@ impl UiExtensionRegistry {
         let extension_id = extension.extension_id().clone();
         let surfaces: Vec<Surface> = extension.surfaces_v0_2().to_vec();
         let initial_effects = extension.initial_effects().to_vec();
+        let io_events = extension.take_io_events();
+        self.io_instances.remove(&extension_id);
+        if let Some(io_events) = io_events {
+            self.start_io_loop(extension.clone(), io_events, cx);
+        }
         self.register_backend(Rc::new(extension), &surfaces, cx);
         // Effects of instantiation and `surfaces` (0.2), after the static surfaces exist.
         for effect in initial_effects {
@@ -947,6 +957,85 @@ impl UiExtensionRegistry {
                     }
                 });
                 if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Delivers an instance's I/O outcomes (a finished fetch) through `handle-io`, one at a time,
+    /// applying each reply's effects like a tick's (W2c, plan 4.6). The loop ends when the
+    /// instance is replaced or stops.
+    fn start_io_loop(
+        &mut self,
+        extension: UiExtension,
+        mut events: futures::channel::mpsc::Receiver<ui_ext_wasm::network::IoEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let extension_id = extension.extension_id().clone();
+        self.next_io_epoch += 1;
+        let epoch = self.next_io_epoch;
+        self.io_instances
+            .insert(extension_id.clone(), (epoch, extension));
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.next().await {
+                let Ok(Some(instance)) = this.update(cx, |this, _| {
+                    this.io_instances
+                        .get(&extension_id)
+                        .filter(|(current, _)| *current == epoch)
+                        .map(|(_, instance)| instance.clone())
+                }) else {
+                    break;
+                };
+                let result = instance.handle_io(event).await;
+                drop(instance);
+                let still_current = this.update(cx, |this, cx| {
+                    let current = this
+                        .io_instances
+                        .get(&extension_id)
+                        .is_some_and(|(current, _)| *current == epoch);
+                    if !current {
+                        return false;
+                    }
+                    match result {
+                        Ok(reply) => {
+                            for effect in reply.effects {
+                                this.apply_effect(&extension_id, effect, cx);
+                            }
+                        }
+                        Err(error) => match error
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<ui_ext_wasm::EffectReplyError>())
+                        {
+                            Some(rejected) => {
+                                log::error!(
+                                    "fyx:ui: {extension_id}: handle-io failed: {}",
+                                    ui_ext::sanitize_for_log(&rejected.message)
+                                );
+                                for effect in rejected.effects.clone() {
+                                    this.apply_effect(&extension_id, effect, cx);
+                                }
+                            }
+                            // A trap or the time budget: the instance is dead.
+                            None => {
+                                log::error!(
+                                    "fyx:ui: {extension_id}: handle-io stopped it: {}",
+                                    ui_ext::sanitize_for_log(&format!("{error:#}"))
+                                );
+                                this.fail_extension(
+                                    &extension_id,
+                                    "",
+                                    format!("{extension_id} crashed. Restart the extension to try again.")
+                                        .into(),
+                                    cx,
+                                );
+                            }
+                        },
+                    }
+                    true
+                });
+                if !matches!(still_current, Ok(true)) {
                     break;
                 }
             }
@@ -1349,6 +1438,7 @@ impl UiExtensionRegistry {
         // notifications, and the registry's handle on it (triage-3, ASYNC 7).
         remove_decorations(extension_id, cx);
         self.close_notifications_of(extension_id, None, cx);
+        self.io_instances.remove(extension_id);
         self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
