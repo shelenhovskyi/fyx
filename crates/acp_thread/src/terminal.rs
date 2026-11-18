@@ -964,6 +964,7 @@ pub async fn create_terminal_entity(
     };
 
     disable_pagers_through_env(&mut env);
+    cx.update(|cx| fyx_guard::scrub_env(&mut env, cx)); // fyx: security shield
     env.extend(env_vars);
 
     // Use remote shell or default system shell, as appropriate

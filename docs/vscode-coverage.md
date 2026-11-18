@@ -65,7 +65,11 @@ are in the generated section at the end.
 ### Sandboxing with Node's permission model
 
 Each extension runs in its own sidecar process with `--permission`, read access to the extension
-and its sandbox folder, and write access to the sandbox folder only. What that looks like in
+and its sandbox folder, and write access to the sandbox folder only. The sidecar enforces this
+itself: `main.ts` exits with code 78 when `process.permission` is missing, or when it reports a
+grant for every path (`fs.read`, `fs.write`) or for `child`, `worker`, `wasi` or `addon`, so a
+launcher that forgets the flags cannot run extensions unsandboxed. The phase-3 Rust launcher must
+pass the same path-scoped flags as `MockHost.spawn`. What that looks like in
 practice:
 
 1. **It blocks what it should.** Language-server extensions (auto-rename-tag, svg) cannot spawn
@@ -105,8 +109,11 @@ These were worked around without touching the WIT; each is a candidate for the i
 | Colours are tokens only | `ThemeColor` ids map to the nearest token; raw CSS colours (indent-rainbow, todo-highlight) are dropped and reported | keep as is for `fyx:ui`; decorations (layer 4, W6) may need a palette index or a raw-colour escape hatch |
 
 The JSON mirror itself (encoding rules below) needed no change, and it matches the serde derive W2
-put on the `ui_ext` types. The mock host also enforces W2's host rules: only `flex` nodes have
-children, `before` names a sibling, at most 2,048 patches per update and 16,384 nodes per tree.
+put on the `ui_ext` types. The mock host also enforces W2's host rules (`ui_ext::Tree`) and refuses
+what the host refuses, atomically: only `flex` nodes have children, `before` names a sibling, at
+most 2,048 patches per update and 2,048 nodes per list row, and at most 16,384 nodes per tree, which
+also caps a `mount` and a `replace`. An invalid `mount` or `list-rows` reply fails the whole call,
+as it does in the host.
 
 ### API gaps, by how many extensions they block
 
@@ -159,6 +166,7 @@ accepted and recorded in the coverage report's `partial` notes.
 | `languages.setLanguageConfiguration` | `wordPattern` drives `TextDocument.getWordRangeAtPosition`; the whole configuration goes to the host as `vscode/setLanguageConfiguration` (`null` on dispose) |
 | `window.registerTreeDataProvider().dispose()`, `TreeView.dispose()` | removes the provider; the view shows "No data provider" |
 | `TreeView.title`, `description`, `badge` | re-render as a header row (`fyx:ui` cannot rename a surface, so a changed title is a bold header, not the panel title) |
+| TreeView rows | at most 10,000 visible rows, counted across all levels; past that a muted line says the view is cut off, and the coverage report notes it. Rows deeper than 5,461 levels keep the deepest indent, because flex `padding` is a `u16` and one out-of-range row would fail the host's whole `list-rows` reply |
 | `TreeView.reveal` | expands the element's ancestors (needs `getParent`, as in VS Code) and `expand` levels up to 3, then selects it. It cannot scroll the row into view or take focus: `fyx:ui` has no scroll-to-row |
 | `QuickPick`/`InputBox` `buttons` | rendered as buttons; a click fires `onDidTriggerButton` |
 | `QuickPick`/`InputBox` `title`, `step`, `totalSteps`, `busy` after `show()` | re-render |
@@ -216,7 +224,7 @@ JSON-RPC 2.0, one JSON message per line on stdin/stdout. Requests can go both wa
 | host → sidecar | `surfaces` | → `surface[]` (WIT `surfaces`) |
 | host → sidecar | `mount` | `{"surface-id"}` → `node[]` (WIT `mount`) |
 | host → sidecar | `handle-event` | `{"surface-id", event: ui-event}` → `update` (WIT `handle-event`) |
-| host → sidecar | `list-rows` | `{"surface-id", "list-node", start, count}` → `list-row[]` |
+| host → sidecar | `list-rows` | `{"surface-id", "list-node", start, count}` → `list-row[]`. Row node ids are row-local and start at `0x8000_0000` in every row, as in the SDK (`ROW_NODE_ID_BASE`); main-tree ids stay below that value |
 | sidecar → host | `push-update` | `{"surface-id", update}` → `null`, or an error when the host refuses the update (WIT `host.push-update`, coalesced per tick). A request, not a notification: at most one per surface is in flight, and after a refusal the sidecar's next update for that surface is a full `replace`. Diffs above the 2048-patch cap are sent as `replace` too. |
 | sidecar → host | `log` | `{level, message}` (WIT `host.log`; extension `console.*` goes here) |
 | sidecar → host | `fyx/surfacesChanged` | `{added: surface[], removed: string[]}` (not in the WIT, see gaps) |

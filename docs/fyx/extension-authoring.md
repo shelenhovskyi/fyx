@@ -53,6 +53,61 @@ of memory; see "Limits" in `limits-and-gotchas.md`). Besides WASI, the host func
 
 <!-- crates/ui_ext_wasm/src/ui_ext_wasm.rs:452-453 (WasiCtxBuilder::new + inherit_stderr), crates/ui_ext/wit/fyx-ui.wit:163-173 -->
 
+## Quick start: `script/fyx-new-extension`
+
+One command in a Fyx checkout scaffolds a standalone extension crate that builds as-is:
+
+```bash
+script/fyx-new-extension my-panel --out ~/src
+```
+
+This creates `~/src/my_panel/` (the crate name is the name with `-` as `_`; the extension id and
+the surface id are the name with `_` as `-`):
+
+```
+my_panel/
+├── Cargo.toml           # cdylib, its own empty [workspace], ui_ext_sdk dependency
+├── extension.toml       # id "my-panel" + [fyx_ui] with capabilities = ["ui:panel"]
+├── rust-toolchain.toml  # the toolchain Fyx pins, plus the wasm32-wasip2 target
+├── README.md            # build, test and run instructions
+├── .gitignore           # /target and /fyx_ui.wasm
+└── src/
+    └── my_panel.rs      # a right-dock panel with a button that patches a label, and a unit test
+```
+
+Then:
+
+```bash
+cd ~/src/my_panel && cargo test
+```
+
+```bash
+cargo build --target wasm32-wasip2 --release && cp target/wasm32-wasip2/release/my_panel.wasm fyx_ui.wasm
+```
+
+```bash
+FYX_UI_DEV_EXTENSIONS=$PWD /path/to/fyx --foreground
+```
+
+Options:
+
+| Option | Effect |
+|---|---|
+| `--out <dir>` | Parent directory of the new crate, default the current directory. `<dir>/<crate>` must not exist or must be empty. |
+| `--sdk-path <checkout>` | Path dependency on `<checkout>/crates/ui_ext_sdk`. The default is the checkout the script runs from, written as an absolute path. |
+| `--sdk-git <url>` | Git dependency on `ui_ext_sdk` instead, at `--sdk-branch <branch>` (default `integration`) or `--sdk-rev <rev>`. Cargo then clones the whole Fyx repository on the first build. |
+
+The name must be lower-case letters and digits, separated by single `-` or `_`, and start with a
+letter. The empty `[workspace]` table lets the crate build inside a Fyx checkout too (for example
+`--out extensions`) without becoming a member of the Fyx workspace. Inside a Fyx checkout, build
+with `RUSTC_WRAPPER=` if you do not have sccache (see [Building](#building)).
+
+The generated panel is the walkthrough below in miniature: one `SurfaceTree`, node ids stored on
+every mount, and a `set-props` patch in reply to a click. The rest of this guide explains each
+piece.
+
+<!-- script/fyx-new-extension; verified by scaffolding a crate and running cargo test, cargo clippy (host and wasm32-wasip2) and cargo build --target wasm32-wasip2 --release, then wasm-tools component wit on the output -->
+
 ## Project layout
 
 A UI extension is one directory holding the manifest and the built component, plus the Rust crate
@@ -67,9 +122,9 @@ my_counter/
     └── lib.rs          # implements ui_ext_sdk::Extension, ends with register_extension!
 ```
 
-The demo extensions in this repository (`extensions/fyx_demo_counter`,
-`extensions/fyx_demo_todo`) have this layout. Each one also has a `.gitignore` that ignores
-`/fyx_ui.wasm`.
+The demo extensions in this repository (`extensions/fyx_demo_*`) have this layout, except that
+they are members of the Fyx workspace and name their crate root `src/<crate>.rs`. Each one also
+has a `.gitignore` that ignores `/fyx_ui.wasm`.
 
 `Cargo.toml` of a standalone extension:
 
@@ -625,3 +680,19 @@ Note the double parentheses in `UiEvent::InputChanged((id, text))`: a WIT tuple 
 Rust tuple field.
 
 `extensions/fyx_demo_todo` shows inputs, filter buttons, row clicks and list rebuilding together.
+
+### More demos
+
+Each demo's crate docs pin its first mount and the patches every event produces, and its tests
+replay every update through the host's own tree model (`ui_ext::Tree`).
+
+| Demo | Shows |
+|---|---|
+| `extensions/fyx_demo_counter` | the smallest complete extension: a mount, `set-props` replies, `list-rows` |
+| `extensions/fyx_demo_todo` | inputs without echo, filter buttons, `row-click`, rebuilding a list |
+| `extensions/fyx_demo_gallery` | every node kind, and a status item |
+| `extensions/fyx_demo_markdown` | an input previewed live in a `markdown` node, clearing an input after Enter |
+| `extensions/fyx_demo_gitstatus` | list rows with coloured icons, `row-click` to a details box rebuilt with `remove` + `insert` |
+| `extensions/fyx_demo_form` | validation, error text in the `error` token inserted and removed, Submit disabled until valid |
+
+`script/fyx-build-demos` builds all of them.

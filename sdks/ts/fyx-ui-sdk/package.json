@@ -1,0 +1,12 @@
+{
+  "name": "fyx-ui-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript guest SDK for Fyx UI extensions (fyx:ui@0.1.0), compiled with jco componentize.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/fyx-ui-sdk.ts"
+  },
+  "types": "./src/fyx-ui-sdk.ts"
+}

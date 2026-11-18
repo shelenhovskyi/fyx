@@ -1,0 +1,84 @@
+# fyx: cargo-deny config for script/gate.sh (upstream Zed ships none). It checks only RustSec
+# advisories and the wasmtime compiler-backend bans (spec decision 27). Licenses are
+# script/check-licenses' job, so `licenses` and `sources` are not run. See docs/fyx/ci.md.
+# Run: cargo deny --locked --config script/fyx-deny.toml check advisories bans
+
+[graph]
+# Empty `targets` means every target, so Windows-, macOS- and Linux-only crates are all checked.
+targets = []
+# Server-only and never built by Fyx; script/gate.sh skips it too. It is the only path to h2 0.3
+# (RUSTSEC-2026-0258), rustls-pemfile 1.x and, through aws-sdk-s3's sigv4a feature, crypto-bigint
+# (RUSTSEC-2026-0387).
+exclude = ["collab"]
+
+[advisories]
+version = 2
+# Only upstream-only items Fyx cannot fix without diverging from Zed: no patched release exists,
+# or upstream crates pin a semver range that excludes the fix. Each entry is reachable without any
+# Fyx crate and is in upstream v1.28.1's Cargo.lock. Never ignore a wasmtime advisory (decision
+# 27: adopt the fix within 14 days). Re-triage an entry on every upstream rebase and at the latest
+# by its expiry date; delete it once upstream moves off the crate. Triage table: docs/fyx/ci.md.
+ignore = [
+    # Vulnerabilities and unsound code, fix needs a semver-major bump in upstream crates.
+    # expires 2027-02-15
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9 via rpc (rsa = ^0.9); fixed only in 0.10" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.30 via sqlez and sqlx-sqlite (^0.30.1); fixed only in 0.39" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.16 via language_core, agent_ui, aws-sdk-s3 (^0.16); fixed only in 0.18.2" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.30/0.37/0.39 via xcb, wayland-scanner, zbus_xml (build-time and D-Bus XML); fixed only in 0.41" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.30/0.37/0.39 via xcb, wayland-scanner, zbus_xml (build-time and D-Bus XML); fixed only in 0.41" },
+    # Unmaintained, no maintained release to move to.
+    # expires 2027-02-15
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via xtask -> gh-workflow (dev tool only)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2024-0384", reason = "instant via fastrand 1.x (repl -> async-dispatcher)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml_ng (agent_skills)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2025-0052", reason = "async-std via async-tar (fs)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.x via zed-reqwest (reqwest_client)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x via ipc-channel (cli)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser via fontdb and cosmic-text (gpui_wgpu)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz via usvg (gpui)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via accesskit_unix and zbus (gpui_linux)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via accesskit_unix and zbus (gpui_linux)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via accesskit_unix and zbus (gpui_linux)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils via async-std (fs -> async-tar)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0542", reason = "humantime via env_logger (pet, python environments)" },
+    # expires 2027-02-15
+    { id = "RUSTSEC-2026-0543", reason = "chrono, a direct dependency of gpui and many upstream crates" },
+]
+
+[bans]
+# Only the wasmtime policy below is enforced; duplicate versions and wildcards are upstream's call.
+multiple-versions = "allow"
+wildcards = "allow"
+# Keep in sync with script/fyx-check-wasmtime-policy.
+deny = [
+    { crate = "wasmtime-internal-winch", reason = "Fyx uses native Cranelift only (spec decision 27)" },
+    { crate = "winch-codegen", reason = "Fyx uses native Cranelift only (spec decision 27)" },
+]
+
+[[bans.features]]
+crate = "wasmtime"
+deny = ["winch", "pulley", "all-arch", "profile-pulley"]
+
+[[bans.features]]
+crate = "wasmtime-internal-cranelift"
+deny = ["all-arch"]
+
+[[bans.features]]
+crate = "cranelift-codegen"
+deny = ["all-arch"]

@@ -3,8 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, chownSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, relative, sep } from "node:path";
-import { defaultStorageDir, ensurePrivateDir, unpackVsix } from "../src/host.ts";
+import { defaultStorageDir, ensurePrivateDir, sandboxProblem, unpackVsix } from "../src/host.ts";
 import { MockHost, tempDir } from "../src/mock-host.ts";
 import { Uri } from "../src/shim/types.ts";
 import { writeZip } from "../src/zip.ts";
@@ -46,6 +47,29 @@ test("sidecar process loads a .vsix under --permission and keeps stdout clean", 
     await host.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the sidecar refuses to start without the permission model or with a grant that voids it", () => {
+  const main = join(import.meta.dirname, "..", "src", "main.ts");
+  const here = join(import.meta.dirname, "..");
+  for (const [flags, expected] of [
+    [[], /refusing to start: the sidecar must run under Node's permission model/],
+    [["--permission", `--allow-fs-read=${here}`, "--allow-child-process"], /refusing to start: the sidecar's sandbox is too wide: drop --allow-child-process/],
+    [["--permission", "--allow-fs-read=*"], /sandbox is too wide: drop --allow-fs-read=\*/],
+  ] as const) {
+    const run = spawnSync(process.execPath, [...flags, main], { cwd: here, input: "", encoding: "utf8", timeout: 20_000 });
+    assert.equal(run.status, 78, `${flags.join(" ")}: ${run.stderr}`);
+    assert.match(run.stderr, expected);
+    assert.equal(run.stdout, "", "nothing reaches the protocol stream");
+  }
+});
+
+test("sandboxProblem accepts only path-scoped grants", () => {
+  const grants = (granted: string[]) => ({ has: (scope: string) => granted.includes(scope) });
+  assert.equal(sandboxProblem(grants([])), undefined);
+  assert.match(sandboxProblem(undefined)!, /--permission/);
+  assert.equal(sandboxProblem(grants(["fs.write", "worker", "addon"])), "the sidecar's sandbox is too wide: drop --allow-fs-write=*, --allow-worker, --allow-addons");
+  assert.equal(sandboxProblem({ has: () => { throw new Error("unknown scope"); } }), undefined, "a scope this Node lacks cannot be granted");
 });
 
 test("the permission model blocks workspace.fs outside the granted folders", async () => {

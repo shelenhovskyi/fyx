@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExtensionHost, type InitializeParams, type InitializeResult } from "./host.ts";
 import { ErrorCodes, RpcError, RpcPeer, pairedPeers, type RpcMessage } from "./rpc.ts";
-import { applyUpdate, validateNodes, validateProps, type ListRow, type Node, type Surface, type UiEvent, type Update } from "./schema.ts";
+import { applyUpdate, validateNodes, validateProps, validateRow, type ListRow, type Node, type Surface, type UiEvent, type Update } from "./schema.ts";
 
 export interface TrafficEntry {
   direction: "host→sidecar" | "sidecar→host";
@@ -67,20 +67,20 @@ export class MockHost {
     this.registerHandlers();
   }
 
-  /** Sidecar in a child process, optionally under Node's permission model. */
-  /** `probe` starts the sidecar in coverage probe mode (missing APIs become inert stubs). */
-  static spawn(options: MockHostOptions & { permission?: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string>; probe?: boolean } = {}): MockHost {
+  /**
+   * Sidecar in a child process under Node's permission model, which `main.ts` requires. `probe`
+   * starts it in coverage probe mode (missing APIs become inert stubs).
+   */
+  static spawn(options: MockHostOptions & { permission: { read: string[]; write: string[] }; cwd?: string; env?: Record<string, string>; probe?: boolean }): MockHost {
     const main = join(import.meta.dirname, "main.ts");
-    const flags = options.permission
-      ? [
-          "--permission",
-          ...[import.meta.dirname, ...options.permission.read].flatMap(driveVariants).map((p) => `--allow-fs-read=${p}`),
-          ...options.permission.write.flatMap(driveVariants).map((p) => `--allow-fs-write=${p}`),
-        ]
-      : [];
+    const flags = [
+      "--permission",
+      ...[import.meta.dirname, ...options.permission.read].flatMap(driveVariants).map((p) => `--allow-fs-read=${p}`),
+      ...options.permission.write.flatMap(driveVariants).map((p) => `--allow-fs-write=${p}`),
+    ];
     // Under --permission even `existsSync("")` throws unless the cwd is readable, so default the
     // cwd to the first granted folder.
-    const cwd = options.cwd ?? options.permission?.read[0];
+    const cwd = options.cwd ?? options.permission.read[0];
     const child = spawn(process.execPath, [...flags, main, ...(options.probe ? ["--fyx-coverage-probe"] : [])], {
       stdio: ["pipe", "pipe", "pipe"],
       ...(cwd ? { cwd } : {}),
@@ -122,7 +122,10 @@ export class MockHost {
 
   async mount(surfaceId: string): Promise<Node[]> {
     const nodes = await this.rpc.request<Node[]>("mount", { "surface-id": surfaceId });
-    this.check(`mount ${surfaceId}`, validateNodes(nodes));
+    const errors = validateNodes(nodes);
+    this.check(`mount ${surfaceId}`, errors);
+    // The host's `Tree::from_nodes` fails the whole mount.
+    if (errors.length > 0) throw new Error(`mount ${surfaceId} refused: ${errors.join("; ")}`);
     this.trees.set(surfaceId, nodes);
     return nodes;
   }
@@ -135,7 +138,14 @@ export class MockHost {
 
   async listRows(surfaceId: string, listNode: number, start: number, count: number): Promise<ListRow[]> {
     const rows = await this.rpc.request<ListRow[]>("list-rows", { "surface-id": surfaceId, "list-node": listNode, start, count });
-    for (const row of rows) this.check(`list-rows ${surfaceId}#${row.index}`, validateNodes(row.nodes, { singleRoot: true }));
+    let refused = false;
+    for (const row of rows) {
+      const errors = validateRow(row.nodes);
+      this.check(`list-rows ${surfaceId}#${row.index}`, errors);
+      refused ||= errors.length > 0;
+    }
+    // One bad row fails the host's whole `list-rows` call.
+    if (refused) throw new Error(`list-rows ${surfaceId}#${listNode} refused`);
     return rows;
   }
 
@@ -240,9 +250,7 @@ export class MockHost {
       return "refused by the test";
     }
     try {
-      const next = applyUpdate(tree, update);
-      this.check(`${where} ${surfaceId}`, validateNodes(next));
-      this.trees.set(surfaceId, next);
+      this.trees.set(surfaceId, applyUpdate(tree, update));
       return undefined;
     } catch (err) {
       this.schemaErrors.push(`${where} ${surfaceId}: ${(err as Error).message}`);

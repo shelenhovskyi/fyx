@@ -215,6 +215,8 @@ pub struct SettingsContent {
     pub agent_review: Option<AgentReviewSettingsContent>, // fyx: agent_review
     /// Fyx's own settings.
     pub fyx: Option<FyxSettingsContent>, // fyx: settings of Fyx crates
+    /// Security modes for agents.
+    pub fyx_security: Option<FyxSecuritySettingsContent>, // fyx: fyx_guard
 
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
@@ -412,7 +414,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
         call_hierarchy, command_palette, file_finder, git_panel, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
-        agent_servers, agent_review, fyx, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
+        agent_servers, agent_review, fyx_security, fyx, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics, // fyx: agent_review, fyx_security, fyx
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,

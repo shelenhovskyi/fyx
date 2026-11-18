@@ -1,0 +1,32 @@
+[package]
+name = "fyx_ui_host_check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+# Standalone on purpose: not a member of the Fyx workspace, so it never touches Cargo.lock there.
+[workspace]
+
+[[bin]]
+name = "fyx-ui-host-check"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+wasmparser = "0.254"
+# The versions and features crates/extension_host uses, so the check loads components the way Fyx does.
+wasmtime = { version = "=48.0.7", default-features = false, features = [
+    "anyhow",
+    "async",
+    "runtime",
+    "cranelift",
+    "component-model",
+    "parallel-compilation",
+    "incremental-cache",
+] }
+wasmtime-wasi = { version = "=48.0.7", default-features = false, features = ["p2"] }
+
+[profile.release]
+debug = false

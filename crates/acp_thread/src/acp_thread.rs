@@ -7932,6 +7932,7 @@ impl AcpThread {
                     .ok_or_else(|| {
                         acp_v1::Error::resource_not_found(Some(path.display().to_string()))
                     })?;
+                fyx_guard::check_private_path(project, &path, cx)?; // fyx: security shield
                 Ok::<_, acp_v1::Error>(project.open_buffer(path, cx))
             })?;
 
@@ -8002,6 +8003,7 @@ impl AcpThread {
         let should_update_agent_location = self.parent_session_id.is_none();
         cx.spawn(async move |this, cx| {
             let load = project.update(cx, |project, cx| {
+                fyx_guard::check_config_write(project, &path, cx)?; // fyx: read-only agent configs
                 let path = project
                     .project_path_for_absolute_path(&path, cx)
                     .context("invalid path")?;
@@ -8066,7 +8068,8 @@ impl AcpThread {
                 format_on_save
             });
 
-            if format_on_save {
+            // fyx: no reformatting around hunks the review rejected.
+            if format_on_save && feedback.is_none() {
                 let format_task = project.update(cx, |project, cx| {
                     project.format(
                         HashSet::from_iter([buffer.clone()]),
@@ -8109,10 +8112,11 @@ impl AcpThread {
             }),
             None => Task::ready(None).shared(),
         };
-        let env = cx.spawn(async move |_, _| {
+        let env = cx.spawn(async move |_, cx| {
             let mut env = env.await.unwrap_or_default();
 
             disable_pagers_through_env(&mut env);
+            cx.update(|cx| fyx_guard::scrub_env(&mut env, cx)); // fyx: security shield
 
             for (name, value) in extra_env {
                 env.insert(name, value);
@@ -15714,6 +15718,56 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, acp_v1::ErrorCode::ResourceNotFound);
+    }
+
+    // fyx: fyx_guard's hooks in `read_text_file` and `write_text_file`.
+    #[gpui::test]
+    async fn test_fyx_guard_shield_on_acp_file_access(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/tmp"), json!({".env": "API_KEY=1", "main.rs": ""}))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/tmp").as_ref()], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/tmp"))]), cx)
+            })
+            .await
+            .unwrap();
+        let read_env = |cx: &mut TestAppContext| {
+            thread.update(cx, |thread, cx| {
+                thread.read_text_file(path!("/tmp/.env").into(), None, None, false, cx)
+            })
+        };
+        let write_config = |cx: &mut TestAppContext| {
+            thread.update(cx, |thread, cx| {
+                thread.write_text_file(path!("/tmp/.claude/settings.json").into(), "{}".into(), cx)
+            })
+        };
+
+        assert_eq!(read_env(cx).await.unwrap(), "API_KEY=1");
+        write_config(cx).await.unwrap();
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.fyx_security.get_or_insert_default().mode =
+                        Some(settings::FyxSecurityMode::Shield);
+                });
+            });
+        });
+        let error = read_env(cx).await.unwrap_err();
+        assert!(error.message.contains("private_files"), "{}", error.message);
+        let error = write_config(cx).await.unwrap_err();
+        assert!(format!("{error:#}").contains("read-only"), "{error:#}");
+        thread
+            .update(cx, |thread, cx| {
+                thread.read_text_file(path!("/tmp/main.rs").into(), None, None, false, cx)
+            })
+            .await
+            .unwrap();
     }
 
     #[gpui::test]

@@ -1,0 +1,25 @@
+{
+  "name": "fyx-ts-sdk-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "fyx-ui-sdk",
+    "demo-counter"
+  ],
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/jco": "1.42.0",
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "build": "node scripts/build-component.mjs demo-counter/src/counter.ts demo-counter/dist/fyx_ui.wasm && cp demo-counter/dist/fyx_ui.wit demo-counter/component.wit",
+    "build:no-wasi": "node scripts/build-component.mjs demo-counter/src/counter.ts demo-counter/dist/no-wasi/fyx_ui.wasm --profile starlingmonkey-no-wasi",
+    "build:quickjs": "node scripts/build-component.mjs demo-counter/src/counter.ts demo-counter/dist/quickjs/fyx_ui.wasm --profile quickjs",
+    "build:all": "npm run build && npm run build:no-wasi && npm run build:quickjs",
+    "gen-types": "jco guest-types ../../crates/ui_ext/wit/fyx-ui.wit --world-name ui-extension -o fyx-ui-sdk/src/wit",
+    "typecheck": "tsc -p .",
+    "test": "node --import ./test/register-host-mock.mjs --test test/*.test.ts",
+    "check": "npm run typecheck && npm run build:all && npm test"
+  }
+}

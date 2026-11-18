@@ -11,6 +11,10 @@ use ui_ext::{
     PanelDescriptor, Patch, Props, StatusBarSide, StatusItemDescriptor, Surface, SurfaceKind,
     TableProps, TextProps, Tree, TreeError, TreeLimits, UiEvent, Update,
 };
+use ui_ext::{
+    ApiError, ApiVersion, IdKind, IdLimits, LiveIds, MAX_DECORATION_PATH_BYTES, MAX_ID_BYTES,
+    MAX_INDENT_LEVELS, MAX_TOOLTIP_BYTES, PathProblem, Placement, check_decoration_path, v0_2,
+};
 
 /// `arb_nodes` never generates this id and nothing inserts it, so a patch naming it always fails.
 const UNKNOWN: NodeId = u32::MAX - 1;
@@ -1362,5 +1366,861 @@ proptest! {
         json_round_trip(&flex.align)?;
         json_round_trip(&flex)?;
         json_round_trip(&level)?;
+    }
+}
+
+// fyx:ui 0.2: the model in `ui_ext::v0_2` and the version-gated rules in `ApiVersion` / `LiveIds`.
+
+fn arb_icon() -> impl Strategy<Value = v0_2::Icon> {
+    prop::sample::select(v0_2::Icon::ALL)
+}
+
+fn arb_icon_ref() -> impl Strategy<Value = v0_2::IconRef> {
+    prop_oneof![
+        arb_icon().prop_map(v0_2::IconRef::Frozen),
+        // Includes spellings of frozen icons ("check"), which must stay upstream names.
+        prop_oneof![
+            arb_string(),
+            arb_icon().prop_map(|icon| icon.name().to_owned())
+        ]
+        .prop_map(v0_2::IconRef::Upstream),
+    ]
+}
+
+fn arb_button_style() -> impl Strategy<Value = ButtonStyle> {
+    prop_oneof![
+        Just(ButtonStyle::Default),
+        Just(ButtonStyle::Filled),
+        Just(ButtonStyle::Subtle),
+        Just(ButtonStyle::Danger),
+    ]
+}
+
+fn arb_v0_2_leaf_props() -> impl Strategy<Value = v0_2::Props> {
+    let text = (
+        arb_string(),
+        prop::option::of(arb_color()),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(|(content, color, bold, monospace)| {
+            v0_2::Props::Text(TextProps {
+                content,
+                color,
+                bold,
+                monospace,
+            })
+        });
+    let button = (
+        arb_string(),
+        prop::option::of(arb_icon_ref()),
+        arb_button_style(),
+        any::<bool>(),
+        prop::option::of(arb_string()),
+    )
+        .prop_map(|(label, icon, style, disabled, tooltip)| {
+            v0_2::Props::Button(v0_2::ButtonProps {
+                label,
+                icon,
+                style,
+                disabled,
+                tooltip,
+            })
+        });
+    let input =
+        (arb_string(), arb_string(), any::<bool>()).prop_map(|(value, placeholder, secret)| {
+            v0_2::Props::Input(v0_2::InputProps {
+                value,
+                placeholder,
+                secret,
+            })
+        });
+    let list = (any::<u32>(), any::<u16>(), prop::option::of(any::<u32>())).prop_map(
+        |(row_count, row_height, selected)| {
+            v0_2::Props::List(v0_2::ListProps {
+                row_count,
+                row_height,
+                selected,
+            })
+        },
+    );
+    let table = (prop::collection::vec(arb_string(), 0..4), any::<u32>())
+        .prop_map(|(columns, row_count)| v0_2::Props::Table(TableProps { columns, row_count }));
+    let icon = (arb_icon_ref(), prop::option::of(arb_color()))
+        .prop_map(|(name, color)| v0_2::Props::Icon(v0_2::IconProps { name, color }));
+    let diff_view = (arb_string(), arb_string(), prop::option::of(arb_string())).prop_map(
+        |(old_text, new_text, language)| {
+            v0_2::Props::DiffView(DiffViewProps {
+                old_text,
+                new_text,
+                language,
+            })
+        },
+    );
+    prop_oneof![
+        text,
+        button,
+        input,
+        list,
+        table,
+        icon,
+        arb_string().prop_map(v0_2::Props::Markdown),
+        diff_view,
+    ]
+}
+
+fn arb_v0_2_props() -> impl Strategy<Value = v0_2::Props> {
+    prop_oneof![
+        3 => arb_flex_props().prop_map(v0_2::Props::Flex),
+        4 => arb_v0_2_leaf_props(),
+    ]
+}
+
+fn arb_v0_2_node() -> impl Strategy<Value = v0_2::Node> {
+    (
+        any::<NodeId>(),
+        prop::option::of(any::<NodeId>()),
+        arb_v0_2_props(),
+    )
+        .prop_map(|(id, parent, props)| v0_2::Node { id, parent, props })
+}
+
+fn arb_v0_2_patch() -> impl Strategy<Value = v0_2::Patch> {
+    let rows = prop::option::of(
+        (any::<u32>(), any::<u32>()).prop_map(|(start, count)| v0_2::RowRange { start, count }),
+    );
+    prop_oneof![
+        (any::<NodeId>(), arb_v0_2_props())
+            .prop_map(|(id, props)| v0_2::Patch::SetProps(id, props)),
+        (arb_v0_2_node(), prop::option::of(any::<NodeId>()))
+            .prop_map(|(node, before)| v0_2::Patch::Insert(v0_2::InsertOp { node, before })),
+        any::<NodeId>().prop_map(v0_2::Patch::Remove),
+        (any::<NodeId>(), rows).prop_map(|(target, rows)| {
+            v0_2::Patch::InvalidateRows(v0_2::InvalidateRowsOp { target, rows })
+        }),
+    ]
+}
+
+fn arb_v0_2_update() -> impl Strategy<Value = v0_2::Update> {
+    prop_oneof![
+        Just(v0_2::Update::Unchanged),
+        prop::collection::vec(arb_v0_2_node(), 0..6).prop_map(v0_2::Update::Replace),
+        prop::collection::vec(arb_v0_2_patch(), 0..6).prop_map(v0_2::Update::Patches),
+    ]
+}
+
+fn arb_dismiss_reason() -> impl Strategy<Value = v0_2::DismissReason> {
+    prop_oneof![
+        Just(v0_2::DismissReason::Escape),
+        Just(v0_2::DismissReason::FocusLost),
+        Just(v0_2::DismissReason::Replaced),
+        Just(v0_2::DismissReason::WindowClosed),
+    ]
+}
+
+fn arb_v0_2_ui_event() -> impl Strategy<Value = v0_2::UiEvent> {
+    prop_oneof![
+        arb_ui_event().prop_map(v0_2::UiEvent::from),
+        (any::<NodeId>(), any::<u32>()).prop_map(|(id, row)| v0_2::UiEvent::RowSelected(id, row)),
+        arb_dismiss_reason().prop_map(v0_2::UiEvent::Dismissed),
+    ]
+}
+
+fn arb_dock_position() -> impl Strategy<Value = DockPosition> {
+    prop_oneof![
+        Just(DockPosition::Left),
+        Just(DockPosition::Right),
+        Just(DockPosition::Bottom),
+    ]
+}
+
+fn arb_v0_2_surface_kind() -> impl Strategy<Value = v0_2::SurfaceKind> {
+    let panel = (arb_dock_position(), arb_icon_ref(), any::<u32>()).prop_map(
+        |(position, icon, default_size)| {
+            v0_2::SurfaceKind::Panel(v0_2::PanelDescriptor {
+                position,
+                icon,
+                default_size,
+            })
+        },
+    );
+    let status_item = (
+        prop_oneof![Just(StatusBarSide::Left), Just(StatusBarSide::Right)],
+        any::<i32>(),
+    )
+        .prop_map(|(side, priority)| {
+            v0_2::SurfaceKind::StatusItem(StatusItemDescriptor { side, priority })
+        });
+    let modal = prop_oneof![
+        Just(v0_2::ModalWidth::Small),
+        Just(v0_2::ModalWidth::Medium),
+        Just(v0_2::ModalWidth::Large),
+    ]
+    .prop_map(|width| v0_2::SurfaceKind::Modal(v0_2::ModalDescriptor { width }));
+    prop_oneof![panel, status_item, modal]
+}
+
+fn arb_decoration_location() -> impl Strategy<Value = v0_2::DecorationLocation> {
+    (
+        arb_string(),
+        any::<u32>(),
+        prop_oneof![
+            Just(v0_2::DecorationPlacement::Above),
+            Just(v0_2::DecorationPlacement::Below),
+        ],
+        prop::option::of(any::<u16>()),
+    )
+        .prop_map(
+            |(path, line, placement, height_lines)| v0_2::DecorationLocation {
+                path,
+                line,
+                placement,
+                height_lines,
+            },
+        )
+}
+
+fn arb_host_error() -> impl Strategy<Value = v0_2::HostError> {
+    (
+        prop_oneof![
+            Just(v0_2::HostErrorCode::UnknownSurface),
+            Just(v0_2::HostErrorCode::LimitExceeded),
+            Just(v0_2::HostErrorCode::InvalidArgument),
+            Just(v0_2::HostErrorCode::NotPermitted),
+            Just(v0_2::HostErrorCode::Unavailable),
+        ],
+        arb_string(),
+    )
+        .prop_map(|(code, message)| v0_2::HostError { code, message })
+}
+
+/// The inverse of the 0.1 → 0.2 conversion, written out independently: `None` for anything 0.1
+/// cannot express (a frozen icon, or a 0.2-only field that is not empty).
+fn upstream_icon(icon: v0_2::IconRef) -> Option<String> {
+    match icon {
+        v0_2::IconRef::Upstream(name) => Some(name),
+        v0_2::IconRef::Frozen(_) => None,
+    }
+}
+
+fn props_to_v0_1(props: v0_2::Props) -> Option<Props> {
+    Some(match props {
+        v0_2::Props::Flex(props) => Props::Flex(props),
+        v0_2::Props::Text(props) => Props::Text(props),
+        v0_2::Props::Button(props) => {
+            if props.tooltip.is_some() {
+                return None;
+            }
+            Props::Button(ButtonProps {
+                label: props.label,
+                icon: match props.icon {
+                    Some(icon) => Some(upstream_icon(icon)?),
+                    None => None,
+                },
+                style: props.style,
+                disabled: props.disabled,
+            })
+        }
+        v0_2::Props::Input(props) => {
+            if props.secret {
+                return None;
+            }
+            Props::Input(InputProps {
+                value: props.value,
+                placeholder: props.placeholder,
+            })
+        }
+        v0_2::Props::List(props) => {
+            if props.selected.is_some() {
+                return None;
+            }
+            Props::List(ListProps {
+                row_count: props.row_count,
+                row_height: props.row_height,
+            })
+        }
+        v0_2::Props::Table(props) => Props::Table(props),
+        v0_2::Props::Icon(props) => Props::Icon(IconProps {
+            name: upstream_icon(props.name)?,
+            color: props.color,
+        }),
+        v0_2::Props::Markdown(text) => Props::Markdown(text),
+        v0_2::Props::DiffView(props) => Props::DiffView(props),
+    })
+}
+
+fn node_to_v0_1(node: v0_2::Node) -> Option<Node> {
+    Some(Node {
+        id: node.id,
+        parent: node.parent,
+        props: props_to_v0_1(node.props)?,
+    })
+}
+
+fn update_to_v0_1(update: v0_2::Update) -> Option<Update> {
+    Some(match update {
+        v0_2::Update::Unchanged => Update::Unchanged,
+        v0_2::Update::Replace(nodes) => {
+            Update::Replace(nodes.into_iter().map(node_to_v0_1).collect::<Option<_>>()?)
+        }
+        v0_2::Update::Patches(patches) => Update::Patches(
+            patches
+                .into_iter()
+                .map(|patch| match patch {
+                    v0_2::Patch::SetProps(id, props) => {
+                        Some(Patch::SetProps(id, props_to_v0_1(props)?))
+                    }
+                    v0_2::Patch::Insert(op) => Some(insert(node_to_v0_1(op.node)?, op.before)),
+                    v0_2::Patch::Remove(id) => Some(Patch::Remove(id)),
+                    v0_2::Patch::InvalidateRows(_) => None,
+                })
+                .collect::<Option<_>>()?,
+        ),
+    })
+}
+
+fn surface_to_v0_1(surface: v0_2::Surface) -> Option<Surface> {
+    let kind = match surface.kind {
+        v0_2::SurfaceKind::Panel(panel) => SurfaceKind::Panel(PanelDescriptor {
+            position: panel.position,
+            icon: upstream_icon(panel.icon)?,
+            default_size: panel.default_size,
+        }),
+        v0_2::SurfaceKind::StatusItem(item) => SurfaceKind::StatusItem(item),
+        v0_2::SurfaceKind::Modal(_) => return None,
+    };
+    Some(Surface {
+        id: surface.id,
+        title: surface.title,
+        kind,
+    })
+}
+
+/// Written out here rather than calling `SurfaceKind::capability`, so the names are checked
+/// against the manifest names the host uses too.
+fn capability_of(kind: &v0_2::SurfaceKind) -> &'static str {
+    match kind {
+        v0_2::SurfaceKind::Panel(_) => "ui:panel",
+        v0_2::SurfaceKind::StatusItem(_) => "ui:status-bar",
+        v0_2::SurfaceKind::Modal(_) => "ui:modal",
+    }
+}
+
+const CAPABILITIES: [&str; 4] = [
+    "ui:panel",
+    "ui:status-bar",
+    "ui:modal",
+    "ui:editor-decorations",
+];
+
+fn arb_capabilities() -> impl Strategy<Value = Vec<&'static str>> {
+    prop_oneof![
+        1 => Just(CAPABILITIES.to_vec()),
+        2 => prop::sample::subsequence(CAPABILITIES.to_vec(), 0..=CAPABILITIES.len()),
+    ]
+}
+
+fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+}
+
+/// Mostly allowed characters, so valid ids are common, with arbitrary characters mixed in.
+fn arb_id() -> impl Strategy<Value = String> {
+    let allowed: Vec<char> = ('a'..='z')
+        .chain('0'..='9')
+        .chain(['.', '_', '-'])
+        .collect();
+    prop::collection::vec(
+        prop_oneof![
+            16 => prop::sample::select(allowed),
+            1 => any::<char>(),
+        ],
+        0..=MAX_ID_BYTES + 4,
+    )
+    .prop_map(String::from_iter)
+}
+
+fn arb_path_component() -> impl Strategy<Value = String> {
+    "[a-zA-Z0-9 _.~-]{1,12}".prop_filter("a dot component", |component| {
+        component != "." && component != ".."
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn v0_2_props_json_round_trips(props in arb_v0_2_props(), icon in arb_icon_ref()) {
+        json_round_trip(&props)?;
+        json_round_trip(&icon)?;
+    }
+
+    #[test]
+    fn v0_2_update_json_round_trips(update in arb_v0_2_update()) {
+        json_round_trip(&update)?;
+        if let v0_2::Update::Patches(patches) = &update {
+            for patch in patches {
+                json_round_trip(patch)?;
+            }
+        }
+    }
+
+    #[test]
+    fn v0_2_list_row_json_round_trips(
+        index in any::<u32>(),
+        indent in any::<u8>(),
+        nodes in prop::collection::vec(arb_v0_2_node(), 0..6),
+    ) {
+        json_round_trip(&v0_2::ListRow { index, indent, nodes })?;
+    }
+
+    #[test]
+    fn v0_2_host_side_types_json_round_trip(
+        event in arb_v0_2_ui_event(),
+        surface in (arb_string(), arb_string(), arb_v0_2_surface_kind())
+            .prop_map(|(id, title, kind)| v0_2::Surface { id, title, kind }),
+        location in arb_decoration_location(),
+        error in arb_host_error(),
+    ) {
+        json_round_trip(&event)?;
+        json_round_trip(&surface.kind)?;
+        json_round_trip(&surface)?;
+        json_round_trip(&location)?;
+        json_round_trip(&error)?;
+    }
+
+    // Every 0.1 value has a 0.2 counterpart with only upstream icons and empty 0.2 fields, and
+    // the conversion loses nothing. One property per kind of value: as a single test with all five
+    // inputs, the frame overflowed the 2 MiB test-thread stack of Windows debug builds.
+    // fyx: W0 split (integration of p2-wit), same checks as before.
+
+    #[test]
+    fn v0_1_props_convert_into_v0_2_losslessly(props in arb_props()) {
+        prop_assert_eq!(props_to_v0_1(v0_2::Props::from(props.clone())), Some(props));
+    }
+
+    #[test]
+    fn v0_1_updates_convert_into_v0_2_losslessly(update in arb_update()) {
+        prop_assert_eq!(update_to_v0_1(v0_2::Update::from(update.clone())), Some(update));
+    }
+
+    #[test]
+    fn v0_1_list_rows_convert_into_v0_2_losslessly(
+        row in (any::<u32>(), prop::collection::vec(arb_any_node(), 0..6))
+            .prop_map(|(index, nodes)| ListRow { index, nodes }),
+    ) {
+        let converted = v0_2::ListRow::from(row.clone());
+        prop_assert_eq!(converted.indent, 0);
+        prop_assert_eq!(converted.index, row.index);
+        let nodes: Option<Vec<Node>> = converted.nodes.into_iter().map(node_to_v0_1).collect();
+        prop_assert_eq!(nodes, Some(row.nodes));
+    }
+
+    #[test]
+    fn v0_1_events_convert_into_v0_2_losslessly(event in arb_ui_event()) {
+        let converted = v0_2::UiEvent::from(event.clone());
+        prop_assert_eq!(converted.target(), Some(event.target()));
+        prop_assert_eq!(UiEvent::try_from(converted), Ok(event));
+    }
+
+    #[test]
+    fn v0_1_surfaces_convert_into_v0_2_losslessly(surface in arb_surface()) {
+        prop_assert_eq!(surface_to_v0_1(v0_2::Surface::from(surface.clone())), Some(surface));
+    }
+
+    /// 0.1 static surfaces are checked exactly as the 0.1 host checks them: any id, duplicates
+    /// included, no cap, only the capability of each kind.
+    #[test]
+    fn v0_1_static_surfaces_need_only_their_capabilities(
+        surfaces in prop::collection::vec(arb_surface(), 0..8),
+        capabilities in arb_capabilities(),
+    ) {
+        let converted: Vec<v0_2::Surface> = surfaces.into_iter().map(Into::into).collect();
+        let permitted = converted
+            .iter()
+            .all(|surface| capabilities.contains(&capability_of(&surface.kind)));
+        let result = LiveIds::new(ApiVersion::V0_1_0, &converted, &capabilities);
+        prop_assert_eq!(result.is_ok(), permitted, "{:?}", result);
+        if let Err(error) = result {
+            let is_not_permitted = matches!(error, ApiError::NotPermitted { .. });
+            prop_assert!(is_not_permitted);
+        }
+        for surface in &converted {
+            prop_assert_eq!(ApiVersion::V0_1_0.check_surface_id(&surface.id), Ok(()));
+        }
+    }
+
+    #[test]
+    fn v0_2_surface_ids_follow_the_id_rule(id in arb_id()) {
+        let expected = if is_valid_id(&id) {
+            Ok(())
+        } else {
+            Err(ApiError::InvalidId { id: id.clone() })
+        };
+        prop_assert_eq!(ApiVersion::V0_2_0.check_surface_id(&id), expected);
+        prop_assert_eq!(ApiVersion::V0_1_0.check_surface_id(&id), Ok(()));
+    }
+
+    #[test]
+    fn decoration_paths(
+        components in prop::collection::vec(arb_path_component(), 1..8),
+        corruption in 0..6u8,
+        position in any::<Index>(),
+        forbidden in prop::sample::select(vec!['\\', ':', '\0']),
+    ) {
+        let path = components.join("/");
+        prop_assert_eq!(check_decoration_path(&path), Ok(()), "{:?}", path);
+
+        let (corrupted, problem) = match corruption {
+            0 | 1 => {
+                let mut components = components;
+                let inserted = if corruption == 0 { ".." } else { "." };
+                components.insert(position.index(components.len() + 1), inserted.to_owned());
+                (components.join("/"), PathProblem::DotComponent)
+            }
+            2 => {
+                let mut components = components;
+                components.insert(position.index(components.len() + 1), String::new());
+                (components.join("/"), PathProblem::EmptyComponent)
+            }
+            3 => (format!("/{path}"), PathProblem::EmptyComponent),
+            4 => {
+                // Every generated character is ASCII, so every byte index is a boundary.
+                let mut corrupted = path.clone();
+                corrupted.insert(position.index(path.len() + 1), forbidden);
+                (corrupted, PathProblem::ForbiddenCharacter(forbidden))
+            }
+            _ => {
+                let mut long = path.clone();
+                while long.len() <= MAX_DECORATION_PATH_BYTES {
+                    long.push('/');
+                    long.push_str(&path);
+                }
+                (long, PathProblem::TooLong { max: MAX_DECORATION_PATH_BYTES })
+            }
+        };
+        let result = check_decoration_path(&corrupted);
+        prop_assert_eq!(result, Err(ApiError::InvalidPath { path: corrupted, problem }));
+    }
+
+    #[test]
+    fn tooltips_are_truncated_to_the_longest_fitting_prefix(
+        text in prop_oneof![
+            prop::collection::vec(any::<char>(), 0..600).prop_map(String::from_iter),
+            (0usize..1100, prop::collection::vec(any::<char>(), 0..4)).prop_map(|(len, tail)| {
+                let mut text = "a".repeat(len);
+                text.extend(tail);
+                text
+            }),
+        ],
+    ) {
+        let shown = v0_2::truncate_tooltip(&text);
+        prop_assert!(text.starts_with(shown));
+        prop_assert!(shown.len() <= MAX_TOOLTIP_BYTES);
+        if text.len() <= MAX_TOOLTIP_BYTES {
+            prop_assert_eq!(shown, text.as_str());
+        } else {
+            let next = text[shown.len()..].chars().next().map_or(0, char::len_utf8);
+            prop_assert!(shown.len() + next > MAX_TOOLTIP_BYTES);
+        }
+        let button = v0_2::ButtonProps { tooltip: Some(text.clone()), ..v0_2::ButtonProps::default() };
+        prop_assert_eq!(button.tooltip_text(), Some(shown));
+    }
+
+    #[test]
+    fn indent_is_clamped_to_the_drawn_maximum(index in any::<u32>(), indent in any::<u8>()) {
+        let row = v0_2::ListRow { index, indent, nodes: Vec::new() };
+        prop_assert_eq!(row.indent_levels(), indent.min(MAX_INDENT_LEVELS));
+        prop_assert!(row.indent_levels() <= 32);
+    }
+
+    /// What `push-update` accepts at the call is exactly what the tree does not reject for size,
+    /// so an accepted push can only fail later for fit, never for a cap.
+    #[test]
+    fn push_caps_agree_with_the_tree(
+        limits in arb_limits(),
+        existing in arb_nodes(8),
+        update in prop_oneof![
+            arb_update(),
+            prop::collection::vec(arb_any_node(), 0..60).prop_map(Update::Replace),
+            prop::collection::vec(arb_patch(), 0..16).prop_map(Update::Patches),
+        ],
+    ) {
+        let mut existing = existing;
+        existing.truncate(limits.max_nodes);
+        let mut tree = Tree::from_nodes(existing, limits)?;
+        let before = tree.clone();
+        let caps = v0_2::Update::from(update.clone()).check_caps(limits);
+        let result = tree.apply_update(update);
+        match caps {
+            Err(error) => {
+                prop_assert_eq!(result, Err(error));
+                prop_assert_eq!(&tree, &before);
+            }
+            Ok(()) => {
+                let size_error = matches!(
+                    result,
+                    Err(TreeError::UpdateTooLarge { .. } | TreeError::TreeTooLarge { .. })
+                );
+                prop_assert!(!size_error, "{:?}", result);
+            }
+        }
+    }
+}
+
+/// An `add-surface` / `remove-surface` / `place-decoration` / `remove-decoration` sequence picked
+/// from a small id pool, so ids collide, run out and come back.
+#[derive(Clone, Debug)]
+enum IdsOp {
+    AddSurface(Index, v0_2::SurfaceKind),
+    RemoveSurface(Index),
+    PlaceDecoration {
+        id: Index,
+        valid_path: bool,
+        node_count: usize,
+    },
+    RemoveDecoration(Index),
+}
+
+const ID_POOL: [&str; 8] = ["a", "b", "c", "d", "e", "f", "Bad Id", ""];
+
+fn arb_ids_op() -> impl Strategy<Value = IdsOp> {
+    prop_oneof![
+        3 => (any::<Index>(), arb_v0_2_surface_kind())
+            .prop_map(|(id, kind)| IdsOp::AddSurface(id, kind)),
+        1 => any::<Index>().prop_map(IdsOp::RemoveSurface),
+        3 => (
+            any::<Index>(),
+            prop::bool::weighted(0.9),
+            prop_oneof![9 => 0usize..=16384, 1 => Just(16385)],
+        )
+            .prop_map(|(id, valid_path, node_count)| IdsOp::PlaceDecoration {
+                id,
+                valid_path,
+                node_count,
+            }),
+        1 => any::<Index>().prop_map(IdsOp::RemoveDecoration),
+    ]
+}
+
+/// Reference model of the 0.2 rules, from design.md E and L, in the order the design lists them.
+#[derive(Debug)]
+struct IdsModel {
+    limits: IdLimits,
+    surfaces: BTreeMap<String, v0_2::SurfaceKind>,
+    decorations: BTreeSet<String>,
+}
+
+impl IdsModel {
+    fn in_use(&self, id: &str) -> Option<IdKind> {
+        if self.surfaces.contains_key(id) {
+            Some(IdKind::Surface)
+        } else if self.decorations.contains(id) {
+            Some(IdKind::Decoration)
+        } else {
+            None
+        }
+    }
+
+    fn add_surface(
+        &mut self,
+        surface: &v0_2::Surface,
+        capabilities: &[&str],
+    ) -> Result<(), ApiError> {
+        let id = surface.id.clone();
+        if !is_valid_id(&id) {
+            return Err(ApiError::InvalidId { id });
+        }
+        if let Some(kind) = self.in_use(&id) {
+            return Err(ApiError::IdInUse { id, kind });
+        }
+        let capability = capability_of(&surface.kind);
+        if !capabilities.contains(&capability) {
+            return Err(ApiError::NotPermitted {
+                what: format!("surface {id:?}"),
+                capability,
+            });
+        }
+        if self.surfaces.len() >= self.limits.max_surfaces {
+            return Err(ApiError::TooManySurfaces {
+                max: self.limits.max_surfaces,
+            });
+        }
+        self.surfaces.insert(id, surface.kind.clone());
+        Ok(())
+    }
+
+    fn decorations_permitted(capabilities: &[&str]) -> Result<(), ApiError> {
+        if capabilities.contains(&"ui:editor-decorations") {
+            Ok(())
+        } else {
+            Err(ApiError::NotPermitted {
+                what: "editor decorations".to_owned(),
+                capability: "ui:editor-decorations",
+            })
+        }
+    }
+
+    fn place(
+        &mut self,
+        id: &str,
+        path: &str,
+        node_count: usize,
+        capabilities: &[&str],
+    ) -> Result<Placement, ApiError> {
+        Self::decorations_permitted(capabilities)?;
+        if !is_valid_id(id) {
+            return Err(ApiError::InvalidId { id: id.to_owned() });
+        }
+        if self.surfaces.contains_key(id) {
+            return Err(ApiError::IdInUse {
+                id: id.to_owned(),
+                kind: IdKind::Surface,
+            });
+        }
+        check_decoration_path(path)?;
+        if node_count > 16384 {
+            return Err(ApiError::TooManyNodes {
+                count: node_count,
+                max: 16384,
+            });
+        }
+        if self.decorations.contains(id) {
+            return Ok(Placement::Moved);
+        }
+        if self.decorations.len() >= self.limits.max_decorations {
+            return Err(ApiError::TooManyDecorations {
+                max: self.limits.max_decorations,
+            });
+        }
+        self.decorations.insert(id.to_owned());
+        Ok(Placement::New)
+    }
+}
+
+fn check_ids_match_model(ids: &LiveIds, model: &IdsModel) -> Result<(), TestCaseError> {
+    let surfaces: BTreeMap<String, v0_2::SurfaceKind> = ids
+        .surfaces()
+        .map(|(id, kind)| (id.to_owned(), kind.clone()))
+        .collect();
+    prop_assert_eq!(&surfaces, &model.surfaces);
+    let decorations: BTreeSet<String> = ids.decorations().map(str::to_owned).collect();
+    prop_assert_eq!(&decorations, &model.decorations);
+    prop_assert!(surfaces.len() <= ids.limits().max_surfaces);
+    prop_assert!(decorations.len() <= ids.limits().max_decorations);
+    for id in surfaces.keys() {
+        prop_assert!(
+            !decorations.contains(id),
+            "{:?} is a surface and a decoration",
+            id
+        );
+        prop_assert!(is_valid_id(id), "live id {:?} breaks the id rule", id);
+    }
+    for id in &decorations {
+        prop_assert!(is_valid_id(id), "live id {:?} breaks the id rule", id);
+        prop_assert!(ids.is_decoration(id));
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1024))]
+
+    /// Random 0.2 id operations against the reference model: same results, same live sets,
+    /// surfaces and decorations never share an id, and neither cap is ever passed.
+    #[test]
+    fn live_ids_match_reference_model(
+        max_surfaces in 0usize..5,
+        max_decorations in 0usize..5,
+        static_surfaces in prop::collection::vec((any::<Index>(), arb_v0_2_surface_kind()), 0..5),
+        capabilities in arb_capabilities(),
+        ops in prop::collection::vec(arb_ids_op(), 0..40),
+    ) {
+        let limits = IdLimits { max_surfaces, max_decorations };
+        let pick = |index: &Index| *index.get(&ID_POOL);
+        let surface = |id: &Index, kind: &v0_2::SurfaceKind| v0_2::Surface {
+            id: pick(id).to_owned(),
+            title: String::new(),
+            kind: kind.clone(),
+        };
+        let static_surfaces: Vec<v0_2::Surface> =
+            static_surfaces.iter().map(|(id, kind)| surface(id, kind)).collect();
+
+        let mut model = IdsModel {
+            limits,
+            surfaces: BTreeMap::new(),
+            decorations: BTreeSet::new(),
+        };
+        let expected = static_surfaces
+            .iter()
+            .try_for_each(|surface| model.add_surface(surface, &capabilities));
+        let created =
+            LiveIds::with_limits(ApiVersion::V0_2_0, limits, &static_surfaces, &capabilities);
+        let mut ids = match (created, expected) {
+            (Ok(ids), Ok(())) => ids,
+            (Err(actual), Err(expected)) => {
+                prop_assert_eq!(actual, expected);
+                return Ok(());
+            }
+            (created, expected) => {
+                return Err(TestCaseError::fail(format!(
+                    "static set: LiveIds returned {created:?}, model {expected:?}"
+                )));
+            }
+        };
+        check_ids_match_model(&ids, &model)?;
+
+        for op in &ops {
+            match op {
+                IdsOp::AddSurface(id, kind) => {
+                    let surface = surface(id, kind);
+                    let expected = model.add_surface(&surface, &capabilities);
+                    prop_assert_eq!(ids.add_surface(&surface, &capabilities), expected);
+                }
+                IdsOp::RemoveSurface(id) => {
+                    let id = pick(id);
+                    let expected = if model.decorations.contains(id) {
+                        Err(ApiError::NotASurface { id: id.to_owned() })
+                    } else {
+                        model
+                            .surfaces
+                            .remove(id)
+                            .ok_or_else(|| ApiError::UnknownSurface { id: id.to_owned() })
+                    };
+                    prop_assert_eq!(ids.remove_surface(id), expected);
+                }
+                IdsOp::PlaceDecoration { id, valid_path, node_count } => {
+                    let id = pick(id);
+                    let path = if *valid_path { "src/lib.rs" } else { "../outside.rs" };
+                    let location = v0_2::DecorationLocation {
+                        path: path.to_owned(),
+                        line: 0,
+                        placement: v0_2::DecorationPlacement::Below,
+                        height_lines: None,
+                    };
+                    let expected = model.place(id, path, *node_count, &capabilities);
+                    prop_assert_eq!(
+                        ids.place_decoration(id, &location, *node_count, &capabilities),
+                        expected
+                    );
+                }
+                IdsOp::RemoveDecoration(id) => {
+                    let id = pick(id);
+                    let expected = IdsModel::decorations_permitted(&capabilities).and_then(|()| {
+                        if model.decorations.remove(id) {
+                            Ok(())
+                        } else {
+                            Err(ApiError::UnknownDecoration { id: id.to_owned() })
+                        }
+                    });
+                    prop_assert_eq!(ids.remove_decoration(id, &capabilities), expected);
+                }
+            }
+            check_ids_match_model(&ids, &model)?;
+        }
     }
 }

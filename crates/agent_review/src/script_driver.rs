@@ -6,6 +6,7 @@
 //! action agent::NewExternalAgentThread {"agent": "Review Stub"}
 //! review              # wait for the next review pane to open
 //! accept 1            # hunk numbers start at 1
+//! accept-turn         # or reject-turn: every edit of the turn
 //! reject 2
 //! comment 2 keep it lowercase
 //! submit
@@ -22,17 +23,24 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{Action, AnyWindowHandle, App, AsyncApp, Entity};
 use workspace::MultiWorkspace;
 
-use crate::{AcceptHunk, AgentReview, RejectHunk, ReviewId, ReviewPane, SubmitReview};
+use crate::{
+    AcceptHunk, AcceptTurn, AgentReview, RejectHunk, RejectTurn, ReviewId, ReviewPane, SubmitReview,
+};
 
 const SCRIPT_VAR: &str = "FYX_AGENT_REVIEW_SCRIPT";
 const POLL: Duration = Duration::from_millis(250);
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(60);
+/// The actions a script may dispatch: starting an agent thread and opening things. Everything else,
+/// settings included, stays out of reach.
+const ALLOWED_ACTIONS: &[&str] = &["agent::NewExternalAgentThread", "workspace::Open"];
 
 #[derive(Debug, PartialEq)]
 enum Step {
     Action(String, Option<serde_json::Value>),
     Review,
     Accept(usize),
+    AcceptTurn,
+    RejectTurn,
     Reject(usize),
     Comment(usize, String),
     Submit,
@@ -94,6 +102,8 @@ fn parse(script: &str) -> Result<Vec<Step>> {
             }
             "review" => Step::Review,
             "accept" => Step::Accept(hunk(rest)?),
+            "accept-turn" => Step::AcceptTurn,
+            "reject-turn" => Step::RejectTurn,
             "reject" => Step::Reject(hunk(rest)?),
             "comment" => {
                 let (number, text) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -123,6 +133,10 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
         log::info!("fyx: review script: {step:?}");
         match step {
             Step::Action(name, data) => {
+                anyhow::ensure!(
+                    action_allowed(&name),
+                    "action {name} is not allowed in a review script"
+                );
                 let action = cx.update(|cx| cx.build_action(&name, data))?;
                 dispatch(window, action, cx)?;
             }
@@ -140,6 +154,16 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
                 });
                 log::info!("fyx: review script: reviewing {:?} {path:?}", found.0);
                 current = Some(found);
+            }
+            Step::AcceptTurn | Step::RejectTurn => {
+                let (_, pane) = current.as_ref().context("turn decision before review")?;
+                focus_pane(window, pane, cx)?;
+                let action = if matches!(step, Step::AcceptTurn) {
+                    AcceptTurn.boxed_clone()
+                } else {
+                    RejectTurn.boxed_clone()
+                };
+                dispatch(window, action, cx)?;
             }
             Step::Accept(hunk) => {
                 let (_, pane) = current.as_ref().context("accept before review")?;
@@ -174,6 +198,10 @@ async fn run(steps: Vec<Step>, cx: &mut AsyncApp) -> Result<()> {
         cx.background_executor().timer(POLL).await;
     }
     Ok(())
+}
+
+fn action_allowed(name: &str) -> bool {
+    ALLOWED_ACTIONS.contains(&name)
 }
 
 async fn wait_for<T>(
@@ -268,6 +296,9 @@ mod tests {
             ]
         );
         assert!(parse("accept 0").is_err());
+        assert!(action_allowed("agent::NewExternalAgentThread"));
+        assert!(!action_allowed("agent_review::ToggleReviewMode"));
+        assert!(!action_allowed("zed::OpenSettings"));
         assert!(parse("dance").is_err());
     }
 }
