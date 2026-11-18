@@ -1471,6 +1471,8 @@ mod tests {
     #[cfg(windows)]
     #[gpui::test]
     async fn junctions_are_followed(cx: &mut TestAppContext) {
+        // Test setup, before any executor work: blocking on `mklink` here is fine.
+        #[allow(clippy::disallowed_methods)]
         fn junction(link: &Path, target: &Path) {
             let status = std::process::Command::new("cmd")
                 .arg("/C")
