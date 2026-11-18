@@ -89,7 +89,8 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   folder, regular files of at most 2 MiB.
 - **0.3 dispatch**: `UiBindings::V0_3` (`fyx_ui_v0_3.rs`); the 0.2 and 0.3 bindings share the
   `host` imports and the type conversions through macros in `conversions.rs`. Linked: `types`,
-  `host`, `images`; every other 0.3 interface traps when called (`define_unknown_imports_as_traps`),
+  `host`, `images`; every other `fyx:ui` 0.3 interface traps when called (`define_unbuilt_as_traps`; not
+  wasmtime's `define_unknown_imports_as_traps`, which also shadowed newer-patch WASI imports),
   so a component that does not call them works.
 - **`images` import**: `ui:images` declared and granted by the broker at each call, the byte
   checks, at most 32 live handles, handles never reused; `HostEffect::AddImage { handle, format,

@@ -255,7 +255,8 @@ async fn test_v0_3_image_replies(cx: &mut TestAppContext) {
 }
 
 /// A 0.3 interface this build does not implement traps when called, which disables the
-/// extension; it still loads, because nothing calls it at instantiation.
+/// extension; it still loads, because nothing calls it at instantiation. WASI imports at a newer
+/// patch version than the host's (std's `HashMap` seed in the probe's `surfaces`) still resolve.
 #[gpui::test]
 async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
     let extension = load(cx).await;
@@ -266,6 +267,10 @@ async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
     assert!(
         error.downcast_ref::<EffectReplyError>().is_none(),
         "{error:#}"
+    );
+    assert!(
+        format!("{error:?}").contains("fyx:ui/permissions@0.3.0#query is not implemented"),
+        "{error:?}"
     );
     let error = extension
         .handle_event_v0_2(SURFACE, UiEvent::Click(1))
