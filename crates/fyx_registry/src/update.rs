@@ -628,6 +628,74 @@ mod tests {
         );
     }
 
+    /// integration-5 R8: a backdated `published_at` (a leaked release key) does not skip the
+    /// wait; the gate counts from when this client first saw the release.
+    #[test]
+    fn age_gate_counts_from_first_sight() {
+        let backdated = todo("1.1.0");
+        let first_sight = LATER;
+        let ready_at = first_sight.saturating_add(AGE_GATE);
+        assert_eq!(age_gate(&backdated, LATER), AgeGate::Ready);
+        assert_eq!(
+            age_gate_seen(&backdated, Some(first_sight), LATER),
+            AgeGate::Waiting { ready_at }
+        );
+        assert_eq!(
+            age_gate_seen(&backdated, Some(first_sight), ready_at),
+            AgeGate::Ready
+        );
+        // A first sight before `published_at` (clock skew) never shortens the wait.
+        let fresh = published(todo("1.2.0"), LATER);
+        assert_eq!(
+            age_gate_seen(&fresh, Some(PUBLISHED), LATER),
+            AgeGate::Waiting { ready_at }
+        );
+
+        let index = index(vec![todo("1.0.0"), backdated.clone()]);
+        let mut seen = FirstSeen::default();
+        seen.record(&index, first_sight, false);
+        assert_eq!(seen.get(&backdated), Some(first_sight));
+        let extension = installed("1.0.0", None);
+        let plan = |seen: &FirstSeen, now| {
+            plan_updates(std::slice::from_ref(&extension), &index, None, seen, now)
+                .into_iter()
+                .map(|planned| planned.action)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            !plan(&seen, LATER).contains(&update("1.1.0")),
+            "{:?}",
+            plan(&seen, LATER)
+        );
+        assert_eq!(plan(&seen, ready_at), vec![update("1.1.0")]);
+        let install = plan_install(&id(), &index, None, &seen, LATER);
+        assert!(
+            !matches!(&install, Ok(release) if release.version == version("1.1.0")),
+            "{install:?}"
+        );
+    }
+
+    #[test]
+    fn first_seen_keeps_old_sights_and_forgets_dropped_releases() {
+        let old = todo("1.0.0");
+        let new = published(todo("1.1.0"), LATER);
+        let mut seen = FirstSeen::default();
+        // The first index a client accepts has only `published_at` to go by.
+        seen.record(&index(vec![old.clone()]), LATER, true);
+        assert_eq!(seen.get(&old), Some(PUBLISHED));
+        let later = LATER.saturating_add(std::time::Duration::from_secs(HOUR));
+        seen.record(&index(vec![old.clone(), new.clone()]), later, false);
+        assert_eq!(seen.get(&old), Some(PUBLISHED));
+        assert_eq!(seen.get(&new), Some(later));
+        // A re-signed package is a new release: same version, new hash.
+        let mut repacked = new.clone();
+        repacked.package.sha256 = crate::Sha256Digest([7; 32]);
+        seen.record(&index(vec![repacked.clone()]), later.saturating_add(std::time::Duration::from_secs(HOUR)), false);
+        assert_eq!(seen.get(&old), None);
+        assert_eq!(seen.get(&new), None);
+        assert_eq!(seen.get(&repacked), Some(later.saturating_add(std::time::Duration::from_secs(HOUR))));
+    }
+
     #[test]
     fn urgent_releases_skip_the_age_gate() {
         let mut fix = published(todo("1.0.1"), LATER);

@@ -593,6 +593,23 @@ mod tests {
         /// The emergency snapshot, signed offline by the snapshot rotation key, revokes a leaked
         /// block-list key; the next daily snapshots, signed by the online key, keep it revoked,
         /// and only another rotation-key snapshot lifts it.
+        /// integration-5 R8: when the client first saw each release outlives snapshot updates
+        /// and restarts.
+        #[test]
+        fn first_seen_carries_over_and_is_stored() {
+            let mut first = verify(signed_by(&snapshot_key(), 7, &[]), None);
+            let seen: crate::FirstSeen =
+                serde_json::from_value(serde_json::json!({ "todo@1.1.0#ab": 5_000 }))
+                    .expect("first seen");
+            *first.first_seen_mut() = seen.clone();
+            let next = verify(signed_by(&snapshot_key(), 8, &[]), Some(&first));
+            assert_eq!(next.first_seen(), &seen);
+            let stored = next.to_state_json().expect("stored");
+            let restored =
+                VerifiedSnapshot::from_state_json(&stored, &registry_keyset()).expect("restored");
+            assert_eq!(restored.first_seen(), &seen);
+        }
+
         #[test]
         fn the_offline_rotation_key_can_and_the_revocation_carries_over() {
             let emergency = verify(signed_by(&snapshot_rotation_key(), 8, &["bl-a"]), None);
