@@ -2941,3 +2941,30 @@ async fn test_canvas_paints_every_op(cx: &mut TestAppContext) {
         assert!(vcx.debug_bounds("fyx-node-1").is_some(), "{fit:?} drawn");
     }
 }
+
+/// The proxy cell follows Fyx's `proxy` setting, the raw value (never the environment), and an
+/// unusable value goes direct.
+#[gpui::test]
+fn test_extension_proxy_follows_the_setting(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(crate::registry::follow_proxy_setting);
+    let proxy = cx.update(crate::registry::extension_proxy);
+    assert_eq!(proxy.get(), None, "no setting: direct");
+    let set = |value: Option<&str>, cx: &mut TestAppContext| {
+        let value = value.map(str::to_string);
+        cx.update(|cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| settings.proxy = value)
+            })
+        });
+    };
+    set(Some(" http://proxy.example:8080 "), cx);
+    assert_eq!(
+        proxy.get().map(|url| url.to_string()),
+        Some("http://proxy.example:8080/".to_string())
+    );
+    set(Some("not a url"), cx);
+    assert_eq!(proxy.get(), None, "unusable: direct");
+    set(None, cx);
+    assert_eq!(proxy.get(), None);
+}

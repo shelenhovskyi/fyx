@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use agent_review::observe::{
     ObservedEvent, ObservedHunk, ObservedReview, ObservedSource, ObservedTurnFile,
 };
-use futures::{StreamExt as _, channel::mpsc, stream::BoxStream};
+use futures::{
+    FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture, stream::BoxStream,
+};
 use gpui::{App, Global};
 use ui_ext_wasm::observe::{
     AgentEvent, AgentReviews, HunkDecision, HunkInfo, Resolution, ReviewInfo, ReviewSource,
@@ -127,7 +129,9 @@ struct ExtensionReviews {
 }
 
 impl AgentReviews for ExtensionReviews {
-    fn subscribe(&self) -> (Vec<ReviewInfo>, BoxStream<'static, AgentEvent>) {
+    /// Needs no main-thread trip: the feed's mirror and fan-out live under one lock, and the
+    /// observation itself started on the main thread when the extension loaded.
+    fn subscribe(&self) -> BoxFuture<'static, (Vec<ReviewInfo>, BoxStream<'static, AgentEvent>)> {
         let (sender, events) = mpsc::unbounded();
         let (review_mode, reviews) = {
             let mut feed = self.feed.lock();
@@ -146,7 +150,7 @@ impl AgentReviews for ExtensionReviews {
         let files = self.files.clone();
         let first = futures::stream::once(async move { AgentEvent::ReviewMode(review_mode) });
         let rest = events.map(move |event| files.event(event));
-        (snapshot, first.chain(rest).boxed())
+        futures::future::ready((snapshot, first.chain(rest).boxed())).boxed()
     }
 }
 
@@ -319,7 +323,7 @@ mod tests {
             state.reviews = vec![review(1, "/work/a.rs")];
         }
         let reviews = reviews(feed.clone(), open);
-        let (snapshot, mut events) = reviews.subscribe();
+        let (snapshot, mut events) = futures::executor::block_on(reviews.subscribe());
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].file.as_ref().unwrap().path, "a.rs");
         assert_eq!(snapshot[0].hunks.len(), 1);
@@ -366,7 +370,7 @@ mod tests {
         let feed = AgentFeed::default();
         feed.lock().reviews = vec![review(1, "/work/a.rs")];
         let reviews = reviews(feed.clone(), OpenWorktrees::default());
-        let (snapshot, mut events) = reviews.subscribe();
+        let (snapshot, mut events) = futures::executor::block_on(reviews.subscribe());
         assert!(snapshot.is_empty(), "review mode off: no reviews");
 
         feed.lock()

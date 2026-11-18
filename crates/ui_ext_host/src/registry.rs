@@ -1321,6 +1321,7 @@ Environment it may pass: {}",
                         agent_reviews: cx.update(|cx| {
                             crate::agent_observe::for_extension(&found.extension_id, cx)
                         }),
+                        proxy: Some(cx.update(extension_proxy)),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2050,6 +2051,7 @@ pub fn init(cx: &mut App) {
         );
     }
     follow_dev_paths_setting(cx);
+    follow_proxy_setting(cx);
     watch_installed_extensions(cx);
 }
 
@@ -2075,6 +2077,43 @@ fn staged_allowed(dev_extension: bool, cx: &App) -> Option<bool> {
 }
 
 /// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
+/// Fyx's `proxy` setting for `network:fetch`, one cell shared by every load and kept current
+/// (W2c, plan 4.6). The raw setting, never `ProxySettings::proxy_url`, which falls back to
+/// `HTTP_PROXY` and friends: environment proxies never apply (decision 23).
+#[derive(Clone, Default)]
+struct ExtensionProxy(ui_ext_wasm::network::ProxySetting);
+
+impl Global for ExtensionProxy {}
+
+fn proxy_setting(cx: &App) -> Option<String> {
+    cx.try_global::<settings::SettingsStore>()?
+        .merged_settings()
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn follow_proxy_setting(cx: &mut App) {
+    let proxy = cx.default_global::<ExtensionProxy>().0.clone();
+    let apply = move |cx: &mut App| {
+        let setting = proxy_setting(cx);
+        if !proxy.set(setting.as_deref()) && setting.is_some() {
+            log::warn!("fyx:ui: the proxy setting is not a usable proxy URL; fetches go direct");
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
+    }
+}
+
+/// The proxy cell every load gets.
+pub(crate) fn extension_proxy(cx: &mut App) -> ui_ext_wasm::network::ProxySetting {
+    cx.default_global::<ExtensionProxy>().0.clone()
+}
+
 fn follow_dev_paths_setting(cx: &mut App) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
@@ -2770,6 +2809,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         ),
         agent_reviews: cx
             .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
+        proxy: Some(cx.update(extension_proxy)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
