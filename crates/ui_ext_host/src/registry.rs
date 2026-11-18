@@ -118,7 +118,21 @@ pub struct UiExtensionRegistry {
     last_scan: Option<(PathBuf, Arc<dyn Fs>)>,
     /// `fyx.extensions.dev_paths`: folders scanned with the installed ones, as dev extensions.
     dev_paths: Vec<PathBuf>,
+    /// The instance of each registered extension, for surfaces it adds later (`add-surface`).
+    backends: HashMap<Arc<str>, Rc<dyn UiBackend>>,
 }
+
+/// Requests for the workspaces that show a surface (design.md, C and E).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegistryEvent {
+    /// `show-surface` of a panel: open its dock and make it the active panel, without moving
+    /// focus.
+    RevealPanel(SharedString),
+    /// `hide-surface` of a panel: close its dock if it is the dock's active panel.
+    HidePanel(SharedString),
+}
+
+impl gpui::EventEmitter<RegistryEvent> for UiExtensionRegistry {}
 
 /// An installed extension waiting for the user's "Enable".
 #[derive(Clone, Debug)]
@@ -431,32 +445,58 @@ impl UiExtensionRegistry {
                     .update(cx, |state, cx| state.fail(message.into(), false, cx));
             }
         }
+        self.backends
+            .insert(backend.extension_id().into(), backend.clone());
         for surface in surfaces {
-            let info = SurfaceInfo::new(
-                backend.extension_id(),
-                surface,
-                FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
-            );
-            if let Some(loaded) = self.surface_of(backend.extension_id(), &surface.id) {
-                log::info!("fyx:ui: reloading surface {}", info.key);
-                loaded.state.update(cx, |state, cx| {
-                    state.replace_backend(backend.clone(), surface.clone(), cx)
-                });
-                continue;
-            }
-            self.next_activation_priority += 1;
-            let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
-                registry: cx.weak_entity(),
-                extension_id: backend.extension_id().into(),
+            self.add_surface(backend.clone(), surface, cx);
+        }
+        cx.notify();
+    }
+
+    /// Adds one surface of a registered extension, or moves an existing one to `backend`.
+    fn add_surface(
+        &mut self,
+        backend: Rc<dyn UiBackend>,
+        surface: &Surface,
+        cx: &mut Context<Self>,
+    ) {
+        let info = SurfaceInfo::new(
+            backend.extension_id(),
+            surface,
+            FIRST_ACTIVATION_PRIORITY + self.next_activation_priority,
+        );
+        if let Some(loaded) = self.surface_of(backend.extension_id(), &surface.id) {
+            log::info!("fyx:ui: reloading surface {}", info.key);
+            loaded.state.update(cx, |state, cx| {
+                state.replace_backend(backend.clone(), surface.clone(), cx)
             });
-            let state =
-                cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), Some(link), cx));
-            self.surfaces.push(LoadedSurface {
-                extension_id: backend.extension_id().into(),
-                surface_id: surface.id.as_str().into(),
-                info: Rc::new(info),
-                state,
-            });
+            return;
+        }
+        self.next_activation_priority += 1;
+        let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
+            registry: cx.weak_entity(),
+            extension_id: backend.extension_id().into(),
+        });
+        let state =
+            cx.new(|cx| SurfaceState::new(backend.clone(), surface.clone(), Some(link), cx));
+        self.surfaces.push(LoadedSurface {
+            extension_id: backend.extension_id().into(),
+            surface_id: surface.id.as_str().into(),
+            info: Rc::new(info),
+            state,
+        });
+    }
+
+    /// `remove-surface`: its containers close in every workspace; its tree, queued events and
+    /// tick go with its state. No event reaches the extension.
+    fn remove_surface(&mut self, extension_id: &str, surface_id: &str, cx: &mut Context<Self>) {
+        let before = self.surfaces.len();
+        self.surfaces.retain(|surface| {
+            !(surface.extension_id.as_ref() == extension_id
+                && surface.surface_id.as_ref() == surface_id)
+        });
+        if self.surfaces.len() == before {
+            log::debug!("fyx:ui: {extension_id} removed unknown surface {surface_id:?}");
         }
         cx.notify();
     }
@@ -821,6 +861,49 @@ impl UiExtensionRegistry {
             HostEffect::Push { surface_id, update } => {
                 self.apply_pushed(extension_id, &surface_id, update, cx)
             }
+            HostEffect::AddSurface(surface) => {
+                let Some(backend) = self.backends.get(extension_id).cloned() else {
+                    log::error!("fyx:ui: {extension_id} added a surface before it was registered");
+                    return;
+                };
+                if matches!(surface.kind, SurfaceKind::Modal(_)) {
+                    log::warn!(
+                        "fyx:ui: {extension_id}: modal surfaces are not supported by this renderer \
+                         yet ({:?})",
+                        surface.id
+                    );
+                    return;
+                }
+                self.add_surface(backend, &surface, cx);
+                cx.notify();
+            }
+            HostEffect::RemoveSurface { surface_id } => {
+                self.remove_surface(extension_id, &surface_id, cx)
+            }
+            HostEffect::ShowSurface { surface_id } => match self
+                .surface_of(extension_id, &surface_id)
+            {
+                Some(surface)
+                    if matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_)) =>
+                {
+                    let key = surface.info.key.clone();
+                    cx.emit(RegistryEvent::RevealPanel(key));
+                }
+                Some(_) => log::debug!(
+                    "fyx:ui: {extension_id}: show-surface({surface_id:?}) of a status item does nothing"
+                ),
+                None => {
+                    log::debug!("fyx:ui: {extension_id}: show-surface of unknown {surface_id:?}")
+                }
+            },
+            HostEffect::HideSurface { surface_id } => {
+                if let Some(surface) = self.surface_of(extension_id, &surface_id)
+                    && matches!(surface.state.read(cx).surface().kind, SurfaceKind::Panel(_))
+                {
+                    let key = surface.info.key.clone();
+                    cx.emit(RegistryEvent::HidePanel(key));
+                }
+            }
             effect => {
                 log::warn!("fyx:ui: {extension_id}: {effect:?} is not handled by this renderer yet")
             }
@@ -1043,7 +1126,7 @@ struct WorkspaceSurfaces {
     panels: HashMap<SharedString, Box<dyn AnyExtensionPanel>>,
     /// One status bar entry per side, holding that side's extension status items.
     status_groups: HashMap<bool, Entity<ExtensionStatusGroup>>,
-    status_items: HashSet<SharedString>,
+    status_items: HashMap<SharedString, (bool, Entity<ExtensionStatusItem>)>,
     /// Extensions this workspace has offered "Enable" for.
     consent_prompts: HashSet<Arc<str>>,
 }
@@ -1108,6 +1191,42 @@ fn attach_to_workspace(
         move |workspace, registry, window, cx| {
             add_missing_surfaces(workspace, &registry, &surfaces, window, cx);
             offer_consent(workspace, &registry, &surfaces, cx);
+        }
+    })
+    .detach();
+
+    cx.subscribe_in(&registry, window, {
+        let surfaces = surfaces.clone();
+        move |workspace, _, event: &RegistryEvent, window, cx| {
+            // `show-surface` and `hide-surface` act in the window the user is in.
+            if !window.is_window_active() && cx.active_window().is_some() {
+                return;
+            }
+            let (key, open) = match event {
+                RegistryEvent::RevealPanel(key) => (key, true),
+                RegistryEvent::HidePanel(key) => (key, false),
+            };
+            let Some(panel_id) = surfaces
+                .borrow()
+                .panels
+                .get(key)
+                .map(|panel| panel.panel_id())
+            else {
+                return;
+            };
+            for dock in workspace.all_docks() {
+                let Some(index) = dock.read(cx).panel_index_for_id(panel_id) else {
+                    continue;
+                };
+                dock.update(cx, |dock, cx| {
+                    if open {
+                        dock.activate_panel(index, window, cx);
+                        dock.set_open(true, window, cx);
+                    } else if dock.active_panel_index() == Some(index) {
+                        dock.set_open(false, window, cx);
+                    }
+                });
+            }
         }
     })
     .detach();
@@ -1182,6 +1301,8 @@ fn offer_consent(
     }
 }
 
+/// Brings the workspace's containers in line with the registry: adds the missing panels and
+/// status items, and takes out those whose surface is gone (`remove-surface`).
 fn add_missing_surfaces(
     workspace: &mut Workspace,
     registry: &Entity<UiExtensionRegistry>,
@@ -1189,6 +1310,42 @@ fn add_missing_surfaces(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    let live: HashSet<SharedString> = registry
+        .read(cx)
+        .surfaces()
+        .iter()
+        .map(|surface| surface.info.key.clone())
+        .collect();
+    let gone_panels: Vec<SharedString> = surfaces
+        .borrow()
+        .panels
+        .keys()
+        .filter(|key| !live.contains(*key))
+        .cloned()
+        .collect();
+    for key in gone_panels {
+        if let Some(panel) = surfaces.borrow_mut().panels.remove(&key) {
+            panel.remove_from(workspace, window, cx);
+        }
+    }
+    let gone_items: Vec<(bool, Entity<ExtensionStatusItem>)> = {
+        let mut surfaces = surfaces.borrow_mut();
+        let keys: Vec<SharedString> = surfaces
+            .status_items
+            .keys()
+            .filter(|key| !live.contains(*key))
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| surfaces.status_items.remove(&key))
+            .collect()
+    };
+    for (left, item) in gone_items {
+        let group = surfaces.borrow().status_groups.get(&left).cloned();
+        if let Some(group) = group {
+            group.update(cx, |group, cx| group.remove(&item, cx));
+        }
+    }
     let loaded: Vec<(Rc<SurfaceInfo>, Entity<SurfaceState>, SurfaceKind)> = registry
         .read(cx)
         .surfaces()
@@ -1214,11 +1371,15 @@ fn add_missing_surfaces(
                 surfaces.borrow_mut().panels.insert(key, panel);
             }
             SurfaceKind::StatusItem(descriptor) => {
-                if !surfaces.borrow_mut().status_items.insert(info.key.clone()) {
+                if surfaces.borrow().status_items.contains_key(&info.key) {
                     continue;
                 }
                 let item = cx.new(|cx| ExtensionStatusItem::new(state, window, cx));
                 let left = descriptor.side == StatusBarSide::Left;
+                surfaces
+                    .borrow_mut()
+                    .status_items
+                    .insert(info.key.clone(), (left, item.clone()));
                 let existing = surfaces.borrow().status_groups.get(&left).cloned();
                 let group = match existing {
                     Some(group) => group,

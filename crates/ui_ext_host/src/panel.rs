@@ -240,6 +240,13 @@ pub(crate) trait AnyExtensionPanel {
     fn panel_focus(&self, cx: &App) -> Option<FocusHandle>;
     /// Where focus goes when the panel is activated: the surface view.
     fn surface_focus(&self, cx: &App) -> Option<FocusHandle>;
+    /// Takes the panel out of the workspace's docks (`remove-surface`, uninstall).
+    fn remove_from(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    );
 }
 
 impl<const SLOT: usize> AnyExtensionPanel for WeakEntity<ExtensionPanel<SLOT>> {
@@ -253,6 +260,17 @@ impl<const SLOT: usize> AnyExtensionPanel for WeakEntity<ExtensionPanel<SLOT>> {
 
     fn surface_focus(&self, cx: &App) -> Option<FocusHandle> {
         Some(self.upgrade()?.read(cx).view.read(cx).focus_handle.clone())
+    }
+
+    fn remove_from(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        if let Some(panel) = self.upgrade() {
+            workspace.remove_panel(&panel, window, cx);
+        }
     }
 }
 
@@ -313,6 +331,11 @@ impl ExtensionStatusGroup {
             StatusBarSide::Right => self.items.partition_point(|(other, _)| *other <= priority),
         };
         self.items.insert(index, (priority, item));
+        cx.notify();
+    }
+
+    pub fn remove(&mut self, item: &Entity<ExtensionStatusItem>, cx: &mut Context<Self>) {
+        self.items.retain(|(_, existing)| existing != item);
         cx.notify();
     }
 

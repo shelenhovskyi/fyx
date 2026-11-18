@@ -1618,6 +1618,105 @@ async fn test_extension_ids_belong_to_their_source(cx: &mut TestAppContext) {
     });
 }
 
+/// Plan 2.3, design E: `add-surface` adds and mounts a surface at runtime, `remove-surface` takes
+/// it away, and `show-surface` / `hide-surface` of a panel reach the workspaces as events.
+#[gpui::test]
+async fn test_runtime_surfaces(cx: &mut TestAppContext) {
+    use crate::backend::HostEffect;
+    use crate::registry::RegistryEvent;
+    init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let backend = Rc::new(FakeBackend::default());
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[panel_surface("main", "Main")], cx)
+    });
+    let events = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        let events = events.clone();
+        cx.subscribe(&registry, move |_, event: &RegistryEvent, _| {
+            events.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "fake",
+            HostEffect::AddSurface(panel_surface("added", "Added")),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let added = registry.read_with(cx, |registry, _| {
+        registry
+            .surface_of("fake", "added")
+            .map(|s| s.state.clone())
+    });
+    let added = added.expect("added at runtime");
+    assert!(
+        added.read_with(cx, |state, _| state.tree().is_some()),
+        "and mounted"
+    );
+
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "fake",
+            HostEffect::ShowSurface {
+                surface_id: "added".into(),
+            },
+            cx,
+        );
+        registry.apply_effect(
+            "fake",
+            HostEffect::HideSurface {
+                surface_id: "added".into(),
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        *events.borrow(),
+        [
+            RegistryEvent::RevealPanel("fake/added".into()),
+            RegistryEvent::HidePanel("fake/added".into()),
+        ]
+    );
+
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "fake",
+            HostEffect::RemoveSurface {
+                surface_id: "added".into(),
+            },
+            cx,
+        )
+    });
+    registry.read_with(cx, |registry, _| {
+        assert!(registry.surface_of("fake", "added").is_none());
+        assert!(registry.surface_of("fake", "main").is_some());
+    });
+}
+
+/// `SurfaceState::with_tree` starts from a known tree, without a `mount` call (decorations).
+#[gpui::test]
+async fn test_surface_with_tree_does_not_mount(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let tree = Tree::from_nodes(vec![node(1, None, text("given"))], TreeLimits::default())
+        .expect("valid tree");
+    let surface = panel_surface("decoration", "Decoration");
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| SurfaceState::with_tree(dyn_backend, surface, None, tree, cx));
+    cx.run_until_parked();
+    assert_eq!(props_of(&state, 1, cx), text("given"));
+    assert!(
+        !backend.calls().contains(&Call::Mount),
+        "no mount: {:?}",
+        backend.calls()
+    );
+}
+
 /// Sandbox: only http(s) links in an extension's markdown may open (after a confirmation).
 #[test]
 fn test_markdown_links_are_filtered() {

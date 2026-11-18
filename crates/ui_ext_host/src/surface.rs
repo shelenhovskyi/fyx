@@ -189,14 +189,40 @@ pub fn summarize_update(update: &Update) -> String {
 }
 
 impl SurfaceState {
+    /// A surface that mounts itself from the extension.
     pub fn new(
         backend: Rc<dyn UiBackend>,
         surface: Surface,
         link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut this = Self::unmounted(backend, surface, link);
+        this.mount(cx);
+        this
+    }
+
+    /// A surface whose first tree is already known (a decoration's `place-decoration` nodes):
+    /// no `mount` call; a later resync or Retry mounts from the extension as usual.
+    pub fn with_tree(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        link: Option<Rc<dyn SurfaceLink>>,
+        tree: Tree,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::unmounted(backend, surface, link);
+        this.set_tree(tree);
+        cx.notify();
+        this
+    }
+
+    fn unmounted(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        link: Option<Rc<dyn SurfaceLink>>,
+    ) -> Self {
         let backend_version = backend.api_version();
-        let mut this = Self {
+        Self {
             backend,
             surface,
             link,
@@ -215,9 +241,7 @@ impl SurfaceState {
             history: VecDeque::new(),
             rules: ApiRules::for_version(&backend_version),
             _mount: None,
-        };
-        this.mount(cx);
-        this
+        }
     }
 
     pub fn surface(&self) -> &Surface {
