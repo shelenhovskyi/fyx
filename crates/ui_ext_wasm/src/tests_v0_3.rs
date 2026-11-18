@@ -915,7 +915,7 @@ async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
         ),
         (
             "api_version = \"0.1.0\"\ncapabilities = [\"ui:notifications\"]\n",
-            "needs fyx:ui 0.3",
+            "\"ui:notifications\" needs fyx:ui 0.2",
         ),
         (
             "api_version = \"0.2.0\"\n[[fyx_ui.commands]]\nid = \"a\"\ntitle = \"A\"\n",
