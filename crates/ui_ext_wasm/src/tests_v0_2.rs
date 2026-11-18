@@ -158,7 +158,7 @@ async fn test_v0_2_probe_loads_as_v0_2(cx: &mut TestAppContext) {
     assert_eq!(extension.ui_api_version(), ApiVersion::V0_2_0);
     assert_eq!(
         extension.capabilities().len(),
-        4,
+        5,
         "no manifest: every capability"
     );
     assert_eq!(extension.surfaces_v0_2(), &[panel(SURFACE, Icon::Box)]);

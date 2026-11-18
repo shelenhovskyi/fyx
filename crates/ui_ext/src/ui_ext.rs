@@ -6,6 +6,7 @@
 //! converts into. [`ApiVersion`] selects the rules that differ between the two.
 
 mod api_version;
+pub mod image;
 mod tree;
 mod types;
 pub mod v0_2;
@@ -24,3 +25,5 @@ pub use types::*;
 pub const WIT_DIR: &str = WIT_DIR_V0_1_0;
 pub const WIT_DIR_V0_1_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
 pub const WIT_DIR_V0_2_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit/since_v0.2.0");
+/// The staged 0.3 world (docs/fyx/wit-0.3/design.md); its images model is in [`image`].
+pub const WIT_DIR_V0_3_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit/since_v0.3.0");
