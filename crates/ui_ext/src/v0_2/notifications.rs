@@ -31,6 +31,8 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// progresses one panel stacks.
 pub const AUTO_DISMISS_INFO: Duration = Duration::from_secs(6);
 pub const AUTO_DISMISS_WARNING: Duration = Duration::from_secs(10);
+/// The least a renderer must apply. Fyx's host applies at least 1 s to every card, notification
+/// buttons included (integration-6 Q10), so a guest must not count on a click landing sooner.
 pub const BUTTON_CLICK_GUARD: Duration = Duration::from_millis(750);
 pub const MAX_PROGRESS_REDRAWS_PER_SECOND: u32 = 10;
 pub const MAX_PROGRESSES_PER_PANEL: usize = 4;

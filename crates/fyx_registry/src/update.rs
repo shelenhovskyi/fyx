@@ -18,22 +18,21 @@ use crate::{
     VerifiedIndex,
 };
 
-/// A release installs only once it has been in the index this long, unless it is `urgent`.
+/// A release installs only once it has been in the index this long. `urgent` skips it only to
+/// replace an installed version the block list blocks (integration-6 R8): the release key signs
+/// `urgent`, and a leaked release key alone must not skip the wait, so the separately held
+/// block-list key has to agree. A fresh install of an urgent release waits too.
 pub const AGE_GATE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgeGate {
     Ready,
-    /// Younger than the gate but flagged as a security fix.
-    Urgent,
-    Waiting {
-        ready_at: Timestamp,
-    },
+    Waiting { ready_at: Timestamp },
 }
 
 impl AgeGate {
     pub fn allows_install(self) -> bool {
-        matches!(self, AgeGate::Ready | AgeGate::Urgent)
+        matches!(self, AgeGate::Ready)
     }
 }
 
@@ -95,8 +94,6 @@ pub fn age_gate_seen(release: &Release, first_seen: Option<Timestamp>, now: Time
     let ready_at = start.saturating_add(AGE_GATE);
     if now >= ready_at {
         AgeGate::Ready
-    } else if release.urgent {
-        AgeGate::Urgent
     } else {
         AgeGate::Waiting { ready_at }
     }
@@ -111,6 +108,10 @@ pub struct Permissions {
     pub capabilities: BTreeSet<String>,
     pub network_domains: BTreeSet<String>,
     pub processes: BTreeSet<String>,
+    /// The user accepted a package that also runs as a Zed extension (owner's Q1). Absent in
+    /// `state.json` written before integration-6: such an install has not accepted it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zed_extension: bool,
 }
 
 impl Permissions {
@@ -120,6 +121,7 @@ impl Permissions {
             capabilities: release.capabilities.clone(),
             network_domains: release.network_domains.clone(),
             processes: release.processes.clone(),
+            zed_extension: release.zed_extension,
         }
     }
 
@@ -151,6 +153,7 @@ impl Permissions {
                 .difference(&self.processes)
                 .cloned()
                 .collect(),
+            zed_extension: release.zed_extension && !self.zed_extension,
         }
     }
 
@@ -162,6 +165,7 @@ impl Permissions {
         self.network_domains
             .extend(release.network_domains.iter().cloned());
         self.processes.extend(release.processes.iter().cloned());
+        self.zed_extension |= release.zed_extension;
     }
 }
 
@@ -171,6 +175,9 @@ pub struct Additions {
     pub capabilities: BTreeSet<String>,
     pub network_domains: BTreeSet<String>,
     pub processes: BTreeSet<String>,
+    /// The release newly runs as a Zed extension (owner's Q1, W3 dfdb6b0023): an already-T2
+    /// install that gains a Zed `extension.wasm` is held for approval like a new capability.
+    pub zed_extension: bool,
 }
 
 impl Additions {
@@ -179,6 +186,7 @@ impl Additions {
             && self.capabilities.is_empty()
             && self.network_domains.is_empty()
             && self.processes.is_empty()
+            && !self.zed_extension
     }
 }
 
@@ -307,6 +315,10 @@ fn plan_extension(
         blocklist.and_then(|blocklist| blocklist.block_for(&extension.id, version, package_sha256))
     };
 
+    let active_block = block_for(
+        &extension.active.version,
+        extension.active.package_sha256.as_ref(),
+    );
     let mut update = None;
     let mut hold = None;
     // A file from disk never auto-updates (decision 18); the block list still applies to it.
@@ -318,7 +330,7 @@ fn plan_extension(
             if block_for(&release.version, Some(&release.package.sha256)).is_some() {
                 continue;
             }
-            let reasons = hold_reasons(extension, release, first_seen, now);
+            let reasons = hold_reasons(extension, release, active_block.is_some(), first_seen, now);
             if reasons.is_empty() {
                 update = Some(release);
                 break;
@@ -333,10 +345,7 @@ fn plan_extension(
     }
 
     let mut actions = Vec::new();
-    match block_for(
-        &extension.active.version,
-        extension.active.package_sha256.as_ref(),
-    ) {
+    match active_block {
         Some(block) => {
             let rollback_target = extension.previous.as_ref().filter(|previous| {
                 !extension.pinned
@@ -369,9 +378,12 @@ fn plan_extension(
     actions
 }
 
+/// `replaces_blocked`: the active version is blocked, so an `urgent` release skips the wait
+/// ([`AGE_GATE`]).
 fn hold_reasons(
     extension: &InstalledExtension,
     release: &Release,
+    replaces_blocked: bool,
     first_seen: &FirstSeen,
     now: Timestamp,
 ) -> Vec<HoldReason> {
@@ -379,7 +391,9 @@ fn hold_reasons(
     if extension.pinned {
         reasons.push(HoldReason::Pinned);
     }
-    if let AgeGate::Waiting { ready_at } = age_gate_seen(release, first_seen.get(release), now) {
+    if let AgeGate::Waiting { ready_at } = age_gate_seen(release, first_seen.get(release), now)
+        && !(replaces_blocked && release.urgent)
+    {
         reasons.push(HoldReason::TooNew { ready_at });
     }
     let additions = extension.approved.additions(release);
@@ -454,7 +468,7 @@ pub fn plan_install<'a>(
             continue;
         }
         match age_gate_seen(release, first_seen.get(release), now) {
-            AgeGate::Ready | AgeGate::Urgent => return Ok(release),
+            AgeGate::Ready => return Ok(release),
             AgeGate::Waiting { ready_at } => {
                 newest_waiting.get_or_insert((release, ready_at));
             }
@@ -581,10 +595,10 @@ mod tests {
             AgeGate::Waiting { ready_at }
         );
 
+        // integration-6 R8: `urgent` alone never skips the wait.
         let mut urgent = release;
         urgent.urgent = true;
-        assert_eq!(age_gate(&urgent, PUBLISHED), AgeGate::Urgent);
-        assert!(AgeGate::Urgent.allows_install());
+        assert_eq!(age_gate(&urgent, PUBLISHED), AgeGate::Waiting { ready_at });
         assert_eq!(age_gate(&urgent, ready_at), AgeGate::Ready);
     }
 
@@ -703,15 +717,23 @@ mod tests {
         );
     }
 
+    /// integration-6 R8: `urgent`, which the online release key signs, skips the wait only to
+    /// replace a version the block list blocks.
     #[test]
-    fn urgent_releases_skip_the_age_gate() {
+    fn urgent_releases_wait_unless_they_replace_a_blocked_version() {
         let mut fix = published(todo("1.0.1"), LATER);
         fix.urgent = true;
         let index = index(vec![todo("1.0.0"), fix]);
-        assert_eq!(
-            actions(&installed("1.0.0", None), &index, None, LATER),
-            vec![update("1.0.1")]
-        );
+        assert!(matches!(
+            &actions(&installed("1.0.0", None), &index, None, LATER)[..],
+            [Action::Hold { reasons, .. }] if matches!(&reasons[..], [HoldReason::TooNew { .. }])
+        ));
+        let blocklist = verified(blocklist(1, vec![entry("todo", "=1.0.0")]));
+        assert!(matches!(
+            &actions(&installed("1.0.0", None), &index, Some(&blocklist), LATER)[..],
+            [Action::Update { to, reason: UpdateReason::ReplacesBlocked(_) }]
+                if *to == version("1.0.1")
+        ));
     }
 
     #[test]
@@ -743,6 +765,37 @@ mod tests {
         );
     }
 
+    /// W3 dfdb6b0023: an update of an approved T2 install that newly runs as a Zed extension is
+    /// held for approval, and installs once approved.
+    #[test]
+    fn a_new_zed_extension_is_held() {
+        let t2 = |version: &str, zed_extension: bool| {
+            let mut release = todo(version);
+            release.tier = Tier::T2;
+            release.capabilities.insert("network:fetch".into());
+            release.zed_extension = zed_extension;
+            release
+        };
+        let index = index(vec![t2("1.0.0", false), t2("1.1.0", true)]);
+        let mut extension = installed("1.0.0", None);
+        extension.approved = Permissions::of(&t2("1.0.0", false));
+        assert_eq!(
+            actions(&extension, &index, None, LATER),
+            vec![Action::Hold {
+                version: version("1.1.0"),
+                reasons: vec![HoldReason::NeedsApproval(Additions {
+                    zed_extension: true,
+                    ..Additions::default()
+                })],
+            }]
+        );
+        extension.approved.approve(&t2("1.1.0", true));
+        assert_eq!(
+            actions(&extension, &index, None, LATER),
+            vec![update("1.1.0")]
+        );
+    }
+
     #[test]
     fn new_domains_programs_and_unknown_capabilities_are_held() {
         let mut current = todo("1.0.0");
@@ -771,6 +824,7 @@ mod tests {
                     capabilities: ["ui:from-the-future".to_string()].into(),
                     network_domains: ["cdn.example.com".to_string()].into(),
                     processes: ["rg".to_string()].into(),
+                    zed_extension: false,
                 })],
             }]
         );
@@ -911,6 +965,7 @@ mod tests {
                         capabilities: ["network:fetch".to_string()].into(),
                         network_domains: ["example.com".to_string()].into(),
                         processes: BTreeSet::new(),
+                        zed_extension: false,
                     })],
                 },
             ]

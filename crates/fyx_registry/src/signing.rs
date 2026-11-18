@@ -185,9 +185,11 @@ impl Keyset {
         (!keys.is_empty()).then_some(Self { keys })
     }
 
-    /// The registry's role separation (registry-repo.md, "Keys"), for the keyset the
-    /// registry repository publishes. Clients do not apply it: they only check that a signature
-    /// comes from a key with the right role.
+    /// The registry's role separation (registry-repo.md, "Keys"), for the keyset the registry
+    /// repository publishes and the one a release build compiles in. Clients do not apply it to
+    /// each document: they check that a signature comes from a key with the right role, and the
+    /// keyset is fixed at build time, so the build checks it once (integration-6 R9: the host's
+    /// `release_keyset` refuses a keyset that fails this).
     ///
     /// Refuses a key with two signing roles (`release`, `blocklist`, `snapshot`), and
     /// `blocklist-revocation` on a key without `snapshot`. With `online_snapshot_key`, the key
@@ -213,7 +215,8 @@ impl Keyset {
                 && !key.roles.contains(&KeyRole::Snapshot)
             {
                 return Err(Error::Invalid(format!(
-                    "key {} has blocklist-revocation but not snapshot; only the offline snapshot                      rotation key may have it",
+                    "key {} has blocklist-revocation but not snapshot; only the offline snapshot \
+                     rotation key may have it",
                     key.key_id
                 )));
             }
@@ -231,7 +234,8 @@ impl Keyset {
             }
             if key.roles.contains(&KeyRole::BlocklistRevocation) {
                 return Err(Error::Invalid(format!(
-                    "the online snapshot key {key_id} has blocklist-revocation; that role                      belongs to the offline rotation key only"
+                    "the online snapshot key {key_id} has blocklist-revocation; that role \
+                     belongs to the offline rotation key only"
                 )));
             }
         }
