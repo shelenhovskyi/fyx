@@ -351,6 +351,7 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                     wit_process::SpawnError::LimitExceeded
                 }
                 ui_ext::process::SpawnError::Io(error) => wit_process::SpawnError::Io(error),
+                ui_ext::process::SpawnError::Other(why) => wit_process::SpawnError::Other(why),
             },
         ))),
         net::IoEvent::EditDone(id, result) => Some(wit_io::IoEvent::EditDone((
@@ -364,6 +365,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                     EditError::NotFound(why) => wit_edit::EditError::NotFound(why),
                     EditError::Invalid(why) => wit_edit::EditError::Invalid(why),
                     EditError::Cancelled => wit_edit::EditError::Cancelled,
+                    EditError::UntrustedWorktree => wit_edit::EditError::UntrustedWorktree,
+                    EditError::Other(why) => wit_edit::EditError::Other(why),
                 }
             }),
         ))),
@@ -452,9 +455,13 @@ fn review_info(info: ui_ext::observe::ReviewInfo) -> wit_observe::ReviewInfo {
 fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
     use ui_ext::observe::AgentEvent;
     match event {
-        AgentEvent::Snapshot(reviews) => {
-            wit_observe::AgentEvent::Snapshot(reviews.into_iter().map(review_info).collect())
-        }
+        AgentEvent::Snapshot {
+            reviews,
+            older_dropped,
+        } => wit_observe::AgentEvent::Snapshot(wit_observe::ReviewSnapshot {
+            reviews: reviews.into_iter().map(review_info).collect(),
+            older_dropped,
+        }),
         AgentEvent::Opened(info) => wit_observe::AgentEvent::Opened(review_info(info)),
         AgentEvent::Updated(info) => wit_observe::AgentEvent::Updated(review_info(info)),
         AgentEvent::Resolved(info) => wit_observe::AgentEvent::Resolved(review_info(info)),
@@ -655,6 +662,10 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
                 model::HostErrorCode::Denied => wit_host::HostErrorCode::Denied,
+                model::HostErrorCode::UntrustedWorktree => {
+                    wit_host::HostErrorCode::UntrustedWorktree
+                }
+                model::HostErrorCode::NoWorktree => wit_host::HostErrorCode::NoWorktree,
             },
             message,
         }

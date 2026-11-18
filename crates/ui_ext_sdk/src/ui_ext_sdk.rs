@@ -1811,6 +1811,10 @@ impl HostErrorCode {
             HostErrorCode::Unavailable => "unavailable",
             #[cfg(feature = "fyx-ui-0-3")]
             HostErrorCode::Denied => "denied",
+            #[cfg(feature = "fyx-ui-0-3")]
+            HostErrorCode::UntrustedWorktree => "untrusted-worktree",
+            #[cfg(feature = "fyx-ui-0-3")]
+            HostErrorCode::NoWorktree => "no-worktree",
         }
     }
 }
@@ -2172,6 +2176,8 @@ impl std::fmt::Display for EditError {
             EditError::NotFound(why) => write!(f, "not found: {why}"),
             EditError::Invalid(why) => write!(f, "invalid edit: {why}"),
             EditError::Cancelled => f.write_str("the edit was cancelled"),
+            EditError::UntrustedWorktree => f.write_str("the worktree is not trusted"),
+            EditError::Other(why) => f.write_str(why),
         }
     }
 }
@@ -2192,6 +2198,7 @@ impl std::fmt::Display for SpawnError {
             SpawnError::NotFound(program) => write!(f, "program not found: {program}"),
             SpawnError::LimitExceeded => f.write_str("too many processes"),
             SpawnError::Io(error) => write!(f, "starting the program failed: {error}"),
+            SpawnError::Other(why) => f.write_str(why),
         }
     }
 }

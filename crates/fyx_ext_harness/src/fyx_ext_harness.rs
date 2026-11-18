@@ -1550,7 +1550,10 @@ impl Harness {
                     self.observing = true;
                     self.agent_events.insert(
                         0,
-                        ui_ext::observe::AgentEvent::Snapshot(self.agent_snapshot.clone()),
+                        ui_ext::observe::AgentEvent::Snapshot {
+                            reviews: self.agent_snapshot.clone(),
+                            older_dropped: false,
+                        },
                     );
                 }
             }

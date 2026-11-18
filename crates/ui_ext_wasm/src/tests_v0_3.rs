@@ -1962,9 +1962,10 @@ mod harness_conformance_process {
         let (host, mut harness) = both(None, Some(&worktree), cx).await;
         let report = command(&host, &mut harness, &format!("spawn -- {MISSING}-2")).await;
         assert!(report.contains("denied"), "{report}");
+        // A5: no worktree is its own code.
         let (host, mut harness) = both(Some(Arc::new(GrantAll)), None, cx).await;
         let report = command(&host, &mut harness, &format!("spawn -- {MISSING}-2")).await;
-        assert!(report.contains("unavailable"), "{report}");
+        assert!(report.contains("no-worktree"), "{report}");
     }
 
     /// The harness's fake programs: stdin, output, the exit code, a kill.

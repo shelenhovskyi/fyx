@@ -963,13 +963,13 @@ impl ApiState {
         match self.worktree {
             None => {
                 return Err(host_error(
-                    model::HostErrorCode::Unavailable,
+                    model::HostErrorCode::NoWorktree,
                     "no worktree is open",
                 ));
             }
             Some(false) => {
                 return Err(host_error(
-                    model::HostErrorCode::Denied,
+                    model::HostErrorCode::UntrustedWorktree,
                     "the worktree is not trusted",
                 ));
             }
