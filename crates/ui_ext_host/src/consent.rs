@@ -479,7 +479,10 @@ impl ConsentStore {
             }
         };
         match serde_json::to_string_pretty(&file) {
-            Ok(text) => Some((path, text)),
+            Ok(text) => {
+                record_newest(&path, &text);
+                Some((path, text))
+            }
             Err(error) => {
                 log::error!("fyx:ui: cannot save consent: {error}");
                 None
@@ -615,7 +618,30 @@ pub async fn read_file(
 }
 
 /// Writes what [`ConsentStore::grant`] returned.
+/// The newest contents of each consent file, recorded in order on the main thread when they are
+/// made ([`ConsentStore::file_contents`]): saves run in the background and may run in any order,
+/// so each one writes the newest, not its own (integration-5 R9).
+static NEWEST: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
+    std::sync::LazyLock::new(Default::default);
+static WRITING: std::sync::LazyLock<futures::lock::Mutex<()>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn record_newest(path: &Path, text: &str) {
+    NEWEST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_path_buf(), text.to_string());
+}
+
+/// Writes the consent file: the newest contents made for `path`, or `text` when none was recorded.
 pub async fn save(path: PathBuf, text: String, fs: &dyn Fs) {
+    let _writing = WRITING.lock().await;
+    let text = NEWEST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&path)
+        .cloned()
+        .unwrap_or(text);
     if let Some(dir) = path.parent()
         && let Err(error) = fs.create_dir(dir).await
     {
@@ -814,7 +840,7 @@ mod tests {
         );
         // A new T2 capability with a program, an argument pattern and an environment name.
         let v3 = manifest(
-            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]\n[network]\ndomains = [\"api.example.com\"]\n[[processes]]\nname = \"git\"\nargs = [\"status\"]\n[process]\nenv = [\"GIT_DIR\"]",
+            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]\n[network]\ndomains = [\"api.example.com\"]\n[[processes]]\nname = \"git\"\nargs = [\"status\"]\n[process]\nenv = [\"FYX_TEST\"]",
         );
         check(&v3).expect("valid");
         let ConsentState::NeedsApproval { new_capabilities } = store.state("ext", &record(&v3))
@@ -824,7 +850,7 @@ mod tests {
         assert_eq!(
             new_capabilities,
             [
-                "process:env@GIT_DIR",
+                "process:env@FYX_TEST",
                 "process:spawn",
                 "process:spawn@git",
                 "process:spawn@git status"

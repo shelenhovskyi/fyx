@@ -339,7 +339,12 @@ fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
             else {
                 return Ok(None);
             };
-            let info = store.inspect_package(&package, fs.as_ref()).await?;
+            // Read once: what the dialog shows is what installs (integration-5 R5).
+            let bytes = store.read_package_file(&package, fs.as_ref()).await?;
+            let label = package.display().to_string();
+            let info = store
+                .inspect_package_bytes(bytes.clone(), &label, fs.as_ref())
+                .await?;
             let state = store.state(fs.as_ref()).await?;
             let current = state
                 .extensions
@@ -348,7 +353,8 @@ fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
                 .unwrap_or_default();
             let detail = format!(
                 "It asks for:\n{}\n\nUnsigned, not from the registry.\nPackage: {}{current}",
-                describe_capability_ids(&info.manifest.capabilities).join("\n"),
+                // Every item it is granted, hosts and programs included (integration-5 R9).
+                describe_capability_ids(&info.manifest.consent_items()).join("\n"),
                 package.display(),
             );
             let answer = workspace.update_in(cx, |_, window, cx| {
@@ -363,7 +369,10 @@ fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
             if answer.await != Ok(0) {
                 return Ok(None);
             }
-            let installed = store.install_package(&package, fs.as_ref()).await?;
+            let source = crate::install_store::VersionSource::local_file(&bytes);
+            let installed = store
+                .install_package_bytes(bytes, &label, source, None, fs.as_ref())
+                .await?;
             let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
             grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
             let loaded = load_outcome(waiter, cx).await;
@@ -485,9 +494,21 @@ fn run(
             };
             let message = match command {
                 StoreCommand::RollBack => {
+                    if let Some(blocked) =
+                        crate::fyx_extensions_page::rollback_blocked(&store, id, fs.as_ref(), cx)
+                            .await
+                    {
+                        anyhow::bail!("{blocked}");
+                    }
                     let waiter = cx.update(|_, cx| expect_load(id, cx))?;
                     let version = store.rollback(id, fs.as_ref()).await?;
-                    grant_and_rescan(&store, id, fs.clone(), cx).await?;
+                    // No dialog showed the old version's permissions, so nothing is granted: a
+                    // permission it needs that was revoked waits for "Enable" (integration-5 R4).
+                    cx.update(|_, cx| {
+                        if let Some(registry) = UiExtensionRegistry::global(cx) {
+                            registry.update(cx, |registry, cx| registry.rescan(cx));
+                        }
+                    })?;
                     match load_outcome(waiter, cx).await {
                         Ok(()) => format!("Rolled {id} back to {version}"),
                         Err(reason) => {

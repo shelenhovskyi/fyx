@@ -343,8 +343,35 @@ impl UiExtensionRegistry {
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
         if let Some((path, text)) = self.consent.revoke(extension_id, capability)? {
+            let fs = fs.clone();
             cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
                 .detach();
+        }
+        // A registry install's approval goes too, so the next update's dialog asks for it again
+        // instead of it coming back silently (integration-5 R4).
+        if let Some(store) = self.install_store().cloned() {
+            let (extension_id, capability) = (extension_id.to_string(), capability.to_string());
+            cx.background_spawn(async move {
+                let Ok(installed) = store.installed_extensions(fs.as_ref()).await else {
+                    return;
+                };
+                let Some(mut approved) = installed
+                    .into_iter()
+                    .find(|installed| installed.id.as_str() == extension_id)
+                    .map(|installed| installed.approved)
+                else {
+                    return;
+                };
+                if approved.capabilities.remove(&capability) {
+                    if let Err(error) = store
+                        .set_approved(&extension_id, approved, fs.as_ref())
+                        .await
+                    {
+                        log::error!("fyx:ui: cannot record the revoke of {capability}: {error:#}");
+                    }
+                }
+            })
+            .detach();
         }
         log::info!("fyx:ui: revoked {capability} from {extension_id}");
         cx.notify();

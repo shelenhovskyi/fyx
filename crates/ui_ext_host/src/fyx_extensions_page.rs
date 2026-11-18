@@ -43,7 +43,6 @@ use workspace::{
 use crate::{
     UiExtensionRegistry,
     install::{FyxExtensionsSettings, capability_chip_label, describe_capability_ids},
-    install_store::VersionSource,
     registry_service::{
         RefreshOutcome, Registry, RegistryLocation, RegistryStateDir, UPDATE_CHECK_INTERVAL,
         compiled_keyset, now,
@@ -474,16 +473,7 @@ pub(crate) async fn apply_plan(
                 let result = async {
                     let bytes = registry.download(release).await?;
                     store
-                        .install_package_bytes(
-                            bytes,
-                            &format!("{id} {to}"),
-                            VersionSource {
-                                origin: Origin::Registry,
-                                package_sha256: Some(release.package.sha256),
-                            },
-                            None,
-                            fs,
-                        )
+                        .install_registry_package(bytes, release, None, fs)
                         .await
                 }
                 .await;
@@ -657,16 +647,7 @@ fn install_release(
                 let mut approved = base;
                 approved.approve(&release);
                 let installed = store
-                    .install_package_bytes(
-                        bytes,
-                        &format!("{} {}", release.id, release.version),
-                        VersionSource {
-                            origin: Origin::Registry,
-                            package_sha256: Some(release.package.sha256),
-                        },
-                        Some(approved),
-                        fs.as_ref(),
-                    )
+                    .install_registry_package(bytes, &release, Some(approved), fs.as_ref())
                     .await?;
                 let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
                 grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
@@ -694,6 +675,36 @@ fn install_release(
 }
 
 /// Pin, roll back or uninstall, then rescan and refresh.
+/// Why the version a rollback would bring back may not run: the block list names it
+/// (integration-5 R9). `None` without a registry or a block list.
+pub(crate) async fn rollback_blocked(
+    store: &crate::install_store::InstallStore,
+    id: &str,
+    fs: &dyn Fs,
+    cx: &mut gpui::AsyncApp,
+) -> Option<String> {
+    let registry = cx.update(|cx| {
+        let hub = RegistryHub::global(cx)?;
+        hub.update(cx, |hub, cx| hub.registry(cx))
+    })?;
+    let installed = store
+        .installed_extensions(fs)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|installed| installed.id.as_str() == id)?;
+    let previous = installed.previous?;
+    let client = registry.client().lock().await;
+    client
+        .blocklist()?
+        .block_for(
+            &installed.id,
+            &previous.version,
+            previous.package_sha256.as_ref(),
+        )
+        .map(|block| format!("{id} {} is blocked: {}", previous.version, block.reason))
+}
+
 fn store_change(
     workspace: WeakEntity<Workspace>,
     id: String,
@@ -720,6 +731,10 @@ fn store_change(
                         }
                     }
                     StoreChange::RollBack => {
+                        if let Some(blocked) = rollback_blocked(&store, &id, fs.as_ref(), cx).await
+                        {
+                            anyhow::bail!("{blocked}");
+                        }
                         let version = store.rollback(&id, fs.as_ref()).await?;
                         format!("Rolled {id} back to {version}")
                     }
