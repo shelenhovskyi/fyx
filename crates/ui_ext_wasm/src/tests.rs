@@ -860,7 +860,9 @@ mod harness_conformance {
                 .handle_event(SURFACE, UiEvent::Click(id))
                 .await
                 .expect("event");
-            let outcome = harness.event_v0_1(SURFACE, UiEvent::Click(id)).expect("event");
+            let outcome = harness
+                .event_v0_1(SURFACE, UiEvent::Click(id))
+                .expect("event");
             assert_eq!(pushes(&reply.pushed), outcome.pushed, "click {id}");
             assert_eq!(reply.value, outcome.update, "click {id}");
             tree.apply_update(reply.value).expect("apply");
@@ -909,7 +911,11 @@ mod harness_conformance {
                 .await
                 .is_err()
         );
-        assert!(harness.handle_event_raw_v0_1(probe::SURFACE, flood).is_err());
+        assert!(
+            harness
+                .handle_event_raw_v0_1(probe::SURFACE, flood)
+                .is_err()
+        );
         let next = UiEvent::Click(probe::PUSH);
         assert!(
             host.handle_event(probe::SURFACE, next.clone())
