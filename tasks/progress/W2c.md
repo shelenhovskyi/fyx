@@ -94,10 +94,14 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
 - **`images` import**: `ui:images` declared and granted by the broker at each call, the byte
   checks, at most 32 live handles, handles never reused; `HostEffect::AddImage { handle, format,
   bytes }` / `RemoveImage { handle }`. `ui:images` and `ui:canvas` are T0.
-- **Not yet**: `image` nodes are refused (`invalid-argument` in a push, the call's error in a
-  reply) until the model has `Props::Image`, which waits on W3 (asked 2026-11-18: add it to
-  `ui_ext::v0_2::Props`?). Then the host checks `check_image_props` and `check_image_placement` on
-  every update, as it already can.
+- **`image` nodes** (coordinator decision 2026-11-18): `ui_ext::v0_2::Props::Image(ImageProps)`;
+  `v0_2` is documented as the newest model, staged 0.3 additions included. The host checks image
+  props when an update applies (`ApiState::check_images`): in `push-update` (`invalid-argument`)
+  and in 0.3 replies to `mount`, `handle-event`, `tick` and `list-rows` (the guest's error, a
+  resync): `check_image_props`, panels only (`check_image_placement`; decorations are refused
+  too), and a `generated` handle `add-image` returned (a removed one is fine, design.md §12).
+  The renderer draws the alt text in a muted box (`Renderer::image_placeholder`) until W3's 4.11;
+  the 0.1 shims (host and harness) turn an image into its alt text.
 - Tests: `fixtures/probe_v0_3` and `tests_v0_3.rs` (the bomb, 1 MiB + 1, entity SVG, junk, the
   32-handle cap, the capability, image nodes refused, traps), unit tests in `ui_ext::image`,
   `effects` and `images` (path fixtures, links out on Unix).
