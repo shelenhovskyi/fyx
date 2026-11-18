@@ -534,6 +534,17 @@ impl Render for SurfaceView {
                             })),
                     )
                 })
+                .when_some(state.failure_detail().cloned(), |this, detail| {
+                    this.child(
+                        Button::new("fyx-ui-copy-error", "Copy Error Details")
+                            .style(UiButtonStyle::Subtle)
+                            .on_click(move |_: &ClickEvent, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    detail.to_string(),
+                                ))
+                            }),
+                    )
+                })
                 .into_any_element(),
             Phase::Ready(tree) => {
                 let renderer = Renderer {

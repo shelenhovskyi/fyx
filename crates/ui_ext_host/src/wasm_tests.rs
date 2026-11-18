@@ -796,6 +796,77 @@ async fn test_unknown_and_t2_capabilities_are_refused(cx: &mut TestAppContext) {
     }
 }
 
+/// Triage-3 #7: an install command learns whether its load worked (`wait_for_load`), and an
+/// extension whose `extension.toml` stops parsing is not taken for uninstalled: it keeps running
+/// and its surface says what is wrong.
+#[gpui::test]
+async fn test_load_outcomes_are_reported(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let root = tempfile::tempdir().expect("temp dir");
+    let installed = root.path().join("installed");
+    let ui_dir = installed.join("fyx-test-status-item");
+    std::fs::create_dir_all(&ui_dir).expect("ui dir");
+    std::fs::copy(status_item_manifest(), ui_dir.join("extension.toml")).expect("manifest");
+    std::fs::write(ui_dir.join("fyx_ui.wasm"), b"not a component").expect("broken component");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    const ID: &str = "fyx-test-status-item";
+
+    // A component that does not load: the waiter hears why.
+    let waiter = registry.update(cx, |registry, _| registry.wait_for_load(ID));
+    registry.update(cx, |registry, cx| {
+        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    });
+    let mut waiter = waiter;
+    let mut outcome = None;
+    run_until(cx, "the failed load", |_| {
+        if outcome.is_none() {
+            outcome = waiter.try_recv().ok().flatten();
+        }
+        outcome.is_some()
+    });
+    assert!(matches!(outcome, Some(Err(_))), "{outcome:?}");
+
+    // A good one: loaded.
+    std::fs::write(ui_dir.join("fyx_ui.wasm"), status_item_wasm()).expect("component");
+    let mut waiter = registry.update(cx, |registry, _| registry.wait_for_load(ID));
+    registry.update(cx, |registry, cx| registry.rescan(cx));
+    let mut outcome = None;
+    run_until(cx, "the load", |_| {
+        if outcome.is_none() {
+            outcome = waiter.try_recv().ok().flatten();
+        }
+        outcome.is_some()
+    });
+    assert_eq!(outcome, Some(Ok(())));
+    let surface = registry.read_with(cx, |registry, _| {
+        registry.surface_of(ID, "status").unwrap().state.clone()
+    });
+    run_until(cx, "the mount", |cx| {
+        surface.read_with(cx, |state, _| state.tree().is_some())
+    });
+
+    // The manifest breaks: not an uninstall; the surface keeps its tree and says why.
+    std::fs::write(ui_dir.join("extension.toml"), "this is = = not toml").expect("broken toml");
+    registry.update(cx, |registry, cx| registry.rescan(cx));
+    run_until(cx, "the scan", |cx| {
+        surface.read_with(cx, |state, _| state.last_error().is_some())
+    });
+    surface.read_with(cx, |state, _| {
+        assert!(state.tree().is_some(), "still running");
+        let error = state.last_error().unwrap();
+        assert!(error.contains("cannot be read"), "{error}");
+    });
+    assert!(
+        registry.read_with(cx, |registry, _| registry
+            .surface_of(ID, "status")
+            .is_some()),
+        "not uninstalled"
+    );
+}
+
 /// integration-3 finding 2: UI extensions load from the installed-extensions directory (any
 /// subdirectory with a `[fyx_ui]` table; a regular Zed extension is skipped), reload when their
 /// component changes, and stop when they are uninstalled.

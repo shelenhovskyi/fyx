@@ -960,9 +960,16 @@ async fn test_a_dead_instance_stops_the_extension(cx: &mut TestAppContext) {
     state.update(cx, |state, cx| state.dispatch(UiEvent::Click(FATAL), cx));
     cx.run_until_parked();
     let message = failure(&state, cx).expect("the surface stopped");
-    assert!(
-        message.contains("fake stopped") && message.contains("wasm trap"),
-        "{message}"
+    // Triage-3 #7: plain words and the next step; the raw error is the detail.
+    assert_eq!(
+        message,
+        "fake took too long to answer and was stopped. Restart the extension to try again."
+    );
+    assert_eq!(
+        state
+            .read_with(cx, |state, _| state.failure_detail().cloned())
+            .as_deref(),
+        Some("wasm trap: interrupt")
     );
     assert_eq!(backend.failed_from.borrow().as_slice(), ["counter"]);
     assert!(
