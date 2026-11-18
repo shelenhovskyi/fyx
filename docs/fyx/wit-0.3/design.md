@@ -591,26 +591,23 @@ result<http-response, fetch-error>)`. A host import, not WASI sockets (spec deci
   no TLS bypass.
 - **Headers.** The guest may set any header except the hop-by-hop and framing set (WIT comment),
   `proxy-*` and `accept-encoding`. `accept-encoding` is host-owned because the host decodes the
-  body and applies the cap to the decoded size: it sends only the encodings it can decode (W2c,
-  0213dd3cc7: `gzip` today). The host sets `user-agent: Fyx/<major.minor> (extension <id>/<version>)`
-  unless the guest sets one, and adds no cookie, no authorization and no editor token. There is no
+  body and applies the cap to the decoded size: it sends only the encodings it can decode,
+  `accept-encoding: gzip, deflate, br, zstd` (W2c, 1cec81f03f).
+- **User-agent.** The host sets `user-agent: Fyx/<major.minor> (extension <id>/<version>)` unless
+  the guest sets one (W2c, 9fad627507). Fyx's version comes from the app; the extension's version
+  from `extension.toml`, and only when it is a plain version string, otherwise `/<version>` is left
+  out.
+- **No credentials.** The host adds no cookie, no authorization and no editor token. There is no
   cookie jar; `set-cookie` is returned to the guest as a header.
-- **Decompression.** gzip, deflate, brotli and zstd are decoded by the host, and the 16 MiB cap
-  applies to the decoded body, counted while streaming (a compression bomb ends with `too-large`).
-  A `content-length` above 16 MiB fails before the body is read. W2c's first cut (0213dd3cc7)
-  decodes gzip only; any other `content-encoding` gives `other` until the rest land (plan 4.6
-  follow-ups).
-- **WIT comment fix (for the gatekeeper).** The `headers` comment in
-  `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit` does not list `accept-encoding` yet. One line, at
-  line 1011 on `origin/integration` (1014 on W2c's branch):
-
-  ```diff
-  @@ -1011 +1011 @@
-  -        /// header are set by the host and rejected here.
-  +        /// header, and `accept-encoding`, are set by the host and rejected here.
-  ```
-
-  The same change is already in this folder's `fyx-ui-0.3.wit`.
+- **Decompression.** The host decodes `gzip`, `deflate` (zlib, as RFC 9110 defines it), `br` and
+  `zstd` (W2c, 1cec81f03f). The 16 MiB cap applies to the decoded body, counted while streaming,
+  so a compression bomb ends with `too-large`. zstd frames may use a window of at most 8 MiB
+  (`window_log_max(23)`), so a frame cannot make the decoder allocate 128 MiB; a wider window
+  fails. Any other `content-encoding` gives `other`. A `content-length` above 16 MiB fails before
+  the body is read.
+- **The WIT comment** on `headers` names `accept-encoding` among the host-set headers (W0,
+  e1da7d5e3f, in `crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`; also in this folder's
+  `fyx-ui-0.3.wit`).
 - **Timeout.** 30 s for the whole request, redirects included; the guest may ask for less.
 
 **Limits.** 8 in flight (decision 23), 120 started per minute (token bucket), request body 4 MiB,

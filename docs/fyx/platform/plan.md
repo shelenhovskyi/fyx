@@ -73,18 +73,26 @@ rank below every other P4 task. If P4 slips, 4.10–4.12 (images) stay and 4.13�
 to 0.4.
 
 **4.6 follow-ups** (W2c's "not done yet" list in `tasks/progress/W2c.md`, at 0213dd3cc7). The
-first cut of `network:fetch` lands without these; each is still W2c's and still needed for 4.6 to
-match [design §8](../wit-0.3/design.md#8-networkfetch-plan-46):
+first cut of `network:fetch` landed without these; each is W2c's, needed for 4.6 to match
+[design §8](../wit-0.3/design.md#8-networkfetch-plan-46).
+
+Done (W2c, `claude/fyx-w2c-host-0-2-cbde2c`):
+
+- ~~brotli, zstd and deflate decoding~~: **done** in 1cec81f03f. `accept-encoding: gzip, deflate,
+  br, zstd`, each under the 16 MiB decoded cap, zstd windows capped at 8 MiB;
+- ~~the Fyx version in the user-agent~~: **done** in 9fad627507,
+  `Fyx/<major.minor> (extension <id>/<version>)`;
+- ~~one Extension Inspector line per request~~: **done host side** in 6b36bc4e7d. Each fetch,
+  process, edit and agent-feed operation leaves a record (capability, id, what, outcome,
+  duration), with the URL stripped of user info, query and fragment; never bodies or header
+  values. Showing the records in the Inspector is W3's (`ui_ext_host/src/inspector.rs`).
+
+Still open:
 
 - Fyx's proxy setting (without credentials; the address check cannot run behind a proxy);
-- brotli, zstd and deflate decoding, with the 16 MiB decoded cap (today any other
-  `content-encoding` → `other`);
 - the webpki roots next to the system roots (today reqwest's native roots only);
 - a local TLS test server with a test CA injected only in tests (the pinning test uses a plain TCP
-  server);
-- one Extension Inspector line per request: method, host, path, status, bytes, time; never bodies
-  or header values;
-- the Fyx version in the user-agent (`Fyx/<major.minor> (extension <id>/<version>)`).
+  server).
 
 ## Deferred after 1.0
 
