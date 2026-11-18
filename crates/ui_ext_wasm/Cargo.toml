@@ -18,14 +18,17 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
+# fyx: the decoders network:fetch offers in `accept-encoding`.
+async-compression = { workspace = true, features = ["brotli", "zlib", "zstd"] }
 bytes.workspace = true
 fs.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
+http_client_tls.workspace = true
 http_proxy.workspace = true
 log.workspace = true
+release_channel.workspace = true
 moka.workspace = true
 reqwest.workspace = true
 semver.workspace = true
@@ -54,5 +57,7 @@ windows = { workspace = true, features = [
 fyx_ext_harness.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+rustls.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+tokio-rustls.workspace = true

@@ -323,3 +323,48 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   takes an argument, and unit tests of the rules and the queue.
 - **For W3:** implement both traits in ui_ext_host (contract in their doc comments).
 - **Not done:** the real implementations (W3 with W5's read API), the Inspector line.
+
+## 4.6 follow-up 1: Inspector lines for T2 operations (2026-11-18)
+
+- `Diagnostics.io: VecDeque<IoRecord>` (200 kept): capability, id, `what`, outcome (`None` while
+  running), duration. Started by each handle after its call, finished in `Running::deliver`
+  when the outcome is delivered; the agent feed notes start and stop.
+- `what` holds no secrets: a URL without user info, query or fragment; a program and its
+  argument count; an edit's label and file count.
+- Rendering it in the Inspector is W3's (ui_ext_host/src/inspector.rs).
+
+## 4.6 follow-ups 2 and 3: user-agent, decoders (2026-11-18)
+
+- `user-agent: Fyx/<major.minor> (extension <id>/<version>)` (design §8); the version from
+  `extension.toml` (`UiManifest.version`, `LoadOptions.extension_version`) only when it is a
+  plain version string, else left out. Fyx's version from `release_channel::AppVersion`.
+- `accept-encoding: gzip, deflate, br, zstd`; each is decoded under the 16 MiB decoded cap
+  (`deflate` is zlib, RFC 9110); zstd windows are capped at 8 MiB (`window_log_max(23)`), so a
+  frame cannot make the decoder allocate 128 MiB. Tests: round trip and bomb per encoding, the
+  header, a wide-window zstd frame refused.
+- Lock: async-compression features `brotli`, `zlib`, `zstd` in ui_ext_wasm add brotli 8.0.4,
+  brotli-decompressor 5.0.3, alloc-no-stdlib 2.0.4, alloc-stdlib 0.2.4 (BSD-3-Clause/MIT;
+  `cargo deny` advisories and bans ok).
+
+## 4.6 follow-ups 4 and 5: TLS roots, local TLS test server (2026-11-18)
+
+- `network:fetch` uses Zed's TLS exactly as its own client does
+  (`use_preconfigured_tls(http_client_tls::tls_config())`): the platform verifier, falling back
+  to the bundled webpki roots when it cannot load. No extension CA, no bypass.
+- `test_server::start_tls` serves the same handler over TLS with a checked-in test CA and
+  `localhost` certificate (`src/test_tls/`, DER, P-256, valid to 2126, regeneration steps in its
+  README); `Fetcher::with_tls` (test only) trusts that CA. Test: https end to end, and the same
+  request with Zed's roots fails with `tls`.
+- Lock: ui_ext_wasm gains `http_client_tls` (dependency) and `rustls`, `tokio-rustls`
+  (dev-dependencies), all already in the workspace.
+
+## 4.6 follow-up 6: Fyx's proxy setting (2026-11-18)
+
+- `network::ProxySetting`: a shared cell the host keeps current from Zed's `proxy` setting
+  (the raw value, not `ProxySettings::proxy_url()`, which falls back to the environment); each
+  request reads it. `http`, `https`, `socks5`, `socks5h` only; anything else goes direct.
+- `LoadOptions.proxy`; environment proxies stay off (`no_proxy()` first). The address checks
+  still run before a proxied request (the proxy resolves on its own); `localhost` is never
+  proxied. Tests: the CONNECT reaches the proxy, a private answer is refused before it,
+  `localhost` goes direct, clearing applies to the next request, the scheme rule.
+- For W3: set it in ui_ext_host from `ProxySettings::get_global(cx).proxy` and on each change.

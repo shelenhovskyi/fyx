@@ -181,6 +181,11 @@ impl EditHandle {
     /// Starts `pending` on the current tokio runtime, in call order.
     pub(crate) fn start(&self, pending: Vec<PendingEdit>) {
         for PendingEdit { id, edit } in pending {
+            self.running.diagnostics.io_started(
+                CAPABILITY_EDIT,
+                id,
+                format!("{:?} ({} files)", edit.label, edit.files.len()),
+            );
             let (handle, registration) = AbortHandle::new_pair();
             self.set.lock().insert(id, handle);
             let set = self.set.clone();
