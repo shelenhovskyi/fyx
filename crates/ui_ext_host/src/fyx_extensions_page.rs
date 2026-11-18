@@ -3,9 +3,15 @@
 //! `fyx_ui: open fyx extensions`.
 //!
 //! - **Search** over the verified index (name, id, description).
-//! - **Install** the newest installable release: what it asks for is confirmed first (nothing to
-//!   confirm for an all-T0 release), the package is verified against the signed hash, unpacked
-//!   by the install store as a registry install, and loaded.
+//! - **Install** the release the client's `plan_install` picks (the newest one that is not blocked
+//!   and passed the 24 h wait; integration-5 R1): what it asks for is confirmed first (nothing to
+//!   confirm for an all-T0 release), then `download_for_install` plans again, and the install
+//!   stops if that picks another release. The package is verified against the signed hash,
+//!   unpacked by the install store as a registry install, and loaded. A blocked extension shows
+//!   "Blocked", one still in its wait "Available in …", both on a disabled button.
+//! - **Checks** (decision 3): when the page opens or refreshes (block actions only: roll back,
+//!   disable, enable again) and [`UPDATE_CHECK_INTERVAL`] after the last check (updates too). The
+//!   last check's time is kept across restarts; nothing is checked at startup.
 //! - **Installed:** version, origin ("Unsigned, not from the registry" for a file install), pin,
 //!   roll back, uninstall; an update the plan names; a held update with its reasons, and
 //!   "Approve and Update" when it waits for new permissions.
@@ -16,8 +22,8 @@ use anyhow::Result;
 use editor::{Editor, EditorEvent};
 use fs::Fs;
 use fyx_registry::{
-    Action, Freshness, HoldReason, InstalledExtension, Origin, Permissions, PlannedAction, Release,
-    Unavailable,
+    Action, Freshness, HoldReason, InstallError, InstallRefusal, InstalledExtension, Origin,
+    PlannedAction, Release, Timestamp, Unavailable,
 };
 use gpui::{
     App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
@@ -67,9 +73,14 @@ pub struct RegistryHub {
     /// Why there is no registry (off, a bad URL, no trusted keys).
     off: Option<SharedString>,
     refreshing: bool,
+    /// When the last check started (`None`: not read from the state dir yet, or never).
+    last_check: Option<Timestamp>,
+    last_check_read: bool,
     pub last_refresh: Option<RefreshOutcome>,
-    /// The newest release of each extension in the index.
-    pub listing: Vec<Release>,
+    /// Each extension in the index, with what a fresh install would get.
+    pub listing: Vec<Listed>,
+    /// The releases the planned actions name (updates and held updates).
+    pub releases: Vec<Release>,
     pub unavailable: Option<Unavailable>,
     pub freshness: Option<Freshness>,
     pub installed: Vec<InstalledExtension>,
@@ -80,6 +91,27 @@ pub struct RegistryHub {
     pub applied: Vec<String>,
     _refresh: Option<Task<()>>,
 }
+
+/// One extension of the listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// The release a fresh install gets, or the newest one when it cannot be installed.
+    pub release: Release,
+    /// Why a fresh install is refused (blocked, or still in its 24 h wait).
+    pub refusal: Option<InstallRefusal>,
+}
+
+/// What a refresh may do by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Apply {
+    /// The block actions: roll back, disable, enable again (the page opening or refreshing).
+    Blocks,
+    /// The block actions and updates (the 6 h check).
+    All,
+}
+
+/// The first timed check waits at least this long after start, so none runs at startup.
+const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 struct GlobalRegistryHub(Entity<RegistryHub>);
 
@@ -96,12 +128,21 @@ pub(crate) fn init(cx: &mut App) {
             }
         })
         .detach();
-        // The update check: never at startup, then every 6 h, only with a registry set.
+        // The update check: 6 h after the last one (kept across restarts), never at startup,
+        // only with a registry set.
         cx.spawn(async move |hub, cx| {
+            let started = std::time::Instant::now();
             loop {
-                cx.background_executor().timer(UPDATE_CHECK_INTERVAL).await;
+                let Ok(wait) = hub.update(cx, |hub, _| hub.next_check_in(started)) else {
+                    break;
+                };
+                cx.background_executor().timer(wait).await;
                 if hub
-                    .update(cx, |hub, cx| hub.refresh_and_apply(true, cx))
+                    .update(cx, |hub, cx| {
+                        if hub.check_due() {
+                            hub.refresh_and_apply(Apply::All, cx)
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -133,6 +174,40 @@ impl RegistryHub {
         self.state_dir = Some(dir);
     }
 
+    fn state_dir(&self) -> RegistryStateDir {
+        self.state_dir
+            .clone()
+            .unwrap_or_else(RegistryStateDir::default_dir)
+    }
+
+    /// When the last check started, read from the state dir once (a local file, no network).
+    fn last_check(&mut self) -> Option<Timestamp> {
+        if !self.last_check_read {
+            self.last_check_read = true;
+            self.last_check = self.state_dir().last_check();
+        }
+        self.last_check
+    }
+
+    pub(crate) fn check_due(&mut self) -> bool {
+        self.last_check()
+            .is_none_or(|last| now().0.saturating_sub(last.0) >= UPDATE_CHECK_INTERVAL.as_secs())
+    }
+
+    /// How long the timer waits: until 6 h after the last check, and at least until
+    /// [`STARTUP_GRACE`] after start.
+    pub(crate) fn next_check_in(&mut self, started: std::time::Instant) -> std::time::Duration {
+        let since_last = self
+            .last_check()
+            .map(|last| std::time::Duration::from_secs(now().0.saturating_sub(last.0)));
+        let until_due = since_last.map_or(std::time::Duration::ZERO, |since| {
+            UPDATE_CHECK_INTERVAL.saturating_sub(since)
+        });
+        until_due
+            .max(STARTUP_GRACE.saturating_sub(started.elapsed()))
+            .max(std::time::Duration::from_secs(60))
+    }
+
     /// Opens the registry from the settings on first use. No network.
     fn ensure_open(&mut self, cx: &App) -> Option<Registry> {
         if !self.opened {
@@ -151,9 +226,7 @@ impl RegistryHub {
                         compiled_keyset(),
                         location,
                         cx.http_client(),
-                        self.state_dir
-                            .clone()
-                            .unwrap_or_else(RegistryStateDir::default_dir),
+                        self.state_dir(),
                     );
                     if self.registry.is_none() {
                         self.off = Some(
@@ -179,22 +252,30 @@ impl RegistryHub {
         self.ensure_open(cx)
     }
 
-    /// Fetches the index (and the block list when due), then what the page shows.
+    /// Fetches the index (and the block list when due), applies the block actions at once
+    /// (spec 19), then what the page shows.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.refresh_and_apply(false, cx)
+        self.refresh_and_apply(Apply::Blocks, cx)
     }
 
-    /// [`Self::refresh`], and with `apply` the plan's automatic actions (the update check):
-    /// updates of registry installs, a rollback of a blocked version, disabling a blocked version
-    /// with nothing to roll back to (and enabling it when the block lifts). Held updates wait.
-    pub fn refresh_and_apply(&mut self, apply: bool, cx: &mut Context<Self>) {
+    /// Fetches the index (and the block list when due), then carries out the plan's automatic
+    /// actions: a rollback of a blocked version, disabling a blocked version with nothing to roll
+    /// back to (and enabling it when the block lifts), and with [`Apply::All`] the updates of
+    /// registry installs. Held updates wait. Each one counts as a check for the 6 h timer.
+    pub fn refresh_and_apply(&mut self, apply: Apply, cx: &mut Context<Self>) {
         if self.refreshing {
             return;
         }
+        let checked_at = now();
+        self.last_check();
+        self.last_check = Some(checked_at);
         let Some(registry) = self.ensure_open(cx) else {
             cx.notify();
             return;
         };
+        if let Err(error) = self.state_dir().set_last_check(checked_at) {
+            log::warn!("fyx:ui: cannot store the registry check time: {error:#}");
+        }
         self.refreshing = true;
         cx.notify();
         let store = UiExtensionRegistry::global(cx)
@@ -212,11 +293,24 @@ impl RegistryHub {
                 };
                 let client = registry.client().lock().await;
                 let time = now();
+                // The listing comes from the install plan, so what the page offers is what
+                // `download_for_install` accepts (integration-5 R1).
                 let (listing, unavailable) = match client.index(time) {
                     Ok(index) => (
                         index
                             .extensions()
-                            .filter_map(|id| index.latest(id).cloned())
+                            .filter_map(|id| match client.plan_install(id, time) {
+                                Ok(plan) => Some(Listed {
+                                    release: plan.release.clone(),
+                                    refusal: None,
+                                }),
+                                Err(InstallError::Refused(InstallRefusal::NotInIndex))
+                                | Err(InstallError::Unavailable(_)) => None,
+                                Err(InstallError::Refused(refusal)) => Some(Listed {
+                                    release: index.latest(id)?.clone(),
+                                    refusal: Some(refusal),
+                                }),
+                            })
                             .collect(),
                         None,
                     ),
@@ -224,12 +318,15 @@ impl RegistryHub {
                 };
                 let actions = client.plan_updates(&installed, time);
                 let freshness = client.blocklist_freshness(time);
-                // The releases the updates name, while the index is at hand.
-                let updates: Vec<Release> = match client.index(time) {
+                // The releases the actions name, while the index is at hand.
+                let releases: Vec<Release> = match client.index(time) {
                     Ok(index) => actions
                         .iter()
                         .filter_map(|action| match &action.action {
                             Action::Update { to, .. } => index.release(&action.id, to).cloned(),
+                            Action::Hold { version, .. } => {
+                                index.release(&action.id, version).cloned()
+                            }
                             _ => None,
                         })
                         .collect(),
@@ -239,10 +336,16 @@ impl RegistryHub {
                 let mut applied = PlanOutcome::default();
                 let mut disabled = Vec::new();
                 if let Some(store) = &store {
-                    if apply {
-                        applied =
-                            apply_plan(&registry, store, fs.as_ref(), &actions, &updates).await;
-                    }
+                    // Block actions on every refresh; updates only with `Apply::All`.
+                    let automatic: Vec<PlannedAction> = actions
+                        .iter()
+                        .filter(|action| {
+                            apply == Apply::All || !matches!(action.action, Action::Update { .. })
+                        })
+                        .cloned()
+                        .collect();
+                    applied =
+                        apply_plan(&registry, store, fs.as_ref(), &automatic, &releases).await;
                     if let Ok(state) = store.state(fs.as_ref()).await {
                         disabled = state
                             .extensions
@@ -253,7 +356,7 @@ impl RegistryHub {
                 }
                 (
                     outcome,
-                    listing,
+                    (listing, releases),
                     unavailable,
                     freshness,
                     installed,
@@ -262,8 +365,16 @@ impl RegistryHub {
                     disabled,
                 )
             };
-            let (outcome, listing, unavailable, freshness, installed, actions, applied, disabled) =
-                cx.background_spawn(work).await;
+            let (
+                outcome,
+                (listing, releases),
+                unavailable,
+                freshness,
+                installed,
+                actions,
+                applied,
+                disabled,
+            ) = cx.background_spawn(work).await;
             if !applied.lines.is_empty() {
                 cx.update(|cx| {
                     if let Some(registry) = UiExtensionRegistry::global(cx) {
@@ -282,12 +393,13 @@ impl RegistryHub {
                 this.refreshing = false;
                 this.last_refresh = Some(outcome);
                 this.listing = listing;
+                this.releases = releases;
                 this.unavailable = unavailable;
                 this.freshness = Some(freshness);
                 this.installed = installed;
                 this.actions = actions;
                 this.disabled = disabled;
-                if apply {
+                if !applied.lines.is_empty() || apply == Apply::All {
                     this.applied = applied.lines;
                 }
                 cx.notify();
@@ -452,15 +564,38 @@ fn describe_additions(additions: &fyx_registry::Additions) -> Vec<String> {
     lines
 }
 
+/// What [`install_release`] installs.
+#[derive(Clone)]
+enum InstallMode {
+    /// A fresh install of the release the listing's plan picked.
+    Fresh,
+    /// An update (or an approved held update) the plan named for an installed extension.
+    Update(InstalledExtension),
+}
+
+fn format_wait(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60);
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{} h", minutes.div_ceil(60))
+    }
+}
+
 /// Installs `release` (a fresh install, an update, or an approved held update), after the user
-/// confirmed what it asks for when it asks for anything new.
+/// confirmed what it asks for when it asks for anything new. The download plans again: a fresh
+/// install must get the same release (`download_for_install`), an update must still be planned.
 fn install_release(
     workspace: WeakEntity<Workspace>,
     release: Release,
-    approved_before: Option<Permissions>,
+    mode: InstallMode,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let approved_before = match &mode {
+        InstallMode::Fresh => None,
+        InstallMode::Update(installed) => Some(installed.approved.clone()),
+    };
     let Some(hub) = RegistryHub::global(cx) else {
         return;
     };
@@ -500,7 +635,25 @@ fn install_release(
                         return Ok(None);
                     }
                 }
-                let bytes = registry.download(&release).await?;
+                let bytes = match &mode {
+                    InstallMode::Fresh => {
+                        let (planned, bytes) =
+                            registry.download_for_install(&release.id, now()).await?;
+                        anyhow::ensure!(
+                            planned.version == release.version
+                                && planned.package.sha256 == release.package.sha256,
+                            "the registry changed since the page showed {} {}; refresh and try again",
+                            release.id,
+                            release.version
+                        );
+                        bytes
+                    }
+                    InstallMode::Update(installed) => {
+                        registry
+                            .download_planned_update(installed, &release, now())
+                            .await?
+                    }
+                };
                 let mut approved = base;
                 approved.approve(&release);
                 let installed = store
@@ -712,28 +865,51 @@ impl FyxExtensionsPage {
     ) -> impl IntoElement {
         let hub = self.hub.read(cx);
         let id = release.id.as_str().to_string();
-        let installed = hub
-            .installed(&id)
-            .map(|installed| installed.active.version.clone());
+        let installed = hub.installed(&id).is_some();
+        let refusal = hub
+            .listing
+            .iter()
+            .find(|listed| listed.release.id == release.id)
+            .and_then(|listed| listed.refusal.clone());
         let workspace = self.workspace.clone();
-        let button = match &installed {
-            Some(version) if *version >= release.version => Button::new(
-                SharedString::from(format!("fyx-reg-installed-{id}")),
-                "Installed",
-            )
-            .disabled(true),
-            Some(_) => Button::new(
-                SharedString::from(format!("fyx-reg-update-{id}")),
-                format!("Update to {}", release.version),
+        // Updates are on the installed row, where the plan decides them.
+        let (button, note) = match (&refusal, installed) {
+            (_, true) => (
+                Button::new(
+                    SharedString::from(format!("fyx-reg-installed-{id}")),
+                    "Installed",
+                )
+                .disabled(true),
+                None,
             ),
-            None => Button::new(
-                SharedString::from(format!("fyx-reg-install-{id}")),
-                "Install",
+            (Some(InstallRefusal::Blocked { block }), false) => (
+                Button::new(
+                    SharedString::from(format!("fyx-reg-blocked-{id}")),
+                    "Blocked",
+                )
+                .disabled(true),
+                Some((format!("Blocked: {}", block.reason), Color::Error)),
+            ),
+            (Some(InstallRefusal::TooNew { ready_at, .. }), false) => (
+                Button::new(
+                    SharedString::from(format!("fyx-reg-waiting-{id}")),
+                    format!(
+                        "Available in {}",
+                        format_wait(ready_at.0.saturating_sub(now().0))
+                    ),
+                )
+                .disabled(true),
+                None,
+            ),
+            (Some(InstallRefusal::NotInIndex), false) | (None, false) => (
+                Button::new(
+                    SharedString::from(format!("fyx-reg-install-{id}")),
+                    "Install",
+                )
+                .disabled(refusal.is_some()),
+                None,
             ),
         };
-        let approved = hub
-            .installed(&id)
-            .map(|installed| installed.approved.clone());
         let release_for_click = release.clone();
         let _ = window;
         v_flex()
@@ -762,7 +938,7 @@ impl FyxExtensionsPage {
                                 install_release(
                                     workspace.clone(),
                                     release_for_click.clone(),
-                                    approved.clone(),
+                                    InstallMode::Fresh,
                                     window,
                                     cx,
                                 )
@@ -774,6 +950,9 @@ impl FyxExtensionsPage {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
+            .when_some(note, |this, (note, color)| {
+                this.child(Label::new(note).size(LabelSize::Small).color(color))
+            })
             .child(
                 h_flex()
                     .gap_1()
@@ -810,7 +989,7 @@ impl FyxExtensionsPage {
         let actions: Vec<Action> = hub.actions_for(&id).cloned().collect();
         let workspace = self.workspace.clone();
         let index_release = |version: &semver::Version| {
-            hub.listing
+            hub.releases
                 .iter()
                 .find(|release| release.id.as_str() == id && &release.version == version)
                 .cloned()
@@ -832,6 +1011,10 @@ impl FyxExtensionsPage {
                     }
                 }
                 Action::Hold { version, reasons } => {
+                    // Approving helps only when nothing else holds the update.
+                    let only_approval = reasons
+                        .iter()
+                        .all(|reason| matches!(reason, HoldReason::NeedsApproval(_)));
                     for reason in reasons {
                         match reason {
                             HoldReason::Pinned => {
@@ -849,7 +1032,7 @@ impl FyxExtensionsPage {
                                     ),
                                     Color::Warning,
                                 ));
-                                if let Some(release) = index_release(version) {
+                                if only_approval && let Some(release) = index_release(version) {
                                     update = Some((release, "Approve and Update"));
                                 }
                             }
@@ -872,7 +1055,7 @@ impl FyxExtensionsPage {
         };
         let pinned = installed.pinned;
         let has_previous = installed.previous.is_some();
-        let approved = installed.approved.clone();
+        let installed_for_update = installed.clone();
         let button = |label: &'static str, key: &str| {
             Button::new(SharedString::from(format!("fyx-reg-{key}-{id}")), label)
                 .style(ButtonStyle::Subtle)
@@ -903,7 +1086,7 @@ impl FyxExtensionsPage {
                             .gap_1()
                             .when_some(update, |this, (release, label)| {
                                 let workspace = workspace.clone();
-                                let approved = approved.clone();
+                                let installed = installed_for_update.clone();
                                 this.child(
                                     Button::new(
                                         SharedString::from(format!("fyx-reg-up-{id}")),
@@ -916,7 +1099,7 @@ impl FyxExtensionsPage {
                                             install_release(
                                                 workspace.clone(),
                                                 release.clone(),
-                                                Some(approved.clone()),
+                                                InstallMode::Update(installed.clone()),
                                                 window,
                                                 cx,
                                             )
@@ -1034,6 +1217,7 @@ impl Render for FyxExtensionsPage {
             .read(cx)
             .listing
             .iter()
+            .map(|listed| &listed.release)
             .filter(|release| self.matches(release, cx))
             .cloned()
             .collect();
