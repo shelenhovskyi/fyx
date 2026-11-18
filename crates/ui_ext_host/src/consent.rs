@@ -850,16 +850,17 @@ mod tests {
         assert_eq!(
             new_capabilities,
             [
+                "process:args@git status",
                 "process:env@FYX_TEST",
                 "process:spawn",
-                "process:spawn@git",
-                "process:spawn@git status"
+                "process:spawn@git"
             ]
         );
-        assert!(
-            crate::install::describe_capability_ids(&new_capabilities)
-                .contains(&"Runs git".to_string())
-        );
+        let described = crate::install::describe_capability_ids(&new_capabilities);
+        assert!(described.contains(&"Runs git".to_string()));
+        // An argument pattern is not one more program.
+        assert!(described.contains(&"Runs git with arguments matching status".to_string()));
+        assert!(!described.contains(&"Runs git status".to_string()));
 
         // The rules.
         for bad in [
