@@ -12,15 +12,23 @@ use wasmtime::{Store, component::Component};
 use crate::{
     CallBudget, PushedUpdate, Reply, ReplyError, UiExtension, UiRuntime, UiState,
     bindings as wit_v0_1,
+    conversions::try_collect,
     effects::{EffectReply, EffectReplyError, HostEffect},
-    fyx_ui_v0_2,
+    fyx_ui_v0_2, fyx_ui_v0_3,
 };
 
 /// The bindings of a component, by the world it targets. The newest version comes first, as in
 /// `extension_host`'s `wit::Extension`.
 pub(crate) enum UiBindings {
+    V0_3(fyx_ui_v0_3::UiExtension),
     V0_2(fyx_ui_v0_2::UiExtension),
     V0_1(wit_v0_1::UiExtension),
+}
+
+/// A guest value the model cannot hold yet (a 0.3 `image` or `canvas` node), as the guest's own
+/// error for that call, so it is rejected like a bad reply instead of disabling the extension.
+fn guest_value<T>(value: Result<T, model::HostError>) -> Result<T, String> {
+    value.map_err(|error| error.message)
 }
 
 impl UiBindings {
@@ -31,6 +39,15 @@ impl UiBindings {
         runtime: &UiRuntime,
     ) -> wasmtime::Result<Self> {
         Ok(match version {
+            ApiVersion::V0_3_0 => {
+                // The 0.3 interfaces this build does not implement yet trap when called (they are
+                // staged with the WIT, plan 4.x); a component that never calls them works.
+                let mut linker = runtime.linker_v0_3.clone();
+                linker.define_unknown_imports_as_traps(component)?;
+                Self::V0_3(
+                    fyx_ui_v0_3::UiExtension::instantiate_async(store, component, &linker).await?,
+                )
+            }
             ApiVersion::V0_2_0 => Self::V0_2(
                 fyx_ui_v0_2::UiExtension::instantiate_async(store, component, &runtime.linker_v0_2)
                     .await?,
@@ -45,20 +62,22 @@ impl UiBindings {
         &self,
         store: &mut Store<UiState>,
     ) -> wasmtime::Result<Vec<model::Surface>> {
-        Ok(match self {
-            Self::V0_2(extension) => extension
-                .call_surfaces(store)
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            Self::V0_1(extension) => extension
-                .call_surfaces(store)
-                .await?
-                .into_iter()
-                .map(|surface| ui_ext::Surface::from(surface).into())
-                .collect(),
-        })
+        let surfaces = match self {
+            Self::V0_3(extension) => try_collect(extension.call_surfaces(store).await?),
+            Self::V0_2(extension) => try_collect(extension.call_surfaces(store).await?),
+            Self::V0_1(extension) => {
+                return Ok(extension
+                    .call_surfaces(store)
+                    .await?
+                    .into_iter()
+                    .map(|surface| ui_ext::Surface::from(surface).into())
+                    .collect());
+            }
+        };
+        match surfaces {
+            Ok(surfaces) => Ok(surfaces),
+            Err(error) => wasmtime::bail!("{}", error.message),
+        }
     }
 
     async fn call_mount(
@@ -67,10 +86,14 @@ impl UiBindings {
         surface_id: &str,
     ) -> wasmtime::Result<Result<Vec<model::Node>, String>> {
         Ok(match self {
+            Self::V0_3(extension) => extension
+                .call_mount(store, surface_id)
+                .await?
+                .and_then(|nodes| guest_value(try_collect(nodes))),
             Self::V0_2(extension) => extension
                 .call_mount(store, surface_id)
                 .await?
-                .map(|nodes| nodes.into_iter().map(Into::into).collect()),
+                .and_then(|nodes| guest_value(try_collect(nodes))),
             Self::V0_1(extension) => extension.call_mount(store, surface_id).await?.map(|nodes| {
                 nodes
                     .into_iter()
@@ -87,10 +110,14 @@ impl UiBindings {
         event: model::UiEvent,
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
+            Self::V0_3(extension) => extension
+                .call_handle_event(store, surface_id, &event.into())
+                .await?
+                .and_then(|update| guest_value(update.try_into())),
             Self::V0_2(extension) => extension
                 .call_handle_event(store, surface_id, &event.into())
                 .await?
-                .map(Into::into),
+                .and_then(|update| guest_value(update.try_into())),
             Self::V0_1(extension) => {
                 // The host never produces 0.2-only events for a 0.1 surface (0.1 has no modals),
                 // so this is defence in depth: the event is dropped, not sent.
@@ -118,15 +145,19 @@ impl UiBindings {
         list_node: model::NodeId,
         start: u32,
         count: u32,
-    ) -> wasmtime::Result<Vec<model::ListRow>> {
+    ) -> wasmtime::Result<Result<Vec<model::ListRow>, String>> {
         Ok(match self {
-            Self::V0_2(extension) => extension
-                .call_list_rows(store, surface_id, list_node, start, count)
-                .await?
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            Self::V0_1(extension) => extension
+            Self::V0_3(extension) => guest_value(try_collect(
+                extension
+                    .call_list_rows(store, surface_id, list_node, start, count)
+                    .await?,
+            )),
+            Self::V0_2(extension) => guest_value(try_collect(
+                extension
+                    .call_list_rows(store, surface_id, list_node, start, count)
+                    .await?,
+            )),
+            Self::V0_1(extension) => Ok(extension
                 .call_list_rows(store, surface_id, list_node, start, count)
                 .await?
                 .into_iter()
@@ -136,7 +167,7 @@ impl UiBindings {
                         nodes: row.nodes.into_iter().map(Into::into).collect(),
                     })
                 })
-                .collect(),
+                .collect()),
         })
     }
 
@@ -147,10 +178,14 @@ impl UiBindings {
         surface_id: &str,
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
+            Self::V0_3(extension) => extension
+                .call_tick(store, surface_id)
+                .await?
+                .and_then(|update| guest_value(update.try_into())),
             Self::V0_2(extension) => extension
                 .call_tick(store, surface_id)
                 .await?
-                .map(Into::into),
+                .and_then(|update| guest_value(update.try_into())),
             Self::V0_1(_) => Ok(model::Update::Unchanged),
         })
     }
@@ -323,7 +358,15 @@ impl UiExtension {
             )
             .await?;
         let nodes = self.guest_result(result, &effects)?;
-        let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), self.limits)
+        // Validated as a 0.2 tree; the 0.1 copy is for the 0.1 shims, until plan 2.3 drops them.
+        let tree = model::tree::Tree::from_nodes(nodes.clone(), self.limits)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| {
+                Ok(Tree::from_nodes(
+                    nodes.iter().map(shim::node).collect(),
+                    self.limits,
+                )?)
+            })
             .with_context(|| format!("invalid tree from mount({surface_id:?})"));
         match tree {
             Ok(tree) => Ok((nodes, tree, effects)),
@@ -351,6 +394,7 @@ impl UiExtension {
                 }
             })
             .await?;
+        let rows = self.guest_result(rows, &effects)?;
         let requested = start..start.saturating_add(count);
         let rows = rows
             .into_iter()
@@ -360,6 +404,12 @@ impl UiExtension {
                     "list-rows({surface_id:?}, {list_node}) returned row {} outside {requested:?}",
                     row.index,
                 );
+                model::tree::Tree::from_row(row.nodes.clone(), self.limits).with_context(|| {
+                    format!(
+                        "invalid row {} from list-rows({surface_id:?}, {list_node})",
+                        row.index
+                    )
+                })?;
                 let tree = Tree::from_row(row.nodes.iter().map(shim::node).collect(), self.limits)
                     .with_context(|| {
                         format!(

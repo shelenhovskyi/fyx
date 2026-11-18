@@ -9,7 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ui_ext::{ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement, v0_2};
+use ui_ext::{
+    ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement,
+    image::{self, ImageFormat},
+    v0_2,
+};
 
 use crate::MAX_PUSHES_PER_CALL;
 
@@ -60,6 +64,16 @@ pub enum HostEffect {
     },
     /// `remove-decoration`: remove it in every editor. No event.
     RemoveDecoration { id: String },
+    /// `images.add-image` (0.3): the bytes passed the size cap and the header checks of
+    /// [`ui_ext::image::check_image_bytes`]; decode them off the main thread under the limits of
+    /// design.md section 12. `handle` never repeats within an instance.
+    AddImage {
+        handle: u32,
+        format: ImageFormat,
+        bytes: Arc<[u8]>,
+    },
+    /// `images.remove-image` of a live handle: nodes that show it fall back to their alt text.
+    RemoveImage { handle: u32 },
 }
 
 /// The validated result of a call with the effects the guest made during it: apply `effects` in
@@ -124,6 +138,9 @@ pub(crate) struct ApiState {
     pushes: usize,
     pushed_items: usize,
     decoration_effects: usize,
+    /// Live generated images (0.3), at most [`image::MAX_GENERATED_IMAGES`].
+    images: BTreeSet<u32>,
+    next_image: u32,
 }
 
 impl ApiState {
@@ -141,6 +158,8 @@ impl ApiState {
             pushes: 0,
             pushed_items: 0,
             decoration_effects: 0,
+            images: BTreeSet::new(),
+            next_image: 1,
         }
     }
 
@@ -152,7 +171,7 @@ impl ApiState {
             ApiVersion::V0_1_0 => {
                 self.live = LiveIds::new(self.version, surfaces, &self.capabilities[..])?;
             }
-            ApiVersion::V0_2_0 => {
+            ApiVersion::V0_2_0 | ApiVersion::V0_3_0 => {
                 for surface in surfaces {
                     self.live.add_surface(surface, &self.capabilities[..])?;
                 }
@@ -417,9 +436,144 @@ impl ApiState {
     }
 }
 
+impl ApiState {
+    /// `images.add-image` (0.3): declared `ui:images`, at most
+    /// [`image::MAX_GENERATED_IMAGE_BYTES`], a PNG header within [`image::MAX_IMAGE_SIDE`] or a
+    /// plain SVG, and fewer than [`image::MAX_GENERATED_IMAGES`] live images.
+    pub(crate) fn add_image(
+        &mut self,
+        format: ImageFormat,
+        bytes: Vec<u8>,
+    ) -> Result<u32, v0_2::HostError> {
+        if !self
+            .capabilities
+            .iter()
+            .any(|capability| capability == image::CAPABILITY_IMAGES)
+        {
+            return Err(host_error(
+                v0_2::HostErrorCode::NotPermitted,
+                format!(
+                    "images need {:?} in [fyx_ui].capabilities",
+                    image::CAPABILITY_IMAGES
+                ),
+            ));
+        }
+        image::check_image_bytes(format, &bytes, image::MAX_GENERATED_IMAGE_BYTES)
+            .map_err(|error| host_error(error.code(), error.to_string()))?;
+        if self.images.len() >= image::MAX_GENERATED_IMAGES {
+            let error = image::ImageError::TooManyImages;
+            return Err(host_error(error.code(), error.to_string()));
+        }
+        let handle = self.next_image;
+        self.next_image = handle.checked_add(1).ok_or_else(|| {
+            host_error(
+                v0_2::HostErrorCode::LimitExceeded,
+                "this instance has used up its image handles",
+            )
+        })?;
+        self.images.insert(handle);
+        self.effects.push(HostEffect::AddImage {
+            handle,
+            format,
+            bytes: bytes.into(),
+        });
+        Ok(handle)
+    }
+
+    /// `images.remove-image`: unknown handles are ignored.
+    pub(crate) fn remove_image(&mut self, handle: u32) {
+        if self.images.remove(&handle) {
+            self.effects.push(HostEffect::RemoveImage { handle });
+        }
+    }
+}
+
 fn decoration_effects_exceeded() -> v0_2::HostError {
     host_error(
         v0_2::HostErrorCode::LimitExceeded,
         format!("at most {MAX_DECORATION_EFFECTS_PER_CALL} decoration changes per call"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = PNG_SIGNATURE.to_vec();
+        bytes.extend(13u32.to_be_bytes());
+        bytes.extend(b"IHDR");
+        bytes.extend(width.to_be_bytes());
+        bytes.extend(height.to_be_bytes());
+        bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        bytes
+    }
+
+    fn state(capabilities: &[&str]) -> ApiState {
+        ApiState::new(
+            ApiVersion::V0_2_0,
+            capabilities
+                .iter()
+                .map(|&capability| capability.into())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_add_image_checks_and_handles() {
+        let mut denied = state(&["ui:panel"]);
+        let error = denied.add_image(ImageFormat::Png, png(4, 4)).unwrap_err();
+        assert_eq!(error.code, v0_2::HostErrorCode::NotPermitted);
+
+        let mut api = state(&["ui:panel", image::CAPABILITY_IMAGES]);
+        api.begin_call();
+        let first = api.add_image(ImageFormat::Png, png(4, 4)).expect("added");
+        // The bomb: a tiny file whose header claims 65535 × 65535.
+        let error = api
+            .add_image(ImageFormat::Png, png(65535, 65535))
+            .unwrap_err();
+        assert_eq!(error.code, v0_2::HostErrorCode::LimitExceeded);
+        let mut big = png(4, 4);
+        big.resize(image::MAX_GENERATED_IMAGE_BYTES + 1, 0);
+        let error = api.add_image(ImageFormat::Png, big).unwrap_err();
+        assert_eq!(error.code, v0_2::HostErrorCode::LimitExceeded);
+        let error = api
+            .add_image(ImageFormat::Svg, b"<!ENTITY x \"y\"><svg/>".to_vec())
+            .unwrap_err();
+        assert_eq!(error.code, v0_2::HostErrorCode::InvalidArgument);
+
+        // 32 live images; a removed handle frees a slot but is never reused.
+        for _ in 1..image::MAX_GENERATED_IMAGES {
+            api.add_image(ImageFormat::Svg, b"<svg/>".to_vec())
+                .expect("added");
+        }
+        let error = api
+            .add_image(ImageFormat::Svg, b"<svg/>".to_vec())
+            .unwrap_err();
+        assert_eq!(error.code, v0_2::HostErrorCode::LimitExceeded);
+        api.remove_image(first);
+        api.remove_image(first);
+        api.remove_image(9999);
+        let next = api
+            .add_image(ImageFormat::Svg, b"<svg/>".to_vec())
+            .expect("a slot is free");
+        assert_eq!(next, image::MAX_GENERATED_IMAGES as u32 + 1);
+
+        let effects = api.finish_call();
+        assert_eq!(effects.len(), image::MAX_GENERATED_IMAGES + 2);
+        assert!(matches!(
+            effects[0],
+            HostEffect::AddImage {
+                handle: 1,
+                format: ImageFormat::Png,
+                ..
+            }
+        ));
+        assert_eq!(
+            effects[image::MAX_GENERATED_IMAGES],
+            HostEffect::RemoveImage { handle: first }
+        );
+    }
 }

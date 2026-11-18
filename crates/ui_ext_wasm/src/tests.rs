@@ -245,7 +245,7 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     .await;
     let future = write(
         "/extensions/future",
-        &table("\"ui:panel\"", "fyx_ui.wasm", "0.3.0"),
+        &table("\"ui:panel\"", "fyx_ui.wasm", "0.4.0"),
     )
     .await;
     let mismatch = write(
@@ -273,7 +273,7 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     assert!(load(plain).await.expect("reads").is_none());
     for (dir, message) in [
         (escaping, "must be a relative path inside the extension"),
-        (future, "targets fyx:ui 0.3.0"),
+        (future, "targets fyx:ui 0.4.0"),
         (
             mismatch,
             "extension.toml says fyx:ui 0.2.0, the component targets 0.1.0",
@@ -619,7 +619,7 @@ async fn test_precompiled_cache(cx: &mut TestAppContext) {
 fn test_api_version_gating() {
     assert!(is_supported_api_version(&Version::new(0, 1, 0)));
     assert!(is_supported_api_version(&Version::new(0, 2, 0)));
-    for unknown in [(0, 0, 9), (0, 1, 1), (0, 3, 0), (1, 0, 0)] {
+    for unknown in [(0, 0, 9), (0, 1, 1), (0, 4, 0), (1, 0, 0)] {
         let version = Version::new(unknown.0, unknown.1, unknown.2);
         assert!(!is_supported_api_version(&version), "{version}");
     }
