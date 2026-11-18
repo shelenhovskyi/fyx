@@ -92,6 +92,7 @@ Cases: `default`, `filled`, `subtle`, `danger`.
 | `value` | `string` |  |
 | `placeholder` | `string` |  |
 | `secret` | `bool` | Masks the text on screen (passwords, tokens). The value still reaches the extension in `input-changed` and `input-submitted`; the host never logs it. |
+| `label` | `option<string>` | The accessible name, read by screen readers; without it, the placeholder is used. At most 256 bytes; the host truncates longer text. |
 
 ### record `list-props`
 

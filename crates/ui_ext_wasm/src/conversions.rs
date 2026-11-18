@@ -43,7 +43,9 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
         model::Props::Button(props) => {
             props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
         }
-        model::Props::Input(props) => props.value.len() + props.placeholder.len(),
+        model::Props::Input(props) => {
+            props.value.len() + props.placeholder.len() + option_len(&props.label)
+        }
         model::Props::Table(props) => props.columns.iter().map(String::len).sum(),
         model::Props::Icon(props) => icon_len(&props.name),
         model::Props::Markdown(text) => text.len(),
@@ -416,6 +418,7 @@ macro_rules! conversions {
                         value: props.value,
                         placeholder: props.placeholder,
                         secret: props.secret,
+                        label: props.label,
                     }),
                     wit::Props::List(props) => Self::List(model::ListProps {
                         row_count: props.row_count,
