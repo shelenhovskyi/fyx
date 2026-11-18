@@ -118,6 +118,8 @@ pub const ALL_CAPABILITIES: &[&str] = &[
     model::CAPABILITY_STATUS_BAR,
     model::CAPABILITY_MODAL,
     model::CAPABILITY_EDITOR_DECORATIONS,
+    ui_ext::image::CAPABILITY_IMAGES,
+    model::CAPABILITY_NOTIFICATIONS,
 ];
 
 /// An update the extension pushed during a call, in the 0.1 model.
