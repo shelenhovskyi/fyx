@@ -805,6 +805,18 @@ async fn test_extension_panel_renders_surface(cx: &mut TestAppContext) {
     vcx.simulate_click(bounds.center(), Modifiers::none());
     vcx.run_until_parked();
     assert_eq!(props_of(&state, LABEL, vcx), text("Count: 1"));
+
+    // Triage-3, ASYNC 8: a panel that goes away (its workspace closed) stops showing the
+    // surface, so its ticks wait.
+    panel.update_in(vcx, |panel, window, cx| {
+        use workspace::Panel as _;
+        panel.set_active(true, window, cx)
+    });
+    assert!(state.read_with(vcx, |state, _| state.is_visible()));
+    drop(panel);
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert!(!state.read_with(vcx, |state, _| state.is_visible()));
 }
 
 #[test]

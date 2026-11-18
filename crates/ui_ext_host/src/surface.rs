@@ -838,7 +838,7 @@ impl SurfaceState {
         }
     }
 
-    fn is_visible(&self) -> bool {
+    pub(crate) fn is_visible(&self) -> bool {
         matches!(self.surface.kind, SurfaceKind::StatusItem(_)) || !self.visible_in.is_empty()
     }
 
