@@ -1432,8 +1432,10 @@ mod tests {
         std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
         std::os::unix::fs::symlink(root.join(".claude"), root.join("config")).unwrap();
         std::os::unix::fs::symlink(temp.join("outside.txt"), root.join("out.txt")).unwrap();
+        // The real file system's watcher runs on its own thread.
+        cx.executor().allow_parking();
         let fs = fs::RealFs::new(None, cx.executor());
-        let project = Project::test(std::sync::Arc::new(fs), [root.as_path()], cx).await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
         set_mode(FyxSecurityMode::Shield, cx);
         cx.run_until_parked();
         let worktree_id = project.read_with(cx, |project, cx| {
@@ -1461,6 +1463,66 @@ mod tests {
         assert!(!write(&root.join("out.txt"), cx), "out of the project");
         assert!(write(&root.join("new.txt"), cx));
         drop(project);
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// The directory cases of [`links_are_followed`] on Windows, with junctions, which need no
+    /// privilege (file symlinks do, so those stay Unix-only).
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn junctions_are_followed(cx: &mut TestAppContext) {
+        // Test setup, before any executor work: blocking on `mklink` here is fine.
+        #[allow(clippy::disallowed_methods)]
+        fn junction(link: &Path, target: &Path) {
+            let status = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J {}", link.display());
+        }
+
+        init_test(cx);
+        let temp_dir =
+            std::env::temp_dir().join(format!("fyx-guard-junctions-{}", std::process::id()));
+        std::fs::remove_dir_all(&temp_dir).ok();
+        let temp = temp_dir.as_path();
+        let root = temp.join("p");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::create_dir_all(temp.join("outside")).unwrap();
+        std::fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+        junction(&root.join("config"), &root.join(".claude"));
+        junction(&root.join("shared"), &temp.join("outside"));
+        // The real file system's watcher runs on its own thread.
+        cx.executor().allow_parking();
+        let fs = fs::RealFs::new(None, cx.executor());
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        set_mode(FyxSecurityMode::Shield, cx);
+        cx.run_until_parked();
+        let write = |path: &Path, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_config_write(project, path, cx).is_ok()
+            })
+        };
+        assert!(
+            !write(&root.join("config/settings.json"), cx),
+            "through a junction into .claude/"
+        );
+        assert!(
+            !write(&root.join("config/new.json"), cx),
+            "a new file through a junction into .claude/"
+        );
+        assert!(
+            !write(&root.join("shared/notes.txt"), cx),
+            "through a junction out of the project"
+        );
+        assert!(write(&root.join("new.txt"), cx));
+        drop(project);
+        // `remove_dir_all` removes a junction without following it.
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 }
