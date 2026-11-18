@@ -1041,3 +1041,15 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// integration-6 R9: a release keyset in which one key has two signing roles is refused like
+/// one that does not parse.
+#[test]
+fn test_release_keyset_needs_role_separation() {
+    use crate::registry_service::{TEST_KEYSET_JSON, parse_release_keyset};
+    assert!(parse_release_keyset(TEST_KEYSET_JSON).is_some());
+    let merged = TEST_KEYSET_JSON.replacen("\"release\"", "\"release\", \"blocklist\"", 1);
+    assert_ne!(merged, TEST_KEYSET_JSON);
+    assert!(parse_release_keyset(&merged).is_none());
+    assert!(parse_release_keyset("not json").is_none());
+}

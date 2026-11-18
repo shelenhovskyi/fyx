@@ -54,13 +54,21 @@ pub fn compiled_keyset() -> Option<Keyset> {
 
 /// The keyset of a release build.
 pub fn release_keyset() -> Option<Keyset> {
-    RELEASE_KEYSET_JSON.and_then(|json| match Keyset::from_json(json.as_bytes()) {
+    RELEASE_KEYSET_JSON.and_then(parse_release_keyset)
+}
+
+/// A keyset that does not parse, or that gives one key two signing roles (R9: role separation is
+/// checked once, on the compiled-in keyset, not per document), is trusted for nothing.
+pub(crate) fn parse_release_keyset(json: &str) -> Option<Keyset> {
+    let keyset = Keyset::from_json(json.as_bytes())
+        .and_then(|keyset| keyset.check_role_separation(None).map(|()| keyset));
+    match keyset {
         Ok(keyset) => Some(keyset),
         Err(error) => {
             log::error!("fyx:ui: the compiled-in registry keyset is invalid: {error}");
             None
         }
-    })
+    }
 }
 
 pub fn now() -> Timestamp {

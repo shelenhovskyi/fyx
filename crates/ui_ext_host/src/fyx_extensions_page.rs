@@ -609,13 +609,14 @@ pub(crate) async fn newly_runs_zed_extension(
     !crate::install::has_zed_extension(&store.version_dir(id, &entry.active), fs).await
 }
 
-/// Whether the client holds a verified block list that is fresh, so that an extension it no
+/// Whether the client holds a verified block list that has not expired
+/// ([`fyx_registry::RegistryClient::blocks_can_lift`]) and is fresh, so that an extension it no
 /// longer blocks may be enabled again (integration-6 N4).
 pub(crate) fn lifts_blocks(
     client: &fyx_registry::RegistryClient,
     now: fyx_registry::Timestamp,
 ) -> bool {
-    client.blocklist().is_some() && client.blocklist_freshness(now) == Freshness::Fresh
+    client.blocks_can_lift(now) && client.blocklist_freshness(now) == Freshness::Fresh
 }
 
 /// What a confirmation lists: the capabilities, domains and programs a release adds.

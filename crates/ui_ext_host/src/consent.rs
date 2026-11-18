@@ -840,7 +840,7 @@ mod tests {
         );
         // A new T2 capability with a program, an argument pattern and an environment name.
         let v3 = manifest(
-            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]\n[network]\ndomains = [\"api.example.com\"]\n[[processes]]\nname = \"git\"\nargs = [\"status\"]\n[process]\nenv = [\"FYX_TEST\"]",
+            "capabilities = [\"ui:panel\", \"network:fetch\", \"process:spawn\"]\n[network]\ndomains = [\"api.example.com\"]\n[[processes]]\nname = \"git\"\nargs = [\"status\"]\n[process]\nenv = [\"NO_COLOR\"]",
         );
         check(&v3).expect("valid");
         let ConsentState::NeedsApproval { new_capabilities } = store.state("ext", &record(&v3))
@@ -851,7 +851,7 @@ mod tests {
             new_capabilities,
             [
                 "process:args@git status",
-                "process:env@FYX_TEST",
+                "process:env@NO_COLOR",
                 "process:spawn",
                 "process:spawn@git"
             ]

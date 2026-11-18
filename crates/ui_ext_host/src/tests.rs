@@ -3186,3 +3186,62 @@ fn test_extension_proxy_follows_the_setting(cx: &mut TestAppContext) {
     set(None, cx);
     assert_eq!(proxy.get(), None);
 }
+
+/// integration-5 L1: a reload (`replace_backend`) drops the old instance's pending tick; neither
+/// instance is ticked for it, and the new one asks for its own.
+#[gpui::test]
+async fn test_replaced_backend_drops_the_old_tick(cx: &mut TestAppContext) {
+    init_test(cx);
+    let old = Rc::new(FakeBackend::default());
+    let state = new_state(&old, cx);
+    let panel = cx.update(|cx| cx.new(|_| ()).entity_id());
+    state.update(cx, |state, cx| state.set_visible(panel, true, cx));
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(500), cx)
+    });
+    assert!(state.read_with(cx, |state, _| state.has_pending_tick()));
+
+    let new = Rc::new(FakeBackend::default());
+    state.update(cx, |state, cx| {
+        let backend: Rc<dyn UiBackend> = new.clone();
+        state.replace_backend(backend, panel_surface("counter", "Counter"), cx)
+    });
+    assert!(!state.read_with(cx, |state, _| state.has_pending_tick()));
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+    assert!(!old.calls().contains(&Call::Tick), "{:?}", old.calls());
+    assert_eq!(new.take_calls(), [Call::Mount], "the new instance is only mounted");
+}
+
+/// integration-5 L4 (design C): in a modal, PageDown / PageUp move its first list by the page the
+/// list shows, not to its last or first row.
+#[gpui::test]
+async fn test_modal_page_keys_move_by_a_page(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(300);
+    let state = new_state(&backend, cx);
+    let (modal, vcx) = cx.add_window_view(|window, cx| {
+        crate::modal::ExtensionModal::new(
+            "fake/modal".into(),
+            state.clone(),
+            gpui::WeakEntity::new_invalid(),
+            window,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| gpui::Focusable::focus_handle(modal.read(cx), cx).focus(window, cx));
+    vcx.run_until_parked();
+    let selected = |vcx: &mut VisualTestContext| {
+        state.read_with(vcx, |state, _| state.first_list().and_then(|list| list.1))
+    };
+    key("pagedown", vcx);
+    assert_eq!(selected(vcx), Some(0), "nothing selected: the first row");
+    key("pagedown", vcx);
+    let page = selected(vcx).expect("selected");
+    assert!(page > 1 && page < 299, "a page is {page} rows");
+    key("pageup", vcx);
+    assert_eq!(selected(vcx), Some(0));
+}
