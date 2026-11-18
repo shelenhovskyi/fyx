@@ -254,6 +254,84 @@ async fn test_v0_3_image_replies(cx: &mut TestAppContext) {
     assert_eq!(case(&extension, 1).await.0, ["1", "2"]);
 }
 
+/// Design.md §13: canvas pushes are checked when applied, like images: the props rules and
+/// panels only. The 16-per-surface and no-list-row rules belong to the tree (`ui_ext`).
+#[gpui::test]
+async fn test_v0_3_canvas_pushes(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let (results, effects) = case(&extension, 8).await;
+    assert_eq!(
+        results,
+        [
+            "ok",
+            "invalid-argument",
+            "invalid-argument",
+            "limit-exceeded",
+            "invalid-argument",
+            "invalid-argument"
+        ]
+    );
+    let pushes: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            HostEffect::Push {
+                update: Update::Replace(nodes),
+                ..
+            } => Some(&nodes[0].props),
+            _ => None,
+        })
+        .collect();
+    let [Props::Canvas(canvas)] = &pushes[..] else {
+        panic!("one canvas push: {pushes:?}");
+    };
+    assert_eq!(canvas.ops.len(), 6);
+    assert_eq!(canvas.fit, ui_ext::canvas::CanvasFit::ScaleDown);
+    assert_eq!(ui_ext::canvas::check_canvas_props(canvas), Ok(()));
+}
+
+/// A canvas reply is checked too (panels only), and `canvas-click` reaches the guest in canvas
+/// coordinates.
+#[gpui::test]
+async fn test_v0_3_canvas_replies_and_clicks(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::Click(9))
+        .await
+        .expect("a canvas in a panel");
+    assert!(
+        matches!(&reply.value, Update::Replace(nodes) if matches!(nodes[0].props, Props::Canvas(_)))
+    );
+    let error = extension
+        .handle_event_v0_2("modal", UiEvent::Click(9))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("can only be in a panel"),
+        "{error:#}"
+    );
+
+    let reply = extension
+        .handle_event_v0_2(
+            SURFACE,
+            UiEvent::CanvasClick(ui_ext::canvas::CanvasClick {
+                canvas: 1,
+                x: 12.5.into(),
+                y: 3.0.into(),
+            }),
+        )
+        .await
+        .expect("handled");
+    assert!(
+        matches!(&reply.value, Update::Replace(nodes)
+        if nodes[0].props == Props::Text(ui_ext::v0_2::TextProps {
+            content: "canvas-click 1 12.5 3".into(),
+            ..Default::default()
+        })),
+        "{:?}",
+        reply.value
+    );
+}
+
 /// A 0.3 interface this build does not implement traps when called, which disables the
 /// extension; it still loads, because nothing calls it at instantiation. WASI imports at a newer
 /// patch version than the host's (std's `HashMap` seed in the probe's `surfaces`) still resolve.

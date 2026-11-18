@@ -1652,7 +1652,7 @@ fn props_to_v0_1(props: v0_2::Props) -> Option<Props> {
         }),
         v0_2::Props::Markdown(text) => Props::Markdown(text),
         v0_2::Props::DiffView(props) => Props::DiffView(props),
-        v0_2::Props::Image(_) => return None,
+        v0_2::Props::Image(_) | v0_2::Props::Canvas(_) => return None,
     })
 }
 
