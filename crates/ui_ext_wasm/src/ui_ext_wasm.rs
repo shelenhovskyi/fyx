@@ -1094,6 +1094,22 @@ impl UiExtension {
             .load_bytes(&component_path)
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
+        Self::load_checked(extension_id, manifest, wasm_bytes, options, cx)
+            .await
+            .map(Some)
+    }
+
+    /// Loads `wasm_bytes` as the component `manifest` describes, with the manifest's checks: its
+    /// capabilities apply and its API version must be the component's. For a caller that read
+    /// the manifest and the bytes itself, once, so what it checked (consent) is what loads
+    /// (triage-3, SEC T1).
+    pub async fn load_checked(
+        extension_id: Arc<str>,
+        manifest: UiManifest,
+        wasm_bytes: Vec<u8>,
+        options: LoadOptions,
+        cx: &AsyncApp,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)> {
         let options = LoadOptions {
             capabilities: Some(manifest.capabilities.clone()),
             ..options
@@ -1108,7 +1124,7 @@ impl UiExtension {
             manifest.api_version,
             extension.api_version,
         );
-        Ok(Some((extension, pushed)))
+        Ok((extension, pushed))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {

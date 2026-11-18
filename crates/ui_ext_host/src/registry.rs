@@ -195,6 +195,8 @@ struct Found {
     source: ExtensionSource,
     /// For store installs: where the precompiled component goes.
     cache: Option<PrecompiledCache>,
+    /// The manifest as read by this scan; the load uses this one, not a second read.
+    manifest: UiManifest,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -683,18 +685,37 @@ impl UiExtensionRegistry {
                     let trusted = this
                         .update(cx, |this, _| this.trust_installed)
                         .unwrap_or(false);
+                    // One read of the component: the consent check and the load use the same
+                    // bytes, as they use the same manifest (triage-3, SEC T1).
+                    let mut bytes = match fs.load_bytes(&found.component).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            log::error!(
+                                "fyx:ui: cannot read {}: {error:#}",
+                                found.component.display()
+                            );
+                            this.update(cx, |this, _| {
+                                this.report_load(&found.extension_id, Err(format!("{error:#}")))
+                            })
+                            .ok();
+                            continue;
+                        }
+                    };
                     if !trusted {
-                        let record = match ConsentRecord::current(
+                        let record = match ConsentRecord::for_bytes(
                             &found.dir,
                             &found.capabilities,
-                            &found.component,
+                            bytes,
                             found.is_dev,
                             fs.as_ref(),
                             &cx.background_executor(),
                         )
                         .await
                         {
-                            Ok(record) => record,
+                            Ok((record, same_bytes)) => {
+                                bytes = same_bytes;
+                                record
+                            }
                             Err(error) => {
                                 log::error!(
                                     "fyx:ui: not loading {}: {error:#}",
@@ -717,18 +738,20 @@ impl UiExtensionRegistry {
                         }
                     }
                     let checker = this.update(cx, |this, _| this.consent.checker()).ok();
-                    let loaded = UiExtension::load_from_dir_with_options(
-                        &found.dir,
+                    let loaded = UiExtension::load_checked(
+                        found.extension_id.clone(),
+                        found.manifest.clone(),
+                        bytes,
                         LoadOptions {
                             cache: found.cache.clone(),
                             capability_check: checker,
                             allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
                             ..LoadOptions::default()
                         },
-                        fs.clone(),
                         cx,
                     )
-                    .await;
+                    .await
+                    .map(Some);
                     match loaded {
                         Ok(Some((extension, pushed))) => {
                             log::info!(
@@ -1262,6 +1285,7 @@ async fn found_at(
             capabilities: manifest.capabilities.clone(),
             source,
             cache,
+            manifest,
         }),
         Ok(None) | Err(_) => {
             log::error!(
