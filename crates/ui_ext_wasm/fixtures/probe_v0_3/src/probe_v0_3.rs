@@ -8,9 +8,16 @@
 //!    bytes, of an SVG declaring entities, and of bytes that are no image: four error codes;
 //! 3. `add-image` 34 times: `ok*32,limit-exceeded*2`; then `remove-image` of the first handle and
 //!    one more `add-image`: its handle;
-//! 4. `push-update` of a tree with an `image` node: its error code;
-//! 5. answers with an `image` node instead of the report (the host refuses the reply);
+//! 4. `push-update`s with `image` nodes (design.md §12, the checks at apply): to `probe` an asset,
+//!    a `set-props` and an `insert` (ok), generated handles 0 and 99 that `add-image` never
+//!    returned, empty alt text, a 4096 px box and the asset path `../x.png` (invalid-argument),
+//!    and the asset to the status item `status` and the modal `modal` (invalid-argument); then
+//!    `add-image`, a push of that handle, `remove-image`, and the push again: all their results;
+//! 5. answers with an `image` node instead of the report, on whatever surface it came from;
 //! 6. calls `permissions.query`, which this build links as a trap.
+//!
+//! `mount` answers a text node on `probe` and an `image` node anywhere else; `list-rows` answers
+//! one row holding an `image` node.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.3.0",
@@ -48,15 +55,37 @@ fn image(id: NodeId) -> Node {
     Node {
         id,
         parent: None,
-        props: Props::Image(ImageProps {
-            source: ImageSource::Asset("assets/logo.svg".into()),
-            alt: "Logo".into(),
-            width: Some(32),
-            height: None,
-            fit: ImageFit::Contain,
-            tint: None,
-        }),
+        props: Props::Image(logo()),
     }
+}
+
+fn logo() -> ImageProps {
+    ImageProps {
+        source: ImageSource::Asset("assets/logo.svg".into()),
+        alt: "Logo".into(),
+        width: Some(32),
+        height: None,
+        fit: ImageFit::Contain,
+        tint: None,
+    }
+}
+
+fn push(surface_id: &str, update: Update) -> String {
+    match host::push_update(surface_id, &update) {
+        Ok(()) => "ok".into(),
+        Err(error) => code(&error).into(),
+    }
+}
+
+fn push_image(surface_id: &str, props: ImageProps) -> String {
+    push(
+        surface_id,
+        Update::Replace(vec![Node {
+            id: 2,
+            parent: None,
+            props: Props::Image(props),
+        }]),
+    )
 }
 
 fn png(width: u32, height: u32) -> Vec<u8> {
@@ -135,12 +164,58 @@ fn run(case: NodeId) -> Result<Vec<String>, String> {
             images::remove_image(first.ok_or("no image was added")?);
             vec![summary, add(ImageFormat::Png, &png(1, 1))]
         }
-        4 => vec![
-            match host::push_update(SURFACE_ID, &Update::Replace(vec![image(2)])) {
-                Ok(()) => "ok".into(),
-                Err(error) => code(&error).into(),
-            },
-        ],
+        4 => {
+            let mut results = vec![
+                push_image(SURFACE_ID, logo()),
+                push(
+                    SURFACE_ID,
+                    Update::Patches(vec![Patch::SetProps((1, Props::Image(logo())))]),
+                ),
+                push(
+                    SURFACE_ID,
+                    Update::Patches(vec![Patch::Insert(InsertOp {
+                        node: image(3),
+                        before: None,
+                    })]),
+                ),
+            ];
+            for props in [
+                ImageProps {
+                    source: ImageSource::Generated(0),
+                    ..logo()
+                },
+                ImageProps {
+                    source: ImageSource::Generated(99),
+                    ..logo()
+                },
+                ImageProps {
+                    alt: String::new(),
+                    ..logo()
+                },
+                ImageProps {
+                    width: Some(4096),
+                    ..logo()
+                },
+                ImageProps {
+                    source: ImageSource::Asset("../x.png".into()),
+                    ..logo()
+                },
+            ] {
+                results.push(push_image(SURFACE_ID, props));
+            }
+            results.push(push_image("status", logo()));
+            results.push(push_image("modal", logo()));
+            let handle = images::add_image(ImageFormat::Png, &png(4, 4))
+                .map_err(|error| code(&error).to_string())?;
+            let generated = ImageProps {
+                source: ImageSource::Generated(handle),
+                ..logo()
+            };
+            results.push(push_image(SURFACE_ID, generated.clone()));
+            images::remove_image(handle);
+            results.push(push_image(SURFACE_ID, generated));
+            results
+        }
         6 => vec![format!(
             "{:?}",
             permissions::query(permissions::T2Capability::NetworkFetch)
@@ -151,19 +226,40 @@ fn run(case: NodeId) -> Result<Vec<String>, String> {
 
 impl Guest for Probe {
     fn surfaces() -> Vec<Surface> {
-        vec![Surface {
-            id: SURFACE_ID.into(),
-            title: "Probe".into(),
-            kind: SurfaceKind::Panel(PanelDescriptor {
-                position: DockPosition::Right,
-                icon: Icon::Image,
-                default_size: 300,
-            }),
-        }]
+        vec![
+            Surface {
+                id: SURFACE_ID.into(),
+                title: "Probe".into(),
+                kind: SurfaceKind::Panel(PanelDescriptor {
+                    position: DockPosition::Right,
+                    icon: Icon::Image,
+                    default_size: 300,
+                }),
+            },
+            Surface {
+                id: "status".into(),
+                title: "Status".into(),
+                kind: SurfaceKind::StatusItem(StatusItemDescriptor {
+                    side: StatusBarSide::Right,
+                    priority: 0,
+                }),
+            },
+            Surface {
+                id: "modal".into(),
+                title: "Modal".into(),
+                kind: SurfaceKind::Modal(ModalDescriptor {
+                    width: ModalWidth::Small,
+                }),
+            },
+        ]
     }
 
-    fn mount(_surface_id: String) -> Result<Vec<Node>, String> {
-        Ok(vec![text(1, "probe")])
+    fn mount(surface_id: String) -> Result<Vec<Node>, String> {
+        if surface_id == SURFACE_ID {
+            Ok(vec![text(1, "probe")])
+        } else {
+            Ok(vec![image(1)])
+        }
     }
 
     fn handle_event(_surface_id: String, event: UiEvent) -> Result<Update, String> {
@@ -177,13 +273,12 @@ impl Guest for Probe {
         }
     }
 
-    fn list_rows(
-        _surface_id: String,
-        _list_node: NodeId,
-        _start: u32,
-        _count: u32,
-    ) -> Vec<ListRow> {
-        Vec::new()
+    fn list_rows(_surface_id: String, _list_node: NodeId, start: u32, _count: u32) -> Vec<ListRow> {
+        vec![ListRow {
+            index: start,
+            indent: 0,
+            nodes: vec![image(1)],
+        }]
     }
 
     fn tick(_surface_id: String) -> Result<Update, String> {

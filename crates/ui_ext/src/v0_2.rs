@@ -2,6 +2,10 @@
 //! 0.1 data converts into: every 0.1 value has exactly one 0.2 counterpart (`From`), with icons as
 //! [`IconRef::Upstream`] and the 0.2-only fields empty.
 //!
+//! It is the newest model, including the staged 0.3 additions built so far: [`Props::Image`]
+//! (design.md §12). A 0.1 or 0.2 component cannot produce those, because its world has no such
+//! case; only a 0.3 component's values convert into them.
+//!
 //! It is a module of its own rather than new fields and cases on the 0.1 types in
 //! [`crate::types`], because the host and the renderer build those with struct literals and match
 //! them exhaustively. Both move to this model when they implement 0.2 (platform plan 2.2, 2.3);
@@ -282,6 +286,9 @@ pub enum Props {
     Icon(IconProps),
     Markdown(String),
     DiffView(DiffViewProps),
+    /// 0.3 (design.md §12): checked by [`crate::image::check_image_props`] and
+    /// [`crate::image::check_image_placement`] when the host applies the update.
+    Image(crate::image::ImageProps),
 }
 
 impl Props {
@@ -301,6 +308,7 @@ impl Props {
             Props::Icon(_) => "icon",
             Props::Markdown(_) => "markdown",
             Props::DiffView(_) => "diff-view",
+            Props::Image(_) => "image",
         }
     }
 }

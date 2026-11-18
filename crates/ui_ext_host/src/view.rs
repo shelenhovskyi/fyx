@@ -258,7 +258,7 @@ impl SurfaceView {
                         }
                     }
                     Props::DiffView(props) => diffs.push((id, props.clone())),
-                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) => {}
+                    Props::Flex(_) | Props::Text(_) | Props::Icon(_) | Props::Image(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
             }
@@ -751,6 +751,7 @@ impl Renderer<'_, '_> {
             Props::Icon(props) => self.icon(props),
             Props::Markdown(source) => self.markdown(id, source, scope),
             Props::DiffView(props) => self.diff_view(id, props, scope),
+            Props::Image(props) => self.image_placeholder(props),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -1062,6 +1063,32 @@ impl Renderer<'_, '_> {
             }
             _ => row.child(self.node(tree, root, scope)).into_any_element(),
         }
+    }
+
+    /// A 0.3 `image` node as the muted box with its alt text that design.md §12 draws
+    /// while an image loads or when it fails. Decoding comes with plan 4.11.
+    fn image_placeholder(&self, props: &ui_ext::image::ImageProps) -> AnyElement {
+        div()
+            .when_some(props.width, |this, width| this.w(px(width as f32)))
+            .when_some(props.height, |this, height| this.h(px(height as f32)))
+            .max_w_full()
+            .min_h(px(20.))
+            .p_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.cx.theme().colors().border_variant)
+            .bg(self.cx.theme().colors().element_background)
+            .child(
+                Label::new(props.alt.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any_element()
     }
 
     fn icon(&self, props: &IconProps) -> AnyElement {
