@@ -12,6 +12,7 @@
 //! For the sprint, extensions are loaded from [`DEV_EXTENSIONS_ENV`] only, and decorations from
 //! [`DEV_DECORATIONS_ENV`].
 
+mod agent_observe;
 mod backend;
 mod canvas;
 mod consent;
@@ -34,6 +35,7 @@ mod registry_service_tests;
 mod store_actions;
 mod surface;
 mod view;
+mod workspace_edit;
 mod worktrees;
 
 #[cfg(test)]

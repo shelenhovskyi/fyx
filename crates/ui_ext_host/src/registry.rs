@@ -1314,6 +1314,13 @@ Environment it may pass: {}",
                             crate::worktrees::OpenWorktrees::global(cx)
                                 .for_extension(&found.extension_id)
                         })),
+                        // workspace:edit and agent:observe (plan 4.8).
+                        workspace_edits: Some(cx.update(|cx| {
+                            crate::workspace_edit::for_extension(&found.extension_id, cx)
+                        })),
+                        agent_reviews: cx.update(|cx| {
+                            crate::agent_observe::for_extension(&found.extension_id, cx)
+                        }),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2342,6 +2349,12 @@ fn attach_to_workspace(
             crate::worktrees::OpenWorktrees::global(cx).set(workspace_id, worktrees);
         };
         report(workspace, cx);
+        crate::workspace_edit::register_workspace(
+            workspace_id,
+            Some(cx.weak_entity()),
+            workspace.project().downgrade(),
+            cx,
+        );
         let project = workspace.project().clone();
         cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
             .detach();
@@ -2350,7 +2363,8 @@ fn attach_to_workspace(
                 .detach();
         }
         cx.on_release(move |_, cx| {
-            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id)
+            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id);
+            crate::workspace_edit::unregister_workspace(workspace_id, cx);
         })
         .detach();
     }
@@ -2751,6 +2765,11 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         workspace: Some(cx.update(|cx| {
             crate::worktrees::OpenWorktrees::global(cx).for_extension(&path.to_string_lossy())
         })),
+        workspace_edits: Some(
+            cx.update(|cx| crate::workspace_edit::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        agent_reviews: cx
+            .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
