@@ -53,6 +53,7 @@ use crate::{
     backend::HostEffect,
     backend::UiBackend,
     consent::{self, ConsentRecord, ConsentState, ConsentStore},
+    decorations::Decorations,
     install_store::InstallStore,
     modal::ExtensionModal,
     panel::{
@@ -442,6 +443,8 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
+        // A reload starts without decorations; the new instance places its own.
+        remove_decorations(backend.extension_id(), cx);
         for loaded in self.surfaces_of(backend.extension_id()) {
             let surface_id = &loaded.surface_id;
             if !surfaces
@@ -898,6 +901,8 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations.
+        remove_decorations(extension_id, cx);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
@@ -982,6 +987,52 @@ impl UiExtensionRegistry {
                     cx.emit(RegistryEvent::HidePanel(key));
                 }
             }
+            HostEffect::PlaceDecoration {
+                id,
+                location,
+                nodes,
+            } => {
+                let Some(backend) = self.backends.get(extension_id).cloned() else {
+                    log::error!(
+                        "fyx:ui: {extension_id} placed a decoration before it was registered"
+                    );
+                    return;
+                };
+                let Some(decorations) = Decorations::global(cx) else {
+                    log::debug!(
+                        "fyx:ui: {extension_id}: no decorations in this app, dropping {id:?}"
+                    );
+                    return;
+                };
+                let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
+                    registry: cx.weak_entity(),
+                    extension_id: extension_id.into(),
+                });
+                let placed = decorations.update(cx, |decorations, cx| {
+                    decorations.place_extension(
+                        extension_id,
+                        &id,
+                        &location,
+                        nodes,
+                        backend,
+                        Some(link),
+                        cx,
+                    )
+                });
+                if let Err(error) = placed {
+                    log::error!("fyx:ui: {extension_id}: place-decoration({id:?}): {error:#}");
+                }
+            }
+            HostEffect::RemoveDecoration { id } => {
+                let removed = Decorations::global(cx).is_some_and(|decorations| {
+                    decorations.update(cx, |decorations, cx| {
+                        decorations.remove_extension_decoration(extension_id, &id, cx)
+                    })
+                });
+                if !removed {
+                    log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
+                }
+            }
             effect => {
                 log::warn!("fyx:ui: {extension_id}: {effect:?} is not handled by this renderer yet")
             }
@@ -999,9 +1050,19 @@ impl UiExtensionRegistry {
             Some(surface) => surface.state.update(cx, |state, cx| {
                 state.apply_pushed_update(update, cx);
             }),
-            None => log::error!(
-                "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
-            ),
+            None => {
+                // Decoration ids share the surface namespace (design.md §L).
+                let pushed = Decorations::global(cx).is_some_and(|decorations| {
+                    decorations.update(cx, |decorations, cx| {
+                        decorations.push(extension_id, surface_id, update, cx)
+                    })
+                });
+                if !pushed {
+                    log::error!(
+                        "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
+                    );
+                }
+            }
         }
     }
 }
@@ -1100,6 +1161,18 @@ async fn found_at(
                 component.display()
             );
             None
+        }
+    }
+}
+
+/// Removes every decoration of an extension (unload, reload, disable).
+fn remove_decorations(extension_id: &str, cx: &mut App) {
+    if let Some(decorations) = Decorations::global(cx) {
+        let removed = decorations.update(cx, |decorations, cx| {
+            decorations.remove_extension(extension_id, cx)
+        });
+        if removed > 0 {
+            log::debug!("fyx:ui: removed {removed} decoration(s) of {extension_id}");
         }
     }
 }
