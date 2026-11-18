@@ -21,8 +21,11 @@
 //!   the system's are never read, so they cannot be probed), then the node and blur caps on the
 //!   parsed tree, then `resvg` at the box's pixel size.
 //! - **Cache:** per extension, by (source, pixel size, tint), least recently drawn first out once
-//!   [`MAX_DECODED_BYTES_PER_EXTENSION`] is reached. An image larger than what is left shows its
-//!   alt text, and the log says "image limit reached".
+//!   [`MAX_DECODED_BYTES_PER_EXTENSION`] is reached, but never an image drawn in the latest render
+//!   pass, which is on screen (integration-5 H2: evicting those made a decode loop). An image that
+//!   does not fit beside them shows its alt text, and the log says "image limit reached"; it is
+//!   tried again once the cache frees bytes. A render pass begins with the first lookup after the
+//!   cache changed (every view with images observes it, so they all draw again).
 //! - Until an image is ready, or when it failed, the node draws its alt text in a muted box (with a
 //!   warning icon for a failure).
 
@@ -72,6 +75,8 @@ struct Decoded {
     image: Arc<RenderImage>,
     bytes: u64,
     last_used: Cell<u64>,
+    /// The render pass that last drew it.
+    last_pass: Cell<u64>,
 }
 
 #[derive(Default)]
@@ -83,27 +88,43 @@ struct ExtensionImages {
     decoded: HashMap<ImageKey, Decoded>,
     used_bytes: u64,
     failed: HashSet<ImageKey>,
+    /// Decoded, but did not fit beside the images on screen: alt text until bytes are freed.
+    over_budget: HashSet<ImageKey>,
     pending: HashSet<ImageKey>,
     queue: VecDeque<ImageKey>,
     running: usize,
 }
 
 impl ExtensionImages {
-    fn evict_for(&mut self, bytes: u64) -> bool {
-        while self.used_bytes + bytes > MAX_DECODED_BYTES_PER_EXTENSION {
-            let Some(oldest) = self
-                .decoded
-                .iter()
-                .min_by_key(|(_, decoded)| decoded.last_used.get())
-                .map(|(key, _)| key.clone())
-            else {
-                return false;
-            };
-            if let Some(evicted) = self.decoded.remove(&oldest) {
-                self.used_bytes -= evicted.bytes;
+    /// Makes room for `bytes`, least recently drawn first, never an image drawn in `pass` (on
+    /// screen). Evicts nothing unless that makes enough room.
+    fn evict_for(&mut self, bytes: u64, pass: u64) -> bool {
+        let mut evictable: Vec<(u64, ImageKey, u64)> = self
+            .decoded
+            .iter()
+            .filter(|(_, decoded)| decoded.last_pass.get() != pass)
+            .map(|(key, decoded)| (decoded.last_used.get(), key.clone(), decoded.bytes))
+            .collect();
+        let freeable: u64 = evictable.iter().map(|(_, _, bytes)| bytes).sum();
+        if self.used_bytes.saturating_sub(freeable) + bytes > MAX_DECODED_BYTES_PER_EXTENSION {
+            return false;
+        }
+        evictable.sort_by_key(|(last_used, _, _)| *last_used);
+        for (_, key, _) in evictable {
+            if self.used_bytes + bytes <= MAX_DECODED_BYTES_PER_EXTENSION {
+                break;
             }
+            self.forget(&key);
         }
         true
+    }
+
+    fn forget(&mut self, key: &ImageKey) {
+        if let Some(decoded) = self.decoded.remove(key) {
+            self.used_bytes -= decoded.bytes;
+            // Room for what did not fit before.
+            self.over_budget.clear();
+        }
     }
 }
 
@@ -113,6 +134,10 @@ pub struct ImageCache {
     extensions: HashMap<Arc<str>, ExtensionImages>,
     running: usize,
     clock: Cell<u64>,
+    /// The render pass lookups stamp, and whether the cache changed since it began (the next
+    /// lookup then begins a new one).
+    pass: Cell<u64>,
+    changed_since_pass: Cell<bool>,
     /// Images renders found missing, for [`Self::request`] after the frame.
     wanted: RefCell<Vec<(Arc<str>, ImageKey)>>,
     /// Fyx's bundled fonts for SVG text, loaded on the first SVG decode.
@@ -184,11 +209,9 @@ impl ImageCache {
                 .cloned()
                 .collect();
             for key in keys {
-                if let Some(decoded) = images.decoded.remove(&key) {
-                    images.used_bytes -= decoded.bytes;
-                }
+                images.forget(&key);
             }
-            cx.notify();
+            self.changed(cx);
         }
     }
 
@@ -202,7 +225,7 @@ impl ImageCache {
                 running,
                 ..ExtensionImages::default()
             };
-            cx.notify();
+            self.changed(cx);
         }
     }
 
@@ -255,6 +278,9 @@ impl ImageCache {
 
     /// What to draw for `key` now. A miss is noted for [`Self::request`].
     pub fn get(&self, extension_id: &str, key: &ImageKey) -> ImageState {
+        if self.changed_since_pass.replace(false) {
+            self.pass.set(self.pass.get() + 1);
+        }
         let Some(images) = self.extensions.get(extension_id) else {
             self.want(extension_id, key);
             return ImageState::Pending;
@@ -263,9 +289,10 @@ impl ImageCache {
             let now = self.clock.get() + 1;
             self.clock.set(now);
             decoded.last_used.set(now);
+            decoded.last_pass.set(self.pass.get());
             return ImageState::Ready(decoded.image.clone());
         }
-        if images.failed.contains(key) {
+        if images.failed.contains(key) || images.over_budget.contains(key) {
             return ImageState::Failed;
         }
         if !images.pending.contains(key) {
@@ -293,10 +320,17 @@ impl ImageCache {
         }
     }
 
+    /// The cache changed: views that observe it draw again, in a new render pass.
+    fn changed(&self, cx: &mut Context<Self>) {
+        self.changed_since_pass.set(true);
+        cx.notify();
+    }
+
     pub fn request(&mut self, extension_id: &str, key: ImageKey, cx: &mut Context<Self>) {
         let images = self.extensions.entry(extension_id.into()).or_default();
         if images.decoded.contains_key(&key)
             || images.failed.contains(&key)
+            || images.over_budget.contains(&key)
             || !images.pending.insert(key.clone())
         {
             return;
@@ -397,6 +431,7 @@ impl ImageCache {
         result: Result<(RenderImage, u64)>,
         cx: &mut Context<Self>,
     ) {
+        let pass = self.pass.get();
         let Some(images) = self.extensions.get_mut(extension_id) else {
             return;
         };
@@ -406,12 +441,19 @@ impl ImageCache {
         }
         match result {
             Ok((image, bytes)) => {
-                if bytes > MAX_DECODED_BYTES_PER_EXTENSION || !images.evict_for(bytes) {
+                if bytes > MAX_DECODED_BYTES_PER_EXTENSION {
                     log::warn!(
                         "fyx:ui: {extension_id}: image limit reached for {:?}",
                         key.source
                     );
                     images.failed.insert(key);
+                } else if !images.evict_for(bytes, pass) {
+                    // What is on screen fills the budget: alt text, not a decode loop.
+                    log::warn!(
+                        "fyx:ui: {extension_id}: image limit reached for {:?} (the images on screen fill it)",
+                        key.source
+                    );
+                    images.over_budget.insert(key);
                 } else {
                     images.used_bytes += bytes;
                     images.decoded.insert(
@@ -420,6 +462,9 @@ impl ImageCache {
                             image: Arc::new(image),
                             bytes,
                             last_used: Cell::new(self.clock.get()),
+                            // Not drawn yet: it must not push out the images on screen, and they
+                            // must not push it out before it is drawn.
+                            last_pass: Cell::new(pass),
                         },
                     );
                 }
@@ -433,7 +478,7 @@ impl ImageCache {
                 images.failed.insert(key);
             }
         }
-        cx.notify();
+        self.changed(cx);
     }
 }
 
@@ -1185,6 +1230,76 @@ mod tests {
         // A reload clears the rest.
         cache.update(cx, |cache, cx| cache.clear("ext", cx));
         assert_eq!(cache.read_with(cx, |cache, _| cache.used_bytes("ext")), 0);
+    }
+
+    /// integration-5 H2: images drawn in the latest pass are never evicted. With four on screen
+    /// filling the budget, the fifth shows its alt text (no decode loop), and it is tried again
+    /// once the cache frees bytes.
+    #[gpui::test]
+    async fn test_cache_keeps_what_is_on_screen(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let cache = cx.new(|_| ImageCache::default());
+        let svg = |n: u32| -> Arc<[u8]> {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="{n}" fill="#123456"/></svg>"##
+            )
+            .into_bytes()
+            .into()
+        };
+        let keys: Vec<ImageKey> = cache.update(cx, |cache, _| {
+            (0..5u32)
+                .map(|handle| {
+                    cache.add_generated("ext", handle, ImageFormat::Svg, svg(handle + 1));
+                    cache
+                        .key_for(
+                            "ext",
+                            &ImageSource::Generated(handle),
+                            None,
+                            (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
+                            None,
+                        )
+                        .expect("live handle")
+                })
+                .collect()
+        });
+        // One render pass draws all five: the first four fit, the fifth does not.
+        let draw = |cx: &mut TestAppContext| -> Vec<bool> {
+            cache.read_with(cx, |cache, _| {
+                keys.iter()
+                    .map(|key| matches!(cache.get("ext", key), ImageState::Ready(_)))
+                    .collect()
+            })
+        };
+        for _ in 0..6 {
+            draw(cx);
+            cache.update(cx, |cache, cx| cache.request_wanted(cx));
+            settle(cx);
+        }
+        // Decodes finish in any order: four fit, whichever came last shows its alt text.
+        let drawn = draw(cx);
+        assert_eq!(drawn.iter().filter(|ready| **ready).count(), 4, "{drawn:?}");
+        let left_out = drawn.iter().position(|ready| !ready).unwrap();
+        assert!(matches!(
+            cache.read_with(cx, |cache, _| cache.get("ext", &keys[left_out])),
+            ImageState::Failed
+        ));
+        // No loop: drawing again asks for nothing and changes nothing.
+        assert_eq!(draw(cx), drawn);
+        assert!(!cache.read_with(cx, |cache, _| cache.has_wanted()));
+
+        // Freed bytes: the one left out is tried again and fits.
+        let removed = (0..5).find(|index| *index != left_out).unwrap();
+        cache.update(cx, |cache, cx| {
+            cache.remove_generated("ext", removed as u32, cx)
+        });
+        for _ in 0..3 {
+            draw(cx);
+            cache.update(cx, |cache, cx| cache.request_wanted(cx));
+            settle(cx);
+        }
+        let drawn = draw(cx);
+        assert!(drawn[left_out], "{drawn:?}");
+        assert_eq!(drawn.iter().filter(|ready| **ready).count(), 4, "{drawn:?}");
     }
 
     /// Assets come from the extension's folder only, at most 2 MiB.
