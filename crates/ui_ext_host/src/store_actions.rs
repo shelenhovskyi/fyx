@@ -197,6 +197,73 @@ fn toast(workspace: &mut Workspace, message: String, cx: &mut Context<Workspace>
     );
 }
 
+/// What a command reports: the message, and whether it failed (a failure offers Open Log).
+pub(crate) struct Outcome {
+    pub message: String,
+    pub failed: bool,
+}
+
+/// One toast per command, after the load it started has an outcome (triage-3 #7).
+pub(crate) fn show_outcome(
+    workspace: &mut Workspace,
+    outcome: Outcome,
+    cx: &mut Context<Workspace>,
+) {
+    let mut toast = Toast::new(
+        NotificationId::named("fyx-ui-store".into()),
+        outcome.message,
+    );
+    if outcome.failed {
+        toast = toast.on_click("Open Log", |window, cx| {
+            window.dispatch_action(Box::new(workspace::OpenLog), cx)
+        });
+    }
+    workspace.show_toast(toast, cx);
+}
+
+/// How long a command waits for the load it started before it reports anyway.
+const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Asks the registry to report the next load of `extension_id`. Call before the change that
+/// starts the load.
+pub(crate) fn expect_load(
+    extension_id: &str,
+    cx: &mut gpui::App,
+) -> Option<futures::channel::oneshot::Receiver<Result<(), String>>> {
+    let registry = UiExtensionRegistry::global(cx)?;
+    Some(registry.update(cx, |registry, _| registry.wait_for_load(extension_id)))
+}
+
+/// The load's outcome: `Ok` when loaded, the reason otherwise (also when it takes too long).
+pub(crate) async fn load_outcome(
+    waiter: Option<futures::channel::oneshot::Receiver<Result<(), String>>>,
+    cx: &mut AsyncWindowContext,
+) -> Result<(), String> {
+    use futures::FutureExt as _;
+    let Some(waiter) = waiter else {
+        return Ok(());
+    };
+    let timeout = cx.background_executor().timer(LOAD_WAIT);
+    futures::select_biased! {
+        outcome = waiter.fuse() => outcome.unwrap_or(Err("the load was cancelled".into())),
+        _ = timeout.fuse() => Err(format!("it did not finish loading within {LOAD_WAIT:?}")),
+    }
+}
+
+/// "Installed X 1.2.0", or that it installed but did not load, and why.
+pub(crate) fn installed_outcome(done: String, loaded: Result<(), String>) -> Outcome {
+    match loaded {
+        Ok(()) => Outcome {
+            message: done,
+            failed: false,
+        },
+        Err(reason) => Outcome {
+            message: format!("{done}, but it did not load: {reason}"),
+            failed: true,
+        },
+    }
+}
+
 fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(store) = store(cx) else {
         return;
@@ -209,7 +276,7 @@ fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
         prompt: Some("Install UI Extension Package".into()),
     });
     cx.spawn_in(window, async move |workspace, cx| {
-        let result: Result<Option<String>> = async {
+        let result: Result<Option<Outcome>> = async {
             let Some(package): Option<PathBuf> =
                 paths.await??.and_then(|paths| paths.into_iter().next())
             else {
@@ -240,23 +307,29 @@ fn install_from_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
                 return Ok(None);
             }
             let installed = store.install_package(&package, fs.as_ref()).await?;
+            let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
             grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
-            Ok(Some(match installed.previous {
+            let loaded = load_outcome(waiter, cx).await;
+            let done = match installed.previous {
                 Some(previous) => format!(
                     "Installed {} {} (previous: {previous})",
                     installed.extension_id, installed.version
                 ),
                 None => format!("Installed {} {}", installed.extension_id, installed.version),
-            }))
+            };
+            Ok(Some(installed_outcome(done, loaded)))
         }
         .await;
-        let message = match result {
+        let outcome = match result {
             Ok(None) => return,
-            Ok(Some(message)) => message,
-            Err(error) => format!("Could not install the package: {error:#}"),
+            Ok(Some(outcome)) => outcome,
+            Err(error) => Outcome {
+                message: format!("Could not install the package: {error:#}"),
+                failed: true,
+            },
         };
         workspace
-            .update(cx, |workspace, cx| toast(workspace, message, cx))
+            .update(cx, |workspace, cx| show_outcome(workspace, outcome, cx))
             .ok();
     })
     .detach();
@@ -355,9 +428,15 @@ fn run(
             };
             let message = match command {
                 StoreCommand::RollBack => {
+                    let waiter = cx.update(|_, cx| expect_load(id, cx))?;
                     let version = store.rollback(id, fs.as_ref()).await?;
                     grant_and_rescan(&store, id, fs.clone(), cx).await?;
-                    format!("Rolled {id} back to {version}")
+                    match load_outcome(waiter, cx).await {
+                        Ok(()) => format!("Rolled {id} back to {version}"),
+                        Err(reason) => {
+                            format!("Rolled {id} back to {version}, but it did not load: {reason}")
+                        }
+                    }
                 }
                 StoreCommand::TogglePin => {
                     let pinned = !state.extensions[id].pinned;

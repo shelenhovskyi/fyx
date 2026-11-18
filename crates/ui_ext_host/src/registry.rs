@@ -53,6 +53,7 @@ use crate::{
     backend::HostEffect,
     backend::UiBackend,
     consent::{self, ConsentRecord, ConsentState, ConsentStore},
+    decorations::Decorations,
     install_store::InstallStore,
     modal::ExtensionModal,
     panel::{
@@ -125,6 +126,8 @@ pub struct UiExtensionRegistry {
     tick_budgets: HashMap<Arc<str>, ui_ext_wasm::ticks::TickBudget>,
     /// The workspace whose window was active last: where `show-surface` opens a modal.
     active_workspace: Option<gpui::EntityId>,
+    /// Install commands waiting for the outcome of the next load of an id (triage-3 #7).
+    load_waiters: HashMap<Arc<str>, Vec<futures::channel::oneshot::Sender<Result<(), String>>>>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -442,6 +445,8 @@ impl UiExtensionRegistry {
         surfaces: &[Surface],
         cx: &mut Context<Self>,
     ) {
+        // A reload starts without decorations; the new instance places its own.
+        remove_decorations(backend.extension_id(), cx);
         for loaded in self.surfaces_of(backend.extension_id()) {
             let surface_id = &loaded.surface_id;
             if !surfaces
@@ -497,6 +502,28 @@ impl UiExtensionRegistry {
             info: Rc::new(info),
             state,
         });
+    }
+
+    /// The outcome of the next load of `extension_id`: loaded, or why not. An install command
+    /// awaits it before it says "Installed".
+    pub fn wait_for_load(
+        &mut self,
+        extension_id: &str,
+    ) -> futures::channel::oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.load_waiters
+            .entry(extension_id.into())
+            .or_default()
+            .push(tx);
+        rx
+    }
+
+    fn report_load(&mut self, extension_id: &str, outcome: Result<(), String>) {
+        if let Some(waiters) = self.load_waiters.remove(extension_id) {
+            for waiter in waiters {
+                waiter.send(outcome.clone()).ok();
+            }
+        }
     }
 
     /// The workspace whose window became active; modals open there.
@@ -604,9 +631,11 @@ impl UiExtensionRegistry {
         let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             loop {
-                let mut found = find_ui_extensions(&dir, fs.as_ref()).await;
+                // Folders that exist but cannot be read: not uninstalls (triage-3 #7).
+                let mut unreadable = Vec::new();
+                let mut found = find_ui_extensions(&dir, fs.as_ref(), &mut unreadable).await;
                 if let Some(store) = &store {
-                    found.extend(find_store_extensions(store, fs.as_ref()).await);
+                    found.extend(find_store_extensions(store, fs.as_ref(), &mut unreadable).await);
                 }
                 // Read again on every round: a change during the scan asks for another round.
                 let dev_paths = this
@@ -614,7 +643,16 @@ impl UiExtensionRegistry {
                     .unwrap_or_default();
                 for path in dev_paths {
                     let source = ExtensionSource::Directory(path.clone());
-                    match found_at(path.clone(), true, source, None, fs.as_ref()).await {
+                    match found_at(
+                        path.clone(),
+                        true,
+                        source,
+                        None,
+                        fs.as_ref(),
+                        &mut unreadable,
+                    )
+                    .await
+                    {
                         Some(extension) => found.push(extension),
                         None => log::error!(
                             "fyx:ui: fyx.extensions.dev_paths: {} is not a built UI extension",
@@ -623,7 +661,10 @@ impl UiExtensionRegistry {
                     }
                 }
                 let Ok((to_load, consent_file)) = this.update(cx, |this, cx| {
-                    (this.plan_scan(found, cx), this.consent.path_to_load())
+                    (
+                        this.plan_scan(found, &unreadable, cx),
+                        this.consent.path_to_load(),
+                    )
                 }) else {
                     return;
                 };
@@ -659,6 +700,13 @@ impl UiExtensionRegistry {
                         let allowed = this
                             .update(cx, |this, cx| this.check_consent(&found, &dir, record, cx));
                         if !matches!(allowed, Ok(true)) {
+                            this.update(cx, |this, _| {
+                                this.report_load(
+                                    &found.extension_id,
+                                    Err("it waits for your approval (see the notification)".into()),
+                                )
+                            })
+                            .ok();
                             continue;
                         }
                     }
@@ -668,6 +716,7 @@ impl UiExtensionRegistry {
                         LoadOptions {
                             cache: found.cache.clone(),
                             capability_check: checker,
+                            allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
                             ..LoadOptions::default()
                         },
                         fs.clone(),
@@ -687,8 +736,13 @@ impl UiExtensionRegistry {
                                     found.source.clone(),
                                 ) {
                                     log::error!("fyx:ui: {error:#}");
+                                    this.report_load(
+                                        &found.extension_id,
+                                        Err(format!("{error:#}")),
+                                    );
                                     return;
                                 }
+                                this.report_load(&found.extension_id, Ok(()));
                                 this.installed
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
                                 this.consent
@@ -713,6 +767,7 @@ impl UiExtensionRegistry {
                                 found.dir.display()
                             );
                             this.update(cx, |this, cx| {
+                                this.report_load(&found.extension_id, Err(format!("{error:#}")));
                                 this.reload_failed(&found.extension_id, &error, cx)
                             })
                             .ok();
@@ -860,7 +915,31 @@ impl UiExtensionRegistry {
     }
 
     /// Which found extensions need loading; stops the surfaces of uninstalled ones.
-    fn plan_scan(&mut self, found: Vec<Found>, cx: &mut Context<Self>) -> Vec<Found> {
+    fn plan_scan(
+        &mut self,
+        found: Vec<Found>,
+        unreadable: &[(PathBuf, String)],
+        cx: &mut Context<Self>,
+    ) -> Vec<Found> {
+        // A loaded extension whose folder is there but whose manifest no longer reads is not
+        // uninstalled: it keeps running and its surfaces say what is wrong (triage-3 #7).
+        let broken: Vec<(Arc<str>, String)> = self
+            .installed
+            .iter()
+            .filter_map(|(id, fingerprint)| {
+                unreadable
+                    .iter()
+                    .find(|(dir, _)| *dir == fingerprint.dir)
+                    .map(|(_, error)| (id.clone(), error.clone()))
+            })
+            .collect();
+        for (extension_id, error) in &broken {
+            self.reload_failed(
+                extension_id,
+                &anyhow::anyhow!("its extension.toml cannot be read: {error}"),
+                cx,
+            );
+        }
         self.pending_consent.retain(|pending| {
             found
                 .iter()
@@ -870,6 +949,7 @@ impl UiExtensionRegistry {
             .installed
             .keys()
             .filter(|id| !found.iter().any(|found| &found.extension_id == *id))
+            .filter(|id| !broken.iter().any(|(broken, _)| broken == *id))
             .cloned()
             .collect();
         for extension_id in gone {
@@ -898,6 +978,8 @@ impl UiExtensionRegistry {
         message: SharedString,
         cx: &mut Context<Self>,
     ) {
+        // The instance is gone (trap, disabled, uninstalled): so are its decorations.
+        remove_decorations(extension_id, cx);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
@@ -982,8 +1064,58 @@ impl UiExtensionRegistry {
                     cx.emit(RegistryEvent::HidePanel(key));
                 }
             }
-            effect => {
-                log::warn!("fyx:ui: {extension_id}: {effect:?} is not handled by this renderer yet")
+            HostEffect::PlaceDecoration {
+                id,
+                location,
+                nodes,
+            } => {
+                let Some(backend) = self.backends.get(extension_id).cloned() else {
+                    log::error!(
+                        "fyx:ui: {extension_id} placed a decoration before it was registered"
+                    );
+                    return;
+                };
+                let Some(decorations) = Decorations::global(cx) else {
+                    log::debug!(
+                        "fyx:ui: {extension_id}: no decorations in this app, dropping {id:?}"
+                    );
+                    return;
+                };
+                let link: Rc<dyn SurfaceLink> = Rc::new(RegistryLink {
+                    registry: cx.weak_entity(),
+                    extension_id: extension_id.into(),
+                });
+                let placed = decorations.update(cx, |decorations, cx| {
+                    decorations.place_extension(
+                        extension_id,
+                        &id,
+                        &location,
+                        nodes,
+                        backend,
+                        Some(link),
+                        cx,
+                    )
+                });
+                if let Err(error) = placed {
+                    log::error!("fyx:ui: {extension_id}: place-decoration({id:?}): {error:#}");
+                }
+            }
+            HostEffect::RemoveDecoration { id } => {
+                let removed = Decorations::global(cx).is_some_and(|decorations| {
+                    decorations.update(cx, |decorations, cx| {
+                        decorations.remove_extension_decoration(extension_id, &id, cx)
+                    })
+                });
+                if !removed {
+                    log::debug!("fyx:ui: {extension_id} removed unknown decoration {id:?}");
+                }
+            }
+            // Images are 0.3 (plan 4.10, 4.11): no renderer for them yet, and a 0.2 component
+            // cannot make these effects.
+            HostEffect::AddImage { handle, .. } | HostEffect::RemoveImage { handle } => {
+                log::debug!(
+                    "fyx:ui: {extension_id}: image {handle} ignored (no image renderer yet)"
+                )
             }
         }
     }
@@ -999,16 +1131,30 @@ impl UiExtensionRegistry {
             Some(surface) => surface.state.update(cx, |state, cx| {
                 state.apply_pushed_update(update, cx);
             }),
-            None => log::error!(
-                "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
-            ),
+            None => {
+                // Decoration ids share the surface namespace (design.md §L).
+                let pushed = Decorations::global(cx).is_some_and(|decorations| {
+                    decorations.update(cx, |decorations, cx| {
+                        decorations.push(extension_id, surface_id, update, cx)
+                    })
+                });
+                if !pushed {
+                    log::error!(
+                        "fyx:ui: {extension_id} pushed an update for unknown surface {surface_id:?}"
+                    );
+                }
+            }
         }
     }
 }
 
 /// The UI extensions in `dir`: subdirectories (or links to them, as dev installs are) whose
 /// `extension.toml` has a `[fyx_ui]` table. Others are regular Zed extensions and are skipped.
-async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
+async fn find_ui_extensions(
+    dir: &Path,
+    fs: &dyn Fs,
+    unreadable: &mut Vec<(PathBuf, String)>,
+) -> Vec<Found> {
     let mut entries = match fs.read_dir(dir).await {
         Ok(entries) => entries,
         Err(error) => {
@@ -1031,7 +1177,8 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
             .flatten()
             .is_some_and(|metadata| metadata.is_symlink);
         let source = ExtensionSource::Directory(extension_dir.clone());
-        if let Some(extension) = found_at(extension_dir, is_dev, source, None, fs).await {
+        if let Some(extension) = found_at(extension_dir, is_dev, source, None, fs, unreadable).await
+        {
             found.push(extension);
         }
     }
@@ -1039,7 +1186,11 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
 }
 
 /// The active version of every extension in the install store.
-async fn find_store_extensions(store: &InstallStore, fs: &dyn Fs) -> Vec<Found> {
+async fn find_store_extensions(
+    store: &InstallStore,
+    fs: &dyn Fs,
+    unreadable: &mut Vec<(PathBuf, String)>,
+) -> Vec<Found> {
     let active = match store.active(fs).await {
         Ok(active) => active,
         Err(error) => {
@@ -1050,7 +1201,16 @@ async fn find_store_extensions(store: &InstallStore, fs: &dyn Fs) -> Vec<Found> 
     let mut found = Vec::new();
     for (extension_id, version, dir) in active {
         let cache = store.precompiled_cache(&extension_id, &version);
-        match found_at(dir, false, ExtensionSource::Store, Some(cache), fs).await {
+        match found_at(
+            dir,
+            false,
+            ExtensionSource::Store,
+            Some(cache),
+            fs,
+            unreadable,
+        )
+        .await
+        {
             Some(extension) if extension.extension_id == extension_id => found.push(extension),
             Some(extension) => log::error!(
                 "fyx:ui: the install store lists {extension_id}, but its folder holds {}",
@@ -1069,12 +1229,15 @@ async fn found_at(
     source: ExtensionSource,
     cache: Option<PrecompiledCache>,
     fs: &dyn Fs,
+    unreadable: &mut Vec<(PathBuf, String)>,
 ) -> Option<Found> {
     let (extension_id, manifest) = match UiManifest::read(fs, &extension_dir).await {
         Ok(Some(manifest)) => manifest,
         Ok(None) => return None,
         Err(error) => {
-            log::debug!("fyx:ui: skipping {}: {error:#}", extension_dir.display());
+            // Also a regular Zed extension with a broken manifest; logged, not shown.
+            log::warn!("fyx:ui: cannot read {}: {error:#}", extension_dir.display());
+            unreadable.push((extension_dir, format!("{error:#}")));
             return None;
         }
     };
@@ -1100,6 +1263,18 @@ async fn found_at(
                 component.display()
             );
             None
+        }
+    }
+}
+
+/// Removes every decoration of an extension (unload, reload, disable).
+fn remove_decorations(extension_id: &str, cx: &mut App) {
+    if let Some(decorations) = Decorations::global(cx) {
+        let removed = decorations.update(cx, |decorations, cx| {
+            decorations.remove_extension(extension_id, cx)
+        });
+        if removed > 0 {
+            log::debug!("fyx:ui: removed {removed} decoration(s) of {extension_id}");
         }
     }
 }
@@ -1205,6 +1380,21 @@ pub fn init(cx: &mut App) {
     load_dev_extensions(cx);
     follow_dev_paths_setting(cx);
     watch_installed_extensions(cx);
+}
+
+/// Whether a staged `fyx:ui` version (0.2 before it is frozen) may load (migration.md §2): on Dev
+/// and Nightly builds, and for dev extensions. `None` before the release channel is set (tests),
+/// which leaves `ui_ext_wasm`'s default.
+fn staged_allowed(dev_extension: bool, cx: &App) -> Option<bool> {
+    let channel = release_channel::ReleaseChannel::try_global(cx)?;
+    let dev_or_nightly = matches!(
+        channel,
+        release_channel::ReleaseChannel::Dev | release_channel::ReleaseChannel::Nightly
+    );
+    Some(ui_ext_wasm::staged_api_allowed(
+        dev_or_nightly,
+        dev_extension,
+    ))
 }
 
 /// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
@@ -1677,6 +1867,8 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     });
     let options = LoadOptions {
         capability_check: checker,
+        // A `FYX_UI_DEV_EXTENSIONS` entry is a dev extension.
+        allow_staged: cx.update(|cx| staged_allowed(true, cx)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

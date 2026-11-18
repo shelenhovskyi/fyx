@@ -534,6 +534,17 @@ impl Render for SurfaceView {
                             })),
                     )
                 })
+                .when_some(state.failure_detail().cloned(), |this, detail| {
+                    this.child(
+                        Button::new("fyx-ui-copy-error", "Copy Error Details")
+                            .style(UiButtonStyle::Subtle)
+                            .on_click(move |_: &ClickEvent, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    detail.to_string(),
+                                ))
+                            }),
+                    )
+                })
                 .into_any_element(),
             Phase::Ready(tree) => {
                 let renderer = Renderer {
@@ -791,9 +802,7 @@ impl Renderer<'_, '_> {
                 .icon_size(IconSize::Small)
                 .style(style)
                 .disabled(props.disabled)
-                .when_some(tooltip, |this, text| {
-                    this.tooltip(Tooltip::text(text))
-                })
+                .when_some(tooltip, |this, text| this.tooltip(Tooltip::text(text)))
                 .when_some(focus, |this, focus| this.track_focus(focus))
                 .when_some(on_click, |this, on_click| this.on_click(on_click))
                 .into_any_element()
