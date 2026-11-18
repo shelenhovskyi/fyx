@@ -357,3 +357,36 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   request with Zed's roots fails with `tls`.
 - Lock: ui_ext_wasm gains `http_client_tls` (dependency) and `rustls`, `tokio-rustls`
   (dev-dependencies), all already in the workspace.
+
+## 4.6 follow-up 6: Fyx's proxy setting (2026-11-18)
+
+- `network::ProxySetting`: a shared cell the host keeps current from Zed's `proxy` setting
+  (the raw value, not `ProxySettings::proxy_url()`, which falls back to the environment); each
+  request reads it. `http`, `https`, `socks5`, `socks5h` only; anything else goes direct.
+- `LoadOptions.proxy`; environment proxies stay off (`no_proxy()` first). The address checks
+  still run before a proxied request (the proxy resolves on its own); `localhost` is never
+  proxied. Tests: the CONNECT reaches the proxy, a private answer is refused before it,
+  `localhost` goes direct, clearing applies to the next request, the scheme rule.
+- For W3: set it in ui_ext_host from `ProxySettings::get_global(cx).proxy` and on each change.
+
+## 0.3 `permissions` interface, host side (2026-11-18, W4's gap)
+
+- `query(capability)`: `unavailable` unless the manifest declares it, else the broker's state,
+  mirrored per call (one call sees one answer per capability).
+- `request(capability)`: not declared → `not-permitted`; needs the click-or-Enter activation
+  and uses it up (§0.4), else `not-permitted`; in state `ask` the prompt (`broker.request`) is
+  asked once the call returns (a trap drops it); other states change nothing. The answer
+  reaches the guest as `permission-changed` through the broker's `changes()`.
+- Probe: case 6 now traps on `language.unregister-provider`; cases 10 and 11 and the
+  `perm query|request` commands. 3 tests.
+- `AgentReviews::subscribe` is async (85a7d3c2ed) for W5's `agent_review::observe(&mut App)`.
+
+## Retained-tree text cap (2026-11-18, triage-3 #7 remainder)
+
+- `ui_ext::v0_2::tree::MAX_TREE_TEXT_BYTES` = 8 MiB of props text per surface tree (0.2 and
+  0.3), counted by `Props::text_len()` (moved from ui_ext_wasm's conversions, same rules) and
+  kept as a running total through insert, set-props, remove, replace and undo.
+- Past it: `TreeError::TreeTextTooLarge { max }`, atomically like the other caps (a push is
+  refused, a reply fails). `Tree::text_bytes()` for the Inspector.
+- 0.1's tree is unchanged. Not counted: list-row trees, each built and dropped per fetch and
+  bounded by `max_nodes_per_update` and the per-call text cap.

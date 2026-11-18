@@ -14,12 +14,16 @@
 //!    and the asset to the status item `status` and the modal `modal` (invalid-argument); then
 //!    `add-image`, a push of that handle, `remove-image`, and the push again: all their results;
 //! 5. answers with an `image` node instead of the report, on whatever surface it came from;
-//! 6. calls `permissions.query`, which this build links as a trap;
+//! 6. calls `language.unregister-provider`, which this build links as a trap;
 //! 7. (reserved)
 //! 8. `push-update`s with `canvas` nodes (design.md §13): a valid one to `probe` (ok), one with a
 //!    NaN coordinate, one without a description, one of 16385 ops, and the valid one to `status`
 //!    and to `modal`: all their results;
-//! 9. answers with a clickable `canvas` node (id 1) instead of the report.
+//! 9. answers with a clickable `canvas` node (id 1) instead of the report;
+//! 10. `permissions.request(network-fetch)` twice in the click (the gesture is used up by the
+//!     first): both results;
+//! 11. `permissions.query` of all four T2 capabilities, then `request(process-spawn)`: the four
+//!     states and the result.
 //!
 //! A `canvas-click` is answered with a text node (id 1): `canvas-click <canvas> <x> <y>`.
 //!
@@ -51,6 +55,10 @@
 //! - `edit-trap <same>`: the edit, then a trap.
 //!
 //! Outcome: `edit-done <id> ok` or `edit-done <id> err <code>`.
+//!
+//! `permissions`: `perm query <capability>` (the state), `perm request <capability>` (`done`
+//! or the error code; `input-changed` is no gesture), with `network-fetch`, `process-spawn`,
+//! `workspace-edit` or `agent-observe`.
 //!
 //! `agent:observe`: `observe start` (`done` or the error code), `observe stop` (`done`).
 //! Outcomes: `agent snapshot <reviews>`, `agent <opened|updated|resolved> <review> <session>
@@ -383,10 +391,33 @@ fn run(case: NodeId) -> Result<Vec<String>, String> {
             results.push(push_canvas("modal", chart()));
             results
         }
-        6 => vec![format!(
-            "{:?}",
-            permissions::query(permissions::T2Capability::NetworkFetch)
-        )],
+        6 => {
+            fyx::ui::language::unregister_provider(0);
+            vec!["returned".to_string()]
+        }
+        10 => vec![
+            outcome(permissions::request(
+                permissions::T2Capability::NetworkFetch,
+            )),
+            outcome(permissions::request(
+                permissions::T2Capability::NetworkFetch,
+            )),
+        ],
+        11 => {
+            let mut report: Vec<String> = [
+                permissions::T2Capability::NetworkFetch,
+                permissions::T2Capability::ProcessSpawn,
+                permissions::T2Capability::WorkspaceEdit,
+                permissions::T2Capability::AgentObserve,
+            ]
+            .into_iter()
+            .map(|capability| state_name(permissions::query(capability)).to_string())
+            .collect();
+            report.push(outcome(permissions::request(
+                permissions::T2Capability::ProcessSpawn,
+            )));
+            report
+        }
         other => return Err(format!("no case {other}")),
     })
 }
@@ -506,6 +537,12 @@ impl Guest for Probe {
                     ["edit-trap", rest @ ..] => {
                         apply_edit(rest)?;
                         panic!("trap after an edit")
+                    }
+                    ["perm", "query", capability] => {
+                        vec![state_name(permissions::query(t2_capability(capability)?)).to_string()]
+                    }
+                    ["perm", "request", capability] => {
+                        vec![outcome(permissions::request(t2_capability(capability)?))]
                     }
                     ["observe", "start"] => vec![outcome(agent_observe::start())],
                     ["observe", "stop"] => {
@@ -655,6 +692,25 @@ impl Guest for Probe {
         _event: fyx::ui::requests::PickerSourceEvent,
     ) -> Result<(), String> {
         Err("unsupported".into())
+    }
+}
+
+fn t2_capability(name: &str) -> Result<permissions::T2Capability, String> {
+    Ok(match name {
+        "network-fetch" => permissions::T2Capability::NetworkFetch,
+        "process-spawn" => permissions::T2Capability::ProcessSpawn,
+        "workspace-edit" => permissions::T2Capability::WorkspaceEdit,
+        "agent-observe" => permissions::T2Capability::AgentObserve,
+        other => return Err(format!("no capability {other}")),
+    })
+}
+
+fn state_name(state: permissions::PermissionState) -> &'static str {
+    match state {
+        permissions::PermissionState::Granted => "granted",
+        permissions::PermissionState::Denied => "denied",
+        permissions::PermissionState::Ask => "ask",
+        permissions::PermissionState::Unavailable => "unavailable",
     }
 }
 

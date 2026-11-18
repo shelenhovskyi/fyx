@@ -16,6 +16,11 @@ use super::{InsertOp, InvalidateRowsOp, Node, NodeId, Patch, Props, RowRange, Up
 use crate::canvas::MAX_CANVASES_PER_SURFACE;
 use crate::tree::{TreeError, TreeLimits};
 
+/// String bytes one surface's retained tree may hold, across all its props (triage-3 #7): each
+/// call's lifted text is capped, but many calls could otherwise grow a tree without bound. An
+/// update that would pass it is refused with [`TreeError::TreeTextTooLarge`] and changes nothing.
+pub const MAX_TREE_TEXT_BYTES: usize = 8 << 20;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
     props: Arc<Props>,
@@ -142,6 +147,8 @@ pub struct Tree {
     limits: TreeLimits,
     /// Canvas nodes in the tree, at most [`MAX_CANVASES_PER_SURFACE`] (design.md §13).
     canvases: usize,
+    /// [`Props::text_len`] of every node, at most [`MAX_TREE_TEXT_BYTES`].
+    text_bytes: usize,
 }
 
 fn is_canvas(props: &Props) -> bool {
@@ -155,7 +162,22 @@ impl Tree {
             roots: Vec::new(),
             limits,
             canvases: 0,
+            text_bytes: 0,
         }
+    }
+
+    /// The string bytes the tree retains (for the Extension Inspector).
+    pub fn text_bytes(&self) -> usize {
+        self.text_bytes
+    }
+
+    fn check_text(&self, removed: usize, added: usize) -> Result<(), TreeError> {
+        if self.text_bytes - removed + added > MAX_TREE_TEXT_BYTES {
+            return Err(TreeError::TreeTextTooLarge {
+                max: MAX_TREE_TEXT_BYTES,
+            });
+        }
+        Ok(())
     }
 
     pub fn from_nodes(nodes: Vec<Node>, limits: TreeLimits) -> Result<Self, TreeError> {
@@ -296,11 +318,14 @@ impl Tree {
                         let replaced = std::mem::replace(&mut node.props, props);
                         self.canvases = self.canvases + usize::from(is_canvas(&node.props))
                             - usize::from(is_canvas(&replaced));
+                        self.text_bytes =
+                            self.text_bytes + node.props.text_len() - replaced.text_len();
                     }
                 }
                 Undo::Inserted(id) => {
                     if let Some(node) = self.nodes.remove(&id) {
                         self.canvases -= usize::from(is_canvas(&node.props));
+                        self.text_bytes -= node.props.text_len();
                         self.siblings_mut(node.parent)
                             .retain(|&sibling| sibling != id);
                     }
@@ -315,6 +340,10 @@ impl Tree {
                         .iter()
                         .filter(|(_, node)| is_canvas(&node.props))
                         .count();
+                    self.text_bytes += nodes
+                        .iter()
+                        .map(|(_, node)| node.props.text_len())
+                        .sum::<usize>();
                     self.nodes.extend(nodes);
                     let siblings = self.siblings_mut(parent);
                     let index = index.min(siblings.len());
@@ -423,9 +452,13 @@ impl Tree {
                 max: MAX_CANVASES_PER_SURFACE,
             });
         }
+        let (removed, added) = (node.props.text_len(), props.text_len());
+        self.check_text(removed, added)?;
+        let node = self.nodes.get_mut(&id).ok_or(TreeError::UnknownNode(id))?;
         let old = std::mem::replace(&mut node.props, Arc::new(props));
         self.canvases =
             self.canvases + usize::from(is_canvas(&node.props)) - usize::from(is_canvas(&old));
+        self.text_bytes = self.text_bytes - removed + added;
         Ok(old)
     }
 
@@ -469,6 +502,8 @@ impl Tree {
                 max: self.limits.max_depth,
             });
         }
+        let text = node.props.text_len();
+        self.check_text(0, text)?;
         let siblings = match node.parent {
             Some(parent_id) => {
                 let parent = self
@@ -500,6 +535,7 @@ impl Tree {
         };
         siblings.insert(index, node.id);
         self.canvases += usize::from(is_canvas(&node.props));
+        self.text_bytes += text;
         self.nodes.insert(
             node.id,
             TreeNode {
@@ -530,11 +566,13 @@ impl Tree {
         siblings.retain(|&sibling| sibling != id);
         let mut pending = node.children.clone();
         self.canvases -= usize::from(is_canvas(&node.props));
+        self.text_bytes -= node.props.text_len();
         let mut nodes = vec![(id, node)];
         while let Some(child) = pending.pop() {
             if let Some(node) = self.nodes.remove(&child) {
                 removed.insert(child);
                 self.canvases -= usize::from(is_canvas(&node.props));
+                self.text_bytes -= node.props.text_len();
                 pending.extend(node.children.iter().copied());
                 nodes.push((child, node));
             }
@@ -645,6 +683,81 @@ mod tests {
                 index: 0,
                 error: Box::new(TreeError::UnknownNode(99))
             }
+        );
+    }
+
+    fn text_props(bytes: usize) -> Props {
+        Props::Text(TextProps {
+            content: "x".repeat(bytes),
+            ..TextProps::default()
+        })
+    }
+
+    /// triage-3 #7: a surface's tree holds at most `MAX_TREE_TEXT_BYTES` of text, however many
+    /// updates build it; a refused update changes nothing, and removals and undo keep the count.
+    #[test]
+    fn retained_text_is_capped_per_surface() {
+        let half = MAX_TREE_TEXT_BYTES / 2;
+        let mut tree = Tree::from_nodes(vec![flex(1, None)], TreeLimits::default()).unwrap();
+        tree.apply_patches(vec![Patch::Insert(InsertOp {
+            node: node(2, Some(1), text_props(half)),
+            before: None,
+        })])
+        .unwrap();
+        assert_eq!(tree.text_bytes(), half);
+        let before = tree.clone();
+        // Each update is small enough on its own; the third would pass the cap.
+        tree.apply_patches(vec![Patch::Insert(InsertOp {
+            node: node(3, Some(1), text_props(half)),
+            before: None,
+        })])
+        .unwrap();
+        assert_eq!(tree.text_bytes(), MAX_TREE_TEXT_BYTES);
+        let full = tree.clone();
+        let error = tree
+            .apply_patches(vec![
+                Patch::SetProps(2, text_props(1)),
+                Patch::Insert(InsertOp {
+                    node: node(4, Some(1), text_props(half)),
+                    before: None,
+                }),
+            ])
+            .unwrap_err();
+        assert!(
+            matches!(&error, TreeError::Patch { index: 1, error } if matches!(**error, TreeError::TreeTextTooLarge { .. })),
+            "{error:?}"
+        );
+        assert_eq!(tree, full, "the refused update undid its first patch");
+        assert_eq!(tree.text_bytes(), MAX_TREE_TEXT_BYTES);
+        // Growing a node past the cap is refused; shrinking one makes room.
+        assert!(
+            tree.apply_patches(vec![Patch::SetProps(2, text_props(half + 1))])
+                .is_err()
+        );
+        tree.apply_patches(vec![Patch::SetProps(2, text_props(10))])
+            .unwrap();
+        assert_eq!(tree.text_bytes(), half + 10);
+        // Removing a subtree frees its text; undoing the removal counts it again.
+        tree.apply_patches(vec![Patch::Remove(1)]).unwrap();
+        assert_eq!(tree.text_bytes(), 0);
+        let mut tree = before;
+        assert!(
+            tree.apply_patches(vec![Patch::Remove(1), Patch::SetProps(9, text_props(1))])
+                .is_err()
+        );
+        assert_eq!(tree.text_bytes(), half);
+        // A replace counts its own nodes.
+        assert!(matches!(
+            tree.replace(vec![
+                node(1, None, text_props(half)),
+                node(2, None, text_props(half + 1)),
+            ]),
+            Err(TreeError::TreeTextTooLarge { .. })
+        ));
+        assert_eq!(
+            tree.text_bytes(),
+            half,
+            "a refused replace keeps the old tree"
         );
     }
 

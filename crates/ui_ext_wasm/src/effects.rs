@@ -296,6 +296,16 @@ impl ApiState {
         self.activation_window = window;
     }
 
+    /// For a call that needs the activation and uses it up (`permissions.request`, §0.4):
+    /// whether there was one; it is gone after this.
+    pub(crate) fn take_activation(&mut self) -> bool {
+        let had = self.has_activation();
+        if had {
+            self.activation = Activation::None;
+        }
+        had
+    }
+
     fn has_activation(&self) -> bool {
         match self.activation {
             Activation::None => false,

@@ -32,35 +32,7 @@ pub(crate) fn unsupported(what: &str) -> model::HostError {
 
 /// String bytes of a node's props, for [`crate::MAX_LIFTED_TEXT_PER_CALL`].
 pub(crate) fn props_text_len(props: &model::Props) -> usize {
-    let option_len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
-    let icon_len = |icon: &model::IconRef| match icon {
-        model::IconRef::Frozen(_) => 0,
-        model::IconRef::Upstream(name) => name.len(),
-    };
-    match props {
-        model::Props::Flex(_) | model::Props::List(_) => 0,
-        model::Props::Text(props) => props.content.len(),
-        model::Props::Button(props) => {
-            props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
-        }
-        model::Props::Input(props) => {
-            props.value.len() + props.placeholder.len() + option_len(&props.label)
-        }
-        model::Props::Table(props) => props.columns.iter().map(String::len).sum(),
-        model::Props::Icon(props) => icon_len(&props.name),
-        model::Props::Markdown(text) => text.len(),
-        model::Props::DiffView(props) => {
-            props.old_text.len() + props.new_text.len() + option_len(&props.language)
-        }
-        model::Props::Canvas(props) => ui_ext::canvas::canvas_text_len(props),
-        model::Props::Image(props) => {
-            props.alt.len()
-                + match &props.source {
-                    ui_ext::image::ImageSource::Asset(path) => path.len(),
-                    ui_ext::image::ImageSource::Generated(_) => 0,
-                }
-        }
-    }
+    props.text_len()
 }
 
 pub(crate) fn update_text_len(update: &model::Update) -> usize {

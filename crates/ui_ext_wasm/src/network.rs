@@ -96,6 +96,37 @@ impl Resolve for SystemResolver {
     }
 }
 
+/// Fyx's `proxy` setting as `network:fetch` uses it (decision 23): only the setting, never the
+/// `HTTP_PROXY`-style environment variables, which may carry credentials meant for other tools.
+/// The host keeps it current (`set` on every settings change); each request reads it.
+#[derive(Clone, Default)]
+pub struct ProxySetting(Arc<std::sync::RwLock<Option<Url>>>);
+
+impl ProxySetting {
+    /// The proxy a `proxy` setting names: `http`, `https`, `socks5` or `socks5h` with a host;
+    /// `None` for an empty or unusable value (the requests then go direct).
+    pub fn parse(setting: &str) -> Option<Url> {
+        let url = Url::parse(setting.trim()).ok()?;
+        (matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") && url.has_host())
+            .then_some(url)
+    }
+
+    /// Sets it from the setting's text; returns whether it names a usable proxy.
+    pub fn set(&self, setting: Option<&str>) -> bool {
+        let proxy = setting.and_then(Self::parse);
+        let usable = proxy.is_some();
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = proxy;
+        usable
+    }
+
+    pub fn get(&self) -> Option<Url> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The engine
 
@@ -110,6 +141,7 @@ pub struct Fetcher {
     /// Test only: a TLS configuration that trusts the test CA.
     #[cfg(test)]
     tls: Option<rustls::ClientConfig>,
+    proxy: ProxySetting,
 }
 
 /// The `user-agent` of an extension's requests (design.md §8): `Fyx/<major.minor> (extension
@@ -143,7 +175,14 @@ impl Fetcher {
             is_global,
             #[cfg(test)]
             tls: None,
+            proxy: ProxySetting::default(),
         }
+    }
+
+    /// Sends requests through Fyx's proxy setting; `localhost` never goes through it.
+    pub fn with_proxy(mut self, proxy: ProxySetting) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     #[cfg(test)]
@@ -241,7 +280,7 @@ impl Fetcher {
         let mut builder = reqwest::Client::builder()
             .redirect_policy(reqwest::redirect::Policy::none())
             // No proxy from the environment: those can carry the user's credentials (decision
-            // 23). Fyx's own proxy setting is not applied yet.
+            // 23). Fyx's own proxy setting is applied below.
             .no_proxy()
             .user_agent(self.user_agent.clone())
             // Zed's TLS, as its own client uses it: the platform verifier, or the bundled webpki
@@ -285,6 +324,16 @@ impl Fetcher {
             };
             // Connect to the checked addresses only: reqwest does not resolve this name again.
             builder = builder.resolve_to_addrs(&host, &addrs);
+            // Through Fyx's proxy, if one is set. The addresses were still checked here, though
+            // the proxy resolves the name on its own; `localhost` is never proxied.
+            if !allowed.loopback
+                && let Some(proxy) = self.proxy.get()
+            {
+                builder = builder.proxy(
+                    reqwest::Proxy::all(proxy.as_str())
+                        .map_err(|error| FetchError::Other(format!("proxy: {error}")))?,
+                );
+            }
         }
         let client = builder
             .build()
@@ -1459,6 +1508,101 @@ mod tests {
         assert_eq!(response.url, url);
         let refused = run(&domains, &fetcher(), request(&url)).await;
         assert!(matches!(refused, Err(FetchError::Tls(_))), "{refused:?}");
+    }
+
+    /// Answers every name with one public address.
+    struct Public;
+
+    impl Resolve for Public {
+        fn resolve(&self, _: &str, port: u16) -> BoxFuture<'static, io::Result<Vec<SocketAddr>>> {
+            futures::future::ready(Ok(vec![SocketAddr::new(
+                "93.184.216.34".parse().unwrap(),
+                port,
+            )]))
+            .boxed()
+        }
+    }
+
+    /// Plan 4.6 follow-up: requests go through Fyx's proxy setting (here a proxy that records
+    /// the `CONNECT` and refuses it), after the same address checks, and `localhost` goes
+    /// direct.
+    #[tokio::test]
+    async fn requests_use_the_proxy_setting() {
+        let tunnels = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let proxy_server = test_server::start({
+            let tunnels = tunnels.clone();
+            move |target, _| {
+                tunnels.lock().unwrap().push(target.to_string());
+                Some(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n".to_vec())
+            }
+        })
+        .await;
+        let proxy = ProxySetting::default();
+        assert!(proxy.set(Some(&format!(" http://127.0.0.1:{} ", proxy_server.port))));
+        let proxied =
+            Fetcher::new("probe".into(), Some(Arc::new(Public))).with_proxy(proxy.clone());
+        let domains = list(&["api.example.com"]);
+        let result = run(&domains, &proxied, request("https://api.example.com/v1")).await;
+        assert!(result.is_err(), "the proxy refused the tunnel: {result:?}");
+        assert_eq!(*tunnels.lock().unwrap(), ["api.example.com:443"]);
+
+        // A private answer is refused before the proxy is asked.
+        let private = Fetcher::new(
+            "probe".into(),
+            Some(Arc::new(Rebinding {
+                first: vec![SocketAddr::new("10.0.0.1".parse().unwrap(), 443)],
+                later: Vec::new(),
+                calls: Default::default(),
+            })),
+        )
+        .with_proxy(proxy.clone());
+        let result = run(&domains, &private, request("https://api.example.com/v1")).await;
+        assert!(
+            matches!(result, Err(FetchError::HostNotAllowed(_))),
+            "{result:?}"
+        );
+        assert_eq!(proxy_server.connections(), 1);
+
+        // `localhost` goes direct.
+        let target =
+            test_server::start(|path, _| (path == "/hello").then(|| test_server::ok(b"direct")))
+                .await;
+        let local = list(&[&format!("localhost:{}", target.port)]);
+        let response = run(
+            &local,
+            &fetcher().with_proxy(proxy.clone()),
+            request(&format!("http://localhost:{}/hello", target.port)),
+        )
+        .await
+        .expect("direct");
+        assert_eq!(response.body, b"direct");
+        assert_eq!(proxy_server.connections(), 1);
+
+        // Clearing the setting takes effect on the next request.
+        assert!(!proxy.set(None));
+        assert!(proxy.get().is_none());
+    }
+
+    #[test]
+    fn only_usable_proxy_settings_are_taken() {
+        for good in [
+            "http://proxy.corp:3128",
+            "https://user:pw@proxy.corp",
+            "socks5://127.0.0.1:1080",
+            "socks5h://proxy.corp:1080",
+        ] {
+            assert!(ProxySetting::parse(good).is_some(), "{good}");
+        }
+        for bad in [
+            "",
+            "   ",
+            "proxy.corp:3128",
+            "ftp://proxy.corp",
+            "file:///etc/x",
+            "http://",
+        ] {
+            assert!(ProxySetting::parse(bad).is_none(), "{bad}");
+        }
     }
 
     /// Requests carry Fyx's version, the platform and the extension id.
