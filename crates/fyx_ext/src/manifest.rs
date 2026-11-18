@@ -29,6 +29,13 @@ pub const MAX_NETWORK_DOMAINS: usize = 64;
 
 const NETWORK_FETCH: &str = "network:fetch";
 const PROCESS_SPAWN: &str = "process:spawn";
+/// The T2 capabilities the host refuses at load for an `api_version` before they arrive.
+const T2_CAPABILITIES: &[&str] = &[
+    NETWORK_FETCH,
+    PROCESS_SPAWN,
+    "workspace:edit",
+    "agent:observe",
+];
 
 /// Capabilities a manifest may declare (platform spec, decision 21). Ones the current world does
 /// not provide yet are accepted with a warning, so a manifest can be written ahead of the host.
@@ -72,7 +79,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     ),
     (
         "workspace:edit",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
     (
         PROCESS_SPAWN,
@@ -80,7 +87,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     ),
     (
         "agent:observe",
-        CapabilityStatus::Planned("a later release"),
+        CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
 ];
 
@@ -275,8 +282,7 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
             Some((_, CapabilityStatus::Since(since))) => match &api_version {
                 // The host refuses a T2 capability it cannot grant at that version.
                 Some(version)
-                    if version < since
-                        && (capability == NETWORK_FETCH || capability == PROCESS_SPAWN) =>
+                    if version < since && T2_CAPABILITIES.contains(&capability.as_str()) =>
                 {
                     report.error(format!(
                         "capability {capability:?} needs [fyx_ui].api_version {since} or newer"

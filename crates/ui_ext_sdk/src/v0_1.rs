@@ -407,6 +407,26 @@ pub mod glue {
             message: needs_0_3("kill"),
         })
     }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn apply_edit(_edit: &crate::WorkspaceEdit) -> Result<u64, HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("apply_edit"),
+        })
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn observe_start() -> Result<(), HostError> {
+        Err(HostError {
+            code: HostErrorCode::Unavailable,
+            message: needs_0_3("start_observing"),
+        })
+    }
+
+    /// Nothing to stop: this world has no agent feed.
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn observe_stop() {}
 }
 
 #[cfg(test)]

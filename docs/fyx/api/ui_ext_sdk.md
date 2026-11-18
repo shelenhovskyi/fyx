@@ -14,6 +14,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `API_VERSION_V0_1_SECTION_BYTES` | const | `API_VERSION_V0_1` as stored in the section. |
 | `API_VERSION_V0_2` | const | The version `register_extension!(T, v0_2)` exports. |
 | `API_VERSION_V0_2_SECTION_BYTES` | const | `API_VERSION_V0_2` as stored in the section. |
+| `AgentEvent` | re-export | `bindings::fyx::ui::agent_observe::AgentEvent` |
 | `ButtonProps::disabled` | method |  |
 | `ButtonProps::icon` | method |  |
 | `ButtonProps::new` | method |  |
@@ -23,6 +24,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `DecorationLocation::height_lines` | method | The block's height in editor lines. |
 | `DiffViewProps::language` | method |  |
 | `DiffViewProps::new` | method |  |
+| `EditError` | re-export | `bindings::fyx::ui::workspace_edit::EditError` |
+| `EditTarget` | re-export | `bindings::fyx::ui::workspace_edit::EditTarget` |
 | `Extension` | trait | A UI extension. One instance lives for the lifetime of the WASM instance; the host calls it from a single thread, one call at a time. |
 | `Extension::handle_event` | method |  |
 | `Extension::handle_io` | method | `fyx:ui` 0.3: the outcome of work that ran outside a call, such as `IoEvent::FetchDone((id, result))` for `fetch`. It belongs to no surface: update surfaces with `push_update` or `SurfaceTree::push`. An `Err` is logged by the host. |
@@ -32,6 +35,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Extension::surfaces` | method | The static surfaces, called once after instantiation. `add_surface` adds more later. |
 | `Extension::tick` | method | The tick `request_tick` asked for. The update applies to `surface_id`, like an event's reply. `fyx:ui` 0.1 has no ticks, so a `v0_1` extension never gets this call. |
 | `FetchError` | re-export | `bindings::fyx::ui::network::FetchError` |
+| `FileEdit` | re-export | `bindings::fyx::ui::workspace_edit::FileEdit` |
+| `FileEdit::create` | method | Creates the file (empty) first if it does not exist; its directory must. |
+| `FileEdit::document` | method | Edits of an open document, by its `documents` id. |
+| `FileEdit::expected_version` | method | Fails the whole edit with `EditError::Conflict` if the document changed since `version`. |
+| `FileEdit::insert` | method | Inserts `text` at `at`. |
+| `FileEdit::path` | method | Edits of the file at `path`, relative to the root of the one worktree that has it. |
+| `FileEdit::replace` | method | Replaces `range` with `new_text`. Ranges are half-open and must not overlap. |
 | `FileRef` | re-export | `bindings::fyx::ui::documents::FileRef` |
 | `FlexProps::align` | method |  |
 | `FlexProps::background` | method |  |
@@ -56,6 +66,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HttpResponse::header` | method | The first header with this name, ignoring ASCII case. |
 | `HttpResponse::is_success` | method | A 2xx status. |
 | `HttpResponse::text` | method | The body as UTF-8 text. |
+| `HunkDecision` | re-export | `bindings::fyx::ui::agent_observe::HunkDecision` |
+| `HunkInfo` | re-export | `bindings::fyx::ui::agent_observe::HunkInfo` |
 | `Icon::all` | method | Every frozen icon, in WIT declaration order (101 in `fyx:ui` 0.2 and 0.3). |
 | `Icon::name` | method | The WIT case name, such as `arrow-up`. |
 | `IconProps::color` | method |  |
@@ -101,6 +113,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `PatchSet::patches` | method |  |
 | `PatchSet::remove` | method | Removes the node and its whole subtree. |
 | `PatchSet::set_props` | method |  |
+| `Position` | re-export | `bindings::fyx::ui::documents::Position` |
+| `Position::new` | method | Zero-based line, and a column in UTF-8 bytes from the start of the line. |
 | `ProcessExit` | re-export | `bindings::fyx::ui::process::ProcessExit` |
 | `ProcessOutput` | re-export | `bindings::fyx::ui::process::ProcessOutput` |
 | `ProcessOutput::text` | method | The chunk as text; a chunk may end inside a UTF-8 character, so this is lossy. |
@@ -110,6 +124,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `ProgressOptions::new` | method | A progress whose events go to `owner`, which must be a panel for `ProgressLocation::Panel`; not cancellable. The title is 1 to 80 bytes on one line. |
 | `ProgressValue` | re-export | `bindings::fyx::ui::notifications::ProgressValue` |
 | `ROW_NODE_ID_BASE` | const | First id handed out inside a `ListRow` subtree. |
+| `Resolution` | re-export | `bindings::fyx::ui::agent_observe::Resolution` |
+| `ReviewInfo` | re-export | `bindings::fyx::ui::agent_observe::ReviewInfo` |
+| `ReviewSource` | re-export | `bindings::fyx::ui::agent_observe::ReviewSource` |
+| `RuleKind` | re-export | `bindings::fyx::ui::agent_observe::RuleKind` |
 | `SpawnError` | re-export | `bindings::fyx::ui::process::SpawnError` |
 | `SpawnRequest` | re-export | `bindings::fyx::ui::process::SpawnRequest` |
 | `SpawnRequest::arg` | method | At most 256 arguments, 128 KiB in total; they must fit the manifest's patterns. |
@@ -149,10 +167,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SurfaceTree::to_nodes` | method | The whole live tree as a flat, parents-first node list, as the host holds it. |
 | `SurfaceTree::with_limits` | method | A tree checked against `limits` instead of the host's defaults. |
 | `TableProps::new` | method |  |
+| `TextEdit` | re-export | `bindings::fyx::ui::workspace_edit::TextEdit` |
 | `TextProps::bold` | method |  |
 | `TextProps::color` | method |  |
 | `TextProps::monospace` | method |  |
 | `TextProps::new` | method |  |
+| `TextRange` | re-export | `bindings::fyx::ui::documents::TextRange` |
+| `TextRange::new` | method |  |
 | `TreeBuilder` | struct | Builds a flat node list from nested code. Flex nodes take a closure that builds their children; every node gets a fresh id and its parent's id, and parents precede children. |
 | `TreeBuilder::button` | method |  |
 | `TreeBuilder::canvas` | method | `fyx:ui` 0.3: a canvas node (see `CanvasProps` and `DrawList`). Panels only, not in list rows; at most 16 per surface. |
@@ -186,6 +207,10 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TreeError::UnknownNode` | variant |  |
 | `TreeError::UpdateTooLarge` | variant |  |
 | `TreeLimits` | re-export | The host's caps on a surface, which `SurfaceTree` enforces before the host sees an update. |
+| `TurnFile` | re-export | `bindings::fyx::ui::agent_observe::TurnFile` |
+| `WorkspaceEdit` | re-export | `bindings::fyx::ui::workspace_edit::WorkspaceEdit` |
+| `WorkspaceEdit::file` | method | Edits of one file; at most 64 files per edit, each named once. |
+| `WorkspaceEdit::new` | method | An edit named `label` (1 to 128 bytes, one line): the undo step's name. |
 | `bindings` | module |  |
 | `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |

@@ -53,7 +53,9 @@ pub fn import_need(import: &str) -> ImportNeed {
         | "fyx:ui/notifications"
         | "fyx:ui/images"
         | "fyx:ui/network"
-        | "fyx:ui/process" => ImportNeed::Nothing,
+        | "fyx:ui/process"
+        | "fyx:ui/workspace-edit"
+        | "fyx:ui/agent-observe" => ImportNeed::Nothing,
         // The rest of the staged 0.3 world: the host links each interface it does not run yet
         // with functions that trap, so a component loads, and the SDK's 0.3 build imports their
         // types. A call traps, which `fyx-ext test` shows.
@@ -239,6 +241,8 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "ui:canvas",
     "network:fetch",
     "process:spawn",
+    "workspace:edit",
+    "agent:observe",
 ];
 
 /// Declared capabilities against the imports that need them: an import whose capability is not
