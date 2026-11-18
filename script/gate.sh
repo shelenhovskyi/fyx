@@ -78,7 +78,9 @@ done
 profile_snapshot() {
     for dir in "${profile_candidates[@]}"; do
         [[ -d "$dir" ]] || continue
-        find "$dir" -type f -not -path '*/logs/*' -not -path '*/db/*' -printf '%p %s %T@\n' 2>/dev/null
+        # Content, not mtime: upstream's dev-mode credentials provider rewrites
+        # `development_credentials` unchanged during upstream tests; only real changes count.
+        find "$dir" -type f -not -path '*/logs/*' -not -path '*/db/*' -exec sha256sum {} + 2>/dev/null
     done | sort -u
 }
 profile_before=$(profile_snapshot)
@@ -94,7 +96,7 @@ CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
 rm -rf "$test_home"
 profile_after=$(profile_snapshot)
 if [[ "$profile_before" != "$profile_after" ]]; then
-    touched=$(comm -13 <(printf '%s\n' "$profile_before") <(printf '%s\n' "$profile_after") | sed 's/ [0-9]* [0-9.]*$//')
+    touched=$(comm -13 <(printf '%s\n' "$profile_before") <(printf '%s\n' "$profile_after") | sed 's/^[0-9a-f]* [ *]//')
     if tasklist 2>/dev/null | grep -qiE '^(fyx|zed)(-dev)?\.exe'; then
         echo "gate: WARNING: files changed in the real Fyx profile during the tests, but a Fyx/Zed process is running, so they may be its own:"
         printf '  %s\n' $touched
