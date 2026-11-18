@@ -1,0 +1,11 @@
+# W5 check of the deep-review fixes, one turn (see REVIEW_STUB_SCENARIO=full).
+wait 10
+action agent::NewExternalAgentThread {"agent": "Review Stub"}
+review
+accept 1
+reject 2
+submit
+review
+accept-turn
+wait 8
+quit

@@ -17,7 +17,7 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13] | — | install, update, roll back a local `.fyxext` in the dev build |
+| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13]; keep a precompiled `.cwasm` per installed version, keyed by the wasmtime engine, so large components start without recompiling | — | install, update, roll back a local `.fyxext` in the dev build; a second start skips compilation |
 | 1.2 | W3 | "Install Dev Extension" + `fyx.extensions.dev_paths`; env var stays as override [6] | 1.1 | dev extension survives restart without the env var |
 | 1.3 | W3 | Hot reload in place + "Restart extension" after a failure [7, 8] | 1.2 | edit → rebuild → panel updates within 1 s; failure 3 of spec §4 passes |
 | 1.4 | new `platform-cli` | `fyx-ext` crate and binary: `new` (from the template), `build`, `dev`, `check` with declared-vs-used capabilities, `package` [4, 5, 12] | 0.1 | `fyx-ext new demo && fyx-ext dev` opens the panel in Fyx |
@@ -36,7 +36,6 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | 2.2 | W2c | Host side of A–M (including the `decorations` interface of §L), version dispatch. On the 2.1 data layer: `bindgen!` on `ui_ext::WIT_DIR_V0_2_0` next to the 0.1 bindings (moving 0.1 to `since_v0.1.0/` is optional, migration.md §1); dispatch on `ui_ext::ApiVersion`; 0.2 conversions into `ui_ext::v0_2` and 0.1 ones through its `From` impls; `UiState` keeps a `ui_ext::LiveIds` for `add-surface`, `remove-surface`, `place-decoration`, `remove-decoration` and the targets of `push-update` / `request-tick` / `show-surface`; `push-update` checks `v0_2::Update::check_caps` and returns `v0_2::HostError::from(&ApiError)`; the per-call caps the model leaves to the host (64 pushes, 512 decoration effects); ticks, the gesture window, `ui:modal`, staging by channel; M once drafted | 2.1 | probe fixture covers every new import |
 | 2.3 | W3 | Renderer side of A–K and M: ticks, modal with keyboard selection and the click-or-Enter gesture rule, dismissed, runtime surfaces, frozen icons, notifications and progress. On the 2.1 data layer: the renderer moves from the 0.1 root types to `ui_ext::v0_2` (one coordinated change with 2.2, since both build those types); `Tree` moves with it and gains design G (`Patch::InvalidateRows`, `TreeError::NotAList`, the `Touched` result), which 2.1 left out because it changes `Tree` under the renderer; icons through `IconRef` (exhaustive `match` for `Frozen`, today's `from_str` for `Upstream`); tooltips via `ButtonProps::tooltip_text`, indent via `ListRow::indent_levels`; the per-version rules of migration.md §3 | 2.2 | clock status item, picker modal, progress demo in the dev build |
 | 2.4 | W4 | Rust SDK 0.2 (with `place_decoration` / `remove_decoration` for §L) + demos moved to 0.2 as examples | 2.2 | demos build for both 0.1 and 0.2 |
-| 2.5 | new `ts-sdk` | `@fyx/sdk` on 0.2 with `jco componentize`, `fyx-ext new --lang ts`, SDK parity test [3] | 0.1, 2.1 | a TS counter runs in Fyx; parity test red on a missing wrapper |
 | 2.6 | W6 (restart) | Decorations §L on W6's anchor mechanism: an extension backend for `Decorations`, worktree-relative path matching, the registry effects, the 512 cap | 2.2 | a demo places blocks under TODO lines that follow edits and route clicks to `handle-event` |
 
 ## P3 registry
@@ -44,7 +43,7 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
 | 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
-| 3.2 | W0 | Registry CI: build from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
+| 3.2 | W0 | Registry CI: build Rust extensions from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
 | 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18] | 3.2 | install from the index; tampered package refused |
 | 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19] | 3.3 | spec §4 failures 1, 2, 5 pass |
 | 3.5 | W3 + one `fyx:` hook | Extensions page Fyx tab: search, install, update, pin, roll back, held updates [17, 21] | 3.3, 1.5 | user flow done end to end in the dev build |
@@ -63,10 +62,20 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | 4.8 | W2c | `workspace:edit` (undoable transactions), `agent:observe` read-only sessions | 4.5 | an edit undoes with one ctrl-z; observe cannot accept or reject |
 | 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8 | review file in `tasks/reviews/` |
 
+## Deferred after 1.0
+
+TypeScript extensions are deferred until after 1.0, and whether to do them at all is re-evaluated
+then (owner, 2026-11-18; spec decision 3). P3 builds and signs Rust extensions only. `sdks/ts`
+stays in the repository as an unsupported prototype.
+
+| # | Was | Task | Revisit |
+|---|---|---|---|
+| D.1 | 2.5, new `ts-sdk` | `@fyx/sdk` on the current world with `jco componentize`, `fyx-ext new --lang ts`, SDK parity test | after the 1.0 freeze |
+
 ## Parallelism
 
 At most 2 compiling streams plus the gatekeeper (owner limit). Non-compiling work runs alongside:
-1.9, 2.1, 3.1, 3.2 (registry repo), 4.1 (design) and the TS SDK's JS side. Suggested pairs:
+1.9, 2.1, 3.1, 3.2 (registry repo) and 4.1 (design). Suggested pairs:
 P1 = W3 (1.1→1.3→1.5→1.7) + `platform-cli` (1.4, then 1.8 with W4); P2 = W2c + W3, then W6
 for 2.6;
 P3 = W3 alone (registry CI is non-compiling); P4 = W6 + W3, then W2c.

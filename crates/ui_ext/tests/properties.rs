@@ -187,8 +187,7 @@ fn arb_limits() -> impl Strategy<Value = TreeLimits> {
         2 => Just(TreeLimits::default()),
         1 => (0usize..=12, 1usize..=48).prop_map(|(max_nodes_per_update, max_nodes)| TreeLimits {
             max_nodes_per_update,
-            max_nodes,
-        }),
+            max_nodes, ..TreeLimits::default() }),
     ]
 }
 
@@ -1078,7 +1077,7 @@ proptest! {
         extra in 1usize..4,
         targets in prop::collection::vec(any::<NodeId>(), 12),
     ) {
-        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes: 64 };
+        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes: 64, ..TreeLimits::default() };
         let mut tree = Tree::from_nodes(nodes, limits)?;
         let before = tree.clone();
 
@@ -1109,7 +1108,7 @@ proptest! {
             1..30,
         ),
     ) {
-        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes };
+        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes, ..TreeLimits::default() };
         let mut tree = Tree::new(limits);
         let mut next_id: NodeId = 0;
         for (remove_first, remove_pick, parent_picks) in batches {
@@ -1166,7 +1165,7 @@ proptest! {
         max_nodes in 1usize..48,
         existing in arb_nodes(8),
     ) {
-        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes };
+        let limits = TreeLimits { max_nodes_per_update: per_update, max_nodes, ..TreeLimits::default() };
         let fits = nodes.len() <= max_nodes;
 
         let mounted = Tree::from_nodes(nodes.clone(), limits);
@@ -1794,36 +1793,42 @@ proptest! {
         json_round_trip(&error)?;
     }
 
-    /// Every 0.1 value has a 0.2 counterpart with only upstream icons and empty 0.2 fields, and
-    /// the conversion loses nothing.
+    // Every 0.1 value has a 0.2 counterpart with only upstream icons and empty 0.2 fields, and
+    // the conversion loses nothing. One property per kind of value: as a single test with all five
+    // inputs, the frame overflowed the 2 MiB test-thread stack of Windows debug builds.
+    // fyx: W0 split (integration of p2-wit), same checks as before.
+
     #[test]
-    fn v0_1_values_convert_into_v0_2_losslessly(
-        props in arb_props(),
-        update in arb_update(),
-    ) {
+    fn v0_1_props_convert_into_v0_2_losslessly(props in arb_props()) {
         prop_assert_eq!(props_to_v0_1(v0_2::Props::from(props.clone())), Some(props));
+    }
+
+    #[test]
+    fn v0_1_updates_convert_into_v0_2_losslessly(update in arb_update()) {
         prop_assert_eq!(update_to_v0_1(v0_2::Update::from(update.clone())), Some(update));
     }
 
-    /// The rest of the 0.1 values, in a test of their own: with every strategy in one test, the
-    /// generator overflowed the 1 MiB stack of a Windows debug test thread.
     #[test]
-    fn v0_1_rows_events_surfaces_convert_into_v0_2_losslessly(
+    fn v0_1_list_rows_convert_into_v0_2_losslessly(
         row in (any::<u32>(), prop::collection::vec(arb_any_node(), 0..6))
             .prop_map(|(index, nodes)| ListRow { index, nodes }),
-        event in arb_ui_event(),
-        surface in arb_surface(),
     ) {
         let converted = v0_2::ListRow::from(row.clone());
         prop_assert_eq!(converted.indent, 0);
         prop_assert_eq!(converted.index, row.index);
         let nodes: Option<Vec<Node>> = converted.nodes.into_iter().map(node_to_v0_1).collect();
         prop_assert_eq!(nodes, Some(row.nodes));
+    }
 
+    #[test]
+    fn v0_1_events_convert_into_v0_2_losslessly(event in arb_ui_event()) {
         let converted = v0_2::UiEvent::from(event.clone());
         prop_assert_eq!(converted.target(), Some(event.target()));
         prop_assert_eq!(UiEvent::try_from(converted), Ok(event));
+    }
 
+    #[test]
+    fn v0_1_surfaces_convert_into_v0_2_losslessly(surface in arb_surface()) {
         prop_assert_eq!(surface_to_v0_1(v0_2::Surface::from(surface.clone())), Some(surface));
     }
 

@@ -13,6 +13,7 @@
 //! [`DEV_DECORATIONS_ENV`].
 
 mod backend;
+mod consent;
 mod decorations;
 mod install;
 mod keyboard;

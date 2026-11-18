@@ -35,6 +35,9 @@ mod probe {
     pub const ALLOCATE: NodeId = 7;
     pub const PUSH_BULK: NodeId = 8;
     pub const CONNECT: NodeId = 9;
+    pub const PUSH_TEXT: NodeId = 10;
+    pub const LOG_LONG: NodeId = 11;
+    pub const SLOW_SURFACE: &str = "slow";
 }
 
 fn demo_counter_wasm() -> Vec<u8> {
@@ -52,6 +55,16 @@ async fn load(
 ) -> (UiExtension, mpsc::UnboundedReceiver<PushedUpdate>) {
     cx.executor().allow_parking();
     cx.update(gpui_tokio::init);
+    load_another(name, wasm, cx).await
+}
+
+/// Like `load`, for a second extension in the same test: initializing tokio again would replace
+/// the runtime the first extension's queue runs on.
+async fn load_another(
+    name: &str,
+    wasm: Vec<u8>,
+    cx: &mut TestAppContext,
+) -> (UiExtension, mpsc::UnboundedReceiver<PushedUpdate>) {
     cx.update(|cx| UiExtension::load(name.into(), wasm, &cx.to_async()))
         .await
         .unwrap_or_else(|error| panic!("{name} failed to load: {error:#}"))
@@ -353,11 +366,14 @@ async fn test_push_flood_traps_and_disables_extension(cx: &mut TestAppContext) {
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
-/// Sandbox: a component cannot grow its memory past `UI_MEMORY_LIMIT`; trying traps the call
-/// with an explicit error and disables the extension.
+/// Sandbox: a component cannot grow its memory past `UI_MEMORY_LIMIT` (256 MiB); allocating
+/// 300 MiB traps the call with an explicit error and disables that extension only.
 #[gpui::test]
 async fn test_memory_past_the_limit_traps_and_disables_extension(cx: &mut TestAppContext) {
+    assert_eq!(UI_MEMORY_LIMIT, 256 << 20);
     let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+    let (bystander, _bystander_pushed) =
+        load_another("fyx_ui_test_bystander", probe_wasm(), cx).await;
 
     let error = extension
         .handle_event(probe::SURFACE, UiEvent::Click(probe::ALLOCATE))
@@ -375,6 +391,54 @@ async fn test_memory_past_the_limit_traps_and_disables_extension(cx: &mut TestAp
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
+
+    // Another extension's instance is untouched.
+    bystander
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("the other extension still works");
+}
+
+/// Sandbox: the text of one call's pushes and logs is capped at `MAX_LIFTED_TEXT_PER_CALL` in
+/// total, though each piece is within guest memory: five pushes of the same 4 MiB string trap.
+/// One long log message is cut, not refused.
+#[gpui::test]
+async fn test_lifted_text_past_the_cap_traps(cx: &mut TestAppContext) {
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::LOG_LONG))
+        .await
+        .expect("a 1 MiB log message is within the cap");
+
+    let error = extension
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH_TEXT))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "more than {MAX_LIFTED_TEXT_PER_CALL} bytes of text"
+        )),
+        "{error:#}"
+    );
+    assert!(error.downcast_ref::<ReplyError>().is_none());
+}
+
+/// The first mount of a surface gets `UI_FIRST_MOUNT_BUDGET` (2 s); a later mount of the same
+/// surface gets the regular `UI_CALL_BUDGET`. The probe's `slow` surface takes a second to mount.
+#[gpui::test]
+async fn test_first_mount_gets_the_longer_budget(cx: &mut TestAppContext) {
+    assert_eq!(UI_FIRST_MOUNT_BUDGET, Duration::from_secs(2));
+    let (extension, _pushed) = load("fyx_ui_test_probe", probe_wasm(), cx).await;
+
+    let reply = extension
+        .mount(probe::SLOW_SURFACE)
+        .await
+        .expect("the first mount may take a second");
+    assert_eq!(text_of(&reply.value, 1), "slow");
+
+    let error = extension.mount(probe::SLOW_SURFACE).await.unwrap_err();
+    assert!(format!("{error:#}").contains("time budget"), "{error:#}");
 }
 
 /// Sandbox: the pushes of one call may carry at most `MAX_PUSHED_ITEMS_PER_CALL` patches and

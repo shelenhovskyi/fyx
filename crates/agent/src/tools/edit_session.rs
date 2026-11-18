@@ -1,3 +1,4 @@
+mod fyx_review; // fyx: host review of the native agent's edits
 mod reindent;
 mod streaming_fuzzy_matcher;
 mod streaming_parser;
@@ -276,6 +277,11 @@ pub(crate) async fn run_session(
     event_stream: &ToolCallEventStream,
     cx: &mut AsyncApp,
 ) -> Result<EditSessionOutput, EditSessionOutput> {
+    // fyx: the host review (crates/agent_review) decides what of the edit is kept and saved.
+    let result = match fyx_review::review(result, event_stream, cx).await {
+        fyx_review::Reviewed::Unchanged(result) => result,
+        fyx_review::Reviewed::Done(output) => return output,
+    };
     match result {
         EditSessionResult::Completed(session) => {
             session
@@ -722,6 +728,7 @@ impl EditSession {
             update.locations(vec![acp::ToolCallLocation::new(abs_path.clone())])
         });
 
+        fyx_guard::check_agent_edit(&context.project, &abs_path, cx)?; // fyx: read-only agent configs
         cx.update(|cx| context.authorize(tool_name, &path, event_stream, cx))
             .await
             .map_err(|e| e.to_string())?;
