@@ -931,7 +931,7 @@ record image-props {
 |---|---|---|
 | Encoded file | 2 MiB (asset), 1 MiB (generated) | Package cap is 50 MiB; a panel image larger than this is a mistake |
 | Decoded size | at most 2048 × 2048 pixels, after the device scale factor | 16 MiB RGBA, the most one image can cost |
-| Decoded pixels per extension | **64 MiB** (proposed) | Four full-size images or about a thousand 64 × 64 thumbnails. Past it, new images show their alt text with "image limit reached" in the log |
+| Decoded pixels per extension | **64 MiB** (decided, Q13) | Four full-size images or about a thousand 64 × 64 thumbnails. Past it, new images show their alt text with "image limit reached" in the log |
 | Formats | PNG (first frame of an APNG), SVG | `png` 0.18 and `resvg`/`usvg` 0.46 are already in `Cargo.lock` (GPUI uses them); JPEG, GIF and WebP later, additively |
 | Concurrent decodes | 2 per extension, 4 in total | Bounds transient memory (below) |
 | Where | panel trees and panel list rows | Not status items, modals, pickers or decorations: those sit next to host UI and would be easy to spoof (threats). An `image` there rejects the update (`invalid-argument` for a push) |
@@ -1233,9 +1233,10 @@ Ranked by how much of the design depends on the answer and how hard it is to cha
     items; a "Search everywhere" host picker made only of contributions is not in 0.3.
 12. **Default key bindings in the manifest.** *Recommended:* not in 0.3; users bind commands
     themselves. Suggested keys would need conflict rules against the user's and upstream's keymaps.
-13. **Image budget per extension (§12).** *Recommended:* 64 MiB of decoded pixels, 32 live
-    generated images, 2 concurrent decodes per extension (4 in total). Lower values break image
-    previews; higher ones let one extension hold a large share of host memory.
+13. **Image budget per extension (§12).** **Decided 2026-11-18** (coordinator, for the owner): 64 MiB
+    of decoded pixels, 32 live generated images, 2 concurrent decodes per extension (4 in total).
+    Also decided: images in panel list rows (the LRU covers virtualized rows), only a `clickable`
+    canvas is interactive, and `canvas-click` grants the click-or-Enter activation.
 14. **Canvas paint strategy (§13).** *Recommended:* paint the draw list directly with GPUI each
     frame and switch to a texture cached per update only if the 16384-op bench misses 4 ms. A
     texture costs width × height × 4 × scale² of memory per canvas (up to 256 MiB at 4096 × 4096
