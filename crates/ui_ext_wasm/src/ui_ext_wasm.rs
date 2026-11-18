@@ -13,7 +13,7 @@
 use std::{
     future::Future,
     ops::RangeInclusive,
-    path::{Component as PathComponent, Path},
+    path::{Component as PathComponent, Path, PathBuf},
     pin::{Pin, pin},
     sync::{Arc, Mutex, OnceLock, PoisonError},
     task::{Context, Poll, Waker},
@@ -30,6 +30,7 @@ use futures::{
 use gpui::{AsyncApp, Task};
 use semver::Version;
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use ui_ext::{Tree, TreeLimits};
 use wasmtime::{
     Engine, Store, UpdateDeadline,
@@ -242,6 +243,10 @@ impl UiManifest {
         };
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
+        for capability in &manifest.capabilities {
+            permissions::grantable_tier(capability)
+                .with_context(|| format!("extension {id}, in {path:?}"))?;
+        }
         anyhow::ensure!(
             is_supported_api_version(&manifest.api_version),
             "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
@@ -331,11 +336,36 @@ pub struct UiState {
     /// [`UI_FIRST_MOUNT_BUDGET`].
     mounted: std::collections::HashSet<String>,
     disabled: Option<String>,
+    capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+    diagnostics: diagnostics::DiagnosticsBuffer,
 }
 
 impl UiState {
-    fn new(extension_id: Arc<str>, ctx: WasiCtx) -> Self {
+    /// For host imports that read or act for the extension: whether it may use `capability`
+    /// now. Answers from the host's permission broker each time, so a revocation applies to the
+    /// next call. Without a broker, T1 and T2 are denied.
+    pub fn check_capability(&self, capability: &str) -> Result<(), permissions::CapabilityDenied> {
+        let result = permissions::check_without_broker(
+            self.capability_check.as_ref(),
+            &self.extension_id,
+            capability,
+        );
+        self.diagnostics.capability_check(
+            capability,
+            result.as_ref().err().map(|denied| denied.reason.clone()),
+        );
+        result
+    }
+
+    fn new(
+        extension_id: Arc<str>,
+        ctx: WasiCtx,
+        capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+        diagnostics: diagnostics::DiagnosticsBuffer,
+    ) -> Self {
         Self {
+            capability_check,
+            diagnostics,
             extension_id,
             table: ResourceTable::new(),
             ctx,
@@ -478,6 +508,7 @@ impl wit_host::Host for UiState {
             wit_host::LogLevel::Error => log::Level::Error,
         };
         log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        self.diagnostics.log(level, &message);
         Ok(())
     }
 }
@@ -642,6 +673,105 @@ pub struct UiExtension {
     limits: TreeLimits,
     tx: mpsc::UnboundedSender<UiCall>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
+    from_precompiled: bool,
+    diagnostics: diagnostics::DiagnosticsBuffer,
+}
+
+/// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
+/// hashes the engine's compatibility hash (wasmtime version and configuration) and the
+/// component's SHA-256, so a different engine or component never matches a stale file.
+///
+/// Loading one is loading trusted machine code, so the caller must only ever name a place that
+/// Fyx alone writes (the install store), never a path inside an extension package.
+#[derive(Clone, Debug)]
+pub struct PrecompiledCache {
+    pub dir: PathBuf,
+    pub stem: String,
+}
+
+impl PrecompiledCache {
+    /// The file for this component under the current engine.
+    pub fn file_for(&self, wasm_bytes: &[u8]) -> Result<PathBuf> {
+        let engine = &ui_runtime()?.engine;
+        struct Sha256Hasher(Sha256);
+        impl std::hash::Hasher for Sha256Hasher {
+            fn finish(&self) -> u64 {
+                0
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.update(bytes);
+            }
+        }
+        let mut hasher = Sha256Hasher(Sha256::new());
+        std::hash::Hash::hash(&engine.precompile_compatibility_hash(), &mut hasher);
+        hasher.0.update(Sha256::digest(wasm_bytes));
+        let key = format!("{:x}", hasher.0.finalize());
+        Ok(self.dir.join(format!("{}-{}.cwasm", self.stem, &key[..32])))
+    }
+}
+
+/// Compiles `wasm_bytes`, or loads the precompiled copy in `cache` when it is there and fits this
+/// engine. A missing, stale or unreadable copy is (re)written after compiling. Returns whether the
+/// copy was used.
+fn compile_component(
+    engine: &Engine,
+    wasm_bytes: &[u8],
+    cache: Option<&PrecompiledCache>,
+) -> Result<(Component, bool)> {
+    let file = match cache.map(|cache| cache.file_for(wasm_bytes)).transpose() {
+        Ok(file) => file,
+        Err(error) => {
+            log::warn!("fyx:ui: no precompiled cache: {error:#}");
+            None
+        }
+    };
+    // Read into memory rather than `deserialize_file`, which maps the file: on Windows a mapped
+    // file can be neither replaced nor deleted, which would pin old versions in the install store.
+    if let Some(file) = &file
+        && let Ok(bytes) = std::fs::read(file)
+    {
+        // SAFETY: `file` is only ever written by `compile_component` below, from a component
+        // this engine compiled, at a path the caller guarantees only Fyx writes (see
+        // `PrecompiledCache`). wasmtime still checks the header against this engine.
+        match unsafe { Component::deserialize(engine, &bytes) } {
+            Ok(component) => return Ok((component, true)),
+            Err(error) => log::warn!(
+                "fyx:ui: precompiled {} is unusable, compiling again: {error:#}",
+                file.display()
+            ),
+        }
+    }
+    let component = Component::from_binary(engine, wasm_bytes)
+        .map_err(anyhow::Error::from)
+        .context("failed to compile fyx:ui component")?;
+    if let Some(file) = &file {
+        if let Err(error) = write_precompiled(&component, file) {
+            log::warn!(
+                "fyx:ui: could not save precompiled {}: {error:#}",
+                file.display()
+            );
+        }
+    }
+    Ok((component, false))
+}
+
+/// Writes through a temporary file and a rename, so a crash never leaves a torn `.cwasm`.
+fn write_precompiled(component: &Component, file: &Path) -> Result<()> {
+    let bytes = component.serialize().map_err(anyhow::Error::from)?;
+    let dir = file.parent().context("no parent directory")?;
+    std::fs::create_dir_all(dir)?;
+    let temp = file.with_extension("cwasm.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, file)?;
+    Ok(())
+}
+
+/// How [`UiExtension::load_with_options`] loads a component.
+#[derive(Clone, Default)]
+pub struct LoadOptions {
+    pub cache: Option<PrecompiledCache>,
+    /// The host's permission broker, for [`UiState::check_capability`].
+    pub capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
 }
 
 impl UiExtension {
@@ -655,6 +785,40 @@ impl UiExtension {
         wasm_bytes: Vec<u8>,
         cx: &AsyncApp,
     ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_with_cache(extension_id, wasm_bytes, None, cx)
+    }
+
+    /// [`UiExtension::load`], using and filling a precompiled cache. Compiling runs on the
+    /// background executor and instantiation on tokio, so no window waits on either.
+    pub fn load_with_cache(
+        extension_id: Arc<str>,
+        wasm_bytes: Vec<u8>,
+        cache: Option<PrecompiledCache>,
+        cx: &AsyncApp,
+    ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_with_options(
+            extension_id,
+            wasm_bytes,
+            LoadOptions {
+                cache,
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+    }
+
+    /// [`UiExtension::load`] with a precompiled cache and a permission broker.
+    pub fn load_with_options(
+        extension_id: Arc<str>,
+        wasm_bytes: Vec<u8>,
+        options: LoadOptions,
+        cx: &AsyncApp,
+    ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        let LoadOptions {
+            cache,
+            capability_check,
+        } = options;
+        let diagnostics = diagnostics::DiagnosticsBuffer::default();
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
@@ -663,9 +827,8 @@ impl UiExtension {
             async move {
                 let runtime = ui_runtime()?;
                 let section_version = parse_api_version(&extension_id, &wasm_bytes)?;
-                let component = Component::from_binary(&runtime.engine, &wasm_bytes)
-                    .map_err(anyhow::Error::from)
-                    .context("failed to compile fyx:ui component")?;
+                let (component, from_precompiled) =
+                    compile_component(&runtime.engine, &wasm_bytes, cache.as_ref())?;
                 let api_version = section_version
                     .or_else(|| api_version_from_imports(&component, &runtime.engine))
                     .with_context(|| {
@@ -680,16 +843,17 @@ impl UiExtension {
                     MIN_VERSION,
                     MAX_VERSION,
                 );
-                anyhow::Ok((api_version, component))
+                anyhow::Ok((api_version, component, from_precompiled))
             }
         });
 
         cx.spawn(async move |cx| {
-            let (api_version, component) = compile_task.await?;
+            let (api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
 
             let instantiate = {
                 let extension_id = extension_id.clone();
+                let diagnostics = diagnostics.clone();
                 async move {
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -697,8 +861,15 @@ impl UiExtension {
                     deny_network(&mut wasi);
                     // No preopened directories, no environment variables, no arguments: the
                     // builder starts empty and only stderr is inherited.
-                    let mut store =
-                        Store::new(&runtime.engine, UiState::new(extension_id, wasi.build()));
+                    let mut store = Store::new(
+                        &runtime.engine,
+                        UiState::new(
+                            extension_id,
+                            wasi.build(),
+                            capability_check,
+                            diagnostics.clone(),
+                        ),
+                    );
                     store.limiter(|state| &mut state.limits);
                     store.epoch_deadline_callback(|context| {
                         let state = context.data();
@@ -761,6 +932,8 @@ impl UiExtension {
                     limits: TreeLimits::default(),
                     tx,
                     _task: Arc::new(task),
+                    from_precompiled,
+                    diagnostics,
                 },
                 pushed_rx,
             ))
@@ -774,6 +947,16 @@ impl UiExtension {
         fs: Arc<dyn Fs>,
         cx: &AsyncApp,
     ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_from_dir_with_options(extension_dir, LoadOptions::default(), fs, cx).await
+    }
+
+    /// [`UiExtension::load_from_dir`] with a precompiled cache and a permission broker.
+    pub async fn load_from_dir_with_options(
+        extension_dir: &Path,
+        options: LoadOptions,
+        fs: Arc<dyn Fs>,
+        cx: &AsyncApp,
+    ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
         let Some((extension_id, manifest)) = UiManifest::read(fs.as_ref(), extension_dir).await?
         else {
             return Ok(None);
@@ -783,9 +966,10 @@ impl UiExtension {
             .load_bytes(&component_path)
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
-        let (extension, pushed) = Self::load(extension_id.clone(), wasm_bytes, cx)
-            .await
-            .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
+        let (extension, pushed) =
+            Self::load_with_options(extension_id.clone(), wasm_bytes, options, cx)
+                .await
+                .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
         anyhow::ensure!(
             extension.api_version == manifest.api_version,
             "extension {extension_id}: extension.toml says fyx:ui {}, the component targets {}",
@@ -804,6 +988,16 @@ impl UiExtension {
         &self.api_version
     }
 
+    /// What the Extension Inspector shows: recent calls, `log` output and capability checks.
+    pub fn diagnostics(&self) -> diagnostics::Diagnostics {
+        self.diagnostics.snapshot()
+    }
+
+    /// Whether the component came from a precompiled cache rather than a fresh compile.
+    pub fn from_precompiled(&self) -> bool {
+        self.from_precompiled
+    }
+
     /// What `surfaces` returned right after instantiation.
     pub fn surfaces(&self) -> &[ui_ext::Surface] {
         &self.surfaces
@@ -816,12 +1010,17 @@ impl UiExtension {
     /// The initial tree of a surface, validated.
     pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
         let (result, pushed) = self
-            .call(CallBudget::Mount(surface_id.to_string()), {
-                let surface_id = surface_id.to_string();
-                move |extension, store| {
-                    async move { extension.call_mount(store, &surface_id).await }.boxed()
-                }
-            })
+            .call(
+                "mount",
+                surface_id,
+                CallBudget::Mount(surface_id.to_string()),
+                {
+                    let surface_id = surface_id.to_string();
+                    move |extension, store| {
+                        async move { extension.call_mount(store, &surface_id).await }.boxed()
+                    }
+                },
+            )
             .await?;
         let nodes = self.guest_result(result, &pushed)?;
         let tree = Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
@@ -837,7 +1036,7 @@ impl UiExtension {
         event: ui_ext::UiEvent,
     ) -> Result<Reply<ui_ext::Update>> {
         let (result, pushed) = self
-            .call(CallBudget::Regular, {
+            .call("handle-event", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 let event = wit::UiEvent::from(event);
                 move |extension, store| {
@@ -863,7 +1062,7 @@ impl UiExtension {
         count: u32,
     ) -> Result<Reply<Vec<(u32, Tree)>>> {
         let (rows, pushed) = self
-            .call(CallBudget::Regular, {
+            .call("list-rows", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
                 move |extension, store| {
                     async move {
@@ -928,7 +1127,13 @@ impl UiExtension {
 
     /// Runs one guest call on the extension's queue and returns its result with the updates the
     /// guest pushed during it. A failed call (trap, budget) disables the extension and drops them.
-    async fn call<T, F>(&self, budget: CallBudget, f: F) -> Result<(T, Vec<PushedUpdate>)>
+    async fn call<T, F>(
+        &self,
+        kind: &'static str,
+        surface_id: &str,
+        budget: CallBudget,
+        f: F,
+    ) -> Result<(T, Vec<PushedUpdate>)>
     where
         T: 'static + Send,
         F: 'static
@@ -939,6 +1144,8 @@ impl UiExtension {
             ) -> BoxFuture<'a, wasmtime::Result<T>>,
     {
         let (return_tx, return_rx) = oneshot::channel();
+        let diagnostics = self.diagnostics.clone();
+        let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
                 async move {
@@ -953,6 +1160,15 @@ impl UiExtension {
                         })
                         .await;
                         let pushes = std::mem::take(&mut store.data_mut().pushes);
+                        diagnostics.call(diagnostics::CallRecord {
+                            kind,
+                            surface_id,
+                            at: std::time::SystemTime::now(),
+                            duration: store.data().call_started.elapsed(),
+                            budget,
+                            pushes: pushes.len(),
+                            error: result.as_ref().err().map(|error| format!("{error:#}")),
+                        });
                         // A trap or a dropped call, the time budget included, leaves the instance
                         // unusable.
                         if let Err(error) = &result {
@@ -1130,6 +1346,8 @@ impl From<ui_ext::UiEvent> for wit::UiEvent {
     }
 }
 
+pub mod diagnostics;
+pub mod permissions;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 

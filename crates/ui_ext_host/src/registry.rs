@@ -38,7 +38,11 @@ use gpui::{
 };
 use settings::Settings as _;
 use ui_ext::{StatusBarSide, Surface, SurfaceKind, Update};
-use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, PushedUpdate, UiExtension, UiManifest};
+use ui_ext_wasm::{
+    CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, PushedUpdate,
+    UiExtension, UiManifest,
+    permissions::{Tier, tier_of},
+};
 use workspace::{
     Workspace, WorkspaceSettings,
     notifications::{NotificationId, simple_message_notification::MessageNotification},
@@ -47,7 +51,8 @@ use workspace::{
 use crate::{
     ToggleExtensionPanel,
     backend::UiBackend,
-    consent::{self, ConsentRecord, ConsentStore},
+    consent::{self, ConsentRecord, ConsentState, ConsentStore},
+    install_store::InstallStore,
     panel::{
         AnyExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, SurfaceInfo,
         add_extension_panel,
@@ -85,6 +90,8 @@ pub enum ExtensionSource {
     Directory(PathBuf),
     /// A bare component file (`FYX_UI_DEV_EXTENSIONS`).
     File(PathBuf),
+    /// Fyx's install store (`install_store`), whichever version is active.
+    Store,
 }
 
 #[derive(Default)]
@@ -104,6 +111,12 @@ pub struct UiExtensionRegistry {
     pending_consent: Vec<PendingConsent>,
     /// Tests only: load installed extensions without consent.
     trust_installed: bool,
+    /// Fyx's install store, scanned with the installed-extensions directory.
+    store: Option<InstallStore>,
+    /// The directory and file system of the last scan, for `rescan`.
+    last_scan: Option<(PathBuf, Arc<dyn Fs>)>,
+    /// `fyx.extensions.dev_paths`: folders scanned with the installed ones, as dev extensions.
+    dev_paths: Vec<PathBuf>,
 }
 
 /// An installed extension waiting for the user's "Enable".
@@ -116,6 +129,9 @@ pub struct PendingConsent {
     /// As `extension.toml` declares them.
     pub capabilities: Vec<String>,
     pub is_dev: bool,
+    /// Not empty for a held update: an extension enabled before that now asks for these T1
+    /// capabilities as well (its old version keeps running, if loaded).
+    pub new_capabilities: Vec<String>,
     record: ConsentRecord,
 }
 
@@ -128,14 +144,16 @@ enum Reload {
     DevPath(PathBuf),
 }
 
-/// What tells a reinstalled component from an unchanged one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What tells a reinstalled component from an unchanged one: its folder (a store update moves
+/// to a new version folder) and the component's modification time and size.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Fingerprint {
+    dir: PathBuf,
     mtime: MTime,
     len: u64,
 }
 
-/// A UI extension found in the installed-extensions directory.
+/// A UI extension found in the installed-extensions directory or the install store.
 struct Found {
     dir: PathBuf,
     extension_id: Arc<str>,
@@ -144,6 +162,9 @@ struct Found {
     /// A link (Zed's dev install): its component is watched for changes.
     is_dev: bool,
     capabilities: Vec<String>,
+    source: ExtensionSource,
+    /// For store installs: where the precompiled component goes.
+    cache: Option<PrecompiledCache>,
 }
 
 struct GlobalRegistry(Entity<UiExtensionRegistry>);
@@ -156,6 +177,108 @@ impl UiExtensionRegistry {
         Self {
             consent: ConsentStore::at(consent_path),
             ..Self::default()
+        }
+    }
+
+    /// Also loads the active versions of `store`'s extensions.
+    pub fn with_store(mut self, store: InstallStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn install_store(&self) -> Option<&InstallStore> {
+        self.store.as_ref()
+    }
+
+    /// Follows `fyx.extensions.dev_paths`: a new folder loads, a removed one stops.
+    pub fn set_dev_paths(&mut self, dev_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if self.dev_paths != dev_paths {
+            self.dev_paths = dev_paths;
+            self.rescan(cx);
+        }
+    }
+
+    /// Loads an extension again on a fresh instance, from where it came from; its surfaces
+    /// remount on it (Restart extension, Retry after a failed reload).
+    pub fn restart_extension(&mut self, extension_id: &str, cx: &mut Context<Self>) {
+        log::info!("fyx:ui: restarting {extension_id}");
+        // Installed, store and `dev_paths` extensions: forget the fingerprint, so the scan
+        // loads it again even though nothing changed on disk.
+        if self.installed.remove(extension_id).is_some() {
+            self.rescan(cx);
+            return;
+        }
+        match self.sources.get(extension_id).cloned() {
+            Some(ExtensionSource::Directory(path) | ExtensionSource::File(path)) => {
+                let fs = match &self.last_scan {
+                    Some((_, fs)) => fs.clone(),
+                    None => <dyn Fs>::global(cx),
+                };
+                self.reload(Reload::DevPath(path), fs, cx)
+            }
+            Some(ExtensionSource::Store) | None => {
+                log::error!("fyx:ui: cannot restart {extension_id}: unknown source")
+            }
+        }
+    }
+
+    /// A reload of a loaded extension failed: its surfaces keep the old instance and show the
+    /// error with Retry.
+    fn reload_failed(&mut self, extension_id: &str, error: &anyhow::Error, cx: &mut Context<Self>) {
+        let message: SharedString = format!("Reload failed: {error:#}").into();
+        for surface in self.surfaces_of(extension_id) {
+            surface
+                .state
+                .update(cx, |state, cx| state.show_reload_error(message.clone(), cx));
+        }
+    }
+
+    /// The capabilities a loaded extension declared, with their tier and whether each is granted
+    /// (T0 always is), for the chips and the revoke command.
+    pub fn declared_capabilities(&self, extension_id: &str) -> Vec<(String, Tier, bool)> {
+        self.consent
+            .declared(extension_id)
+            .into_iter()
+            .filter_map(|capability| {
+                let tier = tier_of(&capability)?;
+                let granted = self.consent.is_granted(extension_id, &capability);
+                Some((capability, tier, granted))
+            })
+            .collect()
+    }
+
+    /// Granted capabilities that can be taken back, as (extension id, capability).
+    pub fn revocable(&self) -> Vec<(String, String)> {
+        self.consent.revocable()
+    }
+
+    /// Takes a granted capability back: host imports are denied it from the next call, and the
+    /// extension asks again on its next load.
+    pub fn revoke(
+        &mut self,
+        extension_id: &str,
+        capability: &str,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        if let Some((path, text)) = self.consent.revoke(extension_id, capability)? {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        log::info!("fyx:ui: revoked {capability} from {extension_id}");
+        cx.notify();
+        Ok(())
+    }
+
+    /// The broker's check, as host imports get it.
+    pub fn capability_check(&self) -> Arc<dyn ui_ext_wasm::permissions::CapabilityCheck> {
+        self.consent.checker()
+    }
+
+    /// Scans again what the last scan did (after an install-store change).
+    pub fn rescan(&mut self, cx: &mut Context<Self>) {
+        if let Some((dir, fs)) = self.last_scan.clone() {
+            self.scan_installed(dir, fs, cx);
         }
     }
 
@@ -372,14 +495,33 @@ impl UiExtensionRegistry {
     /// the last scan, and stops the surfaces of those that are gone. Scans do not overlap: a
     /// request during a scan makes it run once more at the end.
     pub fn scan_installed(&mut self, dir: PathBuf, fs: Arc<dyn Fs>, cx: &mut Context<Self>) {
+        self.last_scan = Some((dir.clone(), fs.clone()));
         if self.scanning {
             self.rescan_requested = true;
             return;
         }
         self.scanning = true;
+        let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             loop {
-                let found = find_ui_extensions(&dir, fs.as_ref()).await;
+                let mut found = find_ui_extensions(&dir, fs.as_ref()).await;
+                if let Some(store) = &store {
+                    found.extend(find_store_extensions(store, fs.as_ref()).await);
+                }
+                // Read again on every round: a change during the scan asks for another round.
+                let dev_paths = this
+                    .update(cx, |this, _| this.dev_paths.clone())
+                    .unwrap_or_default();
+                for path in dev_paths {
+                    let source = ExtensionSource::Directory(path.clone());
+                    match found_at(path.clone(), true, source, None, fs.as_ref()).await {
+                        Some(extension) => found.push(extension),
+                        None => log::error!(
+                            "fyx:ui: fyx.extensions.dev_paths: {} is not a built UI extension",
+                            path.display()
+                        ),
+                    }
+                }
                 let Ok((to_load, consent_file)) = this.update(cx, |this, cx| {
                     (this.plan_scan(found, cx), this.consent.path_to_load())
                 }) else {
@@ -401,6 +543,7 @@ impl UiExtensionRegistry {
                             &found.component,
                             found.is_dev,
                             fs.as_ref(),
+                            &cx.background_executor(),
                         )
                         .await
                         {
@@ -419,7 +562,17 @@ impl UiExtensionRegistry {
                             continue;
                         }
                     }
-                    let loaded = UiExtension::load_from_dir(&found.dir, fs.clone(), cx).await;
+                    let checker = this.update(cx, |this, _| this.consent.checker()).ok();
+                    let loaded = UiExtension::load_from_dir_with_options(
+                        &found.dir,
+                        LoadOptions {
+                            cache: found.cache.clone(),
+                            capability_check: checker,
+                        },
+                        fs.clone(),
+                        cx,
+                    )
+                    .await;
                     match loaded {
                         Ok(Some((extension, pushed))) => {
                             log::info!(
@@ -430,13 +583,15 @@ impl UiExtensionRegistry {
                             this.update(cx, |this, cx| {
                                 if let Err(error) = this.claim_extension_id(
                                     extension.extension_id(),
-                                    ExtensionSource::Directory(found.dir.clone()),
+                                    found.source.clone(),
                                 ) {
                                     log::error!("fyx:ui: {error:#}");
                                     return;
                                 }
                                 this.installed
-                                    .insert(found.extension_id.clone(), found.fingerprint);
+                                    .insert(found.extension_id.clone(), found.fingerprint.clone());
+                                this.consent
+                                    .declare(&found.extension_id, found.capabilities.clone());
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
                                     this.watch_component(
@@ -451,10 +606,16 @@ impl UiExtensionRegistry {
                             .ok();
                         }
                         Ok(None) => {}
-                        Err(error) => log::error!(
-                            "fyx:ui: failed to load installed extension {}: {error:#}",
-                            found.dir.display()
-                        ),
+                        Err(error) => {
+                            log::error!(
+                                "fyx:ui: failed to load installed extension {}: {error:#}",
+                                found.dir.display()
+                            );
+                            this.update(cx, |this, cx| {
+                                this.reload_failed(&found.extension_id, &error, cx)
+                            })
+                            .ok();
+                        }
                     }
                 }
                 let again = this.update(cx, |this, _| {
@@ -526,12 +687,26 @@ impl UiExtensionRegistry {
             // The scan compares the component's fingerprint and loads it again if it changed.
             Reload::Installed(installed_dir) => self.scan_installed(installed_dir, fs, cx),
             Reload::DevPath(path) => {
-                cx.spawn(async move |_, cx| {
+                cx.spawn(async move |this, cx| {
                     if let Err(error) = load_dev_extension(path.clone(), cx).await {
                         log::error!(
                             "fyx:ui: failed to reload dev extension {}: {error:#}",
                             path.display()
                         );
+                        this.update(cx, |this, cx| {
+                            let extension_id = this.sources.iter().find_map(|(id, source)| {
+                                matches!(
+                                    source,
+                                    ExtensionSource::Directory(p) | ExtensionSource::File(p)
+                                        if *p == path
+                                )
+                                .then(|| id.clone())
+                            });
+                            if let Some(extension_id) = extension_id {
+                                this.reload_failed(&extension_id, &error, cx);
+                            }
+                        })
+                        .ok();
                     }
                 })
                 .detach();
@@ -550,20 +725,33 @@ impl UiExtensionRegistry {
     ) -> bool {
         self.pending_consent
             .retain(|pending| pending.extension_id != found.extension_id);
-        if self.consent.allows(&found.extension_id, &record) {
-            cx.notify();
-            return true;
-        }
-        log::info!(
-            "fyx:ui: {} is installed but not enabled (as it is now); waiting for the user",
-            found.extension_id
-        );
+        let new_capabilities = match self.consent.state(&found.extension_id, &record) {
+            ConsentState::Allowed => {
+                cx.notify();
+                return true;
+            }
+            ConsentState::NotEnabled => {
+                log::info!(
+                    "fyx:ui: {} is installed but not enabled; waiting for the user",
+                    found.extension_id
+                );
+                Vec::new()
+            }
+            ConsentState::NeedsApproval { new_capabilities } => {
+                log::info!(
+                    "fyx:ui: {} now asks for {new_capabilities:?}; the update waits for approval",
+                    found.extension_id
+                );
+                new_capabilities
+            }
+        };
         self.pending_consent.push(PendingConsent {
             extension_id: found.extension_id.clone(),
             dir: found.dir.clone(),
             installed_dir: installed_dir.to_path_buf(),
             capabilities: found.capabilities.clone(),
             is_dev: found.is_dev,
+            new_capabilities,
             record,
         });
         cx.notify();
@@ -654,41 +842,84 @@ async fn find_ui_extensions(dir: &Path, fs: &dyn Fs) -> Vec<Found> {
         let Ok(extension_dir) = entry else {
             continue;
         };
-        let manifest = match UiManifest::read(fs, &extension_dir).await {
-            Ok(Some(manifest)) => manifest,
-            Ok(None) => continue,
-            Err(error) => {
-                log::debug!("fyx:ui: skipping {}: {error:#}", extension_dir.display());
-                continue;
-            }
-        };
-        let (extension_id, manifest) = manifest;
-        let component = extension_dir.join(&manifest.component);
         let is_dev = fs
             .metadata(&extension_dir)
             .await
             .ok()
             .flatten()
             .is_some_and(|metadata| metadata.is_symlink);
-        match fs.metadata(&component).await {
-            Ok(Some(metadata)) => found.push(Found {
-                dir: extension_dir,
-                extension_id,
-                fingerprint: Fingerprint {
-                    mtime: metadata.mtime,
-                    len: metadata.len,
-                },
-                component,
-                is_dev,
-                capabilities: manifest.capabilities.clone(),
-            }),
-            Ok(None) | Err(_) => log::error!(
-                "fyx:ui: {extension_id}: component {} is missing (build it first)",
-                component.display()
-            ),
+        let source = ExtensionSource::Directory(extension_dir.clone());
+        if let Some(extension) = found_at(extension_dir, is_dev, source, None, fs).await {
+            found.push(extension);
         }
     }
     found
+}
+
+/// The active version of every extension in the install store.
+async fn find_store_extensions(store: &InstallStore, fs: &dyn Fs) -> Vec<Found> {
+    let active = match store.active(fs).await {
+        Ok(active) => active,
+        Err(error) => {
+            log::error!("fyx:ui: cannot read the install store: {error:#}");
+            return Vec::new();
+        }
+    };
+    let mut found = Vec::new();
+    for (extension_id, version, dir) in active {
+        let cache = store.precompiled_cache(&extension_id, &version);
+        match found_at(dir, false, ExtensionSource::Store, Some(cache), fs).await {
+            Some(extension) if extension.extension_id == extension_id => found.push(extension),
+            Some(extension) => log::error!(
+                "fyx:ui: the install store lists {extension_id}, but its folder holds {}",
+                extension.extension_id
+            ),
+            None => {}
+        }
+    }
+    found
+}
+
+/// The UI extension in `extension_dir`, if it is one and its component is built.
+async fn found_at(
+    extension_dir: PathBuf,
+    is_dev: bool,
+    source: ExtensionSource,
+    cache: Option<PrecompiledCache>,
+    fs: &dyn Fs,
+) -> Option<Found> {
+    let (extension_id, manifest) = match UiManifest::read(fs, &extension_dir).await {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return None,
+        Err(error) => {
+            log::debug!("fyx:ui: skipping {}: {error:#}", extension_dir.display());
+            return None;
+        }
+    };
+    let component = extension_dir.join(&manifest.component);
+    match fs.metadata(&component).await {
+        Ok(Some(metadata)) => Some(Found {
+            fingerprint: Fingerprint {
+                dir: extension_dir.clone(),
+                mtime: metadata.mtime,
+                len: metadata.len,
+            },
+            dir: extension_dir,
+            extension_id,
+            component,
+            is_dev,
+            capabilities: manifest.capabilities.clone(),
+            source,
+            cache,
+        }),
+        Ok(None) | Err(_) => {
+            log::error!(
+                "fyx:ui: {extension_id}: component {} is missing (build it first)",
+                component.display()
+            );
+            None
+        }
+    }
 }
 
 /// A surface's way back to the registry, for the other surfaces of its extension.
@@ -713,10 +944,21 @@ impl SurfaceLink for RegistryLink {
             })
             .ok();
     }
+
+    fn restart_extension(&self, cx: &mut App) {
+        self.registry
+            .update(cx, |registry, cx| {
+                registry.restart_extension(&self.extension_id, cx)
+            })
+            .ok();
+    }
 }
 
 pub fn init(cx: &mut App) {
-    let registry = cx.new(|_| UiExtensionRegistry::new(ConsentStore::default_path()));
+    let registry = cx.new(|_| {
+        UiExtensionRegistry::new(ConsentStore::default_path())
+            .with_store(InstallStore::new(InstallStore::default_root()))
+    });
     cx.set_global(GlobalRegistry(registry));
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
@@ -728,7 +970,24 @@ pub fn init(cx: &mut App) {
     .detach();
 
     load_dev_extensions(cx);
+    follow_dev_paths_setting(cx);
     watch_installed_extensions(cx);
+}
+
+/// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
+fn follow_dev_paths_setting(cx: &mut App) {
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return;
+    };
+    let dev_paths = crate::install::dev_paths_setting(cx);
+    registry.update(cx, |registry, cx| registry.set_dev_paths(dev_paths, cx));
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(move |cx| {
+            let dev_paths = crate::install::dev_paths_setting(cx);
+            registry.update(cx, |registry, cx| registry.set_dev_paths(dev_paths, cx));
+        })
+        .detach();
+    }
 }
 
 /// Loads the installed UI extensions now and again whenever the extension store changes.
@@ -778,8 +1037,22 @@ fn attach_to_workspace(
     };
     let surfaces = Rc::new(RefCell::new(WorkspaceSurfaces::default()));
 
+    crate::store_actions::register(workspace);
+    if crate::inspector::inspector_enabled(cx) {
+        let inspector =
+            cx.new(|cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
+        workspace.add_panel(inspector, window, cx);
+        workspace.register_action(
+            |workspace, _: &crate::ToggleExtensionInspector, window, cx| {
+                workspace.toggle_panel_focus::<crate::inspector::ExtensionInspector>(window, cx);
+            },
+        );
+    }
     workspace.register_action(|workspace, _: &crate::InstallDevUiExtension, window, cx| {
         crate::install::prompt_and_install(workspace, window, cx)
+    });
+    workspace.register_action(|workspace, _: &crate::RemoveDevUiExtension, window, cx| {
+        crate::install::prompt_and_remove(workspace, window, cx)
     });
     workspace.register_action({
         let surfaces = surfaces.clone();
@@ -850,11 +1123,20 @@ fn offer_consent(
         } else {
             String::new()
         };
-        let message = format!(
-            "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
-            pending.extension_id,
-            crate::install::describe_capability_ids(&pending.capabilities).join("; "),
-        );
+        let message = if pending.new_capabilities.is_empty() {
+            format!(
+                "The UI extension {} is installed but not enabled. It asks for: {}.{folder}",
+                pending.extension_id,
+                crate::install::describe_capability_ids(&pending.capabilities).join("; "),
+            )
+        } else {
+            format!(
+                "An update of the UI extension {} needs approval. It now also asks for: {}.{folder}",
+                pending.extension_id,
+                crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
+            )
+        };
+        let update = !pending.new_capabilities.is_empty();
         let extension_id = pending.extension_id.clone();
         let registry = registry.downgrade();
         let fs = workspace.app_state().fs.clone();
@@ -864,7 +1146,7 @@ fn offer_consent(
             move |cx| {
                 cx.new(|cx| {
                     MessageNotification::new(message, cx)
-                        .primary_message("Enable")
+                        .primary_message(if update { "Approve" } else { "Enable" })
                         .primary_on_click(move |_, cx| {
                             registry
                                 .update(cx, |registry, cx| {
@@ -1010,9 +1292,20 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     } else {
         Some(path.clone())
     };
+    let checker = cx.update(|cx| {
+        UiExtensionRegistry::global(cx).map(|registry| registry.read(cx).capability_check())
+    });
+    let options = LoadOptions {
+        capability_check: checker,
+        ..LoadOptions::default()
+    };
+    let mut declared = Vec::new();
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
-        UiExtension::load_from_dir(&path, fs.clone(), cx)
+        if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
+            declared = manifest.capabilities;
+        }
+        UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?
             .with_context(|| format!("{}: extension.toml has no [fyx_ui] table", path.display()))?
     } else {
@@ -1030,7 +1323,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
                 anyhow::Ok((extension_id, bytes))
             })
             .await?;
-        UiExtension::load(extension_id.into(), bytes, cx).await?
+        UiExtension::load_with_options(extension_id.into(), bytes, options, cx).await?
     };
     log::info!(
         "fyx:ui: loaded {} with {} surface(s)",
@@ -1048,6 +1341,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
                 ExtensionSource::File(reload_path.clone())
             };
             registry.claim_extension_id(&extension_id, source)?;
+            registry.consent.declare(&extension_id, declared);
             registry.register_extension(extension, pushed, cx);
             if let Some(component) = component {
                 registry.watch_component(
