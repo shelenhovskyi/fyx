@@ -161,7 +161,7 @@ mod tests {
             ("assets/entities.svg", b"<!ENTITY a \"b\"><svg/>"),
             (
                 "assets/style-url.svg",
-                b"<svg><style type=\"text/css\">rect { fill: url(#g) }</style><rect/></svg>",
+                b"<svg><style type=\"text/css\">rect { fill: URL(#g) }</style><rect/></svg>",
             ),
         ]);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
