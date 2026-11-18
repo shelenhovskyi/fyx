@@ -1946,7 +1946,7 @@ mod harness_conformance_process {
                 allow_staged: Some(true),
                 capabilities: Some(capabilities()),
                 processes: Some(programs()),
-                process_env: Some(vec!["FYX_TEST".into()]),
+                process_env: Some(vec!["NO_COLOR".into()]),
                 capability_check: broker.clone(),
                 workspace: worktree.map(|worktree| {
                     Arc::new(Worktrees(vec![WorktreeRoot {
@@ -1964,7 +1964,7 @@ mod harness_conformance_process {
         let capabilities = capabilities();
         let capabilities = capabilities.iter().map(String::as_str).collect::<Vec<_>>();
         let mut harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
-            .and_then(|harness| harness.with_processes(programs(), &["FYX_TEST"]))
+            .and_then(|harness| harness.with_processes(programs(), &["NO_COLOR"]))
             .expect("the harness loads the 0.3 probe");
         if broker.is_some() {
             harness.set_broker(TestBroker::granted(Box::new(|_| {
@@ -2010,7 +2010,7 @@ mod harness_conformance_process {
             "kill 99".to_string(),
             "close 99".to_string(),
             "spawn -- undeclared-program".to_string(),
-            format!("spawn env FYX_TEST=1 -- {MISSING} status --short"),
+            format!("spawn env NO_COLOR=1 -- {MISSING} status --short"),
             format!("spawn stdin -- {MISSING}-2 a b"),
             format!("spawn -- {MISSING}-2"),
             format!("spawn -- {MISSING}-2"),
