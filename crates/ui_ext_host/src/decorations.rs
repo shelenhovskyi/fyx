@@ -35,9 +35,10 @@ use gpui::{
 };
 use language::{Bias, BufferId, Point};
 use serde::Deserialize;
-use ui_ext::{
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
     Align, ColorToken, FlexDirection, FlexProps, Node, NodeId, Props, StatusBarSide,
-    StatusItemDescriptor, Surface, SurfaceKind, TextProps, Tree, TreeLimits, UiEvent, Update,
+    StatusItemDescriptor, Surface, SurfaceKind, TextProps, UiEvent, Update, tree::Tree,
 };
 
 use crate::{
@@ -472,7 +473,7 @@ impl UiBackend for StaticBackend {
             .map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -482,7 +483,7 @@ impl UiBackend for StaticBackend {
     fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -495,10 +496,10 @@ impl UiBackend for StaticBackend {
         _: NodeId,
         _: u32,
         _: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Vec::new(),
             })
         }

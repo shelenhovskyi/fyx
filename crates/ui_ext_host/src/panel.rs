@@ -12,17 +12,13 @@ use gpui::{
 };
 use theme::ActiveTheme as _;
 use ui::{IconName, h_flex, v_flex};
-use ui_ext::{DockPosition as SurfaceDockPosition, StatusBarSide, SurfaceKind};
+use ui_ext::v0_2::{DockPosition as SurfaceDockPosition, StatusBarSide, SurfaceKind};
 use workspace::{
     HideStatusItem, ItemHandle, StatusItemView, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-use crate::{
-    ToggleExtensionPanel,
-    surface::SurfaceState,
-    view::{SurfaceView, icon_name},
-};
+use crate::{ToggleExtensionPanel, surface::SurfaceState, view::SurfaceView};
 
 /// Panel types with a name of their own. `Panel::persistent_name` and `Panel::panel_key` are
 /// static (the dock calls them without a context), so a name per panel needs a type per panel:
@@ -90,10 +86,14 @@ pub struct SurfaceInfo {
 }
 
 impl SurfaceInfo {
-    pub fn new(extension_id: &str, surface: &ui_ext::Surface, activation_priority: u32) -> Self {
+    pub fn new(
+        extension_id: &str,
+        surface: &ui_ext::v0_2::Surface,
+        activation_priority: u32,
+    ) -> Self {
         let (icon, position, default_size) = match &surface.kind {
             SurfaceKind::Panel(panel) => (
-                icon_name(&panel.icon),
+                crate::icons::resolve_icon(&panel.icon).static_name(),
                 match panel.position {
                     SurfaceDockPosition::Left => DockPosition::Left,
                     SurfaceDockPosition::Right => DockPosition::Right,
@@ -101,7 +101,9 @@ impl SurfaceInfo {
                 },
                 px(panel.default_size.clamp(120, 2000) as f32),
             ),
-            SurfaceKind::StatusItem(_) => (IconName::Blocks, DockPosition::Right, px(320.)),
+            SurfaceKind::StatusItem(_) | SurfaceKind::Modal(_) => {
+                (IconName::Blocks, DockPosition::Right, px(320.))
+            }
         };
         let title = if surface.title.is_empty() {
             &surface.id
@@ -111,7 +113,7 @@ impl SurfaceInfo {
         let key = format!("{extension_id}/{}", surface.id);
         let slot = match surface.kind {
             SurfaceKind::Panel(_) => Some(panel_slot(&key)),
-            SurfaceKind::StatusItem(_) => None,
+            SurfaceKind::StatusItem(_) | SurfaceKind::Modal(_) => None,
         };
         Self {
             key: key.into(),
@@ -229,6 +231,14 @@ impl<const SLOT: usize> Panel for ExtensionPanel<SLOT> {
     fn activation_priority(&self) -> u32 {
         self.info.activation_priority
     }
+
+    /// The dock reports when this panel becomes the shown one (active in an open dock) or stops
+    /// being it: the surface's ticks wait while it is hidden everywhere (design.md, B).
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        let container = cx.entity_id();
+        let state = self.view.read(cx).state().clone();
+        state.update(cx, |state, cx| state.set_visible(container, active, cx));
+    }
 }
 
 /// An extension panel of any slot, as the registry keeps it.
@@ -238,6 +248,13 @@ pub(crate) trait AnyExtensionPanel {
     fn panel_focus(&self, cx: &App) -> Option<FocusHandle>;
     /// Where focus goes when the panel is activated: the surface view.
     fn surface_focus(&self, cx: &App) -> Option<FocusHandle>;
+    /// Takes the panel out of the workspace's docks (`remove-surface`, uninstall).
+    fn remove_from(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    );
 }
 
 impl<const SLOT: usize> AnyExtensionPanel for WeakEntity<ExtensionPanel<SLOT>> {
@@ -251,6 +268,17 @@ impl<const SLOT: usize> AnyExtensionPanel for WeakEntity<ExtensionPanel<SLOT>> {
 
     fn surface_focus(&self, cx: &App) -> Option<FocusHandle> {
         Some(self.upgrade()?.read(cx).view.read(cx).focus_handle.clone())
+    }
+
+    fn remove_from(
+        &self,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        if let Some(panel) = self.upgrade() {
+            workspace.remove_panel(&panel, window, cx);
+        }
     }
 }
 
@@ -311,6 +339,11 @@ impl ExtensionStatusGroup {
             StatusBarSide::Right => self.items.partition_point(|(other, _)| *other <= priority),
         };
         self.items.insert(index, (priority, item));
+        cx.notify();
+    }
+
+    pub fn remove(&mut self, item: &Entity<ExtensionStatusItem>, cx: &mut Context<Self>) {
+        self.items.retain(|(_, existing)| existing != item);
         cx.notify();
     }
 

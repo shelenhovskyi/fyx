@@ -3,24 +3,54 @@
 //!
 //! All extension calls start here and run on tasks; views only read this state while rendering.
 
-use std::{collections::VecDeque, ops::Range, rc::Rc};
+use std::{
+    collections::VecDeque,
+    ops::Range,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use collections::HashMap;
-use gpui::{App, Context, SharedString, Task};
-use ui_ext::{NodeId, Patch, Props, Surface, Tree, UiEvent, Update};
+use collections::{HashMap, HashSet};
+use gpui::{App, Context, EntityId, SharedString, Task};
+use ui_ext::v0_2::{NodeId, Patch, Props, Surface, SurfaceKind, UiEvent, Update, tree::Tree};
+use ui_ext_wasm::ticks::{PendingTick, TickConditions, TickErrors};
 
-use crate::backend::{PushedUpdate, Reply, ReplyError, UiBackend};
+use crate::backend::{HostEffect, Reply, ReplyError, Row, UiBackend};
 
 /// How a surface reaches the other surfaces of its extension (the registry implements it).
 pub trait SurfaceLink {
     /// Delivers a push that a call on one surface made for another surface of the extension.
-    fn route_push(&self, push: PushedUpdate, cx: &mut App);
+    fn route_effect(&self, effect: HostEffect, cx: &mut App);
     /// The extension's instance is gone (trap, time budget, disabled): every other surface of
     /// it stops too.
     fn extension_failed(&self, from_surface: &str, message: SharedString, cx: &mut App);
     /// Loads the extension again from where it came from, on a fresh instance; its surfaces
     /// remount on it (plan 1.3, spec decision 8).
     fn restart_extension(&self, cx: &mut App);
+    /// The extension's tick budget (design.md, B), shared by its surfaces: when a tick due at
+    /// `due` may run. Without a registry, at `due`.
+    fn reserve_tick(&self, due: Instant, _cx: &mut App) -> Instant {
+        due
+    }
+    /// The extension's least tick delay now (raised while it is throttled).
+    fn min_tick_delay(&self, _cx: &App) -> Duration {
+        ui_ext_wasm::ticks::MIN_TICK_DELAY
+    }
+    /// A tick call finished after `busy`, for the extension's CPU share.
+    fn record_tick(&self, _finished_at: Instant, _busy: Duration, _cx: &mut App) {}
+}
+
+/// An item of a surface's queue: a user event, or a due tick, which waits behind the events
+/// queued before it and never overtakes one (design.md, B).
+enum Queued {
+    Event(QueuedEvent),
+    Tick,
+}
+
+/// What the event worker sends next.
+enum Next {
+    Event(UiEvent),
+    Tick,
 }
 
 /// Remounts in a row caused by updates that did not fit, with no user input between them, before
@@ -33,6 +63,8 @@ const MAX_CACHED_ROWS: usize = 1024;
 pub(crate) const ROW_OVERSCAN: u32 = 8;
 
 pub enum Phase {
+    /// A modal that is not shown: no tree, nothing mounted (design.md, C).
+    Closed,
     Mounting,
     Ready(Tree),
     /// `retryable` is false when the extension's instance is gone (trap, time budget, disabled):
@@ -74,6 +106,8 @@ const MAX_WANTED_ROWS: u32 = 256;
 struct CachedRow {
     generation: u64,
     tree: Option<Tree>,
+    /// Levels to indent the row by (0.2's `list-row.indent`, clamped).
+    indent: u8,
 }
 
 /// An event waiting for the extension, with what it was aimed at when the user made it.
@@ -93,8 +127,18 @@ pub struct SurfaceState {
     /// `last_error` is a failed reload: the old instance still runs, and the footer offers Retry.
     reload_failed: bool,
     lists: HashMap<NodeId, RowCache>,
-    events: VecDeque<QueuedEvent>,
+    events: VecDeque<Queued>,
     event_worker_running: bool,
+    /// The one pending `request-tick`, if any; a new request replaces it.
+    tick: Option<PendingTick>,
+    /// The timer that queues the pending tick when it is due.
+    _tick_timer: Option<Task<()>>,
+    tick_errors: TickErrors,
+    /// A due tick met a surface that was mounting: it goes out after the mount.
+    tick_waits_for_mount: bool,
+    /// Shown somewhere: a status item always; a panel while it is the active panel of an open
+    /// dock in some window (reported by its containers). Ticks wait while hidden.
+    visible_in: HashSet<EntityId>,
     /// How many times the extension has set each input's `value` (`set-props`, insert, replace).
     /// A view writes the value into its editor when this moves past what it last saw; otherwise
     /// the user's text stands (integrator decision 6). A counter, not a flag, so every window's
@@ -112,7 +156,26 @@ pub struct SurfaceState {
     next_row_generation: u64,
     /// Recent events and updates, for the Extension Inspector.
     history: VecDeque<HistoryEntry>,
+    /// What differs by the component's `fyx:ui` version.
+    rules: ApiRules,
     _mount: Option<Task<()>>,
+}
+
+/// The renderer's behaviour by the component's `fyx:ui` version (migration.md §3), decided once
+/// when the surface is created, so no version comparisons are scattered through the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiRules {
+    /// 0.2: rows are fetched again only as design G says; 0.1: every touched list refetches.
+    pub precise_row_refetch: bool,
+}
+
+impl ApiRules {
+    pub fn for_version(version: &semver::Version) -> Self {
+        let v0_2 = *version >= semver::Version::new(0, 2, 0);
+        Self {
+            precise_row_refetch: v0_2,
+        }
+    }
 }
 
 /// Entries of a surface's history the Extension Inspector keeps.
@@ -142,15 +205,24 @@ pub fn summarize_update(update: &Update) -> String {
             let parts: Vec<String> = patches
                 .iter()
                 .map(|patch| match patch {
-                    ui_ext::Patch::SetProps(id, props) => {
+                    Patch::SetProps(id, props) => {
                         format!("set-props {id} ({})", props.kind_name())
                     }
-                    ui_ext::Patch::Insert(insert) => format!(
+                    Patch::Insert(insert) => format!(
                         "insert {} ({})",
                         insert.node.id,
                         insert.node.props.kind_name()
                     ),
-                    ui_ext::Patch::Remove(id) => format!("remove {id}"),
+                    Patch::Remove(id) => format!("remove {id}"),
+                    Patch::InvalidateRows(op) => match op.rows {
+                        Some(range) => format!(
+                            "invalidate-rows {} {}..{}",
+                            op.target,
+                            range.start,
+                            range.start + range.count
+                        ),
+                        None => format!("invalidate-rows {}", op.target),
+                    },
                 })
                 .collect();
             format!("patches: {}", parts.join(", "))
@@ -159,13 +231,151 @@ pub fn summarize_update(update: &Update) -> String {
 }
 
 impl SurfaceState {
+    /// A surface that mounts itself from the extension.
     pub fn new(
         backend: Rc<dyn UiBackend>,
         surface: Surface,
         link: Option<Rc<dyn SurfaceLink>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        let modal = matches!(surface.kind, SurfaceKind::Modal(_));
+        let mut this = Self::unmounted(backend, surface, link);
+        if modal {
+            // A modal mounts each time it is shown.
+            this.phase = Phase::Closed;
+        } else {
+            this.mount(cx);
+        }
+        this
+    }
+
+    pub fn is_modal(&self) -> bool {
+        matches!(self.surface.kind, SurfaceKind::Modal(_))
+    }
+
+    /// Whether a modal is shown (anything but `Closed`).
+    pub fn is_open(&self) -> bool {
+        !matches!(self.phase, Phase::Closed)
+    }
+
+    /// `show-surface` of a modal: a fresh mount, since modals keep no tree between showings.
+    /// Showing one that is already shown does nothing.
+    pub fn show(&mut self, cx: &mut Context<Self>) {
+        if self.is_open() {
+            return;
+        }
+        self.phase = Phase::Mounting;
+        self.revision += 1;
+        self.mount(cx);
+        cx.notify();
+    }
+
+    /// Closes a modal: the tree, queued events and the pending tick go. With a `reason` the user
+    /// closed it, and `dismissed(reason)` goes to the extension (the only item left in the
+    /// queue, so it never waits on events for a tree that is gone); without one the extension
+    /// asked (`hide-surface`, `remove-surface`), and nothing is sent.
+    pub fn close(&mut self, reason: Option<ui_ext::v0_2::DismissReason>, cx: &mut Context<Self>) {
+        if !self.is_open() {
+            return;
+        }
+        self.phase = Phase::Closed;
+        self.events.clear();
+        self.lists.clear();
+        self.tick = None;
+        self._tick_timer = None;
+        self.tick_waits_for_mount = false;
+        self._mount = None;
+        self.resyncing = false;
+        self.last_error = None;
+        self.revision += 1;
+        if let Some(reason) = reason {
+            let event = UiEvent::Dismissed(reason);
+            self.record(HistoryEntry::Event {
+                at: std::time::SystemTime::now(),
+                event: event.clone(),
+            });
+            self.events.push_back(Queued::Event(QueuedEvent {
+                event,
+                row_generation: None,
+            }));
+            self.run_queue(cx);
+        }
+        cx.notify();
+    }
+
+    /// Keyboard selection in a list (design.md, C): the host moves `selected` in its own tree
+    /// first, like typed text, then sends `row-selected`. Consecutive selections of one list
+    /// are coalesced. Returns the new index.
+    pub fn select_row(&mut self, list: NodeId, index: u32, cx: &mut Context<Self>) -> Option<u32> {
+        let Phase::Ready(tree) = &mut self.phase else {
+            return None;
+        };
+        let Some(Props::List(props)) = tree.get(list).map(|node| node.props()) else {
+            return None;
+        };
+        if props.row_count == 0 {
+            return None;
+        }
+        let index = index.min(props.row_count - 1);
+        if props.selected == Some(index) {
+            return Some(index);
+        }
+        let mut props = props.clone();
+        props.selected = Some(index);
+        if let Err(error) = tree.apply_patches(vec![Patch::SetProps(list, Props::List(props))]) {
+            log::error!("fyx:ui: failed to record the selection of list {list}: {error}");
+            return None;
+        }
+        self.revision += 1;
+        if let Some(Queued::Event(QueuedEvent {
+            event: UiEvent::RowSelected(queued, _),
+            ..
+        })) = self.events.back()
+            && *queued == list
+        {
+            self.events.pop_back();
+        }
+        self.dispatch(UiEvent::RowSelected(list, index), cx);
+        cx.notify();
+        Some(index)
+    }
+
+    /// The first list node of the tree in pre-order (a modal's keyboard selection moves it).
+    pub fn first_list(&self) -> Option<(NodeId, Option<u32>, u32)> {
+        let tree = self.tree()?;
+        let mut stack: Vec<NodeId> = tree.roots().iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            let node = tree.get(id)?;
+            if let Props::List(list) = node.props() {
+                return Some((id, list.selected, list.row_count));
+            }
+            stack.extend(node.children().iter().rev());
+        }
+        None
+    }
+
+    /// A surface whose first tree is already known (a decoration's `place-decoration` nodes):
+    /// no `mount` call; a later resync or Retry mounts from the extension as usual.
+    pub fn with_tree(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        link: Option<Rc<dyn SurfaceLink>>,
+        tree: Tree,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::unmounted(backend, surface, link);
+        this.set_tree(tree);
+        cx.notify();
+        this
+    }
+
+    fn unmounted(
+        backend: Rc<dyn UiBackend>,
+        surface: Surface,
+        link: Option<Rc<dyn SurfaceLink>>,
+    ) -> Self {
+        let backend_version = backend.api_version();
+        Self {
             backend,
             surface,
             link,
@@ -175,6 +385,11 @@ impl SurfaceState {
             lists: HashMap::default(),
             events: VecDeque::new(),
             event_worker_running: false,
+            tick: None,
+            _tick_timer: None,
+            tick_errors: TickErrors::default(),
+            tick_waits_for_mount: false,
+            visible_in: HashSet::default(),
             input_sets: HashMap::default(),
             revision: 0,
             mounts: 0,
@@ -182,10 +397,9 @@ impl SurfaceState {
             remounts_without_input: 0,
             next_row_generation: 0,
             history: VecDeque::new(),
+            rules: ApiRules::for_version(&backend_version),
             _mount: None,
-        };
-        this.mount(cx);
-        this
+        }
     }
 
     pub fn surface(&self) -> &Surface {
@@ -203,7 +417,7 @@ impl SurfaceState {
     pub fn tree(&self) -> Option<&Tree> {
         match &self.phase {
             Phase::Ready(tree) => Some(tree),
-            Phase::Mounting | Phase::Failed { .. } => None,
+            Phase::Closed | Phase::Mounting | Phase::Failed { .. } => None,
         }
     }
 
@@ -254,15 +468,16 @@ impl SurfaceState {
             let result = call.await;
             this.update(cx, |this, cx| {
                 this.resyncing = false;
+                if !this.is_open() {
+                    // A modal closed while its mount was in flight.
+                    return;
+                }
                 match result {
-                    Ok(Reply { pushed, value }) => {
+                    Ok(Reply { effects, value }) => {
                         // Pushes for this surface made during `mount` are superseded by the tree
-                        // it returns; pushes for other surfaces still apply.
-                        let others = pushed
-                            .into_iter()
-                            .filter(|push| push.surface_id != this.surface.id)
-                            .collect();
-                        this.apply_pushes(others, cx);
+                        // it returns; every other effect still applies.
+                        let others = this.without_own_pushes(effects);
+                        this.apply_effects(others, cx);
                         this.set_tree(value);
                     }
                     Err(error) => {
@@ -271,13 +486,10 @@ impl SurfaceState {
                             this.extension_id(),
                             this.surface.id
                         );
-                        if let Some(pushed) = reply_error_pushes(&error) {
+                        if let Some(effects) = reply_error_effects(&error) {
                             // This surface has no tree to apply its own pushes to.
-                            let others = pushed
-                                .into_iter()
-                                .filter(|push| push.surface_id != this.surface.id)
-                                .collect();
-                            this.apply_pushes(others, cx);
+                            let others = this.without_own_pushes(effects);
+                            this.apply_effects(others, cx);
                             this.fail(format!("{error:#}").into(), true, cx);
                         } else {
                             this.fail_extension(&error, cx);
@@ -319,6 +531,10 @@ impl SurfaceState {
     pub fn fail(&mut self, message: SharedString, retryable: bool, cx: &mut Context<Self>) {
         self.phase = Phase::Failed { message, retryable };
         self.events.clear();
+        // A failed surface drops its tick (design.md, B).
+        self.tick = None;
+        self._tick_timer = None;
+        self.tick_waits_for_mount = false;
         self.lists.clear();
         self.resyncing = false;
         self.revision += 1;
@@ -356,6 +572,9 @@ impl SurfaceState {
     }
 
     fn set_tree(&mut self, tree: Tree) {
+        if std::mem::take(&mut self.tick_waits_for_mount) {
+            self.events.push_back(Queued::Tick);
+        }
         self.record(HistoryEntry::Update {
             at: std::time::SystemTime::now(),
             summary: format!("mount: {} nodes", tree.len()),
@@ -382,77 +601,106 @@ impl SurfaceState {
         let Some(tree) = self.tree() else {
             return;
         };
-        if !tree.contains(event.target()) {
-            log::debug!("fyx:ui: dropping {event:?}, its node is gone");
+        if event.target().is_some_and(|target| !tree.contains(target)) {
+            log::debug!(
+                "fyx:ui: dropping {:?}, its node is gone",
+                self.redacted(&event)
+            );
             return;
         }
+        let shown = self.redacted(&event);
         self.record(HistoryEntry::Event {
             at: std::time::SystemTime::now(),
-            event: event.clone(),
+            event: shown,
         });
         if let UiEvent::InputChanged(id, value) | UiEvent::InputSubmitted(id, value) = &event {
             self.set_input_locally(*id, value);
         }
         if let UiEvent::InputChanged(id, _) = &event
-            && let Some(QueuedEvent {
+            && let Some(Queued::Event(QueuedEvent {
                 event: UiEvent::InputChanged(queued_id, _),
                 ..
-            }) = self.events.back()
+            })) = self.events.back()
             && queued_id == id
         {
             self.events.pop_back();
         }
+        // A user event lets ticks resume after errors stopped them.
+        self.tick_errors.on_user_event();
         let row_generation = match &event {
             // The generation of the row the user saw, which may be older than the list's
             // current one while its replacement is on the way (integration-3 finding 9).
             UiEvent::RowClick(list, index) => Some(self.drawn_row_generation(*list, *index)),
             _ => None,
         };
-        self.events.push_back(QueuedEvent {
+        self.events.push_back(Queued::Event(QueuedEvent {
             event,
             row_generation,
-        });
-        if !self.event_worker_running {
-            self.event_worker_running = true;
-            cx.spawn(async move |this, cx| {
-                loop {
-                    let next = this.update(cx, |this, _| {
-                        let event = this.next_event();
-                        if event.is_none() {
-                            this.event_worker_running = false;
-                        }
-                        event.map(|event| {
-                            let call = this.backend.handle_event(&this.surface.id, event.clone());
-                            (event, call)
-                        })
-                    });
-                    let Ok(Some((event, call))) = next else {
-                        break;
-                    };
-                    let result = call.await;
-                    if this
-                        .update(cx, |this, cx| this.apply_reply(&event, result, cx))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .detach();
+        }));
+        self.run_queue(cx);
+    }
+
+    /// Starts the worker that sends queued items one at a time, unless it runs already.
+    fn run_queue(&mut self, cx: &mut Context<Self>) {
+        if self.event_worker_running {
+            return;
         }
+        self.event_worker_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                let next = this.update(cx, |this, cx| {
+                    let this_now = cx.background_executor().now();
+                    let next = this.next_item();
+                    if next.is_none() {
+                        this.event_worker_running = false;
+                    }
+                    next.map(|next| {
+                        let call = match &next {
+                            Next::Event(event) => {
+                                this.backend.handle_event(&this.surface.id, event.clone())
+                            }
+                            Next::Tick => this.backend.tick(&this.surface.id),
+                        };
+                        (next, call, this_now)
+                    })
+                });
+                let Ok(Some((next, call, started))) = next else {
+                    break;
+                };
+                let result = call.await;
+                let applied = this.update(cx, |this, cx| match next {
+                    Next::Event(event) => this.apply_reply(&event, result, cx),
+                    Next::Tick => this.apply_tick_reply(result, started, cx),
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The next queued event that still means what it meant when the user made it. Replies to
     /// earlier events may have removed its node or changed the list under a row click.
-    fn next_event(&mut self) -> Option<UiEvent> {
-        while let Some(QueuedEvent {
-            event,
-            row_generation,
-        }) = self.events.pop_front()
-        {
-            let still_there = self
-                .tree()
-                .is_some_and(|tree| tree.contains(event.target()));
+    fn next_item(&mut self) -> Option<Next> {
+        while let Some(item) = self.events.pop_front() {
+            let QueuedEvent {
+                event,
+                row_generation,
+            } = match item {
+                // A tick goes out only to a mounted surface; otherwise it waits for the mount.
+                Queued::Tick if self.tree().is_some() => return Some(Next::Tick),
+                Queued::Tick => {
+                    self.tick_waits_for_mount = true;
+                    continue;
+                }
+                Queued::Event(queued) => queued,
+            };
+            let still_there = match event.target() {
+                // `dismissed` belongs to the whole surface, which has no tree any more.
+                None => true,
+                Some(target) => self.tree().is_some_and(|tree| tree.contains(target)),
+            };
             let same_rows = match (&event, row_generation) {
                 (UiEvent::RowClick(list, _), Some(generation)) => {
                     self.row_generation(*list) == generation
@@ -460,9 +708,12 @@ impl SurfaceState {
                 _ => true,
             };
             if still_there && same_rows {
-                return Some(event);
+                return Some(Next::Event(event));
             }
-            log::debug!("fyx:ui: dropping {event:?}, an earlier reply changed its target");
+            log::debug!(
+                "fyx:ui: dropping {:?}, an earlier reply changed its target",
+                self.redacted(&event)
+            );
         }
         None
     }
@@ -492,8 +743,161 @@ impl SurfaceState {
     pub(crate) fn queued_events(&self) -> Vec<UiEvent> {
         self.events
             .iter()
-            .map(|queued| queued.event.clone())
+            .filter_map(|queued| match queued {
+                Queued::Event(queued) => Some(queued.event.clone()),
+                Queued::Tick => None,
+            })
             .collect()
+    }
+
+    /// `request-tick` for this surface: one pending tick, `delay` from now (when the requesting
+    /// call's effects apply), replacing any earlier one. Ignored while errors stopped its ticks.
+    pub fn request_tick(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.tick_errors.stopped() {
+            log::debug!(
+                "fyx:ui {}/{}: request-tick ignored, ticks stopped after errors",
+                self.backend.extension_id(),
+                self.surface.id
+            );
+            return;
+        }
+        self.tick = Some(PendingTick::new(delay, cx.background_executor().now()));
+        self.schedule_tick(cx);
+    }
+
+    pub fn cancel_tick(&mut self) {
+        self.tick = None;
+        self._tick_timer = None;
+    }
+
+    pub fn has_pending_tick(&self) -> bool {
+        self.tick.is_some()
+    }
+
+    /// A container of this surface became visible or hidden (`id` names the container).
+    pub fn set_visible(&mut self, container: EntityId, visible: bool, cx: &mut Context<Self>) {
+        let changed = if visible {
+            self.visible_in.insert(container)
+        } else {
+            self.visible_in.remove(&container)
+        };
+        if changed {
+            self.schedule_tick(cx);
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        matches!(self.surface.kind, SurfaceKind::StatusItem(_)) || !self.visible_in.is_empty()
+    }
+
+    /// Arms the timer for the pending tick under design B's rules, or disarms it while hidden.
+    fn schedule_tick(&mut self, cx: &mut Context<Self>) {
+        let Some(tick) = self.tick else {
+            self._tick_timer = None;
+            return;
+        };
+        let min_delay = self
+            .link
+            .as_ref()
+            .map_or(ui_ext_wasm::ticks::MIN_TICK_DELAY, |link| {
+                link.min_tick_delay(cx)
+            });
+        let conditions = TickConditions {
+            visible: self.is_visible(),
+            app_active: cx.active_window().is_some(),
+            extension_min_delay: min_delay,
+        };
+        let Some(due) = tick.due(conditions) else {
+            self._tick_timer = None;
+            return;
+        };
+        let run_at = match self.link.clone() {
+            Some(link) => link.reserve_tick(due, cx),
+            None => due,
+        };
+        let wait = run_at.saturating_duration_since(cx.background_executor().now());
+        let timer = cx.background_executor().timer(wait);
+        self._tick_timer = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            this.update(cx, |this, cx| this.tick_due(cx)).ok();
+        }));
+    }
+
+    /// The pending tick is due: it joins the queue behind the events already in it.
+    fn tick_due(&mut self, cx: &mut Context<Self>) {
+        if self.tick.take().is_none() {
+            return;
+        }
+        self._tick_timer = None;
+        self.events.push_back(Queued::Tick);
+        self.run_queue(cx);
+    }
+
+    /// A tick's reply applies like an event's, but does not count as user progress for the
+    /// remount bound, so a tick loop cannot keep a broken surface remounting (design.md, B).
+    fn apply_tick_reply(
+        &mut self,
+        result: anyhow::Result<Reply<Update>>,
+        started: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let finished = cx.background_executor().now();
+        if let Some(link) = self.link.clone() {
+            link.record_tick(finished, finished - started, cx);
+        }
+        match result {
+            Ok(Reply { effects, value }) => {
+                self.tick_errors.on_success();
+                if self.apply_effects(effects, cx) {
+                    self.apply_update(value, cx);
+                }
+            }
+            Err(error) => {
+                log::error!(
+                    "fyx:ui {}/{}: tick failed: {error:#}",
+                    self.extension_id(),
+                    self.surface.id
+                );
+                match reply_error_effects(&error) {
+                    Some(effects) => {
+                        self.apply_effects(effects, cx);
+                        if self.tick_errors.on_error() {
+                            log::warn!(
+                                "fyx:ui {}/{}: ticks stopped after {} errors in a row, until the \
+                                 next user event",
+                                self.extension_id(),
+                                self.surface.id,
+                                ui_ext_wasm::ticks::MAX_CONSECUTIVE_TICK_ERRORS
+                            );
+                            self.cancel_tick();
+                        }
+                        self.last_error = Some(format!("{error:#}").into());
+                        cx.notify();
+                    }
+                    None => self.fail_extension(&error, cx),
+                }
+            }
+        }
+    }
+
+    /// The event with a secret input's text replaced (design K): what logs and the Extension
+    /// Inspector may show.
+    pub fn redacted(&self, event: &UiEvent) -> UiEvent {
+        let secret = |id: NodeId| {
+            matches!(
+                self.tree().and_then(|tree| tree.get(id)).map(|node| node.props()),
+                Some(Props::Input(input)) if input.secret
+            )
+        };
+        match event {
+            UiEvent::InputChanged(id, _) if secret(*id) => {
+                UiEvent::InputChanged(*id, "<secret>".into())
+            }
+            UiEvent::InputSubmitted(id, _) if secret(*id) => {
+                UiEvent::InputSubmitted(*id, "<secret>".into())
+            }
+            event => event.clone(),
+        }
     }
 
     fn row_generation(&self, list: NodeId) -> u64 {
@@ -527,20 +931,21 @@ impl SurfaceState {
     ) {
         match result {
             // Pushes made during the call first, the reply last.
-            Ok(Reply { pushed, value }) => {
-                if self.apply_pushes(pushed, cx) && self.apply_update(value, cx) {
+            Ok(Reply { effects, value }) => {
+                if self.apply_effects(effects, cx) && self.apply_update(value, cx) {
                     self.remounts_without_input = 0;
                 }
             }
             Err(error) => {
                 log::error!(
-                    "fyx:ui {}/{}: handle-event({event:?}) failed: {error:#}",
+                    "fyx:ui {}/{}: handle-event({:?}) failed: {error:#}",
                     self.extension_id(),
-                    self.surface.id
+                    self.surface.id,
+                    self.redacted(event)
                 );
-                match reply_error_pushes(&error) {
-                    Some(pushed) => {
-                        self.apply_pushes(pushed, cx);
+                match reply_error_effects(&error) {
+                    Some(effects) => {
+                        self.apply_effects(effects, cx);
                         self.last_error = Some(format!("{error:#}").into());
                         cx.notify();
                     }
@@ -550,25 +955,42 @@ impl SurfaceState {
         }
     }
 
-    /// Applies pushes in order: this surface's here, other surfaces' through the link. Returns
-    /// false if one of this surface's failed: the surface is then being mounted again, so its
-    /// later pushes and the reply no longer fit and are skipped. Pushes for other surfaces are
-    /// still routed, because their mirrors in the extension already count them as applied.
-    fn apply_pushes(&mut self, pushed: Vec<PushedUpdate>, cx: &mut Context<Self>) -> bool {
+    fn without_own_pushes(&self, effects: Vec<HostEffect>) -> Vec<HostEffect> {
+        effects
+            .into_iter()
+            .filter(|effect| {
+                !matches!(effect, HostEffect::Push { surface_id, .. } if *surface_id == self.surface.id)
+            })
+            .collect()
+    }
+
+    /// Applies a call's effects in order: this surface's pushes here, everything else (pushes to
+    /// other surfaces and decorations, ticks, surfaces added, removed, shown or hidden) through the
+    /// link. Returns false if one of this surface's pushes failed: the surface is then being
+    /// mounted again, so its later pushes and the reply no longer fit and are skipped. Other
+    /// effects still apply, because the extension already counts them as done.
+    fn apply_effects(&mut self, effects: Vec<HostEffect>, cx: &mut Context<Self>) -> bool {
         let mut own_ok = true;
-        for push in pushed {
-            if push.surface_id == self.surface.id {
-                if own_ok && !self.apply_update(push.update, cx) {
-                    own_ok = false;
+        for effect in effects {
+            match effect {
+                HostEffect::Push { surface_id, update } if surface_id == self.surface.id => {
+                    if own_ok && !self.apply_update(update, cx) {
+                        own_ok = false;
+                    }
                 }
-            } else if let Some(link) = self.link.clone() {
-                link.route_push(push, cx);
-            } else {
-                log::error!(
-                    "fyx:ui {}: dropping a push for surface {:?}, nothing routes it",
-                    self.backend.extension_id(),
-                    push.surface_id
-                );
+                HostEffect::RequestTick { surface_id, delay } if surface_id == self.surface.id => {
+                    self.request_tick(delay, cx)
+                }
+                HostEffect::CancelTick { surface_id } if surface_id == self.surface.id => {
+                    self.cancel_tick()
+                }
+                effect => match self.link.clone() {
+                    Some(link) => link.route_effect(effect, cx),
+                    None => log::error!(
+                        "fyx:ui {}: dropping {effect:?}, nothing routes it",
+                        self.backend.extension_id(),
+                    ),
+                },
             }
         }
         own_ok
@@ -603,19 +1025,35 @@ impl SurfaceState {
             Ok(touched) if touched.is_empty() => true,
             Ok(touched) => {
                 let tree = &*tree;
-                for id in touched {
-                    match tree.get(id).map(|node| node.props()) {
-                        // The WIT has no "rows changed" patch: a touched list (its row count,
-                        // usually) has its rows fetched again, once, for the visible range.
-                        Some(Props::List(_) | Props::Table(_)) => {
-                            if let Some(cache) = self.lists.get_mut(&id) {
-                                self.next_row_generation += 1;
-                                cache.invalidate(self.next_row_generation);
-                            }
-                        }
-                        // Set, inserted or replaced by the extension: the views write the value.
-                        Some(Props::Input(_)) => *self.input_sets.entry(id).or_default() += 1,
-                        _ => {}
+                // Which lists fetch their rows again (migration.md §3): a 0.1 component has no
+                // `invalidate-rows`, so every touched list refetches; a 0.2 component refetches
+                // only what design G names (`Touched::rows`). Either way only the visible range
+                // is fetched, once.
+                let refetch: Vec<NodeId> = if self.rules.precise_row_refetch {
+                    touched.rows.keys().copied().collect()
+                } else {
+                    touched
+                        .nodes
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            matches!(
+                                tree.get(*id).map(|node| node.props()),
+                                Some(Props::List(_) | Props::Table(_))
+                            )
+                        })
+                        .collect()
+                };
+                for id in refetch {
+                    if let Some(cache) = self.lists.get_mut(&id) {
+                        self.next_row_generation += 1;
+                        cache.invalidate(self.next_row_generation);
+                    }
+                }
+                for id in &touched.nodes {
+                    // Set, inserted or replaced by the extension: the views write the value.
+                    if let Some(Props::Input(_)) = tree.get(*id).map(|node| node.props()) {
+                        *self.input_sets.entry(*id).or_default() += 1;
                     }
                 }
                 self.lists.retain(|id, _| {
@@ -667,6 +1105,14 @@ impl SurfaceState {
     /// A cached row, possibly from before the list last changed.
     pub fn row(&self, list: NodeId, index: u32) -> Option<&Tree> {
         self.lists.get(&list)?.rows.get(&index)?.tree.as_ref()
+    }
+
+    /// The indent level of a cached row (0 when unknown).
+    pub fn row_indent(&self, list: NodeId, index: u32) -> u8 {
+        self.lists
+            .get(&list)
+            .and_then(|cache| cache.rows.get(&index))
+            .map_or(0, |row| row.indent)
     }
 
     /// Makes sure rows `range` of `list` are fetched, without waiting for them. Cheap when they
@@ -756,21 +1202,21 @@ impl SurfaceState {
         list: NodeId,
         generation: u64,
         range: Range<u32>,
-        result: anyhow::Result<Reply<Vec<(u32, Tree)>>>,
+        result: anyhow::Result<Reply<Vec<Row>>>,
         cx: &mut Context<Self>,
     ) {
         let result = match result {
-            Ok(Reply { pushed, value }) => {
+            Ok(Reply { effects, value }) => {
                 // A push that touches this list gives it a new generation, so these rows no
                 // longer count and are fetched again.
-                if self.apply_pushes(pushed, cx) {
+                if self.apply_effects(effects, cx) {
                     self.remounts_without_input = 0;
                 }
                 Ok(value)
             }
-            Err(error) => match reply_error_pushes(&error) {
-                Some(pushed) => {
-                    self.apply_pushes(pushed, cx);
+            Err(error) => match reply_error_effects(&error) {
+                Some(effects) => {
+                    self.apply_effects(effects, cx);
                     Err(error)
                 }
                 None => {
@@ -791,10 +1237,20 @@ impl SurfaceState {
         if generation == cache.generation {
             match result {
                 Ok(rows) => {
-                    let mut answered: HashMap<u32, Tree> = rows.into_iter().collect();
+                    let mut answered: HashMap<u32, Row> =
+                        rows.into_iter().map(|row| (row.index, row)).collect();
                     for index in range.clone() {
-                        let tree = answered.remove(&index);
-                        cache.rows.insert(index, CachedRow { generation, tree });
+                        let row = answered.remove(&index);
+                        let indent = row.as_ref().map_or(0, |row| row.indent);
+                        let tree = row.map(|row| row.tree);
+                        cache.rows.insert(
+                            index,
+                            CachedRow {
+                                generation,
+                                tree,
+                                indent,
+                            },
+                        );
                     }
                     if cache.rows.len() > MAX_CACHED_ROWS {
                         let keep = range.start.saturating_sub(MAX_CACHED_ROWS as u32 / 4)
@@ -835,11 +1291,11 @@ impl RowCache {
 
 /// The pushes a rejected call carries, or `None` when the error is not a rejection: then the
 /// instance itself failed (trap, time budget, disabled) and carries none.
-fn reply_error_pushes(error: &anyhow::Error) -> Option<Vec<PushedUpdate>> {
+fn reply_error_effects(error: &anyhow::Error) -> Option<Vec<HostEffect>> {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ReplyError>())
-        .map(|reply_error| reply_error.pushed.clone())
+        .map(|reply_error| reply_error.effects.clone())
 }
 
 fn count_all_inputs(tree: &Tree, input_sets: &mut HashMap<NodeId, u64>) {

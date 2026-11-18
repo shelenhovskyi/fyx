@@ -6,9 +6,10 @@ use std::{cell::RefCell, rc::Rc};
 use anyhow::Result;
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use gpui::{AppContext as _, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
-use ui_ext::{
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
     ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps, IconProps,
-    InputProps, Node, NodeId, Props, TableProps, TextProps, Tree, TreeLimits, UiEvent, Update,
+    InputProps, Node, NodeId, Props, TableProps, TextProps, UiEvent, Update, tree::Tree,
 };
 
 use crate::{
@@ -39,9 +40,10 @@ fn node(id: NodeId, parent: Option<NodeId>, props: Props) -> Node {
 fn button(label: &str, icon: Option<&str>, style: ButtonStyle, disabled: bool) -> Props {
     Props::Button(ButtonProps {
         label: label.into(),
-        icon: icon.map(Into::into),
+        icon: icon.map(|name| ui_ext::v0_2::IconRef::Upstream(name.into())),
         style,
         disabled,
+        tooltip: None,
     })
 }
 
@@ -96,7 +98,7 @@ fn nodes() -> Vec<Node> {
             UNKNOWN_ICON,
             root,
             Props::Icon(IconProps {
-                name: "fyx_no_such_icon".into(),
+                name: ui_ext::v0_2::IconRef::Upstream("fyx_no_such_icon".into()),
                 color: None,
             }),
         ),
@@ -104,7 +106,7 @@ fn nodes() -> Vec<Node> {
             KNOWN_ICON,
             root,
             Props::Icon(IconProps {
-                name: "check".into(),
+                name: ui_ext::v0_2::IconRef::Upstream("check".into()),
                 color: Some(ColorToken::Success),
             }),
         ),
@@ -139,6 +141,7 @@ fn nodes() -> Vec<Node> {
             Props::Input(InputProps {
                 value: "draft".into(),
                 placeholder: "Filter".into(),
+                secret: false,
             }),
         ),
         node(
@@ -195,7 +198,7 @@ impl UiBackend for StaticBackend {
         let tree = Tree::from_nodes(nodes(), TreeLimits::default()).map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -210,7 +213,7 @@ impl UiBackend for StaticBackend {
         self.events.borrow_mut().push(event);
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -223,17 +226,21 @@ impl UiBackend for StaticBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         let rows = if list == TABLE {
             (start..(start + count).min(TABLE_ROWS))
-                .map(|index| (index, table_row(index)))
+                .map(|index| crate::backend::Row {
+                    index,
+                    indent: 0,
+                    tree: table_row(index),
+                })
                 .collect()
         } else {
             Vec::new()
         };
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: rows,
             })
         }
@@ -251,12 +258,12 @@ fn open(
 ) {
     crate::tests::init_test(cx);
     let backend = Rc::new(StaticBackend::default());
-    let surface = ui_ext::Surface {
+    let surface = ui_ext::v0_2::Surface {
         id: "static".into(),
         title: "Static".into(),
-        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
-            position: ui_ext::DockPosition::Right,
-            icon: "hash".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
             default_size: 320,
         }),
     };
@@ -385,7 +392,10 @@ async fn test_input_shows_its_value_and_user_text_stands(cx: &mut TestAppContext
     vcx.simulate_input("ed");
     state.update(vcx, |state, cx| {
         state.apply_update(
-            Update::Patches(vec![ui_ext::Patch::SetProps(MONO_TEXT, text("changed"))]),
+            Update::Patches(vec![ui_ext::v0_2::Patch::SetProps(
+                MONO_TEXT,
+                text("changed"),
+            )]),
             cx,
         );
     });
