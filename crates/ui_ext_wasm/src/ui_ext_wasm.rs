@@ -454,9 +454,17 @@ impl UiManifest {
                     "unknown capability {capability:?}"
                 );
             } else if !world.contains(&capability.as_str()) {
+                // The first world that has it: 0.2 for `ui:notifications`, else 0.3.
+                let needs = if world_capabilities(&Version::new(0, 2, 0))
+                    .contains(&capability.as_str())
+                {
+                    "0.2"
+                } else {
+                    "0.3"
+                };
                 match permissions::tier_of(capability) {
                     Some(_) => bail!(
-                        "capability {capability:?} needs fyx:ui 0.3; this extension targets \
+                        "capability {capability:?} needs fyx:ui {needs}; this extension targets \
                          {version}"
                     ),
                     None => bail!("unknown capability {capability:?}"),
