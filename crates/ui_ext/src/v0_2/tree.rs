@@ -4,22 +4,33 @@
 //! invalidation.
 //!
 //! Every update is validated and applied atomically: a bad update leaves the previous tree as it
-//! was.
+//! was. Patches apply in place with an undo log (perf-1 #6), and props are shared behind an
+//! [`Arc`], so neither an update nor a clone copies text (perf-1 #12).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use super::{InsertOp, InvalidateRowsOp, Node, NodeId, Patch, Props, RowRange, Update};
 use crate::tree::{TreeError, TreeLimits};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
-    props: Props,
+    props: Arc<Props>,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
 }
 
 impl TreeNode {
     pub fn props(&self) -> &Props {
+        &self.props
+    }
+
+    /// The shared props. Every `set-props`, insert and replace makes a new `Arc`, so
+    /// `Arc::ptr_eq` between two revisions is true exactly when the node's props were not
+    /// replaced in between: a renderer can keep these and compare by pointer.
+    pub fn props_arc(&self) -> &Arc<Props> {
         &self.props
     }
 
@@ -106,6 +117,22 @@ fn rows_changed(old: &Props, new: &Props) -> bool {
     }
 }
 
+/// How to take back one applied patch, for [`Tree::apply_patches`].
+enum Undo {
+    /// `set-props`: the props it replaced.
+    Props(NodeId, Arc<Props>),
+    /// `insert`: the node it added (with no children yet when undone, since later patches are
+    /// undone first).
+    Inserted(NodeId),
+    /// `remove`: the removed subtree, and where its root was among its siblings.
+    Removed {
+        id: NodeId,
+        parent: Option<NodeId>,
+        index: usize,
+        nodes: Vec<(NodeId, TreeNode)>,
+    },
+}
+
 /// A forest: nodes with `parent: None` are roots, kept in insertion order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tree {
@@ -183,7 +210,7 @@ impl Tree {
             nodes.push(Node {
                 id,
                 parent: node.parent,
-                props: node.props.clone(),
+                props: Props::clone(&node.props),
             });
             stack.extend(node.children.iter().rev().copied());
         }
@@ -229,26 +256,63 @@ impl Tree {
         Ok(touched)
     }
 
-    /// Applies patches in order, atomically: on error the tree is left as it was.
+    /// Applies patches in order, atomically: on error the tree is left as it was. They apply in
+    /// place; each applied patch logs its inverse, and an error replays the log backwards. A
+    /// failing patch itself changes nothing, as every check comes before its first change.
     pub fn apply_patches(&mut self, patches: Vec<Patch>) -> Result<Touched, TreeError> {
         self.check_update_size(patches.len())?;
         let mut touched = Touched::default();
-        if patches.is_empty() {
-            return Ok(touched);
-        }
-        // Patching a copy keeps rollback trivial; updates are per input event, not per frame.
-        let mut next = self.clone();
+        let mut undo = Vec::new();
         for (index, patch) in patches.into_iter().enumerate() {
-            next.apply_patch(patch, &mut touched)
-                .map_err(|error| TreeError::Patch {
+            if let Err(error) = self.apply_patch(patch, &mut touched, &mut undo) {
+                self.undo(undo);
+                return Err(TreeError::Patch {
                     index,
                     error: Box::new(error),
-                })?;
+                });
+            }
         }
         // Rows of lists removed later in the same update need no fetch.
-        touched.rows.retain(|id, _| next.nodes.contains_key(id));
-        *self = next;
+        touched.rows.retain(|id, _| self.nodes.contains_key(id));
         Ok(touched)
+    }
+
+    fn undo(&mut self, log: Vec<Undo>) {
+        for entry in log.into_iter().rev() {
+            match entry {
+                Undo::Props(id, props) => {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.props = props;
+                    }
+                }
+                Undo::Inserted(id) => {
+                    if let Some(node) = self.nodes.remove(&id) {
+                        self.siblings_mut(node.parent)
+                            .retain(|&sibling| sibling != id);
+                    }
+                }
+                Undo::Removed {
+                    id,
+                    parent,
+                    index,
+                    nodes,
+                } => {
+                    self.nodes.extend(nodes);
+                    let siblings = self.siblings_mut(parent);
+                    let index = index.min(siblings.len());
+                    siblings.insert(index, id);
+                }
+            }
+        }
+    }
+
+    /// The children of `parent`, or the roots. A missing parent gives the roots' list only in
+    /// [`Tree::undo`], where every parent exists again by the time its children are restored.
+    fn siblings_mut(&mut self, parent: Option<NodeId>) -> &mut Vec<NodeId> {
+        match parent.and_then(|parent| self.nodes.get_mut(&parent)) {
+            Some(parent) => &mut parent.children,
+            None => &mut self.roots,
+        }
     }
 
     fn check_update_size(&self, count: usize) -> Result<(), TreeError> {
@@ -261,7 +325,12 @@ impl Tree {
         Ok(())
     }
 
-    fn apply_patch(&mut self, patch: Patch, touched: &mut Touched) -> Result<(), TreeError> {
+    fn apply_patch(
+        &mut self,
+        patch: Patch,
+        touched: &mut Touched,
+        undo: &mut Vec<Undo>,
+    ) -> Result<(), TreeError> {
         match patch {
             Patch::SetProps(id, props) => {
                 let old = self.set_props(id, props)?;
@@ -270,6 +339,7 @@ impl Tree {
                 if is_rows_node(new) && rows_changed(&old, new) {
                     touched.invalidate(id, RowInvalidation::All);
                 }
+                undo.push(Undo::Props(id, old));
             }
             Patch::Insert(op) => {
                 let id = op.node.id;
@@ -279,8 +349,17 @@ impl Tree {
                 if rows {
                     touched.invalidate(id, RowInvalidation::All);
                 }
+                undo.push(Undo::Inserted(id));
             }
-            Patch::Remove(id) => self.remove(id, &mut touched.nodes)?,
+            Patch::Remove(id) => {
+                let (parent, index, nodes) = self.remove(id, &mut touched.nodes)?;
+                undo.push(Undo::Removed {
+                    id,
+                    parent,
+                    index,
+                    nodes,
+                });
+            }
             Patch::InvalidateRows(InvalidateRowsOp { target, rows }) => {
                 let node = self
                     .nodes
@@ -312,7 +391,7 @@ impl Tree {
     }
 
     /// Returns the props it replaced.
-    fn set_props(&mut self, id: NodeId, props: Props) -> Result<Props, TreeError> {
+    fn set_props(&mut self, id: NodeId, props: Props) -> Result<Arc<Props>, TreeError> {
         let node = self.nodes.get_mut(&id).ok_or(TreeError::UnknownNode(id))?;
         if !node.children.is_empty() && !props.is_container() {
             return Err(TreeError::NotAContainer {
@@ -320,7 +399,7 @@ impl Tree {
                 kind: props.kind_name(),
             });
         }
-        Ok(std::mem::replace(&mut node.props, props))
+        Ok(std::mem::replace(&mut node.props, Arc::new(props)))
     }
 
     /// Levels from `id` up to its root, inclusive (a root is 1). The walk stops at
@@ -391,7 +470,7 @@ impl Tree {
         self.nodes.insert(
             node.id,
             TreeNode {
-                props: node.props,
+                props: Arc::new(node.props),
                 parent: node.parent,
                 children: Vec::new(),
             },
@@ -399,27 +478,33 @@ impl Tree {
         Ok(())
     }
 
-    fn remove(&mut self, id: NodeId, removed: &mut BTreeSet<NodeId>) -> Result<(), TreeError> {
+    /// Removes `id` and its subtree. Returns, for the undo log, its parent, its index among its
+    /// siblings and every removed node.
+    #[allow(clippy::type_complexity)]
+    fn remove(
+        &mut self,
+        id: NodeId,
+        removed: &mut BTreeSet<NodeId>,
+    ) -> Result<(Option<NodeId>, usize, Vec<(NodeId, TreeNode)>), TreeError> {
         let node = self.nodes.remove(&id).ok_or(TreeError::UnknownNode(id))?;
         removed.insert(id);
-        let siblings = match node.parent {
-            Some(parent_id) => self
-                .nodes
-                .get_mut(&parent_id)
-                .map(|parent| &mut parent.children),
-            None => Some(&mut self.roots),
-        };
-        if let Some(siblings) = siblings {
-            siblings.retain(|&sibling| sibling != id);
-        }
-        let mut pending = node.children;
+        let parent = node.parent;
+        let siblings = self.siblings_mut(parent);
+        let index = siblings
+            .iter()
+            .position(|&sibling| sibling == id)
+            .unwrap_or(siblings.len());
+        siblings.retain(|&sibling| sibling != id);
+        let mut pending = node.children.clone();
+        let mut nodes = vec![(id, node)];
         while let Some(child) = pending.pop() {
             if let Some(node) = self.nodes.remove(&child) {
                 removed.insert(child);
-                pending.extend(node.children);
+                pending.extend(node.children.iter().copied());
+                nodes.push((child, node));
             }
         }
-        Ok(())
+        Ok((parent, index, nodes))
     }
 }
 
@@ -526,6 +611,81 @@ mod tests {
                 error: Box::new(TreeError::UnknownNode(99))
             }
         );
+    }
+
+    /// perf-1 #6: patches apply in place, and a failing one undoes every earlier one, sibling
+    /// order and removed subtrees included.
+    #[test]
+    fn a_failing_update_undoes_everything_in_place() {
+        let mut tree = sample();
+        tree.apply_patches(vec![
+            Patch::Insert(InsertOp {
+                node: flex(5, Some(1)),
+                before: Some(3),
+            }),
+            Patch::Insert(InsertOp {
+                node: node(6, Some(5), text("x")),
+                before: None,
+            }),
+        ])
+        .expect("valid");
+        let before = tree.clone();
+        let error = tree
+            .apply_patches(vec![
+                Patch::SetProps(3, text("b")),
+                Patch::Remove(5),
+                Patch::Insert(InsertOp {
+                    node: node(7, Some(1), text("new")),
+                    before: Some(2),
+                }),
+                Patch::Remove(4),
+                Patch::Insert(InsertOp {
+                    node: flex(8, None),
+                    before: None,
+                }),
+                Patch::SetProps(2, list(1, 20, None)),
+                Patch::Remove(99),
+            ])
+            .unwrap_err();
+        assert!(matches!(error, TreeError::Patch { index: 6, .. }));
+        assert_eq!(tree, before);
+        assert_eq!(tree.get(1).expect("root").children(), [2, 5, 3, 4]);
+        assert_eq!(tree.get(5).expect("restored").children(), [6]);
+        assert_eq!(tree.roots(), [1]);
+    }
+
+    /// perf-1 #12: a node's props `Arc` changes exactly when its props are replaced.
+    #[test]
+    fn props_are_shared_until_replaced() {
+        let mut tree = sample();
+        let text_props = tree.get(3).expect("text").props_arc().clone();
+        let list_props = tree.get(2).expect("list").props_arc().clone();
+        let copy = tree.clone();
+        assert!(Arc::ptr_eq(
+            copy.get(3).expect("text").props_arc(),
+            &text_props
+        ));
+        tree.apply_patches(vec![Patch::SetProps(3, text("a"))])
+            .expect("valid");
+        assert!(!Arc::ptr_eq(
+            tree.get(3).expect("text").props_arc(),
+            &text_props
+        ));
+        assert_eq!(**tree.get(3).expect("text").props_arc(), *text_props);
+        assert!(Arc::ptr_eq(
+            tree.get(2).expect("list").props_arc(),
+            &list_props
+        ));
+        // A rolled-back update gives back the very same props.
+        tree.apply_patches(vec![
+            Patch::SetProps(2, list(1, 20, None)),
+            Patch::Remove(99),
+        ])
+        .unwrap_err();
+        assert!(Arc::ptr_eq(
+            tree.get(2).expect("list").props_arc(),
+            &list_props
+        ));
     }
 
     /// Design G's refetch rule: `selected` alone fetches nothing; `row-count`, `row-height`,

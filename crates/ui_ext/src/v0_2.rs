@@ -238,10 +238,15 @@ impl ButtonProps {
 
 /// The longest prefix of `text` that fits in [`MAX_TOOLTIP_BYTES`] without splitting a character.
 pub fn truncate_tooltip(text: &str) -> &str {
-    if text.len() <= MAX_TOOLTIP_BYTES {
+    truncate_to(text, MAX_TOOLTIP_BYTES)
+}
+
+/// The longest prefix of `text` that fits in `max` bytes without splitting a character.
+fn truncate_to(text: &str, max: usize) -> &str {
+    if text.len() <= max {
         return text;
     }
-    let mut end = MAX_TOOLTIP_BYTES;
+    let mut end = max;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -255,6 +260,22 @@ pub struct InputProps {
     pub placeholder: String,
     /// The host masks the text and never logs the value.
     pub secret: bool,
+    /// The accessible name (UX F16), read by screen readers; without it, the placeholder. Kept as
+    /// the extension sent it; [`InputProps::label_text`] is what the host uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The most bytes of an input's accessible label the host uses.
+pub const MAX_LABEL_BYTES: usize = 256;
+
+impl InputProps {
+    /// The accessible label as used: at most [`MAX_LABEL_BYTES`], cut at a character boundary.
+    pub fn label_text(&self) -> Option<&str> {
+        self.label
+            .as_deref()
+            .map(|label| truncate_to(label, MAX_LABEL_BYTES))
+    }
 }
 
 /// Virtualized: rows come from `list-rows`, not from child nodes.
@@ -568,6 +589,7 @@ impl From<v0_1::InputProps> for InputProps {
             value: props.value,
             placeholder: props.placeholder,
             secret: false,
+            label: None,
         }
     }
 }
@@ -858,6 +880,16 @@ mod tests {
         assert_eq!(button.tooltip_text(), Some(&long[..MAX_TOOLTIP_BYTES]));
         assert_eq!(button.tooltip.as_deref(), Some(long.as_str()));
         assert_eq!(ButtonProps::default().tooltip_text(), None);
+
+        let input = InputProps {
+            label: Some(format!("{}é", "a".repeat(MAX_LABEL_BYTES - 1))),
+            ..InputProps::default()
+        };
+        assert_eq!(
+            input.label_text(),
+            Some("a".repeat(MAX_LABEL_BYTES - 1).as_str())
+        );
+        assert_eq!(InputProps::default().label_text(), None);
     }
 
     #[test]

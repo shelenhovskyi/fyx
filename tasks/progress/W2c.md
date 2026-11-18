@@ -118,9 +118,17 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
     `CallRecord::executed` is the same counter, for the renderer's tick CPU-share throttle
     (`ticks::TickBudget::record`). Pinned by `test_budget_ignores_time_spent_waiting_for_a_worker`,
     which fails on the old wall-clock budget.
-  - UX F16 (an accessible `label` next to `button-props.tooltip`) and PERF 6/12 (`Arc` props,
-    in-place apply) change `ui_ext::v0_2` types and `v0_2::tree`, which W3 is moving the
-    renderer onto (plan 2.3); held until 2.3 lands, per the coordinator.
+  - UX F16 and PERF 6/12, agreed with W3 (2026-11-18):
+    - F16: `input-props.label: option<string>` in WIT 0.2 and 0.3, and `InputProps.label` in
+      the model. `label_text()` caps it at `MAX_LABEL_BYTES` (256). Buttons keep `tooltip` as
+      their accessible name. The renderer side is W3's: an input's aria label is its label,
+      else its placeholder; an icon-only button's is its tooltip, else the icon name.
+    - PERF 6: `v0_2::Tree::apply_patches` applies in place with an undo log; `Touched` is
+      unchanged.
+    - PERF 12: `TreeNode` holds `Arc<Props>`, plus `props_arc()`, whose pointer changes exactly
+      when the props are replaced.
+    - The fixes in other crates were left to their owners: W3's ui_ext_host test literals, and
+      W4's SDK `InputProps::new` and the harness wit→model conversion.
 
 ## §M notifications and progress, host side (2026-11-18)
 

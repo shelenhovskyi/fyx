@@ -100,6 +100,7 @@ fn rich_tree() -> Vec<Node> {
                 value: "hunter2".into(),
                 placeholder: "Token".into(),
                 secret: true,
+                label: Some("API token".into()),
             }),
         },
         Node {

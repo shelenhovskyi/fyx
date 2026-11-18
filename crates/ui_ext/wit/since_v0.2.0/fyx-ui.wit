@@ -179,6 +179,9 @@ interface types {
         /// Masks the text on screen (passwords, tokens). The value still reaches the extension in
         /// `input-changed` and `input-submitted`; the host never logs it.
         secret: bool,
+        /// The accessible name, read by screen readers; without it, the placeholder is used. At
+        /// most 256 bytes; the host truncates longer text.
+        label: option<string>,
     }
 
     /// Virtualized: the host asks for rows with `list-rows` as they scroll into view.
