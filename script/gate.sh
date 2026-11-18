@@ -81,8 +81,10 @@ profile_snapshot() {
         # Content, not mtime: upstream's dev-mode credentials provider rewrites
         # `development_credentials` unchanged during upstream tests; only real changes count. LMDB
         # `lock.mdb` files change whenever any process opens the database and hold no user data.
+        # `development_credentials`: an upstream `client` test logs in through the dev-mode
+        # credentials provider (docs/fyx/ci.md, Known local issues).
         find "$dir" -type f -not -path '*/logs/*' -not -path '*/db/*' -not -name 'lock.mdb' \
-            -exec sha256sum {} + 2>/dev/null
+            -not -name 'development_credentials' -exec sha256sum {} + 2>/dev/null
     done | sort -u
 }
 profile_before=$(profile_snapshot)

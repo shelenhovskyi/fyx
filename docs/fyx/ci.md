@@ -248,6 +248,12 @@ Things the gate works around on one machine only. CI never takes these paths.
   is in the gated set and `example.com` resolves to `127.*`, `script/gate.sh` skips exactly
   these three with a `gate: WARNING` line. Fix on the machine (find what filters its DNS) and the
   skip turns itself off.
+- **Upstream tests write `development_credentials` in the real profile** (found 2026-11-18). In
+  debug builds Zed keeps credentials in `%APPDATA%\Fyx\development_credentials` instead of the
+  keychain, and an upstream `client` test logs in through it, leaving a fake `https://zed.dev`
+  token. Zed's own tests do the same to Zed's profile. The gate's profile check skips this one
+  file; fixing it means changing upstream tests. If a dev build shows a stray zed.dev sign-in,
+  reset the file to `{}`.
 
 ## Known gaps
 
