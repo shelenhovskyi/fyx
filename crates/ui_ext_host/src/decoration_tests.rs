@@ -257,6 +257,58 @@ async fn test_updates_repaint_and_resize_the_block(cx: &mut TestAppContext) {
     assert_eq!(text.as_deref(), Some("first\nsecond"));
 }
 
+/// design.md 0.3 §11: nothing of an extension is drawn in the review pane's editors.
+#[gpui::test]
+async fn test_review_pane_editors_get_no_block(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let (project, buffer) = scratch_buffer(
+        "a
+b
+", cx,
+    )
+    .await;
+    let id = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("scratch/notes.txt", 0), text_tree("note"), cx)
+        })
+        .expect("valid tree");
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    only_block(&decorations, &editor, id, &mut vcx);
+
+    let window = cx.add_window(|window, cx| {
+        let mut editor = Editor::for_buffer(buffer.clone(), Some(project.clone()), window, cx);
+        editor.register_addon(agent_review::AgentReviewEditor);
+        editor
+    });
+    let review = window.root(cx).expect("editor window");
+    let mut review_cx = VisualTestContext::from_window(*window, cx);
+    redraw(&mut review_cx);
+    let blocks_in = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+        decorations.read_with(cx, |decorations, _| {
+            decorations.blocks_in(editor.entity_id(), id)
+        })
+    };
+    assert!(blocks_in(&review, &mut review_cx).is_empty());
+
+    // Marked after a block was placed: it goes at the next sync (here, a decorations change).
+    editor.update(&mut vcx, |editor, _| {
+        editor.register_addon(agent_review::AgentReviewEditor)
+    });
+    let second = decorations
+        .update(&mut vcx, |decorations, cx| {
+            decorations.add_tree(below("scratch/notes.txt", 1), text_tree("another"), cx)
+        })
+        .expect("valid tree");
+    redraw(&mut vcx);
+    assert!(blocks_in(&editor, &mut vcx).is_empty());
+    assert!(
+        decorations
+            .read_with(&mut vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), second))
+            .is_empty()
+    );
+}
+
 #[gpui::test]
 async fn test_other_files_get_no_block(cx: &mut TestAppContext) {
     let decorations = init(cx);
@@ -320,6 +372,8 @@ struct FakeExtension {
     event_effects: RefCell<Vec<HostEffect>>,
     /// The next event fails like a trapped instance (an error without a `ReplyError`).
     trap_next_event: Cell<bool>,
+    /// Decorations the renderer reported as closed.
+    closed: RefCell<Vec<String>>,
 }
 
 impl FakeExtension {
@@ -330,6 +384,7 @@ impl FakeExtension {
             mount_label: RefCell::new(Some("mounted".into())),
             event_effects: RefCell::default(),
             trap_next_event: Cell::new(false),
+            closed: RefCell::default(),
         })
     }
 
@@ -375,6 +430,10 @@ fn todo_tree(text: &str) -> Vec<Node> {
 impl UiBackend for FakeExtension {
     fn extension_id(&self) -> &str {
         self.id
+    }
+
+    fn decoration_closed(&self, id: &str) {
+        self.closed.borrow_mut().push(id.to_string());
     }
 
     fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
@@ -698,6 +757,15 @@ async fn test_extension_decoration_moves_resyncs_and_is_removed_on_failed_mount(
 ) {
     let decorations = init(cx);
     let extension = FakeExtension::new("ext");
+    // The registry hears of a failed decoration's removal (integration-5 M2).
+    let registry = cx.new(|_| UiExtensionRegistry::trusting());
+    cx.update(|cx| {
+        crate::registry::set_global_for_tests(registry.clone(), cx);
+        let backend: Rc<dyn UiBackend> = extension.clone();
+        registry.update(cx, |registry, cx| {
+            registry.register_backend(backend, &[], cx)
+        });
+    });
     let (project, buffer) = scratch_buffer("a\nb\nc\n", cx).await;
     let first = place(
         &decorations,
@@ -775,6 +843,11 @@ async fn test_extension_decoration_moves_resyncs_and_is_removed_on_failed_mount(
             .read_with(vcx, |decorations, _| decorations
                 .blocks_in(editor.entity_id(), resynced))
             .is_empty()
+    );
+    assert_eq!(
+        *extension.closed.borrow(),
+        ["todo"],
+        "the host side is told"
     );
 }
 

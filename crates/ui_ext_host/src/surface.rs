@@ -59,6 +59,10 @@ pub const MAX_QUEUED_EVENTS: usize = 64;
 /// Remounts in a row caused by updates that did not fit, with no user input between them, before
 /// the surface gives up (judge review w3-deep-1, finding 4).
 const MAX_REMOUNTS_WITHOUT_INPUT: u32 = 3;
+/// A bad update this long after the previous remount starts the count again, so a surface fed
+/// only by pushes or ticks survives an occasional desync over a session (finding 9), while one
+/// that keeps sending bad updates still stops (integration-5 M1).
+const REMOUNT_WINDOW: Duration = Duration::from_secs(60);
 
 /// Cached rows above this count are pruned to the neighbourhood of the latest request.
 const MAX_CACHED_ROWS: usize = 1024;
@@ -152,9 +156,12 @@ pub struct SurfaceState {
     /// Bumped when a mounted tree is applied; see `mount_count`.
     mounts: u64,
     resyncing: bool,
-    /// Remounts caused by bad updates since the last update that applied (a reply, a push, a row
-    /// answer).
+    /// Remounts caused by bad updates since the last applied reply to a user event. Pushes, row
+    /// answers and ticks do not count as progress, so a bad update from a tick or a push cannot
+    /// remount forever (integration-5 M1).
     remounts_without_input: u32,
+    /// When the last of those remounts happened.
+    last_remount: Option<std::time::Instant>,
     /// The source of row generations; see `RowCache::generation`.
     next_row_generation: u64,
     /// Recent events and updates, for the Extension Inspector.
@@ -404,6 +411,7 @@ impl SurfaceState {
             mounts: 0,
             resyncing: false,
             remounts_without_input: 0,
+            last_remount: None,
             next_row_generation: 0,
             history: VecDeque::new(),
             rules: ApiRules::for_version(&backend_version),
@@ -779,12 +787,10 @@ impl SurfaceState {
     }
 
     /// Applies an update pushed outside a reply to this surface's own events (by another
-    /// surface's call, or after instantiation). One that applies counts as progress for the
-    /// remount bound, like an applied reply.
+    /// surface's call, a tick, or after instantiation). It is not progress for the remount bound:
+    /// only a user event's applied reply is (integration-5 M1).
     pub fn apply_pushed_update(&mut self, update: Update, cx: &mut Context<Self>) {
-        if self.apply_update(update, cx) {
-            self.remounts_without_input = 0;
-        }
+        self.apply_update(update, cx);
     }
 
     #[cfg(test)]
@@ -1131,6 +1137,13 @@ impl SurfaceState {
                 self.last_error =
                     Some(format!("Invalid update from the extension: {error}").into());
                 if !self.resyncing {
+                    let now = cx.background_executor().now();
+                    if self
+                        .last_remount
+                        .is_some_and(|last| now.saturating_duration_since(last) >= REMOUNT_WINDOW)
+                    {
+                        self.remounts_without_input = 0;
+                    }
                     if self.remounts_without_input >= MAX_REMOUNTS_WITHOUT_INPUT {
                         self.fail(
                             format!(
@@ -1144,6 +1157,7 @@ impl SurfaceState {
                         return false;
                     }
                     self.remounts_without_input += 1;
+                    self.last_remount = Some(now);
                     self.resyncing = true;
                     self.mount(cx);
                 }
@@ -1267,10 +1281,8 @@ impl SurfaceState {
         let result = match result {
             Ok(Reply { effects, value }) => {
                 // A push that touches this list gives it a new generation, so these rows no
-                // longer count and are fetched again.
-                if self.apply_effects(effects, cx) {
-                    self.remounts_without_input = 0;
-                }
+                // longer count and are fetched again. Not progress for the remount bound.
+                self.apply_effects(effects, cx);
                 Ok(value)
             }
             Err(error) => match reply_error_effects(&error) {

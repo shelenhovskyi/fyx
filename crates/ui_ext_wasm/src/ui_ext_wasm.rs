@@ -168,10 +168,14 @@ pub const MAX_LIFTED_TEXT_PER_CALL: usize = 16 << 20;
 /// Longest `log` message written out; the rest is cut off (it still counts toward
 /// [`MAX_LIFTED_TEXT_PER_CALL`]).
 pub const MAX_LOG_MESSAGE_LEN: usize = 16 << 10;
-/// Linear memory one UI component may grow to: room for a JS engine (a componentize-js guest
+/// Linear memory one UI component may grow to, all its memories together (a component and its
+/// adapters have a few; triage-3, host memory): room for a JS engine (a componentize-js guest
 /// embeds one) as well as a tree mirror and state. It also bounds each string and list one host
 /// call copies out of the guest; [`MAX_LIFTED_TEXT_PER_CALL`] bounds their sum per call.
 pub const UI_MEMORY_LIMIT: usize = 256 << 20;
+/// Entries in an instance's WASI resource table (streams, pollables, handles). wasmtime's default
+/// is a million; a UI component needs a few dozen.
+pub const UI_RESOURCE_TABLE_LIMIT: usize = 4096;
 /// Table elements per table (function references; a Rust component uses a few thousand).
 pub const UI_TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
 /// Core instances, tables and memories per component (a component and its adapters use a handful).
@@ -223,12 +227,13 @@ pub fn staged_api_allowed_by_default() -> bool {
 }
 
 /// Every capability a surface or decoration can need, for a load without a manifest.
-const ALL_UI_CAPABILITIES: [&str; 6] = [
+const ALL_UI_CAPABILITIES: [&str; 7] = [
     CAPABILITY_PANEL,
     CAPABILITY_STATUS_BAR,
     CAPABILITY_MODAL,
     CAPABILITY_EDITOR_DECORATIONS,
     ui_ext::image::CAPABILITY_IMAGES,
+    ui_ext::canvas::CAPABILITY_CANVAS,
     ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
 ];
 
@@ -449,9 +454,17 @@ impl UiManifest {
                     "unknown capability {capability:?}"
                 );
             } else if !world.contains(&capability.as_str()) {
+                // The first world that has it: 0.2 for `ui:notifications`, else 0.3.
+                let needs = if world_capabilities(&Version::new(0, 2, 0))
+                    .contains(&capability.as_str())
+                {
+                    "0.2"
+                } else {
+                    "0.3"
+                };
                 match permissions::tier_of(capability) {
                     Some(_) => bail!(
-                        "capability {capability:?} needs fyx:ui 0.3; this extension targets \
+                        "capability {capability:?} needs fyx:ui {needs}; this extension targets \
                          {version}"
                     ),
                     None => bail!("unknown capability {capability:?}"),
@@ -721,7 +734,7 @@ pub struct UiState {
     pushed_items: usize,
     /// String bytes of the running call's `push-update` and `log` arguments.
     lifted_text: usize,
-    limits: wasmtime::StoreLimits,
+    limits: UiLimits,
     call_started: Instant,
     call_budget: Duration,
     /// Epochs the running call has executed in, as time: what its budget counts.
@@ -816,12 +829,16 @@ impl UiState {
             network,
             process,
             extension_id,
-            table: ResourceTable::new(),
+            table: {
+                let mut table = ResourceTable::new();
+                table.set_max_capacity(UI_RESOURCE_TABLE_LIMIT);
+                table
+            },
             ctx,
             pushes: Vec::new(),
             pushed_items: 0,
             lifted_text: 0,
-            limits: ui_store_limits(),
+            limits: UiLimits::new(),
             call_started: Instant::now(),
             call_budget: UI_INIT_BUDGET,
             executed: Duration::ZERO,
@@ -1064,6 +1081,75 @@ pub fn validate_surfaces(surfaces: &[ui_ext::Surface]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The store's resource limiter: [`ui_store_limits`] per memory and table, and
+/// [`UI_MEMORY_LIMIT`] for all the instance's memories together, so eight memories cannot take
+/// eight times the budget (triage-3, host memory). Memories only grow, so the sum of the growths
+/// is what they hold.
+pub(crate) struct UiLimits {
+    inner: wasmtime::StoreLimits,
+    memory_total: usize,
+}
+
+impl UiLimits {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: ui_store_limits(),
+            memory_total: 0,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for UiLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if !self.inner.memory_growing(current, desired, maximum)? {
+            return Ok(false);
+        }
+        let total = self.memory_total + desired.saturating_sub(current);
+        if total > UI_MEMORY_LIMIT {
+            // Like `trap_on_grow_failure`: a trap, which disables the extension, with the reason.
+            wasmtime::bail!(
+                "memory of all its instances would be {total} bytes, the limit is {UI_MEMORY_LIMIT}"
+            );
+        }
+        self.memory_total = total;
+        Ok(true)
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
 }
 
 /// Resource caps of every UI component's store. Growing past one traps (rather than failing the

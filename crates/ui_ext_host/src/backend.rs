@@ -174,6 +174,10 @@ pub trait UiBackend: 'static {
     }
     /// The renderer dropped a `ShowSurface` (no window to show the modal in).
     fn modal_closed(&self, _surface_id: &str) {}
+    /// The renderer removed a decoration that failed to mount: the host should stop counting it
+    /// toward the decoration cap and close what it owns (integration-5 M2). The instance side is
+    /// W2c's (`ui_ext_wasm` dispatch); until it exists this does nothing.
+    fn decoration_closed(&self, _id: &str) {}
     /// Recent calls, `log` output and capability checks, for the Extension Inspector.
     fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
         None

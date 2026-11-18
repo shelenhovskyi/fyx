@@ -723,6 +723,11 @@ async fn test_inspector_shows_the_counter_demo(cx: &mut TestAppContext) {
     );
     assert!(snapshot.phase.starts_with("ready"), "{}", snapshot.phase);
     assert!(
+        snapshot.phase.ends_with("of props text (cap 8.0 MiB)"),
+        "{}",
+        snapshot.phase
+    );
+    assert!(
         snapshot.tree[0].starts_with("#1 flex"),
         "{:?}",
         snapshot.tree

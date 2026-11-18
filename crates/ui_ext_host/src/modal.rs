@@ -65,7 +65,13 @@ impl ExtensionModal {
             }
             cx.notify();
         });
-        cx.on_release(|this: &mut Self, cx| {
+        // A shown modal is visible, so its ticks run (integration-5 H1); it stops being visible
+        // when it goes (dismissed, closed by the extension, or its window closed).
+        let container = cx.entity_id();
+        state.update(cx, |state, cx| state.set_visible(container, true, cx));
+        cx.on_release(move |this: &mut Self, cx| {
+            this.state
+                .update(cx, |state, cx| state.set_visible(container, false, cx));
             // The window went while the modal was shown.
             if !this.closed_by_host && !this.dismiss_sent {
                 this.state.update(cx, |state, cx| {

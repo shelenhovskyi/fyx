@@ -66,6 +66,10 @@ actions!(
         CommentHunk,
         /// Returns from the comment field to the diff.
         FocusDiff,
+        /// Moves the keyboard to the pane's next button (`tab`).
+        FocusNextControl,
+        /// Moves the keyboard to the pane's previous button (`shift-tab`).
+        FocusPreviousControl,
         /// Sends the decisions; every hunk must be decided.
         SubmitReview,
         /// Opens the review panes of every open review in this workspace.
@@ -441,6 +445,17 @@ pub(crate) fn escape_for_display(text: &str) -> String {
     escaped
 }
 
+/// Marks the editors of a review pane (the diff and the comment field), so code that decorates or
+/// annotates editors (extensions' buffer decorations, hovers) can leave them alone:
+/// `editor.addon::<AgentReviewEditor>().is_some()`.
+pub struct AgentReviewEditor;
+
+impl editor::Addon for AgentReviewEditor {
+    fn to_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 pub enum ReviewPaneEvent {
     Close,
 }
@@ -506,6 +521,7 @@ impl ReviewPane {
         let turn = self.turn;
         let comment_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
+            editor.register_addon(AgentReviewEditor);
             editor.set_placeholder_text("Comment for the agent on this hunk", window, cx);
             editor
         });
@@ -644,6 +660,7 @@ impl ReviewPane {
                 cx,
             );
             editor.set_read_only(true);
+            editor.register_addon(AgentReviewEditor);
             editor.disable_diagnostics(cx);
             editor.set_expand_all_diff_hunks(cx);
             editor.set_diff_hunk_renderer(Some(renderer), cx);
@@ -1039,6 +1056,7 @@ impl ReviewPane {
                     ("review-file", id.0),
                     display_path(&self.project, &path, cx),
                 )
+                .tab_index(0isize)
                 .label_size(LabelSize::Small)
                 .toggle_state(is_current)
                 .style(if is_current {
@@ -1075,6 +1093,7 @@ impl ReviewPane {
                         ("unreviewed-file", index),
                         display_path(&self.project, &path, cx),
                     )
+                    .tab_index(0isize)
                     .label_size(LabelSize::Small)
                     .style(ButtonStyle::Subtle)
                     .tooltip(Tooltip::text(
@@ -1244,6 +1263,7 @@ impl ReviewPane {
         let action = action.boxed_clone();
         // The tooltip shows the binding from the keymap, as the user has it.
         Button::new(id, label)
+            .tab_index(0isize)
             .tooltip(Tooltip::for_action_title(label, action.as_ref()))
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     }
@@ -1308,6 +1328,10 @@ impl Render for ReviewPane {
         v_flex()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            // `tab` / `shift-tab` walk the buttons in the order they are drawn.
+            .tab_group()
+            .on_action(cx.listener(|_, _: &FocusNextControl, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &FocusPreviousControl, window, cx| window.focus_prev(cx)))
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .on_action(cx.listener(Self::accept_hunk))
@@ -1640,6 +1664,19 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(review_bindings.len() > 20, "the review blocks load");
         cx.bind_keys(review_bindings);
+        // The pane's tab navigation as the default keymap binds it, bound here as well so these
+        // tests do not depend on when those keymap lines land.
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", FocusNextControl, Some(KEY_CONTEXT)),
+            gpui::KeyBinding::new("shift-tab", FocusPreviousControl, Some(KEY_CONTEXT)),
+            gpui::KeyBinding::new("escape", FocusDiff, Some(KEY_CONTEXT)),
+            gpui::KeyBinding::new("tab", FocusNextControl, Some("AgentReview > Editor")),
+            gpui::KeyBinding::new(
+                "shift-tab",
+                FocusPreviousControl,
+                Some("AgentReview > Editor"),
+            ),
+        ]);
     }
 
     #[test]
@@ -1827,6 +1864,34 @@ mod tests {
         pane.update_in(cx, |pane, window, cx| pane.show_next(window, cx));
         cx.run_until_parked();
         assert_eq!(pane.read_with(cx, |pane, _| pane.current_hunk), Some(0));
+
+        // Editors that decorate or annotate other editors can tell the review's apart.
+        pane.read_with(cx, |pane, cx| {
+            let current = pane.current.as_ref().unwrap();
+            assert!(
+                current
+                    .editor
+                    .read(cx)
+                    .addon::<AgentReviewEditor>()
+                    .is_some()
+            );
+            let comment = pane.comment_editor.as_ref().unwrap();
+            assert!(comment.read(cx).addon::<AgentReviewEditor>().is_some());
+        });
+
+        // `tab` leaves the diff for the pane's buttons; `escape` comes back.
+        let diff_focused = |cx: &mut gpui::VisualTestContext| {
+            pane.update_in(cx, |pane, window, cx| {
+                pane.diff_focus_handle(cx).is_focused(window)
+            })
+        };
+        assert!(diff_focused(cx));
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert!(!diff_focused(cx), "a button has the keyboard");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(diff_focused(cx));
 
         // An action that cannot be done says why.
         cx.simulate_keystrokes(&format!("{MOD}-enter"));

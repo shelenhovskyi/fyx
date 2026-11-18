@@ -13,7 +13,8 @@
 | 4 | Режими безпеки (W9): audit і shield | 5 |
 | 5 | Необов'язково: демо `fyx:ui` 0.2 (gallery-next, picker, clock, TODO-декорації) | 6 |
 
-Джерела: W3 `tasks/progress/W3-user-check.md` (гілка `claude/fyx-w3-renderer-e20d2b`);
+Джерела: W3 `tasks/progress/W3-user-check.md` у версії з `6c82da02f3` (`git show
+6c82da02f3:tasks/progress/W3-user-check.md`; пізніша версія на гілці W3 пакує вже через `fyx-ext`);
 `docs/fyx/agent-review.md`, `docs/fyx/review-rules.md`, `tasks/progress/W5.md`;
 `docs/fyx/manual-tests.md` T5; `tasks/progress/W1.md`; `docs/fyx/security-modes.md`.
 
@@ -82,7 +83,9 @@ for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912 6a256
 ### Матеріали
 
 - `D:\fyx-user-check\w3\`: `packages\fyx-demo-counter-0.1.0.fyxext`, `…-0.2.0.fyxext`,
-  `dev-todo\`, `crash-item\` (вже є; як створити заново, описано в W3-user-check.md, «Підготовка»).
+  `dev-todo\`, `crash-item\`. **Вони вже готові**, зібрані 2026-11-18 для цієї збірки; я перевірив,
+  що всі чотири на місці. Нічого не збирайте й не пакуйте заново. Якщо чогось бракує, скажіть
+  координатору.
 - Проєкт для огляду змін, створіть його зараз:
 
   ```powershell
@@ -142,8 +145,8 @@ for c in 4ca0073db1 4b83f766d2 41782c1f78 29999cd5f3 a98221e345 3851a95912 6a256
 
 ## 2. UI-розширення (14 хв)
 
-Повний опис кожного кроку є в `tasks/progress/W3-user-check.md`. Нижче той самий порядок,
-скорочено; усе робиться в тому самому вікні Fyx. Команди запускаються з палітри
+Повний опис кожного кроку є в `tasks/progress/W3-user-check.md` (версія з `6c82da02f3`; її
+розділ «Підготовка» пропустіть, матеріали вже є). Нижче той самий порядок, скорочено; усе робиться в тому самому вікні Fyx. Команди запускаються з палітри
 (**Ctrl+Shift+P**). Відкрийте папку `D:\fyx-user-check\review-project` (**File → Open Folder**).
 
 1. **Пакет.** `fyx_ui: install UI extension from file` → `…\packages\fyx-demo-counter-0.1.0.fyxext`.

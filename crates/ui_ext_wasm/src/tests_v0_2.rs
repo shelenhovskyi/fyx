@@ -158,7 +158,7 @@ async fn test_v0_2_probe_loads_as_v0_2(cx: &mut TestAppContext) {
     assert_eq!(extension.ui_api_version(), ApiVersion::V0_2_0);
     assert_eq!(
         extension.capabilities().len(),
-        6,
+        7,
         "no manifest: every capability"
     );
     assert_eq!(extension.surfaces_v0_2(), &[panel(SURFACE, Icon::Box)]);
@@ -304,6 +304,7 @@ async fn test_v0_2_mount_and_rows_carry_the_new_props(cx: &mut TestAppContext) {
             style: ui_ext::ButtonStyle::Filled,
             disabled: false,
             tooltip: Some("Accept every hunk".into()),
+            accessible_label: Some("Accept all hunks".into()),
         })
     );
     assert_eq!(

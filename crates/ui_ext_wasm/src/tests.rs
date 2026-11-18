@@ -931,3 +931,27 @@ mod harness_conformance {
         );
     }
 }
+
+/// Triage-3, host memory: the 256 MiB budget covers all of an instance's memories together, and
+/// the WASI resource table is capped.
+#[test]
+fn test_memory_budget_covers_every_memory() {
+    use wasmtime::ResourceLimiter as _;
+    let mut limits = UiLimits::new();
+    let half = UI_MEMORY_LIMIT / 2;
+    assert!(
+        limits.memory_growing(0, half, None).unwrap(),
+        "first memory"
+    );
+    assert!(
+        limits.memory_growing(0, half, None).unwrap(),
+        "second memory, at the budget"
+    );
+    assert!(
+        limits.memory_growing(0, 64 * 1024, None).is_err(),
+        "a third memory past the budget traps"
+    );
+    let mut table = ResourceTable::new();
+    table.set_max_capacity(UI_RESOURCE_TABLE_LIMIT);
+    assert_eq!(table.max_capacity(), UI_RESOURCE_TABLE_LIMIT);
+}
