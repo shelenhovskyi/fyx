@@ -146,21 +146,25 @@ impl FakeReviews {
 impl AgentReviews for FakeReviews {
     fn subscribe(
         &self,
-    ) -> (
-        Vec<ReviewInfo>,
-        futures::stream::BoxStream<'static, AgentEvent>,
-    ) {
+    ) -> futures::future::BoxFuture<
+        'static,
+        (
+            Vec<ReviewInfo>,
+            futures::stream::BoxStream<'static, AgentEvent>,
+        ),
+    > {
         let (sender, receiver) = mpsc::unbounded();
         self.feeds.lock().unwrap().push(sender);
         let read = self.read.clone();
-        (
+        futures::future::ready((
             self.snapshot.clone(),
             receiver
                 .inspect(move |_| {
                     read.fetch_add(1, Ordering::SeqCst);
                 })
                 .boxed(),
-        )
+        ))
+        .boxed()
     }
 }
 

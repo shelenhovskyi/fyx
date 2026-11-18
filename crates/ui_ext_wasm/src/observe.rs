@@ -20,7 +20,7 @@ use std::{
 
 use futures::{
     StreamExt as _,
-    future::{AbortHandle, Abortable},
+    future::{AbortHandle, Abortable, BoxFuture},
     stream::BoxStream,
 };
 pub use ui_ext::observe::{
@@ -44,7 +44,10 @@ pub trait AgentReviews: Send + Sync + 'static {
     /// The reviews open now, oldest first, and every change after them, in order, with no
     /// change lost between the two. The stream may begin with `review-mode`; a `snapshot` in it
     /// replaces everything before. Dropping the stream unsubscribes.
-    fn subscribe(&self) -> (Vec<ReviewInfo>, BoxStream<'static, AgentEvent>);
+    ///
+    /// Called from tokio, never on the main thread: an implementation over gpui state sends the
+    /// request to the main thread and resolves when the snapshot is taken there.
+    fn subscribe(&self) -> BoxFuture<'static, (Vec<ReviewInfo>, BoxStream<'static, AgentEvent>)>;
 }
 
 /// What the running call asked for; the last of `start` and `stop` wins.
@@ -235,7 +238,7 @@ async fn feed(reviews: &dyn AgentReviews, running: &Running) {
     };
     let mut ids = OpaqueIds::default();
     let mut queue = VecDeque::new();
-    let (snapshot, mut stream) = reviews.subscribe();
+    let (snapshot, mut stream) = reviews.subscribe().await;
     queue.push_back(ids.event(AgentEvent::Snapshot(snapshot)));
     let mut ended = false;
     enum Step {
@@ -275,7 +278,7 @@ async fn feed(reviews: &dyn AgentReviews, running: &Running) {
                 if !enqueue(&mut queue, ids.event(event)) {
                     // Too far behind: start over from a fresh snapshot.
                     drop(stream);
-                    let (snapshot, fresh) = reviews.subscribe();
+                    let (snapshot, fresh) = reviews.subscribe().await;
                     stream = fresh;
                     queue.clear();
                     queue.push_back(ids.event(AgentEvent::Snapshot(snapshot)));
