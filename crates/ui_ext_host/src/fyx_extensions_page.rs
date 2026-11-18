@@ -236,7 +236,7 @@ impl RegistryHub {
                     Err(_) => Vec::new(),
                 };
                 drop(client);
-                let mut applied = Vec::new();
+                let mut applied = PlanOutcome::default();
                 let mut disabled = Vec::new();
                 if let Some(store) = &store {
                     if apply {
@@ -264,10 +264,17 @@ impl RegistryHub {
             };
             let (outcome, listing, unavailable, freshness, installed, actions, applied, disabled) =
                 cx.background_spawn(work).await;
-            if !applied.is_empty() {
+            if !applied.lines.is_empty() {
                 cx.update(|cx| {
                     if let Some(registry) = UiExtensionRegistry::global(cx) {
-                        registry.update(cx, |registry, cx| registry.rescan(cx));
+                        registry.update(cx, |registry, cx| {
+                            // The name while the instance is still loaded.
+                            for block in &applied.blocks {
+                                let name = registry.provenance_name(&block.extension_id);
+                                registry.notify_block(&name, block, cx);
+                            }
+                            registry.rescan(cx)
+                        });
                     }
                 });
             }
@@ -281,7 +288,7 @@ impl RegistryHub {
                 this.actions = actions;
                 this.disabled = disabled;
                 if apply {
-                    this.applied = applied;
+                    this.applied = applied.lines;
                 }
                 cx.notify();
             })
@@ -303,15 +310,34 @@ impl RegistryHub {
     }
 }
 
-/// Carries out what the update check may do by itself. Returns one line per change, also logged.
+/// What the user is told in the window when a block changes an installed extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockNotice {
+    pub extension_id: String,
+    /// "rolled back to 1.0.0" or "disabled".
+    pub what: String,
+    /// The block list's reason.
+    pub reason: String,
+}
+
+/// What the update check did: one line per change (also logged), and the block changes to
+/// show in the window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlanOutcome {
+    pub lines: Vec<String>,
+    pub blocks: Vec<BlockNotice>,
+}
+
+/// Carries out what the update check may do by itself.
 pub(crate) async fn apply_plan(
     registry: &Registry,
     store: &crate::install_store::InstallStore,
     fs: &dyn Fs,
     actions: &[PlannedAction],
     updates: &[Release],
-) -> Vec<String> {
+) -> PlanOutcome {
     let mut applied = Vec::new();
+    let mut blocks = Vec::new();
     let mut note = |line: String| {
         log::warn!("fyx:ui: {line}");
         applied.push(line);
@@ -353,16 +379,30 @@ pub(crate) async fn apply_plan(
                 }
             }
             Action::Rollback { to, block } => match store.rollback(id, fs).await {
-                Ok(_) => note(format!(
-                    "rolled {id} back to {to}: blocked ({})",
-                    block.reason
-                )),
+                Ok(_) => {
+                    note(format!(
+                        "rolled {id} back to {to}: blocked ({})",
+                        block.reason
+                    ));
+                    blocks.push(BlockNotice {
+                        extension_id: id.to_string(),
+                        what: format!("rolled back to {to}"),
+                        reason: block.reason.clone(),
+                    });
+                }
                 Err(error) => note(format!("could not roll {id} back: {error:#}")),
             },
             Action::Disable { block } => {
                 let reason = format!("blocked: {}", block.reason);
                 match store.set_disabled(id, Some(reason.clone()), fs).await {
-                    Ok(()) => note(format!("disabled {id}: {reason}")),
+                    Ok(()) => {
+                        note(format!("disabled {id}: {reason}"));
+                        blocks.push(BlockNotice {
+                            extension_id: id.to_string(),
+                            what: "disabled".into(),
+                            reason: block.reason.clone(),
+                        });
+                    }
                     Err(error) => note(format!("could not disable {id}: {error:#}")),
                 }
             }
@@ -379,7 +419,10 @@ pub(crate) async fn apply_plan(
             }
         }
     }
-    applied
+    PlanOutcome {
+        lines: applied,
+        blocks,
+    }
 }
 
 /// What a confirmation lists: the capabilities, domains and programs a release adds.

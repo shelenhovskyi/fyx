@@ -464,7 +464,7 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
         .await
         .unwrap();
     test_registry.publish("demo", "1.1.0", &v2, &["ui:status-bar"]);
-    let applied = check(&test_registry).await;
+    let applied = check(&test_registry).await.lines;
     assert_eq!(applied, ["updated demo to 1.1.0"]);
     assert_eq!(active(&store, &fs).await, ("1.1.0".into(), None));
 
@@ -472,7 +472,17 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
     let mut block = blocklist_blocking("demo", 1);
     block.entries[0].versions = fyx_registry::VersionRange::parse("=1.1.0").unwrap();
     test_registry.write_blocklist(block);
-    let applied = check(&test_registry).await;
+    let outcome = check(&test_registry).await;
+    // The window is told, with the block list's reason.
+    assert_eq!(
+        outcome.blocks,
+        [crate::fyx_extensions_page::BlockNotice {
+            extension_id: "demo".into(),
+            what: "rolled back to 1.0.0".into(),
+            reason: "Steals tokens".into(),
+        }]
+    );
+    let applied = outcome.lines;
     assert_eq!(applied.len(), 1, "{applied:?}");
     assert!(
         applied[0].starts_with("rolled demo back to 1.0.0"),
@@ -482,7 +492,9 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
 
     // Every version blocked: nothing to roll back to, so it is disabled and not loaded.
     test_registry.write_blocklist(blocklist_blocking("demo", 2));
-    let applied = check(&test_registry).await;
+    let outcome = check(&test_registry).await;
+    assert_eq!(outcome.blocks[0].what, "disabled");
+    let applied = outcome.lines;
     assert!(
         applied.iter().any(|line| line.starts_with("disabled demo")),
         "{applied:?}"
@@ -497,7 +509,7 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
     let mut lifted = blocklist_blocking("demo", 3);
     lifted.entries.clear();
     test_registry.write_blocklist(lifted);
-    let applied = check(&test_registry).await;
+    let applied = check(&test_registry).await.lines;
     assert_eq!(applied, ["updated demo to 1.1.0"]);
     assert_eq!(active(&store, &fs).await, ("1.1.0".into(), None));
 
@@ -506,7 +518,55 @@ async fn test_update_check_applies_the_plan(cx: &mut gpui::TestAppContext) {
         .set_disabled("demo", Some("blocked: test".into()), fs.as_ref())
         .await
         .unwrap();
-    let applied = check(&test_registry).await;
+    let applied = check(&test_registry).await.lines;
     assert_eq!(applied, ["enabled demo again: no longer blocked"]);
     assert_eq!(active(&store, &fs).await.1, None);
+}
+
+/// Plan 3.4: a block that changes an installed extension is shown in the active window, with
+/// the extension's name and the block list's reason, as Fyx's own notice.
+#[gpui::test]
+async fn test_block_notice_goes_to_the_active_window(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    crate::tests::init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let workspace = cx.new(|_| ()).entity_id();
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscription = cx.update(|cx| {
+        let events = events.clone();
+        cx.subscribe(&registry, move |_, event: &crate::RegistryEvent, _| {
+            events.borrow_mut().push(event.clone())
+        })
+    });
+    let notice = crate::fyx_extensions_page::BlockNotice {
+        extension_id: "demo".into(),
+        what: "disabled".into(),
+        reason: "Steals tokens".into(),
+    };
+    registry.update(cx, |registry, cx| {
+        registry.notify_block("Demo", &notice, cx)
+    });
+    assert!(events.borrow().is_empty(), "no window: the log has it");
+    registry.update(cx, |registry, cx| {
+        registry.set_active_workspace(workspace);
+        registry.notify_block("Demo", &notice, cx)
+    });
+    let events = events.borrow();
+    let [
+        crate::RegistryEvent::HostNotice {
+            title,
+            message,
+            workspace: target,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(title.as_ref(), "Demo was disabled");
+    assert!(
+        message.contains("Steals tokens") && message.contains("demo"),
+        "{message}"
+    );
+    assert_eq!(*target, workspace);
 }
