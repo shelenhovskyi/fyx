@@ -136,7 +136,11 @@ impl TestRegistry {
             },
             published_at: Timestamp(now().0 - 2 * 24 * 60 * 60),
             urgent: false,
-            tier: Tier::T0,
+            tier: capabilities
+                .iter()
+                .map(|capability| Tier::of_capability_or_highest(capability))
+                .max()
+                .unwrap_or(Tier::T0),
             capabilities: capabilities
                 .iter()
                 .map(|capability| capability.to_string())
@@ -614,4 +618,102 @@ async fn test_script_registry(cx: &mut gpui::TestAppContext) {
             .unwrap_or_else(|error| panic!("{id}: {error:#}"));
         assert_eq!(bytes.len() as u64, release.package.size);
     }
+}
+
+/// Spec §4, failure 1: an update with a new T2 capability is never approved, then the old version
+/// is blocked. The extension is disabled, not upgraded to the held version, and the page offers
+/// "Approve and Update" or "Uninstall" (both actions are planned for it).
+#[gpui::test]
+async fn test_spec_failure_1_held_t2_update_then_blocked(cx: &mut gpui::TestAppContext) {
+    use crate::fyx_extensions_page::apply_plan;
+    cx.executor().allow_parking();
+    let mut test_registry = TestRegistry::new();
+    let v1 = crate::install_store::test_support::package("demo", "1.0.0", b"one").await;
+    let v2 = crate::install_store::test_support::package("demo", "2.0.0", b"two").await;
+    test_registry.publish("demo", "1.0.0", &v1, &["ui:status-bar"]);
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = crate::install_store::InstallStore::new(store_dir.path().to_path_buf());
+    let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    let source = crate::install_store::VersionSource {
+        origin: Origin::Registry,
+        package_sha256: Some(Sha256Digest::of(&v1)),
+    };
+    let first = Release::clone(
+        registry_release(&test_registry, "demo", "1.0.0", cx)
+            .await
+            .as_ref()
+            .unwrap(),
+    );
+    store
+        .install_package_bytes(
+            v1,
+            "demo",
+            source,
+            Some(Permissions::of(&first)),
+            fs.as_ref(),
+        )
+        .await
+        .unwrap();
+
+    // 2.0.0 adds network:fetch (T2): held, never installed by itself.
+    test_registry.publish("demo", "2.0.0", &v2, &["ui:status-bar", "network:fetch"]);
+    // Then 1.0.0 is blocked.
+    let mut block = blocklist_blocking("demo", 1);
+    block.entries[0].versions = fyx_registry::VersionRange::parse("=1.0.0").unwrap();
+    test_registry.write_blocklist(block);
+
+    let state = tempfile::tempdir().unwrap();
+    let registry = open(&test_registry, state.path());
+    registry.refresh(now()).await;
+    let installed = store.installed_extensions(fs.as_ref()).await.unwrap();
+    let actions = registry
+        .client()
+        .lock()
+        .await
+        .plan_updates(&installed, now());
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action.action, fyx_registry::Action::Disable { .. })),
+        "{actions:?}"
+    );
+    assert!(
+        actions.iter().any(|action| matches!(
+            &action.action,
+            fyx_registry::Action::Hold { reasons, .. }
+                if reasons.iter().any(|reason| matches!(
+                    reason,
+                    fyx_registry::HoldReason::NeedsApproval(additions)
+                        if additions.capabilities.contains("network:fetch")
+                ))
+        )),
+        "the held update stays on offer: {actions:?}"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action.action, fyx_registry::Action::Update { .. })),
+        "never upgraded to the held version: {actions:?}"
+    );
+    let outcome = apply_plan(&registry, &store, fs.as_ref(), &actions, &[]).await;
+    assert_eq!(outcome.blocks[0].what, "disabled");
+    let entry = store.state(fs.as_ref()).await.unwrap().extensions["demo"].clone();
+    assert_eq!(entry.active, Version::new(1, 0, 0), "not upgraded");
+    assert!(entry.disabled.is_some(), "disabled");
+}
+
+async fn registry_release(
+    test_registry: &TestRegistry,
+    id: &str,
+    version: &str,
+    _cx: &mut gpui::TestAppContext,
+) -> Option<Release> {
+    let state = tempfile::tempdir().unwrap();
+    let registry = open(test_registry, state.path());
+    registry.refresh(now()).await;
+    let client = registry.client().lock().await;
+    let index = client.index(now()).ok()?;
+    index
+        .release(&ExtensionId::new(id).ok()?, &Version::parse(version).ok()?)
+        .cloned()
 }
