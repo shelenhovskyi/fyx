@@ -355,7 +355,7 @@ fyx-registry verify keyset keyset.json --online-snapshot-key fyx-snap-2026-a
 - `verify release|index|blocklist|snapshot` checks signatures and contents; `verify release
   --package` also checks the package file, `verify index --snapshot` that the snapshot names this
   index. Any failure exits non-zero.
-- `verify keyset` checks the registry's role separation (registry-repo.md, "Keys and roles"): it
+- `verify keyset` checks the registry's role separation ([registry-repo.md, "Keys"](registry-repo.md#keys)): it
   refuses a key with two signing roles (`release`, `blocklist`, `snapshot`) and
   `blocklist-revocation` on a key without `snapshot`. With `--online-snapshot-key <id>`, the key in
   `SNAPSHOT_KEY`, it also refuses that key unless it has `snapshot` and not
