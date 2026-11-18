@@ -633,3 +633,5 @@ fn the_counter_demo_runs_as_0_2() {
         Some(model::Props::Button(button)) if button.icon == Some(model::IconRef::Frozen(model::Icon::Plus))
     ));
 }
+
+mod demos_v0_2;

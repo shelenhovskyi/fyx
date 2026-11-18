@@ -160,18 +160,23 @@ checks nothing: the rules apply when a node goes into a tree.
 
 | Type | Constructor and defaults | Setters |
 |---|---|---|
-| `Surface` | `Surface::panel(id, title, DockPosition, icon, default_size: u32)`<br>`Surface::status_item(id, title, StatusBarSide, priority: i32)` | — |
+| `Surface` | `Surface::panel(id, title, DockPosition, Icon, default_size: u32)`<br>`Surface::status_item(id, title, StatusBarSide, priority: i32)`<br>`Surface::modal(id, title, ModalWidth)`: closed until `show_surface`; needs `ui:modal` | — |
 | `FlexProps` | `FlexProps::column()`, `FlexProps::row()`: gap 0, padding 0, no grow, `Align::Start`, no background | `.gap(u16)`, `.padding(u16)`, `.grow()`, `.align(Align)`, `.background(ColorToken)` |
 | `TextProps` | `TextProps::new(content)`: no colour, not bold, not monospace; also `From<&str>` and `From<String>` | `.color(ColorToken)`, `.bold()`, `.monospace()` |
-| `ButtonProps` | `ButtonProps::new(label)`: no icon, `ButtonStyle::Default`, enabled; also `From<&str>` and `From<String>` | `.icon(name)`, `.style(ButtonStyle)`, `.disabled(bool)` |
-| `InputProps` | `InputProps::new(value)`: empty placeholder | `.placeholder(text)` |
-| `ListProps` | `ListProps::new(row_count: u32, row_height: u16)` | — |
+| `ButtonProps` | `ButtonProps::new(label)`: no icon, `ButtonStyle::Default`, enabled, no tooltip; also `From<&str>` and `From<String>` | `.icon(Icon)`, `.style(ButtonStyle)`, `.disabled(bool)`, `.tooltip(text)` |
+| `InputProps` | `InputProps::new(value)`: empty placeholder, not secret | `.placeholder(text)`, `.secret()` |
+| `ListProps` | `ListProps::new(row_count: u32, row_height: u16)`: no selected row | `.selected(Option<u32>)` |
 | `TableProps` | `TableProps::new(columns: impl IntoIterator<Item = impl Into<String>>, row_count: u32)` | — |
-| `IconProps` | `IconProps::new(name)`: no colour; also `From<&str>` | `.color(ColorToken)` |
+| `IconProps` | `IconProps::new(Icon)`: no colour; also `From<Icon>` | `.color(ColorToken)` |
+| `ListRow` | `list_row(index, build)` (below): indent 0 | `.with_indent(u8)`: nesting depth, at most 32 levels drawn |
 | `DiffViewProps` | `DiffViewProps::new(old_text, new_text)`: no language | `.language(name)` |
 
 `From<XProps> for Props` exists for all eight records, so any function that takes
 `impl Into<Props>` accepts them directly.
+
+`Icon` is the frozen icon set of `fyx:ui` 0.2: `Icon::all()` lists all 101 in WIT order, and
+`icon.name()` is the WIT name, such as `arrow-up`. An extension exported as 0.1 sends the upstream
+`IconName` instead.
 
 <!-- sdk:919-1163 -->
 
@@ -185,7 +190,7 @@ How the host renders each kind, and the units it uses:
 | input | A single-line editor in a bordered box. |
 | list | A `uniform_list` with fixed `row_height` (0 means 24 px). It is at least `min(row_count, 3)` rows tall, and rows come from `list-rows`. |
 | table | A header from `columns`, then rows from `list-rows` at a fixed 24 px. If a row's root is a flex node, its children become equal-width cells. |
-| icon | `ui::Icon` by snake_case `IconName`. An unknown name shows the `blocks` icon. |
+| icon | A frozen `Icon`, which the host maps to its own icon set; `spinner` is animated. A 0.1 component names a snake_case upstream `IconName`, and an unknown name shows the `blocks` icon. |
 | markdown | Zed's markdown element. Inside list rows it is a plain label. |
 | diff-view | **Placeholder**: common leading and trailing lines as context, the middle as removed then added lines. It is not Zed's diff editor, and `language` is unused. |
 
@@ -337,6 +342,7 @@ counts one patch per node.
 | `remove(id) -> Result<(), _>` | Removes the node and its whole subtree (one `remove` patch). | `UpdateTooLarge`. |
 | `rebuild(id, build) -> Result<Vec<NodeId>, _>` | Replaces `id` and its subtree with the nodes `build` adds, at the same position, **with new ids** (`remove` + inserts). The host treats them as new nodes, so a rebuilt list has all its rows requested again. Checked as a whole: on error nothing is removed. | `IsRoot(id)` if `id` has no parent: wrap anything you want to rebuild in a flex node. `NotAChild` if the mirror is inconsistent. `UpdateTooLarge` if queue + 1 + new nodes > 2048. `TreeTooLarge`. |
 | `clear_children(parent) -> Result<(), _>` | Removes every child of `parent` (one `remove` per child). | `UpdateTooLarge`. |
+| `invalidate_rows(list, Option<RowRange>) -> Result<(), _>` | Queues `invalidate-rows`: the host fetches those rows again (all for `None`), keeping the scroll position. Exported as 0.1, it queues an unchanged `set-props` of the list instead, after which a 0.1 host fetches every row again. | `NotAList { node, kind }` if `list` is not a list or table. `UpdateTooLarge`. |
 | `take_update() -> Update` | Returns the queue, `Update::Unchanged` if empty, and clears it. | — |
 
 <!-- sdk:677-772, 778-843 -->
@@ -474,6 +480,7 @@ return `Result<_, String>`. The string is what the user sees.
 ## `log`, `push_update`, `take_pushed_updates`
 
 ```rust
+pub fn exported_api_version() -> (u16, u16, u16);
 pub fn log(level: LogLevel, message: &str);
 pub fn push_update(surface_id: &str, update: &Update) -> Result<(), HostError>;
 #[cfg(not(target_arch = "wasm32"))]
