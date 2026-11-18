@@ -126,7 +126,8 @@ pub struct Release {
     pub package: Package,
     /// When the registry CI published the release; the 24 h age gate counts from here.
     pub published_at: Timestamp,
-    /// A security fix that skips the age gate (decision 17).
+    /// A security fix: it skips the age gate only to replace a blocked version (decision 17 as
+    /// narrowed by integration-6 R8; [`crate::AGE_GATE`]).
     pub urgent: bool,
     /// The highest tier among the capabilities, as declared in `extension.toml`.
     pub tier: Tier,

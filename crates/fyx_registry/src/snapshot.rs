@@ -156,6 +156,9 @@ pub struct VerifiedSnapshot {
     ignored_revocations: BTreeSet<KeyId>,
     /// When the client first saw each release, carried from snapshot to snapshot (R8).
     first_seen: crate::FirstSeen,
+    /// The highest block-list sequence the client ever accepted, carried from snapshot to
+    /// snapshot, so dropping the cached list does not forget it (integration-6 N4).
+    blocklist_floor: Option<u64>,
 }
 
 /// What a client stores between runs: the last accepted snapshot and the revocations in force,
@@ -173,6 +176,9 @@ struct SnapshotState {
     /// When the client first saw each release (integration-5 R8).
     #[serde(default)]
     first_seen: crate::FirstSeen,
+    /// The highest block-list sequence ever accepted (integration-6 N4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocklist_floor: Option<u64>,
 }
 
 /// Keys only a rotation-key snapshot may revoke.
@@ -222,6 +228,7 @@ impl VerifiedSnapshot {
         );
         if let Some(previous) = previous {
             verified.first_seen = previous.first_seen.clone();
+            verified.blocklist_floor = previous.blocklist_floor;
         }
         Ok(verified)
     }
@@ -257,6 +264,7 @@ impl VerifiedSnapshot {
             revocations,
             ignored_revocations,
             first_seen: crate::FirstSeen::default(),
+            blocklist_floor: None,
         }
     }
 
@@ -277,6 +285,7 @@ impl VerifiedSnapshot {
                 revocations: self.revocations.clone(),
                 protected_revocations: BTreeSet::new(),
                 first_seen: self.first_seen.clone(),
+                blocklist_floor: self.blocklist_floor,
             },
             Document::Snapshot,
         )
@@ -296,6 +305,7 @@ impl VerifiedSnapshot {
             .collect();
         let mut restored = Self::with_revocations(state.snapshot, keyset, Some(&carried));
         restored.first_seen = state.first_seen;
+        restored.blocklist_floor = state.blocklist_floor;
         Ok(restored)
     }
 
@@ -307,6 +317,19 @@ impl VerifiedSnapshot {
 
     pub(crate) fn first_seen_mut(&mut self) -> &mut crate::FirstSeen {
         &mut self.first_seen
+    }
+
+    /// The highest block-list sequence the client accepted with this snapshot or one before it.
+    pub fn blocklist_floor(&self) -> Option<u64> {
+        self.blocklist_floor
+    }
+
+    /// Records an accepted block-list sequence; the floor never goes down.
+    pub(crate) fn raise_blocklist_floor(&mut self, sequence: u64) {
+        self.blocklist_floor = Some(
+            self.blocklist_floor
+                .map_or(sequence, |floor| floor.max(sequence)),
+        );
     }
 
     /// Entries of `revoked_keys` that this snapshot was not allowed to revoke (a `blocklist` key

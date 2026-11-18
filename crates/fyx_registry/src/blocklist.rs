@@ -8,7 +8,12 @@
 //! Its age is measured from the signed `generated_at`, and it carries a signed `expires_at`
 //! (security-2 S5): a mirror that keeps serving the newest list it has, after the registry
 //! published a newer one, cannot make it look fresh. The registry CI publishes a new list, with a
-//! new sequence, at least daily.
+//! new sequence, at least every 12 h (spec decision 19).
+//!
+//! "No list" never means "nothing is blocked" (integration-6 N4): the client keeps the highest
+//! sequence it ever accepted even when it drops the cache (a revoked block-list key), refuses a
+//! list below it, and refuses an expired list it has nothing to compare with. Blocks it applied
+//! lift only while it holds a current list ([`crate::RegistryClient::blocks_can_lift`]).
 
 use std::{fmt, time::Duration};
 
@@ -303,8 +308,10 @@ impl VerifiedBlocklist {
         &self.signed.signed.entries
     }
 
-    /// The first entry that blocks `version` of `id` whose package has `package_sha256` (if
-    /// known). An entry with a hash only blocks a package known to have it.
+    /// The first entry that blocks `version` of `id` whose package has `package_sha256`. An entry
+    /// with a hash blocks the package known to have it, and, within its versions, a package whose
+    /// hash was never recorded: an unknown hash cannot prove it is not the blocked one
+    /// (integration-5 R9).
     pub fn block_for(
         &self,
         id: &ExtensionId,
@@ -317,7 +324,7 @@ impl VerifiedBlocklist {
                 && entry
                     .package_sha256
                     .as_ref()
-                    .is_none_or(|blocked| package_sha256 == Some(blocked))
+                    .is_none_or(|blocked| package_sha256.is_none_or(|known| known == blocked))
         })
     }
 
@@ -377,6 +384,16 @@ pub enum KeepReason {
     ConflictingSequence {
         sequence: u64,
     },
+    /// Lower than the highest sequence this client ever accepted, whose list it no longer holds
+    /// (integration-6 N4).
+    BelowFloor {
+        floor: u64,
+        fetched: u64,
+    },
+    /// Past its signed `expires_at`, with no list held to compare it with (integration-5 R9).
+    Expired {
+        expires_at: Timestamp,
+    },
 }
 
 /// How current the cached block list is, for the extensions page.
@@ -424,6 +441,18 @@ impl BlocklistCache {
         keyset: &Keyset,
         now: Timestamp,
     ) -> CacheUpdate {
+        Self::apply_fetch_above(cache, None, fetched, keyset, now)
+    }
+
+    /// [`BlocklistCache::apply_fetch`] for a client that remembers `floor`, the highest sequence
+    /// it ever accepted, past a dropped cache: a list below it is a replay and is kept out.
+    pub fn apply_fetch_above(
+        cache: Option<&BlocklistCache>,
+        floor: Option<u64>,
+        fetched: Result<&[u8], String>,
+        keyset: &Keyset,
+        now: Timestamp,
+    ) -> CacheUpdate {
         let body = match fetched {
             Ok(body) => body,
             Err(error) => return CacheUpdate::Keep(KeepReason::FetchFailed(error)),
@@ -436,11 +465,22 @@ impl BlocklistCache {
             fetched_at: now,
             blocklist,
         };
+        let fetched = fresh.blocklist.sequence();
+        if let Some(floor) = floor
+            && fetched < floor
+        {
+            return CacheUpdate::Keep(KeepReason::BelowFloor { floor, fetched });
+        }
         let Some(cache) = cache else {
+            // Nothing to compare with: an expired list may be any old one a mirror kept.
+            if now >= fresh.blocklist.expires_at() {
+                return CacheUpdate::Keep(KeepReason::Expired {
+                    expires_at: fresh.blocklist.expires_at(),
+                });
+            }
             return CacheUpdate::Replace(fresh);
         };
         let cached = cache.blocklist.sequence();
-        let fetched = fresh.blocklist.sequence();
         if fetched > cached {
             CacheUpdate::Replace(fresh)
         } else if fetched < cached {
@@ -867,7 +907,33 @@ mod tests {
         let todo = ExtensionId::new("todo").expect("valid");
         assert!(list.is_blocked(&todo, &version("9.0.0"), Some(&bad)));
         assert!(!list.is_blocked(&todo, &version("9.0.0"), Some(&Sha256Digest::of(b"good"))));
-        assert!(!list.is_blocked(&todo, &version("9.0.0"), None));
+        // An install whose hash was never recorded is blocked within the versions (R9).
+        assert!(list.is_blocked(&todo, &version("9.0.0"), None));
+    }
+
+    /// integration-6 N4, integration-5 R9: past a dropped cache, a list below the highest
+    /// sequence ever accepted is kept out; with no cache, an expired list is too.
+    #[test]
+    fn floor_and_expiry_without_a_cache() {
+        let keyset = keyset();
+        let old = signed_json(blocklist(3, Vec::new()), &registry_key());
+        assert!(matches!(
+            BlocklistCache::apply_fetch_above(None, Some(4), Ok(&old), &keyset, Timestamp(31)),
+            CacheUpdate::Keep(KeepReason::BelowFloor {
+                floor: 4,
+                fetched: 3
+            })
+        ));
+        let same = signed_json(blocklist(4, Vec::new()), &registry_key());
+        assert!(matches!(
+            BlocklistCache::apply_fetch_above(None, Some(4), Ok(&same), &keyset, Timestamp(41)),
+            CacheUpdate::Replace(_)
+        ));
+        let expires_at = blocklist(4, Vec::new()).expires_at;
+        assert_eq!(
+            BlocklistCache::apply_fetch_above(None, Some(4), Ok(&same), &keyset, expires_at),
+            CacheUpdate::Keep(KeepReason::Expired { expires_at })
+        );
     }
 
     fn arbitrary_range() -> impl Strategy<Value = VersionRange> {
