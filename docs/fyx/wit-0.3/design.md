@@ -584,9 +584,16 @@ result<http-response, fetch-error>)`. A host import, not WASI sockets (spec deci
   these. It connects to the address it checked, never resolving twice, so a name cannot pass the
   check with one address and connect to another. `localhost` never goes to DNS. Corporate hosts
   that resolve to private addresses need a user setting (Q4).
-- **Proxy.** With a proxy configured in Fyx, requests go through it without the user's proxy
-  credentials (decision 23). Then the proxy resolves names and the address check cannot run; the
-  domain list, HTTPS and certificate checks still hold. The extensions page says so.
+- **Proxy.** With a proxy configured in Fyx, a fetch to a declared domain is **refused in 1.0**
+  (`other`: "Fyx is set to use a proxy, and network:fetch does not go through proxies yet"; W2c,
+  a1c2557b27).
+  - **Why:** the host pins the address it checked and keeps the domain for TLS SNI. reqwest's
+    CONNECT through a proxy cannot do both, so the proxy would resolve the name again and the
+    address check would mean nothing.
+  - **What still works:** `localhost` goes direct, as before. Proxy URLs with credentials are
+    never used. Fyx reads only its own proxy setting, never environment proxies.
+  - **After 1.0:** proxied fetches through a hand-made CONNECT tunnel that pins the checked address
+    and keeps SNI. This does not change the WIT.
 - **TLS.** The system roots plus webpki roots; no extension-supplied CA, no client certificates,
   no TLS bypass.
 - **Headers.** The guest may set any header except the hop-by-hop and framing set (WIT comment),
@@ -686,9 +693,11 @@ returns `limit-exceeded`.
     it leaves the worktree through a symlink.
   - The resolved path is resolved again on every spawn (a `PATH` change applies) and shown in the
     Inspector.
-- **Arguments.** Passed as an argument vector, never through a shell. With `args` patterns in the
-  manifest (Q2), every argument must match the pattern at its position (`**` matches the rest),
-  as Zed's `process:exec` capability does.
+- **Arguments.** Passed as an argument vector, never through a shell. Every argument must match
+  the manifest's `args` pattern at its position (`**` matches the rest), as Zed's `process:exec`
+  capability does (Q2).
+  - **No `args` means no arguments:** the program may run only with none. Write
+    `args = ["**"]` to allow any arguments (W2c, a1c2557b27).
 - **Working directory.** A directory inside a worktree (`file-ref`), default the first worktree
   root; refused if it leaves the worktree through a symlink. No worktree: `unavailable`.
 - **Environment.** Cleared, then `PATH`, `HOME` (`USERPROFILE`, `SystemRoot`, `TEMP` and `TMP` on
@@ -796,9 +805,16 @@ version it was computed against, and non-overlapping text edits.
   - the path is worktree-relative with the path rule; `document` targets must have origin `file`;
   - the target is refused if it, or a parent, is a symlink leaving the worktree (the worktree
     entry is `is_external`), or if it is ignored-and-excluded (`file_scan_exclusions`);
-  - **protected paths** are refused with `not-allowed`: `.git/`, `.fyx/` (agent review rules, so an
-    extension cannot set `auto_accept`), `.zed/` (settings, tasks: code execution), `.vscode/`,
-    `.idea/`, and files matching the `private_files` setting;
+  - **protected paths** are refused with `not-allowed`, **in every security mode**, shield or not
+    (W2c, e740fd00d5):
+    - the directories `.git`, `.fyx` (agent review rules, so an extension cannot set
+      `auto_accept`), `.zed` (settings, tasks: code execution), `.vscode` and `.idea`, at any depth;
+    - every agent config, from the one list `ui_ext::protected` that the agent shield
+      (`fyx_guard`) uses too: `.claude/`, `.codex/`, `.gemini/`, `.agents/`, `.cursor/`,
+      `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules`, `.cursorrules`,
+      `.vscode/tasks.json`, `.vscode/launch.json`;
+    - the worktree's `read_only` patterns, links out of the project, and files matching the
+      `private_files` setting (`fyx_guard::extension_write_denial`);
   - collaboration guests (a project shared by someone else) are refused: that is another person's
     project;
   - untrusted worktree: `denied` without a prompt (decision 26).

@@ -56,15 +56,23 @@ the process cannot open its own sockets; the numbering of the modes follows stre
 
 ### Cross-cutting items
 
-- **Read-only agent configs** (step 1): agents may not write `.claude/`, `.codex/`, `.gemini/`,
-  `.agents/`, `.cursor/`, `.zed/`, `.fyx/` or `.git/`, `.mcp.json`, the agent rules files
-  `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules` and `.cursorrules` (decided 2026-11-18), or
-  `.vscode/tasks.json` and `.vscode/launch.json`, at any depth. Inside a worktree the names are
-  matched in the worktree-relative path only, so a project that itself lives under a `.claude/`
-  folder (an agent's worktree) is not read-only as a whole; outside every worktree the absolute
-  path counts (so also `~/.claude/` for the built-in agent, which can edit files outside the
-  project). Fyx's own config directory (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings
-  file, `tasks.json`, `keymap.json`) and its confirmed-mode file are read-only too. All of
+- **Read-only agent configs** (step 1). Agents may not write any of these, at any depth:
+  - the directories `.claude/`, `.codex/`, `.gemini/`, `.agents/`, `.cursor/`, `.zed/`, `.fyx/`
+    and `.git/`;
+  - `.mcp.json` and the agent rules files `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules` and
+    `.cursorrules` (decided 2026-11-18);
+  - `.vscode/tasks.json` and `.vscode/launch.json`.
+
+  The list is one shared rule list, `ui_ext::protected` (W2c, e740fd00d5), which UI extensions get
+  too (below).
+  - **Inside a worktree** the names are matched in the worktree-relative path only, so a project
+    that itself lives under a `.claude/` folder (an agent's worktree) is not read-only as a whole.
+  - **Outside every worktree** the absolute path counts, so also `~/.claude/` for the built-in
+    agent, which can edit files outside the project.
+  - **Fyx's own config directory** (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings file,
+    `tasks.json`, `keymap.json`) and its confirmed-mode file are read-only too.
+
+  All of
   `.git/` is protected, not only `hooks/`: `config` (`core.hooksPath`, `core.fsmonitor`), `info/`,
   a submodule's `modules/*/config` and a linked worktree's `commondir` each make the next `git` run
   start a program, and a `.git` file redirects git to another directory. Matching is by path
@@ -74,6 +82,16 @@ the process cannot open its own sockets; the numbering of the modes follows stre
   destination (moving `pkg/` with a `pkg/.claude/` inside writes a `.claude/`), and for a move or
   delete also as it goes away at the source. Copying a file out of an agent config is a read and is
   allowed.
+- **UI extensions get the same list in every mode** (W2c, e740fd00d5; integration-5 S1, S2). The
+  agent shield applies the list only under shield, but the extension host applies it always:
+  - **Writes:** `workspace:edit` refuses every path on the list, the worktree's `read_only`
+    patterns and links out of the project, in `off`, `audit` and `shield` alike
+    (`fyx_guard::extension_write_denial`).
+  - **Reads:** an extension never gets the text of a `private_files` match or of
+    `.fyx/security.toml` (`fyx_guard::extension_read_denial`). That applies to `agent:observe`'s
+    review feed, for instance.
+  - **The repository's `.fyx/security.toml`** is therefore read in every mode, `off` included. The
+    agent hooks still ignore it while the mode is `off`.
 - **Redaction** (step 5): known secret values (from the OS credential store, the stripped
   environment, matched `private_files`) are replaced in transcripts, tool output shown to the model,
   logs and exported threads.
