@@ -18,7 +18,7 @@ use ui_ext::v0_2::{
 
 use crate::{
     SurfaceState, SurfaceView, TYPING_DEBOUNCE,
-    backend::{PushedUpdate, Reply, ReplyError, UiBackend},
+    backend::{HostEffect, Reply, ReplyError, UiBackend},
     icons::upstream_icon as icon_name,
     surface::fetch_range,
     view::{DiffLine, diff_lines},
@@ -78,8 +78,10 @@ struct FakeBackend {
 struct FakeLink(Rc<FakeBackend>);
 
 impl crate::surface::SurfaceLink for FakeLink {
-    fn route_push(&self, push: PushedUpdate, _: &mut App) {
-        self.0.routed.borrow_mut().push(push.surface_id);
+    fn route_effect(&self, effect: HostEffect, _: &mut App) {
+        if let HostEffect::Push { surface_id, .. } = effect {
+            self.0.routed.borrow_mut().push(surface_id);
+        }
     }
 
     fn extension_failed(&self, from_surface: &str, _: gpui::SharedString, _: &mut App) {
@@ -94,8 +96,8 @@ impl crate::surface::SurfaceLink for FakeLink {
     }
 }
 
-fn unfit_push() -> PushedUpdate {
-    PushedUpdate {
+fn unfit_push() -> HostEffect {
+    HostEffect::Push {
         surface_id: "counter".into(),
         update: Update::Patches(vec![Patch::SetProps(99, text("no such node"))]),
     }
@@ -198,7 +200,7 @@ impl UiBackend for FakeBackend {
         let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -213,9 +215,9 @@ impl UiBackend for FakeBackend {
         self.calls.borrow_mut().push(Call::Event(event.clone()));
         if event == UiEvent::Click(BAD_OWN_THEN_OTHER) {
             let reply = Reply {
-                pushed: vec![
+                effects: vec![
                     unfit_push(),
-                    PushedUpdate {
+                    HostEffect::Push {
                         surface_id: "other".into(),
                         update: Update::Unchanged,
                     },
@@ -229,14 +231,14 @@ impl UiBackend for FakeBackend {
         }
         if event == UiEvent::Click(REMOVER) {
             let reply = Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Patches(vec![Patch::Remove(REMOVER)]),
             };
             return async move { Ok(reply) }.boxed_local();
         }
         if event == UiEvent::Click(PUSH_THEN_FAIL) {
             let error = anyhow::Error::new(ReplyError {
-                pushed: vec![PushedUpdate {
+                effects: vec![HostEffect::Push {
                     surface_id: "counter".into(),
                     update: Update::Patches(vec![Patch::SetProps(
                         LABEL,
@@ -250,12 +252,12 @@ impl UiBackend for FakeBackend {
         }
         if event == UiEvent::Click(PUSHER) {
             let reply = Reply {
-                pushed: vec![
-                    PushedUpdate {
+                effects: vec![
+                    HostEffect::Push {
                         surface_id: "counter".into(),
                         update: Update::Patches(vec![Patch::SetProps(LABEL, text("pushed"))]),
                     },
-                    PushedUpdate {
+                    HostEffect::Push {
                         surface_id: "other".into(),
                         update: Update::Unchanged,
                     },
@@ -284,7 +286,7 @@ impl UiBackend for FakeBackend {
         };
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: update,
             })
         }
@@ -297,14 +299,14 @@ impl UiBackend for FakeBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         self.calls
             .borrow_mut()
             .push(Call::Rows { list, start, count });
         let result = if self.fail_rows.get() {
             // An extension-reported error: the instance lives on.
             Err(anyhow::Error::new(ReplyError {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 message: "rows unavailable".into(),
             }))
         } else {
@@ -322,19 +324,20 @@ impl UiBackend for FakeBackend {
                         None,
                         text(format!("Row {} of {total}", index + 1)),
                     )];
-                    (
+                    crate::backend::Row {
                         index,
-                        Tree::from_row(row, TreeLimits::default()).expect("valid row"),
-                    )
+                        indent: 0,
+                        tree: Tree::from_row(row, TreeLimits::default()).expect("valid row"),
+                    }
                 })
                 .collect())
         };
-        let pushed = if self.bad_rows_push.get() {
+        let effects = if self.bad_rows_push.get() {
             vec![unfit_push()]
         } else {
             Vec::new()
         };
-        async move { result.map(|value| Reply { pushed, value }) }.boxed_local()
+        async move { result.map(|value| Reply { effects, value }) }.boxed_local()
     }
 }
 
@@ -1252,14 +1255,15 @@ async fn test_a_stale_row_answer_after_a_remount_is_dropped(cx: &mut TestAppCont
         let rows = (0..5)
             .map(|index| {
                 let row = vec![node(ROW_ROOT, None, text("stale"))];
-                (
+                crate::backend::Row {
                     index,
-                    Tree::from_row(row, TreeLimits::default()).expect("valid row"),
-                )
+                    indent: 0,
+                    tree: Tree::from_row(row, TreeLimits::default()).expect("valid row"),
+                }
             })
             .collect();
         let reply = Reply {
-            pushed: Vec::new(),
+            effects: Vec::new(),
             value: rows,
         };
         state.receive_rows(LIST, old_generation, 0..5, Ok(reply), cx);
@@ -1319,7 +1323,13 @@ async fn test_applied_pushes_reset_the_remount_bound(cx: &mut TestAppContext) {
 
     for round in 0..6 {
         state.update(cx, |state, cx| {
-            state.apply_pushed_update(unfit_push().update, cx)
+            state.apply_pushed_update(
+                match unfit_push() {
+                    HostEffect::Push { update, .. } => update,
+                    _ => unreachable!(),
+                },
+                cx,
+            )
         });
         cx.run_until_parked();
         state.update(cx, |state, cx| {

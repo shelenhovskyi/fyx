@@ -50,7 +50,7 @@ use workspace::{
 
 use crate::{
     ToggleExtensionPanel,
-    backend::PushedUpdate,
+    backend::HostEffect,
     backend::UiBackend,
     consent::{self, ConsentRecord, ConsentState, ConsentStore},
     install_store::InstallStore,
@@ -471,13 +471,13 @@ impl UiExtensionRegistry {
         cx: &mut Context<Self>,
     ) {
         let extension_id = extension.extension_id().clone();
-        let surfaces: Vec<Surface> = extension
-            .surfaces()
-            .iter()
-            .cloned()
-            .map(Into::into)
-            .collect();
+        let surfaces: Vec<Surface> = extension.surfaces_v0_2().to_vec();
+        let initial_effects = extension.initial_effects().to_vec();
         self.register_backend(Rc::new(extension), &surfaces, cx);
+        // Effects of instantiation and `surfaces` (0.2), after the static surfaces exist.
+        for effect in initial_effects {
+            self.apply_effect(&extension_id, effect, cx);
+        }
         cx.spawn(async move |this, cx| {
             while let Some(first) = pushed.next().await {
                 let mut batch = vec![first];
@@ -486,7 +486,7 @@ impl UiExtensionRegistry {
                 }
                 let applied = this.update(cx, |this, cx| {
                     for pushed in batch {
-                        let PushedUpdate { surface_id, update } = pushed.into();
+                        let (surface_id, update) = (pushed.surface_id, pushed.update.into());
                         this.apply_pushed(&extension_id, &surface_id, update, cx);
                     }
                 });
@@ -814,6 +814,19 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// Applies one effect of a call (or of instantiation) that the surface that made the call did
+    /// not apply itself. Effects come in emission order.
+    pub fn apply_effect(&mut self, extension_id: &str, effect: HostEffect, cx: &mut Context<Self>) {
+        match effect {
+            HostEffect::Push { surface_id, update } => {
+                self.apply_pushed(extension_id, &surface_id, update, cx)
+            }
+            effect => {
+                log::warn!("fyx:ui: {extension_id}: {effect:?} is not handled by this renderer yet")
+            }
+        }
+    }
+
     fn apply_pushed(
         &mut self,
         extension_id: &str,
@@ -937,10 +950,10 @@ struct RegistryLink {
 }
 
 impl SurfaceLink for RegistryLink {
-    fn route_push(&self, push: PushedUpdate, cx: &mut App) {
+    fn route_effect(&self, effect: HostEffect, cx: &mut App) {
         self.registry
             .update(cx, |registry, cx| {
-                registry.apply_pushed(&self.extension_id, &push.surface_id, push.update, cx)
+                registry.apply_effect(&self.extension_id, effect, cx)
             })
             .ok();
     }
