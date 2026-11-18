@@ -8,6 +8,8 @@ mod blocklist;
 mod canonical;
 mod index;
 mod signing;
+mod snapshot;
+mod text;
 mod update;
 
 use std::{fmt, time::Duration};
@@ -18,16 +20,18 @@ use sha2::{Digest as _, Sha256};
 pub use blocklist::{
     BLOCKLIST_FETCH_INTERVAL, BLOCKLIST_SCHEMA, BLOCKLIST_STALE_AFTER, BlockEntry, Blocklist,
     BlocklistCache, CacheUpdate, Comparator, ComparatorOp, Freshness, KeepReason,
-    VerifiedBlocklist, VersionRange,
+    MAX_BLOCK_ENTRIES, MAX_BLOCKLIST_SIZE, MAX_BLOCKLIST_VALIDITY, VerifiedBlocklist, VersionRange,
 };
 pub use index::{
-    INDEX_SCHEMA, Index, MAX_PACKAGE_SIZE, Package, RejectedRelease, Release, Source, VerifiedIndex,
+    INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
+    RejectedRelease, Release, Source, VerifiedIndex,
 };
-pub use signing::{KeyId, Keyset, PublicKey, Signature, SigningKey};
+pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
+pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};
 pub use update::{
     AGE_GATE, Action, Additions, AgeGate, HoldReason, InstallRefusal, InstalledExtension,
-    InstalledVersion, Origin, Permissions, PlannedAction, UpdateReason, age_gate, plan_install,
-    plan_updates,
+    InstalledVersion, Origin, Permissions, PlannedAction, UpdateReason, age_gate,
+    check_local_version, plan_install, plan_updates,
 };
 
 /// The documents this crate reads, for error messages.
@@ -39,6 +43,7 @@ pub enum Document {
     BlocklistCache,
     Keyset,
     SigningKey,
+    Snapshot,
 }
 
 impl fmt::Display for Document {
@@ -50,6 +55,7 @@ impl fmt::Display for Document {
             Document::BlocklistCache => "cached block list",
             Document::Keyset => "keyset",
             Document::SigningKey => "signing key",
+            Document::Snapshot => "snapshot.json",
         })
     }
 }
@@ -68,10 +74,25 @@ pub enum Error {
     Invalid(String),
     #[error("signed by unknown key {key_id:?}")]
     UnknownKey { key_id: String },
+    #[error("key {key_id:?} may not sign a {role} document")]
+    WrongRole { key_id: String, role: KeyRole },
     #[error("the signature by key {key_id:?} does not match the content")]
     BadSignature { key_id: String },
     #[error("package does not match the index: {0}")]
     PackageMismatch(String),
+    /// A signed document past its `expires_at`: a mirror may be replaying an old copy.
+    #[error("{document} expired at {expires_at:?}")]
+    Expired {
+        document: Document,
+        expires_at: Timestamp,
+    },
+    /// A signed document older than one already seen: a mirror is replaying an old copy.
+    #[error("{document} has sequence {found}, older than the {highest_seen} already seen")]
+    Rollback {
+        document: Document,
+        found: u64,
+        highest_seen: u64,
+    },
 }
 
 /// Seconds since the Unix epoch, UTC. The crate never reads the clock; callers pass `now`.
@@ -173,7 +194,9 @@ impl Tier {
             | "ui:code-lens"
             | "ui:hover"
             | "ui:virtual-documents"
-            | "ui:commands" => Tier::T0,
+            | "ui:commands"
+            | "ui:images"
+            | "ui:canvas" => Tier::T0,
             "workspace:read-buffers" | "workspace:read-files" | "workspace:diagnostics" => Tier::T1,
             "network:fetch" | "process:spawn" | "workspace:edit" | "agent:observe" => Tier::T2,
             _ => return None,
@@ -252,6 +275,9 @@ pub struct Signed<T> {
 
 /// Documents with a canonical byte form that signatures cover.
 pub trait Canonical {
+    /// The key role allowed to sign this document.
+    const ROLE: KeyRole;
+
     fn canonical_bytes(&self) -> Vec<u8>;
 }
 
@@ -262,7 +288,7 @@ impl<T: Canonical> Signed<T> {
     }
 
     pub fn verify(&self, keyset: &Keyset) -> Result<(), Error> {
-        keyset.verify(&self.signed.canonical_bytes(), &self.signature)
+        keyset.verify(&self.signed.canonical_bytes(), &self.signature, T::ROLE)
     }
 }
 
