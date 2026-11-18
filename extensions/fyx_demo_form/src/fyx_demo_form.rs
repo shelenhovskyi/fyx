@@ -412,7 +412,10 @@ impl Extension for FormPanel {
             UiEvent::Click(_)
             | UiEvent::RowClick(_)
             | UiEvent::RowSelected(_)
-            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
+            | UiEvent::Dismissed(_)
+            | UiEvent::NotificationAction(_)
+            | UiEvent::NotificationClosed(_)
+            | UiEvent::ProgressCancelRequested(_) => Ok(Update::Unchanged),
         }
     }
 }

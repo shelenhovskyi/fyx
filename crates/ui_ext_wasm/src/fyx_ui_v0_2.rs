@@ -25,9 +25,13 @@ pub(crate) mod bindings {
 }
 
 pub(crate) use bindings::UiExtension;
-use bindings::fyx::ui::{decorations as wit_decorations, host as wit_host, types as wit};
+use bindings::fyx::ui::{
+    decorations as wit_decorations, host as wit_host, notifications as wit_notifications,
+    types as wit,
+};
 
 conversions::host_imports!();
+conversions::notification_imports!();
 
 impl wit_decorations::Host for UiState {
     fn place_decoration(
