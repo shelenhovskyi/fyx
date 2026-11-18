@@ -778,6 +778,12 @@ impl<'a> TreeBuilder<'a> {
         self.node(props)
     }
 
+    /// `fyx:ui` 0.3: an image node (see [`ImageProps`]).
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn image(&mut self, props: ImageProps) -> NodeId {
+        self.node(props)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -1901,6 +1907,70 @@ impl_into_props! {
     TableProps => Table,
     IconProps => Icon,
     DiffViewProps => DiffView,
+}
+
+#[cfg(feature = "fyx-ui-0-3")]
+impl From<ImageProps> for Props {
+    fn from(props: ImageProps) -> Self {
+        Props::Image(props)
+    }
+}
+
+/// `fyx:ui` 0.3 images (design 0.3, section 12). The host checks them when an update applies:
+/// alt text of 1 to 256 bytes, sides of 1 to 2048 logical pixels, a relative `assets/…` path,
+/// panels and their list rows only. A missing or bad file shows the alt text instead.
+#[cfg(feature = "fyx-ui-0-3")]
+impl ImageProps {
+    /// A PNG or SVG file of the package's `assets/` folder, such as `assets/logo.svg`: scaled to
+    /// fit its box (`contain`), with the image's own size and no tint.
+    pub fn asset(path: impl Into<String>, alt: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Asset(path.into()),
+            alt: alt.into(),
+            width: None,
+            height: None,
+            fit: ImageFit::Contain,
+            tint: None,
+        }
+    }
+
+    /// An image registered with [`add_image`](crate::add_image).
+    pub fn generated(image: crate::GeneratedImage, alt: impl Into<String>) -> Self {
+        Self {
+            source: ImageSource::Generated(image.handle()),
+            ..Self::asset("", alt)
+        }
+    }
+
+    /// The box in logical pixels; the image keeps its aspect ratio inside it ([`ImageProps::fit`]).
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    /// Only the width; the height follows the aspect ratio.
+    pub fn width(mut self, width: u32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    /// Only the height; the width follows the aspect ratio.
+    pub fn height(mut self, height: u32) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    pub fn fit(mut self, fit: ImageFit) -> Self {
+        self.fit = fit;
+        self
+    }
+
+    /// SVG only: draw it as a one-colour mask in this theme colour, like the host's own icons.
+    pub fn tint(mut self, color: ColorToken) -> Self {
+        self.tint = Some(color);
+        self
+    }
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::{Context as _, Result};
-use fyx_ext_harness::{COMPONENT_VARIABLE, Harness};
+use fyx_ext_harness::{COMPONENT_VARIABLE, Harness, PACKAGE_VARIABLE};
 use ui_ext::Props;
 use ui_ext::v0_2::SurfaceKind;
 
@@ -22,8 +22,8 @@ pub fn capability_for(kind: &SurfaceKind) -> &'static str {
 }
 
 /// Loads the component the way the host does; a failure is what the host would report.
-pub fn load(bytes: &[u8], report: &mut Report) -> Option<Harness> {
-    match Harness::load(bytes) {
+pub fn load(bytes: &[u8], dir: &Path, report: &mut Report) -> Option<Harness> {
+    match Harness::load(bytes).and_then(|harness| harness.with_package_root(dir)) {
         Ok(harness) => Some(harness),
         Err(error) => {
             report.error(format!("Fyx would fail to load the component: {error:#}"));
@@ -129,6 +129,10 @@ pub fn smoke(harness: &mut Harness, report: &mut Report) -> SmokeSummary {
             report.warning(format!("the extension logged an error: {message}"));
         }
     }
+    // Missing or bad assets, dead image handles, tint on a PNG: Fyx draws the alt text.
+    for failure in harness.image_failures() {
+        report.warning(failure.clone());
+    }
     summary
 }
 
@@ -189,6 +193,11 @@ pub fn test(dir: &Path, cargo_args: &[String]) -> Result<bool> {
         .arg(dir.join("Cargo.toml"))
         .args(cargo_args)
         .env(COMPONENT_VARIABLE, &component)
+        .env(
+            PACKAGE_VARIABLE,
+            dir.canonicalize()
+                .context("resolving the extension folder")?,
+        )
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     let status = smol::block_on(command.status()).context("running cargo test")?;

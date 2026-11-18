@@ -103,7 +103,7 @@ impl wit_notifications::Host for State {
         &mut self,
         _: wit_notifications::Notification,
     ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(notifications_not_in_harness()))
+        Ok(Err(notifications_not_in_harness().into()))
     }
 
     fn dismiss_notification(&mut self, _: u64) -> wasmtime::Result<()> {
@@ -114,7 +114,7 @@ impl wit_notifications::Host for State {
         &mut self,
         _: wit_notifications::ProgressOptions,
     ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(notifications_not_in_harness()))
+        Ok(Err(notifications_not_in_harness().into()))
     }
 
     fn progress_update(
@@ -123,7 +123,7 @@ impl wit_notifications::Host for State {
         _: wit_notifications::ProgressValue,
         _: Option<String>,
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(Err(notifications_not_in_harness()))
+        Ok(Err(notifications_not_in_harness().into()))
     }
 
     fn progress_end(&mut self, _: u64) -> wasmtime::Result<()> {
@@ -131,9 +131,9 @@ impl wit_notifications::Host for State {
     }
 }
 
-fn notifications_not_in_harness() -> wit_host::HostError {
-    wit_host::HostError {
-        code: wit_host::HostErrorCode::NotPermitted,
+pub(crate) fn notifications_not_in_harness() -> model::HostError {
+    model::HostError {
+        code: model::HostErrorCode::NotPermitted,
         message: "the test harness does not run notifications and progress yet".into(),
     }
 }
