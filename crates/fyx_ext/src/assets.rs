@@ -79,8 +79,41 @@ pub fn check_assets(dir: &Path, report: &mut Report) {
                     dropped.join(", ")
                 ));
             }
+            if style_uses_url(&text) {
+                report.warning(format!(
+                    "{path} uses url(…) inside <style>, which Fyx refuses: it draws the alt text \
+                     instead. Set fill or style on the element"
+                ));
+            }
         }
     }
+}
+
+/// Whether a `<style>` element of this lowercase SVG text uses `url(`. The host's scan before it
+/// parses an SVG refuses that, since it cannot count what the selectors reference.
+fn style_uses_url(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(start) = rest.find("<style") {
+        rest = &rest[start + "<style".len()..];
+        // Another name that only starts with `style`.
+        if !rest.starts_with(|c: char| c == '>' || c == '/' || c.is_ascii_whitespace()) {
+            continue;
+        }
+        let Some(open_end) = rest.find('>') else {
+            return false;
+        };
+        if rest[..open_end].ends_with('/') {
+            rest = &rest[open_end..];
+            continue;
+        }
+        let body = &rest[open_end + 1..];
+        let end = body.find("</style").unwrap_or(body.len());
+        if body[..end].contains("url(") {
+            return true;
+        }
+        rest = &body[end..];
+    }
+    false
 }
 
 /// `assets/...` with `/` separators, as an image node names the file.
@@ -152,14 +185,36 @@ mod tests {
                 b"<svg><script>alert(1)</script><foreignObject/></svg>",
             ),
             ("assets/entities.svg", b"<!ENTITY a \"b\"><svg/>"),
+            (
+                "assets/style-url.svg",
+                b"<svg><style type=\"text/css\">rect { fill: URL(#g) }</style><rect/></svg>",
+            ),
         ]);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let warnings = report.warnings.join("\n");
-        assert_eq!(report.warnings.len(), 4, "{warnings}");
-        for path in ["fake.png", "huge.png", "script.svg", "entities.svg"] {
+        assert_eq!(report.warnings.len(), 5, "{warnings}");
+        for path in [
+            "fake.png",
+            "huge.png",
+            "script.svg",
+            "entities.svg",
+            "style-url.svg",
+        ] {
             assert!(warnings.contains(path), "{path}: {warnings}");
         }
         assert!(warnings.contains("<script>, <foreignobject>"), "{warnings}");
+    }
+
+    #[test]
+    fn url_counts_only_inside_style() {
+        assert!(style_uses_url("<svg><style>a{fill:url(#g)}</style></svg>"));
+        assert!(!style_uses_url(
+            "<svg><style>a{fill:red}</style><rect fill=\"url(#g)\"/></svg>"
+        ));
+        assert!(!style_uses_url(
+            "<svg><style/><rect style=\"fill:url(#g)\"/></svg>"
+        ));
+        assert!(!style_uses_url("<svg><stylesheet>url(</stylesheet></svg>"));
     }
 
     #[test]
