@@ -1,7 +1,9 @@
 //! Keyboard support for extension surfaces.
 //!
 //! - **Tab / Shift-Tab** move focus between the surface's enabled buttons, inputs, lists and
-//!   tables, in tree order, wrapping around.
+//!   tables, in tree order, then the host's own buttons (Retry, Restart extension, Copy Error
+//!   Details, the error footer's Dismiss), wrapping around. Escape is the way out.
+//! - **Enter / Space** on a focused host button press it.
 //! - **Enter / Space** on a focused button send one `click`, the same event a mouse click sends.
 //! - **Up / Down / Home / End / PageUp / PageDown** move the selection of a focused list or table;
 //!   **Enter** sends `row-click` for the selected row.
@@ -17,7 +19,14 @@
 use gpui::{Action, App, Context, FocusHandle, Focusable as _, ScrollStrategy, Window, actions};
 use ui_ext::v0_2::{NodeId, Props, UiEvent};
 
-use crate::view::{DEFAULT_ROW_HEIGHT, SurfaceView};
+use crate::view::{DEFAULT_ROW_HEIGHT, HostControl, SurfaceView};
+
+/// One place in the Tab order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Node(NodeId),
+    Host(HostControl),
+}
 
 actions!(
     fyx_ui,
@@ -117,21 +126,43 @@ impl SurfaceView {
         }
     }
 
+    /// The host control that holds focus in `window`, if any.
+    pub(crate) fn focused_host_control(&self, window: &Window) -> Option<HostControl> {
+        self.host_focus
+            .iter()
+            .find(|(_, handle)| handle.is_focused(window))
+            .map(|(control, _)| *control)
+    }
+
     fn move_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.focus_order.len();
+        // The surface's nodes are drawn only while it is mounted.
+        let mounted = self.state().read(cx).tree().is_some();
+        let order: Vec<Stop> = self
+            .focus_order
+            .iter()
+            .filter(|_| mounted)
+            .map(|&id| Stop::Node(id))
+            .chain(self.host_controls(cx).into_iter().map(Stop::Host))
+            .collect();
+        let count = order.len();
         if count == 0 {
             return;
         }
-        let current = self
-            .focused_node(window, cx)
-            .and_then(|id| self.focus_order.iter().position(|&node| node == id));
+        let focused = match self.focused_host_control(window) {
+            Some(control) => Some(Stop::Host(control)),
+            None => self.focused_node(window, cx).map(Stop::Node),
+        };
+        let current = focused.and_then(|stop| order.iter().position(|&other| other == stop));
         let next = match (current, forward) {
             (Some(index), true) => (index + 1) % count,
             (Some(index), false) => (index + count - 1) % count,
             (None, true) => 0,
             (None, false) => count - 1,
         };
-        self.focus_node(self.focus_order[next], window, cx);
+        match order[next] {
+            Stop::Node(id) => self.focus_node(id, window, cx),
+            Stop::Host(control) => self.host_focus[&control].focus(window, cx),
+        }
         cx.notify();
     }
 
@@ -175,7 +206,9 @@ impl SurfaceView {
     }
 
     pub(crate) fn activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.focused_button(window, cx) {
+        if let Some(control) = self.focused_host_control(window) {
+            self.run_host_control(control, window, cx);
+        } else if let Some(id) = self.focused_button(window, cx) {
             self.dispatch(UiEvent::Click(id), cx);
         }
     }
@@ -186,7 +219,9 @@ impl SurfaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.focused_button(window, cx) {
+        if let Some(control) = self.focused_host_control(window) {
+            self.run_host_control(control, window, cx);
+        } else if let Some(id) = self.focused_button(window, cx) {
             self.dispatch(UiEvent::Click(id), cx);
         } else if let Some((list, _, _)) = self.focused_list(window, cx)
             && let Some(&index) = self.selection.get(&list)

@@ -1181,6 +1181,50 @@ fn key(keys: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Triage-3, UX F6 and F21: the host's own buttons are in the Tab order and take Enter and
+/// Space; the error footer has a Dismiss.
+#[gpui::test]
+async fn test_host_controls_take_the_keyboard(cx: &mut TestAppContext) {
+    use crate::view::HostControl;
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    focus_surface(&view, vcx);
+    let host_focused = |vcx: &mut VisualTestContext| {
+        vcx.update(|window, cx| view.read(cx).focused_host_control(window))
+    };
+
+    // A footer error: after the surface's nodes come Retry and Dismiss.
+    state.update(vcx, |state, cx| {
+        state.show_reload_error("Reload failed: broken".into(), cx)
+    });
+    vcx.run_until_parked();
+    key("shift-tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::DismissError));
+    key("shift-tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::ReloadRetry));
+    key("shift-tab", vcx);
+    assert_eq!(focused(&view, vcx), Some(LIST), "back into the surface");
+    key("tab", vcx);
+    key("tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::DismissError));
+    key("space", vcx);
+    assert_eq!(
+        state.read_with(vcx, |state, _| state.last_error().cloned()),
+        None
+    );
+
+    // A failed surface: Retry, reached by Tab, retries on Enter.
+    state.update(vcx, |state, cx| state.fail("broken".into(), true, cx));
+    vcx.run_until_parked();
+    backend.take_calls();
+    key("tab", vcx);
+    assert_eq!(host_focused(vcx), Some(HostControl::Retry));
+    key("enter", vcx);
+    assert_eq!(backend.take_calls(), [Call::Mount]);
+}
+
 #[gpui::test]
 async fn test_tab_moves_focus_in_tree_order(cx: &mut TestAppContext) {
     init_test(cx);
