@@ -76,7 +76,7 @@ fn mounted() -> Harness {
 
 fn images(harness: &Harness) -> Vec<ImageProps> {
     harness
-        .nodes_v0_2(PANEL)
+        .nodes(PANEL)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|node| match node.props {
@@ -130,9 +130,9 @@ fn the_images_demo_draws_assets_and_a_generated_chart() {
     );
 
     let list = harness
-        .find(PANEL, |props| matches!(props, Props::List(_)))
+        .find_v0_1(PANEL, |props| matches!(props, Props::List(_)))
         .expect("list");
-    let rows = harness.rows_v0_2(PANEL, list, 0, 10).expect("rows");
+    let rows = harness.rows(PANEL, list, 0, 10).expect("rows");
     assert_eq!(rows.len(), 3);
     assert_eq!(
         harness.image_failures().len(),
@@ -144,7 +144,7 @@ fn the_images_demo_draws_assets_and_a_generated_chart() {
 #[test]
 fn shuffle_swaps_the_generated_image() {
     let mut harness = mounted();
-    let outcome = harness.click_v0_2(PANEL, "Shuffle").expect("shuffle");
+    let outcome = harness.click(PANEL, "Shuffle").expect("shuffle");
     assert!(
         matches!(
             &outcome.effects[..],

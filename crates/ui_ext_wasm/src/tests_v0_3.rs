@@ -1322,3 +1322,129 @@ mod process_spawn {
         assert_eq!(lines, ["beta", "alpha"]);
     }
 }
+
+/// The harness (`fyx_ext_harness`) against the host on the same 0.3 probe: every case's effects,
+/// in `Debug` form, and its reply must match (plan 4.12).
+mod harness_conformance_v0_3 {
+    use fyx_ext_harness::Harness;
+
+    use super::*;
+
+    fn debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
+        values.iter().map(|value| format!("{value:?}")).collect()
+    }
+
+    fn harness() -> Harness {
+        Harness::load(&probe_v0_3_wasm()).expect("the harness loads the 0.3 probe")
+    }
+
+    /// Sends `event` to `surface_id` in both and checks that the effects and the reply match.
+    async fn compare(host: &UiExtension, harness: &mut Harness, surface_id: &str, event: UiEvent) {
+        let (host_effects, host_value) =
+            match host.handle_event_v0_2(surface_id, event.clone()).await {
+                Ok(reply) => (reply.effects, Ok(reply.value)),
+                Err(error) => {
+                    let error = error
+                        .downcast_ref::<EffectReplyError>()
+                        .unwrap_or_else(|| panic!("{event:?}: not a guest error: {error:#}"));
+                    (error.effects.clone(), Err(()))
+                }
+            };
+        let reply = harness
+            .handle_event_raw_v0_2(surface_id, event.clone())
+            .unwrap_or_else(|error| panic!("{event:?}: the harness trapped: {error:#}"));
+        assert_eq!(debug(&host_effects), debug(&reply.effects), "{event:?}");
+        assert_eq!(
+            host_value.map(|value| format!("{value:?}")),
+            reply
+                .value
+                .map(|value| format!("{value:?}"))
+                .map_err(|_| ()),
+            "{surface_id} {event:?}"
+        );
+    }
+
+    /// A load without a manifest grants the same capabilities in both.
+    #[test]
+    fn test_all_capabilities_match_the_harness() {
+        let mut host = crate::ALL_UI_CAPABILITIES.to_vec();
+        let mut harness = fyx_ext_harness::ALL_CAPABILITIES.to_vec();
+        host.sort_unstable();
+        harness.sort_unstable();
+        assert_eq!(host, harness);
+    }
+
+    #[gpui::test]
+    async fn test_images_match_the_harness(cx: &mut TestAppContext) {
+        let host = load(cx).await;
+        let mut harness = harness();
+        assert_eq!(harness.api_version(), &Version::new(0, 3, 0));
+        assert_eq!(debug(host.surfaces_v0_2()), debug(harness.surfaces_v0_2()));
+        // add-image, its refusals, the 32-image cap and the checks of image pushes, in one
+        // instance so the handles advance alike.
+        for case in 1..=4 {
+            compare(&host, &mut harness, SURFACE, UiEvent::Click(case)).await;
+        }
+    }
+
+    #[gpui::test]
+    async fn test_image_replies_match_the_harness(cx: &mut TestAppContext) {
+        let host = load(cx).await;
+        let mut harness = harness();
+        for surface in [SURFACE, "status", "modal"] {
+            compare(&host, &mut harness, surface, UiEvent::Click(5)).await;
+            let host_rows = host.list_rows_v0_2(surface, 7, 0, 1).await;
+            let harness_rows = harness.rows_v0_2(surface, 7, 0, 1);
+            assert_eq!(host_rows.is_ok(), harness_rows.is_ok(), "{surface}");
+            if let (Ok(host_rows), Ok(harness_rows)) = (host_rows, harness_rows) {
+                assert_eq!(debug(&host_rows.value), debug(&harness_rows));
+            }
+        }
+    }
+
+    #[gpui::test]
+    async fn test_the_capability_matches_the_harness(cx: &mut TestAppContext) {
+        let capabilities = [
+            CAPABILITY_PANEL,
+            ui_ext::v0_2::CAPABILITY_STATUS_BAR,
+            ui_ext::v0_2::CAPABILITY_MODAL,
+        ];
+        let host = load_with(
+            LoadOptions {
+                capabilities: Some(capabilities.iter().map(|&name| name.into()).collect()),
+                allow_staged: Some(true),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let mut harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
+            .expect("the harness loads the 0.3 probe");
+        compare(&host, &mut harness, SURFACE, UiEvent::Click(1)).await;
+    }
+
+    /// An interface this build does not implement traps alike, and disables both.
+    #[gpui::test]
+    async fn test_unbuilt_interfaces_trap_in_the_harness(cx: &mut TestAppContext) {
+        let host = load(cx).await;
+        let mut harness = harness();
+        let host_error = host
+            .handle_event_v0_2(SURFACE, UiEvent::Click(6))
+            .await
+            .unwrap_err();
+        let harness_error = harness
+            .handle_event_raw_v0_2(SURFACE, UiEvent::Click(6))
+            .unwrap_err();
+        let message = "fyx:ui/permissions@0.3.0#query is not implemented by this build of Fyx yet";
+        assert!(
+            format!("{host_error:?}").contains(message),
+            "{host_error:?}"
+        );
+        assert!(
+            format!("{harness_error:?}").contains(message),
+            "{harness_error:?}"
+        );
+        assert!(harness.disabled().is_some());
+    }
+}

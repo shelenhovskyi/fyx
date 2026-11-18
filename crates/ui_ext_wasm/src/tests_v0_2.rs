@@ -1078,6 +1078,62 @@ mod harness_conformance_v0_2 {
         assert!(harness.disabled().is_none());
     }
 
+    /// Section M: the text rules, ids, the open, per-call and rate caps, progress rules and the
+    /// events that free a notification's slot.
+    #[gpui::test]
+    async fn test_notifications_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(cx).await;
+        for script in [
+            "notify nope info Hi; pstart nope status Job",
+            r"notify probe info a\nb; notify probe info Fyx{rlo}gnp; notify probe info {long};
+              notify probe info Hi a=A b=B c=C; notify probe info Hi a=A a=B;
+              notify probe info Hi Bad=B; notify probe info Hi a={long}",
+            "notify probe warning Build_done open=Open stay; pstart probe status Indexing cancel; \
+             pupdate 1 40 Step_2; pupdate 1 spin; pend 1; pend 1; dismiss 1; dismiss 1",
+            "notify probe info A; notify probe info B; notify probe info C; notify probe info D",
+            "pstart boot panel Job; pstart probe panel Job; pupdate 2 101; pupdate 9 10; \
+             pstart probe status A; pstart probe status B; pstart probe status C; \
+             pstart probe status D",
+            "repeat 70 pupdate 2 50",
+        ] {
+            compare(&host, &mut harness, script).await;
+        }
+        // Closing and acting on a notification free its open slot, alike.
+        compare_on(
+            &host,
+            &mut harness,
+            SURFACE,
+            UiEvent::NotificationClosed(2, ui_ext::v0_2::NotificationCloseReason::User),
+            "notify probe info E",
+        )
+        .await;
+        compare_on(
+            &host,
+            &mut harness,
+            SURFACE,
+            UiEvent::NotificationAction(ui_ext::v0_2::NotificationActionEvent {
+                notification: 3,
+                action: "open".into(),
+            }),
+            "notify probe info F; notify probe info G",
+        )
+        .await;
+        // Removing the owner ends its progresses and closes its notifications.
+        compare(
+            &host,
+            &mut harness,
+            "add panel owner; pstart owner panel Job; remove owner",
+        )
+        .await;
+        compare(
+            &host,
+            &mut harness,
+            "pupdate 7 10; pstart probe status After",
+        )
+        .await;
+        assert!(harness.disabled().is_none());
+    }
+
     #[gpui::test]
     async fn test_gestures_and_modals_match_the_harness(cx: &mut TestAppContext) {
         let (host, mut harness) = both(cx).await;

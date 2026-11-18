@@ -210,40 +210,7 @@ impl wit_images::Host for State {
     }
 }
 
-/// §M is not in the harness yet: every call is refused, so an extension that uses notifications
-/// still loads and runs in tests.
-impl wit_notifications::Host for State {
-    fn notify(
-        &mut self,
-        _: wit_notifications::Notification,
-    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(crate::v0_2::notifications_not_in_harness().into()))
-    }
-
-    fn dismiss_notification(&mut self, _: u64) -> wasmtime::Result<()> {
-        Ok(())
-    }
-
-    fn progress_start(
-        &mut self,
-        _: wit_notifications::ProgressOptions,
-    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(crate::v0_2::notifications_not_in_harness().into()))
-    }
-
-    fn progress_update(
-        &mut self,
-        _: u64,
-        _: wit_notifications::ProgressValue,
-        _: Option<String>,
-    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(Err(crate::v0_2::notifications_not_in_harness().into()))
-    }
-
-    fn progress_end(&mut self, _: u64) -> wasmtime::Result<()> {
-        Ok(())
-    }
-}
+crate::notifications::notification_imports!();
 
 impl From<model::HostError> for wit_host::HostError {
     fn from(error: model::HostError) -> Self {
@@ -255,6 +222,7 @@ impl From<model::HostError> for wit_host::HostError {
                 model::HostErrorCode::InvalidArgument => wit_host::HostErrorCode::InvalidArgument,
                 model::HostErrorCode::NotPermitted => wit_host::HostErrorCode::NotPermitted,
                 model::HostErrorCode::Unavailable => wit_host::HostErrorCode::Unavailable,
+                model::HostErrorCode::Denied => wit_host::HostErrorCode::Denied,
             },
             message,
         }
@@ -522,6 +490,11 @@ impl From<model::UiEvent> for wit::UiEvent {
                 },
             )),
             model::UiEvent::ProgressCancelRequested(id) => Self::ProgressCancelRequested(id),
+            model::UiEvent::CanvasClick(click) => Self::CanvasClick(wit::CanvasClick {
+                canvas: click.canvas,
+                x: click.x.0,
+                y: click.y.0,
+            }),
         }
     }
 }
