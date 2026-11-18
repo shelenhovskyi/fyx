@@ -619,6 +619,10 @@ impl Harness {
                 v0_2::UiExtension::instantiate(&mut store, &component, &runtime.linker_v0_2)
                     .map(Bindings::V0_2)
             }
+            // W0 integration stopgap until platform plan 4.12 (W4): the harness runs 0.1 and 0.2 only.
+            ApiVersion::V0_3_0 => {
+                anyhow::bail!("fyx:ui 0.3 components are not supported by the harness yet")
+            }
         }
         .map_err(anyhow::Error::from)
         .context("instantiating the component")?;

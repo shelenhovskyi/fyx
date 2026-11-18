@@ -121,6 +121,8 @@ impl ApiState {
                     self.live.add_surface(surface, &self.capabilities)?;
                 }
             }
+            // W0 integration stopgap until platform plan 4.12 (W4): 0.3 is refused at load.
+            ApiVersion::V0_3_0 => unreachable!("the harness refuses fyx:ui 0.3 components at load"),
         }
         Ok(())
     }
