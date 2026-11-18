@@ -36,7 +36,7 @@ pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
 pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};
 pub use update::{
     AGE_GATE, Action, Additions, AgeGate, HoldReason, InstallRefusal, InstalledExtension,
-    InstalledVersion, Origin, Permissions, PlannedAction, UpdateReason, age_gate,
+    InstalledVersion, Origin, Permissions, PlanChanges, PlannedAction, UpdateReason, age_gate,
     check_local_version, plan_install, plan_updates,
 };
 
