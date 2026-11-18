@@ -52,6 +52,9 @@ pub struct InspectorSnapshot {
     /// Calls, newest first: kind, surface, duration against budget, pushes, error.
     pub calls: Vec<String>,
     pub capability_checks: Vec<String>,
+    /// 0.3 I/O, newest first, one line per operation: fetches, programs, edits, the agent feed
+    /// (redacted by the host before it gets here).
+    pub io: Vec<String>,
     pub logs: Vec<String>,
 }
 
@@ -141,6 +144,23 @@ fn tree_lines(tree: &Tree) -> Vec<String> {
     lines
 }
 
+/// One I/O record: when, which capability, its id, what it does, and how it ended.
+fn io_line(record: &ui_ext_wasm::diagnostics::IoRecord) -> String {
+    let outcome = match (&record.outcome, record.duration) {
+        (Some(outcome), Some(duration)) => format!("{outcome} in {} ms", duration.as_millis()),
+        (Some(outcome), None) => outcome.clone(),
+        (None, _) => "running".to_string(),
+    };
+    format!(
+        "{} {} #{} {}: {}",
+        clock(record.at),
+        record.capability,
+        record.id,
+        ui_ext::sanitize_for_log(&record.what),
+        outcome
+    )
+}
+
 /// The snapshot of `selected` (or the first surface) in `registry`.
 pub fn snapshot(
     registry: &UiExtensionRegistry,
@@ -225,6 +245,13 @@ pub fn snapshot(
                     format!("{} {} denied: {reason}", clock(check.at), check.capability)
                 }
             })
+            .collect();
+        snapshot.io = diagnostics
+            .io
+            .iter()
+            .rev()
+            .take(SHOWN_ENTRIES)
+            .map(io_line)
             .collect();
         snapshot.logs = diagnostics
             .logs
@@ -351,6 +378,7 @@ impl Render for ExtensionInspector {
                     "none",
                     cx,
                 ))
+                .child(section("Network, programs, edits", snapshot.io, "none", cx))
                 .child(section("Log", snapshot.logs, "nothing logged", cx))
         };
         v_flex()
@@ -426,4 +454,36 @@ impl Panel for ExtensionInspector {
 /// Whether workspaces get the inspector: dev builds, or `fyx.extensions.developer_mode`.
 pub fn inspector_enabled(cx: &App) -> bool {
     cfg!(debug_assertions) || crate::install::developer_mode_setting(cx)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use ui_ext_wasm::diagnostics::IoRecord;
+
+    use super::io_line;
+
+    #[test]
+    fn test_io_line() {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_millis(61_250);
+        let running = IoRecord {
+            at,
+            capability: "network:fetch",
+            id: 3,
+            what: "GET https://example.com/a\nforged line".into(),
+            outcome: None,
+            duration: None,
+        };
+        let line = io_line(&running);
+        assert!(line.starts_with("01.250 network:fetch #3 GET https://example.com/a"));
+        assert!(line.ends_with(": running"), "{line}");
+        assert!(!line.contains('\n'), "one line per record: {line}");
+        let done = IoRecord {
+            outcome: Some("200".into()),
+            duration: Some(Duration::from_millis(42)),
+            ..running
+        };
+        assert!(io_line(&done).ends_with(": 200 in 42 ms"));
+    }
 }

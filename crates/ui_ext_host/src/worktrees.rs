@@ -6,12 +6,13 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
 use gpui::{App, EntityId, Global};
 use sha2::{Digest as _, Sha256};
+use ui_ext::process::FileRef;
 use ui_ext_wasm::process::{Workspace as ProcessWorkspace, WorktreeRoot};
 
 /// One worktree as a workspace reported it.
@@ -52,6 +53,46 @@ impl OpenWorktrees {
         self.set(workspace, Vec::new());
     }
 
+    /// Every open worktree, in no particular order.
+    pub(crate) fn all(&self) -> Vec<OpenWorktree> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// `abs_path` as the extension keyed by `key` names it: worktree-relative in the innermost
+    /// open worktree that holds it, or `None` outside every worktree (or for a path the path rule
+    /// cannot express).
+    pub(crate) fn file_ref(&self, key: &str, abs_path: &Path) -> Option<FileRef> {
+        let all = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (worktree, relative) = all
+            .values()
+            .flatten()
+            .filter_map(|worktree| Some((worktree, abs_path.strip_prefix(&worktree.root).ok()?)))
+            .min_by_key(|(_, relative)| relative.components().count())?;
+        let mut components = Vec::new();
+        for component in relative.components() {
+            match component {
+                Component::Normal(name) => components.push(name.to_str()?),
+                _ => return None,
+            }
+        }
+        if components.is_empty() {
+            return None;
+        }
+        Some(FileRef {
+            worktree: Some(opaque_id(key, worktree.key)),
+            path: components.join("/"),
+        })
+    }
+
     /// The provider for one extension.
     pub fn for_extension(&self, extension_id: &str) -> Arc<dyn ProcessWorkspace> {
         Arc::new(ExtensionWorktrees {
@@ -67,7 +108,7 @@ struct ExtensionWorktrees {
 }
 
 /// An id opaque to the extension: a keyed hash of the worktree's key.
-fn opaque_id(extension_id: &str, key: (u64, u64)) -> u64 {
+pub(crate) fn opaque_id(extension_id: &str, key: (u64, u64)) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(b"fyx-worktree\0");
     hasher.update(extension_id.as_bytes());
@@ -181,6 +222,16 @@ mod tests {
         assert_ne!(first[0].id, other[0].id, "per extension");
         assert_eq!(first[0].root, PathBuf::from("/work/a"));
         assert!(first[0].trusted && !first[1].trusted);
+        let file = open
+            .file_ref("one", std::path::Path::new("/work/b/src/main.rs"))
+            .expect("inside /work/b");
+        assert_eq!(file.worktree, Some(first[1].id));
+        assert_eq!(file.path, "src/main.rs");
+        assert_eq!(
+            open.file_ref("one", std::path::Path::new("/etc/hosts")),
+            None
+        );
+        assert_eq!(open.file_ref("one", std::path::Path::new("/work/a")), None);
         open.remove(EntityId::from(1u64));
         assert!(open.for_extension("one").worktrees().is_empty());
     }

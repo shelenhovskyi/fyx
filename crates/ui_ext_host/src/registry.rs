@@ -1314,6 +1314,14 @@ Environment it may pass: {}",
                             crate::worktrees::OpenWorktrees::global(cx)
                                 .for_extension(&found.extension_id)
                         })),
+                        // workspace:edit and agent:observe (plan 4.8).
+                        workspace_edits: Some(cx.update(|cx| {
+                            crate::workspace_edit::for_extension(&found.extension_id, cx)
+                        })),
+                        agent_reviews: cx.update(|cx| {
+                            crate::agent_observe::for_extension(&found.extension_id, cx)
+                        }),
+                        proxy: Some(cx.update(extension_proxy)),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2043,6 +2051,7 @@ pub fn init(cx: &mut App) {
         );
     }
     follow_dev_paths_setting(cx);
+    follow_proxy_setting(cx);
     watch_installed_extensions(cx);
 }
 
@@ -2068,6 +2077,43 @@ fn staged_allowed(dev_extension: bool, cx: &App) -> Option<bool> {
 }
 
 /// Keeps the registry's dev paths equal to `fyx.extensions.dev_paths`.
+/// Fyx's `proxy` setting for `network:fetch`, one cell shared by every load and kept current
+/// (W2c, plan 4.6). The raw setting, never `ProxySettings::proxy_url`, which falls back to
+/// `HTTP_PROXY` and friends: environment proxies never apply (decision 23).
+#[derive(Clone, Default)]
+struct ExtensionProxy(ui_ext_wasm::network::ProxySetting);
+
+impl Global for ExtensionProxy {}
+
+fn proxy_setting(cx: &App) -> Option<String> {
+    cx.try_global::<settings::SettingsStore>()?
+        .merged_settings()
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn follow_proxy_setting(cx: &mut App) {
+    let proxy = cx.default_global::<ExtensionProxy>().0.clone();
+    let apply = move |cx: &mut App| {
+        let setting = proxy_setting(cx);
+        if !proxy.set(setting.as_deref()) && setting.is_some() {
+            log::warn!("fyx:ui: the proxy setting is not a usable proxy URL; fetches go direct");
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
+    }
+}
+
+/// The proxy cell every load gets.
+pub(crate) fn extension_proxy(cx: &mut App) -> ui_ext_wasm::network::ProxySetting {
+    cx.default_global::<ExtensionProxy>().0.clone()
+}
+
 fn follow_dev_paths_setting(cx: &mut App) {
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return;
@@ -2342,6 +2388,12 @@ fn attach_to_workspace(
             crate::worktrees::OpenWorktrees::global(cx).set(workspace_id, worktrees);
         };
         report(workspace, cx);
+        crate::workspace_edit::register_workspace(
+            workspace_id,
+            Some(cx.weak_entity()),
+            workspace.project().downgrade(),
+            cx,
+        );
         let project = workspace.project().clone();
         cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
             .detach();
@@ -2350,7 +2402,8 @@ fn attach_to_workspace(
                 .detach();
         }
         cx.on_release(move |_, cx| {
-            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id)
+            crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id);
+            crate::workspace_edit::unregister_workspace(workspace_id, cx);
         })
         .detach();
     }
@@ -2751,6 +2804,12 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         workspace: Some(cx.update(|cx| {
             crate::worktrees::OpenWorktrees::global(cx).for_extension(&path.to_string_lossy())
         })),
+        workspace_edits: Some(
+            cx.update(|cx| crate::workspace_edit::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        agent_reviews: cx
+            .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
+        proxy: Some(cx.update(extension_proxy)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
