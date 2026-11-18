@@ -12,6 +12,7 @@ use super::*;
 const SURFACE: &str = "probe";
 
 mod edit_observe;
+mod permissions;
 
 fn probe_v0_3_wasm() -> Vec<u8> {
     crate::test_support::fixture_wasm("fyx_ui_test_probe_v0_3")
@@ -349,7 +350,8 @@ async fn test_v0_3_interfaces_not_built_yet_trap(cx: &mut TestAppContext) {
         "{error:#}"
     );
     assert!(
-        format!("{error:?}").contains("fyx:ui/permissions@0.3.0#query is not implemented"),
+        format!("{error:?}")
+            .contains("fyx:ui/language@0.3.0#unregister-provider is not implemented"),
         "{error:?}"
     );
     let error = extension
@@ -1496,7 +1498,8 @@ mod harness_conformance_v0_3 {
         let harness_error = harness
             .handle_event_raw_v0_2(SURFACE, UiEvent::Click(6))
             .unwrap_err();
-        let message = "fyx:ui/permissions@0.3.0#query is not implemented by this build of Fyx yet";
+        let message =
+            "fyx:ui/language@0.3.0#unregister-provider is not implemented by this build of Fyx yet";
         assert!(
             format!("{host_error:?}").contains(message),
             "{host_error:?}"
