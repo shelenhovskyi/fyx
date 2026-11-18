@@ -168,6 +168,37 @@ impl ReviewRules {
         })
     }
 
+    /// The text the rules were parsed from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Every restriction of both: what holds while the user has not agreed to drop some of them.
+    pub fn union(&self, other: &ReviewRules) -> ReviewRules {
+        fn merged(first: &[Pattern], second: &[Pattern]) -> Vec<Pattern> {
+            let mut sources = Vec::<&str>::new();
+            for pattern in first.iter().chain(second) {
+                if !sources.contains(&pattern.source.as_str()) {
+                    sources.push(&pattern.source);
+                }
+            }
+            sources
+                .into_iter()
+                .filter_map(|source| Pattern::new(source).ok())
+                .collect()
+        }
+        ReviewRules {
+            root: self.root.clone(),
+            source: format!(
+                "{}\n# and still in force until confirmed:\n{}",
+                other.source, self.source
+            ),
+            always_ask: merged(&self.always_ask, &other.always_ask),
+            deny: merged(&self.deny, &other.deny),
+            ignored_auto_accept: other.ignored_auto_accept,
+        }
+    }
+
     /// The rules of a worktree without a rules file.
     pub fn none(root: PathBuf) -> Self {
         Self {
@@ -267,6 +298,17 @@ impl ReviewRules {
                 source: source.to_string(),
             })
         })
+    }
+}
+
+/// The key a worktree's confirmed rules are remembered under: its normalised root, compared the way
+/// the platform's file system compares paths.
+pub fn memory_key(root: &Path) -> String {
+    let key = normalize(root).to_string_lossy().into_owned();
+    if CASE_INSENSITIVE {
+        key.to_lowercase()
+    } else {
+        key
     }
 }
 

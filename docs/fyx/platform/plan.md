@@ -17,7 +17,7 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13]; keep a precompiled `.cwasm` per installed version, keyed by the wasmtime engine, so large components start without recompiling | — | install, update, roll back a local `.fyxext` in the dev build; a second start skips compilation |
+| 1.1 | W3 | Install store: layout, `state.json`, keep previous version, rollback, pin [13]; keep a precompiled `.cwasm` per installed version, keyed by the wasmtime engine, so large components start without recompiling | — | install, update, roll back a local `.fyxext` in the dev build; a second start skips compilation; only `.cwasm` files Fyx wrote into the install store are ever deserialized, never one from a package |
 | 1.2 | W3 | "Install Dev Extension" + `fyx.extensions.dev_paths`; env var stays as override [6] | 1.1 | dev extension survives restart without the env var |
 | 1.3 | W3 | Hot reload in place + "Restart extension" after a failure [7, 8] | 1.2 | edit → rebuild → panel updates within 1 s; failure 3 of spec §4 passes |
 | 1.4 | new `platform-cli` | `fyx-ext` crate and binary: `new` (from the template), `build`, `dev`, `check` with declared-vs-used capabilities, `package` [4, 5, 12] | 0.1 | `fyx-ext new demo && fyx-ext dev` opens the panel in Fyx |
@@ -42,10 +42,10 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 
 | # | Owner | Task | Depends on | Done when |
 |---|---|---|---|---|
-| 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16] | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
+| 3.1 | W0 | Create repo `shelenhovskyi/fyx-extensions` (owner's decision, 2026-11-17); entry format, review rules as CODEOWNERS + a CI check for decision 16 [14, 16]. Moderation (owner, 2026-11-18): agents plus CI review every entry; T0–T1 entries auto-merge on green CI, T2 needs the owner's approval | 1.4 | a PR adding a T2 capability cannot merge without a maintainer |
 | 3.2 | W0 | Registry CI: build Rust extensions from source in a pinned image, `check`, `test`, Ed25519 sign, publish `index.json` + packages to Releases [15] | 3.1, 1.8 | a sample extension appears in `index.json` with a valid signature |
-| 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18] | 3.2 | install from the index; tampered package refused |
-| 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19] | 3.3 | spec §4 failures 1, 2, 5 pass |
+| 3.3 | W3 | Registry client: index, 24 h age gate, `urgent`, signature check, unsigned-file badge [17, 18]. The client compiles in both keysets (release keys and block-list keys) and verifies releases and the index only against the release keyset | 3.2 | install from the index; tampered package refused; a release signed with a block-list key refused |
+| 3.4 | W3 | Block list: fetch every 6 h, disable, auto-rollback, cached copy, 7-day warning [19]. Fetched and cached lists are verified only against the block-list keyset | 3.3 | spec §4 failures 1, 2, 5 pass; a block list signed with a release key refused |
 | 3.5 | W3 + one `fyx:` hook | Extensions page Fyx tab: search, install, update, pin, roll back, held updates [17, 21] | 3.3, 1.5 | user flow done end to end in the dev build |
 
 ## P4 `fyx:ui@0.3.0` and T2
@@ -60,7 +60,17 @@ decorations moved from P4 to P2 (§L); notifications and progress are §M.
 | 4.6 | W2c | `network:fetch` host import with domain list and caps [23] | 4.5 | undeclared domain → `denied`; 17 MiB response cut |
 | 4.7 | W2c | `process:spawn`: PATH outside worktree, filtered env, job objects [24] | 4.5 | spec §4 failure 4 passes; reload kills the process tree |
 | 4.8 | W2c | `workspace:edit` (undoable transactions), `agent:observe` read-only sessions | 4.5 | an edit undoes with one ctrl-z; observe cannot accept or reject |
-| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8 | review file in `tasks/reviews/` |
+| 4.9 | W7 | Judge pass over P1–P4, then the 1.0 freeze clock starts [30] | 4.1–4.8, and 4.10–4.15 unless cut | review file in `tasks/reviews/` |
+| 4.10 | W2c | Images, host side ([design §12](../wit-0.3/design.md#12-images-plan-410412)): `image` props and validation (alt, sizes, asset paths, panels only), the `images` import with the 1 MiB and 32-handle caps, `ui:images` (T0) [28] | 4.1 | the image bomb and path fixtures are refused; a 0.2 component cannot send `image` |
+| 4.11 | W3 | Images, renderer: decode queue off the main thread, PNG and SVG decoders with the §12 limits, 64 MiB LRU per extension, placeholder with alt text, clipping [28] | 4.10 | logo, file preview and generated SVG show in a panel; the decoder fixtures fail without a large allocation |
+| 4.12 | W4 | Images, SDK and harness: builders, `add_image`, harness asset checks; an image gallery demo [28] | 4.10 | demo runs in Fyx and headless in `fyx-ext test` |
+| 4.13 | W2c | Canvas, host side ([design §13](../wit-0.3/design.md#13-canvas-plan-413415)): draw-op types, caps (16384 ops, segments, text, 16 per surface), float checks, `canvas-click`, `ui:canvas` (T0) [28] | 4.10 | the cap and NaN cases are refused; the lift bench is at most 1 ms per 10 000 ops |
+| 4.14 | W3 | Canvas, renderer: GPUI paint of the draw list with tokens and the data palette, clipping, `scale-down`, hit-test mapping [28] | 4.13 | the 16384-op paint bench is at most 4 ms; click coordinates are right when scaled and scrolled |
+| 4.15 | W4 | Canvas, SDK and harness: typed builders, `canvas-click` in the harness; a bar-chart and sparkline demo [28] | 4.13 | demo runs in Fyx and headless |
+
+**Priority within P4 (owner's rule, 2026-11-18):** P4 is the first candidate to cut. Tasks 4.10–4.15
+rank below every other P4 task. If P4 slips, 4.10–4.12 (images) stay and 4.13–4.15 (canvas) move
+to 0.4.
 
 ## Deferred after 1.0
 

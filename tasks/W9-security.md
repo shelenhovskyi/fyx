@@ -12,8 +12,10 @@ tightens; `audit` logs and blocks nothing; a protection that cannot start fails 
 1. **Quick wins** (`"mode": "shield"` / `"audit"`). Branch `claude/fyx-w9-guard`.
    - `check_private_path`: Zed's `private_files` on ACP `fs/read_text_file` (H1).
    - `scrub_env`: secret variables stripped from agent terminals, `allow_env` override (H4, H5).
-   - `check_config_write`: `.claude/`, `.codex/`, `.mcp.json`, `.zed/`, `.fyx/`, `.git/hooks/`
-     read-only for ACP `fs/write_text_file` and the built-in agent's edit tools (H2, H3).
+   - `check_config_write`: `.claude/`, `.codex/`, `.mcp.json`, `.zed/`, `.fyx/`, `.git/` and Fyx's
+     config directory read-only for ACP `fs/write_text_file` and the built-in agent's edit, write,
+     create-directory, delete, move and copy tools (H2, H3, H3b–H3e).
+   - A settings change that lowers protection while Fyx runs waits for the user's confirmation.
    - `.fyx/security.toml` with tighten-only `private_files` / `read_only`.
    - `init` from `crates/zed` (H6); stubs `wrap_agent` / `wrap_mcp`, not wired.
    - **Done when:** in shield, an ACP agent's read of `.env` fails and its write to

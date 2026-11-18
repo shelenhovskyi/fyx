@@ -10,10 +10,9 @@ use settings_macros::{MergeFrom, with_fallible_options};
 pub struct AgentReviewSettingsContent {
     /// Hold agent edits for hunk-by-hunk review before they land. Covered: edits ACP agents propose
     /// with a diff (v1 permission requests, single-file v2 patches), writes through Fyx
-    /// (`fs/write_text_file`), and the edit and write tools of Zed's built-in agent. Not reviewed:
-    /// shell and terminal commands (files they change are listed as changed without review), the
-    /// built-in agent's delete, move and copy tools, and edits whose diff Fyx cannot read (a
-    /// notification says so). Only user settings can turn this off; `.fyx/review.toml` in a
+    /// (`fs/write_text_file`), and the edit, write, delete, move and copy tools of Zed's built-in
+    /// agent. Not reviewed: shell and terminal commands (files they change are listed as changed
+    /// without review), and edits whose diff Fyx cannot read (a notification says so). Only user settings can turn this off; `.fyx/review.toml` in a
     /// project can only make review stricter. The `FYX_AGENT_REVIEW` environment variable
     /// overrides it: `0` turns review off, any other value turns it on.
     ///
@@ -29,7 +28,8 @@ pub struct AgentReviewSettingsContent {
 }
 
 /// Security modes for agents (`crates/fyx_guard`, `docs/fyx/security-modes.md`). Read only from
-/// user settings: project settings have no `fyx_security` key.
+/// user settings: project settings have no `fyx_security` key. While Fyx runs, a change that lowers
+/// protection asks for confirmation.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct FyxSecuritySettingsContent {

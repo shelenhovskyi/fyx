@@ -1,4 +1,5 @@
 mod db;
+mod fyx_models; // fyx: model lists load on first use
 mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
@@ -419,19 +420,20 @@ pub struct LanguageModels {
     model_list: acp_thread::AgentModelList,
     refresh_models_rx: watch::Receiver<()>,
     refresh_models_tx: watch::Sender<()>,
+    models_requested: bool, // fyx: see fyx_models.rs
 }
 
 impl LanguageModels {
     fn new(cx: &mut App) -> Self {
         let (refresh_models_tx, refresh_models_rx) = watch::channel(());
-        LanguageModelRegistry::global(cx)
-            .update(cx, |registry, cx| registry.authenticate_providers(cx));
+        // fyx: no `authenticate_providers` here; `fyx_models` starts it on first use.
 
         let mut this = Self {
             models: HashMap::default(),
             model_list: acp_thread::AgentModelList::Grouped(IndexMap::default()),
             refresh_models_rx,
             refresh_models_tx,
+            models_requested: false,
         };
         this.refresh_list(cx);
         this
@@ -3045,6 +3047,7 @@ struct NativeAgentModelSelector {
 impl acp_thread::AgentModelSelector for NativeAgentModelSelector {
     fn list_models(&self, cx: &mut App) -> Task<Result<acp_thread::AgentModelList>> {
         log::debug!("NativeAgentConnection::list_models called");
+        fyx_models::on_list_models(&self.connection, cx); // fyx: first use loads the lists
         let list = self.connection.0.read(cx).models.model_list.clone();
         Task::ready(if list.is_empty() {
             Err(anyhow::anyhow!("No models available"))
@@ -3463,6 +3466,15 @@ impl NativeAgentConnection {
     ) -> Task<Result<acp_v2::StopReason>> {
         let session_id = params.session_id.clone();
         log::info!("Received prompt request for session: {}", session_id);
+        // fyx: the first prompt waits for the model lists, which load on first use.
+        if let Some(wait) = self.wait_for_first_model(&session_id, cx) {
+            let this = self.clone();
+            return cx.spawn(async move |cx| {
+                wait.await;
+                cx.update(|cx| this.execute_prompt(client_user_message_id, params, cx))
+                    .await
+            });
+        }
         log::debug!("Prompt blocks count: {}", params.prompt.len());
 
         let Some(project_state) = self.0.read(cx).session_project_state(&session_id) else {

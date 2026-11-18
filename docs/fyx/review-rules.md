@@ -80,18 +80,24 @@ the diff.
 - A file that cannot be read or parsed (bad TOML, an unknown key, an invalid pattern) keeps the
   previous rules in force. A notification shows the error. Fyx never applies half a file and never
   drops rules silently.
-- When Fyx starts, the file as it is applies. Fyx does not remember confirmed rules across restarts.
-  An agent that removes a restriction gets it lifted only after you confirm, or after a restart.
+- Fyx remembers, per worktree, the rules you last agreed to (in `agent_review/confirmed_rules.json`
+  in its data directory). Until you agree to a change, every remembered restriction stays in force
+  together with anything stricter in the file, across restarts too: an agent that deletes a `deny`
+  and waits for the next start gets nothing.
+- The first time Fyx sees a worktree, its file applies as it is, since a project file can only add
+  restrictions.
 - Remote projects are not supported yet: the file is read through the local file system.
 
 ## Limits
 
 - A rejected permission request carries no message in ACP. An agent whose edit is refused through
-  a permission request is only told "rejected". When the agent writes through Fyx
+  a permission request is told "rejected" at once; the rule and any comments reach it with your next
+  message only when the review left a note (a partial accept or comments). When the agent writes through Fyx
   (`fs/write_text_file`, or Zed's built-in agent), the write fails with the rule in the error
   message.
 - Rules apply to agent edits that reach Fyx: permission requests, `fs/write_text_file`, and the
-  edit and write tools of Zed's built-in agent.
+  edit, write, delete, move and copy tools of Zed's built-in agent. For a move or copy, the
+  strictest rule of its two paths decides: copying a denied file elsewhere is denied too.
   - An agent that changes files another way, for example with a shell command, bypasses them.
   - The turn's review pane lists such files as "changed without review", including a rewritten
     `.fyx/review.toml`. Nothing is blocked.

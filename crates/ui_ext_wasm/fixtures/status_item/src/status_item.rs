@@ -53,7 +53,7 @@ impl Extension for StatusItem {
         let (mut label, mut ping, mut crash) = (0, 0, 0);
         let mounted = tree.mount(|tree| {
             tree.flex(FlexProps::row().gap(4), |tree| {
-                tree.icon(IconProps::new("bell"));
+                tree.icon(IconProps::new(Icon::Bell));
                 label = tree.text(self.label());
                 ping = tree.button(ButtonProps::new("Ping").style(ButtonStyle::Subtle));
                 crash = tree.button(ButtonProps::new("Crash").style(ButtonStyle::Subtle));
@@ -83,4 +83,5 @@ impl Extension for StatusItem {
     }
 }
 
-register_extension!(StatusItem);
+// The host runs fyx:ui 0.1; the SDK's default world is 0.2.
+register_extension!(StatusItem, v0_1);
