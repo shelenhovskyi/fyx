@@ -644,6 +644,40 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - stdin: 1 MiB per write and 4 MiB queued.
 - **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
 
+With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `workspace:edit` and `agent:observe` (design
+0.3, sections 10 and 11; plan 4.8):
+
+```rust
+pub fn apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError>;
+pub fn start_observing() -> Result<(), HostError>;
+pub fn stop_observing();
+```
+
+- **Building an edit:** `WorkspaceEdit::new(label).file(FileEdit::path("src/main.rs")
+  .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), text).insert(at, text))`.
+  - `FileEdit::document(id)` targets an open document instead of a path.
+  - `.expected_version(v)` makes the edit fail with `EditError::Conflict` if the file changed.
+  - `.create()` creates a missing file.
+- **How an edit applies:**
+  - all its files or none, as one undo step per buffer;
+  - nothing is saved: edited buffers stay dirty;
+  - the outcome arrives in `handle_io` as `IoEvent::EditDone((id, result))`, and `EditError`
+    implements `Display`;
+  - protected paths (`.git/`, `.fyx/`, `.zed/`, `.vscode/`, `.idea/`) are refused with
+    `NotAllowed`, and overlapping edits with `Invalid`.
+- **Limits:**
+  - at most 4 edits in flight;
+  - 64 files and 4096 text edits each;
+  - 4 MiB of new text;
+  - a label of 1 to 128 bytes.
+- **The agent feed:** after `start_observing`, `handle_io` gets `IoEvent::Agent`. A `Snapshot`
+  of the open reviews comes first, then `Opened`, `Updated`, `Resolved`, `Closed`, `TurnEnded`,
+  `UnreviewedChanges` and `ReviewMode`.
+  - The ids are opaque to the extension, and long hunks are cut (`truncated`).
+  - The feed is read-only: nothing in the API can accept, reject or comment.
+- **Consent:** both capabilities are T2. The first use asks the user.
+- **Off WASM:** the calls record `HostEffect::ApplyEdit`, `StartObserving` and `StopObserving`.
+
 ## Canvases (`fyx-ui-0-3`)
 
 A `canvas` node holds a static vector draw list (design 0.3, section 13). The values are the
@@ -691,7 +725,8 @@ tree.canvas(canvas);
 In an extension exported with `v0_1` the 0.2 functions return `HostError` with code
 `unavailable` ("needs fyx:ui 0.2"), and `cancel_tick`, `dismiss_notification` and
 `progress_end` do nothing; with `v0_1` or `v0_2`,
-`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin` and `kill` return `unavailable`
+`add_image`, `fetch`, `spawn`, `write_stdin`, `close_stdin`, `kill`, `apply_edit` and
+`start_observing` return `unavailable`
 ("needs fyx:ui 0.3"), and `remove_image` and `cancel_fetch` do nothing. `push_update` converts the update to 0.1 and
 returns `invalid-argument` for one 0.1 cannot express. `SurfaceTree::push(surface_id)` pushes the
 queued update; after a refused push it sends the whole tree as a `replace` next time.

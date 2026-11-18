@@ -138,6 +138,12 @@ pub type FetchResponder = Box<
         -> std::result::Result<ui_ext::network::FetchResponse, ui_ext::network::FetchError>,
 >;
 
+/// What the editor answers an edit the user allowed: `Ok` applies it (all or nothing), or an
+/// error such as a conflict.
+pub type EditAnswer = Box<
+    dyn FnMut(&ui_ext::edit::WorkspaceEdit) -> std::result::Result<(), ui_ext::edit::EditError>,
+>;
+
 /// What a fake program does when it runs: it sees the request and everything written to its
 /// stdin, and returns its output and exit code.
 pub type FakeProgram = Box<dyn FnMut(&ui_ext::process::SpawnRequest, &[u8]) -> FakeRun>;
@@ -887,6 +893,15 @@ pub struct Harness {
     broker: Option<TestBroker>,
     /// What `process:spawn` runs instead of real programs, by name.
     fake_programs: HashMap<String, FakeProgram>,
+    /// `workspace:edit` (0.3): what the editor answers, and the edits it applied.
+    edit_answer: Option<EditAnswer>,
+    applied_edits: Vec<ui_ext::edit::WorkspaceEdit>,
+    /// `agent:observe` (0.3): the host's open reviews, whether the feed runs, the events queued
+    /// for it, and this extension's opaque ids.
+    agent_snapshot: Vec<ui_ext::observe::ReviewInfo>,
+    observing: bool,
+    agent_events: Vec<ui_ext::observe::AgentEvent>,
+    opaque_ids: ui_ext::observe::OpaqueIds,
     /// What the renderer shows of §M: open notifications and running progresses, by id.
     notifications: BTreeMap<u64, model::notifications::Notification>,
     progresses: BTreeMap<u64, Progress>,
@@ -1015,6 +1030,12 @@ impl Harness {
             decorations: BTreeMap::new(),
             broker: None,
             fake_programs: HashMap::new(),
+            edit_answer: None,
+            applied_edits: Vec::new(),
+            agent_snapshot: Vec::new(),
+            observing: false,
+            agent_events: Vec::new(),
+            opaque_ids: ui_ext::observe::OpaqueIds::default(),
             notifications: BTreeMap::new(),
             progresses: BTreeMap::new(),
             shown_modals: BTreeSet::new(),
@@ -1283,6 +1304,46 @@ impl Harness {
         self.store.data_mut().api.set_worktree(worktree);
     }
 
+    /// How the editor answers `workspace:edit` edits the user allowed; without one they apply.
+    pub fn set_edit_answer(
+        &mut self,
+        answer: impl FnMut(
+            &ui_ext::edit::WorkspaceEdit,
+        ) -> std::result::Result<(), ui_ext::edit::EditError>
+        + 'static,
+    ) {
+        self.edit_answer = Some(Box::new(answer));
+    }
+
+    /// The edits the editor applied, oldest first.
+    pub fn applied_edits(&self) -> &[ui_ext::edit::WorkspaceEdit] {
+        &self.applied_edits
+    }
+
+    /// The host's open agent reviews, which `agent-observe.start` sends first as a snapshot
+    /// (with this extension's opaque ids, cut as the host cuts them). `None`: there are no agent
+    /// reviews here, so `start` is `unavailable`.
+    pub fn set_agent_reviews(&mut self, reviews: Option<Vec<ui_ext::observe::ReviewInfo>>) {
+        self.store
+            .data_mut()
+            .api
+            .set_agent_reviews_available(reviews.is_some());
+        self.agent_snapshot = reviews.unwrap_or_default();
+    }
+
+    /// Queues an event of the host's agent review, with the host's ids, for
+    /// [`Harness::deliver_io`]. Only a running feed delivers it; otherwise it is dropped.
+    pub fn agent_event(&mut self, event: ui_ext::observe::AgentEvent) {
+        if self.observing {
+            self.agent_events.push(event);
+        }
+    }
+
+    /// Whether the agent feed runs: started, allowed, and not stopped.
+    pub fn is_observing(&self) -> bool {
+        self.observing
+    }
+
     /// Processes `spawn` accepted that have not finished, oldest first.
     pub fn processes(&self) -> Vec<(u64, ui_ext::process::SpawnRequest)> {
         self.store
@@ -1343,6 +1404,30 @@ impl Harness {
             self.run_follow_ups(follow_ups);
             delivered.push(RawEffects { effects, value });
         }
+        for event in self.run_edits() {
+            let Some(event) = v0_3::io_event(event) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        for event in std::mem::take(&mut self.agent_events) {
+            if !self.observing {
+                break;
+            }
+            let event = self.opaque_ids.event(event);
+            let Some(event) = v0_3::io_event(ui_ext::network::IoEvent::Agent(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
         for event in self.run_processes() {
             let Some(event) = v0_3::io_event(event) else {
                 continue;
@@ -1354,6 +1439,68 @@ impl Harness {
             delivered.push(RawEffects { effects, value });
         }
         Ok(delivered)
+    }
+
+    /// The broker's answer for a T2 request being applied: an `Ask` state prompts once.
+    fn consent(&mut self) -> bool {
+        use ui_ext::network::PermissionState;
+        match self.broker.as_mut() {
+            Some(broker) => {
+                if broker.state == PermissionState::Ask {
+                    broker.prompts += 1;
+                    broker.state = broker.answer;
+                    self.store
+                        .data_mut()
+                        .api
+                        .set_network_permission(broker.state);
+                }
+                broker.state == PermissionState::Granted
+            }
+            None => false,
+        }
+    }
+
+    /// The outcome of every accepted edit, oldest first: refused, or checked with
+    /// `ui_ext::edit::check_targets` and then answered by the editor.
+    fn run_edits(&mut self) -> Vec<ui_ext::network::IoEvent> {
+        use ui_ext::edit::EditError;
+        let mut events = Vec::new();
+        while let Some((id, edit)) = self.store.data_mut().api.take_edit() {
+            let result = if !self.consent() {
+                Err(EditError::Denied)
+            } else {
+                ui_ext::edit::check_targets(&edit).and_then(|()| match self.edit_answer.as_mut() {
+                    Some(answer) => answer(&edit),
+                    None => Ok(()),
+                })
+            };
+            if result.is_ok() {
+                self.applied_edits.push(edit);
+            }
+            events.push(ui_ext::network::IoEvent::EditDone(id, result));
+        }
+        events
+    }
+
+    /// After a call: `agent-observe.start` asks for consent and sends the snapshot first;
+    /// `stop` ends the feed and drops what was queued for it.
+    fn apply_observe(&mut self) {
+        match self.store.data_mut().api.take_observe_op() {
+            Some(true) if !self.observing => {
+                if self.consent() {
+                    self.observing = true;
+                    self.agent_events.insert(
+                        0,
+                        ui_ext::observe::AgentEvent::Snapshot(self.agent_snapshot.clone()),
+                    );
+                }
+            }
+            Some(false) => {
+                self.observing = false;
+                self.agent_events.clear();
+            }
+            _ => {}
+        }
     }
 
     /// The outcomes of the processes that can move, oldest first: a start (the prompt of an
@@ -2026,6 +2173,7 @@ impl Harness {
         match result {
             Ok(value) => {
                 self.record(&effects);
+                self.apply_observe();
                 Ok((value, effects))
             }
             Err(error) => {

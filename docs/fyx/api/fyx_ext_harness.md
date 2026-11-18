@@ -12,6 +12,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `CALL_BUDGET` | const | Every later call. |
 | `COMPONENT_VARIABLE` | const | `fyx-ext test` sets it to the built component; `Harness::from_env` reads it. |
 | `EPOCH_INTERVAL` | const |  |
+| `EditAnswer` | type | What the editor answers an edit the user allowed: `Ok` applies it (all or nothing), or an error such as a conflict. |
 | `EventOutcome` | struct | What one event did, in the 0.1 model. |
 | `EventOutcome::pushed` | field | Pushed during the call, applied first, in order. |
 | `EventOutcome::touched` | field | Node ids the reply touched in the event's surface (see `ui_ext::Tree::apply_update`). |
@@ -25,7 +26,9 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FakeRun::stdout` | field |  |
 | `FetchResponder` | type | What a test broker answers for one request it lets through. |
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
+| `Harness::agent_event` | method | Queues an event of the host's agent review, with the host's ids, for `Harness::deliver_io`. Only a running feed delivers it; otherwise it is dropped. |
 | `Harness::api_version` | method |  |
+| `Harness::applied_edits` | method | The edits the editor applied, oldest first. |
 | `Harness::broker` | method |  |
 | `Harness::cancel_progress` | method | Clicks Cancel on a running cancellable progress; its owner, which must be mounted, gets `progress-cancel-requested`. The progress keeps running until the extension ends it. |
 | `Harness::canvas` | method | The draw list of canvas node `id` on a mounted surface (0.3), for assertions. |
@@ -50,6 +53,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::handle_event_raw` | method | Calls `handle-event` without a mounted surface or applying the reply: what the host runtime does before the renderer applies anything. Effects are applied and recorded as usual. `Err` means the call trapped or overran its budget, which disables the extension. |
 | `Harness::handle_event_raw_v0_1` | method | `Harness::handle_event_raw` in the 0.1 model: the pushes and the reply only. |
 | `Harness::image_failures` | method | Image nodes the renderer would draw as their alt text, with the reason (design 0.3, section 12; decisions D1, D2, D4): an asset that is missing, outside the package, too large or not a valid PNG or SVG, a generated image that is no longer live, or `tint` on a PNG (drawn untinted). None of them is an update error. |
+| `Harness::is_observing` | method | Whether the agent feed runs: started, allowed, and not stopped. |
 | `Harness::is_shown` | method | Whether a modal is open: shown by the extension and not hidden, removed or dismissed. |
 | `Harness::limits` | method |  |
 | `Harness::load` | method | Compiles and instantiates a component with every capability (`ALL_CAPABILITIES`) and asks it for its surfaces. |
@@ -70,7 +74,9 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::pushed_v0_1` | method | Every update pushed so far, in order, in the 0.1 model; `Harness::effects` holds them in the newest one. |
 | `Harness::rows` | method | Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as the extension sent it. |
 | `Harness::rows_v0_1` | method | `Harness::rows` in the 0.1 model: each row's index and tree. |
+| `Harness::set_agent_reviews` | method | The host's open agent reviews, which `agent-observe.start` sends first as a snapshot (with this extension's opaque ids, cut as the host cuts them). `None`: there are no agent reviews here, so `start` is `unavailable`. |
 | `Harness::set_broker` | method | Installs the permission broker and network for `network:fetch`; see `TestBroker`. |
+| `Harness::set_edit_answer` | method | How the editor answers `workspace:edit` edits the user allowed; without one they apply. |
 | `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |

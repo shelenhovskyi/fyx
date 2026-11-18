@@ -1948,3 +1948,237 @@ mod harness_conformance_process {
         assert!(harness.processes().is_empty());
     }
 }
+
+/// `workspace:edit` and `agent:observe` (plan 4.8) in the host and the harness: the import's
+/// checks, the checks when an edit is applied, the outcomes, and the agent feed with the same
+/// opaque ids.
+mod harness_conformance_edit_observe {
+    use std::sync::Mutex;
+
+    use futures::channel::mpsc;
+    use fyx_ext_harness::{Harness, TestBroker};
+
+    use super::*;
+    use crate::{
+        edit::{EditError, WorkspaceEdit, WorkspaceEdits},
+        observe::{AgentEvent, AgentReviews, Resolution, ReviewInfo, ReviewSource},
+        permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
+    };
+
+    struct GrantAll;
+
+    impl CapabilityCheck for GrantAll {
+        fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+            Ok(())
+        }
+
+        fn state(&self, _: &str, _: &str) -> PermissionState {
+            PermissionState::Granted
+        }
+    }
+
+    /// The editor side: applies every edit it is given.
+    struct ApplyAll;
+
+    impl WorkspaceEdits for ApplyAll {
+        fn apply(
+            &self,
+            _: &str,
+            _: WorkspaceEdit,
+        ) -> futures::future::BoxFuture<'static, Result<(), EditError>> {
+            futures::future::ready(Ok(())).boxed()
+        }
+    }
+
+    /// The agent review side: a fixed snapshot, and a sender for the test to feed.
+    #[derive(Default)]
+    struct Reviews {
+        snapshot: Vec<ReviewInfo>,
+        feed: Mutex<Option<mpsc::UnboundedSender<AgentEvent>>>,
+    }
+
+    impl AgentReviews for Reviews {
+        fn subscribe(
+            &self,
+        ) -> (
+            Vec<ReviewInfo>,
+            futures::stream::BoxStream<'static, AgentEvent>,
+        ) {
+            let (sender, receiver) = mpsc::unbounded();
+            *self.feed.lock().unwrap() = Some(sender);
+            (self.snapshot.clone(), receiver.boxed())
+        }
+    }
+
+    fn review(review: u64) -> ReviewInfo {
+        ReviewInfo {
+            review,
+            session: 70,
+            turn: 90,
+            file: Some(crate::process::FileRef {
+                worktree: Some(1),
+                path: "src/main.rs".into(),
+            }),
+            source: ReviewSource::Write,
+            rule: None,
+            resolution: Resolution::Pending(0),
+            submitted: false,
+            hunks: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    fn debug<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
+        values.iter().map(|value| format!("{value:?}")).collect()
+    }
+
+    fn capabilities() -> Vec<String> {
+        vec![
+            CAPABILITY_PANEL.into(),
+            ui_ext::v0_2::CAPABILITY_STATUS_BAR.into(),
+            ui_ext::v0_2::CAPABILITY_MODAL.into(),
+            "workspace:edit".into(),
+            "agent:observe".into(),
+        ]
+    }
+
+    async fn both(
+        broker: Option<Arc<dyn CapabilityCheck>>,
+        reviews: Arc<Reviews>,
+        cx: &mut TestAppContext,
+    ) -> (UiExtension, Harness) {
+        let host = load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(capabilities()),
+                capability_check: broker.clone(),
+                workspace_edits: Some(Arc::new(ApplyAll)),
+                agent_reviews: Some(reviews.clone() as Arc<dyn AgentReviews>),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let capabilities = capabilities();
+        let capabilities = capabilities.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut harness = Harness::load_with_capabilities(&probe_v0_3_wasm(), &capabilities)
+            .expect("the harness loads the 0.3 probe");
+        if broker.is_some() {
+            harness.set_broker(TestBroker::granted(Box::new(|_| {
+                Err(ui_ext::network::FetchError::Denied)
+            })));
+        }
+        harness.set_agent_reviews(Some(reviews.snapshot.clone()));
+        (host, harness)
+    }
+
+    /// Runs probe command `command` in both; the results and effects must match.
+    async fn command(host: &UiExtension, harness: &mut Harness, command: &str) -> String {
+        let event = UiEvent::InputChanged(1, command.into());
+        let reply = host
+            .handle_event_v0_2(SURFACE, event.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+        let raw = harness
+            .handle_event_raw(SURFACE, event)
+            .unwrap_or_else(|error| panic!("{command}: the harness trapped: {error:#}"));
+        assert_eq!(debug(&reply.effects), debug(&raw.effects), "{command}");
+        let host_value = format!("{:?}", reply.value);
+        assert_eq!(
+            host_value,
+            format!("{:?}", raw.value.expect("a report")),
+            "{command}"
+        );
+        host_value
+    }
+
+    /// The next `count` outcomes in both, as sorted pushes.
+    async fn outcomes(
+        host: &UiExtension,
+        events: &mut mpsc::Receiver<crate::network::IoEvent>,
+        harness: &mut Harness,
+        count: usize,
+    ) -> Vec<Vec<String>> {
+        let mut harness_effects = harness
+            .deliver_io()
+            .expect("deliver")
+            .iter()
+            .map(|delivered| debug(&delivered.effects))
+            .collect::<Vec<_>>();
+        let mut host_effects = Vec::new();
+        for _ in 0..count {
+            let event = futures::StreamExt::next(events).await.expect("an outcome");
+            let reply = host.handle_io(event).await.expect("handle-io");
+            host_effects.push(debug(&reply.effects));
+        }
+        harness_effects.sort();
+        host_effects.sort();
+        assert_eq!(host_effects, harness_effects);
+        host_effects
+    }
+
+    #[gpui::test]
+    async fn test_without_a_broker_both_are_denied(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(None, Arc::default(), cx).await;
+        let report = command(&host, &mut harness, "edit src/a.rs@0.0-0.0=x").await;
+        assert!(report.contains("denied"), "{report}");
+        let report = command(&host, &mut harness, "observe start").await;
+        assert!(report.contains("denied"), "{report}");
+    }
+
+    #[gpui::test]
+    async fn test_edits_match_the_harness(cx: &mut TestAppContext) {
+        let (host, mut harness) = both(Some(Arc::new(GrantAll)), Arc::default(), cx).await;
+        let mut events = host.take_io_events().expect("once");
+        for command_text in [
+            "edit label= src/a.rs@0.0-0.0=x",
+            "edit src/a.rs@0.0-0.0=x",
+            "edit .git/config@0.0-0.0=x",
+            "edit src/a.rs@0.0-0.2=x src/a.rs@0.1-0.3=y",
+        ] {
+            command(&host, &mut harness, command_text).await;
+        }
+        let outcomes = outcomes(&host, &mut events, &mut harness, 3).await;
+        let text = format!("{outcomes:?}");
+        assert!(text.contains("edit-done 1 ok"), "{text}");
+        assert!(text.contains("edit-done 2 err not-allowed"), "{text}");
+        assert!(text.contains("edit-done 3 err invalid"), "{text}");
+        assert_eq!(harness.applied_edits().len(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_the_agent_feed_matches_the_harness(cx: &mut TestAppContext) {
+        let reviews = Arc::new(Reviews {
+            snapshot: vec![review(500), review(501)],
+            ..Reviews::default()
+        });
+        let (host, mut harness) = both(Some(Arc::new(GrantAll)), reviews.clone(), cx).await;
+        let mut events = host.take_io_events().expect("once");
+        command(&host, &mut harness, "observe start").await;
+        let snapshot = outcomes(&host, &mut events, &mut harness, 1).await;
+        assert!(
+            format!("{snapshot:?}").contains("agent snapshot"),
+            "{snapshot:?}"
+        );
+
+        // Host ids in, the same opaque ids out.
+        let opened = AgentEvent::Opened(review(502));
+        reviews
+            .feed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("subscribed")
+            .unbounded_send(opened.clone())
+            .unwrap();
+        harness.agent_event(opened);
+        let opened = outcomes(&host, &mut events, &mut harness, 1).await;
+        assert!(format!("{opened:?}").contains("agent opened"), "{opened:?}");
+
+        command(&host, &mut harness, "observe stop").await;
+        harness.agent_event(AgentEvent::Closed(502));
+        assert!(harness.deliver_io().expect("deliver").is_empty());
+        assert!(!harness.is_observing());
+    }
+}

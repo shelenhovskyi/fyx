@@ -58,7 +58,83 @@ pub(crate) fn add_to_linker(
     wit_notifications::add_to_linker::<_, State>(linker, |state| state)?;
     wit_network::add_to_linker::<_, State>(linker, |state| state)?;
     wit_process::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_edit::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_observe::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
+}
+
+impl wit_edit::Host for State {
+    fn apply_edit(
+        &mut self,
+        request: wit_edit::WorkspaceEdit,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        use ui_ext::edit;
+        self.count_lifted_text(
+            request.label.len()
+                + request
+                    .files
+                    .iter()
+                    .map(|file| {
+                        let path = match &file.target {
+                            wit_edit::EditTarget::File(file) => file.path.len(),
+                            wit_edit::EditTarget::Document(_) => 0,
+                        };
+                        path + file
+                            .edits
+                            .iter()
+                            .map(|edit| edit.new_text.len())
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>(),
+        )?;
+        let position = |position: wit_documents::Position| edit::Position {
+            line: position.line,
+            column: position.column,
+        };
+        let request = edit::WorkspaceEdit {
+            label: request.label,
+            files: request
+                .files
+                .into_iter()
+                .map(|file| edit::FileEdit {
+                    target: match file.target {
+                        wit_edit::EditTarget::Document(id) => edit::EditTarget::Document(id),
+                        wit_edit::EditTarget::File(file) => {
+                            edit::EditTarget::File(ui_ext::process::FileRef {
+                                worktree: file.worktree,
+                                path: file.path,
+                            })
+                        }
+                    },
+                    expected_version: file.expected_version,
+                    create: file.create,
+                    edits: file
+                        .edits
+                        .into_iter()
+                        .map(|text_edit| edit::TextEdit {
+                            range: edit::TextRange {
+                                start: position(text_edit.range.start),
+                                end: position(text_edit.range.end),
+                            },
+                            new_text: text_edit.new_text,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        Ok(self.api.apply_edit(request).map_err(Into::into))
+    }
+}
+
+impl wit_observe::Host for State {
+    fn start(&mut self) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(self.api.observe_start().map_err(Into::into))
+    }
+
+    fn stop(&mut self) -> wasmtime::Result<()> {
+        self.api.observe_stop();
+        Ok(())
+    }
 }
 
 impl wit_process::Host for State {
@@ -319,13 +395,15 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 6] = [
+const LINKED_INTERFACES: [&str; 8] = [
     "types",
     "host",
     "images",
     "notifications",
     "network",
     "process",
+    "workspace-edit",
+    "agent-observe",
 ];
 
 /// The resource type of a stubbed interface; no value of it is ever made.

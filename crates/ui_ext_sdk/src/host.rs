@@ -17,7 +17,7 @@ use crate::{
     Surface, Update,
 };
 #[cfg(feature = "fyx-ui-0-3")]
-use crate::{HttpRequest, ImageFormat, SpawnRequest};
+use crate::{HttpRequest, ImageFormat, SpawnRequest, WorkspaceEdit};
 
 #[cfg(target_arch = "wasm32")]
 unsafe extern "Rust" {
@@ -61,6 +61,12 @@ unsafe extern "Rust" {
     safe fn __fyx_ui_close_stdin(process: u64) -> Result<(), HostError>;
     #[cfg(feature = "fyx-ui-0-3")]
     safe fn __fyx_ui_kill(process: u64) -> Result<(), HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_observe_start() -> Result<(), HostError>;
+    #[cfg(feature = "fyx-ui-0-3")]
+    safe fn __fyx_ui_observe_stop();
 }
 
 /// What a host function did, recorded off WASM for unit tests.
@@ -136,6 +142,16 @@ pub enum HostEffect {
     CloseStdin(u64),
     #[cfg(feature = "fyx-ui-0-3")]
     Kill(u64),
+    /// [`apply_edit`]; ids are the shared 1, 2, ….
+    #[cfg(feature = "fyx-ui-0-3")]
+    ApplyEdit {
+        id: u64,
+        edit: WorkspaceEdit,
+    },
+    #[cfg(feature = "fyx-ui-0-3")]
+    StartObserving,
+    #[cfg(feature = "fyx-ui-0-3")]
+    StopObserving,
 }
 
 /// A generated image from [`add_image`], for `ImageProps::generated`. `Copy` and without `Drop`:
@@ -512,21 +528,63 @@ pub fn kill(process: u64) -> Result<(), HostError> {
     record(HostEffect::Kill(process))
 }
 
+/// `fyx:ui` 0.3, `workspace:edit` (design.md §10): applies `edit` after the current call returns,
+/// all files or none, as one undo step per buffer, and returns its id. The outcome arrives in
+/// [`Extension::handle_io`](crate::Extension) as `IoEvent::EditDone((id, result))`. Nothing is
+/// saved: edited buffers stay dirty. The first edit asks the user. At most 4 edits in flight,
+/// 64 files and 4 MiB of new text each; protected paths (`.git/`, `.fyx/`, `.zed/`, …) are
+/// refused. Off WASM it records [`HostEffect::ApplyEdit`] and hands out ids.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_apply_edit(edit);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let id = next_id();
+        record(HostEffect::ApplyEdit {
+            id,
+            edit: edit.clone(),
+        })?;
+        Ok(id)
+    }
+}
+
+/// `fyx:ui` 0.3, `agent:observe` (design.md §11): starts the read-only feed of the host's
+/// review of agent edits. A `Snapshot` of the open reviews comes first, then `Opened`, `Updated`,
+/// `Resolved`, `Closed`, `TurnEnded`, `UnreviewedChanges` and `ReviewMode` as `IoEvent::Agent`.
+/// The first start asks the user. Nothing in the API can accept, reject or comment.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn start_observing() -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_observe_start();
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::StartObserving)
+}
+
+/// `fyx:ui` 0.3: stops the agent feed.
+#[cfg(feature = "fyx-ui-0-3")]
+pub fn stop_observing() {
+    #[cfg(target_arch = "wasm32")]
+    __fyx_ui_observe_stop();
+    #[cfg(not(target_arch = "wasm32"))]
+    record(HostEffect::StopObserving).ok();
+}
+
 /// The implementations behind the shims of `register_extension!(T)`: the SDK's own world, 0.2
 /// or (with `fyx-ui-0-3`) 0.3.
 #[doc(hidden)]
 pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
     use crate::ImageFormat;
-    use crate::bindings::fyx::ui::{decorations, host, notifications};
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::bindings::fyx::ui::{images, network, process};
+    use crate::bindings::fyx::ui::{agent_observe, images, network, process, workspace_edit};
+    use crate::bindings::fyx::ui::{decorations, host, notifications};
     use crate::{
         DecorationLocation, HostError, LogLevel, Node, Notification, ProgressOptions,
         ProgressValue, Surface, Update,
     };
     #[cfg(feature = "fyx-ui-0-3")]
-    use crate::{HttpRequest, SpawnRequest};
+    use crate::{HttpRequest, SpawnRequest, WorkspaceEdit};
 
     pub const API_VERSION: (u16, u16, u16) = crate::API_VERSION;
 
@@ -636,5 +694,20 @@ pub mod newest {
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn kill(id: u64) -> Result<(), HostError> {
         process::kill(id)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn apply_edit(edit: &WorkspaceEdit) -> Result<u64, HostError> {
+        workspace_edit::apply_edit(edit)
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn observe_start() -> Result<(), HostError> {
+        agent_observe::start()
+    }
+
+    #[cfg(feature = "fyx-ui-0-3")]
+    pub fn observe_stop() {
+        agent_observe::stop();
     }
 }

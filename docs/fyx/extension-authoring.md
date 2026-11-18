@@ -244,6 +244,16 @@ On top of these:
     (`not-found`).
   - `set_worktree(None)` or `set_worktree(Some(false))` tests the unavailable and untrusted
     cases.
+- `workspace:edit` and `agent:observe` (0.3) follow the host too: the capability and the
+  broker, then `check_edit` and the in-flight cap. When an edit is applied, `check_targets`
+  refuses protected paths and overlaps.
+  - Allowed edits apply unless `set_edit_answer` says otherwise, and `applied_edits()` lists
+    them.
+  - `set_agent_reviews(Some(reviews))` is the snapshot `start` sends; `None` makes `start`
+    unavailable.
+  - `agent_event(event)` feeds a running feed with the host's ids, and the harness maps them to
+    opaque ones as the host does.
+  - `deliver_io()` delivers `edit-done` and the agent events.
 - In 0.3, picker surfaces are refused as not supported yet, and the 0.3 interfaces the host does
   not implement yet (`decorations` included) trap when called.
 
@@ -1106,6 +1116,33 @@ fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
   - only the declared environment names, and never names that load code into a program (such
     as `LD_*` or `NODE_OPTIONS`).
 - **Stdin:** `.stdin()` keeps it open for `write_stdin` until `close_stdin`.
+
+### Editing files and watching agent reviews (0.3)
+
+Declare `workspace:edit` and `agent:observe`. Both ask the user on first use.
+
+```rust
+let edit = WorkspaceEdit::new("Sort imports").file(
+    FileEdit::path("src/main.rs")
+        .replace(TextRange::new(Position::new(0, 0), Position::new(2, 0)), "use a;\nuse b;\n")
+        .expected_version(version),
+);
+let id = apply_edit(&edit)?;
+start_observing()?;
+
+fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+    match event {
+        IoEvent::EditDone((id, Err(error))) => { /* error.to_string(): "the file changed: …" */ }
+        IoEvent::Agent(AgentEvent::Snapshot(reviews)) => { /* the open reviews */ }
+        IoEvent::Agent(AgentEvent::Opened(review)) => { /* review.file, review.hunks */ }
+        _ => {}
+    }
+    Ok(())
+}
+```
+
+An edit applies all its files or none, as one undo step per buffer, and nothing is saved.
+Protected paths such as `.git/` are refused. The agent feed is read-only.
 
 ### Testing 0.3 features headless
 
