@@ -515,10 +515,12 @@ The 24 h gate counts from the later of `published_at` and when this client first
   - W4: `tests_v0_3::harness_conformance_process` declares env `FYX_TEST` at lines 1941, 1959
     and 2005. Two tests fail; the fix is `NO_COLOR`. The harness's `permissions.request` text
     must match F3's (`api_state.rs:1157`).
-  - W3: `consent.rs:843`/`:854` use `FYX_TEST`, same fix. Also asked of W3: gate the re-enable
-    in `apply_plan` on `blocks_can_lift`; make `release_keyset()` refuse a keyset that fails
-    `check_role_separation(None)`; show `Additions.zed_extension` in `describe_additions` and
-    drop the stopgap hold.
+  - W3: done in ba5de3f4a4 (on claude/fyx-w3-renderer-e20d2b and `integration`, checked
+    2026-11-19): the consent test env is `NO_COLOR`; `apply_plan` re-enables only when
+    `blocks_can_lift(now)` holds and the list is fresh; `release_keyset()` goes through
+    `parse_release_keyset`, which refuses a keyset failing `check_role_separation(None)` (tested);
+    `describe_additions` shows `RUNS_ZED_EXTENSION_WARNING` for `Additions.zed_extension` and the
+    host-side hold is gone. Merge W2c with or after it.
 - **Docs:** W10 did the R8, R9/N4 and N1 texts (a768772afb on claude/fyx-w10-docs-a5772b).
 - **Canvas cap:** 16384 stays on my recommendation (bench ~1.1–1.3 ms per 10 000 round trip;
   the excess is the ABI lift). The coordinator records the decision.
