@@ -291,6 +291,23 @@ impl ApiState {
         self.shown_modals.remove(surface_id);
     }
 
+    /// The renderer dropped a decoration on its own (its tree failed to apply, integration-5 M2):
+    /// it no longer counts toward [`ui_ext::MAX_DECORATIONS`], and its notifications and
+    /// progresses are forgotten as on `remove-decoration`. An id that is not a live decoration is
+    /// ignored. No effect is made and no per-call cap is spent.
+    pub(crate) fn decoration_closed(&mut self, id: &str) {
+        if !self.live.is_decoration(id) {
+            return;
+        }
+        if self
+            .live
+            .remove_decoration(id, &self.capabilities[..])
+            .is_ok()
+        {
+            self.forget_owner(id);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_activation_window(&mut self, window: Duration) {
         self.activation_window = window;
@@ -819,6 +836,35 @@ mod tests {
                 .map(|&capability| capability.into())
                 .collect(),
         )
+    }
+
+    /// integration-5 M2: a decoration the renderer dropped frees its place under the 512 cap.
+    #[test]
+    fn test_a_closed_decoration_frees_its_place() {
+        let mut api = state(&["ui:panel", v0_2::CAPABILITY_EDITOR_DECORATIONS]);
+        let location = v0_2::DecorationLocation {
+            path: "src/main.rs".into(),
+            line: 1,
+            placement: v0_2::DecorationPlacement::Below,
+            height_lines: None,
+        };
+        let mut placed = 0;
+        for index in 0..ui_ext::MAX_DECORATIONS {
+            api.begin_call();
+            api.place_decoration(format!("d{index}"), location.clone(), Vec::new())
+                .expect("placed");
+            placed += 1;
+        }
+        assert_eq!(placed, ui_ext::MAX_DECORATIONS);
+        api.begin_call();
+        let full = api
+            .place_decoration("extra".into(), location.clone(), Vec::new())
+            .unwrap_err();
+        assert_eq!(full.code, v0_2::HostErrorCode::LimitExceeded);
+        api.decoration_closed("d7");
+        api.decoration_closed("not-a-decoration");
+        api.place_decoration("extra".into(), location, Vec::new())
+            .expect("room again");
     }
 
     #[test]

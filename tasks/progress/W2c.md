@@ -413,3 +413,7 @@ A 0.1 component is never ticked (`tick` answers `unchanged` without a call) and 
   `args` patterns now means no arguments (`["**"]` for any).
 - **S7**: `authorization`, `cookie`, `proxy-authorization` are dropped on a cross-origin
   redirect.
+- **M2** (host side): `UiExtension::decoration_closed(id)`: a decoration the renderer dropped
+  stops counting toward the 512 and loses its notifications, like `modal_closed`. W3 calls it.
+- Drift: `ALL_UI_CAPABILITIES` should gain `ui:canvas`; held until W4 adds it to the harness's
+  `ALL_CAPABILITIES` (the conformance test compares them).
