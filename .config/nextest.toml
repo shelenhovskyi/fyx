@@ -52,3 +52,8 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter = 'package(fyx_ext_harness) or package(ui_ext_wasm) or (package(ui_ext_host) and (test(/^wasm_tests::/) or test(/^decoration_wasm_tests::/)))'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# fyx: per-test timing for every gate run (<target>/nextest/default/junit.xml); script/gate.sh
+# keeps a copy per integration commit.
+[profile.default.junit]
+path = "junit.xml"
