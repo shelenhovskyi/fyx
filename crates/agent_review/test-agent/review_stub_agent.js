@@ -168,25 +168,20 @@ async function scenarioTurnRulesBypass(sessionId, cwd) {
 // 5. the agent empties `.fyx/review.toml` on disk, then writes Cargo.lock again: removing the deny
 //    must wait for the user, so the write is still refused.
 async function scenarioFull(sessionId, cwd) {
-  await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten by the agent
-");
-  await writeWhole(sessionId, path.resolve(cwd, "docs", "guide.md"), "# Guide, edited by the agent
-");
+  await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten by the agent\n");
+  await writeWhole(sessionId, path.resolve(cwd, "docs", "guide.md"), "# Guide, edited by the agent\n");
   await runEdit(sessionId, path.resolve(cwd, "demo3.txt"), false);
   await Promise.all([
     runEdit(sessionId, path.resolve(cwd, "demo.txt"), true),
     runEdit(sessionId, path.resolve(cwd, "demo2.txt"), true),
   ]);
   const fs = require("fs");
-  fs.writeFileSync(path.resolve(cwd, "outside.txt"), "written by a shell command
-");
+  fs.writeFileSync(path.resolve(cwd, "outside.txt"), "written by a shell command\n");
   log("wrote outside.txt directly on disk");
-  fs.writeFileSync(path.resolve(cwd, ".fyx", "review.toml"), "# no rules
-");
+  fs.writeFileSync(path.resolve(cwd, ".fyx", "review.toml"), "# no rules\n");
   log("emptied .fyx/review.toml directly on disk");
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten again
-");
+  await writeWhole(sessionId, path.resolve(cwd, "Cargo.lock"), "# rewritten again\n");
 }
 
 async function handle(message) {
