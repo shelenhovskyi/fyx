@@ -40,6 +40,7 @@ findings that belong to an item are noted next to it (`tasks/reviews/integration
 | 12 | W8 | ~~VS Code adapter, Rust side: launch the sidecar under `--permission`, bridge JSON-RPC to the `ui_ext` tree and answer `push-update`~~ **Dropped (owner, 2026-11-20).** Fyx does not support VS Code extensions at all | Reason: [roadmap-and-vscode-port.md](docs/fyx/research/roadmap-and-vscode-port.md): the extensions users miss are Microsoft-licensed, LSP-based or webview-based; Node `--permission` is no sandbox; 5–15× memory and slower start. `sidecars/vscode-host` and `tools/vsix-convert` are unsupported; removal is a separate step |
 | 13 | W5 + W3 | One shared end-to-end dev driver, built from W5's review script driver, that also drives `fyx:ui` panels. Compiled only into dev builds | Replaces per-stream drivers |
 | 14 | W7 | Fix the author docs' drift (D1–D10), then keep `docs/fyx/` checked against each merge | integration-3, docs section |
+| 15 | W1, W2c, W3, W4, W5 | **P6 product basics** (owner, 2026-11-20): extension settings in the 0.4 WIT (6.1), self-updater (6.2), local history and agent timeline (6.3), local crash reports (6.4), local/BYO edit predictions (6.5); after 1.0, extension diagnostics (6.6) and tree views with file badges (6.7) | [docs/fyx/platform/plan.md P6](docs/fyx/platform/plan.md#p6-product-basics); 6.1 before the 0.4 freeze, 6.2–6.5 before 1.0 |
 
 ## Rules for every agent
 
