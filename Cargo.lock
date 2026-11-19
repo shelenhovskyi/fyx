@@ -18260,10 +18260,14 @@ name = "terminal_host"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "log",
+ "release_channel",
  "terminal",
  "terminal_ext",
  "terminal_view",
+ "theme_settings",
  "ui",
+ "workspace",
 ]
 
 [[package]]

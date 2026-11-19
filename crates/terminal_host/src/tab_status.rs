@@ -11,11 +11,18 @@ use ui::{CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
 pub(crate) fn init(cx: &mut App) {
     terminal_ext::set_decorations(TabStatus, cx);
 
-    // The user has seen a terminal's status once it has focus, now or when it changes.
+    // The user has seen a terminal's status once it has focus, now or when it changes. Every view is
+    // also an agent-sessions entry; its status changes arrive with the terminal's Wakeup.
     cx.observe_new(|view: &mut TerminalView, window, cx| {
         let Some(window) = window else {
             return;
         };
+        let sessions = crate::sessions::global(cx);
+        if let Some(sessions) = &sessions {
+            let view = cx.weak_entity();
+            let window = window.window_handle();
+            sessions.update(cx, |sessions, _| sessions.register(view, window));
+        }
         let focus_handle = view.focus_handle(cx);
         cx.on_focus_in(&focus_handle, window, |view, _, cx| {
             view.terminal().read(cx).fyx.clear_attention();
@@ -23,13 +30,27 @@ pub(crate) fn init(cx: &mut App) {
         })
         .detach();
         let terminal = view.terminal().clone();
-        cx.subscribe_in(&terminal, window, |view, terminal, event, window, cx| {
-            if matches!(event, TerminalEvent::Wakeup)
-                && view.focus_handle(cx).contains_focused(window, cx)
-            {
-                terminal.read(cx).fyx.clear_attention();
-            }
-        })
+        cx.subscribe_in(
+            &terminal,
+            window,
+            move |view, terminal, event, window, cx| {
+                if !matches!(event, TerminalEvent::Wakeup) {
+                    return;
+                }
+                let focused = view.focus_handle(cx).contains_focused(window, cx);
+                if focused {
+                    terminal.read(cx).fyx.clear_attention();
+                }
+                if let Some(sessions) = &sessions {
+                    let status = terminal.read(cx).fyx.status();
+                    let this = cx.entity();
+                    let window_active = window.is_window_active();
+                    sessions.update(cx, |sessions, cx| {
+                        sessions.status_maybe_changed(&this, status, window_active, cx)
+                    });
+                }
+            },
+        )
         .detach();
     })
     .detach();
@@ -40,19 +61,7 @@ struct TabStatus;
 impl TerminalDecorations for TabStatus {
     fn tab_indicator(&self, terminal: &TerminalExt, _cx: &App) -> Option<AnyElement> {
         let status = terminal.status()?;
-        let (icon, color) = match status.state {
-            StatusState::Working => (IconName::LoadCircle, Color::Accent),
-            StatusState::Blocked => (IconName::Warning, Color::Warning),
-            StatusState::Error => (IconName::XCircle, Color::Error),
-            StatusState::Done => (IconName::Check, Color::Success),
-            StatusState::Idle | StatusState::Clear => return None,
-        };
-        let icon = Icon::new(icon).size(IconSize::Small).color(color);
-        let icon = if status.state == StatusState::Working {
-            icon.with_rotate_animation(2).into_any_element()
-        } else {
-            icon.into_any_element()
-        };
+        let icon = status_icon(&status)?;
         let (title, meta) = tooltip_text(&status);
         Some(
             h_flex()
@@ -68,6 +77,23 @@ impl TerminalDecorations for TabStatus {
                 .into_any_element(),
         )
     }
+}
+
+/// The state icon (working spins); `None` for idle.
+pub(crate) fn status_icon(status: &TerminalStatus) -> Option<AnyElement> {
+    let (icon, color) = match status.state {
+        StatusState::Working => (IconName::LoadCircle, Color::Accent),
+        StatusState::Blocked => (IconName::Warning, Color::Warning),
+        StatusState::Error => (IconName::XCircle, Color::Error),
+        StatusState::Done => (IconName::Check, Color::Success),
+        StatusState::Idle | StatusState::Clear => return None,
+    };
+    let icon = Icon::new(icon).size(IconSize::Small).color(color);
+    Some(if status.state == StatusState::Working {
+        icon.with_rotate_animation(2).into_any_element()
+    } else {
+        icon.into_any_element()
+    })
 }
 
 const MAX_TOOLTIP_DETAIL: usize = 200;
