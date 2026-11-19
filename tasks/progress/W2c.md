@@ -34,10 +34,8 @@ Older history: `archive/W2c.md`.
   3. 5.11 loopback listeners + MCP wrapper (§B.7), with item revocation for `network:listen#<name>`
      and `fs:discovery-file#<name>` in network.rs watch_permissions.
   4. Whole-crate tests, clippy and fmt, then "ready" to W0 and the coordinator.
+- **Ready at W0: a4fcba01b1** (f3f8c731bc, 695499d96f, and set_integration; 477 tests pass). W1 and W3 are told.
 - **Queued by the coordinator** (do these after the T3 runtime, step 1):
-  - `TerminalHost::set_integration(ext, TerminalIntegration { profiles, env, env_all_new,
-    package_dir })`, a default no-op that close_all clears. Then send "ready" to W0 and tell W1
-    and W3.
   - fyx_guard: the `fyx.accounts` dirs (W1 4637d43836) become protected paths (§C.6).
   - WIT diffs for since_v0.4.0, sent to W0 together:
     - `context.to-file-ref(abs) -> option<file-ref>` and `absolute-path(file-ref)`, both behind
