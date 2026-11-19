@@ -212,6 +212,7 @@ async fn open_dialog(
                 title: "Install Demo?".into(),
                 notes: Vec::new(),
                 confirm: "Install".into(),
+                update: false,
             },
             lines,
             window,
@@ -264,6 +265,46 @@ async fn test_consent_dialog_guard_and_ticks(cx: &mut TestAppContext) {
     assert_eq!(answer.try_recv().unwrap(), Some(vec![program("codex")]));
 }
 
+/// §C.2 headings; an update (§C.5) shows only the groups that changed, without "Shows in Fyx"
+/// when T0 did not.
+#[gpui::test]
+async fn test_dialog_headings_and_update_groups(cx: &mut TestAppContext) {
+    let (workspace, _answer, cx) = open_dialog(cx).await;
+    assert_eq!(
+        dialog(&workspace, cx).read_with(cx, |dialog, _| dialog.headings()),
+        [
+            "Shows in Fyx",
+            "Allowed without asking",
+            "Off unless you tick it",
+            "Asks you each time"
+        ]
+    );
+    cx.dispatch_action(menu::Cancel);
+    let t2_only: Vec<_> = consent_items(&manifest(MANIFEST))
+        .into_iter()
+        .filter(|line| line.item == program("codex"))
+        .collect();
+    let _answer = workspace.update_in(cx, |workspace, window, cx| {
+        ask_consent(
+            workspace,
+            ConsentDialogText {
+                title: "Approve the update of Demo?".into(),
+                notes: Vec::new(),
+                confirm: "Approve and Update".into(),
+                update: true,
+            },
+            t2_only,
+            window,
+            cx,
+        )
+    });
+    crate::decoration_tests::redraw(cx);
+    assert_eq!(
+        dialog(&workspace, cx).read_with(cx, |dialog, _| dialog.headings()),
+        ["Off unless you tick it"]
+    );
+}
+
 /// Escape answers nothing.
 #[gpui::test]
 async fn test_consent_dialog_escape(cx: &mut TestAppContext) {
@@ -302,6 +343,53 @@ async fn test_confirm_item_is_preticked_and_guarded(cx: &mut TestAppContext) {
     view.update(cx, |dialog, cx| dialog.install(cx));
     cx.run_until_parked();
     assert_eq!(answer.try_recv().unwrap(), Some(vec![program("codex")]));
+}
+
+/// §C.3: the page's "Always allow" switch shows the owner's warning, with no groups, behind the
+/// same guard; Cancel answers nothing.
+#[gpui::test]
+async fn test_confirm_always_allow_warns_and_is_guarded(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let fs = fs::FakeFs::new(cx.executor());
+    let project = project::Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+    });
+    let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+    crate::decoration_tests::redraw(cx);
+    let mut answer = workspace.update_in(cx, |workspace, window, cx| {
+        crate::consent_dialog::confirm_always_allow(
+            workspace,
+            "Demo",
+            ui_ext_wasm::permissions::T3Capability::Read,
+            window,
+            cx,
+        )
+    });
+    crate::decoration_tests::redraw(cx);
+    let view = dialog(&workspace, cx);
+    view.update(cx, |dialog, cx| dialog.install(cx));
+    cx.run_until_parked();
+    assert!(answer.try_recv().unwrap().is_none(), "inside the guard");
+    cx.executor()
+        .advance_clock(CLICK_GUARD + Duration::from_millis(1));
+    view.update(cx, |dialog, cx| dialog.install(cx));
+    cx.run_until_parked();
+    assert_eq!(answer.try_recv().unwrap(), Some(vec![]));
+
+    let mut cancelled = workspace.update_in(cx, |workspace, window, cx| {
+        crate::consent_dialog::confirm_always_allow(
+            workspace,
+            "Demo",
+            ui_ext_wasm::permissions::T3Capability::Write,
+            window,
+            cx,
+        )
+    });
+    crate::decoration_tests::redraw(cx);
+    cx.dispatch_action(menu::Cancel);
+    cx.run_until_parked();
+    assert!(cancelled.try_recv().is_err(), "dropped without an answer");
 }
 
 /// §C.4: the page's wording (a read never shows content), and the journal goes on uninstall.

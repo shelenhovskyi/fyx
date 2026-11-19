@@ -2,10 +2,13 @@
 //! and for approving a held update (§C.5): four groups, one checkbox per T2 item, unticked.
 //!
 //! 1. **Shows in Fyx** (T0): one line.
-//! 2. **Reads** (T1): a line per capability, no checkbox.
-//! 3. **Can run code or reach outside Fyx** (T2): a checkbox per item with its details and the
+//! 2. **Allowed without asking** (T1): a line per capability, no checkbox.
+//! 3. **Off unless you tick it** (T2): a checkbox per item with its details, its risk line and the
 //!    author's reason ("The author says: …").
 //! 4. **Asks you each time** (T3): listed, no checkbox.
+//!
+//! An update's dialog (§C.5) lists only what changed: a group with no line is left out, "Shows in
+//! Fyx" included.
 //!
 //! Every checkbox and the Install button ignore clicks for [`CLICK_GUARD`] after the dialog
 //! appears. Install answers with what is ticked; Cancel, Escape or dismissing answers nothing.
@@ -39,6 +42,8 @@ pub struct ConsentDialogText {
     pub notes: Vec<String>,
     /// "Install", or "Approve and Update".
     pub confirm: String,
+    /// An update: its lines are what changed, and "Shows in Fyx" shows only when T0 did.
+    pub update: bool,
 }
 
 /// Shows the dialog and answers the ticked items when the user confirms; dropped otherwise.
@@ -70,6 +75,7 @@ pub fn confirm_item(
         title: format!("Turn this on for {extension_name}?"),
         notes: Vec::new(),
         confirm: "Turn On".into(),
+        update: false,
     };
     workspace.toggle_modal(window, cx, move |_, cx| {
         let mut dialog = ConsentDialog::new(text, vec![line.clone()], answer, cx);
@@ -79,6 +85,47 @@ pub fn confirm_item(
     receiver
 }
 
+/// The extension page turning T3 "Always allow" on (§C.3): the owner's warning, with the
+/// same guard on its confirm button; resolves when the user confirms, dropped otherwise.
+pub fn confirm_always_allow(
+    workspace: &mut Workspace,
+    extension_name: &str,
+    capability: ui_ext_wasm::permissions::T3Capability,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> oneshot::Receiver<Vec<ConsentItem>> {
+    let (answer, receiver) = oneshot::channel();
+    let text = ConsentDialogText {
+        title: format!(
+            "Always allow {extension_name} to {} without asking?",
+            match capability {
+                ui_ext_wasm::permissions::T3Capability::Read => "read your terminals",
+                ui_ext_wasm::permissions::T3Capability::Write => "type into shared terminals",
+            }
+        ),
+        notes: vec![
+            crate::t3_cards::always_allow_warning(extension_name),
+            "It holds until you revoke it, or until this extension's component changes. It              never applies in an untrusted worktree."
+                .into(),
+        ],
+        confirm: format!("Always allow {extension_name}"),
+        update: false,
+    };
+    workspace.toggle_modal(window, cx, move |_, cx| {
+        let mut dialog = ConsentDialog::new(text, Vec::new(), answer, cx);
+        dialog.show_groups = false;
+        dialog
+    });
+    receiver
+}
+
+/// Groups 2–4 of §C.2, by tier.
+const GROUPS: &[(ConsentTier, &str)] = &[
+    (ConsentTier::T1, "Allowed without asking"),
+    (ConsentTier::T2, "Off unless you tick it"),
+    (ConsentTier::T3, "Asks you each time"),
+];
+
 pub struct ConsentDialog {
     text: ConsentDialogText,
     lines: Vec<ItemLine>,
@@ -86,6 +133,8 @@ pub struct ConsentDialog {
     guard: ClickGuard,
     answer: Option<oneshot::Sender<Vec<ConsentItem>>>,
     focus_handle: FocusHandle,
+    /// False for a warning with nothing to list ("Always allow", §C.3): no "Shows in Fyx".
+    show_groups: bool,
 }
 
 impl ConsentDialog {
@@ -102,7 +151,28 @@ impl ConsentDialog {
             guard: ClickGuard::new(cx),
             answer: Some(answer),
             focus_handle: cx.focus_handle(),
+            show_groups: true,
         }
+    }
+
+    /// "Shows in Fyx": always on an install, on an update only when T0 changed; never on a
+    /// warning.
+    pub(crate) fn shows_t0_group(&self) -> bool {
+        self.show_groups
+            && (!self.text.update || self.lines.iter().any(|line| line.tier == ConsentTier::T0))
+    }
+
+    /// The headings drawn, in order: what a reader sees of the groups.
+    pub fn headings(&self) -> Vec<&'static str> {
+        let t0 = self.shows_t0_group().then_some("Shows in Fyx");
+        t0.into_iter()
+            .chain(
+                GROUPS
+                    .iter()
+                    .filter(|(tier, _)| self.lines.iter().any(|line| line.tier == *tier))
+                    .map(|(_, name)| *name),
+            )
+            .collect()
     }
 
     pub(crate) fn armed(&self, cx: &App) -> bool {
@@ -227,11 +297,7 @@ impl Render for ConsentDialog {
             .collect();
         let lines = self.lines.clone();
         let mut sections = Vec::new();
-        for (tier, name) in [
-            (ConsentTier::T1, "Reads"),
-            (ConsentTier::T2, "Can run code or reach outside Fyx"),
-            (ConsentTier::T3, "Asks you each time"),
-        ] {
+        for &(tier, name) in GROUPS {
             let rows: Vec<_> = lines
                 .iter()
                 .enumerate()
@@ -265,17 +331,19 @@ impl Render for ConsentDialog {
                     .id("fyx-consent-groups")
                     .overflow_y_scroll()
                     .gap_2()
-                    .child(
-                        v_flex().gap_1().child(heading("Shows in Fyx")).child(
-                            Label::new(if shows.is_empty() {
-                                "Nothing beyond its own UI".to_string()
-                            } else {
-                                shows.join(", ")
-                            })
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                        ),
-                    )
+                    .when(self.shows_t0_group(), |this| {
+                        this.child(
+                            v_flex().gap_1().child(heading("Shows in Fyx")).child(
+                                Label::new(if shows.is_empty() {
+                                    "Nothing beyond its own UI".to_string()
+                                } else {
+                                    shows.join(", ")
+                                })
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            ),
+                        )
+                    })
                     .children(sections)
                     .when(has_checkboxes, |this| {
                         this.child(

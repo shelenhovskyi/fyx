@@ -116,7 +116,9 @@ const READ_CAPABILITIES: &[&str] = &[
     integration::CAPABILITY_CONTEXT_EDITOR,
 ];
 
-fn title_of(capability: &str) -> String {
+/// A capability's line in the install dialog, such as "Shows status on terminals"; an unknown
+/// capability is its own name.
+pub fn title_of(capability: &str) -> String {
     match capability {
         "ui:panel" => "A panel",
         "ui:status-bar" => "Status bar items",

@@ -20,6 +20,8 @@ test-support = []
 anyhow.workspace = true
 # fyx: the decoders network:fetch offers in `accept-encoding`.
 async-compression = { workspace = true, features = ["brotli", "zlib", "zstd"] }
+# fyx: network:listen (design wit-0.4 §B.7): websocket listeners, host tokens, MCP's JSON-RPC.
+async-tungstenite = { workspace = true, features = ["tokio-runtime"] }
 bytes.workspace = true
 fs.workspace = true
 futures.workspace = true
@@ -30,9 +32,11 @@ http_proxy.workspace = true
 log.workspace = true
 release_channel.workspace = true
 moka.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "process", "time"] }
 toml = { workspace = true, features = ["display"] }

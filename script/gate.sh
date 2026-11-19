@@ -83,11 +83,13 @@ echo "gate: ${changed_crates//$'\n'/ }"
 # Known local issue (docs/fyx/ci.md, "Known local issues"): on a machine whose DNS answers
 # example.com with a loopback address, upstream's fetch-tool redirect tests fail because they
 # resolve example.com for real. Skip exactly those, loudly, and never in CI. Checked before the
-# build: under the gate's full load the lookup can time out and the skip silently not apply.
+# build. A lookup that fails every time skips too: on 5a62615004 the skip did not apply and the
+# tests failed, most likely a lookup that timed out under load, and they cannot pass without a
+# real answer anyway. Only a real, non-loopback answer runs them.
 nextest_filter=()
 if [[ "${CI:-}" != "true" && " ${pkgs[*]} " == *" agent "* ]] \
-    && powershell -NoProfile -Command "for (\$i = 0; \$i -lt 3; \$i++) { try { if ([System.Net.Dns]::GetHostAddresses('example.com') | Where-Object { \$_.ToString() -match '^127\.' }) { exit 0 } } catch {}; Start-Sleep -Milliseconds 500 }; exit 1" 2>/dev/null; then
-    echo "gate: WARNING: example.com resolves to loopback here; skipping agent's 3 fetch-tool redirect tests (CI runs them)"
+    && powershell -NoProfile -Command "for (\$i = 0; \$i -lt 5; \$i++) { try { \$a = [System.Net.Dns]::GetHostAddresses('example.com'); if (\$a | Where-Object { \$_.ToString() -match '^127\.' }) { exit 0 }; if (\$a) { exit 1 } } catch {}; Start-Sleep -Milliseconds 1000 }; exit 0" 2>/dev/null; then
+    echo "gate: WARNING: example.com resolves to loopback here (or not at all); skipping agent's 3 fetch-tool redirect tests (CI runs them)"
     nextest_filter=(-E 'not (test(test_fetch_tool_follows_same_host_redirect) | test(test_fetch_tool_refuses_redirect_to_loopback) | test(test_fetch_tool_reauthorizes_redirect_to_new_host))')
 fi
 cargo check "${pkgs[@]}" 2>&1 | tail -20

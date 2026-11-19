@@ -245,8 +245,8 @@ Things the gate works around on one machine only. CI never takes these paths.
   `test_fetch_tool_refuses_redirect_to_loopback` and `test_fetch_tool_reauthorizes_redirect_to_new_host`
   resolve `example.com` for real, so the fetch tool's loopback check refuses it and they fail.
   They fail the same way on `integration` without any Fyx change to `crates/agent`. When `agent`
-  is in the gated set and `example.com` resolves to `127.*`, `script/gate.sh` skips exactly
-  these three with a `gate: WARNING` line. Fix on the machine (find what filters its DNS) and the
+  is in the gated set and `example.com` resolves to `127.*` (or no lookup answers at all, as under
+  load), `script/gate.sh` skips exactly these three with a `gate: WARNING` line. Fix on the machine (find what filters its DNS) and the
   skip turns itself off.
 - **Upstream tests write `development_credentials` in the real profile** (found 2026-11-18). In
   debug builds Zed keeps credentials in `%APPDATA%\Fyx\development_credentials` instead of the

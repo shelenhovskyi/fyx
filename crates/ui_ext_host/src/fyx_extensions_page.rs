@@ -782,6 +782,7 @@ fn install_release(
                             InstallMode::Fresh => "Install".into(),
                             InstallMode::Update(_) => "Approve and Update".into(),
                         },
+                        update: matches!(mode, InstallMode::Update(_)),
                     };
                     let answer = workspace.update_in(cx, |workspace, window, cx| {
                         crate::consent_dialog::ask_consent(
@@ -1464,6 +1465,43 @@ fn request_journal(extension_id: &str, cx: &mut App) {
     }
 }
 
+/// The page's T3 switch (§C.3): off at once; on after the owner's warning.
+#[allow(clippy::too_many_arguments)]
+fn set_always_allow(
+    extension_id: &str,
+    capability: ui_ext_wasm::permissions::T3Capability,
+    on: bool,
+    name: &str,
+    registry: &Entity<UiExtensionRegistry>,
+    workspace: &WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !on {
+        registry.update(cx, |registry, cx| {
+            registry.set_always_allow(extension_id, capability, false, cx);
+        });
+        return;
+    }
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    let answer = workspace.update(cx, |workspace, cx| {
+        crate::consent_dialog::confirm_always_allow(workspace, name, capability, window, cx)
+    });
+    let (id, registry) = (extension_id.to_string(), registry.clone());
+    cx.spawn(async move |cx| {
+        if answer.await.is_ok() {
+            cx.update(|cx| {
+                registry.update(cx, |registry, cx| {
+                    registry.set_always_allow(&id, capability, true, cx);
+                })
+            });
+        }
+    })
+    .detach();
+}
+
 /// The 0.4 page rows (§C.2 "Later", §C.4): every consent item with its state and a switch, then
 /// the usage journal. Turning a T2 item on asks once more with the same text and the 1 s guard;
 /// turning one off applies at once. A T1 item turned off comes back with "Enable" on the next
@@ -1484,11 +1522,24 @@ fn consent_rows(
         return permission_rows(extension_id, cx);
     }
     let name = registry_read.provenance_name(extension_id);
+    let can_always_allow = registry_read.can_always_allow(extension_id);
+    let always_allowed = registry_read.always_allowed();
     let mut rows: Vec<gpui::AnyElement> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let state = registry_read.consent_item_state(extension_id, &line.item);
+        // T3 (§C.3): "Always allow" can be turned on here too, for a component with a hash.
+        let t3 = ui_ext_wasm::permissions::T3Capability::from_name(line.item.capability());
+        let always = t3.is_some_and(|t3| {
+            always_allowed
+                .iter()
+                .any(|(id, capability)| id == extension_id && *capability == t3)
+        });
         let (note, switch) = match (line.tier, state) {
             (ConsentTier::T0, _) => continue,
+            (ConsentTier::T3, _) if always => ("always allowed, without asking", Some(true)),
+            (ConsentTier::T3, _) if can_always_allow && t3.is_some() => {
+                ("asks you each time", Some(false))
+            }
             (ConsentTier::T3, _) => ("asks you each time", None),
             (ConsentTier::T1, PermissionState::Granted) => ("on", Some(true)),
             (ConsentTier::T1, _) => ("off until Enable", None),
@@ -1534,6 +1585,12 @@ fn consent_rows(
                         },
                     )
                     .on_click(move |_, window, cx| {
+                        if let Some(t3) = t3 {
+                            set_always_allow(
+                                &id, t3, !on, &name, &registry, &workspace, window, cx,
+                            );
+                            return;
+                        }
                         let fs = <dyn Fs>::global(cx);
                         if on {
                             registry.update(cx, |registry, cx| {

@@ -558,6 +558,41 @@ enum WorldIo {
     V0_4(v0_4::bindings::fyx::ui::io::IoEvent),
 }
 
+/// `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]`, as the host's
+/// `UiManifest::check_t2_reasons` checks it: from 0.4 every T2 item has one line of at most
+/// 200 bytes (design wit-0.4 §C.2); below 0.4 the key does not exist.
+fn check_t2_reasons(table: &toml::Table, version: &Version) -> Result<()> {
+    fn reason_of(item: &toml::Value) -> Option<Option<&str>> {
+        item.get("reason").map(toml::Value::as_str)
+    }
+    let processes = table
+        .get("processes")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|spec| {
+            let name = spec.get("name").and_then(toml::Value::as_str).unwrap_or("");
+            (format!("[[fyx_ui.processes]] {name:?}"), reason_of(spec))
+        });
+    let network = table
+        .get("network")
+        .map(|network| ("[fyx_ui.network]".to_owned(), reason_of(network)));
+    for (what, reason) in processes.chain(network) {
+        if *version < Version::new(0, 4, 0) {
+            anyhow::ensure!(
+                reason.is_none(),
+                "{what}: reason needs fyx:ui 0.4; this extension targets {version}"
+            );
+        } else {
+            let reason = reason
+                .with_context(|| format!("{what}: a reason is required (fyx:ui 0.4)"))?
+                .with_context(|| format!("{what}: reason must be a string"))?;
+            ui_ext::terminal::check_reason(&what, reason).map_err(anyhow::Error::msg)?;
+        }
+    }
+    Ok(())
+}
+
 /// A 0.4 tree's `terminal` nodes: the extension's own terminals, one node each.
 fn checked_terminals<'a>(
     store: &Store<State>,
@@ -1240,6 +1275,12 @@ impl Harness {
             .with_context(|| format!("reading {component_path:?}"))?;
         let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
             .with_context(|| format!("loading {dir:?}"))?;
+        let version = table
+            .get("api_version")
+            .and_then(toml::Value::as_str)
+            .and_then(|version| Version::parse(version).ok())
+            .unwrap_or_else(|| harness.api_version.clone());
+        check_t2_reasons(table, &version).with_context(|| format!("in {manifest_path:?}"))?;
         if let Some(domains) = table
             .get("network")
             .and_then(toml::Value::as_table)

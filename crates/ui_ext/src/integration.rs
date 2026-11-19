@@ -112,6 +112,87 @@ pub struct DiscoveryFileSpec {
     pub reason: String,
 }
 
+/// §B.7: what a listener's clients send that the extension handles, as `io-event`s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListenerEvent {
+    /// An `mcp-*` listener's `tools/call` of a registered tool.
+    McpCall(McpCall),
+    /// A call whose connection closed, or that the client cancelled, before the answer.
+    McpCancelled(u64),
+    /// A `websocket` listener's text frame.
+    Message {
+        listener: String,
+        connection: u64,
+        text: String,
+    },
+    /// An `http` listener's request, answered with `listeners.reply(id, …)`.
+    Request {
+        id: u64,
+        listener: String,
+        path: String,
+        body: String,
+    },
+}
+
+/// `io-event::mcp-call`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpCall {
+    pub call_id: u64,
+    pub listener: String,
+    pub connection: u64,
+    pub tool: String,
+    /// JSON, as text: the call's `arguments` (`{}` when absent).
+    pub arguments: String,
+}
+
+/// `listeners.tool-def`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    /// A JSON schema object, as text.
+    pub input_schema: String,
+}
+
+/// `listeners.mcp-error`: a JSON-RPC error the client gets instead of a result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpError {
+    pub code: i32,
+    pub message: String,
+}
+
+/// At most this many tools per listener.
+pub const MAX_TOOLS: usize = 64;
+
+/// A tool name: `[A-Za-z0-9_-]{1,64}`, as MCP clients accept it.
+pub fn is_tool_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// An open listener, for the discovery-file writer (§B.8, plan 5.12) and `${listen.<name>.…}`.
+/// The token is the host's: it never reaches the extension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenListener {
+    pub name: String,
+    pub protocol: ListenerProtocol,
+    pub port: u16,
+    pub token: String,
+    /// The listener's `[[fyx_ui.discovery_files]]` entries that are granted now.
+    pub discovery_files: Vec<DiscoveryFileSpec>,
+}
+
+/// The host's side of the listeners: told when one opens, when its granted discovery files
+/// change, and when it closes (reload, disable, uninstall, revocation). The discovery-file writer
+/// writes exactly `discovery_files` for an open listener and removes every file it wrote for a
+/// closed one.
+pub trait ListenerObserver: Send + Sync {
+    fn opened(&self, extension_id: &str, listener: &OpenListener);
+    fn closed(&self, extension_id: &str, listener: &str);
+}
+
 /// The integration tables of one manifest.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IntegrationTables<'a> {
