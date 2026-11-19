@@ -3590,3 +3590,76 @@ mod approval_tests {
         );
     }
 }
+
+mod terminal_host_tests {
+    use super::*;
+    use std::sync::Arc;
+    use ui_ext::terminal::{
+        CreateCommand, PseudoRequest, TerminalError, TerminalHandle, TerminalHost, TerminalInfo,
+        TerminalSink, TerminalStatus,
+    };
+
+    /// A host that refuses everything: the wiring only passes it on.
+    struct FakeTerminalHost;
+
+    impl TerminalHost for FakeTerminalHost {
+        fn open_pseudo(
+            &self,
+            _: &str,
+            _: PseudoRequest,
+            _: TerminalSink,
+        ) -> Result<TerminalHandle, TerminalError> {
+            Err(TerminalError::Unavailable("fake".into()))
+        }
+        fn create(
+            &self,
+            _: &str,
+            _: CreateCommand,
+            _: TerminalSink,
+        ) -> Result<TerminalHandle, TerminalError> {
+            Err(TerminalError::Unavailable("fake".into()))
+        }
+        fn write_output(
+            &self,
+            _: &str,
+            _: TerminalHandle,
+            _: Vec<u8>,
+        ) -> Result<(), TerminalError> {
+            Err(TerminalError::NotFound)
+        }
+        fn send_input(&self, _: &str, _: TerminalHandle, _: Vec<u8>) -> Result<(), TerminalError> {
+            Err(TerminalError::NotFound)
+        }
+        fn paste(&self, _: &str, _: TerminalHandle, _: String) -> Result<(), TerminalError> {
+            Err(TerminalError::NotFound)
+        }
+        fn set_status(
+            &self,
+            _: &str,
+            _: TerminalHandle,
+            _: Option<TerminalStatus>,
+        ) -> Result<(), TerminalError> {
+            Err(TerminalError::NotFound)
+        }
+        fn close(&self, _: &str, _: TerminalHandle) {}
+        fn observe(&self, _: &str, _: Option<TerminalSink>) -> Vec<TerminalInfo> {
+            Vec::new()
+        }
+        fn close_all(&self, _: &str) {}
+    }
+
+    /// `set_terminal_host` is what both load paths pass as `LoadOptions::terminals`; a later
+    /// call replaces it for later loads.
+    #[gpui::test]
+    fn test_set_terminal_host(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            assert!(crate::terminal_host(cx).is_none(), "none until W1 sets it");
+            let first: Arc<dyn TerminalHost> = Arc::new(FakeTerminalHost);
+            crate::set_terminal_host(first.clone(), cx);
+            assert!(Arc::ptr_eq(&crate::terminal_host(cx).unwrap(), &first));
+            let second: Arc<dyn TerminalHost> = Arc::new(FakeTerminalHost);
+            crate::set_terminal_host(second.clone(), cx);
+            assert!(Arc::ptr_eq(&crate::terminal_host(cx).unwrap(), &second));
+        });
+    }
+}

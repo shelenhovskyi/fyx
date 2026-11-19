@@ -1570,6 +1570,9 @@ pub struct LoadOptions {
     pub workspace_edits: Option<Arc<dyn edit::WorkspaceEdits>>,
     /// The agent reviews for `agent:observe`. Without them, `start` is `unavailable`.
     pub agent_reviews: Option<Arc<dyn observe::AgentReviews>>,
+    /// The terminal host for 0.4's `terminals` imports (W1's `terminal_host`, set by
+    /// `ui_ext_host::set_terminal_host`). Without it, they are `unavailable`.
+    pub terminals: Option<Arc<dyn ui_ext::terminal::TerminalHost>>,
 }
 
 impl UiExtension {
@@ -1629,6 +1632,8 @@ impl UiExtension {
             process_environment,
             workspace_edits,
             agent_reviews,
+            // For 0.4's `terminals` imports, which W2c's 0.4 binding wires (plan 5.6).
+            terminals: _,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {

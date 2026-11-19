@@ -1835,6 +1835,7 @@ Environment it may pass: {}",
                         }),
                         proxy: Some(cx.update(extension_proxy)),
                         private_hosts: Some(cx.update(extension_private_hosts)),
+                        terminals: cx.update(|cx| crate::terminal_host(cx)),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -3534,6 +3535,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
         proxy: Some(cx.update(extension_proxy)),
         private_hosts: Some(cx.update(extension_private_hosts)),
+        terminals: cx.update(|cx| crate::terminal_host(cx)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
