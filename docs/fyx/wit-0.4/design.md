@@ -232,7 +232,8 @@ scope = "profiles"                    # "profiles" (default) or "all-new"
   - `PATH`, `PATHEXT`, `COMSPEC`, `HOME`, `USERPROFILE`, `XDG_*`, `ZDOTDIR`, `SHELL`, `TERM*`,
     `FYX_*` and `ZED_*`: names that move where a shell finds programs and its configuration, and
     the host's own names (integration-6 N1);
-  - the auth and config-dir names of §C.6.
+  - the auth and config-dir names of §C.6. A `*_TOKEN` name is allowed only when its value is
+    exactly `${listen.<name>.token}` of one `token_in_env` listener (§C.6, rule 5).
 
   This is stricter than the research, which would allow `PATH` and the loaders with a warning:
   injecting them into the user's interactive shell is the strongest form of N1's attack.
@@ -567,6 +568,10 @@ env name that selects its config dir (`CLAUDE_CONFIG_DIR`, `GEMINI_CLI_HOME`, `C
      `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
      `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, and every name ending in `_API_KEY`,
      `_TOKEN`, `_SECRET`, `_PASSWORD` or `_CREDENTIALS`.
+   - **One exception** (W2c ba7186021a): a `terminal:env` name ending in `_TOKEN` is allowed when
+     its value is exactly one `token_in_env` listener's host token, `${listen.<name>.token}`, and
+     nothing else. That token is Fyx's own, not a credential. The credential names listed by
+     name above, the account-dir names and `FYX_*` stay refused even then.
 
    The list lives in `ui_ext::process` next to `is_forbidden_env` (W2c, plan 5.5).
    Account dirs join the protected paths, like `.claude/`. An extension sees only an account
