@@ -1,7 +1,16 @@
 {
   "permissions": {
     "defaultMode": "acceptEdits",
-    "allow": ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"],
+    "allow": [
+      "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+      "PowerShell(cargo check:*)",
+      "PowerShell(cargo nextest:*)",
+      "PowerShell(cargo fmt:*)",
+      "PowerShell(./script/clippy.ps1:*)",
+      "PowerShell(script/clippy.ps1:*)",
+      "PowerShell(bash script/gate.sh:*)",
+      "PowerShell(bash ./script/gate.sh:*)"
+    ],
     "deny": [
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
@@ -39,7 +48,22 @@
       {
         "matcher": "Bash|PowerShell",
         "hooks": [
-          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/deny-long-sleep.sh\"" }
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/deny-long-sleep.sh\"" },
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-commands.sh\"" }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-integrator-files.sh\"" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/format-rust.sh\"" }
         ]
       }
     ]
