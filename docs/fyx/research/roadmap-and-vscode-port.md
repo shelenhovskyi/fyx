@@ -5,6 +5,11 @@ changed, no cargo builds. Numbers marked **measured** were measured for this not
 `tasks/reviews/perf-1.md` and the 4.13/4.14 bench notes; numbers marked **estimate** are reasoned
 from those plus public sources and need a real bench before anyone quotes them.
 
+> **Owner decision, 2026-11-20:** Fyx will not support VS Code extensions at all: no Node
+> sidecar, no `.vsix` conversion as a feature. PLAN.md backlog item 12 is dropped. The W8 code
+> (`sidecars/vscode-host`, `tools/vsix-convert`) stays unsupported until a separate removal step.
+> Sections 2 and 3 below are the research behind that decision.
+
 Three questions:
 
 1. Which must-have editor features are missing from the current plan (P1–P5, the 1.0 cut around
@@ -161,7 +166,11 @@ list them in the default view.
 
 ### Verdict
 
-Ship the converter (after F1) as a feature: "import themes, snippets and keymaps from Open VSX".
+**Decided by the owner on 2026-11-20: no VS Code extension support of any kind**, including the
+converter. The recommendation below, which kept a small compatibility tier, is superseded and kept
+only as a record.
+
+Superseded recommendation: ship the converter (after F1) as a feature: "import themes, snippets and keymaps from Open VSX".
 Keep the sidecar as an **experimental compatibility tier behind a setting**, finish the Rust bridge
 (backlog 12) only after 0.4 lands commands (4.4), and do not build webviews for it. Put the effort
 saved into G4/G7/G8 so that native extensions can do what the small VS Code utilities do, and into a

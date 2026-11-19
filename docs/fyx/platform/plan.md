@@ -170,6 +170,11 @@ TypeScript extensions are deferred until after 1.0, and whether to do them at al
 then (owner, 2026-11-18; spec decision 3). P3 builds and signs Rust extensions only. `sdks/ts`
 stays in the repository as an unsupported prototype.
 
+**VS Code extensions: not supported (owner, 2026-11-20).** No Node sidecar and no `.vsix`
+conversion as a feature; PLAN.md backlog item 12 is dropped. `sidecars/vscode-host` and
+`tools/vsix-convert` stay as unsupported code until a separate removal step
+([research](../research/roadmap-and-vscode-port.md)).
+
 | # | Was | Task | Revisit |
 |---|---|---|---|
 | D.1 | 2.5, new `ts-sdk` | `@fyx/sdk` on the current world with `jco componentize`, `fyx-ext new --lang ts`, SDK parity test | after the 1.0 freeze |
