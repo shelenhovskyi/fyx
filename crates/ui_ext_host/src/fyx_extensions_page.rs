@@ -782,6 +782,7 @@ fn install_release(
                             InstallMode::Fresh => "Install".into(),
                             InstallMode::Update(_) => "Approve and Update".into(),
                         },
+                        update: matches!(mode, InstallMode::Update(_)),
                     };
                     let answer = workspace.update_in(cx, |workspace, window, cx| {
                         crate::consent_dialog::ask_consent(

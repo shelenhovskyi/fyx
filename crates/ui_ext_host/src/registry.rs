@@ -3539,6 +3539,7 @@ pub(crate) fn ask_pending_consent(
             title,
             notes,
             confirm: confirm.into(),
+            update,
         },
         lines,
         window,

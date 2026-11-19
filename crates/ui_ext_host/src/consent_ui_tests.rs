@@ -212,6 +212,7 @@ async fn open_dialog(
                 title: "Install Demo?".into(),
                 notes: Vec::new(),
                 confirm: "Install".into(),
+                update: false,
             },
             lines,
             window,
@@ -262,6 +263,46 @@ async fn test_consent_dialog_guard_and_ticks(cx: &mut TestAppContext) {
     view.update(cx, |dialog, cx| dialog.install(cx));
     cx.run_until_parked();
     assert_eq!(answer.try_recv().unwrap(), Some(vec![program("codex")]));
+}
+
+/// §C.2 headings; an update (§C.5) shows only the groups that changed, without "Shows in Fyx"
+/// when T0 did not.
+#[gpui::test]
+async fn test_dialog_headings_and_update_groups(cx: &mut TestAppContext) {
+    let (workspace, _answer, cx) = open_dialog(cx).await;
+    assert_eq!(
+        dialog(&workspace, cx).read_with(cx, |dialog, _| dialog.headings()),
+        [
+            "Shows in Fyx",
+            "Allowed without asking",
+            "Off unless you tick it",
+            "Asks you each time"
+        ]
+    );
+    cx.dispatch_action(menu::Cancel);
+    let t2_only: Vec<_> = consent_items(&manifest(MANIFEST))
+        .into_iter()
+        .filter(|line| line.item == program("codex"))
+        .collect();
+    let _answer = workspace.update_in(cx, |workspace, window, cx| {
+        ask_consent(
+            workspace,
+            ConsentDialogText {
+                title: "Approve the update of Demo?".into(),
+                notes: Vec::new(),
+                confirm: "Approve and Update".into(),
+                update: true,
+            },
+            t2_only,
+            window,
+            cx,
+        )
+    });
+    crate::decoration_tests::redraw(cx);
+    assert_eq!(
+        dialog(&workspace, cx).read_with(cx, |dialog, _| dialog.headings()),
+        ["Off unless you tick it"]
+    );
 }
 
 /// Escape answers nothing.

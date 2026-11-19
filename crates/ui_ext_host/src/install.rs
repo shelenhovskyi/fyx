@@ -283,6 +283,7 @@ pub(crate) fn prompt_and_install(
                 title: format!("Install the dev UI extension {extension_id}?"),
                 notes: dev_install_notes(&manifest, &source, zed_extension),
                 confirm: "Install".into(),
+                update: false,
             };
             let answer = workspace.update_in(cx, |workspace, window, cx| {
                 crate::consent_dialog::ask_consent(workspace, text, lines.clone(), window, cx)
