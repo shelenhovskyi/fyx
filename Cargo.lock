@@ -18234,6 +18234,7 @@ dependencies = [
  "alacritty_terminal",
  "log",
  "polling",
+ "rand 0.9.4",
 ]
 
 [[package]]
