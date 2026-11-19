@@ -205,6 +205,19 @@ pub enum TerminalEvent {
     WriteDone(u64, Result<(), String>),
 }
 
+/// P2.4: what the host needs to start an extension's profile terminals and inject its env
+/// into them (and into every new terminal for `scope = "all-new"`), as granted at load.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalIntegration {
+    pub profiles: Vec<TerminalProfile>,
+    /// `[fyx_ui.terminal_env]` when `terminal:env` is granted.
+    pub env: Option<TerminalEnv>,
+    /// The second, stronger checkbox of §B.4 is granted too.
+    pub env_all_new: bool,
+    /// The extension's package directory, when `package:files` is declared.
+    pub package_dir: Option<PathBuf>,
+}
+
 /// §C.3: what a T3 card and the import's checks need about a terminal the extension names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct T3Target {
@@ -318,6 +331,11 @@ pub trait TerminalHost: Send + Sync + 'static {
     /// Reload, disable, uninstall, revocation: every terminal of `ext` closes, created ones with
     /// their process trees, and observing stops.
     fn close_all(&self, ext: &str);
+    /// P2.4: the extension's profiles and env, sent at load and again when a grant changes;
+    /// [`TerminalHost::close_all`] clears it.
+    fn set_integration(&self, ext: &str, integration: TerminalIntegration) {
+        let _ = (ext, integration);
+    }
     /// §C.3: the terminal behind a handle from `observe` or `list`, for a T3 card.
     fn t3_target(&self, ext: &str, handle: TerminalHandle) -> Result<T3Target, TerminalError> {
         let _ = (ext, handle);
