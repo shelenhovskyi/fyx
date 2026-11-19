@@ -9,9 +9,8 @@
 прохід на одній збірці `fyx.exe`, приблизно **24 хвилини**. Назви команд, кнопок і повідомлень
 наведено англійською, як у Fyx. Ключі, паролі та входи в акаунти вводите лише ви, ніколи не агент.
 
-**Стан аркуша:** 2026-11-19. Місця, які ще треба заповнити, позначені **«ЗАПОВНИТИ: …»**.
-Збірку надіслав гейткіпер; теки демо й пакет збирає W4. Шукайте `ЗАПОВНИТИ` у файлі: перед
-перевіркою їх не має лишитися.
+**Стан аркуша:** 2026-11-19, готовий. Збірку надіслав гейткіпер, демо й пакет зібрав W4 з того
+самого коміту.
 
 | Блок | Що | Хв |
 |---|---|---|
@@ -28,8 +27,7 @@
 ### Збірка
 
 - **Коміт:** `12f77bb234` (debug-збірка з вбудованими ресурсами).
-- **Файл:** `D:yx-builds
-f77bb234yx.exe`. Поруч лежать `conpty.dll` і `OpenConsole.exe`, їх не
+- **Файл:** `D:\fyx-builds\12f77bb234\fyx.exe`. Поруч лежать `conpty.dll` і `OpenConsole.exe`, їх не
   переносьте окремо.
 - Перевірка з кореня репозиторію (Git Bash). Кожен рядок має закінчуватися на `yes`. Рядок
   `f868421052` (клавіша Tab в огляді, W5) теж є в цій збірці.
@@ -50,12 +48,13 @@ for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-ba
 
 Нічого не збирайте самі: усе готує координатор.
 
-- **Демо:** «ЗАПОВНИТИ: теки демо, які W4 збирає з `12f77bb234`». Теки `demos-0.2\`, `demos-0.2-next\` і
-  `demos-0.3\` від 2026-11-18 **не підходять**: ABI 0.2 і 0.3 змінився після `6bc8a1c12b`
-  (`accessible-label`, менший 0.3, заморожування). Потрібні `fyx_demo_gallery`, `fyx_demo_images`,
-  `fyx_demo_charts` і `fyx_demo_t2`.
-- **Пакет:** `D:\fyx-user-check\w3\packages\fyx-demo-counter-0.1.0.fyxext`. «ЗАПОВНИТИ:
-  W4 перепаковує його з `12f77bb234`; шлях».
+- **Демо** в `D:\fyx-user-check\day2\demos\`, зібрані W4 з `12f77bb234`: `fyx_demo_gallery`
+  (`fyx:ui` 0.2, панель **Gallery 0.2**), `fyx_demo_images`, `fyx_demo_charts` і `fyx_demo_t2`
+  (0.3). Кожне проходить `fyx-ext check` на цьому коміті; що з чого зібрано, записано в
+  `D:\fyx-user-check\day2\BUILT-FROM.txt`. Старі теки `demos-0.2\`, `demos-0.2-next\` і
+  `demos-0.3\` **не беріть**: ABI 0.2 і 0.3 змінився після них.
+- **Пакет:** `D:\fyx-user-check\day2\packages\fyx-demo-counter-0.1.0.fyxext` (перепакований з
+  `12f77bb234`). Старий файл у `w3\packages\` не потрібен.
 - **Проєкт для огляду.** Створіть його заново (той самий скрипт, що в першому дні):
 
   ```powershell
@@ -78,8 +77,7 @@ for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-ba
 
    ```powershell
    Remove-Item -Recurse -Force D:\fyx-user-check\profile-2 -ErrorAction SilentlyContinue
-   $fyx = 'D:yx-builds
-f77bb234yx.exe'
+   $fyx = 'D:\fyx-builds\12f77bb234\fyx.exe'
    $prof = 'D:\fyx-user-check\profile-2'
    & $fyx --user-data-dir $prof --foreground D:\fyx-user-check\review-project
    ```
@@ -112,11 +110,11 @@ f77bb234yx.exe'
 
 | # | Що зробити | Очікується |
 |---|---|---|
-| W1 | На сторінці **Fyx Extensions** натисніть **Install Dev Extension…**. У вікні вибору теки (заголовок `Install Dev UI Extension`) оберіть теку `fyx_demo_t2` з матеріалів | Підтвердження у вікні Fyx: `Install the dev UI extension fyx-demo-t2?`, під ним `It asks for:` і перелік можливостей простими словами, потім `Component:` і `Folder:`. Кнопки **Install** і **Cancel**. Натисніть **Escape**: нічого не встановлено. Повторіть і натисніть **Install**: toast `Installed the dev UI extension fyx-demo-t2`. |
-| W2 | **Install Dev Extension…** ще для `fyx_demo_gallery`, `fyx_demo_images` і `fyx_demo_charts` | Те саме підтвердження для кожної. |
-| W3 | **Install from File…**. Вікно вибору файлу (`Install UI Extension Package`) → `fyx-demo-counter-0.1.0.fyxext` | Підтвердження `Install fyx-demo-counter 0.1.0?` з можливостями і шляхом до файлу. **Install** → toast `Installed fyx-demo-counter 0.1.0`, панель Counter у доку. |
+| W1 | На сторінці **Fyx Extensions** натисніть **Install Dev Extension…**. У вікні вибору теки (заголовок `Install Dev UI Extension`) оберіть `D:\fyx-user-check\day2\demos\fyx_demo_t2` | Підтвердження у вікні Fyx: `Install the dev UI extension fyx-demo-t2?`, під ним `It asks for:` і перелік можливостей простими словами, потім `Component:` і `Folder:`. Кнопки **Install** і **Cancel**. Натисніть **Escape**: нічого не встановлено. Повторіть і натисніть **Install**: toast `Installed the dev UI extension fyx-demo-t2`. |
+| W2 | **Install Dev Extension…** ще для `fyx_demo_gallery`, `fyx_demo_images` і `fyx_demo_charts` з тієї самої теки `day2\demos\` | Те саме підтвердження для кожної. |
+| W3 | **Install from File…**. Вікно вибору файлу (`Install UI Extension Package`) → `D:\fyx-user-check\day2\packages\fyx-demo-counter-0.1.0.fyxext` | Підтвердження `Install fyx-demo-counter 0.1.0?` з можливостями і шляхом до файлу. **Install** → toast `Installed fyx-demo-counter 0.1.0`, панель Counter у доку. |
 | W4 | Палітра команд → `fyx_ui: open extension panel` | Список `Open which extension panel?` з полем `Type to filter…`. Наберіть `cha`: лишається **Charts**. **Enter** відкриває панель. Наберіть щось без збігів: `No match`. |
-| W5 | Відкрийте панелі **Gallery 0.2** (або **Gallery**, залежно від збірки демо), **Images** і **Charts**. Лише подивіться | Чи виглядають картинки, діаграма й sparkline охайно, у кольорах теми, без миготіння? |
+| W5 | Відкрийте панелі **Gallery 0.2**, **Images** і **Charts**. Лише подивіться | Чи виглядають картинки, діаграма й sparkline охайно, у кольорах теми, без миготіння? |
 | W6 | Поставте курсор у `a.txt`. Панель **T2 capabilities** → **Request fetch**. Одразу, менш ніж за секунду, натисніть **Allow**. Потім спробуйте **Enter** і **Escape** | Картка в стосі сповіщень, а не діалог посеред екрана: `Allow T2 capabilities demo to connect to the internet?`. Курсор лишається в `a.txt`. Перша секунда кліки по **Allow** не діють. Enter і Escape картку не закривають і нічого не відповідають. Після секунди **Allow** спрацьовує, на панелі `Permission: allowed`. |
 
 | Крок | Що | Так / ні, враження |
