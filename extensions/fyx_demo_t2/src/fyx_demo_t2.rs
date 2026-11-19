@@ -68,9 +68,7 @@ mod t2 {
                 Known::Untrusted => match capability {
                     T2Capability::ProcessSpawn => "Trust this project to use git",
                     T2Capability::WorkspaceEdit => "Trust this project to edit its files",
-                    T2Capability::NetworkFetch | T2Capability::AgentObserve => {
-                        "Trust this project to use this"
-                    }
+                    _ => "Trust this project to use this",
                 },
                 Known::NoWorktree => "Open a folder to use this",
             }
@@ -256,6 +254,8 @@ mod t2 {
                 T2Capability::ProcessSpawn => self.process_state,
                 T2Capability::WorkspaceEdit => self.edit_state,
                 T2Capability::AgentObserve => self.agent_state,
+                #[cfg(feature = "fyx-ui-0-4")]
+                _ => Known::NotDeclared,
             }
         }
 
@@ -265,6 +265,8 @@ mod t2 {
                 T2Capability::ProcessSpawn => self.process_state = known,
                 T2Capability::WorkspaceEdit => self.edit_state = known,
                 T2Capability::AgentObserve => self.agent_state = known,
+                #[cfg(feature = "fyx-ui-0-4")]
+                _ => {}
             }
         }
 
@@ -750,8 +752,14 @@ mod t2 {
                                 self.observing = false;
                             }
                         }
+                        // 0.4's T2 capabilities: this demo declares none of them.
+                        #[cfg(feature = "fyx-ui-0-4")]
+                        _ => {}
                     }
                 }
+                // 0.4's events (terminals, listeners, ...): this demo asks for none of them.
+                #[cfg(feature = "fyx-ui-0-4")]
+                _ => {}
             }
             if self.nodes.is_none() {
                 return Ok(());

@@ -441,7 +441,7 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
         model::IconRef::Upstream(name) => name.len(),
     };
     match props {
-        model::Props::Flex(_) | model::Props::List(_) => 0,
+        model::Props::Flex(_) | model::Props::List(_) | model::Props::Terminal(_) => 0,
         model::Props::Text(props) => props.content.len(),
         model::Props::Button(props) => {
             props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
@@ -768,17 +768,15 @@ impl Bindings {
             .map(|()| rows)
         })
         .and_then(|rows| {
-            match rows.iter().flat_map(|row| &row.nodes).find(|node| {
-                matches!(node.props, model::Props::Canvas(_))
-                    || v0_4::terminal_node_handle(&node.props).is_some()
-            }) {
-                Some(node) if matches!(node.props, model::Props::Canvas(_)) => {
-                    Err(ui_ext::TreeError::CanvasInRow(node.id).to_string())
-                }
-                Some(node) => Err(format!(
-                    "node {}: a terminal cannot be in a list row",
-                    node.id
-                )),
+            match rows
+                .iter()
+                .flat_map(|row| &row.nodes)
+                .find_map(|node| match node.props {
+                    model::Props::Canvas(_) => Some(ui_ext::TreeError::CanvasInRow(node.id)),
+                    model::Props::Terminal(_) => Some(ui_ext::TreeError::TerminalInRow(node.id)),
+                    _ => None,
+                }) {
+                Some(error) => Err(error.to_string()),
                 None => Ok(rows),
             }
         }))
@@ -1283,6 +1281,15 @@ impl Harness {
                 .with_context(|| format!("[[fyx_ui.terminal_programs]] in {manifest_path:?}"))?;
             harness = harness.with_terminal_programs(programs);
         }
+        if let Some(profiles) = table.get("terminal_profiles") {
+            let profiles: Vec<ui_ext::terminal::TerminalProfileSpec> = profiles
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.terminal_profiles]] in {manifest_path:?}"))?;
+            harness = harness
+                .with_terminal_profiles(profiles)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
         Ok(harness)
@@ -1470,11 +1477,127 @@ impl Harness {
     ) -> Self {
         let state = self.store.data_mut();
         let capabilities = state.api.capabilities().to_vec();
-        state.terminals = terminals::FakeTerminals::new(&capabilities, programs);
+        state.terminals.set_programs(&capabilities, programs);
         self
     }
 
-    /// One of the extension's 0.4 terminals (pseudo or created), while it is open.
+    /// The profiles the user can start from "+", as `[[fyx_ui.terminal_profiles]]` declares
+    /// them (design.md B.1), with the host's checks: `terminal:profiles` is declared, the
+    /// entries pass `ui_ext::terminal::check_profiles`, and `${package}` needs `package:files`.
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn with_terminal_profiles(
+        mut self,
+        profiles: Vec<ui_ext::terminal::TerminalProfileSpec>,
+    ) -> Result<Self> {
+        let profiles =
+            ui_ext::terminal::check_profiles(profiles).map_err(|error| anyhow::anyhow!(error))?;
+        let state = self.store.data_mut();
+        let declares = |capability: &str| {
+            state
+                .api
+                .capabilities()
+                .iter()
+                .any(|name| name == capability)
+        };
+        if !profiles.is_empty() && !declares(ui_ext::terminal::CAPABILITY_PROFILES) {
+            anyhow::bail!(
+                "[[fyx_ui.terminal_profiles]] needs the {} capability",
+                ui_ext::terminal::CAPABILITY_PROFILES
+            );
+        }
+        if profiles
+            .iter()
+            .any(|profile| profile.args.iter().any(|arg| arg.uses_package()))
+            && !declares(ui_ext::terminal::CAPABILITY_PACKAGE_FILES)
+        {
+            anyhow::bail!(
+                "${{package}} in a terminal profile needs the {} capability",
+                ui_ext::terminal::CAPABILITY_PACKAGE_FILES
+            );
+        }
+        state.terminals.set_profiles(profiles);
+        Ok(self)
+    }
+
+    /// The checked `[[fyx_ui.terminal_profiles]]`, in manifest order.
+    pub fn terminal_profiles(&self) -> Vec<ui_ext::terminal::TerminalProfile> {
+        self.store.data().terminals.profiles().to_vec()
+    }
+
+    /// The command line the host would start for profile `id`: `${package}` is the package
+    /// folder ([`Harness::load_package`]'s, or `<package>` for a harness loaded from bytes) and
+    /// `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the
+    /// host does.
+    pub fn profile_command_line(&self, id: &str) -> Result<(String, Vec<String>)> {
+        struct Cx(String);
+        impl ui_ext::terminal::TemplateContext for Cx {
+            fn package(&self) -> Option<String> {
+                Some(self.0.clone())
+            }
+            fn listen_port(&self, _: &str) -> Option<u16> {
+                None
+            }
+            fn listen_token(&self, _: &str) -> Option<String> {
+                None
+            }
+            fn relay(&self) -> Option<String> {
+                Some("fyx-relay".into())
+            }
+            fn account_dir(&self, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let profiles = self.store.data().terminals.profiles();
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .with_context(|| format!("{id:?} is not in [[fyx_ui.terminal_profiles]]"))?;
+        let cx = Cx(self.package.as_ref().map_or_else(
+            || "<package>".to_owned(),
+            |dir| dir.to_string_lossy().replace('\\', "/"),
+        ));
+        let args = profile
+            .args
+            .iter()
+            .filter_map(|arg| arg.resolve(&cx))
+            .collect();
+        Ok((profile.program.clone(), args))
+    }
+
+    /// The user starts profile `id` from "+", with account profile `account` when the profile
+    /// has an `account_tool` (design.md C.6; the extension sees only its name). With
+    /// `terminal:observe`, [`Harness::deliver_io`] delivers `terminal-created`. Returns the
+    /// extension's handle for it.
+    pub fn open_profile(&mut self, id: &str, account: Option<&str>) -> Result<u64> {
+        let command = self.profile_command_line(id)?;
+        self.store
+            .data_mut()
+            .terminals
+            .open_profile(id, command, account.map(str::to_owned))
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The user closes a profile terminal; with `terminal:observe`, [`Harness::deliver_io`]
+    /// delivers `terminal-closed`.
+    pub fn close_profile(&mut self, handle: u64) -> Result<()> {
+        self.store
+            .data_mut()
+            .terminals
+            .close_profile(handle)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// Whether a profile terminal's program has bracketed paste on (it starts on); `paste`
+    /// is `unavailable` while it is off (design.md B.11).
+    pub fn set_bracketed_paste(&mut self, handle: u64, on: bool) -> Result<()> {
+        self.store
+            .data_mut()
+            .terminals
+            .set_bracketed_paste(handle, on)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// One of the extension's 0.4 terminals (pseudo, created or profile), while it is open.
     pub fn terminal(&self, handle: u64) -> Option<&FakeTerminal> {
         self.store.data().terminals.get(handle)
     }
@@ -2667,6 +2790,11 @@ mod shim {
         match props {
             model::Props::Flex(flex) => Props::Flex(flex.clone()),
             model::Props::Text(text) => Props::Text(text.clone()),
+            // 0.4 only; named as the host's 0.1 shim names it.
+            model::Props::Terminal(terminal) => Props::Text(ui_ext::TextProps {
+                content: format!("[terminal {}]", terminal.handle),
+                ..ui_ext::TextProps::default()
+            }),
             model::Props::Button(button) => Props::Button(ui_ext::ButtonProps {
                 label: button.label.clone(),
                 icon: button.icon.as_ref().map(icon),

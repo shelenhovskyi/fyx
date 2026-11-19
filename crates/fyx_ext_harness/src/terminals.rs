@@ -8,6 +8,11 @@
 //!   `[[fyx_ui.terminal_programs]]` entry and the arguments fit its patterns. Its fake program
 //!   echoes: every `send-input` comes back as `terminal-output`, as from a pty in cooked mode.
 //!   [`crate::Harness::exit_terminal`] ends it.
+//! - A **profile terminal** is one the user starts from a `[[fyx_ui.terminal_profiles]]` entry
+//!   in "+" ([`crate::Harness::open_profile`], design.md B.1). It belongs to the user: the
+//!   extension sees it in `list` and `terminal-created` (with `terminal:observe`), may set its
+//!   status and paste into it while its program has bracketed paste on
+//!   ([`crate::Harness::set_bracketed_paste`]), and never reads or writes it.
 //! - Status, `list` (with `terminal:observe`) and `paste` work on the extension's own terminals;
 //!   the T3 requests are `unavailable`, as no terminal of the user's exists here.
 
@@ -17,7 +22,7 @@ use ui_ext::process::args_match;
 use ui_ext::terminal::{
     self as model_terminal, CAPABILITY_CREATE, CAPABILITY_OBSERVE, CAPABILITY_PSEUDO,
     MAX_CREATED_TERMINALS, MAX_PASTE_BYTES, MAX_SEND_INPUT_BYTES, MAX_WRITE_OUTPUT_BYTES,
-    PseudoRequest, TerminalEvent, TerminalHandle, TerminalInfo, TerminalOrigin,
+    PseudoRequest, TerminalEvent, TerminalHandle, TerminalInfo, TerminalOrigin, TerminalProfile,
     TerminalProgramSpec, TerminalStatus,
 };
 use ui_ext::v0_2::{HostError, HostErrorCode};
@@ -38,8 +43,15 @@ pub struct FakeTerminal {
     pub in_panel: bool,
     /// Pseudo: every byte the extension wrote. Created: every byte the program printed.
     pub output: Vec<u8>,
-    /// Created: the program and arguments it runs.
+    /// Created and profile: the program and arguments it runs (a profile's with `${package}`
+    /// and `${relay}` resolved).
     pub command: Option<(String, Vec<String>)>,
+    /// Profile: the `[[fyx_ui.terminal_profiles]]` id it was started from.
+    pub profile: Option<String>,
+    /// Profile: the account profile's name the user picked (design.md C.6), never its path.
+    pub account: Option<String>,
+    /// Profile: whether its program has bracketed paste on, which `paste` needs. Starts on.
+    pub bracketed_paste: bool,
     pub status: Option<TerminalStatus>,
     /// Text pasted into it, in order.
     pub pasted: Vec<String>,
@@ -50,6 +62,23 @@ pub struct FakeTerminal {
 }
 
 impl FakeTerminal {
+    fn blank(origin: TerminalOrigin) -> Self {
+        Self {
+            origin,
+            title: String::new(),
+            in_panel: false,
+            output: Vec::new(),
+            command: None,
+            profile: None,
+            account: None,
+            bracketed_paste: false,
+            status: None,
+            pasted: Vec::new(),
+            size: None,
+            exited: false,
+        }
+    }
+
     /// [`Self::output`] as text without escape sequences: CSI, OSC and other `ESC` sequences are
     /// dropped, `\r` too, and the rest decoded lossily. Enough to assert what a TUI drew.
     pub fn plain_output(&self) -> String {
@@ -108,6 +137,7 @@ pub fn plain_text(bytes: &[u8]) -> String {
 pub(crate) struct FakeTerminals {
     capabilities: Vec<String>,
     programs: Vec<TerminalProgramSpec>,
+    profiles: Vec<TerminalProfile>,
     next_handle: u64,
     terminals: BTreeMap<u64, FakeTerminal>,
     /// For `handle-io`, oldest first.
@@ -121,6 +151,24 @@ impl FakeTerminals {
             programs,
             ..Self::default()
         }
+    }
+
+    /// The capabilities and `[[fyx_ui.terminal_programs]]`, keeping the profiles and terminals.
+    pub(crate) fn set_programs(
+        &mut self,
+        capabilities: &[String],
+        programs: Vec<TerminalProgramSpec>,
+    ) {
+        self.capabilities = capabilities.to_vec();
+        self.programs = programs;
+    }
+
+    pub(crate) fn set_profiles(&mut self, profiles: Vec<TerminalProfile>) {
+        self.profiles = profiles;
+    }
+
+    pub(crate) fn profiles(&self) -> &[TerminalProfile] {
+        &self.profiles
     }
 
     fn declares(&self, capability: &str) -> bool {
@@ -164,15 +212,10 @@ impl FakeTerminals {
         self.require(CAPABILITY_PSEUDO)?;
         request.check()?;
         Ok(self.add(FakeTerminal {
-            origin: TerminalOrigin::Pseudo,
             title: request.title,
             in_panel: request.in_panel,
-            output: Vec::new(),
-            command: None,
-            status: None,
-            pasted: Vec::new(),
             size: request.cols.zip(request.rows),
-            exited: false,
+            ..FakeTerminal::blank(TerminalOrigin::Pseudo)
         }))
     }
 
@@ -242,16 +285,81 @@ impl FakeTerminals {
         }
         let title = title.unwrap_or_else(|| spec.name.clone());
         Ok(self.add(FakeTerminal {
-            origin: TerminalOrigin::Created,
             title,
-            in_panel: false,
-            output: Vec::new(),
             command: Some((spec.name.clone(), args)),
-            status: None,
-            pasted: Vec::new(),
-            size: None,
-            exited: false,
+            ..FakeTerminal::blank(TerminalOrigin::Created)
         }))
+    }
+
+    /// The user starts profile `id` from "+" (design.md B.1), with the command line the host
+    /// resolved. With `terminal:observe` the extension gets `terminal-created`.
+    pub(crate) fn open_profile(
+        &mut self,
+        id: &str,
+        command: (String, Vec<String>),
+        account: Option<String>,
+    ) -> Result<u64, HostError> {
+        let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+            return Err(error(
+                HostErrorCode::InvalidArgument,
+                format!("{id:?} is not in [[fyx_ui.terminal_profiles]]"),
+            ));
+        };
+        if account.is_some() && profile.account_tool.is_none() {
+            return Err(error(
+                HostErrorCode::InvalidArgument,
+                format!("profile {id:?} has no account_tool, so no account profile is picked"),
+            ));
+        }
+        let title = profile.name.clone();
+        let handle = self.add(FakeTerminal {
+            title,
+            command: Some(command),
+            profile: Some(id.to_owned()),
+            account,
+            bracketed_paste: true,
+            ..FakeTerminal::blank(TerminalOrigin::Profile)
+        });
+        if self.declares(CAPABILITY_OBSERVE)
+            && let Some(info) = self.info(handle)
+        {
+            self.events.push_back(TerminalEvent::Created(info));
+        }
+        Ok(handle)
+    }
+
+    /// The user closes a profile terminal; with `terminal:observe` the extension gets
+    /// `terminal-closed`.
+    pub(crate) fn close_profile(&mut self, handle: u64) -> Result<(), HostError> {
+        if self.own(handle)?.origin != TerminalOrigin::Profile {
+            return Err(error(
+                HostErrorCode::InvalidArgument,
+                "only a profile terminal is the user's to close",
+            ));
+        }
+        self.close(handle);
+        if self.declares(CAPABILITY_OBSERVE) {
+            self.events
+                .push_back(TerminalEvent::Closed(TerminalHandle(handle)));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_bracketed_paste(&mut self, handle: u64, on: bool) -> Result<(), HostError> {
+        self.own(handle)?.bracketed_paste = on;
+        Ok(())
+    }
+
+    fn info(&self, handle: u64) -> Option<TerminalInfo> {
+        let terminal = self.terminals.get(&handle)?;
+        Some(TerminalInfo {
+            handle: TerminalHandle(handle),
+            origin: terminal.origin,
+            title: terminal.title.clone(),
+            cwd: None,
+            status: terminal.status.clone(),
+            account: terminal.account.clone(),
+        })
     }
 
     /// The fake program echoes what it is sent.
@@ -298,7 +406,15 @@ impl FakeTerminals {
         if let Some(status) = &status {
             status.check()?;
         }
-        self.own(handle)?.status = status;
+        let terminal = self.own(handle)?;
+        terminal.status = status;
+        let profile = terminal.origin == TerminalOrigin::Profile;
+        if profile
+            && self.declares(CAPABILITY_OBSERVE)
+            && let Some(info) = self.info(handle)
+        {
+            self.events.push_back(TerminalEvent::StatusChanged(info));
+        }
         Ok(())
     }
 
@@ -306,15 +422,8 @@ impl FakeTerminals {
         self.require(CAPABILITY_OBSERVE)?;
         Ok(self
             .terminals
-            .iter()
-            .map(|(handle, terminal)| TerminalInfo {
-                handle: TerminalHandle(*handle),
-                origin: terminal.origin,
-                title: terminal.title.clone(),
-                cwd: None,
-                status: terminal.status.clone(),
-                account: None,
-            })
+            .keys()
+            .filter_map(|handle| self.info(*handle))
             .collect())
     }
 
@@ -325,7 +434,14 @@ impl FakeTerminals {
                 format!("paste takes at most {MAX_PASTE_BYTES} bytes"),
             ));
         }
-        self.own(handle)?.pasted.push(text);
+        let terminal = self.own(handle)?;
+        if terminal.origin == TerminalOrigin::Profile && !terminal.bracketed_paste {
+            return Err(error(
+                HostErrorCode::Unavailable,
+                "the terminal's program has bracketed paste off, so a newline would run a command",
+            ));
+        }
+        terminal.pasted.push(text);
         Ok(())
     }
 
@@ -377,6 +493,11 @@ impl FakeTerminals {
                     "a terminal node names {handle}, which is not one of this extension's terminals"
                 ));
             };
+            if terminal.origin == TerminalOrigin::Profile {
+                return Err(format!(
+                    "a terminal node names profile terminal {handle}, which is the user's tab"
+                ));
+            }
             if terminal.origin == TerminalOrigin::Pseudo && !terminal.in_panel {
                 return Err(format!(
                     "a terminal node names pseudo-terminal {handle}, which was opened as a tab; \
@@ -490,5 +611,77 @@ mod tests {
         terminals.close(handle);
         assert!(terminals.events.is_empty());
         assert!(terminals.write_output(handle, b"x").is_err());
+    }
+
+    #[test]
+    fn profile_terminals_are_the_users() {
+        let mut terminals = terminals();
+        terminals.set_profiles(
+            model_terminal::check_profiles(vec![model_terminal::TerminalProfileSpec {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                icon: None,
+                program: "claude".into(),
+                path: None,
+                args: Vec::new(),
+                cwd: model_terminal::ProfileCwd::Worktree,
+                account_tool: Some("claude".into()),
+            }])
+            .unwrap(),
+        );
+        let command = ("claude".to_owned(), Vec::new());
+        let handle = terminals
+            .open_profile("claude", command.clone(), Some("Work".into()))
+            .unwrap();
+        assert!(terminals.open_profile("other", command, None).is_err());
+        // With terminal:observe: terminal-created, with the account's name.
+        let Some(TerminalEvent::Created(info)) = terminals.events.pop_front() else {
+            panic!("terminal-created");
+        };
+        assert_eq!(info.origin, TerminalOrigin::Profile);
+        assert_eq!(info.account.as_deref(), Some("Work"));
+        assert_eq!(
+            terminals.list().unwrap()[0].account.as_deref(),
+            Some("Work")
+        );
+
+        // Status and paste, never output or input; no terminal node.
+        terminals
+            .set_status(
+                handle,
+                Some(TerminalStatus {
+                    state: model_terminal::StatusState::Blocked,
+                    label: "Waiting".into(),
+                    detail: None,
+                    progress: None,
+                    attention: true,
+                }),
+            )
+            .unwrap();
+        assert!(matches!(
+            terminals.events.pop_front(),
+            Some(TerminalEvent::StatusChanged(_))
+        ));
+        terminals
+            .paste(handle, "@src/main.rs#L5-10 ".into())
+            .unwrap();
+        terminals.set_bracketed_paste(handle, false).unwrap();
+        let refused = terminals.paste(handle, "ls\n".into()).unwrap_err();
+        assert_eq!(refused.code, HostErrorCode::Unavailable);
+        assert_eq!(
+            terminals.get(handle).unwrap().pasted,
+            ["@src/main.rs#L5-10 "]
+        );
+        assert!(terminals.write_output(handle, b"x").is_err());
+        assert!(terminals.send_input(handle, b"x").is_err());
+        assert!(terminals.type_into(handle, b"x").is_err());
+        assert!(terminals.check_nodes(&[handle]).is_err());
+
+        terminals.close_profile(handle).unwrap();
+        assert!(matches!(
+            terminals.events.pop_front(),
+            Some(TerminalEvent::Closed(TerminalHandle(closed))) if closed == handle
+        ));
+        assert!(terminals.get(handle).is_none());
     }
 }

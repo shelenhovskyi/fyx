@@ -274,6 +274,9 @@ pub struct Manifest {
     pub api_version: Option<Version>,
     pub component: String,
     pub capabilities: Vec<String>,
+    /// The top-level files and folders that `${package}/...` names in profile args and
+    /// `[fyx_ui.terminal_env]` values (design B.6), which `fyx-ext package` packs.
+    pub package_files: Vec<String>,
 }
 
 impl Manifest {
@@ -425,6 +428,7 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
     check_network(&table, report);
     check_processes(&table, report);
     check_terminals(&table, report);
+    let package_files = check_package_files(dir, &table, report);
 
     Ok(Manifest {
         dir: dir.to_path_buf(),
@@ -433,7 +437,77 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
         api_version,
         component: table.component,
         capabilities: table.capabilities,
+        package_files,
     })
+}
+
+/// The values that may hold `${package}`: profile args and `[fyx_ui.terminal_env]` values.
+fn package_templates(table: &FyxUiTable) -> impl Iterator<Item = &str> {
+    let args = table
+        .terminal_profiles
+        .iter()
+        .flat_map(|profile| profile.args.iter());
+    let env = table.terminal_env.iter().flat_map(|env| env.vars.values());
+    args.chain(env).map(String::as_str)
+}
+
+/// `${package}` and `package:files` (design B.6): the placeholder needs the capability, the
+/// capability is useless without it, and every `${package}/<path>` names a file or folder in the
+/// extension, which is then packed. Returns the top-level names to pack.
+fn check_package_files(dir: &Path, table: &FyxUiTable, report: &mut Report) -> Vec<String> {
+    const PLACEHOLDER: &str = "${package}";
+    let declares = table
+        .capabilities
+        .iter()
+        .any(|name| name == terminal::CAPABILITY_PACKAGE_FILES);
+    let mut uses = false;
+    let mut top_level = std::collections::BTreeSet::new();
+    for value in package_templates(table) {
+        for (at, _) in value.match_indices(PLACEHOLDER) {
+            uses = true;
+            let rest = &value[at + PLACEHOLDER.len()..];
+            let Some(path) = rest.strip_prefix('/') else {
+                continue;
+            };
+            let path = path
+                .split(|c: char| c.is_whitespace() || c == '$')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('/');
+            if path.is_empty() {
+                continue;
+            }
+            let Some(normalized) = normalized_relative(path) else {
+                report.error(format!(
+                    "{value:?}: {PLACEHOLDER}/{path} is not a plain path inside the extension"
+                ));
+                continue;
+            };
+            if std::fs::symlink_metadata(dir.join(&normalized)).is_err() {
+                report.error(format!(
+                    "{value:?}: {PLACEHOLDER}/{normalized} is not in the extension folder, so the \
+                     installed extension would point at nothing"
+                ));
+                continue;
+            }
+            if let Some(first) = normalized.split('/').next() {
+                top_level.insert(first.to_owned());
+            }
+        }
+    }
+    match (uses, declares) {
+        (true, false) => report.error(format!(
+            "{PLACEHOLDER} needs {:?} in [fyx_ui].capabilities",
+            terminal::CAPABILITY_PACKAGE_FILES
+        )),
+        (false, true) => report.warning(format!(
+            "capability {:?} grants nothing without {PLACEHOLDER} in a terminal profile's args or \
+             [fyx_ui].terminal_env",
+            terminal::CAPABILITY_PACKAGE_FILES
+        )),
+        _ => {}
+    }
+    top_level.into_iter().collect()
 }
 
 /// Each world's tables only from that world on, as the host's `UiManifest::check_world`.
@@ -939,6 +1013,65 @@ capabilities = ["ui:panel"]
         let (_, report) = check(&manifest("0.4.0", ", \"terminal:read\"", ""));
         assert!(
             report.errors[0].contains("\"terminal:read\" is not in fyx:ui 0.4.0"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn package_placeholders_need_package_files_and_name_real_paths() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("mkdir");
+        std::fs::write(dir.path().join("scripts/welcome.py"), "").expect("script");
+        let manifest = |capabilities: &str, args: &str| {
+            VALID
+                .replace("api_version = \"0.1.0\"", "api_version = \"0.4.0\"")
+                .replace(
+                    "[\"ui:panel\"]",
+                    &format!("[\"ui:panel\", \"terminal:profiles\"{capabilities}]"),
+                )
+                + &format!(
+                    "\n[[fyx_ui.terminal_profiles]]\nid = \"py\"\nname = \"Py\"\n\
+                     program = \"python\"\nargs = {args}\n"
+                )
+        };
+        let check = |text: &str| {
+            let mut report = Report::default();
+            let manifest = parse(dir.path(), text, &mut report).expect("parses");
+            (manifest, report)
+        };
+        let staged = |report: &Report| {
+            report
+                .warnings
+                .iter()
+                .filter(|warning| !warning.contains("is staged"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let (parsed, report) = check(&manifest(
+            ", \"package:files\"",
+            "[\"-i\", \"${package}/scripts/welcome.py\"]",
+        ));
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(staged(&report).is_empty(), "{report:?}");
+        assert_eq!(parsed.package_files, ["scripts"]);
+
+        let (_, report) = check(&manifest("", "[\"${package}/scripts/welcome.py\"]"));
+        assert!(
+            report.errors[0].contains("${package} needs \"package:files\""),
+            "{report:?}"
+        );
+
+        let (_, report) = check(&manifest(", \"package:files\"", "[\"${package}/gone.py\"]"));
+        assert!(
+            report.errors[0].contains("${package}/gone.py is not in the extension folder"),
+            "{report:?}"
+        );
+
+        let (_, report) = check(&manifest(", \"package:files\"", "[\"-i\"]"));
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(
+            staged(&report)[0].contains("\"package:files\" grants nothing"),
             "{report:?}"
         );
     }

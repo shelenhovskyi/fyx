@@ -1,0 +1,26 @@
+[package]
+name = "fyx_demo_terminal_profiles"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_demo_terminal_profiles.rs"
+crate-type = ["cdylib"]
+test = true
+doctest = false
+
+[features]
+# The profiles are a fyx:ui 0.4 manifest table, so the demo is built for 0.4
+# (`script/fyx-build-demos --fyx-ui-0-4`). The panel itself uses no 0.4 import, so the other
+# worlds build too. The newest world wins when several are on.
+fyx-ui-0-2 = []
+fyx-ui-0-3 = ["ui_ext_sdk/fyx-ui-0-3"]
+fyx-ui-0-4 = ["fyx-ui-0-3", "ui_ext_sdk/fyx-ui-0-4"]
+
+[dependencies]
+ui_ext_sdk.workspace = true
