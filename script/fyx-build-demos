@@ -18,7 +18,9 @@
 # Each world takes its own capabilities (the host's `UiManifest::check_world`). A manifest line
 # `# fyx-ui-0-2: capabilities = [...]` replaces the `capabilities` line in the 0.2 and later
 # copies, `# fyx-ui-0-3: ...` in the 0.3 and 0.4 copies, and `# fyx-ui-0-4: ...` in the 0.4 copy;
-# the repository's manifest stays the 0.1 one.
+# the repository's manifest stays the 0.1 one. Any other `# fyx-ui-0-N: <line>` becomes <line>,
+# in place, in the 0.N and later copies: a key only newer worlds accept, such as the `reason` that
+# 0.4 requires on `[fyx_ui.network]` and `[[fyx_ui.processes]]`.
 #
 # Then point the dev build at the directories it prints, e.g. on Windows:
 #   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;...
@@ -85,7 +87,8 @@ fi
 cargo build --target wasm32-wasip2 "${cargo_args[@]}" "$@"
 
 # The manifest for one world: the newest `# fyx-ui-0-N: capabilities = ...` line for N up to
-# that world, in place of the `capabilities` line. Without one the manifest is copied as it is.
+# that world, in place of the `capabilities` line, and the other markers up to that world as
+# plain lines.
 world_manifest() {
     local manifest=$1 world=$2 markers line
     case "$world" in
@@ -98,12 +101,17 @@ world_manifest() {
         line=$(sed -n "s/^# $marker: \(capabilities = .*\)\$/\1/p" "$manifest")
         if [[ -n "$line" ]]; then break; fi
     done
-    if [[ -z "$line" ]]; then
-        cat "$manifest"
-        return
-    fi
-    awk -v line="$line" '/^capabilities = / { print line; next } /^# fyx-ui-0-[0-9]+: / { next } { print }' \
-        "$manifest"
+    # `0_4` -> 4. A `# fyx-ui-0-N: <line>` marker that is not a capabilities line is kept as
+    # <line> when N is at most the world built; without markers the manifest is copied as it is.
+    awk -v line="$line" -v world="${world#0_}" '
+        /^capabilities = / && line != "" { print line; next }
+        /^# fyx-ui-0-[0-9]+: / {
+            minor = $0; sub(/^# fyx-ui-0-/, "", minor); sub(/:.*/, "", minor)
+            text = $0; sub(/^# fyx-ui-0-[0-9]+: /, "", text)
+            if (text !~ /^capabilities = / && minor + 0 <= world + 0) print text
+            next
+        }
+        { print }' "$manifest"
 }
 
 separator=":"
