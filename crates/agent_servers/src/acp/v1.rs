@@ -1603,7 +1603,15 @@ impl AgentConnection for AcpConnection {
                 cx,
             )),
             acp_v2::AuthMethod::Agent(_) => meta_terminal_auth_task(&self.id, method_id, method)
-                .map(|task| Task::ready(Ok(task))),
+                .map(|mut task| {
+                    crate::fyx::add_login_env(
+                        &self.id,
+                        &self.agent_server_store,
+                        &mut task.env,
+                        cx,
+                    ); // fyx: sign in with the agent's account
+                    Task::ready(Ok(task))
+                }),
             _ => None,
         }
     }

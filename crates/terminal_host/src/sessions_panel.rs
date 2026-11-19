@@ -110,6 +110,7 @@ impl Render for AgentSessionsPanel {
                 .gap_0p5()
                 .children(rows.into_iter().enumerate().map(|(index, (view, status))| {
                     let terminal_title = view.read(cx).terminal().read(cx).title(true);
+                    let accounts = view.read(cx).terminal().read(cx).fyx.accounts();
                     let (title, meta) = tooltip_text(&status);
                     let icon = status_icon(&status).unwrap_or_else(|| {
                         Icon::new(IconName::Terminal)
@@ -136,6 +137,11 @@ impl Render for AgentSessionsPanel {
                                     h_flex()
                                         .gap_1()
                                         .child(Label::new(terminal_title).single_line().truncate())
+                                        .children(
+                                            accounts
+                                                .iter()
+                                                .map(|account| crate::accounts::badge(account, cx)),
+                                        )
                                         .when(status.attention, |this| {
                                             this.child(Indicator::dot().color(Color::Accent))
                                         }),

@@ -1,0 +1,119 @@
+id = "fyx-claude-code"
+name = "Claude Code"
+description = "Runs Claude Code in Fyx's terminal and connects it to the editor: open files, diagnostics, selections, and edits shown hunk by hunk in agent review (fyx:ui 0.4 only)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Plan 5.15, docs/fyx/wit-0.4/design.md "The first extensions". Read by Fyx's extension host
+# (`fyx_ui::UiManifest`); upstream ignores the table. Only for the staged fyx:ui 0.4:
+# `script/fyx-build-demos --fyx-ui-0-4` builds it into <target>/fyx-demos-v0_4/fyx_claude_code/.
+#
+# The protocol facts below were read from Claude Code 2.1.326, the version the compat test pins
+# (src/compat/README.md). Claude's IDE protocol is reverse-engineered, not documented.
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+capabilities = [
+    "ui:panel",
+    # The "Claude Code" entry in the terminal panel's "+" menu (T1).
+    "terminal:profiles",
+    # `${package}/claude-plugin` in CLAUDE_CODE_PLUGIN_DIRS (T0).
+    "package:files",
+    # CLAUDE_CODE_SSE_PORT, ENABLE_IDE_INTEGRATION and CLAUDE_CODE_PLUGIN_DIRS (T2).
+    "terminal:env",
+    # The IDE's MCP server that Claude connects to (T2).
+    "network:listen",
+    # `<account>/ide/<port>.lock`, how Claude finds that server (T2).
+    "fs:discovery-file",
+    # The plugin's hooks, through `fyx-relay` (T2).
+    "relay:hooks",
+    # `openDiff` becomes a blocking proposal in agent review; prompts and stops are turns (T1).
+    "review:propose",
+    # `selection_changed` and `at_mentioned` come from the editor's selection.
+    "context:editor",
+    # `openFile`.
+    "workspace:open",
+]
+
+# Claude Code reads CLAUDE_CODE_SSE_PORT and finds the lock file in the account's config dir.
+# Its terminal belongs to the user: the extension cannot read it or type into it.
+[[fyx_ui.terminal_profiles]]
+id = "claude"
+name = "Claude Code"
+icon = "sparkle"
+program = "claude"
+args = ["--ide"]
+cwd = "worktree"
+# The user picks the account (config dir) for each terminal; the extension never sees its path.
+account_tool = "claude"
+
+# Profile terminals only by default; "all-new" would ask for the stronger checkbox.
+[fyx_ui.terminal_env]
+vars = { CLAUDE_CODE_SSE_PORT = "${listen.ide.port}", ENABLE_IDE_INTEGRATION = "true", CLAUDE_CODE_PLUGIN_DIRS = "${package}/claude-plugin" }
+scope = "profiles"
+reason = "Tells Claude Code where Fyx's IDE server is and loads this extension's Claude plugin."
+
+# Claude connects with the WebSocket subprotocol "mcp" and sends the lock file's authToken in
+# this header.
+[[fyx_ui.listeners]]
+name = "ide"
+protocol = "mcp-websocket"
+auth = { header = "x-claude-code-ide-authorization" }
+token_in_env = false
+reason = "Lets Claude Code in your terminal open files, read diagnostics and propose edits."
+
+# Claude reads pid, workspaceFolders, ideName, transport and authToken. The newest lock file
+# whose folders contain the cwd wins.
+[[fyx_ui.discovery_files]]
+listener = "ide"
+dir = "${account.claude}/ide"
+default_dir = "~/.claude/ide"
+name = "${port}.lock"
+content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx", transport = "ws", authToken = "${token}" }
+reason = "Claude Code finds Fyx's IDE server through this file."
+
+# The plugin's hooks (claude-plugin/hooks/hooks.json). Claude 2.1.326 accepts `http` hooks only
+# with a literal URL, and the listener's port is new every run, so every hook is a command hook
+# through fyx-relay. All of them only report, so they fail open fast.
+[[fyx_ui.relay_channels]]
+name = "session-start"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Shows which Claude session runs in the terminal."
+
+[[fyx_ui.relay_channels]]
+name = "user-prompt"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Starts an agent turn when you send Claude a prompt."
+
+[[fyx_ui.relay_channels]]
+name = "pre-tool"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Shows on the tab which tool Claude is running."
+
+[[fyx_ui.relay_channels]]
+name = "post-tool"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Clears the tool from the tab when it is done."
+
+[[fyx_ui.relay_channels]]
+name = "notification"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Marks the tab when Claude waits for you, with its message."
+
+[[fyx_ui.relay_channels]]
+name = "stop"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Ends the agent turn when Claude stops, with the files it changed."
+
+[[fyx_ui.relay_channels]]
+name = "session-end"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Clears the tab when the Claude session ends."

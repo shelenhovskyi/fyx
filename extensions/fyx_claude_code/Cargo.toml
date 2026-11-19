@@ -1,0 +1,28 @@
+[package]
+name = "fyx_claude_code"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_claude_code.rs"
+crate-type = ["cdylib"]
+test = true
+doctest = false
+
+[features]
+# The manifest's tables are fyx:ui 0.4's, so the extension is built for 0.4
+# (`script/fyx-build-demos --fyx-ui-0-4`). The protocol core (`ide`, `hooks`) needs no
+# host and is tested natively, with the compat transcripts. The newest world wins when several
+# are on.
+fyx-ui-0-2 = []
+fyx-ui-0-3 = ["ui_ext_sdk/fyx-ui-0-3"]
+fyx-ui-0-4 = ["fyx-ui-0-3", "ui_ext_sdk/fyx-ui-0-4"]
+
+[dependencies]
+serde_json.workspace = true
+ui_ext_sdk.workspace = true

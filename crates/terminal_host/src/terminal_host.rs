@@ -1,9 +1,11 @@
 //! Fyx's terminal UI on top of `terminal_ext`: the status on a terminal's tab, the Agent Sessions
 //! panel and pop-up notifications, and the `ui_ext::terminal` host for extensions.
 
+mod accounts;
 mod created;
 mod host;
 mod notification;
+mod profiles;
 mod pseudo;
 mod sessions;
 mod sessions_panel;
@@ -13,6 +15,8 @@ mod tab_status;
 use gpui::App;
 use workspace::Workspace;
 
+pub use accounts::{FyxAccountsSettings, account_choice};
+pub use profiles::TerminalIntegration;
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
 pub use settings::FyxTerminalSettings;
 
@@ -83,6 +87,7 @@ fn run(command: host::Command, cx: &mut App) {
             }
         }
         host::Command::OpenCreated(open) => created::open(open, cx),
+        host::Command::Integration(ext, integration) => profiles::set(ext, integration, cx),
         host::Command::Input(id, bytes) => created::input(id, bytes, cx),
         host::Command::Paste(id, bytes) => created::paste(id, bytes, cx),
         host::Command::Close(id) => {
@@ -105,10 +110,36 @@ pub fn extension_terminal(
     pseudo::held_terminal(id, cx)
 }
 
+/// For `ui_ext_host::set_terminal_node_views`: [`extension_terminal`] in a terminal view of the
+/// window's workspace, for an extension panel's `terminal` node. The caller keeps the view while a
+/// node shows the handle.
+pub fn extension_terminal_view(
+    ext: &str,
+    handle: ui_ext::terminal::TerminalHandle,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> Option<gpui::AnyView> {
+    let terminal = extension_terminal(ext, handle, cx)?;
+    let workspace = Workspace::for_window(window, cx)?;
+    let (weak, database_id, project) = {
+        let workspace = workspace.read(cx);
+        (
+            workspace.weak_handle(),
+            workspace.database_id(),
+            workspace.project().downgrade(),
+        )
+    };
+    let view = gpui::AppContext::new(cx, |cx| {
+        terminal_view::TerminalView::new(terminal, weak, database_id, project, window, cx)
+    });
+    Some(view.into())
+}
+
 pub fn init(cx: &mut App) {
     init_host(cx);
     sessions::init(cx);
     tab_status::init(cx);
+    accounts::init(cx);
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         if let Some(window) = window {
             sessions_panel::register(workspace, window, cx);

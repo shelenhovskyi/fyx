@@ -50,7 +50,7 @@ use crate::{
     },
     store_actions::{
         Outcome, expect_load, grant_and_rescan, install_consent_and_rescan, installed_manifest,
-        installed_outcome, load_outcome, show_outcome,
+        installed_outcome, load_outcome, show_outcome, update_lines,
     },
 };
 
@@ -689,28 +689,6 @@ pub(crate) fn registry_install_notes(release: &Release, zed_extension: bool) -> 
         &release.source.commit[..release.source.commit.len().min(12)],
     ));
     notes
-}
-
-/// An update's dialog (§C.2, §C.5): the lines it adds or widens, which show unticked (an item
-/// left unticked is denied, the others keep their state), and a note on what it no longer asks
-/// for.
-pub(crate) fn update_lines(
-    before: &[crate::consent_model::ItemLine],
-    after: Vec<crate::consent_model::ItemLine>,
-) -> (Vec<crate::consent_model::ItemLine>, Option<String>) {
-    let diff = crate::consent_model::consent_diff(before, &[], &after);
-    let removed = (!diff.removed.is_empty()).then(|| {
-        let titles: Vec<&str> = diff
-            .removed
-            .iter()
-            .map(|line| line.title.as_str())
-            .collect();
-        format!("No longer asks for: {}.", titles.join("; "))
-    });
-    (
-        diff.added.into_iter().chain(diff.widened).collect(),
-        removed,
-    )
 }
 
 /// Installs `release` (a fresh install, an update, or an approved held update), after the user
@@ -1388,7 +1366,10 @@ impl FyxExtensionsPage {
                     .into_iter()
                     .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
-            .children(consent_rows(&id, self.workspace.clone(), cx))
+            .children({
+                request_journal(&id, cx);
+                consent_rows(&id, self.workspace.clone(), cx)
+            })
     }
 
     /// A dev extension or an installed folder (not the install store): where it is, "Enable"
@@ -1463,12 +1444,24 @@ impl FyxExtensionsPage {
                         .color(Color::Warning),
                 )
             })
-            .children(consent_rows(&id, self.workspace.clone(), cx))
+            .children({
+                request_journal(&id, cx);
+                consent_rows(&id, self.workspace.clone(), cx)
+            })
     }
 }
 
 /// How many journal entries the page shows, newest first.
 const JOURNAL_ROWS: usize = 20;
+
+/// Keeps the journal the page draws fresh: the registry reads it again off the main thread.
+fn request_journal(extension_id: &str, cx: &mut App) {
+    if let Some(registry) = UiExtensionRegistry::global(cx) {
+        registry.update(cx, |registry, cx| {
+            registry.request_journal(extension_id, false, cx)
+        });
+    }
+}
 
 /// The 0.4 page rows (§C.2 "Later", §C.4): every consent item with its state and a switch, then
 /// the usage journal. Turning a T2 item on asks once more with the same text and the 1 s guard;
@@ -1530,7 +1523,6 @@ fn consent_rows(
                     workspace.clone(),
                     name.clone(),
                 );
-                let lines = lines.clone();
                 this.child(
                     ui::Switch::new(
                         SharedString::from(format!("fyx-consent-{extension_id}-{index}")),
@@ -1551,8 +1543,7 @@ fn consent_rows(
                                         log::error!("fyx:ui: {error:#}");
                                     }
                                 } else {
-                                    registry
-                                        .set_consent_item(&id, &lines, &line.item, false, fs, cx)
+                                    registry.set_consent_item(&id, &line.item, false, fs, cx)
                                 }
                             });
                             return;
@@ -1569,14 +1560,12 @@ fn consent_rows(
                                 cx,
                             )
                         });
-                        let (id, registry, line, lines) =
-                            (id.clone(), registry.clone(), line.clone(), lines.clone());
+                        let (id, registry, line) = (id.clone(), registry.clone(), line.clone());
                         cx.spawn(async move |cx| {
                             if answer.await.is_ok_and(|ticked| ticked.contains(&line.item)) {
                                 cx.update(|cx| {
                                     registry.update(cx, |registry, cx| {
-                                        registry
-                                            .set_consent_item(&id, &lines, &line.item, true, fs, cx)
+                                        registry.set_consent_item(&id, &line.item, true, fs, cx)
                                     })
                                 });
                             }
@@ -1619,7 +1608,7 @@ fn consent_rows(
             .map(|entry| {
                 Label::new(format!(
                     "{}  {}",
-                    ago(now, entry.at),
+                    ago(now, crate::consent_model::entry_time(entry)),
                     journal_line(&entry.kind)
                 ))
                 .size(LabelSize::XSmall)

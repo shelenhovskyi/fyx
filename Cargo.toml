@@ -285,6 +285,8 @@ members = [
     "extensions/fyx_demo_t2", # fyx
     "extensions/fyx_demo_pseudo_terminal", # fyx
     "extensions/fyx_demo_terminal_profiles", # fyx
+    "extensions/fyx_claude_code", # fyx
+    "extensions/fyx_gemini_cli", # fyx
     "extensions/glsl",
     "extensions/html",
     "extensions/proto",

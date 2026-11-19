@@ -25,7 +25,7 @@ use ui::{
 use workspace::{ModalView, Workspace};
 
 use crate::{
-    consent_model::{ConsentItem, ConsentTier, ItemLine},
+    consent_model::{ConsentItem, ConsentTier, ItemLine, ItemLineExt as _},
     notifications::{CLICK_GUARD, ClickGuard},
 };
 
