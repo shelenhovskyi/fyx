@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Merge gate for the integration branch: nothing red gets merged.
 # Usage: script/gate.sh [base-ref]   (default base: the upstream tag in FYX_UPSTREAM)
-#        FULL=1 script/gate.sh       also builds the `zed` binary (W0 only, on a schedule)
+#        FULL=1 script/gate.sh       also builds the `zed` binary (W0 only, before a fyx/main push)
+#        FAST=1 script/gate.sh       only the crates changed since the last green fyx/main and their
+#                                    reverse dependencies (script/fyx-gate-crates); FYX_GATE_FAST_BASE
+#                                    overrides that base. tasks/W0-integrator.md says when to use which.
 # Gates only crates under crates/ and extensions/ that changed since base; never crates/collab
 # (server-only, not built by Fyx) and never docs/.
 set -euo pipefail
@@ -44,13 +47,23 @@ if [[ -d tools/fyx-extensions-template/scripts ]]; then
     fi
 fi
 
-changed_crates=$(
-    git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \
-        | awk -F/ '{print $1"/"$2"/Cargo.toml"}' | sort -u \
-        | while read -r manifest; do
-            [[ -f "$manifest" ]] && sed -n 's/^name = "\(.*\)"/\1/p' "$manifest" | head -1
-        done
-)
+if [[ "${FAST:-0}" == "1" && "${FULL:-0}" == "1" ]]; then
+    echo "gate: RED: FAST=1 and FULL=1 exclude each other"
+    exit 1
+fi
+if [[ "${FAST:-0}" == "1" ]]; then
+    fast_base="${FYX_GATE_FAST_BASE:-$(git merge-base HEAD origin/fyx/main)}"
+    echo "gate: FAST since $(git rev-parse --short=10 "$fast_base"), within the crates changed since $base"
+    changed_crates=$(python -I script/fyx-gate-crates "$fast_base" "$base")
+else
+    changed_crates=$(
+        git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \
+            | awk -F/ '{print $1"/"$2"/Cargo.toml"}' | sort -u \
+            | while read -r manifest; do
+                [[ -f "$manifest" ]] && sed -n 's/^name = "\(.*\)"/\1/p' "$manifest" | head -1
+            done
+    )
+fi
 
 if [[ -z "$changed_crates" ]]; then
     echo "gate: no crate changes since $base"
