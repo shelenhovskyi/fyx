@@ -14,11 +14,15 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use futures::{StreamExt as _, channel::mpsc};
+use futures::{
+    StreamExt as _,
+    channel::mpsc,
+    future::{AbortHandle, Abortable},
+};
 use ui_ext::{
     process::{SpawnRequest, check_spawn},
     terminal::{
-        self, CreateCommand, PseudoRequest, TemplateContext, TerminalEnv, TerminalError,
+        self, CreateCommand, PseudoRequest, ReadScope, TemplateContext, TerminalEnv, TerminalError,
         TerminalEvent, TerminalHandle, TerminalHost, TerminalOrigin, TerminalProgramSpec,
         TerminalSink, TerminalStatus,
     },
@@ -26,8 +30,12 @@ use ui_ext::{
 };
 
 use crate::{
+    journal::{Journal, JournalKind},
     network::{IoEvent, Running},
-    permissions::{CapabilityCheck, PermissionState},
+    permissions::{
+        CapabilityCheck, MAX_T3_PROMPTS_PER_EXTENSION, PermissionState, T3Answer, T3Capability,
+        T3Prompt,
+    },
     process::{self, Environment, FileRef, ProcessPolicy, Workspace},
 };
 
@@ -105,6 +113,8 @@ pub(crate) struct TerminalsHandle {
     host: Option<Arc<dyn TerminalHost>>,
     sender: mpsc::UnboundedSender<TerminalEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<TerminalEvent>>>,
+    /// T3 requests waiting for their card or the host, by id; aborted when the instance goes.
+    t3_tasks: Arc<Mutex<HashMap<u64, AbortHandle>>>,
 }
 
 impl TerminalsHandle {
@@ -115,6 +125,70 @@ impl TerminalsHandle {
             host,
             sender,
             receiver: Mutex::new(Some(receiver)),
+            t3_tasks: Arc::default(),
+        }
+    }
+
+    /// Starts the T3 requests of a call that returned (§C.3), on the current tokio runtime: the
+    /// card first (none on the extension's own terminals), then the host. A denied card, or no
+    /// broker, answers `Err("denied")`. Done reads and writes go to the journal (§C.4): a read's
+    /// size, never its text, and a write's exact text.
+    pub(crate) fn start_t3(
+        &self,
+        pending: Vec<PendingT3>,
+        broker: Option<Arc<dyn CapabilityCheck>>,
+        journal: Option<Arc<dyn Journal>>,
+    ) {
+        let Some(host) = &self.host else {
+            return;
+        };
+        for request in pending {
+            let id = request.id;
+            let (abort, registration) = AbortHandle::new_pair();
+            self.t3_tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id, abort);
+            let tasks = Arc::downgrade(&self.t3_tasks);
+            let host = host.clone();
+            let sink = self.sink();
+            let broker = broker.clone();
+            let journal = journal.clone();
+            let extension_id = self.extension_id.clone();
+            let work = async move {
+                let answer = match request.prompt.clone() {
+                    None => T3Answer::Once,
+                    Some(prompt) => match &broker {
+                        Some(broker) => broker.t3_request(&extension_id, prompt).await,
+                        None => T3Answer::Deny,
+                    },
+                };
+                if answer == T3Answer::Deny {
+                    sink(match request.op {
+                        T3Op::Read { .. } => TerminalEvent::ReadDone(id, Err("denied".into())),
+                        T3Op::Write { .. } => TerminalEvent::WriteDone(id, Err("denied".into())),
+                    });
+                    return;
+                }
+                let sink = journaled(sink, journal, extension_id.clone(), &request);
+                match request.op {
+                    T3Op::Read { scope, lines } => {
+                        host.read(&extension_id, request.handle, scope, lines, id, sink)
+                    }
+                    T3Op::Write { text, submit } => {
+                        host.write(&extension_id, request.handle, text, submit, id, sink)
+                    }
+                }
+            };
+            tokio::spawn(async move {
+                Abortable::new(work, registration).await.ok();
+                if let Some(tasks) = tasks.upgrade() {
+                    tasks
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
+                }
+            });
         }
     }
 
@@ -171,8 +245,74 @@ impl TerminalsHandle {
 
 impl Drop for TerminalsHandle {
     fn drop(&mut self) {
+        for (_, task) in self
+            .t3_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+        {
+            task.abort();
+        }
         self.close_all();
     }
+}
+
+/// What a T3 request does once allowed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum T3Op {
+    Read { scope: ReadScope, lines: u16 },
+    Write { text: String, submit: bool },
+}
+
+/// A `request-read` or `request-write` of the running call, started after it returns.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingT3 {
+    id: u64,
+    handle: TerminalHandle,
+    /// The card; `None` on the extension's own terminal.
+    prompt: Option<T3Prompt>,
+    /// The terminal as the journal names it: its title, or the extension's own handle.
+    label: String,
+    op: T3Op,
+}
+
+/// `sink`, recording what succeeded in the journal on the way.
+fn journaled(
+    sink: TerminalSink,
+    journal: Option<Arc<dyn Journal>>,
+    extension_id: Arc<str>,
+    request: &PendingT3,
+) -> TerminalSink {
+    let Some(journal) = journal else {
+        return sink;
+    };
+    let terminal = request.label.clone();
+    let op = request.op.clone();
+    Arc::new(move |event| {
+        match (&event, &op) {
+            (TerminalEvent::ReadDone(_, Ok(text)), T3Op::Read { scope, lines }) => journal.record(
+                &extension_id,
+                JournalKind::TerminalRead {
+                    terminal: terminal.clone(),
+                    scope: match scope {
+                        ReadScope::LastCommand => "last command".into(),
+                        ReadScope::LastLines => format!("last {lines} lines"),
+                    },
+                    bytes: text.len() as u64,
+                },
+            ),
+            (TerminalEvent::WriteDone(_, Ok(())), T3Op::Write { text, submit }) => journal.record(
+                &extension_id,
+                JournalKind::TerminalWrite {
+                    terminal: terminal.clone(),
+                    text: text.clone(),
+                    submit: *submit,
+                },
+            ),
+            _ => {}
+        }
+        sink(event)
+    })
 }
 
 /// The extension's own terminal, as the import knows it.
@@ -192,6 +332,10 @@ pub(crate) struct TerminalState {
     workspace: Option<Arc<dyn Workspace>>,
     environment: Environment,
     owned: HashMap<TerminalHandle, Owned>,
+    /// The ids `request-read` and `request-write` return, never reused within one load.
+    next_t3_id: u64,
+    /// The running call's T3 requests.
+    pending_t3: Vec<PendingT3>,
 }
 
 impl TerminalState {
@@ -209,6 +353,8 @@ impl TerminalState {
             workspace,
             environment: environment.unwrap_or_else(|| Arc::new(|| std::env::vars_os().collect())),
             owned: HashMap::new(),
+            next_t3_id: 1,
+            pending_t3: Vec::new(),
         }
     }
 
@@ -439,6 +585,138 @@ impl TerminalState {
             return Err(too_large("paste", terminal::MAX_PASTE_BYTES));
         }
         Ok(self.host()?.paste(&self.extension_id, handle, text)?)
+    }
+
+    /// `request-read` (§C.3), after a gesture; the caller checked that `terminal:read` is
+    /// declared. Returns the id its `terminal-read-done` carries.
+    pub(crate) fn request_read(
+        &mut self,
+        gesture: bool,
+        handle: TerminalHandle,
+        scope: ReadScope,
+        lines: u16,
+    ) -> Result<u64, HostError> {
+        if !gesture {
+            return Err(error(
+                HostErrorCode::NotPermitted,
+                "request-read needs a click or Enter in the extension's UI",
+            ));
+        }
+        if lines > terminal::MAX_READ_LINES || (scope == ReadScope::LastLines && lines == 0) {
+            return Err(error(
+                HostErrorCode::InvalidArgument,
+                format!("lines is 1 to {}", terminal::MAX_READ_LINES),
+            ));
+        }
+        self.queue_t3(
+            handle,
+            T3Capability::Read,
+            T3Op::Read { scope, lines },
+            Some((scope, lines)),
+        )
+    }
+
+    /// `request-write` (§C.3), after a gesture: printable text and tab only, confirmed on a card
+    /// on a terminal the user shared for writing. The caller checked that `terminal:write` is
+    /// declared.
+    pub(crate) fn request_write(
+        &mut self,
+        gesture: bool,
+        handle: TerminalHandle,
+        text: String,
+        submit: bool,
+    ) -> Result<u64, HostError> {
+        if !gesture {
+            return Err(error(
+                HostErrorCode::NotPermitted,
+                "request-write needs a click or Enter in the extension's UI",
+            ));
+        }
+        terminal::check_write_text(&text)?;
+        self.queue_t3(
+            handle,
+            T3Capability::Write,
+            T3Op::Write { text, submit },
+            None,
+        )
+    }
+
+    fn queue_t3(
+        &mut self,
+        handle: TerminalHandle,
+        capability: T3Capability,
+        op: T3Op,
+        scope: Option<(ReadScope, u16)>,
+    ) -> Result<u64, HostError> {
+        if self.pending_t3.len() >= MAX_T3_PROMPTS_PER_EXTENSION {
+            return Err(error(
+                HostErrorCode::LimitExceeded,
+                format!("at most {MAX_T3_PROMPTS_PER_EXTENSION} terminal requests per call"),
+            ));
+        }
+        let host = self.host()?;
+        let (prompt, label) = if self.owns(handle) {
+            (None, format!("own terminal {}", handle.0))
+        } else {
+            let target = host.t3_target(&self.extension_id, handle)?;
+            if let Some(cwd) = &target.cwd
+                && self.in_untrusted_worktree(cwd)
+            {
+                return Err(error(
+                    HostErrorCode::UntrustedWorktree,
+                    "the terminal is in a restricted worktree: it is not trusted",
+                ));
+            }
+            let (text, submit) = match &op {
+                T3Op::Write { text, submit } => (Some(text.clone()), *submit),
+                T3Op::Read { .. } => (None, false),
+            };
+            let label = target.title.clone();
+            let prompt = T3Prompt {
+                capability,
+                terminal: target.terminal,
+                terminal_title: target.title,
+                scope,
+                text,
+                submit,
+            };
+            (Some(prompt), label)
+        };
+        let id = self.next_t3_id;
+        self.next_t3_id += 1;
+        self.pending_t3.push(PendingT3 {
+            id,
+            handle,
+            prompt,
+            label,
+            op,
+        });
+        Ok(id)
+    }
+
+    /// Whether `cwd` is inside an open worktree that is not trusted (§C.3: never there).
+    fn in_untrusted_worktree(&self, cwd: &std::path::Path) -> bool {
+        // As given and canonical: either may be missing (a deleted directory, a symlink).
+        let canonical_cwd = cwd.canonicalize().ok();
+        self.workspace
+            .as_ref()
+            .map(|workspace| workspace.worktrees())
+            .unwrap_or_default()
+            .iter()
+            .filter(|worktree| !worktree.trusted)
+            .any(|worktree| {
+                cwd.starts_with(&worktree.root)
+                    || canonical_cwd
+                        .as_ref()
+                        .zip(worktree.root.canonicalize().ok())
+                        .is_some_and(|(cwd, root)| cwd.starts_with(root))
+            })
+    }
+
+    /// The call's T3 requests once it returned; a failed call drops them (design.md §0.3).
+    pub(crate) fn finish_call(&mut self, succeeded: bool) -> Vec<PendingT3> {
+        let pending = std::mem::take(&mut self.pending_t3);
+        if succeeded { pending } else { Vec::new() }
     }
 
     /// Before `handle-io` delivers a terminal event: an exited created terminal stops counting

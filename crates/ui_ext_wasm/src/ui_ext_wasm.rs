@@ -374,8 +374,7 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         observe::CAPABILITY_OBSERVE,
     ];
     // Staged (plan P5): 0.3 plus the terminal and integration capabilities of
-    // docs/fyx/wit-0.4/design.md. The T3 ones (`terminal:read`, `terminal:write`) come with the
-    // broker's T3 model (plan 5.6); plan 4.2-4.4's join with their WIT.
+    // docs/fyx/wit-0.4/design.md, T3 included (§C.3); plan 4.2-4.4's join with their WIT.
     const V0_4: &[&str] = &[
         CAPABILITY_PANEL,
         CAPABILITY_STATUS_BAR,
@@ -394,6 +393,8 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         terminal::CAPABILITY_ENV,
         terminal::CAPABILITY_STATUS,
         terminal::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_READ,
+        terminal::CAPABILITY_WRITE,
         terminal::CAPABILITY_PACKAGE_FILES,
         integration::CAPABILITY_NETWORK_LISTEN,
         integration::CAPABILITY_DISCOVERY_FILE,
@@ -2213,6 +2214,7 @@ impl UiExtension {
         let processes = self.processes.clone();
         let edits = self.edits.clone();
         let observer = self.observer.clone();
+        let terminals = self.terminals.clone();
         let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
@@ -2248,6 +2250,11 @@ impl UiExtension {
                         processes.start(store.data_mut().process.finish_call(result.is_ok()));
                         edits.start(store.data_mut().edit.finish_call(result.is_ok()));
                         observer.apply(store.data_mut().observe.finish_call(result.is_ok()));
+                        terminals.start_t3(
+                            store.data_mut().terminals.finish_call(result.is_ok()),
+                            store.data().capability_check.clone(),
+                            store.data().journal.clone(),
+                        );
                         // A trap kills the extension's processes with it (design.md §9) and ends
                         // its agent feed.
                         if result.is_err() {
