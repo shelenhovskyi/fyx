@@ -39,6 +39,8 @@ pub struct FyxExtensionsSettings {
     pub developer_mode: bool,
     pub hidden_status_items: Vec<String>,
     pub registry_url: String,
+    /// `fyx.extensions.network.private_hosts` (0.3 Q4), as written; `PrivateHosts::set` checks it.
+    pub private_hosts: Vec<String>,
 }
 
 impl Settings for FyxExtensionsSettings {
@@ -68,6 +70,13 @@ impl Settings for FyxExtensionsSettings {
                 .as_ref()
                 .and_then(|fyx| fyx.extensions.as_ref())
                 .and_then(|extensions| extensions.registry_url.clone())
+                .unwrap_or_default(),
+            private_hosts: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.network.as_ref())
+                .and_then(|network| network.private_hosts.clone())
                 .unwrap_or_default(),
         }
     }
