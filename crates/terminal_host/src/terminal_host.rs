@@ -142,6 +142,28 @@ pub fn extension_terminal(
     pseudo::held_terminal(id, cx)
 }
 
+/// §B.11 focus rule: whether one of an extension's terminals (its pseudo or created terminals,
+/// its profiles' terminals) has keyboard focus now. Callable from any thread.
+pub type TerminalFocus = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// The [`TerminalFocus`] for `ui_ext_host`'s editor context (`workspace.open` with `focus`).
+pub fn terminal_focus(cx: &App) -> Option<TerminalFocus> {
+    let front = front(cx)?;
+    Some(Arc::new(move |ext: &str| {
+        front.extension_terminal_focused(ext)
+    }))
+}
+
+/// For a [`RelayDelivery`]: the handle its extension holds for the terminal the hook runs in, or
+/// `None` when the extension has never been told of that terminal.
+pub fn relay_terminal_handle(
+    ext: &str,
+    terminal: TerminalId,
+    cx: &App,
+) -> Option<ui_ext::terminal::TerminalHandle> {
+    front(cx)?.existing_handle(ext, terminal)
+}
+
 /// For `ui_ext_host::set_terminal_node_views`: [`extension_terminal`] in a terminal view of the
 /// window's workspace, for an extension panel's `terminal` node. The caller keeps the view while a
 /// node shows the handle.

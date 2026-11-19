@@ -43,11 +43,21 @@ pub(crate) fn init(cx: &mut App) {
             .detach();
         }
         let focus_handle = view.focus_handle(cx);
-        cx.on_focus_in(&focus_handle, window, |view, _, cx| {
+        let focus_front = front.clone();
+        cx.on_focus_in(&focus_handle, window, move |view, _, cx| {
+            if let Some(front) = &focus_front {
+                front.terminal_focus_changed(id, true);
+            }
             view.terminal().read(cx).fyx.clear_attention();
             cx.notify();
         })
         .detach();
+        if let Some(front) = front.clone() {
+            cx.on_focus_out(&focus_handle, window, move |_, _, _, _| {
+                front.terminal_focus_changed(id, false)
+            })
+            .detach();
+        }
         let terminal = view.terminal().clone();
         cx.subscribe_in(
             &terminal,

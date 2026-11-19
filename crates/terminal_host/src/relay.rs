@@ -46,6 +46,11 @@ impl RelayReply {
             })
             .ok();
     }
+
+    /// The same reply in the form `UiExtensionRegistry::relay_request` takes.
+    pub fn into_extension_reply(self) -> ui_ext::integration::RelayReply {
+        Box::new(move |answer| self.send(answer.exit, answer.stdout, answer.stderr))
+    }
 }
 
 #[derive(Default)]
