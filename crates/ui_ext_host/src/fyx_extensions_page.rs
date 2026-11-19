@@ -617,6 +617,7 @@ pub(crate) fn describe_additions(additions: &fyx_registry::Additions) -> Vec<Str
             name: program.clone(),
             args: Vec::new(),
             path: None,
+            reason: None,
         });
         crate::install::runs_line(program, any_code)
     }));

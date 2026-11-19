@@ -368,6 +368,7 @@ name = "codex"
         name: "git".into(),
         args: vec!["status".into()],
         path: None,
+        reason: None,
     });
     let new_capabilities: Vec<String> = new
         .consent_items()
