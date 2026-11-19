@@ -167,13 +167,39 @@ name = \"claude\"
 reason = \"Runs Claude\"
 ";
     let (shown, removed) =
-        crate::fyx_extensions_page::update_lines(&before, consent_items(&manifest(&newer)));
+        crate::store_actions::update_lines(&before, consent_items(&manifest(&newer)));
     let keys: Vec<String> = shown.iter().map(|line| line.item.key()).collect();
     assert_eq!(keys, ["terminal:create#claude", "terminal:create#git"]);
     let removed = removed.expect("a removal note");
     assert!(removed.starts_with("No longer asks for: "), "{removed}");
-    let (shown, removed) = crate::fyx_extensions_page::update_lines(&before, before.clone());
+    let (shown, removed) = crate::store_actions::update_lines(&before, before.clone());
     assert!(shown.is_empty() && removed.is_none());
+}
+
+/// The file install's notes: unsigned, the package, and the version it replaces.
+#[test]
+fn test_file_install_notes() {
+    let info = crate::install_store::PackageInfo {
+        extension_id: "demo".into(),
+        version: semver::Version::new(1, 2, 0),
+        manifest: manifest(MANIFEST),
+        zed_extension: false,
+    };
+    let package = std::path::Path::new("demo.fyxext");
+    let fresh = crate::store_actions::file_install_notes(&info, package, None);
+    assert_eq!(
+        fresh,
+        ["Unsigned, not from the registry. Package: demo.fyxext."]
+    );
+    let over = crate::store_actions::file_install_notes(
+        &info,
+        package,
+        Some(&semver::Version::new(1, 1, 0)),
+    );
+    assert_eq!(
+        over.last().map(String::as_str),
+        Some("Installed now: 1.1.0.")
+    );
 }
 
 /// The stand-in broker fails closed: a capability is allowed only when every item of it is

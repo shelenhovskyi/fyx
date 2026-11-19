@@ -50,7 +50,7 @@ use crate::{
     },
     store_actions::{
         Outcome, expect_load, grant_and_rescan, install_consent_and_rescan, installed_manifest,
-        installed_outcome, load_outcome, show_outcome,
+        installed_outcome, load_outcome, show_outcome, update_lines,
     },
 };
 
@@ -689,28 +689,6 @@ pub(crate) fn registry_install_notes(release: &Release, zed_extension: bool) -> 
         &release.source.commit[..release.source.commit.len().min(12)],
     ));
     notes
-}
-
-/// An update's dialog (§C.2, §C.5): the lines it adds or widens, which show unticked (an item
-/// left unticked is denied, the others keep their state), and a note on what it no longer asks
-/// for.
-pub(crate) fn update_lines(
-    before: &[crate::consent_model::ItemLine],
-    after: Vec<crate::consent_model::ItemLine>,
-) -> (Vec<crate::consent_model::ItemLine>, Option<String>) {
-    let diff = crate::consent_model::consent_diff(before, &[], &after);
-    let removed = (!diff.removed.is_empty()).then(|| {
-        let titles: Vec<&str> = diff
-            .removed
-            .iter()
-            .map(|line| line.title.as_str())
-            .collect();
-        format!("No longer asks for: {}.", titles.join("; "))
-    });
-    (
-        diff.added.into_iter().chain(diff.widened).collect(),
-        removed,
-    )
 }
 
 /// Installs `release` (a fresh install, an update, or an approved held update), after the user
