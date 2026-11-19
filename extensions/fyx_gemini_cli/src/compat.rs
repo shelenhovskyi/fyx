@@ -184,6 +184,9 @@ impl Replay {
     /// The host answers `initialize`, `tools/list` and notifications; the extension answers
     /// `tools/call`.
     fn from_cli(&mut self, connection: u64, message: &Value) -> Result<(), String> {
+        if message["method"] == "notifications/initialized" {
+            self.server.initialized(&mut self.host, connection);
+        }
         if message["method"] != "tools/call" {
             return Ok(());
         }
