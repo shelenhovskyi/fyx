@@ -1,0 +1,6 @@
+{
+  "name": "fyx",
+  "version": "0.1.0",
+  "description": "Connects Claude Code to the Fyx editor it runs in. Fyx loads it through CLAUDE_CODE_PLUGIN_DIRS in its own terminals; outside Fyx its hooks do nothing.",
+  "author": { "name": "Fyx" }
+}
