@@ -455,6 +455,58 @@ async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
     // A refresh is a check: the 6 h timer counts from it, across restarts.
     let last = RegistryStateDir(state.path().to_path_buf()).last_check();
     assert!(last.is_some_and(|last| now().0 - last.0 < 60), "{last:?}");
+
+    // Day 2: a new block of "demo". The automatic refresh (the page opening) waits until the
+    // block list is due; the Refresh button fetches it now.
+    test_registry.write_blocklist(blocklist_blocking("demo", 2));
+    let blocked = |hub: &RegistryHub| {
+        hub.listing.iter().any(|listed| {
+            listed.release.id.as_str() == "demo"
+                && matches!(
+                    listed.refusal,
+                    Some(fyx_registry::InstallRefusal::Blocked { .. })
+                )
+        })
+    };
+    let wait = |cx: &mut gpui::TestAppContext| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while hub.read_with(cx, |hub, _| hub.is_refreshing()) && std::time::Instant::now() < deadline
+        {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    hub.update(cx, |hub, cx| hub.refresh(cx));
+    wait(cx);
+    assert!(!hub.read_with(cx, |hub, _| blocked(hub)), "not due yet");
+    hub.update(cx, |hub, cx| hub.refresh_now(cx));
+    wait(cx);
+    assert!(hub.read_with(cx, |hub, _| blocked(hub)), "Refresh fetches it");
+}
+
+/// Day 2: after a block of the installed version, the Available row (an older version, still
+/// installable) says which version is installed and that it is disabled.
+#[test]
+fn test_available_row_of_a_blocked_install() {
+    use crate::fyx_extensions_page::installed_row_state;
+    let version = |text: &str| semver::Version::parse(text).unwrap();
+    let (label, note) = installed_row_state(
+        &version("0.1.0"),
+        &version("0.1.1"),
+        Some("blocked: crashes on start"),
+    );
+    assert_eq!(label, "Disabled");
+    let (note, color) = note.expect("a note");
+    assert_eq!(note, "Installed 0.1.1: disabled, blocked: crashes on start");
+    assert_eq!(color, ui::Color::Error);
+    assert_eq!(
+        installed_row_state(&version("0.1.0"), &version("0.1.1"), None),
+        ("Installed 0.1.1".to_string(), None)
+    );
+    assert_eq!(
+        installed_row_state(&version("0.1.1"), &version("0.1.1"), None),
+        ("Installed".to_string(), None)
+    );
 }
 
 /// Plan 3.4: the update check updates a registry install, rolls a blocked version back,
