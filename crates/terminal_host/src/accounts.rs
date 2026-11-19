@@ -361,7 +361,10 @@ mod tests {
             ("opencode", "OPENCODE_CONFIG_DIR"),
         ] {
             assert_eq!(tools[tool].env.as_deref(), Some(env));
-            assert!(ui_ext::terminal::is_account_env(env), "{env} is refused for extensions");
+            assert!(
+                ui_ext::terminal::is_account_env(env),
+                "{env} is refused for extensions"
+            );
         }
         assert_eq!(accounts.tool_for_agent("claude-acp"), Some("claude"));
         assert!(accounts.accounts().is_empty());
