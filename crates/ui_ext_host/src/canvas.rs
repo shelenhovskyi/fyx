@@ -668,7 +668,7 @@ mod bench {
             ("circle (fill + stroke)", circle),
             ("line", line),
             ("path, 4 segments (fill + stroke)", path),
-            ("text (no glyphs)", text),
+            ("text (glyphs in the texture only)", text),
             ("mixed, 1/6 of each", mixed),
         ];
         let vcx = cx.add_empty_window();
@@ -681,8 +681,16 @@ mod bench {
             "canvas paint bench: {OPS} ops, {SIDE} x {SIDE} at {scale}x, {FRAMES} frames after {WARMUP}"
         );
         println!(
-            "{:<34} {:>11} {:>8} {:>8} {:>13} {:>13} {:>13} {:>13}",
-            "case", "paint med", "p95", "max", "frame med", "tex paint", "tex frame", "raster med"
+            "{:<34} {:>11} {:>8} {:>8} {:>13} {:>13} {:>13} {:>13} {:>13}",
+            "case",
+            "paint med",
+            "p95",
+            "max",
+            "frame med",
+            "tex paint",
+            "tex frame",
+            "raster 8t",
+            "raster 1t"
         );
         for (index, (name, op)) in cases.into_iter().enumerate() {
             let props = canvas(op);
@@ -704,25 +712,35 @@ mod bench {
                 vcx.update(|_, cx| crate::canvas_texture::drawn_from_for_bench(&props, cx)),
                 "the texture case drew its texture"
             );
-            // One update's raster on its own (main-thread colour lookup, SVG, resvg), as the
-            // background task does it.
+            // One update's raster on its own (main-thread colour lookup, tiny-skia, usvg for the
+            // text), as the background task does it.
             let canvas = canvas_props(&props).unwrap();
-            let fonts = vcx.update(|_, cx| crate::images::shared_fonts(cx));
-            let rasters = stats(
-                (0..5)
-                    .map(|_| {
-                        let start = Instant::now();
-                        let palette = vcx.update(|_, cx| {
-                            crate::canvas_texture::Palette::resolve(canvas, 14., cx)
-                        });
-                        let svg = crate::canvas_texture::to_svg(canvas, &palette);
-                        crate::canvas_texture::rasterize(&svg, device, fonts.clone()).unwrap();
-                        start.elapsed()
-                    })
-                    .collect(),
-            );
+            let fonts = crate::canvas_texture::test_fonts();
+            let mut raster = |threads: usize| {
+                stats(
+                    (0..5)
+                        .map(|_| {
+                            let start = Instant::now();
+                            let palette = vcx.update(|_, cx| {
+                                crate::canvas_texture::Palette::resolve(canvas, 14., cx)
+                            });
+                            crate::canvas_texture::rasterize_on(
+                                canvas,
+                                &palette,
+                                device,
+                                fonts.clone(),
+                                threads,
+                            )
+                            .unwrap();
+                            start.elapsed()
+                        })
+                        .collect(),
+                )
+            };
+            let rasters = raster(8);
+            let single = raster(1);
             println!(
-                "{:<34} {:>8.2} ms {:>5.2} ms {:>5.2} ms {:>10.2} ms {:>10.3} ms {:>10.2} ms {:>10.1} ms",
+                "{:<34} {:>8.2} ms {:>5.2} ms {:>5.2} ms {:>10.2} ms {:>10.3} ms {:>10.2} ms {:>10.1} ms {:>10.1} ms",
                 name,
                 ms(paints.median),
                 ms(paints.p95),
@@ -731,6 +749,7 @@ mod bench {
                 ms(texture_paints.median),
                 ms(texture_frames.median),
                 ms(rasters.median),
+                ms(single.median),
             );
         }
     }
