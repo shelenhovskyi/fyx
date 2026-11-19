@@ -56,6 +56,29 @@ pub fn ask_consent(
     receiver
 }
 
+/// The extension page turning one T2 item on (§C.2 "Later"): the same line, ticked, with the
+/// same guard; answers whether the user confirmed.
+pub fn confirm_item(
+    workspace: &mut Workspace,
+    extension_name: &str,
+    line: ItemLine,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> oneshot::Receiver<Vec<ConsentItem>> {
+    let (answer, receiver) = oneshot::channel();
+    let text = ConsentDialogText {
+        title: format!("Turn this on for {extension_name}?"),
+        notes: Vec::new(),
+        confirm: "Turn On".into(),
+    };
+    workspace.toggle_modal(window, cx, move |_, cx| {
+        let mut dialog = ConsentDialog::new(text, vec![line.clone()], answer, cx);
+        dialog.ticked.insert(line.item);
+        dialog
+    });
+    receiver
+}
+
 pub struct ConsentDialog {
     text: ConsentDialogText,
     lines: Vec<ItemLine>,

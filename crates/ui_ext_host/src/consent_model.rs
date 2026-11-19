@@ -436,3 +436,105 @@ impl ConsentBroker for ConsentStore {
         }
     }
 }
+
+/// One usage-journal entry (§C.4), as W2c's `ui_ext_wasm::journal::JournalEntry`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JournalEntry {
+    pub at: std::time::SystemTime,
+    pub kind: JournalKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JournalKind {
+    ProgramStarted {
+        name: String,
+        argv: Vec<String>,
+        cwd: String,
+        exit: Option<i32>,
+    },
+    /// Never the content.
+    TerminalRead {
+        terminal: String,
+        scope: String,
+        bytes: u64,
+    },
+    TerminalWrite {
+        terminal: String,
+        text: String,
+    },
+    ListenerOpened {
+        port: u16,
+    },
+    Connections {
+        listener: String,
+        per_hour: u32,
+    },
+    DiscoveryFile {
+        path: String,
+        written: bool,
+    },
+    Relay {
+        channel: String,
+        per_hour: u32,
+    },
+    ProposedEdit {
+        path: String,
+        outcome: String,
+    },
+    ConsentChanged {
+        item_key: String,
+        allowed: bool,
+    },
+}
+
+/// The journal of one extension, newest last; `incomplete` when entries were dropped (a full
+/// disk).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JournalPage {
+    pub entries: Vec<JournalEntry>,
+    pub incomplete: bool,
+}
+
+/// How the extension page words an entry.
+pub fn journal_line(kind: &JournalKind) -> String {
+    match kind {
+        JournalKind::ProgramStarted {
+            name,
+            argv,
+            cwd,
+            exit,
+        } => {
+            let ended = match exit {
+                Some(code) => format!(", exited {code}"),
+                None => String::new(),
+            };
+            format!("Ran {name} {} in {cwd}{ended}", argv.join(" ")).replace("  ", " ")
+        }
+        JournalKind::TerminalRead {
+            terminal,
+            scope,
+            bytes,
+        } => format!("Read {scope} of the terminal \"{terminal}\" ({bytes} bytes)"),
+        JournalKind::TerminalWrite { terminal, text } => {
+            format!("Typed into the terminal \"{terminal}\": {text}")
+        }
+        JournalKind::ListenerOpened { port } => format!("Listened on port {port}"),
+        JournalKind::Connections { listener, per_hour } => {
+            format!("{per_hour} connections to {listener} in an hour")
+        }
+        JournalKind::DiscoveryFile { path, written } => format!(
+            "{} the discovery file {path}",
+            if *written { "Wrote" } else { "Removed" }
+        ),
+        JournalKind::Relay { channel, per_hour } => {
+            format!("{per_hour} hook requests on {channel} in an hour")
+        }
+        JournalKind::ProposedEdit { path, outcome } => {
+            format!("Proposed an edit to {path}: {outcome}")
+        }
+        JournalKind::ConsentChanged { item_key, allowed } => format!(
+            "{item_key} {}",
+            if *allowed { "turned on" } else { "turned off" }
+        ),
+    }
+}

@@ -141,6 +141,11 @@ pub struct UiExtensionRegistry {
     notifications: HashMap<(Arc<str>, u64), OpenNotification>,
     /// Approval cards from `approvals.ask` until they are answered or closed (0.4, §B.12).
     approvals: HashMap<(Arc<str>, u64), OpenApproval>,
+    /// The consent lines of each loaded extension's manifest (0.4, §C.2), for its page.
+    consent_lines: HashMap<Arc<str>, Vec<crate::consent_model::ItemLine>>,
+    /// The usage journal (§C.4). A stand-in until W2c's `JournalStore` is written by the
+    /// runtime; the page reads it the same way.
+    journals: HashMap<Arc<str>, crate::consent_model::JournalPage>,
     /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
     /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
     dev_reloads: HashMap<PathBuf, Task<()>>,
@@ -477,6 +482,8 @@ impl UiExtensionRegistry {
             cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
                 .detach();
         }
+        // §C.4: the journal is cleared on uninstall.
+        self.journals.remove(extension_id);
         log::info!("fyx:ui: forgot the permissions of {extension_id}");
         cx.notify();
     }
@@ -578,6 +585,37 @@ impl UiExtensionRegistry {
             if allowed { "allowed" } else { "turned off" }
         );
         cx.notify();
+    }
+
+    /// The consent lines of a loaded extension, for its page (empty when it is not loaded).
+    pub fn consent_lines(&self, extension_id: &str) -> Vec<crate::consent_model::ItemLine> {
+        self.consent_lines
+            .get(extension_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The usage journal of an extension (§C.4), newest last.
+    pub fn journal(&self, extension_id: &str) -> crate::consent_model::JournalPage {
+        self.journals.get(extension_id).cloned().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_journal(
+        &mut self,
+        extension_id: &str,
+        page: crate::consent_model::JournalPage,
+    ) {
+        self.journals.insert(extension_id.into(), page);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_consent_lines(
+        &mut self,
+        extension_id: &str,
+        lines: Vec<crate::consent_model::ItemLine>,
+    ) {
+        self.consent_lines.insert(extension_id.into(), lines);
     }
 
     /// The state of one consent item, for the extension page.
@@ -1739,6 +1777,10 @@ Environment it may pass: {}",
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
                                 this.consent
                                     .declare(&found.extension_id, found.capabilities.clone());
+                                this.consent_lines.insert(
+                                    found.extension_id.clone(),
+                                    crate::consent_model::consent_items(&found.manifest),
+                                );
                                 set_image_dir(&found.extension_id, found.dir.clone(), cx);
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
@@ -3291,10 +3333,12 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
+    let mut lines = Vec::new();
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
         if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
             declared = manifest.consent_items();
+            lines = crate::consent_model::consent_items(&manifest);
         }
         UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?
@@ -3333,6 +3377,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             };
             registry.claim_extension_id(&extension_id, source)?;
             registry.consent.declare(&extension_id, declared);
+            registry.consent_lines.insert(extension_id.clone(), lines);
             if reload_path.is_dir() {
                 set_image_dir(&extension_id, reload_path.clone(), cx);
             }

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 use ui_ext_wasm::{UiManifest, permissions::PermissionState};
 
 use crate::{
@@ -299,4 +299,75 @@ async fn test_consent_dialog_escape(cx: &mut TestAppContext) {
     cx.dispatch_action(menu::Cancel);
     cx.run_until_parked();
     assert!(answer.try_recv().is_err(), "dropped without an answer");
+}
+
+/// The page's "Turn On": the same line, already ticked, behind the same guard.
+#[gpui::test]
+async fn test_confirm_item_is_preticked_and_guarded(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let fs = fs::FakeFs::new(cx.executor());
+    let project = project::Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+    });
+    let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+    crate::decoration_tests::redraw(cx);
+    let line = consent_items(&manifest(MANIFEST))
+        .into_iter()
+        .find(|line| line.item == program("codex"))
+        .unwrap();
+    let mut answer = workspace.update_in(cx, |workspace, window, cx| {
+        crate::consent_dialog::confirm_item(workspace, "Demo", line, window, cx)
+    });
+    crate::decoration_tests::redraw(cx);
+    let view = dialog(&workspace, cx);
+    view.update(cx, |dialog, cx| dialog.install(cx));
+    cx.run_until_parked();
+    assert!(answer.try_recv().unwrap().is_none(), "inside the guard");
+    cx.executor()
+        .advance_clock(CLICK_GUARD + Duration::from_millis(1));
+    view.update(cx, |dialog, cx| dialog.install(cx));
+    cx.run_until_parked();
+    assert_eq!(answer.try_recv().unwrap(), Some(vec![program("codex")]));
+}
+
+/// §C.4: the page's wording (a read never shows content), and the journal goes on uninstall.
+#[gpui::test]
+async fn test_journal_lines_and_uninstall(cx: &mut TestAppContext) {
+    use crate::consent_model::{JournalEntry, JournalKind, JournalPage, journal_line};
+    assert_eq!(
+        journal_line(&JournalKind::ProgramStarted {
+            name: "codex".into(),
+            argv: vec!["-c".into(), "notify=x".into()],
+            cwd: "D:/demo".into(),
+            exit: Some(0),
+        }),
+        "Ran codex -c notify=x in D:/demo, exited 0"
+    );
+    assert_eq!(
+        journal_line(&JournalKind::TerminalRead {
+            terminal: "pwsh".into(),
+            scope: "the last 50 lines".into(),
+            bytes: 1200,
+        }),
+        "Read the last 50 lines of the terminal \"pwsh\" (1200 bytes)"
+    );
+    crate::tests::init_test(cx);
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::FakeFs::new(cx.executor());
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let page = JournalPage {
+        entries: vec![JournalEntry {
+            at: std::time::SystemTime::now(),
+            kind: JournalKind::ListenerOpened { port: 4100 },
+        }],
+        incomplete: false,
+    };
+    registry.update(cx, |registry, cx| {
+        registry.set_journal("demo", page.clone());
+        registry.set_consent_lines("demo", consent_items(&manifest(MANIFEST)));
+        assert_eq!(registry.journal("demo"), page);
+        assert_eq!(registry.consent_lines("demo").len(), 9);
+        registry.forget_consent("demo", fs, cx);
+        assert_eq!(registry.journal("demo"), JournalPage::default());
+    });
 }
