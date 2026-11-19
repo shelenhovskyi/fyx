@@ -18232,7 +18232,9 @@ name = "terminal_ext"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "log",
+ "percent-encoding",
  "polling",
  "rand 0.9.4",
 ]
