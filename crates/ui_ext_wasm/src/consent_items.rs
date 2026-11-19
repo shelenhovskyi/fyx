@@ -219,7 +219,12 @@ pub fn consent_items(manifest: &UiManifest) -> Vec<ItemLine> {
                 } else {
                     domains.join(", ")
                 };
-                lines.push(whole(domains, None, sends_warning(target)));
+                let author = manifest
+                    .network
+                    .as_ref()
+                    .and_then(|network| network.reason.as_deref())
+                    .and_then(reason);
+                lines.push(whole(domains, author, sends_warning(target)));
             }
             process::CAPABILITY_PROCESS if !manifest.processes.is_empty() => {
                 for spec in &manifest.processes {
@@ -234,7 +239,7 @@ pub fn consent_items(manifest: &UiManifest) -> Vec<ItemLine> {
                         },
                         format!("Runs {}", spec.name),
                         program_details(spec),
-                        None,
+                        spec.reason.as_deref().and_then(reason),
                         warnings,
                     ));
                 }
@@ -455,6 +460,7 @@ api_version = "0.4.0"
 capabilities = ["ui:panel", "context:editor", "terminal:create", "terminal:env", "network:fetch", "terminal:read"]
 [fyx_ui.network]
 domains = ["api.example.com"]
+reason = "checks for updates"
 [[fyx_ui.terminal_programs]]
 name = "codex"
 args = ["-c", "notify=*"]
@@ -504,6 +510,7 @@ reason = "connects the CLI"
         assert_eq!(codex.reason.as_deref(), Some("runs Codex in a panel"));
         assert!(codex.warnings.is_empty());
         assert_eq!(lines[3].warnings, [WARNING_RUNS_ANY_CODE]);
+        assert_eq!(lines[6].reason.as_deref(), Some("checks for updates"));
         let env = &lines[4];
         assert_eq!(
             env.details,

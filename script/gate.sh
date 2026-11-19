@@ -60,7 +60,7 @@ fi
 if [[ "${FAST:-0}" == "1" ]]; then
     fast_base="${FYX_GATE_FAST_BASE:-$(git merge-base HEAD origin/fyx/main)}"
     echo "gate: FAST since $(git rev-parse --short=10 "$fast_base"), within the crates changed since $base"
-    changed_crates=$(python -I script/fyx-gate-crates "$fast_base" "$base")
+    changed_crates=$(python -I script/fyx-gate-crates "$fast_base" "$base" | tr -d '\r')
 else
     changed_crates=$(
         git diff --name-only "$base"...HEAD -- crates extensions ':!crates/collab' \

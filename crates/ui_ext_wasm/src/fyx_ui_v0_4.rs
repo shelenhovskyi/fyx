@@ -350,28 +350,46 @@ impl wit_terminals::Host for UiState {
             .map_err(Into::into))
     }
 
-    /// T3 comes with the broker's cards (plan 5.6); until then no manifest may declare it.
+    /// T3 (§C.3): checked and queued now; the card and the read start after the call returns.
     fn request_read(
         &mut self,
-        _handle: u64,
-        _scope: wit_terminals::ReadScope,
-        _lines: u16,
+        handle: u64,
+        scope: wit_terminals::ReadScope,
+        lines: u16,
     ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(not_yet(model_terminal::CAPABILITY_READ)))
+        if !self.api.declares(model_terminal::CAPABILITY_READ) {
+            return Ok(Err(not_declared(model_terminal::CAPABILITY_READ)));
+        }
+        let gesture = self.api.take_activation();
+        let scope = match scope {
+            wit_terminals::ReadScope::LastCommand => model_terminal::ReadScope::LastCommand,
+            wit_terminals::ReadScope::LastLines => model_terminal::ReadScope::LastLines,
+        };
+        Ok(self
+            .terminals
+            .request_read(gesture, terminal_handle(handle), scope, lines)
+            .map_err(Into::into))
     }
 
     fn request_write(
         &mut self,
-        _handle: u64,
+        handle: u64,
         text: String,
-        _submit: bool,
+        submit: bool,
     ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
         self.count_lifted_text(text.len())?;
-        Ok(Err(not_yet(model_terminal::CAPABILITY_WRITE)))
+        if !self.api.declares(model_terminal::CAPABILITY_WRITE) {
+            return Ok(Err(not_declared(model_terminal::CAPABILITY_WRITE)));
+        }
+        let gesture = self.api.take_activation();
+        Ok(self
+            .terminals
+            .request_write(gesture, terminal_handle(handle), text, submit)
+            .map_err(Into::into))
     }
 }
 
-fn not_yet(capability: &str) -> wit_host::HostError {
+fn not_declared(capability: &str) -> wit_host::HostError {
     model::HostError {
         code: model::HostErrorCode::NotPermitted,
         message: format!("{capability:?} is not in the manifest"),

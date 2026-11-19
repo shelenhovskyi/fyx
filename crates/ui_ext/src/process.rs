@@ -140,6 +140,10 @@ pub struct ProcessSpec {
     /// A worktree-relative program, which needs a trusted worktree.
     #[serde(default)]
     pub path: Option<String>,
+    /// 0.4 (design wit-0.4 §C.2): the author's one line under the item at install, required
+    /// there and refused below 0.4.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The manifest's program list and passed-through environment names.
@@ -593,6 +597,7 @@ mod tests {
             name: name.into(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
             path: None,
+            reason: None,
         };
         for name in [
             "bash", "Python3", "node.exe", "PWSH.EXE", "cmd", "env", "npx.cmd",
@@ -660,11 +665,13 @@ mod tests {
                     name: "git".into(),
                     args: strings(&["status", "--porcelain=*", "**"]),
                     path: None,
+                    reason: None,
                 },
                 ProcessSpec {
                     name: "echo".into(),
                     args: strings(&["**"]),
                     path: None,
+                    reason: None,
                 },
             ],
             env: ["NO_COLOR".to_string()].into(),
