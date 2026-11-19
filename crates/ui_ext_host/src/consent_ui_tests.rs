@@ -304,6 +304,53 @@ async fn test_confirm_item_is_preticked_and_guarded(cx: &mut TestAppContext) {
     assert_eq!(answer.try_recv().unwrap(), Some(vec![program("codex")]));
 }
 
+/// §C.3: the page's "Always allow" switch shows the owner's warning, with no groups, behind the
+/// same guard; Cancel answers nothing.
+#[gpui::test]
+async fn test_confirm_always_allow_warns_and_is_guarded(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let fs = fs::FakeFs::new(cx.executor());
+    let project = project::Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+        workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+    });
+    let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+    crate::decoration_tests::redraw(cx);
+    let mut answer = workspace.update_in(cx, |workspace, window, cx| {
+        crate::consent_dialog::confirm_always_allow(
+            workspace,
+            "Demo",
+            ui_ext_wasm::permissions::T3Capability::Read,
+            window,
+            cx,
+        )
+    });
+    crate::decoration_tests::redraw(cx);
+    let view = dialog(&workspace, cx);
+    view.update(cx, |dialog, cx| dialog.install(cx));
+    cx.run_until_parked();
+    assert!(answer.try_recv().unwrap().is_none(), "inside the guard");
+    cx.executor()
+        .advance_clock(CLICK_GUARD + Duration::from_millis(1));
+    view.update(cx, |dialog, cx| dialog.install(cx));
+    cx.run_until_parked();
+    assert_eq!(answer.try_recv().unwrap(), Some(vec![]));
+
+    let mut cancelled = workspace.update_in(cx, |workspace, window, cx| {
+        crate::consent_dialog::confirm_always_allow(
+            workspace,
+            "Demo",
+            ui_ext_wasm::permissions::T3Capability::Write,
+            window,
+            cx,
+        )
+    });
+    crate::decoration_tests::redraw(cx);
+    cx.dispatch_action(menu::Cancel);
+    cx.run_until_parked();
+    assert!(cancelled.try_recv().is_err(), "dropped without an answer");
+}
+
 /// §C.4: the page's wording (a read never shows content), and the journal goes on uninstall.
 #[gpui::test]
 async fn test_journal_lines_and_uninstall(cx: &mut TestAppContext) {

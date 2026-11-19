@@ -44,6 +44,7 @@ pub mod registry_service;
 mod registry_service_tests;
 mod store_actions;
 mod surface;
+pub mod t3_cards;
 mod view;
 mod workspace_edit;
 mod worktrees;
@@ -54,6 +55,8 @@ mod decoration_tests;
 mod decoration_wasm_tests;
 #[cfg(test)]
 mod primitive_tests;
+#[cfg(test)]
+mod t3_card_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
