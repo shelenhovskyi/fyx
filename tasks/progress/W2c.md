@@ -19,7 +19,8 @@ Older history: `archive/W2c.md`.
 - **Next:** whatever the coordinator sends. 5.13 runtime side is done.
 - **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `IoEvent::Listener`,
   `Context`, `ReviewDecided` => None (drop once W0's arms are merged here).
-- **Gotchas:** target `D:/fyx-targets/w2c`. Python via Write-tool scripts. `cargo fmt` skips
+- **Gotchas:** prefix every cargo command with `CARGO_TARGET_DIR=D:/fyx-targets/w2c` (this
+  session predates the env hook; a stray 32 GB `./target` was deleted 2026-11-19). Python via Write-tool scripts. `cargo fmt` skips
   `t2_shared.rs` (use `rustfmt --edition 2024 --check`). Close listeners in spec order. T1 calls
   go through the broker's `check`, not `state`. io tests: permission changes arrive on the io
   channel too. Loading the same id shuts the old instance down.
