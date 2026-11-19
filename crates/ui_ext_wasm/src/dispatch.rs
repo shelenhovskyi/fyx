@@ -14,12 +14,13 @@ use crate::{
     bindings as wit_v0_1,
     conversions::try_collect,
     effects::{EffectReply, EffectReplyError, HostEffect},
-    fyx_ui_v0_2, fyx_ui_v0_3,
+    fyx_ui_v0_2, fyx_ui_v0_3, fyx_ui_v0_4,
 };
 
 /// The bindings of a component, by the world it targets. The newest version comes first, as in
 /// `extension_host`'s `wit::Extension`.
 pub(crate) enum UiBindings {
+    V0_4(fyx_ui_v0_4::UiExtension),
     V0_3(fyx_ui_v0_3::UiExtension),
     V0_2(fyx_ui_v0_2::UiExtension),
     V0_1(wit_v0_1::UiExtension),
@@ -56,17 +57,32 @@ impl UiBindings {
         runtime: &UiRuntime,
     ) -> wasmtime::Result<Self> {
         Ok(match version {
-            // The 0.4 world is staged for its manifest and model (plan 5.5); its bindings come
-            // with the imports.
-            ApiVersion::V0_4_0 => wasmtime::bail!(
-                "fyx:ui 0.4 is staged, and this build does not run 0.4 components yet"
-            ),
+            ApiVersion::V0_4_0 => {
+                // `listeners`, `relay`, `review`, `context` and `approvals` trap when called
+                // until plan 5.11 and 5.13 build them.
+                let mut linker = runtime.linker_v0_4.clone();
+                let engine = store.engine().clone();
+                fyx_ui_v0_3::define_unbuilt_as_traps(
+                    fyx_ui_v0_4::LINKED_INTERFACES,
+                    &mut linker,
+                    component,
+                    &engine,
+                )?;
+                Self::V0_4(
+                    fyx_ui_v0_4::UiExtension::instantiate_async(store, component, &linker).await?,
+                )
+            }
             ApiVersion::V0_3_0 => {
                 // The 0.3 interfaces this build does not implement yet trap when called (they are
                 // staged with the WIT, plan 4.x); a component that never calls them works.
                 let mut linker = runtime.linker_v0_3.clone();
                 let engine = store.engine().clone();
-                fyx_ui_v0_3::define_unbuilt_as_traps(&mut linker, component, &engine)?;
+                fyx_ui_v0_3::define_unbuilt_as_traps(
+                    fyx_ui_v0_3::LINKED_INTERFACES,
+                    &mut linker,
+                    component,
+                    &engine,
+                )?;
                 Self::V0_3(
                     fyx_ui_v0_3::UiExtension::instantiate_async(store, component, &linker).await?,
                 )
@@ -86,6 +102,7 @@ impl UiBindings {
         store: &mut Store<UiState>,
     ) -> wasmtime::Result<Vec<model::Surface>> {
         let surfaces = match self {
+            Self::V0_4(extension) => try_collect(extension.call_surfaces(store).await?),
             Self::V0_3(extension) => try_collect(extension.call_surfaces(store).await?),
             Self::V0_2(extension) => try_collect(extension.call_surfaces(store).await?),
             Self::V0_1(extension) => {
@@ -109,6 +126,19 @@ impl UiBindings {
         surface_id: &str,
     ) -> wasmtime::Result<Result<Vec<model::Node>, String>> {
         Ok(match self {
+            Self::V0_4(extension) => extension
+                .call_mount(&mut *store, surface_id)
+                .await?
+                .and_then(|nodes| guest_value(try_collect::<_, model::Node>(nodes)))
+                .and_then(|nodes| {
+                    guest_value(
+                        store
+                            .data()
+                            .api
+                            .check_images(surface_id, nodes.iter().map(|node| &node.props)),
+                    )
+                    .map(|()| nodes)
+                }),
             Self::V0_3(extension) => extension
                 .call_mount(&mut *store, surface_id)
                 .await?
@@ -142,6 +172,13 @@ impl UiBindings {
         event: model::UiEvent,
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
+            Self::V0_4(extension) => extension
+                .call_handle_event(&mut *store, surface_id, &event.into())
+                .await?
+                .and_then(|update| guest_value(update.try_into()))
+                .and_then(|update| checked_images(store, surface_id, update)),
+            // A 0.2 surface has no canvas, so the host never sends it `canvas-click`: defence in
+            // depth, like 0.1's below.
             Self::V0_3(extension) => extension
                 .call_handle_event(&mut *store, surface_id, &event.into())
                 .await?
@@ -185,6 +222,21 @@ impl UiBindings {
         count: u32,
     ) -> wasmtime::Result<Result<Vec<model::ListRow>, String>> {
         Ok(match self {
+            Self::V0_4(extension) => guest_value(try_collect::<_, model::ListRow>(
+                extension
+                    .call_list_rows(&mut *store, surface_id, list_node, start, count)
+                    .await?,
+            ))
+            .and_then(|rows| {
+                guest_value(
+                    store.data().api.check_images(
+                        surface_id,
+                        rows.iter()
+                            .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                    ),
+                )
+                .map(|()| rows)
+            }),
             Self::V0_3(extension) => guest_value(try_collect::<_, model::ListRow>(
                 extension
                     .call_list_rows(&mut *store, surface_id, list_node, start, count)
@@ -226,6 +278,10 @@ impl UiBindings {
         event: crate::network::IoEvent,
     ) -> wasmtime::Result<Result<(), String>> {
         Ok(match self {
+            Self::V0_4(extension) => match fyx_ui_v0_4::io_event(event) {
+                Some(event) => extension.call_handle_io(store, &event).await?,
+                None => Ok(()),
+            },
             Self::V0_3(extension) => match fyx_ui_v0_3::io_event(event) {
                 Some(event) => extension.call_handle_io(store, &event).await?,
                 None => Ok(()),
@@ -241,6 +297,11 @@ impl UiBindings {
         surface_id: &str,
     ) -> wasmtime::Result<Result<model::Update, String>> {
         Ok(match self {
+            Self::V0_4(extension) => extension
+                .call_tick(&mut *store, surface_id)
+                .await?
+                .and_then(|update| guest_value(update.try_into()))
+                .and_then(|update| checked_images(store, surface_id, update)),
             Self::V0_3(extension) => extension
                 .call_tick(&mut *store, surface_id)
                 .await?
@@ -419,6 +480,10 @@ impl UiExtension {
                             crate::network::IoEvent::EditDone(id, result) => {
                                 store.data_mut().edit.delivered(id);
                                 crate::network::IoEvent::EditDone(id, result)
+                            }
+                            crate::network::IoEvent::Terminal(event) => {
+                                store.data_mut().terminals.delivered(&event);
+                                crate::network::IoEvent::Terminal(event)
                             }
                             other => other,
                         };
