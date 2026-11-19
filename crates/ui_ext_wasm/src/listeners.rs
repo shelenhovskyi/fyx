@@ -40,7 +40,8 @@ use tokio::{
 use ui_ext::{
     integration::{
         DiscoveryFileSpec, ListenerEvent, ListenerObserver, ListenerProtocol, ListenerSpec,
-        MAX_TOOLS, McpCall, McpError, OpenListener, ToolDef, is_tool_name,
+        MAX_MCP_CLIENT_INFO_BYTES, MAX_TOOLS, McpCall, McpError, McpSession, OpenListener, ToolDef,
+        is_tool_name,
     },
     v0_2::{HostError, HostErrorCode},
 };
@@ -243,6 +244,9 @@ struct Connection {
     outbound: Option<(u64, mpsc::UnboundedSender<String>)>,
     /// `mcp-streamable-http`: the `Mcp-Session-Id`.
     session: Option<String>,
+    /// `initialize`'s `clientInfo` name and version, until `notifications/initialized` reports
+    /// them (once).
+    client: Option<(String, String)>,
 }
 
 struct Listener {
@@ -361,6 +365,24 @@ impl Inner {
         self.cancel_calls(|call| call.listener == name && call.connection == connection);
     }
 
+    /// `notifications/initialized` after `initialize`: one `mcp-initialized` per connection.
+    fn initialized(&self, listener: &Listener, connection: u64) {
+        let client = listener
+            .connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&connection)
+            .and_then(|entry| entry.client.take());
+        if let Some((client_name, client_version)) = client {
+            (self.sink)(ListenerEvent::McpInitialized(McpSession {
+                listener: listener.spec.name.clone(),
+                connection,
+                client_name,
+                client_version,
+            }));
+        }
+    }
+
     /// One JSON-RPC message of an `mcp-*` connection.
     fn handle_mcp(&self, listener: &Listener, connection: u64, message: Value) -> Handled {
         let Value::Object(message) = message else {
@@ -383,6 +405,9 @@ impl Inner {
         };
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let Some(id) = id else {
+            if method == "notifications/initialized" {
+                self.initialized(listener, connection);
+            }
             if method == "notifications/cancelled"
                 && let Some(request_id) = params.get("requestId")
             {
@@ -397,6 +422,26 @@ impl Inner {
         };
         match method {
             "initialize" => {
+                let info = |key: &str| {
+                    let text = params
+                        .get("clientInfo")
+                        .and_then(|info| info.get(key))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let mut end = text.len().min(MAX_MCP_CLIENT_INFO_BYTES);
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text[..end].to_string()
+                };
+                if let Some(entry) = listener
+                    .connections
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_mut(&connection)
+                {
+                    entry.client = Some((info("name"), info("version")));
+                }
                 let requested = params.get("protocolVersion").and_then(Value::as_str);
                 let version = requested
                     .filter(|requested| PROTOCOL_VERSIONS.contains(requested))
@@ -880,7 +925,10 @@ impl ListenersHandle {
             Arc::new({
                 let last_request = last_request.clone();
                 move |event| {
-                    if !matches!(event, ListenerEvent::McpCancelled(_)) {
+                    if !matches!(
+                        event,
+                        ListenerEvent::McpCancelled(_) | ListenerEvent::McpInitialized(_)
+                    ) {
                         *last_request.lock().unwrap_or_else(PoisonError::into_inner) =
                             Some(Instant::now());
                     }
@@ -1280,6 +1328,7 @@ async fn serve_websocket(
             Connection {
                 outbound: Some((connection, outbound.clone())),
                 session: None,
+                client: None,
             },
         );
     }
@@ -1633,6 +1682,7 @@ fn new_session(inner: &Inner, listener: &Listener) -> Option<(u64, String)> {
             Connection {
                 outbound: None,
                 session: Some(session.clone()),
+                client: None,
             },
         );
         evicted
@@ -2279,6 +2329,24 @@ mod tests {
                 .0,
             202
         );
+        // The handshake is reported once, without a `clientInfo` with empty parts.
+        let ListenerEvent::McpInitialized(initialized_session) = setup.events.next().await.unwrap()
+        else {
+            panic!("the handshake")
+        };
+        assert_eq!(
+            (
+                initialized_session.client_name.as_str(),
+                initialized_session.client_version.as_str()
+            ),
+            ("", "")
+        );
+        assert_eq!(
+            http(port, &post(port, &token, Some(&session), &initialized))
+                .await
+                .0,
+            202
+        );
 
         // The event stream carries notifications.
         let mut events = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -2385,6 +2453,110 @@ mod tests {
         assert_eq!(
             reply["result"]["capabilities"],
             json!({ "tools": { "listChanged": true } })
+        );
+    }
+
+    /// Gap 8 (W4): `notifications/initialized` reports the session with `initialize`'s
+    /// `clientInfo`, once, so the extension can push its first context; on a websocket too.
+    #[tokio::test]
+    async fn mcp_initialized_reports_the_client() {
+        let spec = spec(ListenerProtocol::McpStreamableHttp, bearer_auth());
+        let mut setup = setup(&spec);
+        let long = "é".repeat(MAX_MCP_CLIENT_INFO_BYTES);
+        let initialize = json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25",
+            "clientInfo":{"name":"gemini-cli-mcp-client","version":long}}});
+        let (status, head, _) = http(
+            setup.port,
+            &post(setup.port, &setup.token, None, &initialize),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let session = head
+            .lines()
+            .find_map(|line| line.strip_prefix("mcp-session-id: "))
+            .unwrap()
+            .to_owned();
+        let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        for _ in 0..2 {
+            assert_eq!(
+                http(
+                    setup.port,
+                    &post(setup.port, &setup.token, Some(&session), &initialized)
+                )
+                .await
+                .0,
+                202
+            );
+        }
+        let ListenerEvent::McpInitialized(reported) = setup.events.next().await.unwrap() else {
+            panic!("the handshake")
+        };
+        assert_eq!(reported.listener, spec.name);
+        assert_eq!(reported.client_name, "gemini-cli-mcp-client");
+        assert_eq!(
+            reported.client_version,
+            "é".repeat(MAX_MCP_CLIENT_INFO_BYTES / 2)
+        );
+        // Once: the second `initialized` reported nothing.
+        let ping = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
+        http(
+            setup.port,
+            &post(setup.port, &setup.token, Some(&session), &ping),
+        )
+        .await;
+        assert!(setup.events.try_recv().is_err(), "no second report");
+        assert_eq!(
+            setup.set.notify(
+                &spec.name,
+                Some(reported.connection),
+                "notifications/message",
+                "{}"
+            ),
+            Ok(())
+        );
+
+        let ws_spec = ListenerSpec {
+            name: "ws".into(),
+            protocol: ListenerProtocol::McpWebsocket,
+            auth: header_auth(),
+            ..spec.clone()
+        };
+        let ws = setup
+            .set
+            .open(&tokio::runtime::Handle::current(), &ws_spec, Vec::new());
+        let ws_port = ws.unwrap();
+        let headers = [
+            (
+                "x-claude-code-ide-authorization",
+                setup.set.token("ws").unwrap(),
+            ),
+            ("sec-websocket-protocol", MCP_SUBPROTOCOL.to_string()),
+        ];
+        let mut socket = ws_connect(ws_port, &headers).await.unwrap();
+        let send = |value: Value| Message::text(value.to_string());
+        socket
+            .send(send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-03-26","clientInfo":{"name":"claude-code","version":"2.1"}}})))
+            .await
+            .unwrap();
+        next_text(&mut socket).await;
+        socket
+            .send(send(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            ))
+            .await
+            .unwrap();
+        let ListenerEvent::McpInitialized(reported) = setup.events.next().await.unwrap() else {
+            panic!("the websocket handshake")
+        };
+        assert_eq!(
+            (
+                reported.listener.as_str(),
+                reported.client_name.as_str(),
+                reported.client_version.as_str()
+            ),
+            ("ws", "claude-code", "2.1")
         );
     }
 

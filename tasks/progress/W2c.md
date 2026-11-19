@@ -2,31 +2,27 @@
 
 Older history: `archive/W2c.md`.
 
-## Handoff (2026-11-19, eleventh context)
+## Handoff (2026-11-19, twelfth context)
 
-- **Branch** claude/fyx-w2c-host-0-2-cbde2c (push every ready before reporting it). W0 has up
-  to 83f07c47e4; 50171cd30b, f4cedd3b96, bcadfde5fb (5.13 review) are in W0's FAST batch.
-- **5.13 diagnostics (§B.11, W10's 824b124aea):** 31bf4de62c model + runtime:
-  `ui_ext::context::DiagnosticsSource` (W3 implements it in ui_ext_host; contract sent to W3
-  2026-11-19), `diagnostics_snapshot` (errors first, 500 cap, 2 KiB messages), ContextHandle
-  `diagnostics`/`watch_diagnostics` (300 ms debounce here, private and outside files dropped,
-  >200 → empty list, reload takeover, revocation stops). LoadOptions `diagnostics_source`.
-  The next commit adds the `wit_context::Host` methods, `diagnostics-changed`, probe commands
-  `diag`/`diag-all`/`watch-diag` and tests `test_v0_4_diagnostics*`. It needs W0's staged WIT:
-  the spec block in `context` plus `use types.{file-ref};` in `io` for
-  `diagnostics-changed(list<file-ref>)`. Until it is on origin/integration, the WIT edit in
-  `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` is **local only, never commit** (discard it,
-  then merge integration and re-run the tests).
-- **fyx_guard_core (compile speed):** the pure rules (paths, policy, modes, enforce, scrub,
-  reasons, user-config and account-dir rules) moved out of fyx_guard, which keeps the glue and
-  re-exports. Root `Cargo.toml` member + workspace dep and `Cargo.lock` are local only until W0
-  merges the integrator diff. Rule tests: ~20 s → ~7 s after a touch; 27 s from empty.
-- **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `IoEvent::Listener`,
-  `Context`, `DiagnosticsChanged`, `ReviewDecided` => None (drop once W0's arms are merged).
-- **Told W3:** ReviewHost, ContextHost, close(ids), DiagnosticsSource contracts.
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c (push every ready before reporting it).
+- **5.12 relay, extension side (§B.9), 38a8d578db:** `ui_ext_wasm/src/relay.rs` RelayHandle;
+  `UiExtension::relay_request(channel, terminal, argv, stdin, RelayReply) -> Result<u64,
+  String>`, `relay_channels()`, `relay_granted()`; `LoadOptions` `relay_channels`
+  (load_checked) and `relay_binary` (`${relay}` in terminal:env). A dropped reply means
+  on_failure. W3 has the names and the glue recipe against W1's 9a28af71e0 API.
+- **Gap 8 (W4), f847ec1f86:** `ListenerEvent::McpInitialized(McpSession)` on
+  `notifications/initialized`, once per connection, with clientInfo. The WIT
+  `mcp-initialized(mcp-session)` is proposed to W0. Until it is staged, `fyx_ui_v0_4.rs`
+  maps it to `None`; then map it there, add a probe report and a tests_v0_4 test. W10 has
+  the §B.7 note.
+- **fyx_guard_core (7aa8211636):** root `Cargo.toml` member and workspace dep and
+  `Cargo.lock` are local only until W0 merges them.
+- **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `RelayRequest` => None
+  and `McpInitialized` => unreachable (W0 has the diffs).
+- **Told W3:** ReviewHost, ContextHost, close(ids), DiagnosticsSource, relay hook contracts.
 - **Gotchas:** prefix every cargo command with `CARGO_TARGET_DIR=D:/fyx-targets/w2c`. Bash
   heredocs break here: write Python scripts with the Write tool. `cargo fmt` skips
-  `t2_shared.rs` (use `rustfmt --edition 2024 --check`). Close listeners in spec order. T1
-  calls go through the broker's `check`. io tests: permission changes arrive on the io channel
-  too. Loading the same id shuts the old instance down.
-  `test_reload_kills_the_process_tree` (0.3) flakes under full-crate load, passes alone.
+  `t2_shared.rs` and the probe fixture (use `rustfmt --edition 2024`). Close listeners in spec
+  order. T1 calls go through the broker's `check`. io tests: permission changes arrive on the
+  io channel too. Loading the same id shuts the old instance down.
+  `test_reload_kills_the_process_tree` (0.3) flakes under full-crate load and passes alone.
