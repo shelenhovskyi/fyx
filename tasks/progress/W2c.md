@@ -13,8 +13,8 @@ Older history: `archive/W2c.md`.
   `IoEvent::Terminal`; close_all on drop and on revoking create/env); fixture `probe_v0_4`;
   `tests_v0_4.rs`. `terminal` nodes are refused until 5.7; T3 calls answer `not-permitted`.
 - **Next:**
-  1. 5.6, the broker. I sent W3 (local_31b10de5-…) an API sketch on 2026-11-19 and am waiting
-     for its OK; check for its reply first. In the sketch:
+  1. 5.6, the broker. **W3 OK'd it with changes: follow `W2c-broker-api.md`**, which overrides
+     the summary below (W3 = local_31b10de5-…). Old summary:
      - in ui_ext_wasm: `Tier::T3`; `ConsentItem` {Capability, Program{capability,name},
        Listener, DiscoveryFile, EnvAllNew} with `key()`; `ItemLine`; `consent_items(&UiManifest)`
        and `consent_diff(old, new)` (§C.5; extend the existing `UiManifest::consent_items`);
