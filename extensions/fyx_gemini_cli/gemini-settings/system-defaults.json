@@ -1,0 +1,88 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-session-start",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/session-start",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-before-agent",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/before-agent",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-before-tool",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/before-tool",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-after-tool",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/after-tool",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-notification",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/notification",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-after-agent",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/after-agent",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "fyx-session-end",
+            "command": "node -e \"const relay=process.env.FYX_RELAY;if(relay){const run=require('child_process').spawnSync(relay,process.argv.slice(1),{stdio:'inherit'});process.exit(run.status===null?0:run.status)}\" -- --channel fyx-gemini-cli/session-end",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}

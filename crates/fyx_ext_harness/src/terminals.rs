@@ -406,6 +406,14 @@ impl FakeTerminals {
         if let Some(status) = &status {
             status.check()?;
         }
+        // As the host: free on the extension's own terminals, `terminal:status` on others.
+        let theirs = matches!(
+            self.own(handle)?.origin,
+            TerminalOrigin::Profile | TerminalOrigin::User
+        );
+        if theirs {
+            self.require(model_terminal::CAPABILITY_STATUS)?;
+        }
         let terminal = self.own(handle)?;
         terminal.status = status;
         let profile = terminal.origin == TerminalOrigin::Profile;
@@ -647,19 +655,22 @@ mod tests {
             Some("Work")
         );
 
-        // Status and paste, never output or input; no terminal node.
+        // Status (with terminal:status) and paste, never output or input; no terminal node.
+        let waiting = TerminalStatus {
+            state: model_terminal::StatusState::Blocked,
+            label: "Waiting".into(),
+            detail: None,
+            progress: None,
+            attention: true,
+        };
+        let refused = terminals
+            .set_status(handle, Some(waiting.clone()))
+            .unwrap_err();
+        assert_eq!(refused.code, HostErrorCode::NotPermitted);
         terminals
-            .set_status(
-                handle,
-                Some(TerminalStatus {
-                    state: model_terminal::StatusState::Blocked,
-                    label: "Waiting".into(),
-                    detail: None,
-                    progress: None,
-                    attention: true,
-                }),
-            )
-            .unwrap();
+            .capabilities
+            .push(model_terminal::CAPABILITY_STATUS.to_owned());
+        terminals.set_status(handle, Some(waiting)).unwrap();
         assert!(matches!(
             terminals.events.pop_front(),
             Some(TerminalEvent::StatusChanged(_))

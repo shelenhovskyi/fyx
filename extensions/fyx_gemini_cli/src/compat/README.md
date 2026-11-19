@@ -58,6 +58,17 @@ closed them.
    - In a shared `/tmp`, the host must refuse a `gemini` folder it does not own, not only a
      symlink.
    - If Gemini drops the fallback, the kit needs `${uid}` in folder names, or a dir per OS.
+
+   What the host needs, exactly:
+   - **W1 (manifest check, `ui_ext::integration`):** allow `${uid}` inside a `dir` segment of
+     `[[fyx_ui.discovery_files]]` (only `${uid}`: a number, never a path), so the manifest can
+     say `${tmp}/gemini-ide-${uid}`. A per-OS `dir` (`dir_windows`/`dir_unix`) would do too, but
+     one placeholder is smaller.
+   - **W2c (discovery writer, `ui_ext_host`):** expand `${uid}` to the real uid on Unix (on
+     Windows the spec's dir has none, so the manifest keeps `${tmp}/gemini/ide` there); and,
+     before writing under a shared `/tmp`, refuse each folder on the way that Fyx's user does
+     not own or that others can write to (no sticky bit), not only a symlinked one, and
+     create the folders it makes private to the user.
 3. **The IDE's pid in env (W2c).** The CLI looks for `gemini-ide-server-<IDE pid>-*.json`, and
    finds that pid with a heuristic:
    - Unix: the shell's grandparent;
@@ -68,6 +79,10 @@ closed them.
    window. `GEMINI_CLI_IDE_PID` would fix it, but needs an env template for the host's pid
    (`${pid}`, which exists only in discovery templates). `GEMINI_CLI_IDE_SERVER_PORT` (set) is
    the spec's tie-breaker, so the gap is small.
+
+   What the host needs, exactly (W2c, with W1 for the check): `${pid}` in `[fyx_ui.terminal_env]`
+   `vars`, expanded to the Fyx process's pid (the same number the discovery file's name uses).
+   The manifest then adds `GEMINI_CLI_IDE_PID = "${pid}"`.
 4. **Withdrawing a review proposal: closed (W2c, `review.withdraw`).** `closeDiff` withdraws the
    proposal and returns its current text, with the user's edits.
 5. **Focus times and trust in the editor context: trust closed (W2c, `editor-context.trusted`).**
@@ -84,21 +99,32 @@ closed them.
    connects when `/ide enable` runs (or at start); once it finishes the handshake, the
    extension sends it the last `ide/contextUpdate` (unless no file is open).
 
-## Hooks and turns: decided, built after the skeleton
+## Hooks and turns: built
 
-Gemini has no plugin-dir env like `CLAUDE_CODE_PLUGIN_DIRS`. The coordinator decided
-(2026-11-19):
-- The hooks go in a settings file shipped in the package. `GEMINI_CLI_SYSTEM_DEFAULTS_PATH =
-  "${package}/gemini-defaults.json"` goes into `[fyx_ui.terminal_env]`, in profile terminals
-  only. It needs `package:files` too.
-- System defaults have the lowest precedence, and nothing is written into the user's
-  `~/.gemini`, which is an account dir and protected.
-- There is no installed Gemini extension.
-- The hooks are command hooks through `fyx-relay`, as in `fyx_claude_code`. They need
-  `relay:hooks` and relay channels. They give Gemini turns:
-  - `BeforeAgent` begins a turn;
-  - `AfterAgent` ends it.
+Gemini has no plugin-dir env like `CLAUDE_CODE_PLUGIN_DIRS`, so, as the coordinator decided
+(2026-11-19), the hooks go in a settings file shipped in the package:
+`GEMINI_CLI_SYSTEM_DEFAULTS_PATH = "${package}/gemini-settings/system-defaults.json"`, in
+profile terminals only (`package:files`). System defaults have the lowest precedence, nothing is
+written into the user's `~/.gemini`, and there is no installed Gemini extension.
 
-  The event names must be checked against the pinned CLI when this is built.
+`src/hooks.rs` reads the hooks, checked against Gemini CLI's `packages/core/src/hooks` (the
+source the transcripts pin):
+- Seven channels, one per event: `SessionStart`, `BeforeAgent` (begins a turn), `BeforeTool`
+  (the tool on the tab), `AfterTool` (the files `write_file` and `replace` wrote, a relative
+  `file_path` joined to `cwd`), `Notification` (the tab waits for you), `AfterAgent` (ends the
+  turn with those files) and `SessionEnd`. A `BeforeAgent` while a turn is open ends that turn
+  first. The turn's session names the `openDiff` proposals made in it.
+- Every hook is answered at once with exit 0 and no output: the hooks only report.
+- Gemini runs a command hook in PowerShell on Windows and in `bash -c` elsewhere, so each hook
+  is `node -e "<script>" -- --channel fyx-gemini-cli/<name>`: Gemini runs on Node, and the
+  script has no `$`, backtick or double quote. Outside Fyx (`FYX_RELAY` unset) it exits 0.
 
-Until then, Gemini's edits outside `openDiff` show as "changed without review".
+Known limits, none of which the extension can change:
+- Hooks from settings run only in a **trusted folder** (`folderTrust` is on by default).
+  Elsewhere Gemini has no turns in Fyx, and its edits outside `openDiff` show as "changed
+  without review".
+- With `security.environmentVariableRedaction.enabled` (off by default; on in GitHub Actions)
+  the hook's env loses names with `TOKEN`, so `FYX_TERMINAL_TOKEN` is gone and the relay fails
+  open: Gemini goes on, without turns. Fyx does not change that setting.
+- A settings file of the user's or the project's with its own `hooks` adds to these (the lists
+  are concatenated); it does not replace them.

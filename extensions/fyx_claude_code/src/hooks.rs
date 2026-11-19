@@ -201,6 +201,19 @@ impl Sessions {
         self.sessions.len()
     }
 
+    /// The one session in a turn, which an `openDiff` belongs to; `None` with none or several.
+    pub fn current(&self) -> Option<&str> {
+        let mut in_turn = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.in_turn)
+            .map(|(id, _)| id.as_str());
+        match (in_turn.next(), in_turn.next()) {
+            (Some(id), None) => Some(id),
+            _ => None,
+        }
+    }
+
     /// The user rejected an `openDiff` in Fyx, and the extension answered `DIFF_REJECTED`. Claude
     /// 2.1.326 then ends the turn with no `Stop` hook (live recording, 2026-11-19), so the
     /// extension ends it here. The turn is the one session whose current tool is an edit; with
