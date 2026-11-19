@@ -45,8 +45,10 @@ for dir in "${targets[@]}"; do
         continue
     fi
     if [[ $have_sweep -eq 1 ]]; then
+        # cargo-sweep finds the target dir through `cargo metadata` of a project, which honours
+        # CARGO_TARGET_DIR; this checkout's manifest stands in for every worktree's.
         echo "disk-guard: $dir: cargo sweep --time 2"
-        cargo sweep --time 2 "$dir" 2>&1 | tail -2
+        CARGO_TARGET_DIR="$(cygpath -w "$dir")" cargo sweep --time 2 . 2>&1 | tail -2
     fi
     echo "disk-guard: $dir: fyx-prune-target"
     script/fyx-prune-target "$dir" 2>&1 | tail -1
