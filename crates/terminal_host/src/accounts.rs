@@ -109,6 +109,8 @@ impl TerminalEnvHook for AccountsEnv {
             .map(FyxAccount::env_entry)
             .collect::<Vec<_>>();
         if !request.remote {
+            // The relay of this Fyx (§B.9); the names are Fyx's, so no extension sets them.
+            vars.extend(crate::relay::relay_env(cx));
             // Extensions the user allowed into every new terminal (§B.4), after the accounts so
             // they cannot replace an account's variable.
             let names = vars

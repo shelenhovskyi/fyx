@@ -8,9 +8,11 @@
 //! shell is started unless the profile names one.
 //!
 //! Env values are resolved here, never by the extension: `${package}` to the extension's package
-//! dir and `${account.<tool>}` to the terminal's account dir (§C.6). `${listen.*}` and `${relay}`
-//! have no value until listeners (plan 5.11) and the relay (5.12) exist, so a variable using them
-//! is left out, and a profile whose arguments use them does not start. Names that select an
+//! dir, `${account.<tool>}` to the terminal's account dir (§C.6) and `${listen.<name>.port|token}`
+//! to the extension's open listener (plan 5.11, kept by the discovery writer). A variable whose
+//! listener is not open is left out. `${relay}` is the `fyx-relay` binary next to Fyx (§B.9);
+//! without one, a variable using it is left out and a profile whose arguments use it does not
+//! start. Names that select an
 //! account's dir (the presets' and the user's `fyx.accounts.tools`) are dropped whatever the
 //! manifest check let through.
 
@@ -27,7 +29,9 @@ use settings::settings_content::{FyxAccount, FyxAccountsSettingsContent};
 use terminal::terminal_settings::TerminalSettings;
 use terminal::{TerminalBuilder, TerminalMode};
 use terminal_ext::{ACCOUNT_CHOICE_ENV, MenuEntry};
-use ui_ext::terminal::{ProfileCwd, TemplateContext, TerminalEnv, TerminalProfile};
+use ui_ext::terminal::{
+    ProfileCwd, Template, TemplateContext, TemplatePart, TerminalEnv, TerminalProfile,
+};
 use util::paths::PathStyle;
 use workspace::Workspace;
 
@@ -81,9 +85,14 @@ fn integrations(cx: &App) -> Vec<(String, Arc<TerminalIntegration>)> {
         .unwrap_or_default()
 }
 
+/// An extension's open listener by name: its port and host token.
+type Listeners<'a> = &'a dyn Fn(&str) -> Option<(u16, String)>;
+
 struct Values<'a> {
     package: Option<&'a Path>,
     accounts: &'a [FyxAccount],
+    listeners: Listeners<'a>,
+    relay: Option<&'a Path>,
 }
 
 impl TemplateContext for Values<'_> {
@@ -92,16 +101,18 @@ impl TemplateContext for Values<'_> {
             .map(|package| package.to_string_lossy().into_owned())
     }
 
-    fn listen_port(&self, _listener: &str) -> Option<u16> {
-        None
+    fn listen_port(&self, listener: &str) -> Option<u16> {
+        (self.listeners)(listener).map(|(port, _)| port)
     }
 
-    fn listen_token(&self, _listener: &str) -> Option<String> {
-        None
+    /// The manifest check let `${listen.<name>.token}` through only for a listener with
+    /// `token_in_env`.
+    fn listen_token(&self, listener: &str) -> Option<String> {
+        (self.listeners)(listener).map(|(_, token)| token)
     }
 
     fn relay(&self) -> Option<String> {
-        None
+        self.relay.map(|relay| relay.to_string_lossy().into_owned())
     }
 
     fn account_dir(&self, tool: &str) -> Option<String> {
@@ -112,16 +123,15 @@ impl TemplateContext for Values<'_> {
     }
 }
 
-/// The variable names that select an account's dir: the manifest check's list and every tool's
-/// in the user's `fyx.accounts.tools`.
-fn is_account_dir_name(name: &str, settings: &FyxAccountsSettingsContent) -> bool {
-    ui_ext::terminal::is_account_env(name)
-        || settings
-            .tools
-            .iter()
-            .flatten()
-            .filter_map(|(_, tool)| tool.env.as_deref())
-            .any(|env| env.trim().eq_ignore_ascii_case(name))
+/// The variable names that select an account's dir in the user's `fyx.accounts.tools` (the
+/// manifest check's own list is in [`ui_ext::terminal::is_forbidden_terminal_env`]).
+fn is_user_tool_env(name: &str, settings: &FyxAccountsSettingsContent) -> bool {
+    settings
+        .tools
+        .iter()
+        .flatten()
+        .filter_map(|(_, tool)| tool.env.as_deref())
+        .any(|env| env.trim().eq_ignore_ascii_case(name))
 }
 
 /// `integration`'s env for a terminal with `accounts`, resolved; a variable without a value or
@@ -129,6 +139,8 @@ fn is_account_dir_name(name: &str, settings: &FyxAccountsSettingsContent) -> boo
 fn resolve_env(
     integration: &TerminalIntegration,
     accounts: &[FyxAccount],
+    listeners: Listeners,
+    relay: Option<&Path>,
     settings: &FyxAccountsSettingsContent,
 ) -> Vec<(String, String)> {
     let Some(env) = &integration.env else {
@@ -137,18 +149,36 @@ fn resolve_env(
     let values = Values {
         package: integration.package_dir.as_deref(),
         accounts,
+        listeners,
+        relay,
     };
-    env.resolve(&values)
-        .into_iter()
-        .filter(|(name, _)| {
-            let refused = is_account_dir_name(name, settings)
-                || ui_ext::terminal::is_forbidden_terminal_env(name);
+    env.vars
+        .iter()
+        .filter(|(name, template)| {
+            let refused = is_user_tool_env(name, settings)
+                || (ui_ext::terminal::is_forbidden_terminal_env(name)
+                    && !is_host_token(name, template));
             if refused {
                 log::warn!("terminal:env: dropped {name}");
             }
             !refused
         })
+        .filter_map(|(name, template)| Some((name.clone(), template.resolve(&values)?)))
         .collect()
+}
+
+/// The manifest check's one exception, checked again: a credential-suffix name whose value is
+/// exactly one listener's host token (`${listen.<name>.token}` with `token_in_env`).
+fn is_host_token(name: &str, template: &Template) -> bool {
+    let [TemplatePart::ListenToken(listener)] = template.0.as_slice() else {
+        return false;
+    };
+    let spec = ui_ext::terminal::TerminalEnvSpec {
+        vars: BTreeMap::from([(name.to_owned(), format!("${{listen.{listener}.token}}"))]),
+        scope: ui_ext::terminal::EnvScope::Profiles,
+        reason: "recheck".into(),
+    };
+    ui_ext::terminal::check_terminal_env(spec, &|_| Some(true)).is_ok()
 }
 
 /// For the env hook: the env of every extension whose `terminal:env` the user allowed in every
@@ -158,11 +188,30 @@ pub(crate) fn all_new_env(
     settings: &FyxAccountsSettingsContent,
     cx: &App,
 ) -> Vec<(String, String)> {
+    let writer = crate::discovery::discovery_writer(cx);
+    let relay = crate::relay::relay_binary(cx);
     integrations(cx)
         .iter()
         .filter(|(_, integration)| integration.env_all_new)
-        .flat_map(|(_, integration)| resolve_env(integration, accounts, settings))
+        .flat_map(|(ext, integration)| {
+            let listeners = listeners_of(writer.as_deref(), ext);
+            resolve_env(
+                integration,
+                accounts,
+                &listeners,
+                relay.as_deref(),
+                settings,
+            )
+        })
         .collect()
+}
+
+/// `ext`'s open listeners, as the discovery writer knows them.
+fn listeners_of<'a>(
+    writer: Option<&'a crate::discovery::DiscoveryWriter>,
+    ext: &'a str,
+) -> impl Fn(&str) -> Option<(u16, String)> + 'a {
+    move |name| writer?.listener(ext, name)
 }
 
 /// A "+" menu entry for a profile: which extension, which profile, which account.
@@ -279,7 +328,14 @@ fn launch(
         .first()
         .filter(|root| crate::created::in_trusted_worktree(root, cx))
         .cloned();
-    let start = match plan(profile, &integration, &roots, trusted_root.as_deref()) {
+    let relay = crate::relay::relay_binary(cx);
+    let start = match plan(
+        profile,
+        &integration,
+        &roots,
+        trusted_root.as_deref(),
+        relay.as_deref(),
+    ) {
         Ok(start) => start,
         Err(why) => {
             log::warn!("fyx: profile {ext}/{profile_id} did not start: {why}");
@@ -292,7 +348,15 @@ fn launch(
         accounts::accounts_for(&settings, Some(&start.cwd), account_choice.as_deref());
     let terminal_settings = TerminalSettings::get_global(cx);
     let mut env = terminal_settings.env.clone();
-    env.extend(resolve_env(&integration, &terminal_accounts, &settings));
+    let writer = crate::discovery::discovery_writer(cx);
+    let listeners = listeners_of(writer.as_deref(), ext);
+    env.extend(resolve_env(
+        &integration,
+        &terminal_accounts,
+        &listeners,
+        relay.as_deref(),
+        &settings,
+    ));
     if let Some(choice) = account_choice {
         env.insert(ACCOUNT_CHOICE_ENV.to_owned(), choice);
     }
@@ -366,6 +430,7 @@ fn plan(
     integration: &TerminalIntegration,
     roots: &[PathBuf],
     trusted_root: Option<&Path>,
+    relay: Option<&Path>,
 ) -> Result<Start, String> {
     let cwd = match profile.cwd {
         ProfileCwd::Worktree => roots.first().cloned().ok_or("no local worktree is open")?,
@@ -385,6 +450,9 @@ fn plan(
     let values = Values {
         package: integration.package_dir.as_deref(),
         accounts: &[],
+        // Profile args never name a listener (`TemplateUse::ProfileArg`).
+        listeners: &|_| None,
+        relay,
     };
     let args = profile
         .args
@@ -484,10 +552,11 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ui_ext::terminal::{Template, TemplateUse};
+    use ui_ext::terminal::TemplateUse;
 
     fn template(text: &str, usage: TemplateUse) -> Template {
-        Template::parse(text, usage, &|_| Some(false)).unwrap()
+        // `ide` has `token_in_env`.
+        Template::parse(text, usage, &|name| Some(name == "ide")).unwrap()
     }
 
     fn profile(id: &str, account_tool: Option<&str>) -> TerminalProfile {
@@ -548,6 +617,8 @@ mod tests {
                 ("MY_AMP_DIR", "x"),
             ]),
             std::slice::from_ref(&work),
+            &|_| None,
+            None,
             &settings,
         );
         let package = Path::new("/pkg").to_string_lossy().into_owned();
@@ -566,9 +637,32 @@ mod tests {
         let none = resolve_env(
             &integration(&[("MY_DIR", "${account.claude}")]),
             &[],
+            &|_| None,
+            None,
             &settings,
         );
         assert!(none.is_empty(), "no account, no variable");
+    }
+
+    #[test]
+    fn listen_placeholders_take_the_open_listener() {
+        let settings = accounts_settings();
+        let vars = integration(&[
+            ("CLAUDE_CODE_SSE_PORT", "${listen.ide.port}"),
+            ("TOOL_IDE_TOKEN", "${listen.ide.token}"),
+            ("HOOKS_URL", "http://127.0.0.1:${listen.hooks.port}/h"),
+            ("GITHUB_TOKEN", "${listen.ide.token}"),
+            ("FYX_TOKEN", "${listen.ide.token}"),
+        ]);
+        let open = |name: &str| (name == "ide").then(|| (4100, "secret".to_owned()));
+        assert_eq!(
+            resolve_env(&vars, &[], &open, None, &settings),
+            [
+                ("CLAUDE_CODE_SSE_PORT".to_owned(), "4100".to_owned()),
+                ("TOOL_IDE_TOKEN".to_owned(), "secret".to_owned()),
+            ],
+            "a listener that is not open leaves its variable out; a credential or Fyx name never              carries the token, whatever the manifest check let through"
+        );
     }
 
     #[test]
@@ -644,16 +738,22 @@ mod tests {
         worktree_profile.path = Some(file.into());
         let integration = integration(&[]);
         assert!(
-            plan(&worktree_profile, &integration, &roots, None).is_err(),
+            plan(&worktree_profile, &integration, &roots, None, None).is_err(),
             "untrusted"
         );
-        let start = plan(&worktree_profile, &integration, &roots, Some(&repo)).unwrap();
+        let start = plan(&worktree_profile, &integration, &roots, Some(&repo), None).unwrap();
         assert_eq!(start.cwd, repo);
         assert_eq!(start.args, ["--ide"]);
 
         let mut relay = worktree_profile;
         relay.args = vec![template("${relay}", TemplateUse::ProfileArg)];
-        assert!(plan(&relay, &integration, &roots, Some(&repo)).is_err());
+        assert!(
+            plan(&relay, &integration, &roots, Some(&repo), None).is_err(),
+            "no relay binary"
+        );
+        let binary = repo.join("fyx-relay");
+        let start = plan(&relay, &integration, &roots, Some(&repo), Some(&binary)).unwrap();
+        assert_eq!(start.args, [binary.to_string_lossy().into_owned()]);
         std::fs::remove_dir_all(&base).ok();
     }
 

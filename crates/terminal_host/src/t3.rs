@@ -74,7 +74,7 @@ pub fn set_share_bridge(bridge: Rc<dyn ShareBridge>, cx: &mut App) {
     cx.set_global(GlobalShareBridge(bridge));
 }
 
-/// Main thread: the extension whose write a terminal shows, while it shows it.
+/// Main thread: the display name of the extension whose write a terminal shows, while it shows it.
 #[derive(Default)]
 struct TypedBy(HashMap<TerminalId, (String, u64)>);
 
@@ -138,10 +138,27 @@ pub(crate) fn write(
     (reply.sink)(TerminalEvent::WriteDone(reply.id, result));
 }
 
+/// What "typed by …" names: the extension's display name, as the share menu and the eye do; its
+/// id only when no loaded extension has it.
+fn display_name(targets: &[ShareTarget], extension_id: String) -> String {
+    targets
+        .iter()
+        .find(|target| target.extension_id == extension_id)
+        .map(|target| target.extension_name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(extension_id)
+}
+
 fn mark_typed_by(id: TerminalId, extension: String, cx: &mut App) {
+    let targets = cx
+        .try_global::<GlobalShareBridge>()
+        .map(|bridge| bridge.0.clone())
+        .map(|bridge| bridge.targets(cx))
+        .unwrap_or_default();
+    let name = display_name(&targets, extension);
     let typed = cx.default_global::<TypedBy>();
     let generation = typed.0.get(&id).map_or(0, |(_, generation)| generation + 1);
-    typed.0.insert(id, (extension, generation));
+    typed.0.insert(id, (name, generation));
     cx.spawn(async move |cx| {
         cx.background_executor().timer(TYPED_BY_FOR).await;
         cx.update(|cx| {
@@ -269,4 +286,28 @@ pub(crate) fn access(terminal: &TerminalExt, cx: &App) -> Vec<String> {
         }));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_by_names_the_extension_by_its_display_name() {
+        let targets = [ShareTarget {
+            extension_id: "fyx-check-probe".into(),
+            extension_name: "Check Probe".into(),
+            can_read: true,
+            can_write: true,
+        }];
+        assert_eq!(
+            display_name(&targets, "fyx-check-probe".into()),
+            "Check Probe"
+        );
+        assert_eq!(
+            display_name(&targets, "unloaded".into()),
+            "unloaded",
+            "an extension that is gone keeps its id"
+        );
+    }
 }
