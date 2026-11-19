@@ -206,6 +206,7 @@ impl Default for Setup {
                 terminal::CAPABILITY_CREATE,
                 terminal::CAPABILITY_ENV,
                 terminal::CAPABILITY_OBSERVE,
+                ui_ext::approvals::CAPABILITY_APPROVALS,
             ],
         }
     }
@@ -490,6 +491,79 @@ async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext
         format!("{error:#}").contains("not implemented by this build"),
         "{error:#}"
     );
+}
+
+#[gpui::test]
+async fn test_v0_4_approvals(cx: &mut TestAppContext) {
+    use ui_ext::approvals::{ApprovalOption, ApprovalRequest, MAX_OPEN_APPROVALS};
+
+    let extension = load(&Setup::default(), cx).await.unwrap();
+    let reply = extension
+        .handle_event_v0_2(
+            SURFACE,
+            UiEvent::InputChanged(1, "ask Codex run-tests once deny".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report(&reply.value), "1");
+    assert_eq!(
+        reply.effects,
+        [HostEffect::AskApproval {
+            id: 1,
+            request: ApprovalRequest {
+                tool: Some("Codex".into()),
+                title: "run-tests".into(),
+                detail: "detail".into(),
+                options: vec![ApprovalOption::AllowOnce, ApprovalOption::Deny],
+            },
+        }]
+    );
+    // The text rules, and no options.
+    assert_eq!(
+        command(&extension, "ask - t once once").await,
+        "invalid-argument"
+    );
+    assert_eq!(command(&extension, "ask - t").await, "invalid-argument");
+    // Four open at most.
+    for id in 2..=MAX_OPEN_APPROVALS {
+        assert_eq!(command(&extension, "ask - t always").await, id.to_string());
+    }
+    assert_eq!(command(&extension, "ask - t deny").await, "limit-exceeded");
+
+    // An answer frees the slot and reaches `handle-io`; a second one for the same card, or one
+    // for a card never asked, is dropped.
+    let mut events = extension.take_io_events().unwrap();
+    extension
+        .answer_approval(1, Some(ApprovalOption::AllowOnce))
+        .await;
+    extension
+        .answer_approval(1, Some(ApprovalOption::Deny))
+        .await;
+    extension.answer_approval(99, None).await;
+    extension.answer_approval(2, None).await;
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let event = events.next().await.unwrap();
+        let reply = extension.handle_io(event).await.unwrap();
+        seen.extend(reply.effects.iter().filter_map(|effect| match effect {
+            HostEffect::Push { update, .. } => Some(report(update)),
+            _ => None,
+        }));
+    }
+    assert_eq!(seen, ["approval 1 once", "approval 2 none"]);
+    assert_eq!(command(&extension, "ask - t deny").await, "5");
+    assert_eq!(command(&extension, "ask - t deny").await, "6");
+    assert_eq!(command(&extension, "ask - t deny").await, "limit-exceeded");
+}
+
+#[gpui::test]
+async fn test_v0_4_approvals_need_the_capability(cx: &mut TestAppContext) {
+    let mut setup = Setup::default();
+    setup
+        .capabilities
+        .retain(|capability| *capability != ui_ext::approvals::CAPABILITY_APPROVALS);
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&extension, "ask - t once").await, "not-permitted");
 }
 
 #[test]

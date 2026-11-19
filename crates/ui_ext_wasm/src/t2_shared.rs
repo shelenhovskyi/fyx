@@ -1,6 +1,7 @@
 // The imports 0.3 and 0.4 share, included by `fyx_ui_v0_3` and `fyx_ui_v0_4` with each world's
 // bindings in scope (`wit`, `wit_host`, `wit_images`, ...): both worlds spell these types the same.
-// A module that includes it defines `t2_capability`, `t2_from_name` and `terminal_io_event`.
+// A module that includes it defines `t2_capability`, `t2_from_name`, `terminal_io_event` and
+// `approval_io_event`.
 
 impl wit_images::Host for UiState {
     fn add_image(
@@ -395,6 +396,9 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
             ))
         }
         network::IoEvent::Terminal(event) => return terminal_io_event(event),
+        network::IoEvent::ApprovalAnswered(id, answer) => {
+            return approval_io_event(id, answer);
+        }
         network::IoEvent::EditDone(id, result) => wit_io::IoEvent::EditDone((
             id,
             result.map_err(|error| match error {

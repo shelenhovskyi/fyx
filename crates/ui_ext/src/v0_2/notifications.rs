@@ -167,7 +167,7 @@ fn is_hidden(character: char, newline_allowed: bool) -> bool {
 }
 
 /// Plain text of `min..=max` bytes; `max_lines` of 1 means one line.
-fn check_text(
+pub(crate) fn check_text(
     field: &str,
     text: &str,
     min: usize,

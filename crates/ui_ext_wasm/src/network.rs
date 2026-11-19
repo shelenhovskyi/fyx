@@ -951,6 +951,12 @@ impl NetworkHandle {
             .take()
     }
 
+    /// Queues an outcome the host produced itself (an approval card's answer) behind the
+    /// others; nothing once the instance is gone.
+    pub(crate) async fn deliver(&self, event: IoEvent) {
+        self.running.deliver(event).await;
+    }
+
     /// Whether the capability is granted now, for the delivery: a revocation while a request
     /// ran turns its outcome into `denied`.
     pub(crate) fn granted(&self) -> bool {
