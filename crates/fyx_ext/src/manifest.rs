@@ -93,6 +93,7 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         integration::CAPABILITY_CONTEXT_EDITOR,
         integration::CAPABILITY_WORKSPACE_OPEN,
         integration::CAPABILITY_APPROVALS,
+        integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
     ];
     if *version >= Version::new(0, 4, 0) {
         Some(V0_4)
@@ -142,10 +143,6 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
         CapabilityStatus::Planned("a later release"),
     ),
     (
-        "workspace:diagnostics",
-        CapabilityStatus::Planned("a later release"),
-    ),
-    (
         "workspace:edit",
         CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
@@ -173,6 +170,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     (integration::CAPABILITY_CONTEXT_EDITOR, SINCE_V0_4),
     (integration::CAPABILITY_WORKSPACE_OPEN, SINCE_V0_4),
     (integration::CAPABILITY_APPROVALS, SINCE_V0_4),
+    (integration::CAPABILITY_WORKSPACE_DIAGNOSTICS, SINCE_V0_4),
 ];
 
 const SINCE_V0_4: CapabilityStatus = CapabilityStatus::Since(Version::new(0, 4, 0));
@@ -925,6 +923,42 @@ capabilities = ["ui:panel"]
                 "{report:?}"
             );
         }
+    }
+
+    /// The table follows the host: every demo in `extensions/` passes, so `fyx-ext check` skips
+    /// none of them (`workspace:diagnostics` was still "planned" here while 0.4 provided it).
+    #[test]
+    fn shipped_demos_pass_the_manifest_check() {
+        let extensions = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&extensions).expect("extensions/ exists") {
+            let dir = entry.expect("readable entry").path();
+            let Ok(text) = std::fs::read_to_string(dir.join("extension.toml")) else {
+                continue;
+            };
+            if !text.contains("[fyx_ui]") {
+                continue;
+            }
+            let mut report = Report::default();
+            let manifest = parse(&dir, &text, &mut report);
+            assert!(manifest.is_ok(), "{}: {manifest:?}", dir.display());
+            assert!(report.errors.is_empty(), "{}: {report:?}", dir.display());
+            assert!(
+                !report.warnings.iter().any(|w| w.contains("arrives with")),
+                "{}: {report:?}",
+                dir.display()
+            );
+            checked += 1;
+        }
+        assert!(checked > 1, "found {checked} fyx_ui demos");
+        assert!(capability_available(
+            integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+            Some(&Version::new(0, 4, 0))
+        ));
+        assert!(!capability_available(
+            integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+            Some(&Version::new(0, 3, 0))
+        ));
     }
 
     #[test]
