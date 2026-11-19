@@ -306,6 +306,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
     use ui_ext::network as net;
     match event {
         net::IoEvent::Terminal(event) => Some(terminal_io_event(event)),
+        // `approvals` traps here until plan 5.14, so no answer arrives.
+        net::IoEvent::ApprovalAnswered(..) => None,
         net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
             id,
             result
