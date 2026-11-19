@@ -2118,6 +2118,10 @@ Environment it may pass: {}",
                         review: Some(cx.update(|cx| {
                             crate::review_bridge::for_extension(&found.extension_id, cx)
                         })),
+                        // context.diagnostics (plan 5.13).
+                        diagnostics_source: Some(cx.update(|cx| {
+                            crate::diagnostics_host::for_extension(&found.extension_id, cx)
+                        })),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -3299,6 +3303,8 @@ fn attach_to_workspace(
         );
         // context:editor and workspace:open (plan 5.13).
         crate::context_host::watch_workspace(workspace, window, cx);
+        // context.diagnostics (plan 5.13).
+        crate::diagnostics_host::watch_project(workspace.project(), cx);
         let project = workspace.project().clone();
         cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
             .detach();
@@ -3887,6 +3893,9 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         ),
         review: Some(
             cx.update(|cx| crate::review_bridge::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        diagnostics_source: Some(
+            cx.update(|cx| crate::diagnostics_host::for_extension(&path.to_string_lossy(), cx)),
         ),
         ..LoadOptions::default()
     };

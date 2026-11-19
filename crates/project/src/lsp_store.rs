@@ -425,6 +425,33 @@ enum LanguageServerStartMode {
 }
 
 impl LocalLspStore {
+    /// fyx: the diagnostics stored for a worktree file, open or not, per language server (read by
+    /// ui_ext_host's diagnostics source for extensions).
+    pub fn fyx_file_diagnostics(
+        &self,
+        worktree_id: WorktreeId,
+        path: &RelPath,
+    ) -> &[(
+        LanguageServerId,
+        Vec<DiagnosticEntry<Unclipped<PointUtf16>>>,
+    )] {
+        self.diagnostics
+            .get(&worktree_id)
+            .and_then(|files| files.get(path))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// fyx: every worktree file with stored diagnostics (information and hints included, which
+    /// the summaries and `DiagnosticsUpdated` leave out).
+    pub fn fyx_files_with_diagnostics(&self) -> impl Iterator<Item = ProjectPath> + '_ {
+        self.diagnostics.iter().flat_map(|(worktree_id, files)| {
+            files.keys().map(|path| ProjectPath {
+                worktree_id: *worktree_id,
+                path: path.clone(),
+            })
+        })
+    }
+
     /// Returns the running language server for the given ID. Note if the language server is starting, it will not be returned.
     pub fn running_language_server_for_id(
         &self,
