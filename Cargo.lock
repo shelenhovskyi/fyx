@@ -18233,10 +18233,22 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
+ "gpui",
  "log",
  "percent-encoding",
  "polling",
  "rand 0.9.4",
+]
+
+[[package]]
+name = "terminal_host"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "terminal",
+ "terminal_ext",
+ "terminal_view",
+ "ui",
 ]
 
 [[package]]
@@ -18281,6 +18293,7 @@ dependencies = [
  "shlex 2.0.1",
  "task",
  "terminal",
+ "terminal_ext",
  "theme",
  "theme_settings",
  "ui",
@@ -22912,6 +22925,7 @@ dependencies = [
  "telemetry",
  "telemetry_events",
  "tempfile",
+ "terminal_host",
  "terminal_view",
  "theme",
  "theme_extension",

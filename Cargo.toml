@@ -223,6 +223,7 @@ members = [
     "crates/telemetry_events",
     "crates/terminal",
     "crates/terminal_ext", # fyx
+    "crates/terminal_host", # fyx
     "crates/terminal_view",
     "crates/text",
     "crates/theme",
@@ -518,6 +519,7 @@ telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }
 terminal = { path = "crates/terminal" }
 terminal_ext = { path = "crates/terminal_ext" } # fyx
+terminal_host = { path = "crates/terminal_host" } # fyx
 terminal_view = { path = "crates/terminal_view" }
 text = { path = "crates/text" }
 theme = { path = "crates/theme" }
