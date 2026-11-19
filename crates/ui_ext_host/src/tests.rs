@@ -54,6 +54,8 @@ enum Call {
         count: u32,
     },
     Tick,
+    /// `UiBackend::answer_approval` (0.4, §B.12).
+    Approval(u64, Option<crate::approvals::ApprovalChoice>),
 }
 
 /// A counter-like extension: a label, an increment button, a list with one row per count and a
@@ -129,7 +131,7 @@ impl FakeBackend {
             .into_iter()
             .filter_map(|call| match call {
                 Call::Event(event) => Some(event),
-                Call::Mount | Call::Rows { .. } | Call::Tick => None,
+                Call::Mount | Call::Rows { .. } | Call::Tick | Call::Approval(..) => None,
             })
             .collect()
     }
@@ -326,6 +328,10 @@ impl UiBackend for FakeBackend {
 
     fn modal_closed(&self, surface_id: &str) {
         self.modals_closed.borrow_mut().push(surface_id.to_string());
+    }
+
+    fn answer_approval(&self, id: u64, answer: Option<crate::approvals::ApprovalChoice>) {
+        self.calls.borrow_mut().push(Call::Approval(id, answer));
     }
 
     fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
@@ -3207,6 +3213,45 @@ fn test_extension_proxy_follows_the_setting(cx: &mut TestAppContext) {
     assert_eq!(proxy.get(), None);
 }
 
+/// 0.3 Q4: the private hosts every load gets follow `fyx.extensions.network.private_hosts`;
+/// invalid entries are ignored (and logged), the others apply.
+#[gpui::test]
+fn test_private_hosts_follow_the_setting(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(crate::registry::follow_private_hosts_setting);
+    let hosts = cx.update(crate::registry::extension_private_hosts);
+    assert!(!hosts.allows("build.corp.example"), "none by default");
+    let set = |entries: Option<Vec<&str>>, cx: &mut TestAppContext| {
+        let entries = entries.map(|entries| entries.into_iter().map(String::from).collect());
+        cx.update(|cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .fyx
+                        .get_or_insert_default()
+                        .extensions
+                        .get_or_insert_default()
+                        .network
+                        .get_or_insert_default()
+                        .private_hosts = entries
+                })
+            })
+        });
+    };
+    set(
+        Some(vec!["*.corp.example", "nas.home.example", "127.0.0.1"]),
+        cx,
+    );
+    assert!(hosts.allows("build.corp.example"));
+    assert!(!hosts.allows("corp.example"), "*. is the subdomains only");
+    assert!(hosts.allows("nas.home.example"));
+    assert!(!hosts.allows("127.0.0.1"), "an IP literal is ignored");
+    // A load made earlier holds the same list, so it sees the change.
+    let later = cx.update(crate::registry::extension_private_hosts);
+    set(None, cx);
+    assert!(!hosts.allows("build.corp.example") && !later.allows("nas.home.example"));
+}
+
 /// integration-5 L1: a reload (`replace_backend`) drops the old instance's pending tick; neither
 /// instance is ticked for it, and the new one asks for its own.
 #[gpui::test]
@@ -3320,4 +3365,228 @@ async fn test_tick_share_counts_guest_execution(cx: &mut TestAppContext) {
         link.0.borrow()[1] < Duration::from_millis(7),
         "the wall time without a record"
     );
+}
+
+mod approval_tests {
+    use super::*;
+    use crate::approvals::{
+        ApprovalCard, ApprovalChoice, ApprovalRequest, MAX_DETAIL_LINES, MAX_OPEN_APPROVALS,
+        MAX_TITLE_CHARS, display_detail, display_line,
+    };
+    use crate::notifications::CLICK_GUARD;
+
+    fn request(options: &[ApprovalChoice]) -> ApprovalRequest {
+        ApprovalRequest {
+            tool: Some("Codex".into()),
+            title: "Run `cargo test`?".into(),
+            detail: "in D:/projects/demo".into(),
+            options: options.to_vec(),
+        }
+    }
+
+    fn setup(
+        cx: &mut TestAppContext,
+        with_window: bool,
+    ) -> (Rc<FakeBackend>, Entity<crate::UiExtensionRegistry>) {
+        init_test(cx);
+        let backend = Rc::new(FakeBackend::default());
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        let workspace = cx.new(|_| ()).entity_id();
+        registry.update(cx, |registry, cx| {
+            let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+            registry.register_backend(dyn_backend, &[panel_surface("counter", "Counter")], cx);
+            if with_window {
+                registry.set_active_workspace(workspace);
+            }
+        });
+        cx.run_until_parked();
+        backend.take_calls();
+        (backend, registry)
+    }
+
+    /// What the workspace does on `ShowApproval`: the card, in a window of its own.
+    fn show<'a>(
+        registry: &Entity<crate::UiExtensionRegistry>,
+        id: u64,
+        request: ApprovalRequest,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<ApprovalCard>, &'a mut VisualTestContext) {
+        registry.update(cx, |registry, cx| {
+            registry.ask_approval("fake", id, request, cx)
+        });
+        let (name, request) = registry
+            .update(cx, |registry, _| registry.take_pending_approval("fake", id))
+            .expect("pending");
+        let weak = registry.downgrade();
+        let (view, vcx) = cx
+            .add_window_view(|_, cx| ApprovalCard::new("fake".into(), id, name, request, weak, cx));
+        registry.update(vcx, |registry, _| {
+            registry.set_approval_view("fake", id, view.downgrade())
+        });
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    #[test]
+    fn test_approval_text_is_drawn_plain() {
+        assert_eq!(
+            display_line("Run\n`rm`\u{202e}  now\u{200b}?", MAX_TITLE_CHARS),
+            "Run `rm` now ?"
+        );
+        let long = "x".repeat(MAX_TITLE_CHARS + 5);
+        let shown = display_line(&long, MAX_TITLE_CHARS);
+        assert_eq!(shown.chars().count(), MAX_TITLE_CHARS + 1);
+        assert!(shown.ends_with('…'));
+        let lines = (0..MAX_DETAIL_LINES + 3)
+            .map(|line| format!("line {line}\u{2066}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let detail = display_detail(&lines);
+        assert_eq!(detail.lines().count(), MAX_DETAIL_LINES + 1);
+        assert!(detail.ends_with('…'));
+        assert!(!detail.contains('\u{2066}'));
+    }
+
+    /// §B.12: the buttons ignore clicks for 1 s, no key answers the card, the host draws the
+    /// options in its own order, an option that was not offered does nothing, and the answer
+    /// reaches the instance once.
+    #[gpui::test]
+    async fn test_approval_card_guard_order_and_answer(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx, true);
+        let (card, vcx) = show(
+            &registry,
+            1,
+            request(&[
+                ApprovalChoice::AllowOnce,
+                ApprovalChoice::Deny,
+                ApprovalChoice::AllowOnce,
+            ]),
+            cx,
+        );
+        assert_eq!(
+            card.read_with(vcx, |card, _| card.options().to_vec()),
+            [ApprovalChoice::Deny, ApprovalChoice::AllowOnce],
+            "host order, no duplicates"
+        );
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_approvals("fake")),
+            [1]
+        );
+
+        vcx.executor()
+            .advance_clock(CLICK_GUARD - Duration::from_millis(1));
+        card.update(vcx, |card, cx| card.answer(ApprovalChoice::AllowOnce, cx));
+        vcx.run_until_parked();
+        assert_eq!(backend.calls(), [], "inside the click guard");
+
+        vcx.executor().advance_clock(Duration::from_millis(1));
+        vcx.update(|window, cx| gpui::Focusable::focus_handle(card.read(cx), cx).focus(window, cx));
+        vcx.simulate_keystrokes("enter space escape");
+        card.update(vcx, |card, cx| card.answer(ApprovalChoice::AlwaysAllow, cx));
+        vcx.run_until_parked();
+        assert_eq!(backend.calls(), [], "keys and an option not offered");
+
+        card.update(vcx, |card, cx| card.answer(ApprovalChoice::AllowOnce, cx));
+        card.update(vcx, |card, cx| card.answer(ApprovalChoice::Deny, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            backend.take_calls(),
+            [Call::Approval(1, Some(ApprovalChoice::AllowOnce))]
+        );
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_approvals("fake")),
+            Vec::<u64>::new()
+        );
+        // The view going away after an answer sends nothing more.
+        drop(card);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert_eq!(backend.calls(), []);
+    }
+
+    /// Closing the card, or its window going away, answers `none`; the close button works inside
+    /// the guard.
+    #[gpui::test]
+    async fn test_approval_closed_unanswered(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx, true);
+        let (card, vcx) = show(&registry, 1, request(&[ApprovalChoice::Deny]), cx);
+        card.update(vcx, |card, cx| card.close(cx));
+        vcx.run_until_parked();
+        assert_eq!(backend.take_calls(), [Call::Approval(1, None)]);
+        drop(card);
+        vcx.update(|window, _| window.remove_window());
+
+        let (card, vcx) = show(&registry, 2, request(&[ApprovalChoice::Deny]), cx);
+        drop(card);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert_eq!(backend.take_calls(), [Call::Approval(2, None)]);
+    }
+
+    /// At most four open per extension; a fifth, an id already open, no options, or no window to
+    /// show in are answered `none` at once.
+    #[gpui::test]
+    async fn test_approval_limits(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx, true);
+        registry.update(cx, |registry, cx| {
+            for id in 1..=MAX_OPEN_APPROVALS as u64 + 1 {
+                registry.ask_approval("fake", id, request(&[ApprovalChoice::Deny]), cx);
+            }
+            registry.ask_approval("fake", 1, request(&[ApprovalChoice::Deny]), cx);
+            registry.ask_approval("fake", 9, request(&[]), cx);
+        });
+        assert_eq!(
+            backend.take_calls(),
+            [
+                Call::Approval(MAX_OPEN_APPROVALS as u64 + 1, None),
+                Call::Approval(1, None),
+                Call::Approval(9, None),
+            ]
+        );
+        assert_eq!(
+            registry.read_with(cx, |registry, _| registry.open_approvals("fake")),
+            (1..=MAX_OPEN_APPROVALS as u64).collect::<Vec<_>>()
+        );
+
+        let (backend, registry) = setup(cx, false);
+        registry.update(cx, |registry, cx| {
+            registry.ask_approval("fake", 1, request(&[ApprovalChoice::Deny]), cx)
+        });
+        assert_eq!(backend.take_calls(), [Call::Approval(1, None)], "no window");
+    }
+
+    /// A new instance (a reload) or a dead one closes the old instance's cards with no answer.
+    #[gpui::test]
+    async fn test_approval_cards_close_with_the_instance(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx, true);
+        let (card, vcx) = show(&registry, 1, request(&[ApprovalChoice::AllowOnce]), cx);
+        let dismissed = Rc::new(Cell::new(false));
+        vcx.update(|_, cx| {
+            let dismissed = dismissed.clone();
+            cx.subscribe(&card, move |_, _: &gpui::DismissEvent, _| {
+                dismissed.set(true)
+            })
+            .detach()
+        });
+        registry.update(vcx, |registry, cx| {
+            let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+            registry.register_backend(dyn_backend, &[panel_surface("counter", "Counter")], cx);
+        });
+        vcx.run_until_parked();
+        assert!(dismissed.get(), "the card closed");
+        drop(card);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        assert!(
+            !backend
+                .take_calls()
+                .iter()
+                .any(|call| matches!(call, Call::Approval(..))),
+            "no answer for the old instance"
+        );
+        assert_eq!(
+            registry.read_with(vcx, |registry, _| registry.open_approvals("fake")),
+            Vec::<u64>::new()
+        );
+    }
 }

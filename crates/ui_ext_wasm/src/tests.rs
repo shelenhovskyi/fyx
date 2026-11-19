@@ -839,15 +839,16 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
-        // The harness runs every version the host runs (plan 4.12): the ranges are equal again.
+        // The harness runs every frozen version the host runs; the staged 0.4 joins once the
+        // harness runs it (P5 5.5).
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(
             harness_versions,
-            [MIN_VERSION, Version::new(0, 2, 0), MAX_VERSION]
+            [MIN_VERSION, Version::new(0, 2, 0), MAX_FROZEN_VERSION]
         );
         assert!(harness_versions.iter().all(is_supported_api_version));
-        assert!(harness_versions.contains(&MAX_FROZEN_VERSION));
-        assert_eq!(MAX_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_VERSION, Version::new(0, 4, 0));
     }
 
     #[gpui::test]

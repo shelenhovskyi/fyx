@@ -264,6 +264,14 @@ impl RegistryHub {
         self.refresh_and_apply(Apply::Blocks, cx)
     }
 
+    /// The page's Refresh button: like [`Self::refresh`], with the block list fetched now even
+    /// when it is not due, as "Check for extension updates" does (the due interval stays for the
+    /// automatic refreshes: the page opening, after an install).
+    pub fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.blocklist_now = true;
+        self.refresh(cx)
+    }
+
     /// "Check for extension updates": the index and the block list now, then updates as the
     /// timer applies them.
     pub fn check_now(&mut self, cx: &mut Context<Self>) {
@@ -630,6 +638,27 @@ enum InstallMode {
     Update(InstalledExtension),
 }
 
+/// The Available row's button and note for an installed id: the installed version when the
+/// listing offers another one (a blocked installed version leaves an older one installable), and
+/// the store's disabled state, so a blocked install does not read as plainly "Installed".
+pub(crate) fn installed_row_state(
+    listed: &semver::Version,
+    installed: &semver::Version,
+    disabled: Option<&str>,
+) -> (String, Option<(String, Color)>) {
+    match disabled {
+        Some(reason) => (
+            "Disabled".to_string(),
+            Some((
+                format!("Installed {installed}: disabled, {reason}"),
+                Color::Error,
+            )),
+        ),
+        None if listed != installed => (format!("Installed {installed}"), None),
+        None => ("Installed".to_string(), None),
+    }
+}
+
 fn format_wait(seconds: u64) -> String {
     let minutes = seconds.div_ceil(60);
     if minutes < 60 {
@@ -974,7 +1003,15 @@ impl FyxExtensionsPage {
     ) -> impl IntoElement {
         let hub = self.hub.read(cx);
         let id = release.id.as_str().to_string();
-        let installed = hub.installed(&id).is_some();
+        let installed_state = hub.installed(&id).map(|installed| {
+            let disabled = hub
+                .disabled
+                .iter()
+                .find(|(disabled, _)| *disabled == id)
+                .map(|(_, reason)| reason.as_str());
+            installed_row_state(&release.version, &installed.active.version, disabled)
+        });
+        let installed = installed_state.is_some();
         let refusal = hub
             .listing
             .iter()
@@ -983,14 +1020,14 @@ impl FyxExtensionsPage {
         let workspace = self.workspace.clone();
         // Updates are on the installed row, where the plan decides them.
         let (button, note) = match (&refusal, installed) {
-            (_, true) => (
-                Button::new(
-                    SharedString::from(format!("fyx-reg-installed-{id}")),
-                    "Installed",
+            (_, true) => {
+                let (label, note) = installed_state.unwrap_or_default();
+                (
+                    Button::new(SharedString::from(format!("fyx-reg-installed-{id}")), label)
+                        .disabled(true),
+                    note,
                 )
-                .disabled(true),
-                None,
-            ),
+            }
             (Some(InstallRefusal::Blocked { block }), false) => (
                 Button::new(
                     SharedString::from(format!("fyx-reg-blocked-{id}")),
@@ -1475,7 +1512,7 @@ impl Render for FyxExtensionsPage {
                                     .style(ButtonStyle::Outlined)
                                     .disabled(refreshing)
                                     .on_click(move |_, _, cx| {
-                                        hub.update(cx, |hub, cx| hub.refresh(cx))
+                                        hub.update(cx, |hub, cx| hub.refresh_now(cx))
                                     }),
                             ),
                     ),
