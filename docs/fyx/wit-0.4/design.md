@@ -323,7 +323,7 @@ content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx",
   worktree roots), `${platform.windows}` (a JSON boolean), `${uid}` (Unix) and `${tmp}`.
 - **The content is JSON-aware.** The host writes a JSON object, not a text template: a value that
   is exactly `"${worktrees}"` becomes a JSON array and exactly `"${platform.windows}"` a JSON
-  boolean, so `"workspaceFolders": ["C:\src\app"]` and `"windows": true` are valid JSON with no
+  boolean, so `"workspaceFolders": ["/home/me/app"]` and `"windows": true` are valid JSON with no
   escaping by the extension. In any other value the placeholders are substituted as text, and
   the host escapes it for JSON.
 - **Where it may write:**
