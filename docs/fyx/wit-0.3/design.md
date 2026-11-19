@@ -534,6 +534,11 @@ without `text`, every provider request record has to be duplicated in 1.x.
 
 ## 7. T2 consent at first use (plan 4.5)
 
+> **Changes with 0.4** (decided by the owner 2026-11-19): T2 is accepted at install with a
+> checkbox per item, and first use stays only for dev installs; T3 is new.
+> See [wit-0.4/design.md §C](../wit-0.4/design.md#c-consent-in-04-layer-c). This section describes
+> 0.3 as built.
+
 **Model** (spec decisions 21, 26). The P1 permission broker (`ui_ext_host::permissions`) keeps one
 state per extension and T2 capability: `ask`, `granted`, `denied`, persisted in
 `<data_dir>/extensions/fyx/state.json` together with what was approved (the domain list, the
@@ -1360,7 +1365,7 @@ So §1–§6 below describe 0.4 work, and no question remains open for 0.3.
 |---|---|
 | Webviews (`ui:web`) | Layer 6, out of scope (spec §5) |
 | Streaming responses, WebSockets, SSE, `wasi:http`, raw sockets | `fetch` covers request/response; streaming needs flow control through `handle-io`; additive later |
-| A pty or terminal for processes | Pipes only; a terminal is the user's |
+| A pty or terminal for processes | Pipes only; a terminal is the user's. **0.4** (owner, 2026-11-19): the user's terminals are the user's by default, an extension's own terminals are its own ([wit-0.4/design.md](../wit-0.4/design.md)) |
 | `workspace:read-files`, file watching, workspace search | §6; additive later |
 | Saving, deleting, renaming or moving files | §10: edits leave buffers dirty; file operations need their own review |
 | Persistent storage and secret storage for extensions | No consumer in plan 4.x; tokens typed into a `secret` input live in memory; additive later |
