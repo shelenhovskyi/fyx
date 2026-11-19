@@ -13,7 +13,7 @@ use crate::inbox::{NOTIFY_RATE, QUERY_REPLY_RATE, RateLimiter, SHELL_RATE, STATE
 use crate::osc::{self, OscEvent};
 use crate::osc_scan::OscScanner;
 use crate::program_status;
-use crate::terminal_id::{Shared, TerminalExt};
+use crate::terminal_id::{Shared, TerminalExt, lock};
 
 /// Called on the IO thread with every OSC payload the pty writes. Keep it cheap.
 pub type OscObserver = Box<dyn FnMut(&[u8]) + Send>;
@@ -147,15 +147,12 @@ impl<P: EventedPty> Read for TeePty<P> {
             let Some(event) = osc::parse(payload) else {
                 return;
             };
-            let mut inbox = shared
-                .inbox
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if limits.allow(&event) {
-                inbox.push(event);
-            } else {
-                inbox.note_dropped();
+            if !limits.allow(&event) {
+                lock(&shared.inbox).note_dropped();
+                return;
             }
+            lock(&shared.status).apply(&event, std::time::Instant::now());
+            lock(&shared.inbox).push(event);
         });
         Ok(read)
     }
@@ -194,7 +191,11 @@ impl<P: EventedPty> EventedReadWrite for TeePty<P> {
 
 impl<P: EventedPty> EventedPty for TeePty<P> {
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        self.inner.next_child_event()
+        let event = self.inner.next_child_event();
+        if let (Some(ChildEvent::Exited(_)), Some(shared)) = (&event, &self.shared) {
+            lock(&shared.status).drop_live_records();
+        }
+        event
     }
 }
 

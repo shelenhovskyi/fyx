@@ -10,6 +10,7 @@ use rand::TryRngCore as _;
 
 use crate::inbox::Inbox;
 use crate::osc::OscEvent;
+use crate::status::{StatusModel, TerminalStatus};
 use rand::rngs::OsRng;
 
 /// Env var with the terminal's [`TerminalId`], in decimal.
@@ -94,6 +95,7 @@ pub struct TerminalExt {
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) inbox: Mutex<Inbox>,
+    pub(crate) status: Mutex<StatusModel>,
 }
 
 impl TerminalExt {
@@ -131,6 +133,7 @@ impl TerminalExt {
             token,
             shared: Arc::new(Shared {
                 inbox: Mutex::default(),
+                status: Mutex::default(),
             }),
         }
     }
@@ -146,6 +149,16 @@ impl TerminalExt {
     /// OSC events parsed on the IO thread since the last call, oldest first, and how many were
     /// dropped by rate limits or a full queue. Call it on the terminal's `Wakeup`: alacritty sends
     /// one after every read, so every queued event is followed by one.
+    /// What the tab shows: the program's own report (OSC 7501, else OSC 9;4 progress).
+    pub fn status(&self) -> Option<TerminalStatus> {
+        lock(&self.shared.status).current()
+    }
+
+    /// The user has seen the terminal (it got focus).
+    pub fn clear_attention(&self) {
+        lock(&self.shared.status).clear_attention();
+    }
+
     pub fn take_osc_events(&self) -> (Vec<OscEvent>, u64) {
         self.shared
             .inbox
@@ -153,6 +166,10 @@ impl TerminalExt {
             .unwrap_or_else(|poison| poison.into_inner())
             .drain()
     }
+}
+
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 impl Default for TerminalExt {

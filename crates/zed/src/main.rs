@@ -750,6 +750,7 @@ fn main() {
         project_panel::init(cx);
         outline_panel::init(cx);
         ui_ext_host::init(cx); // fyx: extension panels and status items
+        terminal_host::init(cx); // fyx: terminal status on tabs
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
