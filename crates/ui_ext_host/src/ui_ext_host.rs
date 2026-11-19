@@ -19,6 +19,10 @@ mod canvas;
 mod canvas_texture;
 mod choice;
 mod consent;
+pub mod consent_dialog;
+pub mod consent_model;
+#[cfg(test)]
+mod consent_ui_tests;
 mod decorations;
 pub mod fyx_extensions_page;
 mod icons;

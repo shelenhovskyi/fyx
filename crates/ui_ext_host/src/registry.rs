@@ -539,6 +539,57 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// The install dialog's answer (0.4, §C.2): the record, and each T2 item ticked or not.
+    pub fn install_consent(
+        &mut self,
+        extension_id: &str,
+        record: ConsentRecord,
+        lines: &[crate::consent_model::ItemLine],
+        ticked: &[crate::consent_model::ConsentItem],
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::consent_model::ConsentBroker as _;
+        if let Some((path, text)) = self.consent.install(extension_id, record, lines, ticked) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        cx.notify();
+    }
+
+    /// The extension page's switch for one item (0.4, §C.2 "Later").
+    pub fn set_consent_item(
+        &mut self,
+        extension_id: &str,
+        lines: &[crate::consent_model::ItemLine],
+        item: &crate::consent_model::ConsentItem,
+        allowed: bool,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::consent_model::ConsentBroker as _;
+        if let Some((path, text)) = self.consent.set_item(extension_id, lines, item, allowed) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        log::info!(
+            "fyx:ui: {extension_id}: {} {}",
+            item.key(),
+            if allowed { "allowed" } else { "turned off" }
+        );
+        cx.notify();
+    }
+
+    /// The state of one consent item, for the extension page.
+    pub fn consent_item_state(
+        &self,
+        extension_id: &str,
+        item: &crate::consent_model::ConsentItem,
+    ) -> ui_ext_wasm::permissions::PermissionState {
+        use crate::consent_model::ConsentBroker as _;
+        self.consent.item_state(extension_id, item)
+    }
+
     pub fn global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalRegistry>()
             .map(|global| global.0.clone())
