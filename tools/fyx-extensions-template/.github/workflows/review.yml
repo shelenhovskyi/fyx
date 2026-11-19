@@ -147,12 +147,26 @@ jobs:
           run=$(gh run list --repo "$REPO" --workflow pr.yml --commit "$HEAD" --limit 1 --json databaseId --jq '.[0].databaseId')
           if [ -n "$run" ]; then gh api "repos/$REPO/actions/runs/$run/jobs" > data/jobs.json; fi
           gh release download index --repo "$REPO" --pattern index.json --pattern blocklist.json --dir data || true
+          # extension.toml at the last published release's source commit, for the update diff of
+          # the comment (0.4 design C.5): text only, fetched with git and never run.
+          if [ -n "$entry" ] && [ -f data/index.json ]; then
+            id=$(basename "$entry" .toml)
+            last=$(jq -r --arg id "$id" '[.releases[].signed | select(.id == $id)] | sort_by(.version | split(".") | map(tonumber)) | last | select(. != null) | "\(.source.repository) \(.source.commit) \(.source.path // ".")"' data/index.json || true)
+            if [ -n "$last" ]; then
+              set -- $last
+              git init -q last-source
+              if git -C last-source fetch -q --depth 1 "$1" "$2"; then
+                git -C last-source show "FETCH_HEAD:$3/extension.toml" > data/last-extension.toml || true
+              fi
+            fi
+          fi
       - name: Decide
         run: |
           python3 scripts/registry.py decision-input --pr data/pr.json --jobs data/jobs.json \
             --before data/before --after data/after --manifest data/extension.toml \
             --index data/index.json --blocklist data/blocklist.json --verdict verdict.json \
-            --source-files data/source-files.txt > data/input.json
+            --source-files data/source-files.txt --last-manifest data/last-extension.toml \
+            > data/input.json
           python3 scripts/registry.py decide data/input.json > data/decision.json
           python3 scripts/registry.py comment data/decision.json > data/comment.md
           cat data/decision.json
