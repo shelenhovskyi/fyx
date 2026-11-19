@@ -18259,6 +18259,7 @@ dependencies = [
 name = "terminal_host"
 version = "0.1.0"
 dependencies = [
+ "futures 0.3.34",
  "gpui",
  "log",
  "release_channel",
@@ -18268,6 +18269,7 @@ dependencies = [
  "terminal_view",
  "theme_settings",
  "ui",
+ "ui_ext",
  "workspace",
 ]
 
