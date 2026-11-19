@@ -265,6 +265,10 @@ profile `args` (§B.1) and in env values (§B.4). The extension cannot write the
 version's own folder, so an update changes it; open terminals keep the old value and show
 "Restart to apply". The `${package}` template is the whole capability: the extension itself never
 reads the path, and on its own `package:files` grants nothing beyond what §B.1 and §B.4 show.
+**What a `.fyxext` contains:** besides `extension.toml`, the component and `assets/`, `fyx-ext
+package` packs the top-level folders that a `${package}/<path>` in the manifest names (a plugin
+folder such as `claude-plugin/`), and nothing else, so a folder referenced from profile args or
+env values reaches the user's machine and a stray one does not.
 
 ### B.7 Loopback listeners and the MCP wrapper (`network:listen`, T2)
 
@@ -316,7 +320,12 @@ content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx",
 ```
 
 - **Placeholders:** `${port}`, `${token}`, `${pid}`, `${worktrees}` (a JSON array of the window's
-  worktree roots), `${uid}` (Unix) and `${tmp}`. The content is written as JSON.
+  worktree roots), `${platform.windows}` (a JSON boolean), `${uid}` (Unix) and `${tmp}`.
+- **The content is JSON-aware.** The host writes a JSON object, not a text template: a value that
+  is exactly `"${worktrees}"` becomes a JSON array and exactly `"${platform.windows}"` a JSON
+  boolean, so `"workspaceFolders": ["/home/me/app"]` and `"windows": true` are valid JSON with no
+  escaping by the extension. In any other value the placeholders are substituted as text, and
+  the host escapes it for JSON.
 - **Where it may write:**
   - `dir` resolves under `${account.<tool>}` (an account profile dir, §C.6), under `default_dir`
     when that is in the user's home, or under `${tmp}`;
@@ -406,6 +415,12 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   range. `focus = true` needs the user's gesture, or a listener or relay request less than 2 s
   old from a terminal that has focus. Otherwise the file opens in a background tab and never
   takes focus from typing.
+- **File references from a tool** (under `context:editor`). A tool's IDE protocol speaks absolute
+  paths (`openFile`, `at_mentioned`), and the WIT speaks `file-ref`. `context.to-file-ref(abs-path)`
+  turns an absolute path into a `file-ref` of one of the window's worktrees, and
+  `context.absolute-path(file-ref)` goes the other way. The host does the conversion, so the
+  extension still never learns a path outside the worktrees: a path that is in no worktree, or is
+  private (`is_private_path`), is an error, not a `file-ref`.
 - **`workspace:diagnostics`** stays T1 (0.3).
 - **Paste into a tool:** `terminals.paste(handle, text)` into the extension's profile terminal
   (§B.1) or own terminal. Only after a gesture in the extension's UI or a command the user ran
@@ -711,6 +726,8 @@ interface context {
     }
     watch: func(on: bool) -> result<_, host-error>;                                      // context:editor
     open: func(path: file-ref, range: option<text-range>, focus: bool) -> result<_, host-error>;  // workspace:open
+    to-file-ref: func(abs-path: string) -> result<file-ref, host-error>;                 // context:editor
+    absolute-path: func(path: file-ref) -> result<string, host-error>;                   // context:editor
 }
 
 /// 0.4. Approval cards (§B.12).
@@ -747,8 +764,12 @@ lists.
 **`fyx_claude_code`** (plan 5.15, W4):
 1. Profile "Claude Code" in "+", with `account_tool = "claude"`; optionally the env in every new
    terminal (the stronger checkbox).
-2. `CLAUDE_CODE_PLUGIN_DIRS` → `${package}/claude-plugin`. That plugin's `http` hooks post to the
-   extension's `http` listener, and its command hooks go through `fyx-relay`. The tab state
+2. `CLAUDE_CODE_PLUGIN_DIRS` → `${package}/claude-plugin`. **All of that plugin's hooks are command
+   hooks** through `fyx-relay`, written `"${FYX_RELAY:-true}" --channel fyx-claude-code/<name>`
+   (W4's skeleton, 655298641f): Claude Code 2.1.326 accepts `http` hooks only with a literal URL,
+   and the listener's port is new every run, so a plugin file cannot name it. Outside Fyx,
+   `FYX_RELAY` is unset and each hook runs `true` and exits 0. The extension's `http` listener is
+   not used for hooks. The tab state
    already comes from OSC 7501; the hooks add details (the tool, a permission request's text, the
    last message) and the agent turn.
 3. `network:listen` (`mcp-websocket`) + `fs:discovery-file` `${account.claude}/ide/${port}.lock` +
@@ -773,6 +794,7 @@ the kit is not general yet, and the primitive is added before 0.4 freezes.
 | Area | Owner | Files |
 |---|---|---|
 | Terminal foundation, terminal host for extensions, relay | W1 | new `crates/terminal_ext` (TeePty, OSC parsers, `TerminalDecorations`, registry, env hook, pseudo-terminal bridge, sanitiser), new `crates/fyx_relay` (binary and endpoint); hooks in `alacritty.rs:214`, `terminal.rs:656`, `terminal_view.rs:1612`; shell-integration scripts in `assets/fyx/shell/` |
+| Terminal host trait | W2c (trait), W1 (implementation) | `ui_ext::terminal::TerminalHost` (W2c) implemented by `terminal_host` (W1). Besides the per-terminal calls it has **`set_integration(ext, profiles, env, env_all_new, package_dir)`**: the extension's accepted terminal profiles (§B.1), its `terminal:env` vars (§B.4), whether the stronger "all new terminals" box was ticked, and the folder `${package}` resolves to (§B.6). `ui_ext_host` calls it on load and on every consent change, and `close_all(ext)` clears it on reload, disable, uninstall and revocation |
 | WIT model, manifest, permissions broker, listeners, review bridge, context | W2c | `crates/ui_ext` (0.4 model, manifest tables, forbidden names of §B.4/§C.6), `crates/ui_ext_wasm` (0.4 bindings, `listeners.rs`, `relay.rs` host side), `crates/ui_ext_host/src/permissions.rs` and `consent.rs` (T2-at-install states, T3, journal store) |
 | Consent UI, terminal node, sessions panel, cards | W3 | `ui_ext_host`: install dialog with checkboxes, extension page switches and journal, update diff, T3 cards and "Always allow", `terminal` node in the panel container, agent sessions panel, approval cards |
 | SDK, harness, demos, first extensions | W4 | `ui_ext_sdk` 0.4 module, `fyx_ext_harness` fakes for terminals, listeners, relay and review; `extensions/fyx_demo_pseudo_terminal`, `extensions/fyx_claude_code`, `extensions/fyx_gemini_cli` |
