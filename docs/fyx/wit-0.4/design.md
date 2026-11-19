@@ -431,8 +431,13 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   - **Post-hoc (primary).** `PreToolUse` and `PostToolUse` hooks reach the extension through
     `fyx-relay` (§B.9). The extension takes a snapshot of the file before the tool writes it and
     proposes the diff afterwards, so the change reaches agent review hunk by hunk whatever the
-    tool's permission mode. It is after the fact: the tool has already written the file. What
-    Reject does for a file already written (restore the snapshot, or only mark it) is a 5.15 decision and is not assumed here.
+    tool's permission mode. It is after the fact: the tool has already written the file.
+    - **Reject restores the before-snapshot.** If the file changed after the agent's write (the
+      user typed in it, another tool wrote it), Fyx shows a conflict view and never overwrites
+      silently.
+    - **Fyx tells the agent what was reverted.** The default channel is the hook's
+      `additionalContext`: on the next `UserPromptSubmit`, or on `PostToolUse` when "hold edits"
+      is on. Pasting the note into the tool's terminal (§B.11) happens only if the user chooses it.
   - **`openDiff` (bonus).** The tool's own IDE protocol proposes the edit before it writes
     (`apply = false`, a blocking call). It happens only when the tool asks, which for Claude Code
     is manual (`default`) permission mode only; `auto` is Claude's default mode now, so this path
