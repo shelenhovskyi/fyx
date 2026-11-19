@@ -1012,6 +1012,10 @@ impl Harness {
                     .and_then(|()| v0_3::UiExtension::instantiate(&mut store, &component, &linker))
                     .map(Bindings::V0_3)
             }
+            // The host loads 0.4 only to refuse it at instantiation, until P5 5.5 links the world.
+            ApiVersion::V0_4_0 => Err(wasmtime::Error::msg(
+                "fyx:ui 0.4 is staged; the harness does not run 0.4 components yet",
+            )),
         }
         .map_err(anyhow::Error::from)
         .context("instantiating the component")?;

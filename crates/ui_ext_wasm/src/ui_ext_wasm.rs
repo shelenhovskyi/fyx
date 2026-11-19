@@ -37,7 +37,7 @@ use gpui::{AsyncApp, Task};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use ui_ext::{ApiVersion, TreeLimits};
+use ui_ext::{ApiVersion, TreeLimits, integration, terminal};
 use wasmtime::{
     Engine, Store, UpdateDeadline,
     component::{Component, HasData, Linker, ResourceTable},
@@ -128,11 +128,12 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 }
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
-pub const MAX_VERSION: Version = Version::new(0, 3, 0);
+/// The newest version this build knows: the staged 0.4 (plan P5).
+pub const MAX_VERSION: Version = Version::new(0, 4, 0);
 /// The newest frozen version: 0.3 (integration-6, plan 4.9). Newer ones are staged: they load only
 /// where [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2).
 /// Freezing a version names it here explicitly; never set this to [`MAX_VERSION`], which may be a
-/// staged world (none now).
+/// staged world (0.4 now).
 pub const MAX_FROZEN_VERSION: Version = Version::new(0, 3, 0);
 
 /// Custom section with the `fyx:ui` version a component targets: three big-endian `u16`s, the same
@@ -316,6 +317,24 @@ pub struct UiManifest {
     /// 0.3, with `network:fetch`: the hosts the extension may fetch from (design.md §8).
     #[serde(default)]
     pub network: Option<NetworkManifest>,
+    /// 0.4: `[[fyx_ui.terminal_profiles]]` (design §B.1).
+    #[serde(default)]
+    pub terminal_profiles: Vec<ui_ext::terminal::TerminalProfileSpec>,
+    /// 0.4: `[[fyx_ui.terminal_programs]]`, for `terminal:create` (§B.3).
+    #[serde(default)]
+    pub terminal_programs: Vec<ui_ext::terminal::TerminalProgramSpec>,
+    /// 0.4: `[fyx_ui.terminal_env]`, for `terminal:env` (§B.4).
+    #[serde(default)]
+    pub terminal_env: Option<ui_ext::terminal::TerminalEnvSpec>,
+    /// 0.4: `[[fyx_ui.listeners]]`, for `network:listen` (§B.7).
+    #[serde(default)]
+    pub listeners: Vec<ui_ext::integration::ListenerSpec>,
+    /// 0.4: `[[fyx_ui.discovery_files]]`, for `fs:discovery-file` (§B.8).
+    #[serde(default)]
+    pub discovery_files: Vec<ui_ext::integration::DiscoveryFileSpec>,
+    /// 0.4: `[[fyx_ui.relay_channels]]`, for `relay:hooks` (§B.9).
+    #[serde(default)]
+    pub relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
 }
 
 /// What each world's manifest may declare (wit-0.3/migration.md §2): a capability a world cannot
@@ -350,7 +369,39 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         edit::CAPABILITY_EDIT,
         observe::CAPABILITY_OBSERVE,
     ];
-    if *version >= Version::new(0, 3, 0) {
+    // Staged (plan P5): 0.3 plus the terminal and integration capabilities of
+    // docs/fyx/wit-0.4/design.md. The T3 ones (`terminal:read`, `terminal:write`) come with the
+    // broker's T3 model (plan 5.6); plan 4.2-4.4's join with their WIT.
+    const V0_4: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+        ui_ext::image::CAPABILITY_IMAGES,
+        ui_ext::canvas::CAPABILITY_CANVAS,
+        network::CAPABILITY_NETWORK,
+        process::CAPABILITY_PROCESS,
+        edit::CAPABILITY_EDIT,
+        observe::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_PROFILES,
+        terminal::CAPABILITY_PSEUDO,
+        terminal::CAPABILITY_CREATE,
+        terminal::CAPABILITY_ENV,
+        terminal::CAPABILITY_STATUS,
+        terminal::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_PACKAGE_FILES,
+        integration::CAPABILITY_NETWORK_LISTEN,
+        integration::CAPABILITY_DISCOVERY_FILE,
+        integration::CAPABILITY_RELAY_HOOKS,
+        integration::CAPABILITY_REVIEW_PROPOSE,
+        integration::CAPABILITY_CONTEXT_EDITOR,
+        integration::CAPABILITY_WORKSPACE_OPEN,
+        integration::CAPABILITY_APPROVALS,
+    ];
+    if *version >= Version::new(0, 4, 0) {
+        V0_4
+    } else if *version >= Version::new(0, 3, 0) {
         V0_3
     } else if *version >= Version::new(0, 2, 0) {
         V0_2
@@ -442,6 +493,7 @@ impl UiManifest {
             let needs = [
                 ("0.2", Version::new(0, 2, 0)),
                 ("0.3", Version::new(0, 3, 0)),
+                ("0.4", Version::new(0, 4, 0)),
             ]
             .into_iter()
             .find(|(_, world)| world_capabilities(world).contains(&capability.as_str()))
@@ -468,6 +520,87 @@ impl UiManifest {
                     "{table} needs fyx:ui 0.3; this extension targets {version}"
                 );
             }
+        }
+        if *version < Version::new(0, 4, 0) {
+            for (present, table) in [
+                (
+                    !self.terminal_profiles.is_empty(),
+                    "[[fyx_ui.terminal_profiles]]",
+                ),
+                (
+                    !self.terminal_programs.is_empty(),
+                    "[[fyx_ui.terminal_programs]]",
+                ),
+                (self.terminal_env.is_some(), "[fyx_ui.terminal_env]"),
+                (!self.listeners.is_empty(), "[[fyx_ui.listeners]]"),
+                (
+                    !self.discovery_files.is_empty(),
+                    "[[fyx_ui.discovery_files]]",
+                ),
+                (!self.relay_channels.is_empty(), "[[fyx_ui.relay_channels]]"),
+            ] {
+                anyhow::ensure!(
+                    !present,
+                    "{table} needs fyx:ui 0.4; this extension targets {version}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The 0.4 terminal and integration tables (design §B, plan 5.5): each goes with its
+    /// capability, and their entries pass `ui_ext::terminal` and `ui_ext::integration`'s checks.
+    pub fn check_terminals(&self) -> Result<()> {
+        let declares = |capability: &str| self.capabilities.iter().any(|c| c == capability);
+        let integration = integration::IntegrationTables {
+            listeners: &self.listeners,
+            discovery_files: &self.discovery_files,
+            relay_channels: &self.relay_channels,
+        };
+        for (present, table, capability) in [
+            (
+                !self.terminal_profiles.is_empty(),
+                "[[fyx_ui.terminal_profiles]]",
+                terminal::CAPABILITY_PROFILES,
+            ),
+            (
+                !self.terminal_programs.is_empty(),
+                "[[fyx_ui.terminal_programs]]",
+                terminal::CAPABILITY_CREATE,
+            ),
+            (
+                self.terminal_env.is_some(),
+                "[fyx_ui.terminal_env]",
+                terminal::CAPABILITY_ENV,
+            ),
+            (
+                !self.listeners.is_empty(),
+                "[[fyx_ui.listeners]]",
+                integration::CAPABILITY_NETWORK_LISTEN,
+            ),
+            (
+                !self.discovery_files.is_empty(),
+                "[[fyx_ui.discovery_files]]",
+                integration::CAPABILITY_DISCOVERY_FILE,
+            ),
+            (
+                !self.relay_channels.is_empty(),
+                "[[fyx_ui.relay_channels]]",
+                integration::CAPABILITY_RELAY_HOOKS,
+            ),
+        ] {
+            match (present, declares(capability)) {
+                (true, false) => bail!("{table} needs the {capability} capability"),
+                (false, true) => bail!("{capability} needs {table}"),
+                _ => {}
+            }
+        }
+        terminal::check_profiles(self.terminal_profiles.clone()).map_err(anyhow::Error::msg)?;
+        terminal::check_programs(&self.terminal_programs).map_err(anyhow::Error::msg)?;
+        integration.check().map_err(anyhow::Error::msg)?;
+        if let Some(env) = &self.terminal_env {
+            terminal::check_terminal_env(env.clone(), &|name| integration.listener(name))
+                .map_err(anyhow::Error::msg)?;
         }
         Ok(())
     }
@@ -596,8 +729,8 @@ impl UiManifest {
             .with_context(|| format!("extension {id}: [fyx_ui].api_version, in {path:?}"))?;
         anyhow::ensure!(
             is_supported_api_version(&api_version),
-            "extension {id} targets fyx:ui {api_version}, this build supports 0.1.0, 0.2.0 and \
-             0.3.0",
+            "extension {id} targets fyx:ui {api_version}, this build supports 0.1.0, 0.2.0, 0.3.0 and the staged \
+             0.4.0",
         );
         let mut manifest = UiManifest::deserialize(table)
             .with_context(|| format!("parsing [fyx_ui] of {path:?}"))?;
@@ -611,6 +744,9 @@ impl UiManifest {
             .with_context(|| format!("extension {id}, in {path:?}"))?;
         manifest
             .check_processes()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .check_terminals()
             .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             !manifest.component.is_empty()
@@ -1545,7 +1681,7 @@ impl UiExtension {
                 let ui_api_version = known_api_version(&api_version).with_context(|| {
                     format!(
                         "extension {extension_id} targets fyx:ui {api_version}, this build \
-                         supports 0.1.0, 0.2.0 and 0.3.0"
+                         supports 0.1.0, 0.2.0, 0.3.0 and the staged 0.4.0"
                     )
                 })?;
                 anyhow::ensure!(

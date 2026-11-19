@@ -51,19 +51,39 @@ pub const T0_CAPABILITIES: &[&str] = &[
     "ui:hover",
     "ui:virtual-documents",
     "ui:commands",
+    // 0.4 (docs/fyx/wit-0.4/design.md §C.1).
+    "package:files",
+    "ui:approvals",
 ];
 
 pub const T1_CAPABILITIES: &[&str] = &[
     "workspace:read-buffers",
     "workspace:read-files",
     "workspace:diagnostics",
+    // 0.4.
+    "context:editor",
+    "workspace:open",
+    "terminal:profiles",
+    "terminal:pseudo",
+    "terminal:status",
+    "review:propose",
 ];
 
+/// The 0.4 additions are accepted at install, one checkbox per item (design §C.2); until the
+/// broker has that model (plan 5.6) they are consented like 0.3's. `terminal:read` and
+/// `terminal:write` (T3, §C.3) are not here yet: a manifest that declares them is refused.
 pub const T2_CAPABILITIES: &[&str] = &[
     "network:fetch",
     "process:spawn",
     "workspace:edit",
     "agent:observe",
+    // 0.4.
+    "network:listen",
+    "terminal:create",
+    "terminal:env",
+    "terminal:observe",
+    "fs:discovery-file",
+    "relay:hooks",
 ];
 
 /// The tier of a known capability.
