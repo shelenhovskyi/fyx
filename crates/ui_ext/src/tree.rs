@@ -63,6 +63,9 @@ pub enum TreeError {
     /// 0.3: canvases are not allowed in list rows.
     #[error("node {0} is a canvas, which a list row cannot hold")]
     CanvasInRow(NodeId),
+    /// 0.4: a terminal view belongs in a panel, not in a virtualized row.
+    #[error("node {0} is a terminal, which a list row cannot hold")]
+    TerminalInRow(NodeId),
     #[error("patch {index}: {error}")]
     Patch { index: usize, error: Box<TreeError> },
 }

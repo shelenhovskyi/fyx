@@ -473,14 +473,17 @@ async fn test_v0_4_without_a_host_terminals_are_unavailable(cx: &mut TestAppCont
 #[gpui::test]
 async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext) {
     let extension = load(&Setup::default(), cx).await.unwrap();
-    let error = extension
+    let reply = extension
         .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, "node".into()))
         .await
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("terminal nodes are not drawn"),
-        "{error:#}"
-    );
+        .unwrap();
+    match reply.value {
+        Update::Replace(nodes) => assert_eq!(
+            nodes[0].props,
+            Props::Terminal(ui_ext::v0_2::TerminalNodeProps { handle: 1 })
+        ),
+        other => panic!("not a replace: {other:?}"),
+    }
     // T3 is not grantable yet.
     assert_eq!(command(&extension, "read 1").await, "not-permitted");
     let error = extension
