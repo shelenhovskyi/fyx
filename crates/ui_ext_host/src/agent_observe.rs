@@ -157,6 +157,43 @@ impl AgentFeed {
     }
 }
 
+/// Tests: a feed that takes the observation's snapshot and events through the same redaction as
+/// [`AgentFeed::global`], with one extension's [`AgentReviews`] on it.
+#[cfg(test)]
+pub(crate) struct TestFeed(AgentFeed);
+
+#[cfg(test)]
+impl TestFeed {
+    pub(crate) fn new(
+        key: &str,
+        review_mode: bool,
+        snapshot: Vec<ObservedReview>,
+        cx: &mut App,
+    ) -> (Self, Arc<dyn AgentReviews>) {
+        let feed = AgentFeed::default();
+        {
+            let mut state = feed.lock();
+            state.review_mode = review_mode;
+            state.reviews = snapshot
+                .into_iter()
+                .map(|review| redact_review(review, cx))
+                .collect();
+        }
+        let reviews = Arc::new(ExtensionReviews {
+            feed: feed.clone(),
+            files: Files {
+                key: key.into(),
+                open: OpenWorktrees::global(cx),
+            },
+        });
+        (Self(feed), reviews)
+    }
+
+    pub(crate) fn observe(&self, event: ObservedEvent, cx: &App) {
+        self.0.lock().apply(redact_event(event, cx));
+    }
+}
+
 /// The [`AgentReviews`] of one load, or `None` without agent review. `key` is what
 /// [`OpenWorktrees::for_extension`] was given, so its file refs match the extension's worktrees.
 pub(crate) fn for_extension(key: &str, cx: &mut App) -> Option<Arc<dyn AgentReviews>> {

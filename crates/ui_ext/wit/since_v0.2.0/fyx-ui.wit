@@ -1,6 +1,5 @@
-// STAGED, not frozen: decided 2026-11-17 (docs/fyx/wit-0.2/design.md). Only the integrator (W0)
-// edits this file. It becomes FROZEN, like ../fyx-ui.wit (0.1.0), in the commit that declares 0.2
-// frozen and lifts the Stable/Preview cap (docs/fyx/wit-0.2/migration.md, section 2).
+// FROZEN: fyx:ui 0.2.0, frozen in integration-5 A2 (docs/fyx/wit-0.2/design.md). Only the integrator
+// (W0) edits this file, and only comments; any other change goes into the next version.
 package fyx:ui@0.2.0;
 
 interface types {

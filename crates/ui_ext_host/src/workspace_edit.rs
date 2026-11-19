@@ -643,14 +643,38 @@ fn keep_until_clean(transaction: &ProjectTransaction, cx: &mut App) {
 
 struct EditNotification;
 
-/// The card: "<extension>: <label>, N files", with Show and Undo. It never takes focus.
+/// Whether an edit gets the Show/Undo card (Q5): one that changed several files, or a file no
+/// editor of the workspace shows. An edit of one open file is in plain sight, and undoing it there
+/// undoes it all (one transaction).
+pub(crate) fn needs_card(
+    transaction: &ProjectTransaction,
+    workspace: &Workspace,
+    cx: &App,
+) -> bool {
+    let mut buffers = transaction.0.keys();
+    let (Some(buffer), None) = (buffers.next(), buffers.next()) else {
+        return transaction.0.len() > 1;
+    };
+    let buffer_id = buffer.read(cx).remote_id();
+    !workspace.items_of_type::<Editor>(cx).any(|editor| {
+        editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .buffer(buffer_id)
+            .is_some()
+    })
+}
+
+/// The card: "<extension>: <label>, N files", with Show and Undo, when [`needs_card`]. It never
+/// takes focus.
 fn notify(extension_id: &str, label: &str, applied: Applied, cx: &mut App) {
     let Some(workspace) = applied.workspace.and_then(|workspace| workspace.upgrade()) else {
         return;
     };
     let transaction = applied.transaction;
     let files = transaction.0.len();
-    if files == 0 {
+    if !needs_card(&transaction, workspace.read(cx), cx) {
         return;
     }
     let name = crate::UiExtensionRegistry::global(cx)

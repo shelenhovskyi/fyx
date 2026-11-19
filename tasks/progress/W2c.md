@@ -524,3 +524,7 @@ The 24 h gate counts from the later of `published_at` and when this client first
   (built), other private addresses only from a user setting (`private_hosts`, not built; it is
   additive). Q7 = (3): 256 MiB for every world, as the code does. Q14 = (1): paint each frame,
   a per-update texture only if W3's paint bench misses 4 ms.
+- **W3 dfdb6b0023 follow-ups:** `Permissions.zed_extension` (serde default, so old `state.json`
+  has not accepted it) and `Additions.zed_extension`: an approved T2 install whose update newly
+  runs as a Zed extension is held for approval. `BUTTON_CLICK_GUARD`'s doc says the host applies
+  at least 1 s to every card (the value stays 750 ms, the renderer's floor).

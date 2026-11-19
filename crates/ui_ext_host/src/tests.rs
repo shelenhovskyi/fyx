@@ -83,6 +83,8 @@ struct FakeBackend {
     fail_ticks: Cell<bool>,
     /// Modals the renderer reported as not shown.
     modals_closed: RefCell<Vec<String>>,
+    /// The guest execution the Inspector records for the last tick call, if any.
+    tick_executed: Cell<Option<Duration>>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -173,6 +175,24 @@ fn button(label: &str) -> Props {
 }
 
 impl UiBackend for FakeBackend {
+    fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
+        let executed = self.tick_executed.get()?;
+        let mut diagnostics = ui_ext_wasm::diagnostics::Diagnostics::default();
+        diagnostics
+            .calls
+            .push_back(ui_ext_wasm::diagnostics::CallRecord {
+                kind: "tick",
+                surface_id: "counter".into(),
+                at: std::time::SystemTime::now(),
+                duration: executed * 10,
+                executed,
+                budget: Duration::from_millis(200),
+                pushes: 0,
+                error: None,
+            });
+        Some(diagnostics)
+    }
+
     fn extension_id(&self) -> &str {
         "fake"
     }
@@ -2229,7 +2249,10 @@ async fn test_modal_lifecycle(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         backend.take_calls(),
-        [Call::Event(UiEvent::Dismissed(DismissReason::Escape)), Call::Mount]
+        [
+            Call::Event(UiEvent::Dismissed(DismissReason::Escape)),
+            Call::Mount
+        ]
     );
     assert!(state.read_with(cx, |state, _| state.tree().is_some()));
 }
@@ -2499,7 +2522,7 @@ mod notification_tests {
     use crate::notifications::{ExtensionNotification, provenance_name};
     use ui_ext::v0_2::{
         Notification, NotificationAction, NotificationActionEvent, NotificationCloseReason,
-        NotificationLevel, notifications::BUTTON_CLICK_GUARD,
+        NotificationLevel,
     };
 
     fn notification(auto_dismiss: bool) -> Notification {
@@ -2619,7 +2642,8 @@ mod notification_tests {
         view.update(vcx, |view, cx| view.click_action("open", cx));
         vcx.run_until_parked();
         assert_eq!(backend.events(), [], "inside the click guard");
-        vcx.executor().advance_clock(BUTTON_CLICK_GUARD);
+        vcx.executor()
+            .advance_clock(crate::notifications::CLICK_GUARD);
         view.update(vcx, |view, cx| view.click_action("open", cx));
         vcx.run_until_parked();
         assert_eq!(
@@ -2757,6 +2781,81 @@ mod notification_tests {
                 NotificationCloseReason::WindowClosed
             ))]
         );
+    }
+    /// integration-6 N2 (decision Q10): the T2 first-use prompt is a card, not a modal. Its
+    /// buttons ignore clicks for 1 s; no key answers it, even with the card focused; Allow then
+    /// grants. Closing it answers nothing: this request is denied and nothing is recorded.
+    #[gpui::test]
+    async fn test_permission_card_guard_and_no_keyboard_answer(cx: &mut TestAppContext) {
+        use crate::notifications::{CLICK_GUARD, PermissionCard};
+        use futures::FutureExt as _;
+        use ui_ext_wasm::permissions::PermissionState;
+        init_test(cx);
+        let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+        let workspace = cx.new(|_| ()).entity_id();
+        let checker = registry.update(cx, |registry, cx| {
+            registry.start_permission_prompts(cx);
+            registry.set_active_workspace(workspace);
+            registry.consent_mut().declare(
+                "demo",
+                vec![
+                    "network:fetch".into(),
+                    "network:fetch@api.example.com".into(),
+                ],
+            );
+            registry.capability_check()
+        });
+        let state = |registry: &Entity<crate::UiExtensionRegistry>, cx: &mut TestAppContext| {
+            registry.read_with(cx, |registry, _| registry.t2_state("demo", "network:fetch"))
+        };
+
+        // Closed without an answer: denied this time, still asked next time.
+        let request = checker.request("demo", "network:fetch");
+        cx.run_until_parked();
+        let (card, vcx) = cx.add_window_view(|_, cx| {
+            PermissionCard::new("demo".into(), "network:fetch".into(), &registry, cx)
+        });
+        card.update(vcx, |card, cx| card.close(cx));
+        vcx.run_until_parked();
+        assert_eq!(request.now_or_never(), Some(PermissionState::Denied));
+        assert_eq!(
+            state(&registry, vcx),
+            PermissionState::Ask,
+            "nothing recorded"
+        );
+        vcx.update(|window, _| window.remove_window());
+
+        let request = checker.request("demo", "network:fetch");
+        cx.run_until_parked();
+        let (card, vcx) = cx.add_window_view(|_, cx| {
+            PermissionCard::new("demo".into(), "network:fetch".into(), &registry, cx)
+        });
+        let armed = card.read_with(vcx, |card, cx| card.buttons_armed(cx));
+        assert!(!armed, "not armed when shown");
+        vcx.executor()
+            .advance_clock(CLICK_GUARD - Duration::from_millis(1));
+        card.update(vcx, |card, cx| card.answer(true, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            state(&registry, vcx),
+            PermissionState::Ask,
+            "inside the guard"
+        );
+
+        vcx.executor().advance_clock(Duration::from_millis(1));
+        vcx.update(|window, cx| gpui::Focusable::focus_handle(card.read(cx), cx).focus(window, cx));
+        vcx.simulate_keystrokes("enter space escape");
+        vcx.run_until_parked();
+        assert_eq!(
+            state(&registry, vcx),
+            PermissionState::Ask,
+            "keys answer nothing"
+        );
+
+        card.update(vcx, |card, cx| card.answer(true, cx));
+        vcx.run_until_parked();
+        assert_eq!(state(&registry, vcx), PermissionState::Granted);
+        assert_eq!(request.now_or_never(), Some(PermissionState::Granted));
     }
 }
 
@@ -3106,4 +3205,119 @@ fn test_extension_proxy_follows_the_setting(cx: &mut TestAppContext) {
     assert_eq!(proxy.get(), None, "unusable: direct");
     set(None, cx);
     assert_eq!(proxy.get(), None);
+}
+
+/// integration-5 L1: a reload (`replace_backend`) drops the old instance's pending tick; neither
+/// instance is ticked for it, and the new one asks for its own.
+#[gpui::test]
+async fn test_replaced_backend_drops_the_old_tick(cx: &mut TestAppContext) {
+    init_test(cx);
+    let old = Rc::new(FakeBackend::default());
+    let state = new_state(&old, cx);
+    let panel = cx.update(|cx| cx.new(|_| ()).entity_id());
+    state.update(cx, |state, cx| state.set_visible(panel, true, cx));
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        state.request_tick(Duration::from_millis(500), cx)
+    });
+    assert!(state.read_with(cx, |state, _| state.has_pending_tick()));
+
+    let new = Rc::new(FakeBackend::default());
+    state.update(cx, |state, cx| {
+        let backend: Rc<dyn UiBackend> = new.clone();
+        state.replace_backend(backend, panel_surface("counter", "Counter"), cx)
+    });
+    assert!(!state.read_with(cx, |state, _| state.has_pending_tick()));
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+    assert!(!old.calls().contains(&Call::Tick), "{:?}", old.calls());
+    assert_eq!(
+        new.take_calls(),
+        [Call::Mount],
+        "the new instance is only mounted"
+    );
+}
+
+/// integration-5 L4 (design C): in a modal, PageDown / PageUp move its first list by the page the
+/// list shows, not to its last or first row.
+#[gpui::test]
+async fn test_modal_page_keys_move_by_a_page(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(300);
+    let state = new_state(&backend, cx);
+    let (modal, vcx) = cx.add_window_view(|window, cx| {
+        crate::modal::ExtensionModal::new(
+            "fake/modal".into(),
+            state.clone(),
+            gpui::WeakEntity::new_invalid(),
+            window,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| gpui::Focusable::focus_handle(modal.read(cx), cx).focus(window, cx));
+    vcx.run_until_parked();
+    let selected = |vcx: &mut VisualTestContext| {
+        state.read_with(vcx, |state, _| state.first_list().and_then(|list| list.1))
+    };
+    key("pagedown", vcx);
+    assert_eq!(selected(vcx), Some(0), "nothing selected: the first row");
+    key("pagedown", vcx);
+    let page = selected(vcx).expect("selected");
+    assert!(page > 1 && page < 299, "a page is {page} rows");
+    key("pageup", vcx);
+    assert_eq!(selected(vcx), Some(0));
+}
+
+/// integration-5 L3: a tick's CPU share counts the guest's own execution from the call record,
+/// not the wall time the call spent behind others; the wall time only without a record.
+#[gpui::test]
+async fn test_tick_share_counts_guest_execution(cx: &mut TestAppContext) {
+    struct TickLink(RefCell<Vec<Duration>>);
+    impl crate::surface::SurfaceLink for TickLink {
+        fn route_effect(&self, _: HostEffect, _: &mut App) {}
+        fn extension_failed(&self, _: &str, _: gpui::SharedString, _: &mut App) {}
+        fn restart_extension(&self, _: &mut App) {}
+        fn record_tick(&self, _: std::time::Instant, busy: Duration, _: &mut App) {
+            self.0.borrow_mut().push(busy);
+        }
+    }
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.tick_executed.set(Some(Duration::from_millis(7)));
+    let link = Rc::new(TickLink(RefCell::new(Vec::new())));
+    let dyn_link: Rc<dyn crate::surface::SurfaceLink> = link.clone();
+    let dyn_backend: Rc<dyn UiBackend> = backend.clone();
+    let state = cx.new(|cx| {
+        SurfaceState::new(
+            dyn_backend,
+            panel_surface("counter", "Counter"),
+            Some(dyn_link),
+            cx,
+        )
+    });
+    let panel = cx.update(|cx| cx.new(|_| ()).entity_id());
+    state.update(cx, |state, cx| state.set_visible(panel, true, cx));
+    cx.run_until_parked();
+    let tick = |cx: &mut TestAppContext| {
+        state.update(cx, |state, cx| {
+            state.request_tick(Duration::from_millis(100), cx)
+        });
+        cx.executor().advance_clock(Duration::from_millis(1050));
+        cx.run_until_parked();
+    };
+    tick(cx);
+    assert_eq!(
+        *link.0.borrow(),
+        [Duration::from_millis(7)],
+        "the record's execution"
+    );
+    backend.tick_executed.set(None);
+    tick(cx);
+    assert_eq!(link.0.borrow().len(), 2);
+    assert!(
+        link.0.borrow()[1] < Duration::from_millis(7),
+        "the wall time without a record"
+    );
 }

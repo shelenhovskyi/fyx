@@ -65,13 +65,14 @@ async fn case(extension: &UiExtension, case: u32) -> (Vec<String>, Vec<HostEffec
 }
 
 #[gpui::test]
-async fn test_v0_3_probe_loads_as_staged_v0_3(cx: &mut TestAppContext) {
+async fn test_v0_3_probe_loads_as_frozen_v0_3(cx: &mut TestAppContext) {
     let extension = load(cx).await;
     assert_eq!(extension.api_version(), &Version::new(0, 3, 0));
     assert_eq!(extension.ui_api_version(), ApiVersion::V0_3_0);
     assert_eq!(extension.surfaces_v0_2().len(), 3);
 
-    let error = load_with(
+    // Frozen (integration-6): Stable and Preview load it too.
+    let extension = load_with(
         LoadOptions {
             allow_staged: Some(false),
             ..LoadOptions::default()
@@ -79,12 +80,8 @@ async fn test_v0_3_probe_loads_as_staged_v0_3(cx: &mut TestAppContext) {
         cx,
     )
     .await
-    .err()
-    .expect("staged");
-    assert!(
-        format!("{error:#}").contains("targets fyx:ui 0.3.0, which is staged"),
-        "{error:#}"
-    );
+    .expect("Stable and Preview load 0.3");
+    assert_eq!(extension.api_version(), &Version::new(0, 3, 0));
 }
 
 #[gpui::test]

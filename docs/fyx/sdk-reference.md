@@ -637,8 +637,10 @@ pub fn kill(process: u64) -> Result<(), HostError>;
 
   - **Arguments:** a program without `args` runs with no arguments only; `args = ["**"]` allows
     any.
-  - **Environment names:** names that load code or redirect a program (`LD_*`, `GIT_DIR`,
-    `CARGO_*`, `PATH`, …) are refused (`ui_ext::process::is_forbidden_env`).
+  - **Environment names:** only names on Fyx's allowlist (`LANG`, `LC_*`, `TZ`, `TERM`,
+    `NO_COLOR`, `RUST_LOG`, …; `ui_ext::process::ALLOWED_ENV_NAMES`) may be declared or set.
+    Any other name (`HOME`, `LD_*`, `GIT_DIR`, `CARGO_*`, `PATH`, …) is refused at load and at
+    the call.
 
 - **Consent and limits:**
   - `process:spawn` is T2: the first spawn asks the user, and a refusal ends
