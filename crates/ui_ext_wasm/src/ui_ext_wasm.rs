@@ -618,6 +618,34 @@ impl UiManifest {
             terminal::check_terminal_env(env.clone(), &|name| integration.listener(name))
                 .map_err(anyhow::Error::msg)?;
         }
+        // `${package}` names the package's files (§B.6), so it needs `package:files`, as
+        // `fyx-ext check` and the harness require.
+        let uses_package = |text: &str, usage: terminal::TemplateUse| {
+            terminal::Template::parse(text, usage, &|_| Some(true))
+                .is_ok_and(|template| template.0.contains(&terminal::TemplatePart::Package))
+        };
+        let in_profiles = self.terminal_profiles.iter().any(|profile| {
+            profile
+                .args
+                .iter()
+                .any(|arg| uses_package(arg, terminal::TemplateUse::ProfileArg))
+        });
+        let in_env = self.terminal_env.iter().any(|env| {
+            env.vars
+                .values()
+                .any(|value| uses_package(value, terminal::TemplateUse::EnvValue))
+        });
+        if (in_profiles || in_env) && !declares(terminal::CAPABILITY_PACKAGE_FILES) {
+            bail!(
+                "${{package}} in {} needs the {} capability",
+                if in_profiles {
+                    "[[fyx_ui.terminal_profiles]] args"
+                } else {
+                    "[fyx_ui.terminal_env]"
+                },
+                terminal::CAPABILITY_PACKAGE_FILES
+            );
+        }
         Ok(())
     }
 
