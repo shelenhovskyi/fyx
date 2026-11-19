@@ -1,6 +1,7 @@
 //! Fyx's terminal UI on top of `terminal_ext`: the status on a terminal's tab, the Agent Sessions
 //! panel and pop-up notifications, and the `ui_ext::terminal` host for extensions.
 
+mod accounts;
 mod created;
 mod host;
 mod notification;
@@ -13,6 +14,7 @@ mod tab_status;
 use gpui::App;
 use workspace::Workspace;
 
+pub use accounts::{FyxAccountsSettings, account_choice};
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
 pub use settings::FyxTerminalSettings;
 
@@ -109,6 +111,7 @@ pub fn init(cx: &mut App) {
     init_host(cx);
     sessions::init(cx);
     tab_status::init(cx);
+    accounts::init(cx);
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         if let Some(window) = window {
             sessions_panel::register(workspace, window, cx);

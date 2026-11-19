@@ -154,8 +154,10 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
+                                let fyx_entries = terminal_ext::new_terminal_menu(window, cx); // fyx: account profiles
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.context(focus_handle.clone())
+                                    let menu = menu
+                                        .context(focus_handle.clone())
                                         .action(
                                             "New Terminal",
                                             workspace::NewTerminal::default().boxed_clone(),
@@ -166,7 +168,8 @@ impl TerminalPanel {
                                         .action(
                                             "Spawn Task",
                                             zed_actions::Spawn::modal().boxed_clone(),
-                                        )
+                                        );
+                                    fyx_menu(menu, fyx_entries) // fyx
                                 });
 
                                 Some(menu)
@@ -1870,6 +1873,25 @@ impl RenderOnce for InlineAssistTabBarButton {
                 Tooltip::for_action_in("Inline Assist", &InlineAssist::default(), &focus_handle, cx)
             })
     }
+}
+
+/// fyx: the "+" menu entries `terminal_host` adds (account profiles, design §C.6).
+fn fyx_menu(menu: ContextMenu, entries: Vec<terminal_ext::MenuEntry>) -> ContextMenu {
+    entries.into_iter().fold(menu, |menu, entry| match entry {
+        terminal_ext::MenuEntry::Separator => menu.separator(),
+        terminal_ext::MenuEntry::Header(title) => menu.header(title),
+        terminal_ext::MenuEntry::Toggle {
+            label,
+            checked,
+            on_select,
+        } => menu.toggleable_entry(
+            label,
+            checked,
+            ui::IconPosition::Start,
+            None,
+            move |window, cx| on_select(window, cx),
+        ),
+    })
 }
 
 #[cfg(test)]

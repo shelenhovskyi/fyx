@@ -1115,6 +1115,12 @@ impl TerminalBuilder {
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
         let no_pty = HeadlessTerminal::is_enabled(cx);
+        terminal_ext::apply_env_hook(
+            &mut env,
+            working_directory.as_deref(),
+            is_remote_terminal,
+            cx,
+        ); // fyx: accounts, terminal:env
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")

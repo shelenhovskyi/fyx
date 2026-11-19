@@ -92,39 +92,69 @@ fn title_and_cwd(terminal: &Entity<Terminal>, cx: &App) -> (String, Option<Strin
 struct TabStatus;
 
 impl TerminalDecorations for TabStatus {
-    fn tab_indicator(&self, terminal: &TerminalExt, _cx: &App) -> Option<AnyElement> {
-        let origin = terminal.origin();
-        let Some((status, icon)) = terminal
-            .status()
-            .and_then(|status| Some((status.clone(), status_icon(&status)?)))
-        else {
-            return origin.map(|origin| origin_marker(terminal, &origin));
-        };
-        let (title, mut meta) = tooltip_text(&status);
-        if let Some(origin) = &origin {
-            meta.push_str(" · ");
-            meta.push_str(&origin.describe());
+    fn tab_indicator(&self, terminal: &TerminalExt, cx: &App) -> Option<AnyElement> {
+        let status = status_indicator(terminal);
+        let accounts = terminal.accounts();
+        if accounts.is_empty() {
+            return status;
         }
-        // "started by <extension>" stays visible beside the program's status (§B.3).
-        let started_by = origin
-            .as_ref()
-            .filter(|origin| matches!(origin, ExtensionOrigin::Created { .. }))
-            .map(|origin| origin_marker(terminal, origin));
+        // The account is always visible on the tab (design §C.6).
+        let tooltip = crate::accounts::describe(&accounts, cx).unwrap_or_default();
         Some(
             h_flex()
-                .id(("fyx-terminal-status", terminal.id().as_u64()))
-                .gap_0p5()
-                .children(started_by)
-                .child(icon)
-                .when(status.attention, |this| {
-                    this.child(Indicator::dot().color(Color::Accent))
-                })
-                .tooltip(move |_window, cx| {
-                    Tooltip::with_meta(title.clone(), None, meta.clone(), cx)
-                })
+                .gap_1()
+                .children(status)
+                .child(
+                    h_flex()
+                        .id(("fyx-terminal-account", terminal.id().as_u64()))
+                        .gap_1()
+                        .children(
+                            accounts
+                                .iter()
+                                .map(|account| crate::accounts::badge(account, cx)),
+                        )
+                        .tooltip(Tooltip::text(tooltip)),
+                )
                 .into_any_element(),
         )
     }
+
+    fn new_terminal_menu(&self, window: &Window, cx: &App) -> Vec<terminal_ext::MenuEntry> {
+        crate::accounts::menu_entries(window, cx)
+    }
+}
+
+/// The program's status, else the extension's mark.
+fn status_indicator(terminal: &TerminalExt) -> Option<AnyElement> {
+    let origin = terminal.origin();
+    let Some((status, icon)) = terminal
+        .status()
+        .and_then(|status| Some((status.clone(), status_icon(&status)?)))
+    else {
+        return origin.map(|origin| origin_marker(terminal, &origin));
+    };
+    let (title, mut meta) = tooltip_text(&status);
+    if let Some(origin) = &origin {
+        meta.push_str(" · ");
+        meta.push_str(&origin.describe());
+    }
+    // "started by <extension>" stays visible beside the program's status (§B.3).
+    let started_by = origin
+        .as_ref()
+        .filter(|origin| matches!(origin, ExtensionOrigin::Created { .. }))
+        .map(|origin| origin_marker(terminal, origin));
+    Some(
+        h_flex()
+            .id(("fyx-terminal-status", terminal.id().as_u64()))
+            .gap_0p5()
+            .children(started_by)
+            .child(icon)
+            .when(status.attention, |this| {
+                this.child(Indicator::dot().color(Color::Accent))
+            })
+            .tooltip(move |_window, cx| Tooltip::with_meta(title.clone(), None, meta.clone(), cx))
+            .into_any_element(),
+    )
 }
 
 /// The extension's mark on its terminal and whose it is. A created terminal also names the
