@@ -15,6 +15,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::CancelFetch` | variant |  |
 | `HostEffect::CancelTick` | variant |  |
 | `HostEffect::CloseStdin` | variant |  |
+| `HostEffect::Context` | variant | A `crate::context` function (`fyx:ui` 0.4). |
 | `HostEffect::DismissNotification` | variant |  |
 | `HostEffect::Fetch` | variant | `fetch`; off WASM the ids are the shared 1, 2, … of `notify`. |
 | `HostEffect::HideSurface` | variant |  |

@@ -81,6 +81,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::notifications` | method | The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or acted on. The harness has no clock, so `auto_dismiss` ones stay until `Harness::close_notification`. |
 | `Harness::open_mcp_calls` | method | The MCP calls the extension has not answered, by call id. |
 | `Harness::open_profile` | method | The user starts profile `id` from "+", with account profile `account` when the profile has an `account_tool` (design.md C.6; the extension sees only its name). With `terminal:observe`, `Harness::deliver_io` delivers `terminal-created`. Returns the extension's handle for it. |
+| `Harness::opened_files` | method | Every `context.open` the extension made, in order. |
 | `Harness::pending_fetches` | method | Requests `fetch` accepted that `Harness::deliver_io` has not delivered yet, oldest first. |
 | `Harness::pending_tick` | method | The delay of the surface's pending tick, already clamped up to `MIN_TICK_DELAY`. |
 | `Harness::processes` | method | Processes `spawn` accepted that have not finished, oldest first. |
@@ -96,8 +97,11 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::set_bracketed_paste` | method | Whether a profile terminal's program has bracketed paste on (it starts on); `paste` is `unavailable` while it is off (design.md B.11). |
 | `Harness::set_broker` | method | Installs the permission broker and network for `network:fetch`; see `TestBroker`. |
 | `Harness::set_edit_answer` | method | How the editor answers `workspace:edit` edits the user allowed; without one they apply. |
+| `Harness::set_editor_context` | method | What the editor shows now; while the extension watches, `Harness::deliver_io` delivers it, filtered as the host filters it, as `context-changed`. |
 | `Harness::set_listener_granted` | method | Grants or revokes `network:listen#<name>`. Revoking closes the listener: its connections end, and `Harness::deliver_io` delivers `mcp-cancelled` for their open calls. |
+| `Harness::set_private_file` | method | A file the user keeps private: `to-file-ref` and `absolute-path` refuse it, and the context carries no selection text of it. |
 | `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
+| `Harness::set_worktrees` | method | The open worktrees for `context` (0.4): (id, root as the host spells it, `\` or `/`). The roots need not exist. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |
 | `Harness::terminal` | method | One of the extension's 0.4 terminals (pseudo, created or profile), while it is open. |
@@ -109,6 +113,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::tree_v0_1` | method | The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds it. |
 | `Harness::type_into_terminal` | method | Keys or text the user types into a pseudo-terminal; `Harness::deliver_io` hands them to the extension as `terminal-input`. |
 | `Harness::ui_api_version` | method |  |
+| `Harness::watching_context` | method | Whether the extension watches the editor context. |
 | `Harness::with_network_domains` | method | The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them; `Harness::load_package` reads them from the manifest. |
 | `Harness::with_package_root` | method | Checks asset images against the extension folder `dir`, as `Harness::load_package` does, for a harness loaded from bytes. |
 | `Harness::with_processes` | method | The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env` declare them; `Harness::load_package` reads them from the manifest. |
@@ -130,6 +135,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `MIN_TICK_DELAY` | re-export | `api_state::MIN_TICK_DELAY` |
 | `McpCall` | re-export | `listeners::McpCall` |
 | `McpError` | re-export | `listeners::McpError` |
+| `OpenedFile` | re-export | `context::OpenedFile` |
 | `Outcome` | struct | What one event or tick did. |
 | `Outcome::effects` | field | The call's effects, applied first, in order. |
 | `Outcome::invalidated` | field | The reply's `invalidate-rows` patches, in order. |
