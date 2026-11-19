@@ -57,3 +57,9 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # keeps a copy per integration commit.
 [profile.default.junit]
 path = "junit.xml"
+
+# fyx: upstream's grandchild-kill tests (util, v1.29.2) wait at most 2-5 s for the process tree;
+# under the gate's full parallel load on Windows the tree takes longer. They pass alone in ~1 s.
+[[profile.default.overrides]]
+filter = 'package(util) and test(/terminates_grandchildren/)'
+retries = 2
