@@ -128,7 +128,10 @@ impl TerminalStatus {
 pub struct TerminalInfo {
     pub handle: TerminalHandle,
     pub origin: TerminalOrigin,
-    /// Redacted (`•••` for the command line) without a T3 read (§B.5).
+    /// Redacted without a T3 read (§B.5), since a tab title is often the running command: `•••`
+    /// for a user terminal and for another extension's terminal, the profile's name for a profile
+    /// terminal, and the extension's own title for its own terminals (agreed with W1,
+    /// 2026-11-19).
     pub title: String,
     pub cwd: Option<String>,
     pub status: Option<TerminalStatus>,
