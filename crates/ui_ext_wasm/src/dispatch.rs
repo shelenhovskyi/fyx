@@ -56,6 +56,11 @@ impl UiBindings {
         runtime: &UiRuntime,
     ) -> wasmtime::Result<Self> {
         Ok(match version {
+            // The 0.4 world is staged for its manifest and model (plan 5.5); its bindings come
+            // with the imports.
+            ApiVersion::V0_4_0 => wasmtime::bail!(
+                "fyx:ui 0.4 is staged, and this build does not run 0.4 components yet"
+            ),
             ApiVersion::V0_3_0 => {
                 // The 0.3 interfaces this build does not implement yet trap when called (they are
                 // staged with the WIT, plan 4.x); a component that never calls them works.

@@ -968,8 +968,8 @@ async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
     for (fyx_ui, problem) in [
         // A newer world's tables do not hide its version.
         (
-            "api_version = \"0.4.0\"\n[fyx_ui.future]\nx = 1\n",
-            "targets fyx:ui 0.4.0",
+            "api_version = \"0.5.0\"\n[fyx_ui.future]\nx = 1\n",
+            "targets fyx:ui 0.5.0",
         ),
         (
             "api_version = \"0.2.0\"\ncapabilities = [\"ui:canvas\"]\n",
@@ -1008,6 +1008,126 @@ async fn test_manifests_are_read_version_first(cx: &mut TestAppContext) {
         let error = read(fyx_ui).await.err().expect("refused");
         assert!(
             format!("{error:#}").contains(problem),
+            "{problem}: {error:#}"
+        );
+    }
+}
+
+/// Plan 5.5 "done when": the 0.4 tables and capabilities load in a 0.4 manifest, a 0.3 manifest
+/// with a 0.4 table or capability is refused, and `PATH`, `HOME`, `CLAUDE_CONFIG_DIR` and
+/// `FOO_API_KEY` in `terminal:env` are refused.
+#[gpui::test]
+async fn test_v0_4_manifest_tables(cx: &mut TestAppContext) {
+    let fs = fs::FakeFs::new(cx.executor());
+    fs.create_dir(Path::new("/ext/t")).await.expect("dir");
+    let read = |fyx_ui: &str| {
+        let fs = fs.clone();
+        let text = format!(
+            "id = \"t\"\nname = \"T\"\nversion = \"0.1.0\"\nschema_version = 1\n[fyx_ui]\n\
+             component = \"fyx_ui.wasm\"\n{fyx_ui}"
+        );
+        async move {
+            fs.insert_file("/ext/t/extension.toml", text.into_bytes())
+                .await;
+            UiManifest::read(fs.as_ref(), Path::new("/ext/t")).await
+        }
+    };
+    const LISTENER: &str = "[[fyx_ui.listeners]]\nname = \"ide\"\nprotocol = \"mcp-websocket\"\n\
+         auth = { header = \"x-claude-code-ide-authorization\" }\nreason = \"lets Claude Code connect\"\n";
+    let env = |vars: &str| {
+        format!(
+            "api_version = \"0.4.0\"\ncapabilities = [\"terminal:env\", \"network:listen\"]\n\
+             {LISTENER}[fyx_ui.terminal_env]\nvars = {{ {vars} }}\nreason = \"connects the CLI\"\n"
+        )
+    };
+    let claude = format!(
+        "api_version = \"0.4.0\"\n\
+         capabilities = [\"ui:panel\", \"terminal:profiles\", \"terminal:create\", \"terminal:env\", \
+         \"network:listen\", \"fs:discovery-file\", \"relay:hooks\", \"package:files\", \
+         \"review:propose\", \"context:editor\"]\n\
+         [[fyx_ui.terminal_profiles]]\nid = \"claude\"\nname = \"Claude Code\"\nprogram = \"claude\"\n\
+         args = [\"--ide\"]\naccount_tool = \"claude\"\n\
+         [[fyx_ui.terminal_programs]]\nname = \"codex\"\nargs = [\"-c\", \"notify=*\", \"**\"]\n\
+         reason = \"runs Codex in a panel\"\n\
+         [fyx_ui.terminal_env]\nvars = {{ CLAUDE_CODE_SSE_PORT = \"${{listen.ide.port}}\", \
+         ENABLE_IDE_INTEGRATION = \"true\", CLAUDE_CODE_PLUGIN_DIRS = \"${{package}}/claude-plugin\" }}\n\
+         reason = \"connects Claude Code to Fyx\"\n\
+         {LISTENER}\
+         [[fyx_ui.discovery_files]]\nlistener = \"ide\"\ndir = \"${{account.claude}}/ide\"\n\
+         default_dir = \"~/.claude/ide\"\nname = \"${{port}}.lock\"\n\
+         content = {{ pid = \"${{pid}}\", authToken = \"${{token}}\" }}\n\
+         reason = \"Claude Code finds Fyx through it\"\n\
+         [[fyx_ui.relay_channels]]\nname = \"pre-tool\"\non_failure = {{ exit = 0 }}\n\
+         reason = \"the pre-tool hook\"\n"
+    );
+    let (_, manifest) = read(&claude)
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"))
+        .expect("a fyx_ui table");
+    assert_eq!(manifest.terminal_profiles[0].id, "claude");
+    assert_eq!(manifest.listeners[0].name, "ide");
+    assert_eq!(manifest.relay_channels[0].timeout_ms, 30_000);
+    read(&env("TOOL_IDE_PORT = \"${listen.ide.port}\""))
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
+
+    let mut refused = vec![
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"terminal:env\"]\n\
+             [fyx_ui.terminal_env]\nvars = { A = \"b\" }\nreason = \"r\"\n"
+                .to_string(),
+            "\"terminal:env\" needs fyx:ui 0.4".to_string(),
+        ),
+        (
+            format!("api_version = \"0.3.0\"\ncapabilities = [\"network:listen\"]\n{LISTENER}"),
+            "needs fyx:ui 0.4".to_string(),
+        ),
+        (
+            "api_version = \"0.3.0\"\n[[fyx_ui.terminal_profiles]]\nid = \"a\"\nname = \"A\"\nprogram = \"a\"\n"
+                .to_string(),
+            "[[fyx_ui.terminal_profiles]] needs fyx:ui 0.4".to_string(),
+        ),
+        (
+            "api_version = \"0.4.0\"\ncapabilities = [\"terminal:create\"]\n".to_string(),
+            "terminal:create needs [[fyx_ui.terminal_programs]]".to_string(),
+        ),
+        (
+            "api_version = \"0.4.0\"\n[[fyx_ui.terminal_programs]]\nname = \"codex\"\nreason = \"r\"\n"
+                .to_string(),
+            "needs the terminal:create capability".to_string(),
+        ),
+        (
+            "api_version = \"0.4.0\"\ncapabilities = [\"terminal:create\"]\n\
+             [[fyx_ui.terminal_programs]]\nname = \"codex\"\n"
+                .to_string(),
+            "missing field `reason`".to_string(),
+        ),
+        (
+            "api_version = \"0.4.0\"\ncapabilities = [\"terminal:read\"]\n".to_string(),
+            "unknown capability".to_string(),
+        ),
+        (
+            env("TOOL_PORT = \"${listen.other.port}\""),
+            "no listener named".to_string(),
+        ),
+    ];
+    for name in [
+        "PATH",
+        "HOME",
+        "CLAUDE_CONFIG_DIR",
+        "FOO_API_KEY",
+        "path",
+        "LD_PRELOAD",
+    ] {
+        refused.push((
+            env(&format!("{name} = \"x\"")),
+            format!("terminal:env name {name}"),
+        ));
+    }
+    for (fyx_ui, problem) in refused {
+        let error = read(&fyx_ui).await.err().expect("refused");
+        assert!(
+            format!("{error:#}").contains(&problem),
             "{problem}: {error:#}"
         );
     }
