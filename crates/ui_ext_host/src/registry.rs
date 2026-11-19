@@ -37,6 +37,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, SharedString, Task, WeakEntity, Window,
 };
 use settings::Settings as _;
+use ui_ext::integration::RelayChannelSpec;
 use ui_ext::v0_2::{
     NotificationActionEvent, NotificationCloseReason, StatusBarSide, Surface, SurfaceKind, UiEvent,
     Update,
@@ -165,7 +166,19 @@ pub struct UiExtensionRegistry {
     /// Told when an extension's listener opens or closes (§B.7, §B.8): W1's discovery-file
     /// writer. One shared observer for every load, so a reload's listeners reach the same one.
     listener_observer: Option<Arc<dyn ui_ext::integration::ListenerObserver>>,
+    /// The `fyx-relay` binary every later load gets for `${relay}` (§B.9; W1 sets it).
+    relay_binary: Option<PathBuf>,
+    /// Told each extension's granted relay channels when they change (§B.9; W1's endpoint).
+    relay_observer: Option<RelayObserver>,
+    /// What [`Self::relay_observer`] was last told, by extension.
+    relay_published: HashMap<Arc<str>, Vec<RelayChannelSpec>>,
+    /// Re-checks the channels on every notify: grants and revokes end in one.
+    _relay_sync: Option<gpui::Subscription>,
 }
+
+/// Gets an extension's granted relay channels whenever they change; an empty list on unload,
+/// failure, uninstall and revocation.
+pub type RelayObserver = Arc<dyn Fn(&str, &[RelayChannelSpec], &App)>;
 
 /// A loaded extension a terminal can be shared with (§C.3), for the terminal's menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -706,6 +719,74 @@ impl UiExtensionRegistry {
 
     pub fn listener_observer(&self) -> Option<Arc<dyn ui_ext::integration::ListenerObserver>> {
         self.listener_observer.clone()
+    }
+
+    /// The `fyx-relay` binary for `${relay}` in `terminal:env` values (§B.9), from
+    /// `terminal_host::relay_binary`. Set it before the first scan; later loads get it.
+    pub fn set_relay_binary(&mut self, binary: Option<PathBuf>) {
+        self.relay_binary = binary;
+    }
+
+    /// Where the relay endpoint learns the granted channels (`terminal_host::set_relay_channels`).
+    /// It is told every extension's channels now, and each change after: a load or reload, a
+    /// grant or revoke of `relay:hooks`, and an empty list when the extension goes.
+    pub fn set_relay_observer(&mut self, observer: RelayObserver, cx: &mut Context<Self>) {
+        self.relay_observer = Some(observer);
+        self.relay_published.clear();
+        self._relay_sync = Some(cx.observe_self(|this, cx| this.sync_relay_channels(cx)));
+        self.sync_relay_channels(cx);
+    }
+
+    /// Each loaded extension's relay channels while `relay:hooks` is granted (§B.9).
+    pub fn relay_channels(&self) -> Vec<(Arc<str>, Vec<RelayChannelSpec>)> {
+        let mut channels: Vec<_> = self
+            .io_instances
+            .iter()
+            .filter(|(_, (_, instance))| instance.relay_granted())
+            .map(|(id, (_, instance))| (id.clone(), instance.relay_channels().to_vec()))
+            .filter(|(_, channels)| !channels.is_empty())
+            .collect();
+        channels.sort_by(|a, b| a.0.cmp(&b.0));
+        channels
+    }
+
+    /// A hook ran `fyx-relay --channel <extension>/<channel>` (§B.9): delivered to the loaded
+    /// instance as `io-event::relay-request`. `terminal` is the extension's handle for the hook's
+    /// terminal, if it has one. On `Err` (no such extension, or the runtime refused: the reason
+    /// is for the log) `reply` was dropped, and the endpoint answers the channel's `on_failure`.
+    pub fn relay_request(
+        &self,
+        extension_id: &str,
+        channel: &str,
+        terminal: Option<ui_ext::terminal::TerminalHandle>,
+        argv: Vec<String>,
+        stdin: String,
+        reply: ui_ext::integration::RelayReply,
+    ) -> Result<u64, String> {
+        let Some((_, instance)) = self.io_instances.get(extension_id) else {
+            return Err(format!("{extension_id} is not loaded"));
+        };
+        instance.relay_request(channel, terminal, argv, stdin, reply)
+    }
+
+    /// Tells [`Self::relay_observer`] what changed since it was last told.
+    fn sync_relay_channels(&mut self, cx: &App) {
+        let Some(observer) = self.relay_observer.clone() else {
+            return;
+        };
+        let now: HashMap<Arc<str>, Vec<RelayChannelSpec>> =
+            self.relay_channels().into_iter().collect();
+        for (extension_id, channels) in &now {
+            if self.relay_published.get(extension_id) != Some(channels) {
+                observer(extension_id, channels, cx);
+            }
+        }
+        for extension_id in self.relay_published.keys() {
+            if !now.contains_key(extension_id) {
+                observer(extension_id, &[], cx);
+            }
+        }
+        self.relay_published = now;
     }
 
     pub(crate) fn journal_sink(&self) -> Option<Arc<dyn ui_ext_wasm::journal::Journal>> {
@@ -1880,6 +1961,7 @@ Environment it may pass: {}",
             self.start_io_loop(extension.clone(), io_events, cx);
         }
         self.register_backend(Rc::new(extension), &surfaces, cx);
+        self.sync_relay_channels(cx);
         // Effects of instantiation and `surfaces` (0.2), after the static surfaces exist.
         for effect in initial_effects {
             self.apply_effect(&extension_id, effect, cx);
@@ -2150,6 +2232,11 @@ Environment it may pass: {}",
                         diagnostics_source: Some(cx.update(|cx| {
                             crate::diagnostics_host::for_extension(&found.extension_id, cx)
                         })),
+                        // `${relay}` in terminal:env (plan 5.12).
+                        relay_binary: this
+                            .read_with(cx, |this, _| this.relay_binary.clone())
+                            .ok()
+                            .flatten(),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2454,6 +2541,7 @@ Environment it may pass: {}",
         self.close_notifications_of(extension_id, None, cx);
         clear_images(extension_id, cx);
         self.io_instances.remove(extension_id);
+        self.sync_relay_channels(cx);
         self.backends.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
@@ -3271,7 +3359,8 @@ fn attach_to_workspace(
     // A banner while FYX_UI_DEV_EXTENSIONS is in use: those load without consent (triage-3).
     if dev_build(cx) && !dev_extension_paths().is_empty() {
         let message = format!(
-            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent.              Unset it to stop."
+            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent. \
+             Unset it to stop."
         );
         workspace.show_notification(
             NotificationId::named("fyx-ui-dev-extensions-env".into()),
@@ -3932,6 +4021,10 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         diagnostics_source: Some(
             cx.update(|cx| crate::diagnostics_host::for_extension(&path.to_string_lossy(), cx)),
         ),
+        relay_binary: cx.update(|cx| {
+            UiExtensionRegistry::global(cx)
+                .and_then(|registry| registry.read(cx).relay_binary.clone())
+        }),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

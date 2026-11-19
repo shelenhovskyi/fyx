@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use fs::FakeFs;
-use gpui::{Entity, EntityId, TestAppContext};
+use gpui::{BorrowAppContext as _, Entity, EntityId, TestAppContext};
 use language::Buffer;
 use project::Project;
 use serde_json::json;
@@ -205,6 +205,103 @@ async fn test_a_private_file_refuses_the_whole_edit(cx: &mut TestAppContext) {
     );
     let a = buffer(&project, "a.txt", cx).await;
     assert_eq!(text(&a, cx), "one\ntwo\n");
+}
+
+/// Design wit-0.4 §C.6 rule 5: an account profile's dir is off limits to extensions, also when
+/// it lies inside an open worktree. Edits, new files in it and the host-side resolve of a file
+/// target are refused, and the reason names the account, never the dir.
+#[gpui::test]
+async fn test_account_dirs_are_refused(cx: &mut TestAppContext) {
+    let (fs, project) = setup(true, cx).await;
+    fs.insert_tree(
+        path!("/work/accounts/work"),
+        json!({ ".credentials.json": "{}\n" }),
+    )
+    .await;
+    cx.update(|cx| {
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                let accounts = settings
+                    .fyx
+                    .get_or_insert_default()
+                    .accounts
+                    .get_or_insert_default();
+                accounts.tools = Some(
+                    [(
+                        "claude".to_string(),
+                        settings::FyxAccountToolContent {
+                            env: Some("CLAUDE_CONFIG_DIR".into()),
+                            ..Default::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                );
+                accounts.profiles = Some(vec![settings::FyxAccountProfileContent {
+                    name: Some("Work".into()),
+                    tool: Some("claude".into()),
+                    dir: Some(path!("/work/accounts/work").into()),
+                    color: None,
+                }]);
+            });
+        });
+    });
+    cx.run_until_parked();
+    let refused = |result: &Result<Applied, EditError>| {
+        matches!(result, Err(EditError::NotAllowed(message))
+            if message.contains("account dir of \"Work\"") && !message.contains(path!("/work/")))
+    };
+
+    let result = run(
+        edit(vec![
+            file("a.txt", &[(at(0, 0), at(0, 3), "ONE")]),
+            file(
+                "accounts/work/.credentials.json",
+                &[(at(0, 0), at(0, 2), "")],
+            ),
+        ]),
+        cx,
+    )
+    .await;
+    assert!(refused(&result), "{:?}", result.err());
+    let mut create = file("accounts/work/new.json", &[(at(0, 0), at(0, 0), "{}")]);
+    create.create = true;
+    let result = run(edit(vec![create]), cx).await;
+    assert!(refused(&result), "{:?}", result.err());
+
+    let resolved = cx
+        .spawn(async move |mut cx: gpui::AsyncApp| {
+            resolve_file(
+                "ext",
+                FileRef {
+                    worktree: None,
+                    path: "accounts/work/.credentials.json".into(),
+                },
+                false,
+                &mut cx,
+            )
+            .await
+        })
+        .await;
+    assert!(
+        matches!(&resolved, Err(EditError::NotAllowed(message)) if message.contains("\"Work\"")),
+        "{:?}",
+        resolved.err()
+    );
+
+    // Nothing changed: the whole edit was refused.
+    let a = buffer(&project, "a.txt", cx).await;
+    assert_eq!(text(&a, cx), "one\ntwo\n");
+    assert_eq!(
+        fs.load(Path::new(path!("/work/accounts/work/.credentials.json")))
+            .await
+            .unwrap(),
+        "{}\n"
+    );
+    assert!(
+        !fs.is_file(Path::new(path!("/work/accounts/work/new.json")))
+            .await
+    );
 }
 
 #[gpui::test]

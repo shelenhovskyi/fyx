@@ -105,7 +105,8 @@ pub fn confirm_always_allow(
         ),
         notes: vec![
             crate::t3_cards::always_allow_warning(extension_name),
-            "It holds until you revoke it, or until this extension's component changes. It              never applies in an untrusted worktree."
+            "It holds until you revoke it, or until this extension's component changes. It \
+             never applies in an untrusted worktree."
                 .into(),
         ],
         confirm: format!("Always allow {extension_name}"),
