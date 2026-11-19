@@ -1,8 +1,8 @@
 //! Host side of the staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`,
 //! docs/fyx/wit-0.4/design.md): everything 0.3 has (`t2_shared.rs`), the ten T2 cases of
-//! `permissions`, `terminals` over [`crate::terminals`], and `approvals` (§B.12). `listeners`,
-//! `relay`, `review` and `context` trap when called until plan 5.11 and 5.13 build them
-//! (`define_unbuilt_as_traps`).
+//! `permissions`, `terminals` over [`crate::terminals`], `approvals` (§B.12) and `listeners`
+//! over [`crate::listeners`] (§B.7). `relay`, `review` and `context` trap when called until plan
+//! 5.12 and 5.13 build them (`define_unbuilt_as_traps`).
 //!
 //! A `terminal` node becomes [`model::Props::Terminal`]; the renderer resolves its handle.
 
@@ -221,6 +221,94 @@ impl wit_approvals::Host for UiState {
             options: options.into_iter().map(approval_option).collect(),
         };
         Ok(self.api.ask_approval(request).map_err(Into::into))
+    }
+}
+
+/// `listeners` (design.md §B.7) over [`crate::listeners::ListenersHandle`]: a listener the
+/// manifest does not declare is `not-permitted`, one that is not granted `denied`, and one that
+/// is granted but not open (yet) `unavailable`. Tools registered before it opens apply when it
+/// does.
+impl wit_listeners::Host for UiState {
+    fn register_tools(
+        &mut self,
+        listener: String,
+        tools: Vec<wit_listeners::ToolDef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            listener.len()
+                + tools
+                    .iter()
+                    .map(|tool| tool.name.len() + tool.description.len() + tool.input_schema.len())
+                    .sum::<usize>(),
+        )?;
+        let tools = tools
+            .into_iter()
+            .map(|tool| ui_ext::integration::ToolDef {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect();
+        Ok(self
+            .listeners
+            .register_tools(&listener, tools)
+            .map_err(Into::into))
+    }
+
+    fn respond(
+        &mut self,
+        call_id: u64,
+        outcome: Result<String, wit_listeners::McpError>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(match &outcome {
+            Ok(text) => text.len(),
+            Err(error) => error.message.len(),
+        })?;
+        let outcome = outcome.map_err(|error| ui_ext::integration::McpError {
+            code: error.code,
+            message: error.message,
+        });
+        Ok(self.listeners.respond(call_id, outcome).map_err(Into::into))
+    }
+
+    fn notify(
+        &mut self,
+        listener: String,
+        connection: Option<u64>,
+        method: String,
+        params: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(listener.len() + method.len() + params.len())?;
+        Ok(self
+            .listeners
+            .notify(&listener, connection, &method, &params)
+            .map_err(Into::into))
+    }
+
+    fn send(
+        &mut self,
+        listener: String,
+        connection: u64,
+        text: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(listener.len() + text.len())?;
+        Ok(self
+            .listeners
+            .send(&listener, connection, &text)
+            .map_err(Into::into))
+    }
+
+    fn reply(
+        &mut self,
+        request_id: u64,
+        status: u16,
+        body: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(body.len())?;
+        Ok(self
+            .listeners
+            .reply(request_id, status, body)
+            .map_err(Into::into))
     }
 }
 
@@ -468,6 +556,7 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "permissions",
     "terminals",
     "approvals",
+    "listeners",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -486,5 +575,6 @@ pub(crate) fn add_to_linker(
     wit_permissions::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_terminals::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_approvals::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_listeners::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

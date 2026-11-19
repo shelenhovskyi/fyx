@@ -56,19 +56,23 @@ fn too_large(what: &str, max: usize) -> HostError {
     )
 }
 
-/// The `${package}` of `terminal:env` values; listeners and the relay come with plan 5.11 and
-/// 5.13, so a value that uses them is left out until then.
-struct PackageContext(Option<String>);
+/// The `${package}` and `${listen.<name>.port|token}` of `terminal:env` values for a created
+/// terminal: a listener's only while it is open, its token only with `token_in_env`. The relay
+/// comes with plan 5.12, so a value that uses it is left out until then.
+struct PackageContext<'a> {
+    package: Option<String>,
+    listeners: &'a crate::listeners::ListenersHandle,
+}
 
-impl TemplateContext for PackageContext {
+impl TemplateContext for PackageContext<'_> {
     fn package(&self) -> Option<String> {
-        self.0.clone()
+        self.package.clone()
     }
-    fn listen_port(&self, _: &str) -> Option<u16> {
-        None
+    fn listen_port(&self, name: &str) -> Option<u16> {
+        self.listeners.port(name)
     }
-    fn listen_token(&self, _: &str) -> Option<String> {
-        None
+    fn listen_token(&self, name: &str) -> Option<String> {
+        self.listeners.token_for_env(name)
     }
     fn relay(&self) -> Option<String> {
         None
@@ -467,6 +471,8 @@ pub(crate) struct TerminalState {
     next_t3_id: u64,
     /// The running call's T3 requests.
     pending_t3: Vec<PendingT3>,
+    /// For `${listen.*}` in the env.
+    listeners: Arc<crate::listeners::ListenersHandle>,
 }
 
 impl TerminalState {
@@ -476,6 +482,7 @@ impl TerminalState {
         policy: Arc<TerminalPolicy>,
         workspace: Option<Arc<dyn Workspace>>,
         environment: Option<Environment>,
+        listeners: Arc<crate::listeners::ListenersHandle>,
     ) -> Self {
         Self {
             extension_id,
@@ -486,6 +493,7 @@ impl TerminalState {
             owned: HashMap::new(),
             next_t3_id: 1,
             pending_t3: Vec::new(),
+            listeners,
         }
     }
 
@@ -620,12 +628,14 @@ impl TerminalState {
         }
         .map_err(|why| error(HostErrorCode::Unavailable, why))?;
         let env = if env_granted {
-            self.policy.env.resolve(&PackageContext(
-                self.policy
+            self.policy.env.resolve(&PackageContext {
+                package: self
+                    .policy
                     .package_dir
                     .as_ref()
                     .map(|dir| dir.to_string_lossy().into_owned()),
-            ))
+                listeners: &self.listeners,
+            })
         } else {
             Vec::new()
         };
