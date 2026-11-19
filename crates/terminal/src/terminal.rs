@@ -3,6 +3,7 @@ mod mappings;
 mod alacritty;
 mod pty_info;
 pub mod terminal_settings;
+pub use terminal_ext; // fyx: for project's remote-shell hook (plan 5.17)
 
 #[cfg(not(windows))]
 use anyhow::Context as _;

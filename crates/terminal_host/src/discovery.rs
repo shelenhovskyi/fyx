@@ -11,6 +11,7 @@
 //! changes.
 
 mod fill;
+mod remote;
 mod safe_fs;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +27,7 @@ use serde_json::Value;
 use settings::SettingsStore;
 
 use fill::Vars;
+pub(crate) use remote::forwarded_port;
 
 /// One `[[fyx_ui.discovery_files]]` entry that is granted now.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,9 +72,11 @@ enum Job {
 /// The discovery-file writer. Cheap to call from any thread.
 pub struct DiscoveryWriter {
     jobs: Mutex<mpsc::Sender<Job>>,
-    /// Open listeners' port and token, for `${listen.<name>.…}` in terminal env; kept here, not on
-    /// the writer thread, so a terminal started right after `opened` sees it.
-    listeners: Mutex<BTreeMap<Key, (u16, String)>>,
+    /// Open listeners, for `${listen.<name>.…}` in terminal env and the SSH tunnels; kept here,
+    /// not on the writer thread, so a terminal started right after `opened` sees it.
+    listeners: Mutex<BTreeMap<Key, OpenListener>>,
+    /// Told when `listeners` changes, so the SSH tunnels follow (plan 5.17).
+    changed: Mutex<Option<futures::channel::mpsc::UnboundedSender<()>>>,
 }
 
 impl DiscoveryWriter {
@@ -95,6 +99,7 @@ impl DiscoveryWriter {
         Arc::new(Self {
             jobs: Mutex::new(jobs),
             listeners: Mutex::new(BTreeMap::new()),
+            changed: Mutex::new(None),
         })
     }
 
@@ -109,10 +114,11 @@ impl DiscoveryWriter {
         if let Ok(mut listeners) = self.listeners.lock() {
             listeners.insert(
                 (extension_id.to_owned(), listener.name.clone()),
-                (listener.port, listener.token.clone()),
+                listener.clone(),
             );
         }
         self.send(Job::Opened(extension_id.to_owned(), listener));
+        self.notify();
     }
 
     /// A listener closed: remove every file written for it.
@@ -121,6 +127,37 @@ impl DiscoveryWriter {
             listeners.remove(&(extension_id.to_owned(), listener.to_owned()));
         }
         self.send(Job::Closed(extension_id.to_owned(), listener.to_owned()));
+        self.notify();
+    }
+
+    fn notify(&self) {
+        if let Ok(changed) = self.changed.lock()
+            && let Some(changed) = changed.as_ref()
+        {
+            changed.unbounded_send(()).ok();
+        }
+    }
+
+    /// A stream that yields whenever a listener opens or closes; replaces the previous one.
+    fn changes(&self) -> futures::channel::mpsc::UnboundedReceiver<()> {
+        let (send, receive) = futures::channel::mpsc::unbounded();
+        if let Ok(mut changed) = self.changed.lock() {
+            *changed = Some(send);
+        }
+        receive
+    }
+
+    /// Every open listener, by extension.
+    fn open_listeners(&self) -> Vec<(String, OpenListener)> {
+        self.listeners
+            .lock()
+            .map(|listeners| {
+                listeners
+                    .iter()
+                    .map(|((ext, _), listener)| (ext.clone(), listener.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn set_context(&self, context: Context) {
@@ -133,7 +170,7 @@ impl DiscoveryWriter {
             .lock()
             .ok()?
             .get(&(extension_id.to_owned(), name.to_owned()))
-            .cloned()
+            .map(|listener| (listener.port, listener.token.clone()))
     }
 
     /// Removes every file, waiting at most `timeout`.
@@ -486,15 +523,28 @@ pub fn init_discovery(data_dir: &Path, cx: &mut App) {
     })
     .detach();
     cx.observe_global::<SettingsStore>(refresh).detach();
-    cx.on_app_quit(move |_| {
+    let mut changes = writer.changes();
+    cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        while changes.next().await.is_some() {
+            cx.update(remote::refresh);
+        }
+    })
+    .detach();
+    cx.on_app_quit(move |cx| {
         let writer = writer.clone();
-        async move { writer.close_all(Duration::from_secs(2)) }
+        let tunnels = remote::close_all(cx);
+        async move {
+            writer.close_all(Duration::from_secs(2));
+            tunnels.wait(Duration::from_secs(2));
+        }
     })
     .detach();
     refresh(cx);
 }
 
 fn refresh(cx: &mut App) {
+    remote::refresh(cx);
     let Some(discovery) = cx.try_global::<GlobalDiscovery>() else {
         return;
     };

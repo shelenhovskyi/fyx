@@ -1,35 +1,49 @@
-# W1: 5.17 SSH terminals and the remote listener tunnel (proposal, 2026-11-19)
+# W1: 5.17 SSH terminals and the remote listener tunnel (2026-11-19)
 
-Not started; needs the coordinator's go on the upstream hooks below.
+Implemented; module doc in `crates/terminal_host/src/discovery/remote.rs` is the reference.
 
-## How SSH terminals are built today
+## Research: the pid in lock files
 
-`project/src/terminals.rs` turns a remote shell into `ssh [options] <dest> <exec>` with
-`RemoteConnection::build_command` (`remote/src/transport/ssh.rs`). The env goes into `<exec>`, so
-the env hook in `TerminalBuilder::new` only reaches the local `ssh` process; it already skips
-extension env for remote terminals (`EnvRequest::remote`). `build_command` takes one `-L` forward
-(debuggers), no `-R`.
+- **Claude Code 2.1.328** (strings in the bundled `claude.exe`): at start it deletes a lock file
+  whose `pid` is not running (`process.kill(pid, 0)`, not on WSL). A lock with no pid (or 0) is
+  deleted only if `127.0.0.1:<port>` refuses. When picking an IDE, the pid must be running and be
+  its parent or an ancestor (10 levels) **only** in a "supported terminal" (VS Code family,
+  JetBrains, `FORCE_CODE_TERMINAL`) and only if the port is not `CLAUDE_CODE_SSE_PORT`. Zed/Fyx
+  terminals are not "supported", so remote Claude connects with `--ide`, `/ide` or
+  `autoConnectIde`; `workspaceFolders` must contain its cwd.
+- **Gemini CLI** (main, `ide-connection-utils.ts`): never deletes. Sorts
+  `gemini-ide-server-<pid>-<port>.json` by pid match (its IDE pid from the process tree or
+  `GEMINI_CLI_IDE_PID`), then alive, then picks the file whose `workspacePath` matches the cwd.
+  Every file must be the user's and `mode & 077 == 0`; the new dir `$TMPDIR/gemini-ide-<uid>`
+  must be 0700, the legacy `$TMPDIR/gemini/ide` (ours) is not checked.
+- So: `${pid}` = 0 on the host. No staging file, no `$$` from the terminal's exec string.
 
-## Proposal
+## What was built (changes the earlier plan)
 
-1. **Reverse forward with the same port.** For an SSH terminal, add `-R <p>:127.0.0.1:<p>` for each
-   open listener of an extension whose env reaches the terminal, and for the relay endpoint, with
-   `-o ExitOnForwardFailure=no`. Same port on both ends, so W2c's `Host: 127.0.0.1:<port>` check
-   passes unchanged. If the remote port is taken, ssh warns and the forward is missing, so the tool
-   fails open.
-   Hook: one `fyx:` call in `create_terminal_shell_internal` (SSH transport only, not WSL/Docker)
-   that inserts the `-R` args at the front of the command template's args and merges the env
-   before `build_command`. It needs `terminal_ext::remote_terminal_additions(cx)`
-   (env + forwards), which `terminal_host` fills.
-2. **Env on the remote side.** `${listen.*}`, `FYX_RELAY_PORT` and `FYX_TERMINAL_TOKEN` go into
-   `<exec>`. `FYX_RELAY` has no remote binary, so remote relay hooks stay unsupported (fail open)
-   unless we upload `fyx-relay` with the remote server (larger; later).
-3. **Remote discovery files** (Claude Code reads `~/.claude/ide/<port>.lock` on the remote host).
-   Open question: writing them needs a remote write path. The remote server has fs RPCs for
-   worktrees, not for arbitrary home paths. Putting the token on the ssh command line leaks it to
-   `ps` on shared hosts, so that is refused. Options: (a) a new remote-server request "write host
-   file 0600" (proto change, W0); (b) skip lock files and rely on `CLAUDE_CODE_SSE_PORT` plus a
-   token in env, if Claude Code accepts it without a lock file (research first).
+- **One tunnel per SSH host, not forwards per terminal.** `ssh -o ExitOnForwardFailure=yes
+  -o BatchMode=yes -R 127.0.0.1:p:127.0.0.1:p… <dest> sh -c <script>` (`project::fyx_remote`,
+  built by `RemoteClient::build_command`). Per-terminal `-R` breaks on Windows (no ControlMaster:
+  the second terminal's forward fails, the first one's dies with it) and a failed forward would
+  leave a lock pointing at a port another user holds. With `ExitOnForwardFailure`, `ssh` exits
+  before the script runs, so no token goes to someone else's port.
+- The script writes the files from stdin (one JSON line each, shell `read`/`printf`, `umask 077`,
+  folders the user owns, no symlinked folder under the temp dir, write beside + `mv`), prints
+  `fyx-tunnel-ready`, waits for stdin EOF and removes what it wrote (trap). Fyx closing stdin,
+  quitting or dying all end it; a stopped tunnel gets 3 s, then `ssh` is killed.
+- `discovery::remote::refresh` runs on worktree/settings/project changes and on listener
+  open/close (`DiscoveryWriter::changes`). Restart when the plan changes; an ended tunnel is
+  retried on a later change after 60 s. Hosts keyed by `display_name()`; projects on one host
+  share a tunnel (worktrees merged).
+- **Remote env:** `TerminalEnvHook::remote_env` + `terminal_ext::apply_remote_env_hook`, called
+  by a `fyx:` line in `create_remote_shell` (through `pub use terminal_ext` in `terminal`). Only
+  all-new env; only `${listen.<n>.port}` of a ready tunnel; no token, package, account, relay,
+  pid. Claude's env is profile-scoped, so remote shells get none of it by default.
 
-Test from plan 5.17 ("a remote Claude reaches the listener over SSH") needs an SSH host: the
-home-server (`~/fyx-light`) can serve as one.
+## Not verified / open
+
+- No real sshd: `ExitOnForwardFailure` stopping the command, ControlMaster forwards (they stay in
+  the master after the tunnel exits; a duplicate `-R` is accepted by the master), `BatchMode` with
+  Zed's askpass. Test on a Linux host with a fake `~/.claude`: `claude --ide` in a remote shell.
+- `a_symlinked_temp_folder_gets_no_file` is unix-only (not run on Windows).
+- Not for WSL, Docker or Windows hosts. Password-only SSH hosts get no tunnel (BatchMode).
+- Relay over SSH still out of scope: remote relay hooks fail open.

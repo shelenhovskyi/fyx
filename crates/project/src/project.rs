@@ -7,6 +7,7 @@ pub mod connection_manager;
 pub mod context_server_store;
 pub mod debounced_delay;
 pub mod debugger;
+pub mod fyx_remote; // fyx: plan 5.17, the SSH tunnel's command
 pub mod git_store;
 pub mod image_store;
 pub mod lsp_command;
