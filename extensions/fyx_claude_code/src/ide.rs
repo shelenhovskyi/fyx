@@ -11,6 +11,10 @@
 //! - the notifications the IDE sends ([`selection_changed`], [`at_mentioned`]).
 //!
 //! Paths are absolute on Claude's side and worktree-relative in Fyx; [`Roots`] maps them.
+//! On Windows Claude sends `C:\a\b` paths and two URI forms (`file:///C:/a/b` and
+//! `file://C:\a\b`); [`normalize_path`] and [`uri_to_path`] make one form of them.
+
+use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
@@ -54,14 +58,14 @@ pub struct FileRef {
 }
 
 /// `types.position`: zero-based line and column.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
 }
 
 /// `types.text-range`, half-open.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextRange {
     pub start: Position,
     pub end: Position,
@@ -71,9 +75,78 @@ pub struct TextRange {
 ///
 /// The 0.4 WIT gives an extension no absolute paths, so this needs a host primitive (reported
 /// to the coordinator, 5.15); until then it is a trait the tests fill.
+///
+/// `to_ref` gets paths in [`normalize_path`]'s form; `to_absolute` gives the OS's own form, as
+/// Claude sends paths (with `\` on Windows).
 pub trait Roots {
     fn to_ref(&self, absolute: &str) -> Option<FileRef>;
     fn to_absolute(&self, file: &FileRef) -> Option<String>;
+}
+
+/// One form for an absolute path from Claude: `\` becomes `/` and a drive letter is upper case
+/// (`c:\a\b` → `C:/a/b`). POSIX paths are kept as they are.
+pub fn normalize_path(path: &str) -> String {
+    let mut path = path.replace('\\', "/");
+    if let [drive, b':', ..] = path.as_bytes()
+        && drive.is_ascii_alphabetic()
+    {
+        let upper = (*drive as char).to_ascii_uppercase().to_string();
+        path.replace_range(..1, &upper);
+    }
+    path
+}
+
+/// The path in a `file:` URI, in [`normalize_path`]'s form. Both forms Claude sends on Windows
+/// work: `file:///C:/a%20b` (percent-encoded) and `file://C:\a b`. `None` for another scheme.
+pub fn uri_to_path(uri: &str) -> Option<String> {
+    let rest = uri
+        .strip_prefix("file://")
+        .or_else(|| uri.strip_prefix("FILE://"))?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let decoded = percent_decode(rest)?;
+    // `/C:/a` → `C:/a`; `/work/a` stays.
+    let path = match decoded.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &decoded[1..],
+        _ => &decoded[..],
+    };
+    Some(normalize_path(path))
+}
+
+/// A `file:` URI for an absolute path, as VS Code writes them: `C:\a b` → `file:///C:/a%20b`,
+/// `/work/a` → `file:///work/a`.
+pub fn path_to_uri(path: &str) -> String {
+    let path = normalize_path(path);
+    let mut uri = String::from(if path.starts_with('/') {
+        "file://"
+    } else {
+        "file:///"
+    });
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'-' | b'.' | b'_' | b'~' => {
+                uri.push(byte as char)
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = text.get(index + 1..index + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The tools Fyx's IDE server offers, which Claude 2.1.326 calls: `openDiff` (blocking),
@@ -88,7 +161,8 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "openFile",
-            description: "Open a file in the editor, optionally selecting text between two markers.",
+            description: "Open a file in the user's editor in Fyx. Give its absolute path; to \
+                select text, give the text where the selection starts and where it ends.",
             input_schema: schema(
                 json!({
                     "filePath": text, "preview": flag, "startText": text, "endText": text,
@@ -99,7 +173,8 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "openDiff",
-            description: "Show a proposed change for review and wait for the user's decision.",
+            description: "Show the user a proposed change to a file in Fyx's review and wait \
+                for their decision.",
             input_schema: schema(
                 json!({
                     "old_file_path": text, "new_file_path": text,
@@ -115,17 +190,19 @@ pub fn tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "close_tab",
-            description: "Close a diff opened with openDiff.",
+            description: "Close a proposed change that openDiff showed, by its tab name.",
             input_schema: schema(json!({ "tab_name": text }), &["tab_name"]),
         },
         ToolDef {
             name: "closeAllDiffTabs",
-            description: "Close every diff opened with openDiff.",
+            description: "Close every proposed change that openDiff showed.",
             input_schema: schema(json!({}), &[]),
         },
         ToolDef {
             name: "getDiagnostics",
-            description: "Diagnostics for one file URI, or for every open file.",
+            description: "Get the errors, warnings and hints that the user's editor in Fyx \
+                shows. Pass a file's file:// URI for that file, or nothing for every open file. \
+                Use it to check code before and after you change it.",
             input_schema: schema(json!({ "uri": text }), &[]),
         },
     ]
@@ -170,7 +247,7 @@ impl IdeCall {
             text(name).ok_or_else(|| McpError::invalid(format!("{tool}: {name} is required")))
         };
         let file = |path: &str| {
-            roots.to_ref(path).ok_or_else(|| {
+            roots.to_ref(&normalize_path(path)).ok_or_else(|| {
                 McpError::invalid(format!("{tool}: {path:?} is not in an open worktree"))
             })
         };
@@ -205,7 +282,9 @@ impl IdeCall {
             "closeAllDiffTabs" => Ok(Self::CloseAllDiffTabs),
             "getDiagnostics" => {
                 let file = match text("uri") {
-                    Some(uri) => Some(file(uri.strip_prefix("file://").unwrap_or(uri))?),
+                    Some(uri) => Some(file(&uri_to_path(uri).ok_or_else(|| {
+                        McpError::invalid(format!("getDiagnostics: {uri:?} is not a file URI"))
+                    })?)?),
                     None => None,
                 };
                 Ok(Self::GetDiagnostics { file })
@@ -284,7 +363,25 @@ pub enum Severity {
 
 /// `getDiagnostics`' result: a text item holding a JSON array of `{uri, diagnostics}` with
 /// LSP-shaped ranges, as VS Code's extension answers.
+///
+/// Stable: files by path, each file's diagnostics by range, then severity and message, with
+/// duplicates left out. Claude compares the answers before and after an edit, so the same
+/// diagnostics must give the same text.
 pub fn diagnostics_result(files: &[(String, Vec<Diagnostic>)]) -> String {
+    let mut files: Vec<(String, Vec<Diagnostic>)> = files.to_vec();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+    for (_, diagnostics) in &mut files {
+        diagnostics.sort_by(|a, b| {
+            (a.range, a.severity as u8, &a.message, &a.source).cmp(&(
+                b.range,
+                b.severity as u8,
+                &b.message,
+                &b.source,
+            ))
+        });
+        diagnostics.dedup();
+    }
     let position =
         |position: Position| json!({ "line": position.line, "character": position.column });
     let files: Vec<Value> = files
@@ -318,10 +415,79 @@ pub fn diagnostics_result(files: &[(String, Vec<Diagnostic>)]) -> String {
                     Value::Object(entry)
                 })
                 .collect();
-            json!({ "uri": format!("file://{absolute}"), "diagnostics": diagnostics })
+            json!({ "uri": path_to_uri(absolute), "diagnostics": diagnostics })
         })
         .collect();
     text_result(&Value::Array(files).to_string())
+}
+
+/// `getDiagnostics` answers within one turn: Claude asks about four times a turn, for one file
+/// and for every file. The same question gets the same text until the host's diagnostics change
+/// or a turn begins.
+#[derive(Debug, Default)]
+pub struct DiagnosticsCache {
+    answers: BTreeMap<Option<FileRef>, String>,
+}
+
+impl DiagnosticsCache {
+    /// A turn began, or the host's diagnostics changed.
+    pub fn invalidate(&mut self) {
+        self.answers.clear();
+    }
+
+    /// The answer for `file` (`None`: every file), computed once until [`Self::invalidate`].
+    pub fn answer(&mut self, file: Option<FileRef>, compute: impl FnOnce() -> String) -> String {
+        self.answers.entry(file).or_insert_with(compute).clone()
+    }
+}
+
+/// The `openDiff` calls of one connection, by tab name. Claude calls `closeAllDiffTabs` at every
+/// prompt and `close_tab` twice after each answered diff, so a close is a no-op unless the
+/// proposal is still open; only then does the extension withdraw it (`review.withdraw`) and
+/// answer the open call with `TAB_CLOSED`.
+#[derive(Debug)]
+pub struct Diffs<K> {
+    open: Vec<(String, K)>,
+}
+
+impl<K> Default for Diffs<K> {
+    fn default() -> Self {
+        Self { open: Vec::new() }
+    }
+}
+
+impl<K: Clone + PartialEq> Diffs<K> {
+    /// An `openDiff` call, as `key` (the proposal, or the call).
+    pub fn opened(&mut self, tab: String, key: K) {
+        self.open.retain(|(open, _)| *open != tab);
+        self.open.push((tab, key));
+    }
+
+    /// The user decided in Fyx, and the call was answered.
+    pub fn decided(&mut self, key: &K) -> bool {
+        let before = self.open.len();
+        self.open.retain(|(_, open)| open != key);
+        self.open.len() != before
+    }
+
+    /// `close_tab`: the proposal to withdraw, if it is still open.
+    pub fn close(&mut self, tab: &str) -> Option<K> {
+        let index = self.open.iter().position(|(open, _)| open == tab)?;
+        Some(self.open.remove(index).1)
+    }
+
+    /// `closeAllDiffTabs`: the proposals still open, to withdraw.
+    pub fn close_all(&mut self) -> Vec<K> {
+        self.open.drain(..).map(|(_, key)| key).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.open.iter().map(|(_, key)| key)
+    }
 }
 
 /// `selection_changed`'s params, from `context.editor-context`'s active file and selection.
@@ -339,7 +505,7 @@ pub fn selection_changed(
         json!({
             "text": text.unwrap_or_default(),
             "filePath": absolute,
-            "fileUrl": format!("file://{absolute}"),
+            "fileUrl": path_to_uri(&absolute),
             "selection": {
                 "start": position(range.start),
                 "end": position(range.end),
@@ -502,5 +668,130 @@ pub(crate) mod tests {
             path: "x".into(),
         };
         assert!(selection_changed(&elsewhere, range, None, &ROOT).is_none());
+    }
+
+    #[test]
+    fn windows_paths_and_both_uri_forms() {
+        assert_eq!(normalize_path(r"c:\work\app\a b.rs"), "C:/work/app/a b.rs");
+        assert_eq!(normalize_path("/work/app/a.rs"), "/work/app/a.rs");
+        for uri in [
+            "file:///C:/work/app/a%20b.rs",
+            "file:///c:/work/app/a%20b.rs",
+            r"file://C:\work\app\a b.rs",
+            "file://localhost/C:/work/app/a b.rs",
+        ] {
+            assert_eq!(
+                uri_to_path(uri).as_deref(),
+                Some("C:/work/app/a b.rs"),
+                "{uri}"
+            );
+        }
+        assert_eq!(
+            uri_to_path("file:///work/app/a.rs").as_deref(),
+            Some("/work/app/a.rs")
+        );
+        assert_eq!(uri_to_path("https://example.com/a"), None);
+        assert_eq!(uri_to_path("file:///C:/a%2"), None);
+        assert_eq!(
+            path_to_uri(r"C:\work\app\a b.rs"),
+            "file:///C:/work/app/a%20b.rs"
+        );
+        assert_eq!(path_to_uri("/work/app/ü.rs"), "file:///work/app/%C3%BC.rs");
+
+        let windows = OneRoot("C:/work/app");
+        let expected = Some(FileRef {
+            worktree: Some(1),
+            path: "src/a.rs".into(),
+        });
+        for uri in [
+            r"file://C:\work\app\src\a.rs",
+            "file:///C:/work/app/src/a.rs",
+        ] {
+            let call = IdeCall::parse(
+                "getDiagnostics",
+                &serde_json::to_string(&json!({ "uri": uri })).unwrap(),
+                &windows,
+            )
+            .unwrap();
+            assert_eq!(
+                call,
+                IdeCall::GetDiagnostics {
+                    file: expected.clone()
+                },
+                "{uri}"
+            );
+        }
+        let call = IdeCall::parse(
+            "openFile",
+            r#"{"filePath":"C:\\work\\app\\src\\a.rs"}"#,
+            &windows,
+        );
+        assert!(call.is_ok(), "{call:?}");
+        let error = IdeCall::parse("getDiagnostics", r#"{"uri":"untitled:1"}"#, &windows);
+        assert_eq!(error.unwrap_err().code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn diagnostics_answers_are_stable_and_cached() {
+        let diagnostic = |line, severity, message: &str| Diagnostic {
+            range: TextRange {
+                start: Position { line, column: 0 },
+                end: Position { line, column: 1 },
+            },
+            severity,
+            message: message.into(),
+            source: None,
+        };
+        let a = vec![
+            diagnostic(3, Severity::Hint, "unused"),
+            diagnostic(1, Severity::Error, "typo"),
+            diagnostic(3, Severity::Hint, "unused"),
+        ];
+        let one = diagnostics_result(&[
+            ("/work/b.rs".into(), vec![]),
+            ("/work/a.rs".into(), a.clone()),
+        ]);
+        let reversed: Vec<_> = a.into_iter().rev().collect();
+        let other = diagnostics_result(&[
+            ("/work/a.rs".into(), reversed),
+            ("/work/b.rs".into(), vec![]),
+        ]);
+        assert_eq!(one, other);
+        let text: Value = serde_json::from_str(&one).unwrap();
+        let files: Value =
+            serde_json::from_str(text["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(files[0]["uri"], "file:///work/a.rs");
+        assert_eq!(files[0]["diagnostics"].as_array().map(Vec::len), Some(2));
+        assert_eq!(files[0]["diagnostics"][0]["message"], "typo");
+
+        let mut cache = DiagnosticsCache::default();
+        let mut computed = 0;
+        for _ in 0..3 {
+            cache.answer(None, || {
+                computed += 1;
+                "all".into()
+            });
+        }
+        assert_eq!(computed, 1);
+        cache.invalidate();
+        assert_eq!(cache.answer(None, || "new".into()), "new");
+    }
+
+    #[test]
+    fn closes_withdraw_only_open_proposals() {
+        let mut diffs = Diffs::default();
+        diffs.opened("tab a".into(), 1);
+        diffs.opened("tab b".into(), 2);
+        // Decided in Fyx: Claude's two close_tab calls after it are no-ops.
+        assert!(diffs.decided(&1));
+        assert!(!diffs.decided(&1));
+        assert_eq!(diffs.close("tab a"), None);
+        assert_eq!(diffs.close("tab a"), None);
+        // closeAllDiffTabs at the next prompt withdraws only what is still open.
+        assert_eq!(diffs.close_all(), [2]);
+        assert_eq!(diffs.close_all(), Vec::<i32>::new());
+        diffs.opened("tab c".into(), 3);
+        assert_eq!(diffs.close("tab c"), Some(3));
+        assert!(diffs.is_empty());
     }
 }
