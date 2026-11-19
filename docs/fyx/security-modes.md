@@ -71,6 +71,9 @@ the process cannot open its own sockets; the numbering of the modes follows stre
     agent, which can edit files outside the project.
   - **Fyx's own config directory** (`~/.config/fyx/`, `%APPDATA%\Fyx\`: the user settings file,
     `tasks.json`, `keymap.json`) and its confirmed-mode file are read-only too.
+  - **Account dirs** of `fyx.accounts` (design wit-0.4 §C.6) are neither read nor written: only
+    the tool itself signs in and keeps its credentials there. UI extensions get the same rule in
+    every mode, and the reason they see names the account, never its dir.
 
   All of
   `.git/` is protected, not only `hooks/`: `config` (`core.hooksPath`, `core.fsmonitor`), `info/`,
