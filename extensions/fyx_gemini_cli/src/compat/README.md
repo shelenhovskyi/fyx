@@ -11,7 +11,9 @@ Where the source and the spec differ, the source wins:
 - `closeDiff` takes `suppressNotification`;
 - the legacy `ide/diffClosed` notification is still read.
 
-`cargo test -p fyx_gemini_cli` replays the transcripts against `companion.rs`.
+`cargo test -p fyx_gemini_cli` replays the transcripts against `companion::Server`, and
+`fyx_ext_harness`'s `gemini_cli_replays_the_compat_transcripts_on_its_listener` replays them
+through the built 0.4 component on the fake `ide` listener.
 
 ## Format: `fyx-gemini-transcript`, version 1
 
@@ -40,18 +42,14 @@ owner's decision, as for Claude. Before each release, check by hand against the 
 
 ## Gaps: what Gemini needs that the 0.4 kit (and Claude) did not
 
-This is the point of 5.16. Each gap names who it is for.
+This is the point of 5.16. Each gap names who it is for; the closed ones stay listed with what
+closed them.
 
-1. **Typed discovery content (W1, with the JSON-aware templates).** The CLI wants three things
-   the string-only `content` table cannot write:
-   - `port` as a JSON number;
-   - `ideInfo` as a nested object `{name, displayName}`;
-   - `workspacePath` as the roots joined with the OS path delimiter (`:` or `;`), not a JSON
-     array.
-
-   Without `ideInfo`, `detectIde` falls back to `TERM_PROGRAM` and refuses IDE mode in Fyx. So
-   this gap blocks the extension, not just polish. `companion::discovery_content` is the
-   reference shape.
+1. **Typed discovery content: closed (W1, 5.12).** A whole `"${port}"` is written as a number,
+   `"${worktrees.joined}"` joins the roots with the OS path delimiter, and `content` nests, so the
+   manifest writes `ideInfo` (without it `detectIde` refuses IDE mode in Fyx).
+   `companion::discovery_content` is the reference the harness test checks the template
+   against.
 2. **A folder name with a placeholder (W1/W2c).** The spec's POSIX dir is
    `${tmp}/gemini-ide-${uid}`, and the kit refuses placeholders inside a folder name. The
    manifest uses `${tmp}/gemini/ide`, which the CLI reads on every OS. On Windows that is the
@@ -70,23 +68,23 @@ This is the point of 5.16. Each gap names who it is for.
    window. `GEMINI_CLI_IDE_PID` would fix it, but needs an env template for the host's pid
    (`${pid}`, which exists only in discovery templates). `GEMINI_CLI_IDE_SERVER_PORT` (set) is
    the spec's tie-breaker, so the gap is small.
-4. **Withdrawing a review proposal (W2c, `review`).** `closeDiff` must close the open diff and
-   return its current text, with the user's edits. `review` has `propose` and no `withdraw`, so
-   the extension cannot close the proposal or read its text. For now, the proposal's own text
-   stands in. Claude's `close_tab` and `closeAllDiffTabs` need the same: today they answer
-   without closing anything in Fyx. Proposal: `review.withdraw(id) -> result<string,
-   host-error>`, returning the current text and ending the proposal without a `review-decided`.
-5. **Focus times and trust in the editor context (W2c, `context`).** `ide/contextUpdate` orders
-   files by last-focus time and carries `isTrusted`. `editor-context` has neither. The extension
-   can stamp files itself as `context-changed` reports them active, if the guest has a clock.
-   Trust it cannot know. Proposal: `editor-context.trusted: option<bool>` (the worktree's
-   trust), and an MRU order for `open`.
+4. **Withdrawing a review proposal: closed (W2c, `review.withdraw`).** `closeDiff` withdraws the
+   proposal and returns its current text, with the user's edits.
+5. **Focus times and trust in the editor context: trust closed (W2c, `editor-context.trusted`).**
+   `open` is most recently focused first but has no times, so each file's `timestamp` is its
+   rank (`wired::context_update`). The spec asks for Unix times, but the CLI only sorts by it
+   (`ideContext.ts`), and `client.ts` does not send it to the model.
 6. **Non-blocking outcomes on the right connection: no gap.** The decision goes back as
    `listeners.notify(listener, some(connection), …)`, and `mcp-call` carries the connection.
 7. **Listener details (W2c 5.11):**
    - The CLI posts to `/mcp`, so the `mcp-streamable-http` listener must serve that path.
    - In Gemini's sandbox (Docker) the CLI uses `host.docker.internal`, which the `Host` check
      refuses. That is a known limitation and stays one.
+8. **The context on a new connection (W2c).** The CLI connects when `/ide enable` runs (or at
+   start), but the extension hears of a connection only through its first `tools/call`. So the
+   CLI gets `ide/contextUpdate` at the next editor change, not at once. An `mcp-connected
+   (listener, connection)` event, or the host sending a listener's last broadcast to a new
+   connection, would close it.
 
 ## Hooks and turns: decided, built after the skeleton
 

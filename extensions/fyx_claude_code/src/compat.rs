@@ -474,10 +474,14 @@ impl IdeHost for ReplayHost<'_> {
         });
     }
 
-    fn diagnostics(&self, only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)> {
+    fn diagnostics(&self, only: Option<&ide::FileRef>) -> Vec<(String, Vec<Diagnostic>)> {
+        let only = only.map(|file| self.roots.to_absolute(file));
         self.diagnostics
             .iter()
-            .filter(|(path, _)| only.is_none_or(|only| only == path))
+            .filter(|(path, _)| {
+                only.as_ref()
+                    .is_none_or(|only| only.as_deref() == Some(path.as_str()))
+            })
             .cloned()
             .collect()
     }

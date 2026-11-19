@@ -499,7 +499,7 @@ pub trait IdeHost {
     fn respond(&mut self, call: u64, outcome: Result<String, McpError>);
     /// What the host's diagnostics hold, by absolute path: of the file `only`, or of every file.
     /// A file with nothing is left out.
-    fn diagnostics(&self, only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)>;
+    fn diagnostics(&self, only: Option<&FileRef>) -> Vec<(String, Vec<Diagnostic>)>;
     /// Opens `file` in the editor (`context.open`); the error is the host's message.
     fn open(&mut self, file: &FileRef, focus: bool) -> Result<(), String>;
     /// Proposes `new_contents` for `file` in agent review (`review.propose`, `apply = false`):
@@ -562,11 +562,9 @@ impl Server {
                 host.respond(call, Ok(text_result("CLOSED_ALL_DIFF_TABS")));
             }
             Ok(IdeCall::GetDiagnostics { file }) => {
-                let only = file
-                    .as_ref()
-                    .and_then(|file| host.roots().to_absolute(file));
+                let only = file.clone();
                 let answer = self.cache.answer(file, || {
-                    diagnostics_result(&host.diagnostics(only.as_deref()))
+                    diagnostics_result(&host.diagnostics(only.as_ref()))
                 });
                 host.respond(call, Ok(answer));
             }

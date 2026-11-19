@@ -2,11 +2,13 @@
 //! companion core. The format is `fyx-gemini-transcript` v1 (`compat/README.md`), the same
 //! shape as `fyx_claude_code`'s, without hooks.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::companion::{
-    self, CompanionCall, Diffs, FileRef, McpError, Notify, OpenFile, ReviewDecision, Roots,
-    Selection,
+    self, CompanionHost, FileRef, McpError, Notify, OpenFile, ReviewDecision, Roots, Selection,
+    Server,
 };
 
 pub const FORMAT: &str = "fyx-gemini-transcript";
@@ -43,9 +45,13 @@ pub fn replay(text: &str) -> Result<Header, String> {
         recorded: field("recorded")?,
     };
     let mut replay = Replay {
-        roots: PrefixRoot(field("root")?),
-        diffs: Diffs::default(),
-        expected_out: Vec::new(),
+        server: Server::default(),
+        host: ReplayHost {
+            roots: PrefixRoot(field("root")?),
+            out: Vec::new(),
+            next_proposal: 0,
+            proposals: BTreeMap::new(),
+        },
     };
     for (index, line) in lines {
         let event: Value =
@@ -54,13 +60,13 @@ pub fn replay(text: &str) -> Result<Header, String> {
             .step(&event)
             .map_err(|why| format!("line {}: {why}", index + 1))?;
     }
-    if let Some((connection, left)) = replay.expected_out.first() {
+    if let Some((connection, left)) = replay.host.out.first() {
         return Err(format!(
-            "the extension never sent {left} on connection {connection}"
+            "the extension never sent {left} on connection {connection:?}"
         ));
     }
-    if replay.diffs.len() > 0 {
-        return Err(format!("{} diffs left open", replay.diffs.len()));
+    if replay.server.open_diffs() > 0 {
+        return Err(format!("{} diffs left open", replay.server.open_diffs()));
     }
     Ok(header_out)
 }
@@ -85,11 +91,76 @@ impl Roots for PrefixRoot {
     }
 }
 
-struct Replay {
+/// The host as the transcript records it: what the extension sent, and a review whose proposal
+/// ids are the `openDiff` calls' ids.
+struct ReplayHost {
     roots: PrefixRoot,
-    diffs: Diffs,
-    /// (connection, message) the extension produced, in order.
-    expected_out: Vec<(u64, Value)>,
+    /// (connection, message) the extension produced, in order; `None` is every connection.
+    out: Vec<(Option<u64>, Value)>,
+    next_proposal: u64,
+    /// Open proposals and their text.
+    proposals: BTreeMap<u64, String>,
+}
+
+impl CompanionHost for ReplayHost {
+    fn roots(&self) -> &dyn Roots {
+        &self.roots
+    }
+
+    /// The call id is the JSON-RPC id, so the answer goes to the connection that asked; the
+    /// replay checks the id, not the connection.
+    fn respond(&mut self, call: u64, outcome: Result<String, McpError>) {
+        let message = match outcome {
+            Ok(result) => json!({
+                "jsonrpc": "2.0",
+                "id": call,
+                "result": serde_json::from_str::<Value>(&result).unwrap_or(Value::Null),
+            }),
+            Err(error) => json!({
+                "jsonrpc": "2.0",
+                "id": call,
+                "error": { "code": error.code, "message": error.message },
+            }),
+        };
+        self.out.push((None, message));
+    }
+
+    fn notify(&mut self, notify: Notify) {
+        self.out.push((
+            Some(notify.connection),
+            json!({
+                "jsonrpc": "2.0",
+                "method": notify.method,
+                "params": serde_json::from_str::<Value>(&notify.params).unwrap_or(Value::Null),
+            }),
+        ));
+    }
+
+    fn broadcast(&mut self, method: &'static str, params: &str) {
+        self.out.push((
+            None,
+            json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": serde_json::from_str::<Value>(params).unwrap_or(Value::Null),
+            }),
+        ));
+    }
+
+    fn propose(&mut self, _file: &FileRef, new_content: &str) -> Result<u64, String> {
+        self.proposals
+            .insert(self.next_proposal, new_content.to_owned());
+        Ok(self.next_proposal)
+    }
+
+    fn withdraw(&mut self, proposal: u64) -> Option<String> {
+        self.proposals.remove(&proposal)
+    }
+}
+
+struct Replay {
+    server: Server,
+    host: ReplayHost,
 }
 
 fn connection(event: &Value) -> u64 {
@@ -110,59 +181,22 @@ impl Replay {
         }
     }
 
-    fn respond(&mut self, connection: u64, id: &Value, outcome: Result<String, McpError>) {
-        let message = match outcome {
-            Ok(result) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": serde_json::from_str::<Value>(&result).unwrap_or(Value::Null),
-            }),
-            Err(error) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": error.code, "message": error.message },
-            }),
-        };
-        self.expected_out.push((connection, message));
-    }
-
-    fn notify(&mut self, notify: Notify) {
-        self.expected_out.push((
-            notify.connection,
-            json!({
-                "jsonrpc": "2.0",
-                "method": notify.method,
-                "params": serde_json::from_str::<Value>(&notify.params).unwrap_or(Value::Null),
-            }),
-        ));
-    }
-
     /// The host answers `initialize`, `tools/list` and notifications; the extension answers
-    /// `tools/call`. A replayed `openDiff` gets the call's id as its proposal id.
+    /// `tools/call`.
     fn from_cli(&mut self, connection: u64, message: &Value) -> Result<(), String> {
         if message["method"] != "tools/call" {
             return Ok(());
         }
-        let id = &message["id"];
+        let id = message["id"]
+            .as_u64()
+            .ok_or("tools/call needs a numeric id here")?;
         let tool = message["params"]["name"]
             .as_str()
             .ok_or("tools/call without a name")?;
         let arguments = message["params"]["arguments"].to_string();
-        match CompanionCall::parse(tool, &arguments, &self.roots) {
-            Ok(CompanionCall::OpenDiff { file, new_content }) => {
-                let proposal = id.as_u64().ok_or("openDiff needs a numeric id here")?;
-                self.diffs.opened(file, proposal, connection, new_content);
-                self.respond(connection, id, Ok(companion::OPENED.to_owned()));
-            }
-            Ok(CompanionCall::CloseDiff { file, suppress }) => {
-                let (result, notify) = self.diffs.close(&file, suppress, None, &self.roots);
-                self.respond(connection, id, Ok(result));
-                if let Some(notify) = notify {
-                    self.notify(notify);
-                }
-            }
-            Err(error) => self.respond(connection, id, Err(error)),
-        }
+        self.host.next_proposal = id;
+        self.server
+            .call(&mut self.host, connection, id, tool, &arguments);
         Ok(())
     }
 
@@ -180,16 +214,16 @@ impl Replay {
         if message["result"]["serverInfo"].is_object() {
             return Ok(());
         }
-        if self.expected_out.is_empty() {
+        if self.host.out.is_empty() {
             return Err(format!(
                 "the extension sent nothing, the transcript has {message}"
             ));
         }
-        let (ours_connection, ours) = self.expected_out.remove(0);
-        if ours_connection != connection || ours != *message {
+        let (ours_connection, ours) = self.host.out.remove(0);
+        if ours_connection.is_some_and(|ours| ours != connection) || ours != *message {
             return Err(format!(
-                "the extension sent {ours} on connection {ours_connection}, the transcript has \
-                 {message} on {connection}"
+                "the extension sent {ours} on connection {ours_connection:?}, the transcript \
+                 has {message} on {connection}"
             ));
         }
         Ok(())
@@ -198,23 +232,27 @@ impl Replay {
     fn review(&mut self, event: &Value) -> Result<(), String> {
         let proposal = event["call"].as_u64().ok_or("review without call")?;
         let decision = match event["decision"].as_str() {
-            Some("accepted") => ReviewDecision::Accepted,
-            Some("partial") => ReviewDecision::Partial,
-            Some("rejected") => ReviewDecision::Rejected,
+            Some("accepted") => Some(ReviewDecision::Accepted),
+            Some("partial") => Some(ReviewDecision::Partial),
+            Some("rejected") => Some(ReviewDecision::Rejected),
+            Some("closed") => None,
             other => return Err(format!("review decision {other:?}")),
         };
+        if self.host.proposals.remove(&proposal).is_none() {
+            return Err(format!("no open proposal {proposal}"));
+        }
         let final_content = event["final_content"].as_str().unwrap_or_default();
-        let notify = self
-            .diffs
-            .decided(proposal, decision, final_content, &self.roots)
-            .ok_or_else(|| format!("no open diff for proposal {proposal}"))?;
-        self.notify(notify);
+        self.server.review_decided(
+            &mut self.host,
+            proposal,
+            decision.map(|decision| (decision, final_content)),
+        );
         Ok(())
     }
 
-    /// `editor`: `files` as `[path, focused_at]`, newest last or in any order; `selection` of
-    /// the active file as `{line, column, text}`, zero-based; `trusted`. The extension sends
-    /// `ide/contextUpdate` to `conn`.
+    /// `editor`: `files` as `[path, focused_at]`, in any order; `selection` of the active file
+    /// as `{line, column, text}`, zero-based; `trusted`. The extension sends
+    /// `ide/contextUpdate` to every connection.
     fn editor(&mut self, event: &Value) -> Result<(), String> {
         let files = event["files"]
             .as_array()
@@ -240,16 +278,9 @@ impl Replay {
             &files,
             selection.as_ref(),
             event["trusted"].as_bool(),
-            &self.roots,
+            &self.host.roots,
         );
-        self.expected_out.push((
-            connection(event),
-            json!({
-                "jsonrpc": "2.0",
-                "method": "ide/contextUpdate",
-                "params": serde_json::from_str::<Value>(&params).unwrap_or(Value::Null),
-            }),
-        ));
+        self.server.context_changed(&mut self.host, params);
         Ok(())
     }
 }

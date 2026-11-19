@@ -13,6 +13,9 @@
 //!
 //! Unlike Claude's blocking `openDiff`, this one is "send, then get a notification": the review
 //! proposal's outcome becomes a notification to the connection that opened it.
+//!
+//! [`Server`] is the one dispatcher, over a [`CompanionHost`]: the SDK in the component
+//! (`wired.rs`), the transcripts in the compat test.
 
 use std::collections::BTreeMap;
 
@@ -49,9 +52,8 @@ pub struct FileRef {
     pub path: String,
 }
 
-/// Absolute paths, as Gemini names files, against Fyx's worktree-relative [`FileRef`]s. The
-/// coordinator assigned the host primitive (`context.to-file-ref` / `absolute-path`) to W2c;
-/// until then the tests fill this trait, as `fyx_claude_code`'s `ide::Roots`.
+/// Absolute paths, as Gemini names files, against Fyx's worktree-relative [`FileRef`]s:
+/// `context.to-file-ref` and `context.absolute-path` in the component, a prefix in the tests.
 pub trait Roots {
     fn to_ref(&self, absolute: &str) -> Option<FileRef>;
     fn to_absolute(&self, file: &FileRef) -> Option<String>;
@@ -183,7 +185,7 @@ pub struct Diffs {
 
 impl Diffs {
     /// After `review.propose` returned `proposal`. Returns the replaced diff's proposal, which
-    /// the extension withdraws (a gap: `review` has no withdraw yet).
+    /// the extension withdraws.
     pub fn opened(
         &mut self,
         file: FileRef,
@@ -234,8 +236,8 @@ impl Diffs {
     }
 
     /// `closeDiff`: the result and, unless suppressed, `ide/diffRejected`. `current` is the
-    /// diff's text with the user's edits, which needs `review` to withdraw a proposal and
-    /// return it (a gap); without it the proposal's own text stands in.
+    /// diff's text with the user's edits (`review.withdraw`'s answer); without it the
+    /// proposal's own text stands in.
     pub fn close(
         &mut self,
         file: &FileRef,
@@ -263,6 +265,16 @@ impl Diffs {
         self.open.contains_key(file)
     }
 
+    /// The review proposal of `file`'s open diff.
+    pub fn proposal(&self, file: &FileRef) -> Option<u64> {
+        self.open.get(file).map(|diff| diff.proposal)
+    }
+
+    /// Forgets `file`'s diff without a notification (the CLI replaced it); its proposal.
+    pub fn forget(&mut self, file: &FileRef) -> Option<u64> {
+        self.open.remove(file).map(|diff| diff.proposal)
+    }
+
     pub fn len(&self) -> usize {
         self.open.len()
     }
@@ -272,12 +284,109 @@ fn text_result(text: &str) -> String {
     json!({ "content": [{ "type": "text", "text": text }] }).to_string()
 }
 
+/// What the companion needs from the host.
+pub trait CompanionHost {
+    fn roots(&self) -> &dyn Roots;
+    /// `listeners.respond`.
+    fn respond(&mut self, call: u64, outcome: Result<String, McpError>);
+    /// `listeners.notify` to one connection.
+    fn notify(&mut self, notify: Notify);
+    /// `listeners.notify` to every connection of [`LISTENER`].
+    fn broadcast(&mut self, method: &'static str, params: &str);
+    /// `review.propose` of `new_content` for `file`: the proposal's id, or why it was refused.
+    fn propose(&mut self, file: &FileRef, new_content: &str) -> Result<u64, String>;
+    /// `review.withdraw`: the proposal's current text, with the user's edits, or `None` when it
+    /// already ended.
+    fn withdraw(&mut self, proposal: u64) -> Option<String>;
+}
+
+/// The companion's state: the open diffs and the last context sent.
+#[derive(Debug, Default)]
+pub struct Server {
+    diffs: Diffs,
+    context: Option<String>,
+}
+
+impl Server {
+    /// The number of diffs waiting for review.
+    pub fn open_diffs(&self) -> usize {
+        self.diffs.len()
+    }
+
+    /// A `tools/call` on `connection`.
+    pub fn call(
+        &mut self,
+        host: &mut dyn CompanionHost,
+        connection: u64,
+        call: u64,
+        tool: &str,
+        arguments: &str,
+    ) {
+        match CompanionCall::parse(tool, arguments, host.roots()) {
+            Ok(CompanionCall::OpenDiff { file, new_content }) => {
+                // The CLI keys diffs by path: a second one for the file replaces the first,
+                // which ends without a notification.
+                if let Some(old) = self.diffs.forget(&file) {
+                    host.withdraw(old);
+                }
+                match host.propose(&file, &new_content) {
+                    Ok(proposal) => {
+                        self.diffs.opened(file, proposal, connection, new_content);
+                        host.respond(call, Ok(OPENED.to_owned()));
+                    }
+                    Err(why) => host.respond(call, Ok(error_result(&format!("openDiff: {why}")))),
+                }
+            }
+            Ok(CompanionCall::CloseDiff { file, suppress }) => {
+                let current = self
+                    .diffs
+                    .proposal(&file)
+                    .and_then(|proposal| host.withdraw(proposal));
+                let (result, notify) =
+                    self.diffs
+                        .close(&file, suppress, current.as_deref(), host.roots());
+                host.respond(call, Ok(result));
+                if let Some(notify) = notify {
+                    host.notify(notify);
+                }
+            }
+            Err(error) => host.respond(call, Err(error)),
+        }
+    }
+
+    /// `io-event::review-decided`: `None` is a review that ended undecided (the file went
+    /// away), which the CLI hears as a rejection.
+    pub fn review_decided(
+        &mut self,
+        host: &mut dyn CompanionHost,
+        proposal: u64,
+        outcome: Option<(ReviewDecision, &str)>,
+    ) {
+        let (decision, final_content) = outcome.unwrap_or((ReviewDecision::Rejected, ""));
+        if let Some(notify) = self
+            .diffs
+            .decided(proposal, decision, final_content, host.roots())
+        {
+            host.notify(notify);
+        }
+    }
+
+    /// `io-event::context-changed`, as [`context_update`]'s params: sent to every connection
+    /// unless it equals the last one sent.
+    pub fn context_changed(&mut self, host: &mut dyn CompanionHost, params: String) {
+        if self.context.as_ref() != Some(&params) {
+            host.broadcast("ide/contextUpdate", &params);
+            self.context = Some(params);
+        }
+    }
+}
+
 /// One open file for [`context_update`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenFile {
     pub file: FileRef,
-    /// Unix milliseconds of the last focus. The editor context has no such field (a gap), so the
-    /// extension stamps files as `context-changed` reports them active.
+    /// When the file had focus last, newer larger. The CLI orders files by it and uses no
+    /// other meaning; the editor context gives an order, not times (`wired.rs`).
     pub focused_at: u64,
 }
 
@@ -291,8 +400,8 @@ pub struct Selection {
 
 /// `ide/contextUpdate`'s params: the newest [`MAX_OPEN_FILES`] files that are in a worktree,
 /// newest first; the newest is active and carries the 1-based cursor and the selection, cut to
-/// [`MAX_SELECTED_TEXT_BYTES`]. `trusted` is the workspace's trust, which the editor context
-/// does not carry yet (a gap); `None` leaves `isTrusted` out.
+/// [`MAX_SELECTED_TEXT_BYTES`]. `trusted` is the active worktree's trust; `None` leaves
+/// `isTrusted` out.
 pub fn context_update(
     files: &[OpenFile],
     selection: Option<&Selection>,
@@ -343,10 +452,9 @@ fn cut(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
-/// The discovery file the CLI reads, as the host must write it: `port` a number,
-/// `workspacePath` the roots joined with the OS path delimiter, and `ideInfo` an object. The
-/// manifest cannot say this yet (`compat/README.md`, gaps 1 and 2); the compat test checks the
-/// shape here so the host side has a reference.
+/// The discovery file the CLI reads: `port` a number, `workspacePath` the roots joined with the
+/// OS path delimiter, and `ideInfo` an object. The manifest's template says the same
+/// (`${port}`, `${worktrees.joined}`); this is the reference the tests check it against.
 pub fn discovery_content(port: u16, roots: &[&str], token: &str, windows: bool) -> String {
     let delimiter = if windows { ";" } else { ":" };
     json!({
