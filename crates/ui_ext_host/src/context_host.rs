@@ -90,12 +90,15 @@ pub(crate) fn for_extension(key: &str, cx: &mut App) -> Arc<dyn ContextHost> {
     Arc::new(ExtensionContext {
         main: MainThread::global(cx),
         watcher,
+        terminal_focus: crate::terminal_focus(cx),
     })
 }
 
 struct ExtensionContext {
     main: MainThread,
     watcher: Arc<Watcher>,
+    /// [`crate::set_terminal_focus`]'s answer, as it was when the extension loaded.
+    terminal_focus: Option<crate::TerminalFocus>,
 }
 
 impl ContextHost for ExtensionContext {
@@ -148,6 +151,12 @@ impl ContextHost for ExtensionContext {
                 reply.send(crate::workspace_edit::is_private_path(&absolute, cx));
             })
             .unwrap_or(true)
+    }
+
+    fn terminal_focused(&self, extension_id: &str) -> bool {
+        self.terminal_focus
+            .as_ref()
+            .is_some_and(|focused| focused(extension_id))
     }
 }
 
