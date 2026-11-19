@@ -1,7 +1,8 @@
 //! Host side of the staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`,
 //! docs/fyx/wit-0.4/design.md): everything 0.3 has (`t2_shared.rs`), the ten T2 cases of
-//! `permissions`, `terminals` over [`crate::terminals`], and `approvals` (§B.12). `listeners`,
-//! `relay`, `review` and `context` trap when called until plan 5.11 and 5.13 build them
+//! `permissions`, `terminals` over [`crate::terminals`], `approvals` (§B.12) and `listeners`
+//! over [`crate::listeners`] (§B.7), and `context` over [`crate::editor_context`] (§B.11). `relay`
+//! and `review` trap when called until plan 5.12 and 5.13 build them
 //! (`define_unbuilt_as_traps`).
 //!
 //! A `terminal` node becomes [`model::Props::Terminal`]; the renderer resolves its handle.
@@ -29,9 +30,10 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    agent_observe as wit_observe, approvals as wit_approvals, decorations as wit_decorations,
-    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
-    notifications as wit_notifications, permissions as wit_permissions, process as wit_process,
+    agent_observe as wit_observe, approvals as wit_approvals, context as wit_context,
+    decorations as wit_decorations, host as wit_host, images as wit_images, io as wit_io,
+    listeners as wit_listeners, network as wit_network, notifications as wit_notifications,
+    permissions as wit_permissions, process as wit_process, review as wit_review,
     terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
@@ -162,6 +164,140 @@ fn approval_option(option: wit_approvals::ApprovalOption) -> ui_ext::approvals::
     }
 }
 
+/// The 0.4 `io-event` cases of a listener's event (design wit-0.4 §B.7).
+fn listener_io_event(event: ui_ext::integration::ListenerEvent) -> Option<wit_io::IoEvent> {
+    use ui_ext::integration::ListenerEvent as Event;
+    Some(match event {
+        Event::McpCall(call) => wit_io::IoEvent::McpCall(wit_listeners::McpCall {
+            call_id: call.call_id,
+            listener: call.listener,
+            connection: call.connection,
+            tool: call.tool,
+            arguments: call.arguments,
+        }),
+        Event::McpCancelled(id) => wit_io::IoEvent::McpCancelled(id),
+        Event::Message {
+            listener,
+            connection,
+            text,
+        } => wit_io::IoEvent::ListenerMessage((listener, connection, text)),
+        Event::Request {
+            id,
+            listener,
+            path,
+            body,
+        } => wit_io::IoEvent::ListenerRequest((id, listener, path, body)),
+    })
+}
+
+fn text_range(range: wit::TextRange) -> ui_ext::edit::TextRange {
+    ui_ext::edit::TextRange {
+        start: position(range.start),
+        end: position(range.end),
+    }
+}
+
+fn wit_text_range(range: ui_ext::edit::TextRange) -> wit::TextRange {
+    let position = |position: ui_ext::edit::Position| wit::Position {
+        line: position.line,
+        column: position.column,
+    };
+    wit::TextRange {
+        start: position(range.start),
+        end: position(range.end),
+    }
+}
+
+/// The `context-changed` case (design wit-0.4 §B.11).
+fn context_io_event(context: ui_ext::context::EditorContext) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::ContextChanged(
+        wit_context::EditorContext {
+            active: context.active.map(wit_file_ref),
+            open: context.open.into_iter().map(wit_file_ref).collect(),
+            selection: context
+                .selection
+                .map(|(range, text)| (wit_text_range(range), text)),
+            trusted: context.trusted,
+        },
+    ))
+}
+
+/// The `review-decided` case (design wit-0.4 §B.10).
+fn review_io_event(
+    id: u64,
+    result: Result<ui_ext::review::ReviewOutcome, String>,
+) -> Option<wit_io::IoEvent> {
+    use ui_ext::review::Decision;
+    Some(wit_io::IoEvent::ReviewDecided((
+        id,
+        result.map(|outcome| wit_review::ReviewOutcome {
+            decision: match outcome.decision {
+                Decision::Accepted => wit_review::Decision::Accepted,
+                Decision::Partial => wit_review::Decision::Partial,
+                Decision::Rejected => wit_review::Decision::Rejected,
+            },
+            final_content: outcome.final_content,
+        }),
+    )))
+}
+
+/// `context` (design.md §B.11) over [`crate::editor_context::ContextHandle`]: `watch`,
+/// `to-file-ref` and `absolute-path` need `context:editor`, `open` needs `workspace:open`.
+impl wit_context::Host for UiState {
+    fn watch(&mut self, on: bool) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        if on && let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self.context.watch(on).map_err(Into::into))
+    }
+
+    fn open(
+        &mut self,
+        path: wit::FileRef,
+        range: Option<wit::TextRange>,
+        focus: bool,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(path.path.len())?;
+        if let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_WORKSPACE_OPEN) {
+            return Ok(Err(error.into()));
+        }
+        let gesture = focus && self.api.take_activation();
+        Ok(self
+            .context
+            .open(file_ref(path), range.map(text_range), focus, gesture)
+            .map_err(Into::into))
+    }
+
+    fn to_file_ref(
+        &mut self,
+        absolute: String,
+    ) -> wasmtime::Result<Result<wit::FileRef, wit_host::HostError>> {
+        self.count_lifted_text(absolute.len())?;
+        if let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .context
+            .to_file_ref(&absolute)
+            .map(wit_file_ref)
+            .map_err(Into::into))
+    }
+
+    fn absolute_path(
+        &mut self,
+        path: wit::FileRef,
+    ) -> wasmtime::Result<Result<String, wit_host::HostError>> {
+        self.count_lifted_text(path.path.len())?;
+        if let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .context
+            .absolute_path(&file_ref(path))
+            .map_err(Into::into))
+    }
+}
+
 /// The `approval-answered` case; `None` when the card closed unanswered.
 fn approval_io_event(
     id: u64,
@@ -195,6 +331,94 @@ impl wit_approvals::Host for UiState {
             options: options.into_iter().map(approval_option).collect(),
         };
         Ok(self.api.ask_approval(request).map_err(Into::into))
+    }
+}
+
+/// `listeners` (design.md §B.7) over [`crate::listeners::ListenersHandle`]: a listener the
+/// manifest does not declare is `not-permitted`, one that is not granted `denied`, and one that
+/// is granted but not open (yet) `unavailable`. Tools registered before it opens apply when it
+/// does.
+impl wit_listeners::Host for UiState {
+    fn register_tools(
+        &mut self,
+        listener: String,
+        tools: Vec<wit_listeners::ToolDef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            listener.len()
+                + tools
+                    .iter()
+                    .map(|tool| tool.name.len() + tool.description.len() + tool.input_schema.len())
+                    .sum::<usize>(),
+        )?;
+        let tools = tools
+            .into_iter()
+            .map(|tool| ui_ext::integration::ToolDef {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect();
+        Ok(self
+            .listeners
+            .register_tools(&listener, tools)
+            .map_err(Into::into))
+    }
+
+    fn respond(
+        &mut self,
+        call_id: u64,
+        outcome: Result<String, wit_listeners::McpError>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(match &outcome {
+            Ok(text) => text.len(),
+            Err(error) => error.message.len(),
+        })?;
+        let outcome = outcome.map_err(|error| ui_ext::integration::McpError {
+            code: error.code,
+            message: error.message,
+        });
+        Ok(self.listeners.respond(call_id, outcome).map_err(Into::into))
+    }
+
+    fn notify(
+        &mut self,
+        listener: String,
+        connection: Option<u64>,
+        method: String,
+        params: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(listener.len() + method.len() + params.len())?;
+        Ok(self
+            .listeners
+            .notify(&listener, connection, &method, &params)
+            .map_err(Into::into))
+    }
+
+    fn send(
+        &mut self,
+        listener: String,
+        connection: u64,
+        text: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(listener.len() + text.len())?;
+        Ok(self
+            .listeners
+            .send(&listener, connection, &text)
+            .map_err(Into::into))
+    }
+
+    fn reply(
+        &mut self,
+        request_id: u64,
+        status: u16,
+        body: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(body.len())?;
+        Ok(self
+            .listeners
+            .reply(request_id, status, body)
+            .map_err(Into::into))
     }
 }
 
@@ -442,6 +666,8 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "permissions",
     "terminals",
     "approvals",
+    "listeners",
+    "context",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -460,5 +686,7 @@ pub(crate) fn add_to_linker(
     wit_permissions::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_terminals::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_approvals::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_listeners::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_context::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

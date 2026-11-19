@@ -73,6 +73,24 @@ fn terminal_io_event(_: ui_ext::terminal::TerminalEvent) -> Option<wit_io::IoEve
     None
 }
 
+/// 0.3 has no listeners.
+fn listener_io_event(_: ui_ext::integration::ListenerEvent) -> Option<wit_io::IoEvent> {
+    None
+}
+
+/// 0.3 has no editor context.
+fn context_io_event(_: ui_ext::context::EditorContext) -> Option<wit_io::IoEvent> {
+    None
+}
+
+/// 0.3 has no proposed edits.
+fn review_io_event(
+    _: u64,
+    _: Result<ui_ext::review::ReviewOutcome, String>,
+) -> Option<wit_io::IoEvent> {
+    None
+}
+
 /// 0.3 has no approval cards.
 fn approval_io_event(
     _: u64,

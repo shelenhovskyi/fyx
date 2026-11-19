@@ -743,3 +743,59 @@ The 24 h gate counts from the later of `published_at` and when this client first
   `limits_match` fails until W4's MAX-0.4 arm lands (known). Targets `E:/fyx-targets/w2c` and
   `w2c-light`. `cargo fmt` skips `t2_shared.rs`: `rustfmt --edition 2024` it. Edit scripts:
   Write a python file to the scratchpad; never make edits "skip if applied" (it doubled them).
+
+## Archived handoff (2026-11-19, seventh context clear)
+
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c; fyx/main merged at cb5b9d7e1d (4d23d31ffb).
+- **Done since the last clear** (ready at W0 with a4fcba01b1):
+  - 8a5bfc9968 T3 runtime: request-read/write (declared, gesture, lines, check_write_text,
+    t3_target, untrusted cwd), queued per call, started after it on tokio: broker.t3_request
+    (no card on own terminals), host.read/write, journal TerminalRead/Write; aborted on drop.
+  - 8c7ac0c31f `${pid}` (TemplateContext::pid defaults to this process).
+  - 75d2762cf0 `reason` on processes/network, required from 0.4, refused below.
+  - WIT batch for W0: side-session-notes `W2c-wit-0.4-batch.diff` (review.withdraw,
+    editor-context.trusted + MRU, context.to-file-ref/absolute-path). Runtime after W0 applies.
+- **Next:**
+  1. 5.11 listeners + MCP wrapper (§B.7): subprotocol "mcp" + `X-Claude-Code-Ide-Authorization`
+     for mcp-websocket, `/mcp` for streamable-http; confirm mcp.respond (full CallToolResult) to
+     W4; revocation of `network:listen#<n>`/`fs:discovery-file#<n>` closes listeners and removes
+     discovery files (network.rs watch_permissions).
+  2. context/review runtime for the WIT batch, once applied.
+  3. fyx_guard: account dirs as protected paths, once W1's 4637d43836 (fyx.accounts) lands in
+     fyx/main: `FyxAccountsSettingsContent::accounts()[].dir` into `write_denial_of` and reads.
+  4. 5.13 (with W4: IDE connection to hook session_id).
+- **Local-only, never commit:** the ReadDone/WriteDone arms in W4's `fyx_ext_harness`
+  (terminals.rs event_handle, v0_4.rs terminal_io_event); `ui_ext_host` does not build on
+  fyx/main + this branch until W3's consent port (e66159d3c6, W3 branch) is integrated.
+- **Gotchas:** target `D:/fyx-targets/w2c`. Bash heredocs break on quotes: write python
+  scripts with the Write tool; open files with `encoding='utf-8'`. `cargo fmt` skips
+  `t2_shared.rs`: `rustfmt --edition 2024` it.
+
+## Handoff (2026-11-19, eighth context clear)
+
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c, on fyx/main b481177ef9 (04bb5cd126 merged there).
+- **Done since the last clear** (not at W0 yet):
+  - d1b1a881e6 fyx_guard: `fyx.accounts` dirs are protected (§C.6 rule 5), reads and writes.
+  - 98777859a4 integrator lines: ui_ext_wasm deps async-tungstenite (tokio-runtime), rand,
+    serde_json.
+  - a7255411a9 5.11 core: `ui_ext_wasm/src/listeners.rs` `ListenerSet` (admission, MCP over
+    websocket and streamable HTTP, raw kinds; 7 tests). `ui_ext::integration` ListenerEvent,
+    McpCall, ToolDef, McpError, OpenListener, ListenerObserver; IoEvent::Listener.
+  - WIT fix for W0: side-session-notes `W2c-wit-0.4-withdraw.diff`: `review.withdraw ->
+    result<string, host-error>` (current text, no review-decided; staged dc04464ee8 was
+    `result<_>` + err("withdrawn")). W4 confirmed the shape; sent to W0 to stage.
+- **Next:**
+  1. Wire 5.11: LoadOptions `listener_observer: Option<Arc<dyn ListenerObserver>>`; a
+     ListenerSet per instance in ui_ext_wasm.rs (next to TerminalsHandle ~:1962), sink to
+     `running.deliver(IoEvent::Listener(..))` like terminals; open each granted
+     `network:listen#<name>` (ConsentItem::Listener) at start on the tokio runtime, with its
+     granted `fs:discovery-file#<spec.name>` files; `impl wit_listeners::Host` in
+     fyx_ui_v0_4.rs (+ add to `add_to_linker`'s list ~:431); watch_permissions (network.rs
+     ~:979): revoke of `network:listen[#n]` -> close, grant -> open, discovery item change ->
+     reopen with the new list; `${listen.<n>.port/token}` in terminals.rs PackageContext.
+  2. 5.13 review/context runtime (after W0 applies the withdraw diff).
+- **Local-only, never commit:** `IoEvent::Listener(..) => None` in W4's fyx_ext_harness
+  v0_3.rs/v0_4.rs (W0 adds it at integration).
+- **Gotchas:** target `D:/fyx-targets/w2c` (a sweep once emptied .fingerprint mid-build:
+  rerun). Write python scripts with the Write tool, not heredocs. async-tungstenite's
+  `split()` halves have inherent `send`/`close(None)`. `cargo fmt` skips `t2_shared.rs`.

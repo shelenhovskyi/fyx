@@ -8,6 +8,10 @@ use std::{
 
 use gpui::TestAppContext;
 use ui_ext::{
+    integration::{
+        DiscoveryFileSpec, ListenerAuth, ListenerObserver, ListenerProtocol, ListenerSpec,
+        OpenListener,
+    },
     terminal::{
         self, CreateCommand, PseudoRequest, ReadScope, T3Target, TerminalError, TerminalEvent,
         TerminalHandle, TerminalHost, TerminalInfo, TerminalIntegration, TerminalOrigin,
@@ -278,6 +282,12 @@ struct Setup {
     cards: Arc<Mutex<Vec<T3Prompt>>>,
     /// In place of a [`Broker`] over `states`.
     broker: Option<Arc<dyn CapabilityCheck>>,
+    /// `[fyx_ui.terminal_env] vars`.
+    env: Vec<(&'static str, &'static str)>,
+    listeners: Vec<ListenerSpec>,
+    discovery_files: Vec<DiscoveryFileSpec>,
+    observer: Option<Arc<dyn ListenerObserver>>,
+    context: Option<Arc<dyn ui_ext::context::ContextHost>>,
 }
 
 impl Default for Setup {
@@ -289,6 +299,11 @@ impl Default for Setup {
             t3: T3Answer::Once,
             cards: Arc::default(),
             broker: None,
+            env: vec![("PROBE_HOME", "${package}/home")],
+            listeners: Vec::new(),
+            discovery_files: Vec::new(),
+            observer: None,
+            context: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -311,11 +326,21 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
     cx.update(gpui_tokio::init);
     let env = terminal::check_terminal_env(
         terminal::TerminalEnvSpec {
-            vars: [("PROBE_HOME".to_string(), "${package}/home".to_string())].into(),
+            vars: setup
+                .env
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
             scope: terminal::EnvScope::Profiles,
             reason: "the probe's home".into(),
         },
-        &|_| None,
+        &|name| {
+            setup
+                .listeners
+                .iter()
+                .find(|listener| listener.name == name)
+                .map(|listener| listener.token_in_env)
+        },
     )
     .unwrap();
     let options = LoadOptions {
@@ -351,6 +376,10 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         ),
         package_dir: Some(PathBuf::from("pkg")),
         journal: Some(setup.journal.clone()),
+        listeners: Some(setup.listeners.clone()),
+        discovery_files: Some(setup.discovery_files.clone()),
+        listener_observer: setup.observer.clone(),
+        context: setup.context.clone(),
         workspace: setup
             .workspace
             .clone()
@@ -636,7 +665,7 @@ async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext
     // T3 is not grantable yet.
     assert_eq!(command(&extension, "read 1").await, "not-permitted");
     let error = extension
-        .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, "listen".into()))
+        .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, "relay".into()))
         .await
         .unwrap_err();
     assert!(
@@ -1061,4 +1090,632 @@ async fn test_v0_4_terminal_integration_after_a_revocation(cx: &mut TestAppConte
             .contains(&"close-all probe-v0-4".to_string())
     );
     drop(extension);
+}
+
+/// What the discovery-file writer hears, and the last it heard of each listener.
+#[derive(Default)]
+struct Observer {
+    heard: Mutex<Vec<String>>,
+    open: Mutex<HashMap<String, OpenListener>>,
+}
+
+impl Observer {
+    fn heard(&self) -> Vec<String> {
+        self.heard.lock().unwrap().clone()
+    }
+
+    fn open(&self, name: &str) -> OpenListener {
+        self.open.lock().unwrap()[name].clone()
+    }
+}
+
+impl ListenerObserver for Observer {
+    fn opened(&self, extension_id: &str, listener: &OpenListener) {
+        self.heard.lock().unwrap().push(format!(
+            "opened {extension_id} {} {}",
+            listener.name,
+            listener.discovery_files.len()
+        ));
+        self.open
+            .lock()
+            .unwrap()
+            .insert(listener.name.clone(), listener.clone());
+    }
+
+    fn closed(&self, extension_id: &str, listener: &str) {
+        self.heard
+            .lock()
+            .unwrap()
+            .push(format!("closed {extension_id} {listener}"));
+    }
+}
+
+/// `ide` speaks MCP over streamable HTTP with a bearer token that may go into terminal env, and
+/// has one discovery file; `hooks` is a raw `http` listener with a header token.
+fn listening_setup(observer: &Arc<Observer>) -> Setup {
+    let mut capabilities = Setup::default().capabilities;
+    capabilities.extend([
+        ui_ext::integration::CAPABILITY_NETWORK_LISTEN,
+        ui_ext::integration::CAPABILITY_DISCOVERY_FILE,
+    ]);
+    Setup {
+        capabilities,
+        env: vec![
+            ("IDE_PORT", "${listen.ide.port}"),
+            ("IDE_TOKEN", "${listen.ide.token}"),
+            ("HOOKS_PORT", "${listen.hooks.port}"),
+        ],
+        listeners: vec![
+            ListenerSpec {
+                name: "ide".into(),
+                protocol: ListenerProtocol::McpStreamableHttp,
+                auth: ListenerAuth {
+                    bearer: true,
+                    ..Default::default()
+                },
+                token_in_env: true,
+                reason: "the IDE connection".into(),
+            },
+            ListenerSpec {
+                name: "hooks".into(),
+                protocol: ListenerProtocol::Http,
+                auth: ListenerAuth {
+                    header: Some("X-Probe-Token".into()),
+                    ..Default::default()
+                },
+                token_in_env: false,
+                reason: "hooks".into(),
+            },
+        ],
+        discovery_files: vec![DiscoveryFileSpec {
+            listener: "ide".into(),
+            dir: "${tmp}/probe".into(),
+            default_dir: None,
+            name: "${port}.lock".into(),
+            content: [("port".to_string(), "${port}".to_string())].into(),
+            reason: "the IDE finds Fyx".into(),
+        }],
+        observer: Some(observer.clone()),
+        ..Setup::default()
+    }
+}
+
+/// One blocking HTTP/1.1 exchange on its own thread: the status, the head and the body.
+fn http_exchange(port: u16, request: String) -> std::thread::JoinHandle<(u16, String, String)> {
+    use std::io::{Read as _, Write as _};
+    std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while !seen.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            seen.push(byte[0]);
+        }
+        let head = String::from_utf8(seen).unwrap().to_lowercase();
+        let status = head[9..12].parse().unwrap();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .map_or(0, |length| length.trim().parse().unwrap());
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        (status, head, String::from_utf8(body).unwrap())
+    })
+}
+
+fn mcp_post(port: u16, token: &str, session: Option<&str>, body: serde_json::Value) -> String {
+    let body = body.to_string();
+    let session = session.map_or(String::new(), |session| {
+        format!("Mcp-Session-Id: {session}\r\n")
+    });
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+         {session}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// The next io-event through `handle-io`, as the probe reports it.
+async fn next_io_report(
+    extension: &UiExtension,
+    events: &mut futures::channel::mpsc::Receiver<crate::network::IoEvent>,
+) -> String {
+    let event = events.next().await.unwrap();
+    let reply = extension.handle_io(event).await.unwrap();
+    let effects = format!("{:?}", reply.effects);
+    let start = effects.find("content: \"").unwrap() + "content: \"".len();
+    let end = start + effects[start..].find("\",").unwrap();
+    effects[start..end].replace("\\\"", "\"")
+}
+
+/// §B.7: listeners open when the registry starts the instance, with the granted discovery
+/// files; tools registered before that apply then; an MCP `tools/call` and a raw request reach
+/// `handle-io` and are answered by `respond` and `reply`; `${listen.*}` fills a created
+/// terminal's env.
+#[gpui::test]
+async fn test_v0_4_listeners(cx: &mut TestAppContext) {
+    let observer = Arc::new(Observer::default());
+    let setup = listening_setup(&observer);
+    let extension = load(&setup, cx).await.unwrap();
+    let mut events = extension.take_io_events().unwrap();
+
+    // Not started yet: tools are kept, nothing is open.
+    assert_eq!(command(&extension, "tools ide openDiff").await, "done");
+    assert_eq!(
+        command(&extension, "tools hooks a").await,
+        "invalid-argument"
+    );
+    assert_eq!(command(&extension, "tools nope a").await, "not-permitted");
+    assert_eq!(command(&extension, "notify ide x/y").await, "unavailable");
+    assert_eq!(extension.listener_port("ide"), None);
+    assert!(observer.heard().is_empty());
+
+    extension.activate_terminals();
+    assert_eq!(
+        observer.heard(),
+        ["opened probe-v0-4 ide 1", "opened probe-v0-4 hooks 0"]
+    );
+    let ide = observer.open("ide");
+    let hooks = observer.open("hooks");
+    assert_eq!(extension.listener_port("ide"), Some(ide.port));
+    assert_eq!(command(&extension, "notify ide x/y").await, "done");
+
+    // `${listen.*}` in the env of a created terminal.
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "1"
+    );
+    let env = setup.host.created.lock().unwrap()[0].env.clone();
+    for var in [
+        ("IDE_PORT".to_string(), ide.port.to_string()),
+        ("IDE_TOKEN".to_string(), ide.token.clone()),
+        ("HOOKS_PORT".to_string(), hooks.port.to_string()),
+    ] {
+        assert!(env.contains(&var), "{var:?} in {env:?}");
+    }
+
+    // MCP: the tool registered before the start is listed, and a call reaches `handle-io`.
+    let (status, head, _) = http_exchange(
+        ide.port,
+        mcp_post(
+            ide.port,
+            &ide.token,
+            None,
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        ),
+    )
+    .join()
+    .unwrap();
+    assert_eq!(status, 200);
+    let session = head
+        .lines()
+        .find_map(|line| line.strip_prefix("mcp-session-id: "))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let (_, _, list) = http_exchange(
+        ide.port,
+        mcp_post(
+            ide.port,
+            &ide.token,
+            Some(&session),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        ),
+    )
+    .join()
+    .unwrap();
+    assert!(list.contains("openDiff"), "{list}");
+    let call = http_exchange(
+        ide.port,
+        mcp_post(
+            ide.port,
+            &ide.token,
+            Some(&session),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"openDiff","arguments":{"a":1}}}),
+        ),
+    );
+    let report = next_io_report(&extension, &mut events).await;
+    let words: Vec<&str> = report.split(' ').collect();
+    assert_eq!(
+        (words[0], words[2], words[4], words[5]),
+        ("mcp-call", "ide", "openDiff", "{\"a\":1}"),
+        "{report}"
+    );
+    assert_eq!(
+        command(
+            &extension,
+            &format!("respond {} {{\"content\":[],\"isError\":false}}", words[1])
+        )
+        .await,
+        "done"
+    );
+    let (status, _, body) = call.join().unwrap();
+    assert_eq!(status, 200);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["id"], 3);
+    assert_eq!(body["result"]["isError"], false);
+
+    // A raw request, answered by `reply`.
+    let request = http_exchange(
+        hooks.port,
+        format!(
+            "POST /hook HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Probe-Token: {}\r\n\
+             Content-Length: 2\r\n\r\nhi",
+            hooks.port, hooks.token
+        ),
+    );
+    let report = next_io_report(&extension, &mut events).await;
+    let words: Vec<&str> = report.split(' ').collect();
+    assert_eq!(
+        (words[0], words[2], words[3], words[4]),
+        ("request", "hooks", "/hook", "hi"),
+        "{report}"
+    );
+    assert_eq!(
+        command(&extension, &format!("reply {} 201 ok", words[1])).await,
+        "done"
+    );
+    let (status, _, body) = request.join().unwrap();
+    assert_eq!((status, body.as_str()), (201, "ok"));
+}
+
+/// A broker whose T2 states and items change while the instance runs, and which tells it.
+#[derive(Default)]
+struct GrantingBroker {
+    states: Mutex<HashMap<String, PermissionState>>,
+    senders: Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, PermissionState)>>>,
+}
+
+impl GrantingBroker {
+    fn set(&self, key: &str, state: PermissionState) {
+        self.states.lock().unwrap().insert(key.into(), state);
+        for sender in self.senders.lock().unwrap().iter() {
+            sender.unbounded_send((key.into(), state)).ok();
+        }
+    }
+}
+
+impl CapabilityCheck for GrantingBroker {
+    fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+        Ok(())
+    }
+
+    fn state(&self, _: &str, capability: &str) -> PermissionState {
+        self.states
+            .lock()
+            .unwrap()
+            .get(capability)
+            .copied()
+            .unwrap_or(PermissionState::Granted)
+    }
+
+    fn item_state(
+        &self,
+        extension_id: &str,
+        item: &crate::permissions::ConsentItem,
+    ) -> PermissionState {
+        let state = self.states.lock().unwrap().get(&item.key()).copied();
+        state.unwrap_or_else(|| self.state(extension_id, item.capability()))
+    }
+
+    fn changes(
+        &self,
+        _: &str,
+    ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        self.senders.lock().unwrap().push(sender);
+        receiver
+    }
+}
+
+/// §B.7, §B.8, §C.2: listeners follow their grants and their discovery files' grants; a
+/// reloaded instance takes over (the old one closes first) and the last one closes them.
+#[gpui::test]
+async fn test_v0_4_listener_grants_and_reloads(cx: &mut TestAppContext) {
+    let observer = Arc::new(Observer::default());
+    let broker = Arc::new(GrantingBroker::default());
+    broker.set("network:listen#hooks", PermissionState::Denied);
+    let setup = Setup {
+        broker: Some(broker.clone()),
+        ..listening_setup(&observer)
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    extension.activate_terminals();
+    assert_eq!(observer.heard(), ["opened probe-v0-4 ide 1"]);
+    assert_eq!(command(&extension, "notify hooks x").await, "denied");
+    let port = extension.listener_port("ide").unwrap();
+    let heard = |count: usize| {
+        let observer = observer.clone();
+        move || observer.heard().len() == count
+    };
+
+    // The discovery file's grant goes: the listener stays, with no file.
+    broker.set("fs:discovery-file#${port}.lock", PermissionState::Denied);
+    wait_for(cx, 10_000, heard(2));
+    assert_eq!(observer.heard()[1], "opened probe-v0-4 ide 0");
+    assert_eq!(extension.listener_port("ide"), Some(port));
+
+    broker.set("network:listen#hooks", PermissionState::Granted);
+    wait_for(cx, 10_000, heard(3));
+    assert_eq!(observer.heard()[2], "opened probe-v0-4 hooks 0");
+
+    // A revocation closes the listener; the extension hears `denied`.
+    broker.set("network:listen#ide", PermissionState::Denied);
+    wait_for(cx, 10_000, heard(4));
+    assert_eq!(observer.heard()[3], "closed probe-v0-4 ide");
+    assert_eq!(extension.listener_port("ide"), None);
+    assert_eq!(command(&extension, "notify ide x/y").await, "denied");
+    broker.set("network:listen#ide", PermissionState::Granted);
+    wait_for(cx, 10_000, heard(5));
+    assert_eq!(observer.heard()[4], "opened probe-v0-4 ide 0");
+
+    // The whole capability.
+    broker.set("network:listen", PermissionState::Denied);
+    wait_for(cx, 10_000, heard(7));
+    assert_eq!(
+        observer.heard()[5..],
+        ["closed probe-v0-4 ide", "closed probe-v0-4 hooks"]
+    );
+    broker.set("network:listen", PermissionState::Granted);
+    wait_for(cx, 10_000, heard(9));
+
+    // A reload: the old instance closes before the new one opens, and leaves it alone after.
+    let reloaded = load(&setup, cx).await.unwrap();
+    reloaded.activate_terminals();
+    assert_eq!(
+        observer.heard()[9..],
+        [
+            "closed probe-v0-4 ide",
+            "closed probe-v0-4 hooks",
+            "opened probe-v0-4 ide 0",
+            "opened probe-v0-4 hooks 0",
+        ]
+    );
+    drop(extension);
+    cx.run_until_parked();
+    assert_eq!(observer.heard().len(), 13);
+    assert!(reloaded.listener_port("ide").is_some());
+    drop(reloaded);
+    wait_for(cx, 10_000, heard(15));
+    assert_eq!(
+        observer.heard()[13..],
+        ["closed probe-v0-4 ide", "closed probe-v0-4 hooks"]
+    );
+}
+
+/// The editor side of `context`: keeps the sink, records `open` and `watch`; `.env` is private.
+#[derive(Default)]
+struct FakeEditor {
+    sink: Mutex<Option<ui_ext::context::ContextSink>>,
+    calls: Mutex<Vec<String>>,
+    terminal_focused: std::sync::atomic::AtomicBool,
+}
+
+impl FakeEditor {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn send(&self, context: ui_ext::context::EditorContext) {
+        let sink = self.sink.lock().unwrap().clone().unwrap();
+        sink(context);
+    }
+}
+
+impl ui_ext::context::ContextHost for FakeEditor {
+    fn watch(&self, ext: &str, sink: Option<ui_ext::context::ContextSink>) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("watch {ext} {}", sink.is_some()));
+        *self.sink.lock().unwrap() = sink;
+    }
+
+    fn open(
+        &self,
+        _: &str,
+        path: ui_ext::process::FileRef,
+        _: Option<ui_ext::edit::TextRange>,
+        focus: bool,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("open {} {focus}", path.path));
+        Ok(())
+    }
+
+    fn is_private(&self, absolute: &Path) -> bool {
+        absolute.file_name().is_some_and(|name| name == ".env")
+    }
+
+    fn terminal_focused(&self, _: &str) -> bool {
+        self.terminal_focused
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A fresh worktree with `a.rs` and a private `.env`.
+fn context_worktree(name: &str) -> PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("fyx-probe-context-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn main() {}").unwrap();
+    std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+    root
+}
+
+fn context_setup(editor: &Arc<FakeEditor>, root: &Path) -> Setup {
+    let mut capabilities = Setup::default().capabilities;
+    capabilities.extend([
+        ui_ext::context::CAPABILITY_CONTEXT_EDITOR,
+        ui_ext::context::CAPABILITY_WORKSPACE_OPEN,
+    ]);
+    Setup {
+        capabilities,
+        context: Some(editor.clone()),
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: root.to_path_buf(),
+            trusted: true,
+        }]),
+        ..Setup::default()
+    }
+}
+
+fn file(path: &str) -> ui_ext::process::FileRef {
+    ui_ext::process::FileRef {
+        worktree: Some(1),
+        path: path.into(),
+    }
+}
+
+fn selection(text: Option<String>) -> Option<(ui_ext::edit::TextRange, Option<String>)> {
+    let at = ui_ext::edit::Position { line: 0, column: 0 };
+    Some((ui_ext::edit::TextRange { start: at, end: at }, text))
+}
+
+/// §B.11: the feed carries worktree files only, never a private file's text, and at most
+/// 64 KiB of selection; a tool's paths and URIs (both Windows spellings Claude Code sends) turn
+/// into `file-ref`s and back; `open` keeps `focus` only with a gesture or a recent listener
+/// request while a terminal has focus.
+#[gpui::test]
+async fn test_v0_4_editor_context(cx: &mut TestAppContext) {
+    let editor = Arc::new(FakeEditor::default());
+    let root = context_worktree("feed");
+    let setup = context_setup(&editor, &root);
+    let extension = load(&setup, cx).await.unwrap();
+    assert!(extension.context_available());
+    let mut events = extension.take_io_events().unwrap();
+
+    assert_eq!(command(&extension, "watch on").await, "done");
+    editor.send(ui_ext::context::EditorContext {
+        active: Some(file("a.rs")),
+        open: vec![
+            file("a.rs"),
+            ui_ext::process::FileRef {
+                worktree: Some(9),
+                path: "elsewhere.rs".into(),
+            },
+            file(".env"),
+        ],
+        selection: selection(Some("x".repeat(70_000))),
+        trusted: Some(true),
+    });
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        format!(
+            "context a.rs a.rs,.env {} true",
+            ui_ext::context::MAX_SELECTION_BYTES
+        )
+    );
+    editor.send(ui_ext::context::EditorContext {
+        active: Some(file(".env")),
+        open: vec![file(".env")],
+        selection: selection(Some("SECRET=1".into())),
+        trusted: Some(true),
+    });
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        "context .env .env none true"
+    );
+
+    // Paths in, `file-ref`s out: a plain path, `file:///C:/…` and `file://C:\…` alike.
+    let plain = root.join("a.rs").to_string_lossy().into_owned();
+    let forward = plain.replace('\\', "/");
+    let slashed = format!("file:///{}", forward.trim_start_matches('/'));
+    let raw = format!("file://{plain}");
+    for input in [&plain, &slashed, &raw] {
+        assert_eq!(
+            command(&extension, &format!("to-ref {input}")).await,
+            "1:a.rs",
+            "{input}"
+        );
+    }
+    let private = root.join(".env").to_string_lossy().into_owned();
+    assert_eq!(
+        command(&extension, &format!("to-ref {private}")).await,
+        "not-permitted"
+    );
+    let outside = std::env::temp_dir()
+        .join("x.rs")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        command(&extension, &format!("to-ref {outside}")).await,
+        "invalid-argument"
+    );
+    assert_eq!(command(&extension, "to-ref a.rs").await, "invalid-argument");
+    assert_eq!(command(&extension, "abs 1 a.rs").await, plain);
+    assert_eq!(command(&extension, "abs - a.rs").await, plain);
+    assert_eq!(command(&extension, "abs 1 .env").await, "not-permitted");
+    assert_eq!(command(&extension, "abs 7 a.rs").await, "invalid-argument");
+
+    // Focus needs a gesture, or a recent listener request while a terminal has focus.
+    assert_eq!(command(&extension, "open 1 a.rs 1").await, "done");
+    assert_eq!(click(&extension, "open 1 a.rs 1").await, "done");
+    assert_eq!(
+        command(&extension, "open 1 nope.rs 0").await,
+        "invalid-argument"
+    );
+    editor
+        .terminal_focused
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // No listener has had a request.
+    assert_eq!(command(&extension, "open 1 a.rs 1").await, "done");
+    assert_eq!(command(&extension, "watch off").await, "done");
+    assert_eq!(
+        editor.calls(),
+        [
+            "watch probe-v0-4 true",
+            "open a.rs false",
+            "open a.rs true",
+            "open a.rs false",
+            "watch probe-v0-4 false",
+        ]
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Without the capabilities the calls are refused; a reloaded instance's watch survives the old
+/// instance's drop.
+#[gpui::test]
+async fn test_v0_4_editor_context_rules_and_reloads(cx: &mut TestAppContext) {
+    let editor = Arc::new(FakeEditor::default());
+    let root = context_worktree("rules");
+    let undeclared = Setup {
+        capabilities: vec!["ui:panel"],
+        ..context_setup(&editor, &root)
+    };
+    let extension = load(&undeclared, cx).await.unwrap();
+    for refused in ["watch on", "open 1 a.rs 0", "abs 1 a.rs", "to-ref /a.rs"] {
+        assert_eq!(
+            command(&extension, refused).await,
+            "not-permitted",
+            "{refused}"
+        );
+    }
+    drop(extension);
+
+    let setup = context_setup(&editor, &root);
+    let old = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&old, "watch on").await, "done");
+    let new = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&new, "watch on").await, "done");
+    drop(old);
+    wait_for(cx, 2_000, || false);
+    assert_eq!(
+        editor.calls(),
+        ["watch probe-v0-4 true", "watch probe-v0-4 true"]
+    );
+    drop(new);
+    wait_for(cx, 10_000, || editor.calls().len() == 3);
+    assert_eq!(editor.calls()[2], "watch probe-v0-4 false");
+    std::fs::remove_dir_all(&root).ok();
 }

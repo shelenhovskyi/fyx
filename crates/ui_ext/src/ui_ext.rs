@@ -10,6 +10,8 @@ mod api_version;
 pub mod approvals;
 pub mod canvas;
 #[cfg(feature = "t2")]
+pub mod context;
+#[cfg(feature = "t2")]
 pub mod edit;
 pub mod image;
 /// fyx:ui 0.4 integration kit manifest tables (plan 5.5).
@@ -22,6 +24,8 @@ pub mod observe;
 #[cfg(feature = "t2")]
 pub mod process;
 pub mod protected;
+#[cfg(feature = "t2")]
+pub mod review;
 /// fyx:ui 0.4 terminals (plan 5.5); behind `t2` until W0 adds a `terminal` feature alias.
 #[cfg(feature = "t2")]
 pub mod terminal;
