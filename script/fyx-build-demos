@@ -25,7 +25,7 @@
 # Then point the dev build at the directories it prints, e.g. on Windows:
 #   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;...
 # FYX_UI_DEV_EXTENSIONS, and the staged worlds, work only in a build on the Dev or Nightly
-# release channel (crates/zed/RELEASE_CHANNEL is "dev" in the repository). An older build on the
+# release channel (integration sets crates/zed/RELEASE_CHANNEL to "dev"). An older build on the
 # Stable channel ignores them: start it with ZED_RELEASE_CHANNEL=dev set as well.
 set -euo pipefail
 
