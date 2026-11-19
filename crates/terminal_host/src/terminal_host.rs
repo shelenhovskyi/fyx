@@ -29,7 +29,7 @@ pub use relay::{
 };
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
 pub use settings::{FyxTerminalSettings, init_shell_integration};
-pub use t3::{Share, ShareBridge, ShareTarget, set_share_bridge, shares_changed};
+pub use t3::{AlwaysAllowed, Share, ShareBridge, ShareTarget, set_share_bridge, shares_changed};
 
 use std::collections::HashMap;
 use std::sync::Arc;

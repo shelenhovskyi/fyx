@@ -58,10 +58,57 @@ pub trait ShareBridge: 'static {
     fn shared(&self, terminal: u64, cx: &App) -> Vec<(String, Share)>;
     /// Turns one share on or off. Reading once and reading until closed replace each other.
     fn share(&self, extension_id: &str, terminal: u64, share: Share, on: bool, cx: &mut App);
-    /// The names of the extensions that hold an "Always allow" for terminals: they may read and
-    /// type into every one, so every user terminal's tab says so.
-    fn always_allowed(&self, _cx: &App) -> Vec<String> {
+    /// The extensions that hold an "Always allow" for terminals, one entry each with what it
+    /// covers, so every user terminal's tab says so.
+    fn always_allowed(&self, _cx: &App) -> Vec<AlwaysAllowed> {
         Vec::new()
+    }
+}
+
+/// One extension's "Always allow" for terminals (§C.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlwaysAllowed {
+    pub extension_name: String,
+    /// It may read every terminal without asking.
+    pub read: bool,
+    /// It may type into shared terminals without asking.
+    pub write: bool,
+}
+
+impl AlwaysAllowed {
+    /// The tab tooltip's line, worded by what the grant covers.
+    fn describe(&self) -> String {
+        let what = match (self.read, self.write) {
+            (true, true) => "may read every terminal and type into shared terminals",
+            (true, false) => "may read every terminal",
+            (false, true) => "may type into shared terminals",
+            (false, false) => "has no terminal access",
+        };
+        format!("{} {what} (Always allow)", self.extension_name)
+    }
+}
+
+/// Who has access to a user terminal now, for its tab (§C.3).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Access {
+    /// One line per "Always allow" and share, for the tooltip.
+    pub lines: Vec<String>,
+    /// The extensions holding an "Always allow", named visibly on the tab.
+    pub always: Vec<String>,
+}
+
+impl Access {
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// The visible tab label: "<name> has access", or a count for several.
+    pub fn label(&self) -> Option<String> {
+        match self.always.as_slice() {
+            [] => None,
+            [one] => Some(format!("{one} has access")),
+            [first, rest @ ..] => Some(format!("{first} and {} more have access", rest.len())),
+        }
     }
 }
 
@@ -251,22 +298,23 @@ pub fn shares_changed(cx: &mut App) {
     }
 }
 
-/// §C.3: who may read or type into this user terminal now, one line each, for its tab.
-pub(crate) fn access(terminal: &TerminalExt, cx: &App) -> Vec<String> {
+/// §C.3: who may read or type into this user terminal now, for its tab.
+pub(crate) fn access(terminal: &TerminalExt, cx: &App) -> Access {
     let Some(bridge) = cx
         .try_global::<GlobalShareBridge>()
         .map(|bridge| bridge.0.clone())
     else {
-        return Vec::new();
+        return Access::default();
     };
     if terminal.origin().is_some() {
-        return Vec::new();
+        return Access::default();
     }
-    let mut lines: Vec<String> = bridge
+    let always = bridge
         .always_allowed(cx)
         .into_iter()
-        .map(|name| format!("{name} may read and type into every terminal (Always allow)"))
-        .collect();
+        .filter(|grant| grant.read || grant.write)
+        .collect::<Vec<_>>();
+    let mut lines: Vec<String> = always.iter().map(AlwaysAllowed::describe).collect();
     let shared = bridge.shared(terminal.id().as_u64(), cx);
     if !shared.is_empty() {
         let targets = bridge.targets(cx);
@@ -285,12 +333,60 @@ pub(crate) fn access(terminal: &TerminalExt, cx: &App) -> Vec<String> {
             format!("{} {what}", name(id))
         }));
     }
-    lines
+    Access {
+        lines,
+        always: always
+            .into_iter()
+            .map(|grant| grant.extension_name)
+            .collect(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn always_allow_wording_follows_the_grant() {
+        let grant = |read, write| AlwaysAllowed {
+            extension_name: "Probe".into(),
+            read,
+            write,
+        };
+        assert_eq!(
+            grant(true, false).describe(),
+            "Probe may read every terminal (Always allow)"
+        );
+        assert_eq!(
+            grant(false, true).describe(),
+            "Probe may type into shared terminals (Always allow)"
+        );
+        assert_eq!(
+            grant(true, true).describe(),
+            "Probe may read every terminal and type into shared terminals (Always allow)"
+        );
+    }
+
+    #[test]
+    fn the_tab_names_who_holds_an_always_allow() {
+        let access = |always: &[&str]| Access {
+            lines: vec!["line".into()],
+            always: always.iter().map(|name| name.to_string()).collect(),
+        };
+        assert_eq!(
+            access(&[]).label(),
+            None,
+            "a share alone keeps to the tooltip"
+        );
+        assert_eq!(
+            access(&["Probe"]).label().as_deref(),
+            Some("Probe has access")
+        );
+        assert_eq!(
+            access(&["Probe", "Other", "Third"]).label().as_deref(),
+            Some("Probe and 2 more have access")
+        );
+    }
 
     #[test]
     fn typed_by_names_the_extension_by_its_display_name() {
