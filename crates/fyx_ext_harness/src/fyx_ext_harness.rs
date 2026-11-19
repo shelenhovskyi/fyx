@@ -441,7 +441,7 @@ pub(crate) fn props_text_len(props: &model::Props) -> usize {
         model::IconRef::Upstream(name) => name.len(),
     };
     match props {
-        model::Props::Flex(_) | model::Props::List(_) => 0,
+        model::Props::Flex(_) | model::Props::List(_) | model::Props::Terminal(_) => 0,
         model::Props::Text(props) => props.content.len(),
         model::Props::Button(props) => {
             props.label.len() + props.icon.as_ref().map_or(0, icon_len) + option_len(&props.tooltip)
@@ -768,17 +768,15 @@ impl Bindings {
             .map(|()| rows)
         })
         .and_then(|rows| {
-            match rows.iter().flat_map(|row| &row.nodes).find(|node| {
-                matches!(node.props, model::Props::Canvas(_))
-                    || v0_4::terminal_node_handle(&node.props).is_some()
-            }) {
-                Some(node) if matches!(node.props, model::Props::Canvas(_)) => {
-                    Err(ui_ext::TreeError::CanvasInRow(node.id).to_string())
-                }
-                Some(node) => Err(format!(
-                    "node {}: a terminal cannot be in a list row",
-                    node.id
-                )),
+            match rows
+                .iter()
+                .flat_map(|row| &row.nodes)
+                .find_map(|node| match node.props {
+                    model::Props::Canvas(_) => Some(ui_ext::TreeError::CanvasInRow(node.id)),
+                    model::Props::Terminal(_) => Some(ui_ext::TreeError::TerminalInRow(node.id)),
+                    _ => None,
+                }) {
+                Some(error) => Err(error.to_string()),
                 None => Ok(rows),
             }
         }))
@@ -2792,6 +2790,11 @@ mod shim {
         match props {
             model::Props::Flex(flex) => Props::Flex(flex.clone()),
             model::Props::Text(text) => Props::Text(text.clone()),
+            // 0.4 only; named as the host's 0.1 shim names it.
+            model::Props::Terminal(terminal) => Props::Text(ui_ext::TextProps {
+                content: format!("[terminal {}]", terminal.handle),
+                ..ui_ext::TextProps::default()
+            }),
             model::Props::Button(button) => Props::Button(ui_ext::ButtonProps {
                 label: button.label.clone(),
                 icon: button.icon.as_ref().map(icon),

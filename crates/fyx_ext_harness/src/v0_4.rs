@@ -3,8 +3,8 @@
 //! [`crate::terminals`] (plan 5.10). The other 0.4 interfaces (`listeners`, `relay`, `review`,
 //! `context`, `approvals`) trap when called ([`define_unlinked_as_traps`]) until plan 5.14.
 //!
-//! The model has no `terminal` node yet: one stands in it as a text node whose content is
-//! [`TERMINAL_NODE_TEXT`] and the handle; [`terminal_node_handle`] reads it back.
+//! A `terminal` node becomes `ui_ext::v0_2::Props::Terminal`; [`terminal_node_handle`] reads its
+//! handle.
 
 use ui_ext::image as model_image;
 use ui_ext::v0_2 as model;
@@ -306,6 +306,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
     use ui_ext::network as net;
     match event {
         net::IoEvent::Terminal(event) => Some(terminal_io_event(event)),
+        // The harness does not bind `approvals` yet (plan 5.14), so no card is ever answered.
+        net::IoEvent::ApprovalAnswered(..) => None,
         net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
             id,
             result
@@ -812,11 +814,8 @@ impl TryFrom<wit::Props> for model::Props {
                 tint: image.tint.map(Into::into),
             }),
             wit::Props::Canvas(canvas) => Self::Canvas(canvas_props(canvas)),
-            wit::Props::Terminal(terminal) => Self::Text(model::TextProps {
-                content: format!("{TERMINAL_NODE_TEXT}{}", terminal.handle),
-                color: None,
-                bold: false,
-                monospace: true,
+            wit::Props::Terminal(terminal) => Self::Terminal(model::TerminalNodeProps {
+                handle: terminal.handle,
             }),
         })
     }
@@ -1081,16 +1080,10 @@ impl From<model::UiEvent> for wit::UiEvent {
     }
 }
 
-/// The content of the text node that stands for a `terminal` node in the model.
-pub(crate) const TERMINAL_NODE_TEXT: &str = "fyx-terminal-node:";
-
-/// The handle of a `terminal` node's stand-in.
+/// The handle a `terminal` node shows.
 pub(crate) fn terminal_node_handle(props: &model::Props) -> Option<u64> {
     match props {
-        model::Props::Text(text) if text.monospace => text
-            .content
-            .strip_prefix(TERMINAL_NODE_TEXT)
-            .and_then(|handle| handle.parse().ok()),
+        model::Props::Terminal(terminal) => Some(terminal.handle),
         _ => None,
     }
 }
