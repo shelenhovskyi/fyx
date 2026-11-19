@@ -96,5 +96,10 @@
         "private_hosts": [],
       },
     },
+    "terminal": {
+      // Pop up a notification when a terminal program (Claude Code through OSC 7501, for
+      // example) waits for you or finishes while the window is in the background.
+      "notifications": true,
+    },
   },
 }

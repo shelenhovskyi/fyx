@@ -108,7 +108,10 @@ impl Sessions {
         let Some(status) = status else {
             return;
         };
-        if window_active || !should_notify(previous, status.state) {
+        if window_active
+            || !should_notify(previous, status.state)
+            || !crate::settings::notifications_enabled(cx)
+        {
             return;
         }
         let now = Instant::now();

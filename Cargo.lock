@@ -18262,6 +18262,7 @@ dependencies = [
  "gpui",
  "log",
  "release_channel",
+ "settings",
  "terminal",
  "terminal_ext",
  "terminal_view",

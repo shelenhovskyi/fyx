@@ -17,9 +17,14 @@ doctest = false
 gpui.workspace = true
 log.workspace = true
 release_channel.workspace = true
+settings.workspace = true
 terminal.workspace = true
 terminal_ext.workspace = true
 terminal_view.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
 workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
