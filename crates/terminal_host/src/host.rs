@@ -381,8 +381,11 @@ impl TerminalHost for HostFront {
         if !observing {
             return Vec::new();
         }
-        let mut infos: Vec<_> = terminals
-            .iter()
+        // New handles go to older terminals first, so the order is defined.
+        let mut known: Vec<_> = terminals.iter().collect();
+        known.sort_by_key(|(id, _)| **id);
+        let mut infos: Vec<_> = known
+            .into_iter()
             .map(|(id, known)| known.info(ext, extension.handle_for(*id)))
             .collect();
         infos.sort_by_key(|info| info.handle);
