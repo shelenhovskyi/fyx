@@ -15,6 +15,7 @@ pub const CAPABILITY_RELAY_HOOKS: &str = "relay:hooks";
 pub const CAPABILITY_REVIEW_PROPOSE: &str = "review:propose";
 pub const CAPABILITY_CONTEXT_EDITOR: &str = "context:editor";
 pub const CAPABILITY_WORKSPACE_OPEN: &str = "workspace:open";
+pub const CAPABILITY_WORKSPACE_DIAGNOSTICS: &str = "workspace:diagnostics";
 pub const CAPABILITY_APPROVALS: &str = "ui:approvals";
 
 /// §B.7.
@@ -106,11 +107,36 @@ pub struct DiscoveryFileSpec {
     pub default_dir: Option<String>,
     /// Contains `${port}` or `${pid}`, ends in `.lock` or `.json`.
     pub name: String,
-    /// Written as a JSON object; values are text with `${port}`, `${token}`, `${pid}`,
-    /// `${worktrees}`, `${uid}` and `${tmp}`.
-    pub content: BTreeMap<String, String>,
+    /// Written as a JSON object (§B.8). Text leaves may hold the [`DISCOVERY_PLACEHOLDERS`]. A
+    /// leaf that is exactly one placeholder takes its JSON type: `${port}` and `${pid}` are
+    /// numbers, `${worktrees}` an array of paths, `${platform.windows}` a bool; any other
+    /// text is a string with the values put in (`${worktrees.joined}` joins the paths with the
+    /// platform's path-list separator).
+    pub content: BTreeMap<String, DiscoveryValue>,
     pub reason: String,
 }
+
+/// A value in a discovery file's `content`: the TOML a manifest writes, as JSON will hold it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum DiscoveryValue {
+    Bool(bool),
+    Integer(i64),
+    Text(String),
+    Array(Vec<DiscoveryValue>),
+    Table(BTreeMap<String, DiscoveryValue>),
+}
+
+impl From<&str> for DiscoveryValue {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+/// The most values (leaves, arrays and tables) one discovery file's `content` may hold.
+pub const MAX_DISCOVERY_VALUES: usize = 256;
+/// How deep `content` may nest; the top-level table is depth 1.
+pub const MAX_DISCOVERY_DEPTH: usize = 4;
 
 /// §B.7: what a listener's clients send that the extension handles, as `io-event`s.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,7 +326,69 @@ fn check_relay_channels(specs: &[RelayChannelSpec]) -> Result<(), String> {
     Ok(())
 }
 
-const DISCOVERY_PLACEHOLDERS: &[&str] = &["port", "token", "pid", "worktrees", "uid", "tmp"];
+/// What a discovery file's text may hold (§B.8).
+pub const DISCOVERY_PLACEHOLDERS: &[&str] = &[
+    "port",
+    "token",
+    "pid",
+    "worktrees",
+    "worktrees.joined",
+    "uid",
+    "tmp",
+    "platform.windows",
+];
+
+/// Checks one `content` value and its children: key and text sizes, the placeholders, the depth
+/// and, through `count`, the number of values.
+fn check_discovery_value(
+    value: &DiscoveryValue,
+    depth: usize,
+    count: &mut usize,
+) -> Result<(), String> {
+    *count += 1;
+    if *count > MAX_DISCOVERY_VALUES {
+        return Err(format!(
+            "content may hold at most {MAX_DISCOVERY_VALUES} values"
+        ));
+    }
+    match value {
+        DiscoveryValue::Bool(_) | DiscoveryValue::Integer(_) => Ok(()),
+        DiscoveryValue::Text(text) => {
+            if text.len() > 1024 {
+                return Err("a content value is longer than 1024 bytes".into());
+            }
+            placeholders(text, DISCOVERY_PLACEHOLDERS).map(|_| ())
+        }
+        DiscoveryValue::Array(items) => {
+            if depth >= MAX_DISCOVERY_DEPTH {
+                return Err(format!("content nests deeper than {MAX_DISCOVERY_DEPTH}"));
+            }
+            items
+                .iter()
+                .try_for_each(|item| check_discovery_value(item, depth + 1, count))
+        }
+        DiscoveryValue::Table(table) => {
+            if depth >= MAX_DISCOVERY_DEPTH {
+                return Err(format!("content nests deeper than {MAX_DISCOVERY_DEPTH}"));
+            }
+            check_discovery_table(table, depth + 1, count)
+        }
+    }
+}
+
+fn check_discovery_table(
+    table: &BTreeMap<String, DiscoveryValue>,
+    depth: usize,
+    count: &mut usize,
+) -> Result<(), String> {
+    for (key, value) in table {
+        if key.is_empty() || key.len() > 64 {
+            return Err(format!("content key {key:?} must be 1 to 64 bytes"));
+        }
+        check_discovery_value(value, depth, count)?;
+    }
+    Ok(())
+}
 
 /// The placeholders of `text`, or an error for an unclosed or unknown one.
 fn placeholders<'a>(text: &'a str, known: &[&str]) -> Result<Vec<&'a str>, String> {
@@ -378,12 +466,7 @@ fn check_discovery_file(
     if spec.content.is_empty() || spec.content.len() > 32 {
         return Err(at("content must have 1 to 32 keys"));
     }
-    for (key, value) in &spec.content {
-        if key.is_empty() || key.len() > 64 || value.len() > 1024 {
-            return Err(at("a content key or value is too long"));
-        }
-        placeholders(value, DISCOVERY_PLACEHOLDERS).map_err(|why| at(&why))?;
-    }
+    check_discovery_table(&spec.content, 1, &mut 0).map_err(|why| at(&why))?;
     check_reason("a discovery file", &spec.reason).map_err(|why| at(&why))?;
     Ok(())
 }
@@ -420,9 +503,9 @@ mod tests {
             default_dir: Some("~/.claude/ide".into()),
             name: name.into(),
             content: [
-                ("pid".to_string(), "${pid}".to_string()),
-                ("authToken".to_string(), "${token}".to_string()),
-                ("workspaceFolders".to_string(), "${worktrees}".to_string()),
+                ("pid".to_string(), "${pid}".into()),
+                ("authToken".to_string(), "${token}".into()),
+                ("workspaceFolders".to_string(), "${worktrees}".into()),
             ]
             .into_iter()
             .collect(),
@@ -500,6 +583,25 @@ mod tests {
         let mut unknown = lock("${account.claude}/ide", "${port}.lock");
         unknown.content.insert("x".into(), "${env.HOME}".into());
         assert!(check(&ide, &[unknown]).is_err());
+        let mut nested_unknown = lock("${account.claude}/ide", "${port}.lock");
+        nested_unknown.content.insert(
+            "ideInfo".into(),
+            DiscoveryValue::Table([("name".to_string(), "${home}".into())].into()),
+        );
+        assert!(check(&ide, &[nested_unknown]).is_err());
+        let mut deep = lock("${account.claude}/ide", "${port}.lock");
+        let mut value = DiscoveryValue::from("x");
+        for _ in 0..MAX_DISCOVERY_DEPTH {
+            value = DiscoveryValue::Array(vec![value]);
+        }
+        deep.content.insert("deep".into(), value);
+        assert!(check(&ide, &[deep]).is_err());
+        let mut many = lock("${account.claude}/ide", "${port}.lock");
+        many.content.insert(
+            "many".into(),
+            DiscoveryValue::Array(vec![DiscoveryValue::Bool(true); MAX_DISCOVERY_VALUES]),
+        );
+        assert!(check(&ide, &[many]).is_err());
         assert!(
             check(&[], &[lock("${tmp}", "${port}.lock")]).is_err(),
             "no listener"
