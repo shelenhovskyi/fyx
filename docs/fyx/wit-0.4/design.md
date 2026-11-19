@@ -224,6 +224,10 @@ scope = "profiles"                    # "profiles" (default) or "all-new"
   `${relay}` (§B.9) and `${account.<tool>}` (resolved by the host to the terminal's account
   profile dir, §C.6; the extension never sees the path). `${listen.<name>.token}` is allowed only
   for a listener that declares `token_in_env = true`. The extension never sees the token itself.
+  `${pid}` is the process id of Fyx (the window's process). Gemini CLI looks for its discovery
+  file by the IDE's pid, and in Fyx the shell is Fyx's direct child, so the CLI's own heuristic
+  (the shell's grandparent, or the third process from the root on Windows) does not find Fyx;
+  `GEMINI_CLI_IDE_PID = "${pid}"` does. (`${pid}` was a discovery-file placeholder only, §B.8.)
   Values have at most 4 KiB, no NUL and no newline. At most 32 names.
 - **Names** match `[A-Za-z_][A-Za-z0-9_]*`. **Refused at load**, in any letter case:
   - every name `ui_ext::process::is_forbidden_env` refuses (code loaders and redirections:
@@ -298,6 +302,10 @@ token_in_env = false
   `mcp.notify(listener, method, params)`, to every connection or to one. A call may stay open
   until the extension answers (needed for a blocking `openDiff`). It is cancelled when its
   connection closes (`io-event::mcp-cancelled`).
+- **`mcp-streamable-http`** serves the path `/mcp` (Gemini CLI posts there).
+- **Known limitation:** a tool inside a Docker sandbox reaches the host as
+  `host.docker.internal`, which the `Host` check refuses. That stays refused: the check is the
+  protection against DNS rebinding, and there is no safe way to relax it for one name.
 - **`websocket` and `http`:** raw frames or requests as `io-event::listener-message` with a
   connection id, answered with `listener.send` / `listener.respond`. Text only (UTF-8 JSON in
   practice), at most 4 MiB.
@@ -319,20 +327,35 @@ content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx",
             transport = "ws", authToken = "${token}" }
 ```
 
-- **Placeholders:** `${port}`, `${token}`, `${pid}`, `${worktrees}` (a JSON array of the window's
-  worktree roots), `${platform.windows}` (a JSON boolean), `${uid}` (Unix) and `${tmp}`.
-- **The content is JSON-aware.** The host writes a JSON object, not a text template: a value that
-  is exactly `"${worktrees}"` becomes a JSON array and exactly `"${platform.windows}"` a JSON
-  boolean, so `"workspaceFolders": ["/home/me/app"]` and `"windows": true` are valid JSON with no
-  escaping by the extension. In any other value the placeholders are substituted as text, and
-  the host escapes it for JSON.
+- **Placeholders:** `${port}`, `${token}`, `${pid}`, `${worktrees}` (the window's worktree roots),
+  `${worktrees.joined}` (the same roots in one string, joined with the platform's path separator,
+  `:` or `;`), `${platform.windows}`, `${uid}` (Unix) and `${tmp}`.
+- **The content is a JSON document with typed substitution** (W4's `fyx_claude_code` and
+  `fyx_gemini_cli`). The manifest's `content` table is the document; the host fills it and writes
+  JSON, and a value that is exactly one placeholder takes that placeholder's JSON type:
+  `${port}` and `${pid}` are numbers, `${worktrees}` is an array of strings, `${platform.windows}`
+  is a boolean, and `${token}` is a string. A placeholder inside a longer string is substituted
+  as text, escaped for JSON. A nested table is a literal object, so
+  `ideInfo = { name = "fyx", displayName = "Fyx" }` is written as it stands. The extension
+  escapes nothing. Gemini CLI's file is `{ port = "${port}", workspacePath = "${worktrees.joined}",
+  authToken = "${token}", ideInfo = { name = "fyx", displayName = "Fyx" } }`: a number, a joined
+  string and an object, none of which a text-only template can write (without `ideInfo` the CLI
+  refuses IDE mode in anything it does not know).
 - **Where it may write:**
   - `dir` resolves under `${account.<tool>}` (an account profile dir, §C.6), under `default_dir`
     when that is in the user's home, or under `${tmp}`;
   - the file name must contain `${port}` or `${pid}`, and end in `.lock` or `.json`, so a
     discovery file can never overwrite a tool's settings (`~/.claude/settings.json`);
   - no `..`, no symlink anywhere in the path (checked with `O_NOFOLLOW` or the Windows
-    equivalent, on the opened handles).
+    equivalent, on the opened handles);
+  - **a folder that exists under `${tmp}` and belongs to another user is refused**, not only a
+    symlink: `/tmp` is shared, and another user could pre-create `${tmp}/gemini/ide` and read the
+    token. The host creates its own folders `0700` and checks the owner of each existing one;
+  - a placeholder inside a folder name is refused. Gemini CLI's spec dir is
+    `${tmp}/gemini-ide-${uid}` on POSIX, so its extension uses `${tmp}/gemini/ide`, which the CLI
+    reads on every OS (the spec's own dir on Windows; on POSIX the CLI's legacy fallback, which it
+    reads without its permission checks). If Gemini drops the fallback, `${uid}` in folder names,
+    or a dir per OS, is added before 0.4 freezes.
 - **How:** directories `0700` (created if missing), the file `0600`, written to a temporary name
   in the same directory and renamed. On Windows the ACL grants only the user.
 - **Cleanup:** removed when the listener closes, on exit, revoke and uninstall; at start, the
@@ -383,6 +406,10 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
 
 - **`review.propose(request)`** with `path` (a worktree file), `new-content` or `unified-diff`, a
   `title`, `session` (the extension's key for a tool session) and `apply: bool`. It returns an id.
+- **`review.withdraw(id) -> result<string, host-error>`** closes an open proposal and returns its
+  current text, with the user's edits so far, without a `review-decided`. Gemini's `closeDiff`
+  needs exactly that (close the diff, return the text), and Claude's `close_tab` and
+  `closeAllDiffTabs` need the closing.
 - **The outcome** comes later: `io-event::review-decided(id, result<review-outcome,
   review-error>)`. `review-outcome` has `decision` (`accepted`, `partial`, `rejected`) and
   `final-content`, the text after the user's choices and edits. A blocking protocol (Claude's
@@ -407,7 +434,10 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
 ### B.11 Editor context, opening files, pasting into a tool
 
 - **`context:editor` (T1).** `context.watch(options)` subscribes to `io-event::context-changed`:
-  the active file, open files, cursor and selection (text up to 64 KiB), debounced 300 ms. Only
+  the active file, open files **in most-recent order** (Gemini's `ide/contextUpdate` orders files
+  by last focus), cursor and selection (text up to 64 KiB), and `trusted: option<bool>`, whether
+  the worktree is trusted (the same flag as `isTrusted` in Gemini's update; `none` when Fyx has no
+  answer), debounced 300 ms. Only
   worktree files; private paths (`is_private_path`) appear as "a private file" with no text.
   The install dialog warns when it is combined with `network:*`, `terminal:*` writes or
   `relay:hooks`: "It can pass what you select to <tool>".
@@ -711,6 +741,7 @@ interface review {
     enum decision { accepted, partial, rejected }
     record review-outcome { decision: decision, final-content: string }
     propose: func(request: proposal) -> result<u64, host-error>;
+    withdraw: func(id: u64) -> result<string, host-error>;     // the current text; no review-decided
     begin-turn: func(session: string) -> result<_, host-error>;
     end-turn: func(session: string, changed: list<file-ref>) -> result<_, host-error>;
 }
@@ -721,7 +752,8 @@ interface context {
     use types.{file-ref, text-range};
     record editor-context {
         active: option<file-ref>,
-        open: list<file-ref>,
+        open: list<file-ref>,                                   // most recently focused first
+        trusted: option<bool>,                                  // the worktree's trust
         selection: option<tuple<text-range, option<string>>>,   // text absent for private files
     }
     watch: func(on: bool) -> result<_, host-error>;                                      // context:editor
@@ -782,12 +814,23 @@ lists.
    each release. Known gaps: in `acceptEdits` and `auto` modes Claude writes without `openDiff`,
    so those edits show as "changed without review"; the protocol is reverse-engineered [RE].
 
-**`fyx_gemini_cli`** (plan 5.16, W4): the documented IDE companion spec over
-`mcp-streamable-http` with a Bearer token, the discovery file in
-`${tmp}/gemini-ide-${uid}/gemini-ide-server-${pid}-${port}.json`, `GEMINI_CLI_IDE_SERVER_PORT`,
-`ide/contextUpdate` from `context:editor`, and non-blocking `openDiff` → `ide/diffAccepted` /
-`ide/diffRejected` from `review:propose`. If this needs a primitive the Claude extension did not,
-the kit is not general yet, and the primitive is added before 0.4 freezes.
+**`fyx_gemini_cli`** (plan 5.16, W4; skeleton 81be13f34b): the documented IDE companion spec over
+`mcp-streamable-http` (path `/mcp`) with a Bearer token, the discovery file in
+`${tmp}/gemini/ide/gemini-ide-server-${pid}-${port}.json` (typed content, §B.8),
+`GEMINI_CLI_IDE_SERVER_PORT` and `GEMINI_CLI_IDE_PID = "${pid}"`, `ide/contextUpdate` from
+`context:editor`, and non-blocking `openDiff` → `ide/diffAccepted` / `ide/diffRejected` from
+`review:propose`, with `closeDiff` through `review.withdraw`. **Pinned to Gemini CLI 0.69.0** by a
+compat test (`src/compat/README.md` in the extension); where the CLI's source and the companion
+spec differ, the source wins. Writing it found the gaps that became §B.4's `${pid}`, §B.7's
+`/mcp`, §B.8's typed content and folder-owner check, §B.10's `withdraw` and §B.11's `trusted` and
+order: this is the proof that the kit is general, and each primitive the Claude extension did not
+need was added before 0.4 freezes. **Its hooks are deferred past the skeleton.** Gemini has no
+plugin-dir env like `CLAUDE_CODE_PLUGIN_DIRS`, only `GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, which names
+a settings file. The extension will ship that file in its package (`${package}/…`) and set the
+variable in `terminal:env` with `scope = "profiles"`, so only its profile terminals read it, and
+the dialog marks it "makes Gemini CLI load this extension's settings". Until then Gemini's edits
+outside `openDiff` show as "changed without review" and there are no agent turns. Known
+limitation: Gemini's Docker sandbox is refused by the `Host` check (§B.7).
 
 ## Changes by component
 
