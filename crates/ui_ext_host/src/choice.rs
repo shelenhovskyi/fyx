@@ -4,23 +4,18 @@
 //! - [`choose`]: a list in the command palette's style. Typing filters it; Up, Down and Enter, or
 //!   a click, pick an entry; Escape or a click outside cancels. It scales to any number of
 //!   entries.
-//! - [`confirm`]: a title, a detail text and buttons; Enter takes the first button, Escape
-//!   cancels.
 //!
-//! Both answer like `Window::prompt`: the index of the entry or button, or `Canceled` when the
-//! dialog went without an answer.
+//! It answers like `Window::prompt`: the index of the entry, or `Canceled` when the dialog went
+//! without an answer.
 
 use editor::{Editor, EditorEvent};
 use futures::channel::oneshot;
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
-    SharedString, Subscription, Window, div, prelude::*, rems,
+    SharedString, Subscription, Window, prelude::*, rems,
 };
 use theme::ActiveTheme as _;
-use ui::{
-    Button, ButtonCommon as _, ButtonStyle, Clickable as _, Label, LabelCommon as _, LabelSize,
-    ListItem, StyledExt as _, Toggleable as _, h_flex, v_flex,
-};
+use ui::{Label, LabelCommon as _, LabelSize, ListItem, StyledExt as _, Toggleable as _, v_flex};
 use workspace::{ModalView, Workspace};
 
 /// Shows a filterable list titled `title` and answers the index of the picked entry.
@@ -37,32 +32,6 @@ pub fn choose(
     let detail = detail.map(|detail| SharedString::from(detail.to_string()));
     workspace.toggle_modal(window, cx, move |window, cx| {
         ChoiceModal::new(title, detail, entries, answer, window, cx)
-    });
-    receiver
-}
-
-/// Shows `title` and `detail` with `buttons` and answers the index of the button pressed.
-pub fn confirm(
-    workspace: &mut Workspace,
-    title: &str,
-    detail: Option<&str>,
-    buttons: &[&str],
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) -> oneshot::Receiver<usize> {
-    let (answer, receiver) = oneshot::channel();
-    let title = SharedString::from(title.to_string());
-    let detail = detail.map(|detail| SharedString::from(detail.to_string()));
-    let buttons: Vec<SharedString> = buttons
-        .iter()
-        .map(|button| SharedString::from(button.to_string()))
-        .collect();
-    workspace.toggle_modal(window, cx, move |_, cx| ConfirmModal {
-        title,
-        detail,
-        buttons,
-        answer: Some(answer),
-        focus_handle: cx.focus_handle(),
     });
     receiver
 }
@@ -233,85 +202,13 @@ impl Render for ChoiceModal {
     }
 }
 
-pub struct ConfirmModal {
-    title: SharedString,
-    detail: Option<SharedString>,
-    buttons: Vec<SharedString>,
-    answer: Option<oneshot::Sender<usize>>,
-    focus_handle: FocusHandle,
-}
-
-impl ConfirmModal {
-    fn press(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(answer) = self.answer.take() {
-            answer.send(index).ok();
-        }
-        cx.emit(DismissEvent);
-    }
-
-    fn confirm(&mut self, _: &menu::Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        self.press(0, cx);
-    }
-
-    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(DismissEvent);
-    }
-}
-
-impl EventEmitter<DismissEvent> for ConfirmModal {}
-
-impl Focusable for ConfirmModal {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl ModalView for ConfirmModal {}
-
-impl Render for ConfirmModal {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let buttons: Vec<_> = self
-            .buttons
-            .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                Button::new(("fyx-confirm", index), label.clone())
-                    .style(if index == 0 {
-                        ButtonStyle::Filled
-                    } else {
-                        ButtonStyle::Subtle
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.press(index, cx)))
-            })
-            .collect();
-        v_flex()
-            .track_focus(&self.focus_handle)
-            .elevation_3(cx)
-            .w(rems(34.))
-            .p_3()
-            .gap_2()
-            .bg(cx.theme().colors().elevated_surface_background)
-            .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(Self::cancel))
-            .child(Label::new(self.title.clone()))
-            .when_some(self.detail.clone(), |this, detail| {
-                this.child(div().children(detail.lines().map(|line| {
-                    Label::new(line.to_string())
-                        .size(LabelSize::Small)
-                        .color(ui::Color::Muted)
-                })))
-            })
-            .child(h_flex().justify_end().gap_1().children(buttons))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::TestAppContext;
 
     #[gpui::test]
-    async fn test_choose_filters_and_confirm_answers(cx: &mut TestAppContext) {
+    async fn test_choose_filters_and_answers(cx: &mut TestAppContext) {
         crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         let project = project::Project::test(fs, [], cx).await;
@@ -359,38 +256,5 @@ mod tests {
             Ok(Some(1)),
             "the filter leaves TODOs only"
         );
-
-        let mut answer = workspace.update_in(cx, |workspace, window, cx| {
-            confirm(
-                workspace,
-                "Install?",
-                Some(
-                    "It asks for:
-Nothing",
-                ),
-                &["Install", "Cancel"],
-                window,
-                cx,
-            )
-        });
-        crate::decoration_tests::redraw(cx);
-        cx.dispatch_action(menu::Confirm);
-        cx.run_until_parked();
-        assert_eq!(answer.try_recv(), Ok(Some(0)));
-
-        let mut answer = workspace.update_in(cx, |workspace, window, cx| {
-            confirm(
-                workspace,
-                "Install?",
-                None,
-                &["Install", "Cancel"],
-                window,
-                cx,
-            )
-        });
-        crate::decoration_tests::redraw(cx);
-        cx.dispatch_action(menu::Cancel);
-        cx.run_until_parked();
-        assert!(answer.try_recv().is_err(), "Escape answers nothing");
     }
 }

@@ -141,7 +141,7 @@ pub(crate) fn open(open: PseudoOpen, cx: &mut App) {
         window
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| {
-                    add_tab(workspace, terminal.clone(), Some(title), window, cx)
+                    add_tab(workspace, terminal.clone(), Some(title), false, window, cx)
                 })
             })
             .is_ok()
@@ -171,11 +171,12 @@ pub(crate) fn target_workspace(cx: &App) -> Option<(AnyWindowHandle, Entity<Work
     })
 }
 
-/// Opens the tab without focus: the extension, not the user, asked for it.
+/// Opens the tab; without focus when the extension, not the user, asked for it.
 pub(crate) fn add_tab(
     workspace: &mut Workspace,
     terminal: Entity<Terminal>,
     title: Option<String>,
+    focus: bool,
     window: &mut gpui::Window,
     cx: &mut gpui::Context<Workspace>,
 ) {
@@ -200,10 +201,10 @@ pub(crate) fn add_tab(
         Some(pane) => {
             workspace.open_panel::<TerminalPanel>(window, cx);
             pane.update(cx, |pane, cx| {
-                pane.add_item(Box::new(view), true, false, None, window, cx)
+                pane.add_item(Box::new(view), true, focus, None, window, cx)
             });
         }
-        None => workspace.add_item_to_active_pane(Box::new(view), None, false, window, cx),
+        None => workspace.add_item_to_active_pane(Box::new(view), None, focus, window, cx),
     }
 }
 

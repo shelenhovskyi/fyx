@@ -14,7 +14,6 @@ use workspace::{Toast, Workspace, notifications::NotificationId};
 use crate::{
     UiExtensionRegistry,
     consent::ConsentRecord,
-    install::describe_capability_ids,
     install_store::{InstallStore, StoreState},
 };
 
@@ -211,6 +210,67 @@ pub(crate) async fn grant_and_rescan(
     fs: Arc<dyn Fs>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
+    record_consent_and_rescan(store, extension_id, None, fs, cx).await
+}
+
+/// [`grant_and_rescan`] with the grouped install dialog's answer (0.4, §C.2): the lines it
+/// showed and the T2 items the user ticked. Items it did not show keep their state.
+pub(crate) async fn install_consent_and_rescan(
+    store: &InstallStore,
+    extension_id: &str,
+    lines: &[crate::consent_model::ItemLine],
+    ticked: &[crate::consent_model::ConsentItem],
+    fs: Arc<dyn Fs>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    record_consent_and_rescan(store, extension_id, Some((lines, ticked)), fs, cx).await
+}
+
+/// An update's dialog (§C.2, §C.5): the lines it adds or widens, which show unticked (an item
+/// left unticked is denied, the others keep their state), and a note on what it no longer asks
+/// for.
+pub(crate) fn update_lines(
+    before: &[crate::consent_model::ItemLine],
+    after: Vec<crate::consent_model::ItemLine>,
+) -> (Vec<crate::consent_model::ItemLine>, Option<String>) {
+    let diff = crate::consent_model::consent_diff_lines(before, &after);
+    let removed = (!diff.removed.is_empty()).then(|| {
+        let titles: Vec<&str> = diff
+            .removed
+            .iter()
+            .map(|line| line.title.as_str())
+            .collect();
+        format!("No longer asks for: {}.", titles.join("; "))
+    });
+    (crate::consent_model::new_lines(&diff), removed)
+}
+
+/// The manifest of the active version of an installed extension.
+pub(crate) async fn installed_manifest(
+    store: &InstallStore,
+    extension_id: &str,
+    fs: &dyn Fs,
+) -> Result<Option<ui_ext_wasm::UiManifest>> {
+    let state = store.state(fs).await?;
+    let Some(entry) = state.extensions.get(extension_id) else {
+        return Ok(None);
+    };
+    let dir = store.version_dir(extension_id, &entry.active);
+    Ok(ui_ext_wasm::UiManifest::read(fs, &dir)
+        .await?
+        .map(|(_, manifest)| manifest))
+}
+
+async fn record_consent_and_rescan(
+    store: &InstallStore,
+    extension_id: &str,
+    answer: Option<(
+        &[crate::consent_model::ItemLine],
+        &[crate::consent_model::ConsentItem],
+    )>,
+    fs: Arc<dyn Fs>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
     let state = store.state(fs.as_ref()).await?;
     if let Some(entry) = state.extensions.get(extension_id) {
         let dir = store.version_dir(extension_id, &entry.active);
@@ -226,8 +286,16 @@ pub(crate) async fn grant_and_rescan(
             .await?;
             cx.update(|cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
-                    registry.update(cx, |registry, cx| {
-                        registry.grant_consent(extension_id, record, fs.clone(), cx)
+                    registry.update(cx, |registry, cx| match answer {
+                        Some((lines, ticked)) => registry.install_consent(
+                            extension_id,
+                            record,
+                            lines,
+                            ticked,
+                            fs.clone(),
+                            cx,
+                        ),
+                        None => registry.grant_consent(extension_id, record, fs.clone(), cx),
                     });
                 }
             });
@@ -365,28 +433,46 @@ fn install_package(
             let current = state
                 .extensions
                 .get(info.extension_id.as_ref())
-                .map(|entry| format!("\nInstalled now: {}", entry.active))
-                .unwrap_or_default();
-            let detail = file_install_detail(&info, &package, &current);
-            let answer = workspace.update_in(cx, |workspace, window, cx| {
-                crate::choice::confirm(
-                    workspace,
-                    &format!("Install {} {}?", info.extension_id, info.version),
-                    Some(&detail),
-                    &["Install", "Cancel"],
-                    window,
-                    cx,
-                )
-            })?;
-            if answer.await != Ok(0) {
-                return Ok(None);
+                .map(|entry| entry.active.clone());
+            // The grouped dialog of §C.2. Over an installed version it lists only what is new or
+            // widened; the other items keep their state.
+            let mut lines = crate::consent_model::consent_items(&info.manifest);
+            let mut notes = file_install_notes(&info, &package, current.as_ref());
+            if current.is_some() {
+                let before = installed_manifest(&store, &info.extension_id, fs.as_ref())
+                    .await?
+                    .as_ref()
+                    .map(crate::consent_model::consent_items)
+                    .unwrap_or_default();
+                let (shown, removed) = update_lines(&before, lines);
+                lines = shown;
+                notes.extend(removed);
             }
+            let text = crate::consent_dialog::ConsentDialogText {
+                title: format!("Install {} {}?", info.extension_id, info.version),
+                notes,
+                confirm: "Install".into(),
+            };
+            let answer = workspace.update_in(cx, |workspace, window, cx| {
+                crate::consent_dialog::ask_consent(workspace, text, lines.clone(), window, cx)
+            })?;
+            let Ok(ticked) = answer.await else {
+                return Ok(None);
+            };
             let source = crate::install_store::VersionSource::local_file(&bytes);
             let installed = store
                 .install_package_bytes(bytes, &label, source, None, fs.as_ref())
                 .await?;
             let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
-            grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
+            install_consent_and_rescan(
+                &store,
+                &installed.extension_id,
+                &lines,
+                &ticked,
+                fs.clone(),
+                cx,
+            )
+            .await?;
             let loaded = load_outcome(waiter, cx).await;
             let done = match installed.previous {
                 Some(previous) => format!(
@@ -413,23 +499,25 @@ fn install_package(
     .detach();
 }
 
-/// The file-install dialog's text: every item it is granted, hosts and programs included
-/// (integration-5 R9), and the Zed-extension warning when the package has one (decision Q1).
-pub(crate) fn file_install_detail(
+/// The file-install dialog's notes: the Zed-extension warning when the package has one
+/// (decision Q1), where it comes from, and the version it replaces.
+pub(crate) fn file_install_notes(
     info: &crate::install_store::PackageInfo,
     package: &std::path::Path,
-    current: &str,
-) -> String {
-    format!(
-        "It asks for:\n{}\n{}\nUnsigned, not from the registry.\nPackage: {}{current}",
-        describe_capability_ids(&info.manifest.consent_items()).join("\n"),
-        if info.zed_extension {
-            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
-        } else {
-            String::new()
-        },
-        package.display(),
-    )
+    current: Option<&semver::Version>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if info.zed_extension {
+        notes.push(crate::install::ZED_EXTENSION_WARNING.to_string());
+    }
+    notes.push(format!(
+        "Unsigned, not from the registry. Package: {}.",
+        package.display()
+    ));
+    if let Some(current) = current {
+        notes.push(format!("Installed now: {current}."));
+    }
+    notes
 }
 
 #[derive(Clone, Copy)]

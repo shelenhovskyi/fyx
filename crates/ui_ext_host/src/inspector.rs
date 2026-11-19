@@ -118,6 +118,7 @@ fn describe_props(props: &Props) -> String {
             canvas.height,
             short(&canvas.description)
         ),
+        Props::Terminal(terminal) => format!("{kind} handle {}", terminal.handle),
         Props::Flex(_) => kind.to_string(),
     }
 }

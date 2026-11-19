@@ -11,6 +11,12 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"
+# On the Windows dev box a FULL run, green or red, ends by sweeping and pruning the target dirs
+# (script/fyx-disk-guard; tasks/W0-integrator.md, "Disk"). Never in CI.
+if [[ "${FULL:-0}" == "1" && "${CI:-}" != "true" && -x script/fyx-disk-guard ]] \
+    && command -v powershell >/dev/null 2>&1; then
+    trap 'script/fyx-disk-guard || true' EXIT
+fi
 
 # Workspace-wide checks (spec decision 27). They do not depend on which crates changed, so they
 # run first and on every gate, even one with no crate changes. See docs/fyx/ci.md.

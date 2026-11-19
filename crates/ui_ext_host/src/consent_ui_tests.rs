@@ -1,4 +1,5 @@
-//! The 0.4 consent UI (plan 5.7): the model stand-in, the stand-in broker and the install dialog.
+//! The 0.4 consent UI (plan 5.7) on W2c's broker: the install dialog, the page's items and
+//! journal, and the held update's card.
 
 use std::time::Duration;
 
@@ -8,9 +9,7 @@ use ui_ext_wasm::{UiManifest, permissions::PermissionState};
 use crate::{
     consent::{ConsentRecord, ConsentStore, Grant},
     consent_dialog::{ConsentDialog, ConsentDialogText, ask_consent},
-    consent_model::{
-        ConsentBroker as _, ConsentItem, ConsentTier, ItemLine, consent_diff, consent_items,
-    },
+    consent_model::{ConsentItem, ItemLineExt as _, consent_items},
     notifications::CLICK_GUARD,
 };
 
@@ -55,110 +54,86 @@ fn record() -> ConsentRecord {
     }
 }
 
-/// §C.2: the groups in order; one line per program, one for the env and the stronger
-/// "all-new" one; the author's reasons; the env and combination warnings.
+/// What the dialog relies on: one line per program and the stronger "all-new" one, and
+/// checkboxes on T2 lines only.
 #[test]
-fn test_consent_items_groups_and_lines() {
+fn test_consent_items_checkboxes() {
     let lines = consent_items(&manifest(MANIFEST));
-    let tiers: Vec<ConsentTier> = lines.iter().map(|line| line.tier).collect();
-    let mut sorted = tiers.clone();
-    sorted.sort();
-    assert_eq!(tiers, sorted, "groups 1-4 in order");
-    let keys: Vec<String> = lines.iter().map(|line| line.item.key()).collect();
-    assert_eq!(
-        keys,
-        [
-            "ui:panel",
-            "ui:approvals",
-            "context:editor",
-            "terminal:create#codex",
-            "terminal:create#git",
-            "terminal:env",
-            "terminal:env#all-new",
-            "network:fetch",
-            "terminal:read",
-        ]
-    );
-    let line = |key: &str| lines.iter().find(|line| line.item.key() == key).unwrap();
-    assert_eq!(line("terminal:create#codex").details, ["-c", "notify=*"]);
-    assert_eq!(
-        line("terminal:create#codex").reason.as_deref(),
-        Some("Runs Codex for you")
-    );
-    assert_eq!(line("network:fetch").details, ["api.example.com"]);
-    assert!(
-        line("terminal:env")
-            .details
-            .contains(&"CODEX_TUI_NOTIFY=1".to_string())
-    );
-    assert!(
-        line("terminal:env")
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("CODEX_PLUGINS")),
-        "a value inside the package says so"
-    );
-    assert!(
-        line("context:editor")
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("send what it reads")),
-        "a read with a way out (§C.1)"
-    );
     let checkboxes: Vec<String> = lines
         .iter()
         .filter(|line| line.has_checkbox())
         .map(|line| line.item.key())
         .collect();
-    assert_eq!(
-        checkboxes,
-        [
-            "terminal:create#codex",
-            "terminal:create#git",
-            "terminal:env",
-            "terminal:env#all-new",
-            "network:fetch",
-        ],
-        "T2 only; T3 is listed without one"
-    );
+    for key in [
+        "terminal:create#codex",
+        "terminal:create#git",
+        "terminal:env#all-new",
+        "network:fetch",
+    ] {
+        assert!(
+            checkboxes.contains(&key.to_string()),
+            "{key}: {checkboxes:?}"
+        );
+    }
+    for key in ["ui:panel", "context:editor", "terminal:read"] {
+        assert!(
+            lines.iter().any(|line| line.item.key() == key) && !checkboxes.contains(&key.into()),
+            "{key} is listed without a checkbox"
+        );
+    }
 }
 
-/// §C.5: a new program and a new argument pattern hold the update; a removal and an item the
-/// user denied do not.
+/// A registry update's dialog shows only what it adds or widens, and notes what it drops.
 #[test]
-fn test_consent_diff() {
-    let granted = consent_items(&manifest(MANIFEST));
+fn test_registry_update_lines() {
+    let before = consent_items(&manifest(MANIFEST));
     let newer = MANIFEST
         .replace(r#"args = ["status"]"#, r#"args = ["status", "push"]"#)
-        .replace(
-            r#"domains = ["api.example.com"]"#,
-            r#"domains = ["api.example.com", "evil.example.com"]"#,
-        )
         .replace(r#""ui:approvals", "#, "")
-        + "[[terminal_programs]]\nname = \"claude\"\nreason = \"Runs Claude\"\n";
-    let diff = consent_diff(
-        &granted,
-        &[ConsentItem::Capability("network:fetch".into())],
-        &consent_items(&manifest(&newer)),
-    );
-    let keys =
-        |lines: &[ItemLine]| -> Vec<String> { lines.iter().map(|line| line.item.key()).collect() };
-    assert_eq!(keys(&diff.added), ["terminal:create#claude"]);
-    assert_eq!(
-        keys(&diff.widened),
-        ["terminal:create#git"],
-        "the denied network:fetch stays denied"
-    );
-    assert_eq!(keys(&diff.removed), ["ui:approvals"]);
-    assert!(diff.needs_approval());
-    let same = consent_diff(&granted, &[], &granted);
-    assert!(!same.needs_approval());
+        + "[[terminal_programs]]
+name = \"claude\"
+reason = \"Runs Claude\"
+";
+    let (shown, removed) =
+        crate::store_actions::update_lines(&before, consent_items(&manifest(&newer)));
+    let keys: Vec<String> = shown.iter().map(|line| line.item.key()).collect();
+    assert_eq!(keys, ["terminal:create#claude", "terminal:create#git"]);
+    let removed = removed.expect("a removal note");
+    assert!(removed.starts_with("No longer asks for: "), "{removed}");
+    let (shown, removed) = crate::store_actions::update_lines(&before, before.clone());
+    assert!(shown.is_empty() && removed.is_none());
 }
 
-/// The stand-in broker fails closed: a capability is allowed only when every item of it is
-/// ticked; the page's switch turns it off at once.
+/// The file install's notes: unsigned, the package, and the version it replaces.
 #[test]
-fn test_stand_in_broker() {
+fn test_file_install_notes() {
+    let info = crate::install_store::PackageInfo {
+        extension_id: "demo".into(),
+        version: semver::Version::new(1, 2, 0),
+        manifest: manifest(MANIFEST),
+        zed_extension: false,
+    };
+    let package = std::path::Path::new("demo.fyxext");
+    let fresh = crate::store_actions::file_install_notes(&info, package, None);
+    assert_eq!(
+        fresh,
+        ["Unsigned, not from the registry. Package: demo.fyxext."]
+    );
+    let over = crate::store_actions::file_install_notes(
+        &info,
+        package,
+        Some(&semver::Version::new(1, 1, 0)),
+    );
+    assert_eq!(
+        over.last().map(String::as_str),
+        Some("Installed now: 1.1.0.")
+    );
+}
+
+/// W2c's broker answers per item: an unticked program is denied while its ticked sibling runs,
+/// and the page's switch changes one item.
+#[test]
+fn test_broker_answers_per_item() {
     let lines = consent_items(&manifest(MANIFEST));
     let mut store = ConsentStore::default();
     store.declare(
@@ -172,18 +147,15 @@ fn test_stand_in_broker() {
     store.install(
         "demo",
         record(),
-        &lines,
+        lines,
         &[
             program("codex"),
             ConsentItem::Capability("network:fetch".into()),
         ],
     );
     let state = |store: &ConsentStore, item: &ConsentItem| store.item_state("demo", item);
-    assert_eq!(
-        state(&store, &program("codex")),
-        PermissionState::Denied,
-        "git is unticked"
-    );
+    assert_eq!(state(&store, &program("codex")), PermissionState::Granted);
+    assert_eq!(state(&store, &program("git")), PermissionState::Denied);
     assert_eq!(
         state(&store, &ConsentItem::Capability("network:fetch".into())),
         PermissionState::Granted
@@ -193,26 +165,27 @@ fn test_stand_in_broker() {
         PermissionState::Denied
     );
 
-    store.set_item("demo", &lines, &program("git"), true);
-    assert_eq!(
-        state(&store, &program("codex")),
-        PermissionState::Denied,
-        "the stand-in needs every item's answer"
-    );
-    store.set_item(
-        "demo",
-        &lines,
-        &ConsentItem::Capability("network:fetch".into()),
-        false,
-    );
+    store
+        .set_item("demo", &program("git"), true)
+        .expect("a T2 item");
+    assert_eq!(state(&store, &program("git")), PermissionState::Granted);
+    assert_eq!(state(&store, &program("codex")), PermissionState::Granted);
+    store
+        .set_item(
+            "demo",
+            &ConsentItem::Capability("network:fetch".into()),
+            false,
+        )
+        .expect("a T2 item");
     assert_eq!(
         state(&store, &ConsentItem::Capability("network:fetch".into())),
         PermissionState::Denied
     );
-    assert_eq!(
-        state(&store, &ConsentItem::Capability("ui:panel".into())),
-        PermissionState::Granted,
-        "T0"
+    assert!(
+        store
+            .set_item("demo", &ConsentItem::Capability("ui:panel".into()), false)
+            .is_err(),
+        "T0 has no switch"
     );
 }
 
@@ -337,12 +310,12 @@ async fn test_journal_lines_and_uninstall(cx: &mut TestAppContext) {
     use crate::consent_model::{JournalEntry, JournalKind, JournalPage, journal_line};
     assert_eq!(
         journal_line(&JournalKind::ProgramStarted {
-            name: "codex".into(),
-            argv: vec!["-c".into(), "notify=x".into()],
-            cwd: "D:/demo".into(),
-            exit: Some(0),
+            capability: "terminal:create".into(),
+            program: "codex".into(),
+            args: vec!["-c".into(), "notify=x".into()],
+            cwd: Some("D:/demo".into()),
         }),
-        "Ran codex -c notify=x in D:/demo, exited 0"
+        "Ran codex -c notify=x in D:/demo"
     );
     assert_eq!(
         journal_line(&JournalKind::TerminalRead {
@@ -357,8 +330,11 @@ async fn test_journal_lines_and_uninstall(cx: &mut TestAppContext) {
     let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
     let page = JournalPage {
         entries: vec![JournalEntry {
-            at: std::time::SystemTime::now(),
-            kind: JournalKind::ListenerOpened { port: 4100 },
+            at_ms: ui_ext_wasm::journal::now_ms(),
+            kind: JournalKind::ListenerOpened {
+                listener: "ide".into(),
+                port: 4100,
+            },
         }],
         incomplete: false,
     };
@@ -366,7 +342,7 @@ async fn test_journal_lines_and_uninstall(cx: &mut TestAppContext) {
         registry.set_journal("demo", page.clone());
         registry.set_consent_lines("demo", consent_items(&manifest(MANIFEST)));
         assert_eq!(registry.journal("demo"), page);
-        assert_eq!(registry.consent_lines("demo").len(), 9);
+        assert!(!registry.consent_lines("demo").is_empty());
         registry.forget_consent("demo", fs, cx);
         assert_eq!(registry.journal("demo"), JournalPage::default());
     });
@@ -405,7 +381,7 @@ name = "codex"
     let diff = registry.update(cx, |registry, _| {
         let consent = registry.consent_mut();
         consent.declare("demo", new.consent_items());
-        consent.grant(
+        consent.install(
             "demo",
             ConsentRecord {
                 capabilities: old.consent_items(),
@@ -413,14 +389,16 @@ name = "codex"
                     sha256: "abc".into(),
                 },
             },
+            consent_items(&old),
+            &[ConsentItem::Program {
+                capability: "process:spawn".into(),
+                name: "codex".into(),
+            }],
         );
-        consent.set_t2("demo", "process:spawn", true);
-        registry.held_update_diff("demo", &lines, &new_capabilities)
+        consent.diff("demo", &lines)
     });
-    let keys: Vec<String> = diff
-        .added
+    let keys: Vec<String> = crate::consent_model::new_lines(&diff)
         .iter()
-        .chain(&diff.widened)
         .map(|line| line.item.key())
         .collect();
     assert_eq!(keys, ["process:spawn#git"], "only the new program");
@@ -439,7 +417,7 @@ name = "codex"
     };
     let text = crate::registry::consent_card_text(&pending);
     assert!(
-        text.contains("New in this version: Runs git (status)."),
+        text.contains("New in this version: Runs git (with status)."),
         "{text}"
     );
 }

@@ -864,8 +864,9 @@ mod tests {
             .expect("inspects");
         assert!(info.zed_extension);
         assert!(
-            crate::store_actions::file_install_detail(&info, package, "")
-                .contains(ZED_EXTENSION_WARNING)
+            crate::store_actions::file_install_notes(&info, package, None)
+                .iter()
+                .any(|note| note == ZED_EXTENSION_WARNING)
         );
         let info = setup
             .store
@@ -874,8 +875,9 @@ mod tests {
             .expect("inspects");
         assert!(!info.zed_extension);
         assert!(
-            !crate::store_actions::file_install_detail(&info, package, "")
-                .contains(ZED_EXTENSION_WARNING)
+            !crate::store_actions::file_install_notes(&info, package, None)
+                .iter()
+                .any(|note| note == ZED_EXTENSION_WARNING)
         );
 
         // Any depth or case in a package counts (owner's Q1, `fyx_registry::runs_zed_extension`).
@@ -907,11 +909,13 @@ mod tests {
         std::fs::write(folder.join("EXTENSION.wasm"), b"zed").expect("zed extension");
         assert!(crate::install::has_zed_extension(&folder, fs).await);
         assert!(
-            crate::install::dev_install_detail(&info.manifest, &folder, true)
+            crate::install::dev_install_notes(&info.manifest, &folder, true)
+                .join(" ")
                 .contains(ZED_EXTENSION_WARNING)
         );
         assert!(
-            !crate::install::dev_install_detail(&info.manifest, &folder, false)
+            !crate::install::dev_install_notes(&info.manifest, &folder, false)
+                .join(" ")
                 .contains(ZED_EXTENSION_WARNING)
         );
         let pending = |zed_extension| crate::registry::PendingConsent {

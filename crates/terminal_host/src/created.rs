@@ -326,6 +326,9 @@ fn started_terminal<E: std::fmt::Debug>(
         return;
     }
     crate::remember_terminal(id, terminal.downgrade(), cx);
+    if let Some(front) = crate::front(cx) {
+        front.set_paste_probe(id, Arc::new(terminal.read(cx).fyx_bracketed_paste()));
+    }
     for bytes in starting.input {
         terminal.update(cx, |terminal, _| terminal.input(bytes));
     }
@@ -333,7 +336,7 @@ fn started_terminal<E: std::fmt::Debug>(
         window
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| {
-                    pseudo::add_tab(workspace, terminal.clone(), title, window, cx)
+                    pseudo::add_tab(workspace, terminal.clone(), title, false, window, cx)
                 })
             })
             .is_ok()
@@ -364,6 +367,19 @@ pub(crate) fn input(id: TerminalId, bytes: Vec<u8>, cx: &mut App) {
     }
 }
 
+/// Main thread: a bracketed paste, unless the program turned bracketed paste off since `paste`
+/// looked.
+pub(crate) fn paste(id: TerminalId, bytes: Vec<u8>, cx: &mut App) {
+    let Some(terminal) = crate::terminal_by_id(id, cx) else {
+        return;
+    };
+    if terminal.read(cx).fyx_bracketed_paste()() {
+        terminal.update(cx, |terminal, _| terminal.input(bytes));
+    } else {
+        log::warn!("fyx: dropped a paste: bracketed paste went off");
+    }
+}
+
 /// Main thread: closing a terminal that is still starting. Returns whether it was.
 pub(crate) fn cancel(id: TerminalId, cx: &mut App) -> bool {
     match cx.default_global::<Starting>().0.get_mut(&id) {
@@ -377,7 +393,7 @@ pub(crate) fn cancel(id: TerminalId, cx: &mut App) -> bool {
 
 /// Whether `cwd` is inside a visible worktree of an open project that the trust store trusts.
 /// Without a trust store (tests, a headless app) nothing is.
-fn in_trusted_worktree(cwd: &Path, cx: &mut App) -> bool {
+pub(crate) fn in_trusted_worktree(cwd: &Path, cx: &mut App) -> bool {
     let Some(trust) = TrustedWorktrees::try_get_global(cx) else {
         return false;
     };
@@ -648,6 +664,32 @@ mod tests {
         );
         assert_eq!(events.last(), Some(&TerminalEvent::Exited(HANDLE, Some(3))));
         drop(terminal);
+    }
+
+    /// The upstream hook reads the live mode, not the last rendered content.
+    #[gpui::test]
+    async fn the_paste_probe_follows_the_programs_mode(cx: &mut gpui::TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                Default::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let probe = terminal.read_with(cx, |terminal, _| terminal.fyx_bracketed_paste());
+        assert!(!probe());
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_raw_output(b"\x1b[?2004h", cx)
+        });
+        assert!(probe());
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_raw_output(b"\x1b[?2004l", cx)
+        });
+        assert!(!probe());
     }
 
     /// Reload kills the tree: the program and what it started.
