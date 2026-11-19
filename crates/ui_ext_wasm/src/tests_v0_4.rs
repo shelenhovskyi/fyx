@@ -168,6 +168,26 @@ impl CapabilityCheck for Broker {
             .copied()
             .unwrap_or(PermissionState::Granted)
     }
+
+    fn item_state(
+        &self,
+        extension_id: &str,
+        item: &crate::permissions::ConsentItem,
+    ) -> PermissionState {
+        match self.0.get(item.key().as_str()) {
+            Some(state) => *state,
+            None => self.state(extension_id, item.capability()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Recorder(Mutex<Vec<(String, crate::journal::JournalKind)>>);
+
+impl crate::journal::Journal for Recorder {
+    fn record(&self, extension_id: &str, kind: crate::journal::JournalKind) {
+        self.0.lock().unwrap().push((extension_id.into(), kind));
+    }
 }
 
 struct Worktrees(Vec<WorktreeRoot>);
@@ -188,6 +208,7 @@ struct Setup {
     states: Vec<(&'static str, PermissionState)>,
     workspace: Option<Vec<WorktreeRoot>>,
     capabilities: Vec<&'static str>,
+    journal: Arc<Recorder>,
 }
 
 impl Default for Setup {
@@ -195,6 +216,7 @@ impl Default for Setup {
         Self {
             host: Arc::default(),
             states: Vec::new(),
+            journal: Arc::default(),
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -237,6 +259,7 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         }]),
         terminal_env: Some(env),
         package_dir: Some(PathBuf::from("pkg")),
+        journal: Some(setup.journal.clone()),
         workspace: setup
             .workspace
             .clone()
@@ -368,6 +391,37 @@ async fn test_v0_4_created_terminals(cx: &mut TestAppContext) {
     assert_eq!(command(&extension, "input 1 ls").await, "done");
     // A pseudo-terminal's call on a created one is refused.
     assert_eq!(command(&extension, "out 1 x").await, "invalid-argument");
+    // The start is in the journal, with its arguments.
+    let journal = setup.journal.0.lock().unwrap().clone();
+    assert_eq!(
+        journal,
+        [(
+            "probe-v0-4".to_string(),
+            crate::journal::JournalKind::ProgramStarted {
+                capability: terminal::CAPABILITY_CREATE.into(),
+                program: shell().into(),
+                args: vec!["hi".into()],
+                cwd: None,
+            }
+        )]
+    );
+}
+
+/// §C.2: a program turned off on the extension page is denied, though the capability is on.
+#[gpui::test]
+async fn test_v0_4_a_program_turned_off(cx: &mut TestAppContext) {
+    let key: &'static str = Box::leak(format!("terminal:create#{}", shell()).into_boxed_str());
+    let setup = Setup {
+        states: vec![(key, PermissionState::Denied)],
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "denied"
+    );
+    assert!(setup.host.created.lock().unwrap().is_empty());
+    assert!(setup.journal.0.lock().unwrap().is_empty());
 }
 
 #[gpui::test]

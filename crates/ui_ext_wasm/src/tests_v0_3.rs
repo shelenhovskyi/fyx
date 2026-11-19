@@ -1103,8 +1103,9 @@ async fn test_v0_4_manifest_tables(cx: &mut TestAppContext) {
             "missing field `reason`".to_string(),
         ),
         (
+            // Known (T3), but not declarable until the T3 cards are wired.
             "api_version = \"0.4.0\"\ncapabilities = [\"terminal:read\"]\n".to_string(),
-            "unknown capability".to_string(),
+            "\"terminal:read\" is not in fyx:ui 0.4.0".to_string(),
         ),
         (
             env("TOOL_PORT = \"${listen.other.port}\""),

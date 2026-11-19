@@ -59,6 +59,7 @@ mod bindings {
 
 use bindings::fyx::ui::{host as wit_host, types as wit};
 
+mod consent_items;
 mod conversions;
 mod dispatch;
 pub mod edit;
@@ -67,6 +68,7 @@ mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 mod fyx_ui_v0_4;
 pub mod images;
+pub mod journal;
 pub mod network;
 pub mod observe;
 pub mod process;
@@ -844,6 +846,8 @@ pub struct UiState {
     observe: observe::ObserveState,
     /// The 0.4 `terminals` import: the extension's own terminals.
     terminals: terminals::TerminalState,
+    /// 0.4 (§C.4): where programs started and T3 use are recorded.
+    journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
     /// sees one answer (design.md §7).
     permission_mirror: std::collections::HashMap<&'static str, permissions::PermissionState>,
@@ -858,6 +862,7 @@ struct IoStates {
     edit: edit::EditState,
     observe: observe::ObserveState,
     terminals: terminals::TerminalState,
+    journal: Option<Arc<dyn journal::Journal>>,
 }
 
 impl UiState {
@@ -910,11 +915,13 @@ impl UiState {
             edit,
             observe,
             terminals,
+            journal,
         } = io;
         Self {
             edit,
             observe,
             terminals,
+            journal,
             capability_check,
             diagnostics,
             api,
@@ -1002,6 +1009,24 @@ impl UiState {
             });
         }
         self.permit(capability)
+    }
+
+    /// 0.4 (§C.2): whether the broker turned off one item of a granted capability, such as a
+    /// single program. Without a broker nothing is granted, so the capability check refuses.
+    fn item_denied(&self, item: &permissions::ConsentItem) -> bool {
+        self.capability_check.as_ref().is_some_and(|broker| {
+            matches!(
+                broker.item_state(&self.extension_id, item),
+                permissions::PermissionState::Denied | permissions::PermissionState::Unavailable
+            )
+        })
+    }
+
+    /// Records a journal entry, when the host keeps a journal.
+    fn journal(&self, kind: journal::JournalKind) {
+        if let Some(journal) = &self.journal {
+            journal.record(&self.extension_id, kind);
+        }
     }
 
     /// A T2 capability a synchronous 0.4 call needs now ([`terminals::t2_now`]).
@@ -1660,6 +1685,8 @@ pub struct LoadOptions {
     /// The extension's directory, for `${package}` in `terminal:env`; set by
     /// [`UiExtension::load_from_dir_with_options`].
     pub package_dir: Option<PathBuf>,
+    /// 0.4 (design §C.4): the usage journal. Without one nothing is recorded.
+    pub journal: Option<Arc<dyn journal::Journal>>,
 }
 
 impl UiExtension {
@@ -1723,6 +1750,7 @@ impl UiExtension {
             terminal_programs,
             terminal_env,
             package_dir,
+            journal,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1829,6 +1857,7 @@ impl UiExtension {
                 process_environment,
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
+                journal.clone(),
             ));
             let is_v0_3 = has_io;
             let edit_set = Arc::new(edit::EditSet::default());
@@ -1924,6 +1953,7 @@ impl UiExtension {
                                     workspace_for_terminals,
                                     terminal_environment,
                                 ),
+                                journal,
                             },
                         ),
                     );
