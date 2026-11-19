@@ -36,8 +36,8 @@ use fs::Fs;
 use futures::channel::oneshot;
 use gpui::Action as _;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Task,
-    WeakEntity, Window,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
+    Task, WeakEntity, Window,
 };
 use language::BufferEditSource;
 use project::{PathChange, Project};
@@ -331,12 +331,89 @@ pub struct TurnEntry {
     pub rule: Option<RuleMatch>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReviewSource {
     /// A diff shown with an ACP permission request, before the agent writes anything.
     Permission(PermissionRequestId),
     /// An agent's `fs/write_text_file`, held until the review is submitted.
     Write,
+    /// An extension's proposal (`fyx:ui` 0.4 `review.propose`, see [`AgentReview::propose`]):
+    /// always reviewed, never auto-accepted.
+    Extension {
+        /// The extension's name, shown in the pane.
+        name: SharedString,
+        /// The proposal's title.
+        title: SharedString,
+    },
+}
+
+/// An extension's proposed change to one file, for [`AgentReview::propose`].
+pub struct ExtensionProposal {
+    /// The change. Its session id names the extension's tool session (`fyx-ext:<ext>:<session>`),
+    /// so turns and the turn summary work as for agents.
+    pub write: AgentWrite,
+    pub extension: SharedString,
+    pub title: SharedString,
+}
+
+/// A proposal under review: its id addresses it at once ([`AgentReview::review_text`],
+/// [`AgentReview::withdraw`], [`AgentReview::close`]), the outcome arrives when it is decided.
+pub struct Proposal {
+    pub id: ReviewId,
+    /// Fails when the review closed without a decision: withdrawn, closed by the user, its session
+    /// closed, or the app quit. Nothing is to be applied then.
+    pub outcome: Task<Result<ProposalOutcome>>,
+}
+
+/// The decision on a proposal as a whole (`fyx:ui` 0.4 `review.decision`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalDecision {
+    /// Every hunk accepted, or the proposal changed nothing.
+    Accepted,
+    Partial,
+    Rejected,
+}
+
+impl ProposalDecision {
+    fn of(resolution: Resolution) -> Self {
+        match resolution {
+            Resolution::Partial { .. } => Self::Partial,
+            Resolution::RejectedAll => Self::Rejected,
+            Resolution::Unchanged | Resolution::AcceptedAll | Resolution::Pending { .. } => {
+                Self::Accepted
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposalOutcome {
+    pub decision: ProposalDecision,
+    /// The decision in detail (hunk counts); never pending.
+    pub resolution: Resolution,
+    /// The text to write, `None` when nothing was accepted.
+    pub content: Option<String>,
+    /// The old text with the accepted hunks applied: what the file holds once the outcome is
+    /// applied (the old text when nothing was accepted). Users decide hunks; they do not edit the
+    /// text inside a review.
+    pub final_content: String,
+    /// The rejected hunks and the user's comments, for the extension's tool.
+    pub feedback: Option<String>,
+}
+
+impl ProposalOutcome {
+    fn of(edit: &ProposedEdit) -> Result<Self> {
+        let resolution = edit.resolution();
+        anyhow::ensure!(!resolution.is_pending(), "the proposal is still undecided");
+        let final_content = edit.apply_accepted()?;
+        Ok(Self {
+            decision: ProposalDecision::of(resolution),
+            resolution,
+            content: (resolution != Resolution::RejectedAll).then(|| final_content.clone()),
+            final_content,
+            feedback: edit.feedback(),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,7 +454,8 @@ type PermissionResponder =
 
 enum Responder {
     Permission(PermissionResponder),
-    Write(oneshot::Sender<AgentWriteOutcome>),
+    /// A held write, operation or proposal: gets the decided edit.
+    Write(oneshot::Sender<ProposedEdit>),
 }
 
 pub struct Review {
@@ -416,8 +494,8 @@ impl Review {
         self.rule.as_ref()
     }
 
-    pub fn source(&self) -> ReviewSource {
-        self.source
+    pub fn source(&self) -> &ReviewSource {
+        &self.source
     }
 
     pub fn edit(&self) -> &ProposedEdit {
@@ -486,6 +564,9 @@ pub struct AgentReview {
     /// Resolves the paths rules are matched against (symlinks, 8.3 names). Without it (tests that
     /// set none), only the typed spellings are matched.
     fs: Option<Arc<dyn Fs>>,
+    /// Proposals whose id is handed out but whose review is not open yet (paths resolving, diff
+    /// running), with their old text. Withdrawing one removes it, and it never opens.
+    pending_proposals: HashMap<ReviewId, String>,
 }
 
 /// What the rules make of a change, once its paths are resolved.
@@ -832,17 +913,7 @@ impl AgentReview {
         paths: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<RulesVerdict>> {
-        let fs = self.fs.clone();
-        let resolve = cx.background_spawn(async move {
-            let mut resolved = Vec::with_capacity(paths.len());
-            for path in paths {
-                resolved.push(match &fs {
-                    Some(fs) => fyx_guard::paths::resolve(fs.as_ref(), &path).await,
-                    None => fyx_guard::paths::unresolved(&path),
-                });
-            }
-            resolved
-        });
+        let resolve = self.resolve_paths(paths, cx);
         cx.spawn(async move |this, cx| {
             let resolved = resolve.await;
             this.read_with(cx, |this, _| {
@@ -857,6 +928,51 @@ impl AgentReview {
                 }
             })
         })
+    }
+
+    /// Resolves `paths` off the main thread, then finds the strictest rule for them.
+    fn resolved_rule(
+        &self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<RuleMatch>>> {
+        let resolve = self.resolve_paths(paths, cx);
+        cx.spawn(async move |this, cx| {
+            let resolved = resolve.await;
+            this.read_with(cx, |this, _| this.rule_for_resolved(&resolved))
+        })
+    }
+
+    fn resolve_paths(
+        &self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Task<Vec<ResolvedPath>> {
+        let fs = self.fs.clone();
+        cx.background_spawn(async move {
+            let mut resolved = Vec::with_capacity(paths.len());
+            for path in paths {
+                resolved.push(match &fs {
+                    Some(fs) => fyx_guard::paths::resolve(fs.as_ref(), &path).await,
+                    None => fyx_guard::paths::unresolved(&path),
+                });
+            }
+            resolved
+        })
+    }
+
+    /// The paths rules match for a write: the spelling sent, and the file the buffer really is.
+    fn write_paths(write: &AgentWrite, cx: &App) -> Vec<PathBuf> {
+        let mut paths = vec![write.abs_path.clone()];
+        paths.extend(
+            write
+                .buffer
+                .read(cx)
+                .file()
+                .and_then(|file| file.as_local())
+                .map(|file| file.abs_path(cx)),
+        );
+        paths
     }
 
     /// Starts a read of the rules file at `root`; only the latest read of a root may apply.
@@ -1017,12 +1133,13 @@ impl AgentReview {
         let edit = review.edit.clone();
         match review.responder.as_ref() {
             Some(Responder::Write(_)) => {
-                let outcome = write_outcome(&edit)?;
+                // Fails here, with the review still open, when the accepted hunks cannot be applied.
+                write_outcome(&edit)?;
                 let Some(Responder::Write(sender)) = review.responder.take() else {
                     return Err(anyhow!("review was already submitted"));
                 };
                 let (turn, rule) = (review.turn, review.rule.clone());
-                if sender.send(outcome).is_ok() {
+                if sender.send(edit.clone()).is_ok() {
                     self.record(turn, &edit, rule, cx);
                 } else {
                     log::info!(
@@ -1175,6 +1292,12 @@ impl AgentReview {
         Ok(review)
     }
 
+    fn next_review_id(&mut self) -> ReviewId {
+        let id = ReviewId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
     fn insert(
         &mut self,
         session_id: acp_v2::SessionId,
@@ -1184,8 +1307,22 @@ impl AgentReview {
         rule: Option<RuleMatch>,
         cx: &mut Context<Self>,
     ) -> ReviewId {
-        let id = ReviewId(self.next_id);
-        self.next_id += 1;
+        let id = self.next_review_id();
+        self.insert_with_id(id, session_id, source, edit, responder, rule, cx);
+        id
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_with_id(
+        &mut self,
+        id: ReviewId,
+        session_id: acp_v2::SessionId,
+        source: ReviewSource,
+        edit: ProposedEdit,
+        responder: Responder,
+        rule: Option<RuleMatch>,
+        cx: &mut Context<Self>,
+    ) {
         let turn = self.turn_for(&session_id);
         self.reviews.push(Review {
             id,
@@ -1202,7 +1339,6 @@ impl AgentReview {
         });
         cx.emit(AgentReviewEvent::Opened(id));
         cx.notify();
-        id
     }
 
     pub fn open_permission_preview(
@@ -1298,17 +1434,7 @@ impl AgentReview {
                 feedback: None,
             }));
         }
-        // Rules match the file the buffer really is, as well as the spelling the agent sent.
-        let mut paths = vec![write.abs_path.clone()];
-        paths.extend(
-            write
-                .buffer
-                .read(cx)
-                .file()
-                .and_then(|file| file.as_local())
-                .map(|file| file.abs_path(cx)),
-        );
-        let verdict = self.rules_verdict(paths, cx);
+        let verdict = self.rules_verdict(Self::write_paths(&write, cx), cx);
         cx.spawn(async move |this, cx| {
             let AgentWrite {
                 session_id,
@@ -1407,32 +1533,34 @@ impl AgentReview {
             cx.notify();
             return Task::ready(write_outcome(&edit));
         }
-        let (_, receiver, alive) = self.hold(session_id, edit, rule, cx);
+        let id = self.next_review_id();
+        let (receiver, alive) = self.hold(id, ReviewSource::Write, session_id, edit, rule, cx);
         cx.spawn(async move |_, _| {
             let _alive = alive;
-            receiver
-                .await
-                .map_err(|_| anyhow!("The review of this edit was closed; the file is unchanged."))
+            let edit = receiver.await.map_err(|_| {
+                anyhow!("The review of this edit was closed; the file is unchanged.")
+            })?;
+            write_outcome(&edit)
         })
     }
 
-    /// Holds a write (or file operation) for review. The review closes by itself when the returned
-    /// `alive` sender is dropped before a decision: the request it answers went away.
+    /// Holds a write, file operation or proposal for review as review `id`. The review closes by
+    /// itself when the returned `alive` sender is dropped before a decision: the request it answers
+    /// went away.
     fn hold(
         &mut self,
+        id: ReviewId,
+        source: ReviewSource,
         session_id: acp_v2::SessionId,
         edit: ProposedEdit,
         rule: Option<RuleMatch>,
         cx: &mut Context<Self>,
-    ) -> (
-        ReviewId,
-        oneshot::Receiver<AgentWriteOutcome>,
-        oneshot::Sender<()>,
-    ) {
+    ) -> (oneshot::Receiver<ProposedEdit>, oneshot::Sender<()>) {
         let (sender, receiver) = oneshot::channel();
-        let id = self.insert(
+        self.insert_with_id(
+            id,
             session_id,
-            ReviewSource::Write,
+            source,
             edit,
             Responder::Write(sender),
             rule,
@@ -1444,7 +1572,7 @@ impl AgentReview {
             this.update(cx, |this, cx| this.write_gone(id, cx)).ok();
         })
         .detach();
-        (id, receiver, alive)
+        (receiver, alive)
     }
 
     /// The request of a held write is gone (answered, or dropped by the agent's side).
@@ -1461,6 +1589,126 @@ impl AgentReview {
 }
 
 impl AgentReview {
+    /// Opens a review of an extension's proposed change (`fyx:ui` 0.4 `review.propose`), whether
+    /// review mode is on or not. Only the user decides it: `auto_accept` (the user's patterns and
+    /// project rules) and "accept all in turn" do not apply to it. A `deny` rule rejects it at once
+    /// and "reject all in turn" rejects it as well. Nothing is written here: the caller applies the
+    /// outcome. Dropping [`Proposal::outcome`] before the decision closes the review.
+    pub fn propose(&mut self, proposal: ExtensionProposal, cx: &mut Context<Self>) -> Proposal {
+        let ExtensionProposal {
+            write,
+            extension,
+            title,
+        } = proposal;
+        let id = self.next_review_id();
+        self.pending_proposals.insert(id, write.old_text.clone());
+        let rule = self.resolved_rule(Self::write_paths(&write, cx), cx);
+        let source = ReviewSource::Extension {
+            name: extension,
+            title,
+        };
+        let outcome = cx.spawn(async move |this, cx| {
+            let AgentWrite {
+                session_id,
+                abs_path,
+                old_text,
+                new_text,
+                ..
+            } = write;
+            let rule = match rule.await {
+                Ok(rule) => rule,
+                Err(error) => {
+                    this.update(cx, |this, _| this.pending_proposals.remove(&id))
+                        .ok();
+                    return Err(error);
+                }
+            };
+            let edit = cx
+                .background_spawn(async move { ProposedEdit::new(abs_path, old_text, new_text) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.decide_proposal(id, source, session_id, edit, rule, cx)
+            })?
+            .await
+        });
+        Proposal { id, outcome }
+    }
+
+    /// The rest of [`Self::propose`], once the rule is known and the diff is made.
+    fn decide_proposal(
+        &mut self,
+        id: ReviewId,
+        source: ReviewSource,
+        session_id: acp_v2::SessionId,
+        mut edit: ProposedEdit,
+        rule: Option<RuleMatch>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ProposalOutcome>> {
+        if self.pending_proposals.remove(&id).is_none() {
+            return Task::ready(Err(anyhow!("The proposal was withdrawn.")));
+        }
+        let turn = self.turn_for(&session_id);
+        if let Some(rule) = rule.clone().filter(|rule| rule.kind == RuleKind::Deny) {
+            edit.decide_all(HunkDecision::Rejected);
+            let feedback = format!(
+                "The project's review rules deny edits to {} ({}). The file is unchanged.",
+                edit.abs_path().display(),
+                rule.describe()
+            );
+            self.record(turn, &edit, Some(rule), cx);
+            cx.notify();
+            return Task::ready(ProposalOutcome::of(&edit).map(|outcome| ProposalOutcome {
+                feedback: Some(feedback),
+                ..outcome
+            }));
+        }
+        // A proposal is never auto-accepted: an `auto_accept` rule leaves it to the user.
+        let rule = rule.filter(|rule| rule.kind != RuleKind::AutoAccept);
+        if self.turn_decision(turn) == Some(HunkDecision::Rejected) {
+            edit.decide_pending(HunkDecision::Rejected);
+        }
+        if !edit.resolution().is_pending() {
+            self.record(turn, &edit, rule, cx);
+            cx.notify();
+            return Task::ready(ProposalOutcome::of(&edit));
+        }
+        let (receiver, alive) = self.hold(id, source, session_id, edit, rule, cx);
+        cx.spawn(async move |_, _| {
+            let _alive = alive;
+            let edit = receiver
+                .await
+                .map_err(|_| anyhow!("The review of this proposal closed without a decision."))?;
+            ProposalOutcome::of(&edit)
+        })
+    }
+
+    /// The text of review `id` with the user's choices so far: the old text with the hunks
+    /// accepted until now (undecided and rejected ones left out). For a proposal whose review is not
+    /// open yet, its old text.
+    pub fn review_text(&self, id: ReviewId) -> Option<String> {
+        if let Some(old_text) = self.pending_proposals.get(&id) {
+            return Some(old_text.clone());
+        }
+        self.review(id)?.edit.apply_accepted_so_far().ok()
+    }
+
+    /// Withdraws an extension's undecided proposal: its review closes, nothing is applied, and its
+    /// outcome fails. Returns [`Self::review_text`] as it was. Fails for an unknown id, a review
+    /// that is not an extension's, or one already decided.
+    pub fn withdraw(&mut self, id: ReviewId, cx: &mut Context<Self>) -> Result<String> {
+        if let Some(old_text) = self.pending_proposals.remove(&id) {
+            return Ok(old_text);
+        }
+        let review = self.open_review_mut(id)?;
+        anyhow::ensure!(
+            matches!(review.source, ReviewSource::Extension { .. }),
+            "review {id:?} is not an extension's proposal"
+        );
+        let text = review.edit.apply_accepted_so_far()?;
+        self.close(id, cx);
+        Ok(text)
+    }
+
     /// Reviews a delete, move or copy of Zed's built-in agent. It is shown as a one-hunk review: a
     /// deleted text file as its removed content, anything else as a one-line description. Rules apply
     /// to every path the operation touches, and the strictest wins.
@@ -1538,15 +1786,17 @@ impl AgentReview {
             cx.notify();
             return Task::ready(operation_outcome(&edit, &description));
         }
-        let (id, receiver, alive) = self.hold(session_id, edit, rule, cx);
+        let id = self.next_review_id();
+        let (receiver, alive) = self.hold(id, ReviewSource::Write, session_id, edit, rule, cx);
         if let Some(review) = self.reviews.iter_mut().find(|review| review.id == id) {
             review.operation = Some(description.clone());
         }
         cx.spawn(async move |_, _| {
             let _alive = alive;
-            let outcome = receiver
+            let edit = receiver
                 .await
                 .map_err(|_| anyhow!("The review was closed: {description} did not happen."))?;
+            let outcome = write_outcome(&edit)?;
             match outcome.content {
                 Some(_) => Ok(()),
                 None => Err(anyhow!(
@@ -2403,7 +2653,7 @@ mod tests {
         let id = only_review_id(&review, cx);
         review.read_with(cx, |review, _| {
             let review = review.review(id).unwrap();
-            assert_eq!(review.source(), ReviewSource::Write);
+            assert_eq!(review.source(), &ReviewSource::Write);
             assert_eq!(review.edit().hunks().len(), 2);
             assert_eq!(review.edit().abs_path(), Path::new("/p/a.txt"));
         });
@@ -4302,5 +4552,222 @@ mod tests {
             1,
             "the host's write shows up in the agent diff"
         );
+    }
+
+    fn extension_proposal(path: &str, cx: &mut TestAppContext) -> ExtensionProposal {
+        let mut write = agent_write(path, cx);
+        write.session_id = acp_v2::SessionId::new("fyx-ext:demo:tool");
+        ExtensionProposal {
+            write,
+            extension: "Demo".into(),
+            title: "Fix the numbers".into(),
+        }
+    }
+
+    fn propose(review: &Entity<AgentReview>, path: &str, cx: &mut TestAppContext) -> Proposal {
+        let proposal = extension_proposal(path, cx);
+        let proposal = review.update(cx, |review, cx| review.propose(proposal, cx));
+        cx.run_until_parked();
+        proposal
+    }
+
+    #[gpui::test]
+    async fn a_proposal_is_reviewed_with_review_mode_off(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        assert!(!review.read_with(cx, |review, _| review.wants_review()));
+        let proposal = propose(&review, "/p/a.txt", cx);
+        let id = proposal.id;
+        assert_eq!(only_review_id(&review, cx), id);
+        assert_eq!(events.borrow().first(), Some(&AgentReviewEvent::Opened(id)));
+        review.read_with(cx, |review, _| {
+            assert_eq!(
+                review.review(id).unwrap().source(),
+                &ReviewSource::Extension {
+                    name: "Demo".into(),
+                    title: "Fix the numbers".into(),
+                }
+            );
+            assert_eq!(review.review_text(id).as_deref(), Some(OLD));
+        });
+
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 0, HunkDecision::Accepted, cx)
+                .unwrap();
+            assert_eq!(
+                review.review_text(id).as_deref(),
+                Some("ONE\ntwo\nthree\nfour\nfive\n"),
+                "the current text follows the choices made so far"
+            );
+            review
+                .set_decision(id, 1, HunkDecision::Rejected, cx)
+                .unwrap();
+            review
+                .set_comment(id, 1, Some("keep it".into()), cx)
+                .unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        let outcome = proposal.outcome.await.unwrap();
+        assert_eq!(outcome.decision, ProposalDecision::Partial);
+        assert_eq!(
+            outcome.resolution,
+            Resolution::Partial {
+                accepted: 1,
+                rejected: 1
+            }
+        );
+        assert_eq!(
+            outcome.content.as_deref(),
+            Some("ONE\ntwo\nthree\nfour\nfive\n")
+        );
+        assert_eq!(outcome.final_content, "ONE\ntwo\nthree\nfour\nfive\n");
+        assert!(outcome.feedback.unwrap().contains("keep it"));
+    }
+
+    #[gpui::test]
+    async fn a_rejected_proposal_writes_nothing(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let proposal = propose(&review, "/p/a.txt", cx);
+        review.update(cx, |review, cx| {
+            review
+                .decide_all(proposal.id, HunkDecision::Rejected, cx)
+                .unwrap();
+            review.submit(proposal.id, cx).unwrap();
+        });
+        let outcome = proposal.outcome.await.unwrap();
+        assert_eq!(outcome.decision, ProposalDecision::Rejected);
+        assert_eq!(outcome.content, None);
+        assert_eq!(outcome.final_content, OLD);
+    }
+
+    #[gpui::test]
+    async fn a_proposal_is_never_auto_accepted(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        set_test_rules(&review, r#"always_ask = ["Cargo.lock"]"#, cx);
+        review.update(cx, |review, cx| {
+            review.set_user_auto_accept(&["docs/**".to_string()], cx)
+        });
+        // An agent's write there lands without review…
+        let outcome = gate_write(&review, agent_write("/p/docs/guide.md", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(outcome.content.as_deref(), Some(NEW));
+        // …and so would the rest of a turn the user accepted.
+        let turn = review.update(cx, |review, _| {
+            review.begin_turn(&acp_v2::SessionId::new("fyx-ext:demo:tool"))
+        });
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap()
+        });
+
+        let proposal = propose(&review, "/p/docs/guide.md", cx);
+        assert_eq!(only_review_id(&review, cx), proposal.id);
+        review.read_with(cx, |review, _| {
+            let open = review.review(proposal.id).unwrap();
+            assert!(open.edit().resolution().is_pending());
+            assert_eq!(open.rule(), None, "no rule asked for it");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_deny_rule_rejects_a_proposal(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        set_test_rules(&review, r#"deny = ["*.env"]"#, cx);
+        let proposal = propose(&review, "/p/.env", cx);
+        let id = proposal.id;
+        let outcome = proposal.outcome.await.unwrap();
+        assert_eq!(outcome.decision, ProposalDecision::Rejected);
+        assert_eq!(outcome.content, None);
+        assert!(outcome.feedback.unwrap().contains("deny"));
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, AgentReviewEvent::Opened(_)))
+        );
+        review.update(cx, |review, cx| {
+            assert!(review.withdraw(id, cx).is_err(), "already decided");
+        });
+    }
+
+    #[gpui::test]
+    async fn reject_all_in_turn_rejects_a_later_proposal(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let turn = review.update(cx, |review, _| {
+            review.begin_turn(&acp_v2::SessionId::new("fyx-ext:demo:tool"))
+        });
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Rejected, cx)
+                .unwrap()
+        });
+        let proposal = propose(&review, "/p/a.txt", cx);
+        let outcome = proposal.outcome.await.unwrap();
+        assert_eq!(outcome.decision, ProposalDecision::Rejected);
+    }
+
+    #[gpui::test]
+    async fn withdrawing_a_proposal_closes_its_review(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        let proposal = propose(&review, "/p/a.txt", cx);
+        let id = proposal.id;
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 1, HunkDecision::Accepted, cx)
+                .unwrap();
+            assert_eq!(
+                review.withdraw(id, cx).unwrap(),
+                "one\ntwo\nthree\nfour\nFIVE\n"
+            );
+            assert!(review.reviews().is_empty());
+            assert!(review.withdraw(id, cx).is_err(), "already gone");
+        });
+        assert!(events.borrow().contains(&AgentReviewEvent::Closed(id)));
+        assert!(proposal.outcome.await.is_err());
+    }
+
+    #[gpui::test]
+    async fn a_proposal_withdrawn_before_its_review_opens_never_opens(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        let proposal = extension_proposal("/p/a.txt", cx);
+        let proposal = review.update(cx, |review, cx| {
+            let proposal = review.propose(proposal, cx);
+            assert_eq!(review.review_text(proposal.id).as_deref(), Some(OLD));
+            assert_eq!(review.withdraw(proposal.id, cx).unwrap(), OLD);
+            proposal
+        });
+        cx.run_until_parked();
+        assert!(proposal.outcome.await.is_err());
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+        assert!(events.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    async fn only_proposals_can_be_withdrawn(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let _held = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        review.update(cx, |review, cx| {
+            assert!(review.withdraw(id, cx).is_err());
+            assert_eq!(review.reviews().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn an_unchanged_proposal_is_accepted_at_once(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let mut proposal = extension_proposal("/p/a.txt", cx);
+        proposal.write.new_text = OLD.into();
+        let proposal = review.update(cx, |review, cx| review.propose(proposal, cx));
+        cx.run_until_parked();
+        let outcome = proposal.outcome.await.unwrap();
+        assert_eq!(outcome.decision, ProposalDecision::Accepted);
+        assert_eq!(outcome.resolution, Resolution::Unchanged);
+        assert_eq!(outcome.final_content, OLD);
     }
 }
