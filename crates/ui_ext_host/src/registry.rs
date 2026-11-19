@@ -3359,7 +3359,8 @@ fn attach_to_workspace(
     // A banner while FYX_UI_DEV_EXTENSIONS is in use: those load without consent (triage-3).
     if dev_build(cx) && !dev_extension_paths().is_empty() {
         let message = format!(
-            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent.              Unset it to stop."
+            "{DEV_EXTENSIONS_ENV} is set: its UI extensions load without asking for consent. \
+             Unset it to stop."
         );
         workspace.show_notification(
             NotificationId::named("fyx-ui-dev-extensions-env".into()),
