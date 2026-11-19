@@ -179,6 +179,10 @@ pub enum ListenerEvent {
     McpCall(McpCall),
     /// A call whose connection closed, or that the client cancelled, before the answer.
     McpCancelled(u64),
+    /// An `mcp-*` client finished the handshake (`notifications/initialized` after
+    /// `initialize`): the extension may push its first context to the connection. Once per
+    /// connection.
+    McpInitialized(McpSession),
     /// A `websocket` listener's text frame.
     Message {
         listener: String,
@@ -193,6 +197,19 @@ pub enum ListenerEvent {
         body: String,
     },
 }
+
+/// `io-event::mcp-initialized`: the client's `clientInfo` from `initialize`, each part cut to
+/// [`MAX_MCP_CLIENT_INFO_BYTES`] (empty when the client sent none).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpSession {
+    pub listener: String,
+    pub connection: u64,
+    pub client_name: String,
+    pub client_version: String,
+}
+
+/// §B.7: what [`McpSession`] keeps of the client's name and of its version.
+pub const MAX_MCP_CLIENT_INFO_BYTES: usize = 256;
 
 /// `io-event::mcp-call`.
 #[derive(Clone, Debug, PartialEq, Eq)]
