@@ -232,7 +232,8 @@ scope = "profiles"                    # "profiles" (default) or "all-new"
   - `PATH`, `PATHEXT`, `COMSPEC`, `HOME`, `USERPROFILE`, `XDG_*`, `ZDOTDIR`, `SHELL`, `TERM*`,
     `FYX_*` and `ZED_*`: names that move where a shell finds programs and its configuration, and
     the host's own names (integration-6 N1);
-  - the auth and config-dir names of §C.6.
+  - the auth and config-dir names of §C.6. A `*_TOKEN` name is allowed only when its value is
+    exactly `${listen.<name>.token}` of one `token_in_env` listener (§C.6, rule 5).
 
   This is stricter than the research, which would allow `PATH` and the loaders with a warning:
   injecting them into the user's interactive shell is the strongest form of N1's attack.
@@ -567,6 +568,10 @@ env name that selects its config dir (`CLAUDE_CONFIG_DIR`, `GEMINI_CLI_HOME`, `C
      `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
      `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, and every name ending in `_API_KEY`,
      `_TOKEN`, `_SECRET`, `_PASSWORD` or `_CREDENTIALS`.
+   - **One exception** (W2c ba7186021a): a `terminal:env` name ending in `_TOKEN` is allowed when
+     its value is exactly one `token_in_env` listener's host token, `${listen.<name>.token}`, and
+     nothing else. That token is Fyx's own, not a credential. The credential names listed by
+     name above, the account-dir names and `FYX_*` stay refused even then.
 
    The list lives in `ui_ext::process` next to `is_forbidden_env` (W2c, plan 5.5).
    Account dirs join the protected paths, like `.claude/`. An extension sees only an account
@@ -615,7 +620,10 @@ and extension host are global to the process.
 ## WIT diff (for W0)
 
 Copy-forward rule: `types`, `host` and every 0.3 interface are copied byte for byte except where
-a comment says "0.4". New parts:
+a comment says "0.4". New parts below. The sketch
+uses WIT's escape for keywords (`%list`), and no parameter is named after a keyword (`outcome`,
+not `result`). W2c's staged draft, `tasks/wit/fyx-ui-0.4.wit` on
+`claude/fyx-w2c-host-0-2-cbde2c` (145f748bbf), parses and wins where the two differ.
 
 ```wit
 // types: one new node kind, marked "0.4".
@@ -654,7 +662,7 @@ interface terminals {
     send-input: func(handle: terminal-handle, bytes: list<u8>) -> result<_, host-error>;
     close: func(handle: terminal-handle);
     set-status: func(handle: terminal-handle, status: option<terminal-status>) -> result<_, host-error>;
-    list: func() -> result<list<terminal-info>, host-error>;                             // terminal:observe
+    %list: func() -> result<list<terminal-info>, host-error>;                            // terminal:observe
     paste: func(handle: terminal-handle, text: string) -> result<_, host-error>;         // gesture
     request-read: func(handle: terminal-handle, scope: read-scope, lines: u16) -> result<u64, host-error>;  // T3, gesture
     request-write: func(handle: terminal-handle, text: string, submit: bool) -> result<u64, host-error>;    // T3, gesture
@@ -667,7 +675,7 @@ interface listeners {
     record mcp-call { call-id: u64, listener: string, connection: u64, tool: string, arguments: string }
     record mcp-error { code: s32, message: string }
     register-tools: func(listener: string, tools: list<tool-def>) -> result<_, host-error>;
-    respond: func(call-id: u64, result: result<string, mcp-error>) -> result<_, host-error>;
+    respond: func(call-id: u64, outcome: result<string, mcp-error>) -> result<_, host-error>;
     notify: func(listener: string, connection: option<u64>, method: string, params: string) -> result<_, host-error>;
     send: func(listener: string, connection: u64, text: string) -> result<_, host-error>;
     reply: func(request-id: u64, status: u16, body: string) -> result<_, host-error>;
