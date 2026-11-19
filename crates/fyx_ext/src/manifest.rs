@@ -63,8 +63,8 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         "workspace:edit",
         "agent:observe",
     ];
-    // Staged: 0.3 plus the terminal and integration capabilities (plan P5 5.5).
-    // `terminal:read` and `terminal:write` are not in it yet.
+    // Staged: 0.3 plus the terminal and integration capabilities (plan P5 5.5), the T3
+    // `terminal:read` and `terminal:write` included (design wit-0.4 §C.3).
     const V0_4: &[&str] = &[
         "ui:panel",
         "ui:status-bar",
@@ -83,6 +83,8 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         terminal::CAPABILITY_ENV,
         terminal::CAPABILITY_STATUS,
         terminal::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_READ,
+        terminal::CAPABILITY_WRITE,
         terminal::CAPABILITY_PACKAGE_FILES,
         integration::CAPABILITY_NETWORK_LISTEN,
         integration::CAPABILITY_DISCOVERY_FILE,
@@ -161,14 +163,8 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     (terminal::CAPABILITY_ENV, SINCE_V0_4),
     (terminal::CAPABILITY_STATUS, SINCE_V0_4),
     (terminal::CAPABILITY_OBSERVE, SINCE_V0_4),
-    (
-        terminal::CAPABILITY_READ,
-        CapabilityStatus::Planned("a later release"),
-    ),
-    (
-        terminal::CAPABILITY_WRITE,
-        CapabilityStatus::Planned("a later release"),
-    ),
+    (terminal::CAPABILITY_READ, SINCE_V0_4),
+    (terminal::CAPABILITY_WRITE, SINCE_V0_4),
     (terminal::CAPABILITY_PACKAGE_FILES, SINCE_V0_4),
     (integration::CAPABILITY_NETWORK_LISTEN, SINCE_V0_4),
     (integration::CAPABILITY_DISCOVERY_FILE, SINCE_V0_4),
@@ -263,6 +259,10 @@ pub struct ProcessTable {
 #[serde(deny_unknown_fields)]
 pub struct NetworkTable {
     pub domains: Vec<String>,
+    /// 0.4 (design wit-0.4 §C.2): the author's line under the item at install, required there
+    /// and refused below 0.4.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// A manifest whose required parts parsed; `report` holds what is wrong with the rest.
@@ -529,6 +529,44 @@ fn check_world_tables(table: &FyxUiTable, version: &Version, report: &mut Report
             report.error(format!(
                 "{name} needs fyx:ui {since}; this extension targets {version}"
             ));
+        }
+    }
+    check_t2_reasons(table, version, report);
+}
+
+/// `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]`, as the host's
+/// `UiManifest::check_t2_reasons`: from 0.4 every T2 item has one line of at most 200 bytes
+/// (design wit-0.4 §C.2); below 0.4 the key does not exist.
+fn check_t2_reasons(table: &FyxUiTable, version: &Version, report: &mut Report) {
+    let items = table
+        .processes
+        .iter()
+        .map(|spec| {
+            (
+                format!("[[fyx_ui.processes]] {:?}", spec.name),
+                spec.reason.as_deref(),
+            )
+        })
+        .chain(
+            table
+                .network
+                .iter()
+                .map(|network| ("[fyx_ui.network]".to_owned(), network.reason.as_deref())),
+        );
+    for (what, reason) in items {
+        match reason {
+            Some(_) if *version < Version::new(0, 4, 0) => report.error(format!(
+                "{what}: reason needs fyx:ui 0.4; this extension targets {version}"
+            )),
+            Some(reason) => {
+                if let Err(error) = terminal::check_reason(&what, reason) {
+                    report.error(error);
+                }
+            }
+            None if *version >= Version::new(0, 4, 0) => report.error(format!(
+                "{what}: a reason is required (fyx:ui 0.4): one line, shown under the item at                  install"
+            )),
+            None => {}
         }
     }
 }
@@ -1009,12 +1047,66 @@ capabilities = ["ui:panel"]
         ));
         assert!(parsed.is_err());
 
-        // terminal:read and terminal:write are not in 0.4 yet.
-        let (_, report) = check(&manifest("0.4.0", ", \"terminal:read\"", ""));
+        // The T3 terminal:read and terminal:write are declarable from 0.4, and not below.
+        let (_, report) = check(&manifest(
+            "0.4.0",
+            ", \"terminal:read\", \"terminal:write\"",
+            "",
+        ));
+        assert!(report.errors.is_empty(), "{report:?}");
+        let (_, report) = check(&manifest("0.3.0", ", \"terminal:write\"", ""));
         assert!(
-            report.errors[0].contains("\"terminal:read\" is not in fyx:ui 0.4.0"),
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("\"terminal:write\" needs fyx:ui 0.4")),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn t2_items_need_a_reason_from_0_4_and_refuse_it_below() {
+        let manifest = |version: &str, network: &str, process: &str| {
+            VALID
+                .replace(
+                    "api_version = \"0.1.0\"",
+                    &format!("api_version = \"{version}\""),
+                )
+                .replace(
+                    "[\"ui:panel\"]",
+                    "[\"ui:panel\", \"network:fetch\", \"process:spawn\"]",
+                )
+                + &format!(
+                    "
+[fyx_ui.network]
+domains = [\"api.github.com\"]
+{network}
+                     [[fyx_ui.processes]]
+name = \"git\"
+args = [\"status\"]
+{process}
+"
+                )
+        };
+        let reason = |text: &str| format!("reason = \"{text}\"");
+        let errors = |text: &str| check(text).1.errors;
+
+        let both = manifest("0.4.0", &reason("fetches zen"), &reason("shows status"));
+        assert!(errors(&both).is_empty(), "{:?}", errors(&both));
+        let errors_04 = errors(&manifest("0.4.0", "", ""));
+        assert_eq!(errors_04.len(), 2, "{errors_04:?}");
+        assert!(errors_04[0].contains("[[fyx_ui.processes]] \"git\": a reason is required"));
+        assert!(errors_04[1].contains("[fyx_ui.network]: a reason is required"));
+        let long = errors(&manifest("0.4.0", &reason(&"x".repeat(201)), &reason("ok")));
+        assert!(
+            long[0].contains("one line of at most 200 bytes"),
+            "{long:?}"
+        );
+
+        let errors_03 = errors(&manifest("0.3.0", &reason("fetches zen"), ""));
+        assert_eq!(errors_03.len(), 1, "{errors_03:?}");
+        assert!(errors_03[0].contains("reason needs fyx:ui 0.4; this extension targets 0.3.0"));
+        assert!(errors(&manifest("0.3.0", "", "")).is_empty());
     }
 
     #[test]

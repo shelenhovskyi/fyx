@@ -88,7 +88,21 @@ This is the point of 5.16. Each gap names who it is for.
    - In Gemini's sandbox (Docker) the CLI uses `host.docker.internal`, which the `Host` check
      refuses. That is a known limitation and stays one.
 
-Not in this skeleton: Gemini's hooks, and therefore agent turns. Gemini has no plugin-dir env
-like `CLAUDE_CODE_PLUGIN_DIRS`, only `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` (a settings file) or an
-installed extension. That is a separate design question for the coordinator. Until then,
-Gemini's edits outside `openDiff` show as "changed without review".
+## Hooks and turns: decided, built after the skeleton
+
+Gemini has no plugin-dir env like `CLAUDE_CODE_PLUGIN_DIRS`. The coordinator decided
+(2026-11-19):
+- The hooks go in a settings file shipped in the package. `GEMINI_CLI_SYSTEM_DEFAULTS_PATH =
+  "${package}/gemini-defaults.json"` goes into `[fyx_ui.terminal_env]`, in profile terminals
+  only. It needs `package:files` too.
+- System defaults have the lowest precedence, and nothing is written into the user's
+  `~/.gemini`, which is an account dir and protected.
+- There is no installed Gemini extension.
+- The hooks are command hooks through `fyx-relay`, as in `fyx_claude_code`. They need
+  `relay:hooks` and relay channels. They give Gemini turns:
+  - `BeforeAgent` begins a turn;
+  - `AfterAgent` ends it.
+
+  The event names must be checked against the pinned CLI when this is built.
+
+Until then, Gemini's edits outside `openDiff` show as "changed without review".
