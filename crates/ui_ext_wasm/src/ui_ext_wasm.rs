@@ -70,6 +70,7 @@ mod fyx_ui_v0_4;
 pub mod images;
 pub mod journal;
 // The WIT imports, the load options and revocation wire it next (plan 5.11).
+mod accounts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod editor_context;
 mod listeners;
@@ -78,6 +79,7 @@ pub mod observe;
 pub mod process;
 mod proposals;
 mod relay;
+pub use accounts::set_account_dirs;
 mod stderr;
 mod terminals;
 pub mod ticks;

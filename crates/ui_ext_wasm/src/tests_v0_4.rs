@@ -2507,3 +2507,88 @@ async fn test_v0_4_relay_rules_and_reloads(cx: &mut TestAppContext) {
     assert_eq!(replies.answers(), [(0, "ok".into(), String::new())]);
     assert!(replies.answers.lock().unwrap().len() == 1);
 }
+
+/// §C.6: a created terminal gets `${account.<tool>}` from its project's account and never the
+/// user's own tools' config-dir variables; account dirs are protected (no terminal starts in
+/// one, no proposal, diagnostic or absolute path names a file in one). Throwaway temp dirs only.
+#[gpui::test]
+async fn test_v0_4_account_profiles(cx: &mut TestAppContext) {
+    use ui_ext::context::{DiagnosticSeverity::Error, FileDiagnostics};
+    let root = context_worktree("accounts");
+    let work = root.join(".claude-work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("x.rs"), "").unwrap();
+    crate::set_account_dirs(Some(Arc::new(crate::accounts::tests::FakeAccounts {
+        profiles: vec![("claude", work.clone(), root.clone())],
+        env_names: vec!["AIDER_HOME"],
+    })));
+    let source = Arc::new(FakeDiagnostics::default());
+    *source.files.lock().unwrap() = vec![
+        FileDiagnostics {
+            path: file("a.rs"),
+            diagnostics: vec![diagnostic(Error, 1, "types")],
+        },
+        FileDiagnostics {
+            path: file(".claude-work/x.rs"),
+            diagnostics: vec![diagnostic(Error, 0, "account")],
+        },
+    ];
+    let reviewer = Arc::new(FakeReviewer::default());
+    let mut setup = diagnostics_setup(&source, &root);
+    setup
+        .capabilities
+        .push(ui_ext::review::CAPABILITY_REVIEW_PROPOSE);
+    setup.review = Some(reviewer.clone());
+    setup.env = vec![
+        ("PROBE_DIR", "${account.claude}"),
+        ("PROBE_CODEX", "${account.codex}"),
+        ("AIDER_HOME", "x"),
+    ];
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "1"
+    );
+    let created = setup.host.created.lock().unwrap().clone();
+    assert_eq!(
+        created[0].env,
+        [("PROBE_DIR".to_string(), work.to_string_lossy().into_owned())],
+        "no codex account: left out; AIDER_HOME is a user tool's variable"
+    );
+    assert_eq!(
+        command(&extension, "propose 1 .claude-work/notes.md new 0 s x").await,
+        "not-permitted"
+    );
+    assert_eq!(
+        command(&extension, "diag 1 .claude-work/x.rs").await,
+        "not-permitted"
+    );
+    let all = command(&extension, "diag-all").await;
+    assert!(
+        all.starts_with("a.rs:") && !all.contains(".claude-work"),
+        "{all}"
+    );
+    assert_eq!(
+        command(&extension, "abs 1 .claude-work/x.rs").await,
+        "not-permitted"
+    );
+    drop(extension);
+
+    // A terminal (or process) never starts in an account dir.
+    let inside = Setup {
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: work.clone(),
+            trusted: true,
+        }]),
+        ..Setup::default()
+    };
+    let extension = load(&inside, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "invalid-argument"
+    );
+    assert!(inside.host.created.lock().unwrap().is_empty());
+    crate::set_account_dirs(None);
+    std::fs::remove_dir_all(&root).ok();
+}

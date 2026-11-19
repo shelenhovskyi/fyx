@@ -236,7 +236,14 @@ impl ReviewHandle {
         }
         // A new file needs its worktree named; an existing one is found in the only worktree
         // that has it.
-        absolute(&roots(self.workspace.as_deref())?, path)
+        let full = absolute(&roots(self.workspace.as_deref())?, path)?;
+        if crate::accounts::in_account_dir(&full) {
+            return Err(error(
+                HostErrorCode::NotPermitted,
+                "a file in an account profile's dir",
+            ));
+        }
+        Ok(full)
     }
 }
 

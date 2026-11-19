@@ -2,6 +2,22 @@
 
 Older history: `archive/W2c.md`.
 
+## API note: account profiles (5.20, §C.6)
+
+- Settings and resolver (W1's, `settings_content/src/fyx.rs`):
+  - `FyxAccountsSettingsContent::accounts()`
+  - `account(tool, name)` for a profile
+  - `project_account(tool, roots)` / `project_accounts(path)` for a project
+  - each gives a `FyxAccount {name, tool, env, dir, color}`; `env_entry()` is the one
+    `(env name, dir)`.
+- Extension runtime: `ui_ext::terminal::AccountDirs` (`dirs()`, `env_names()`,
+  `account_dir(tool, cwd)`), set once with `ui_ext_wasm::set_account_dirs(Some(..))`.
+  - It resolves `${account.<tool>}` for terminal:create.
+  - It drops user tools' env names from that env.
+  - It protects account dirs: no cwd, proposal, diagnostic, context file or absolute path in
+    one.
+  - `ui_ext::terminal::in_account_dirs(path, dirs)` compares paths as written and as resolved.
+
 ## Handoff (2026-11-19, twelfth context)
 
 - **Branch** claude/fyx-w2c-host-0-2-cbde2c (push every ready before reporting it).
@@ -15,6 +31,8 @@ Older history: `archive/W2c.md`.
   `mcp-initialized(mcp-session)` is proposed to W0. Until it is staged, `fyx_ui_v0_4.rs`
   maps it to `None`; then map it there, add a probe report and a tests_v0_4 test. W10 has
   the §B.7 note.
+- **5.20 extension side:** `ui_ext::terminal::AccountDirs`, `ui_ext_wasm::set_account_dirs`
+  (see the API note). W1 implements it from `FyxAccountsSettingsContent`.
 - **fyx_guard_core (7aa8211636):** root `Cargo.toml` member and workspace dep and
   `Cargo.lock` are local only until W0 merges them.
 - **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `RelayRequest` => None
