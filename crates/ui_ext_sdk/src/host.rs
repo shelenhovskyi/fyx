@@ -162,6 +162,9 @@ pub enum HostEffect {
     /// A [`crate::terminals`] function (`fyx:ui` 0.4).
     #[cfg(feature = "fyx-ui-0-4")]
     Terminal(crate::terminals::TerminalEffect),
+    /// A [`crate::listeners`] function (`fyx:ui` 0.4).
+    #[cfg(feature = "fyx-ui-0-4")]
+    Listener(crate::listeners::ListenerEffect),
 }
 
 #[cfg(all(feature = "fyx-ui-0-3", not(target_arch = "wasm32")))]

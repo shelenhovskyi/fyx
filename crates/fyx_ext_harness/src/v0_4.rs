@@ -1,7 +1,8 @@
 //! The staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
 //! `v0_3` runs them (this file started as a copy of it), plus `terminals` on the fakes of
-//! [`crate::terminals`] (plan 5.10). The other 0.4 interfaces (`listeners`, `relay`, `review`,
-//! `context`, `approvals`) trap when called ([`define_unlinked_as_traps`]) until plan 5.14.
+//! [`crate::terminals`] (plan 5.10) and `listeners` on those of [`crate::listeners`] (plan
+//! 5.14). The other 0.4 interfaces (`relay`, `review`, `context`, `approvals`) trap when called
+//! ([`define_unlinked_as_traps`]) until the rest of plan 5.14.
 //!
 //! A `terminal` node becomes `ui_ext::v0_2::Props::Terminal`; [`terminal_node_handle`] reads its
 //! handle.
@@ -24,9 +25,9 @@ pub(crate) mod bindings {
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
     agent_observe as wit_observe, decorations as wit_decorations, host as wit_host,
-    images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
-    permissions as wit_permissions, process as wit_process, terminals as wit_terminals,
-    types as wit, workspace_edit as wit_edit,
+    images as wit_images, io as wit_io, listeners as wit_listeners, network as wit_network,
+    notifications as wit_notifications, permissions as wit_permissions, process as wit_process,
+    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 fn result(
@@ -57,6 +58,7 @@ pub(crate) fn add_to_linker(
     wit_permissions::add_to_linker::<_, State>(linker, |state| state)?;
     wit_decorations::add_to_linker::<_, State>(linker, |state| state)?;
     wit_terminals::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_listeners::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
@@ -402,6 +404,9 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                 wit_permission_state(state),
             )))
         }
+        // W2c's `IoEvent::Listener` (plan 5.11; not on every branch yet). The harness delivers listener events itself (`HostIo::Listener`).
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }
 
@@ -505,8 +510,9 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.4 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 11] = [
+const LINKED_INTERFACES: [&str; 12] = [
     "terminals",
+    "listeners",
     "decorations",
     "permissions",
     "types",
@@ -1273,4 +1279,106 @@ fn t3_unavailable(what: &str) -> wit_host::HostError {
         message: format!("{what}: the harness has no user terminals for a T3 request"),
     }
     .into()
+}
+
+/// A listener event for the `handle-io` export.
+pub(crate) fn listener_io_event(event: crate::listeners::ListenerEvent) -> wit_io::IoEvent {
+    use crate::listeners::ListenerEvent;
+    match event {
+        ListenerEvent::McpCall(call) => wit_io::IoEvent::McpCall(wit_listeners::McpCall {
+            call_id: call.call_id,
+            listener: call.listener,
+            connection: call.connection,
+            tool: call.tool,
+            arguments: call.arguments,
+        }),
+        ListenerEvent::McpCancelled(id) => wit_io::IoEvent::McpCancelled(id),
+        ListenerEvent::Message {
+            listener,
+            connection,
+            text,
+        } => wit_io::IoEvent::ListenerMessage((listener, connection, text)),
+        ListenerEvent::Request {
+            id,
+            listener,
+            path,
+            body,
+        } => wit_io::IoEvent::ListenerRequest((id, listener, path, body)),
+    }
+}
+
+/// `listeners`, on [`crate::listeners::FakeListeners`].
+impl wit_listeners::Host for State {
+    fn register_tools(
+        &mut self,
+        listener: String,
+        tools: Vec<wit_listeners::ToolDef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            listener.len()
+                + tools
+                    .iter()
+                    .map(|tool| tool.name.len() + tool.description.len() + tool.input_schema.len())
+                    .sum::<usize>(),
+        )?;
+        let tools = tools
+            .into_iter()
+            .map(|tool| crate::listeners::ToolDef {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect();
+        result(self.listeners.register_tools(&listener, tools))
+    }
+
+    fn respond(
+        &mut self,
+        call_id: u64,
+        outcome: Result<String, wit_listeners::McpError>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(match &outcome {
+            Ok(text) => text.len(),
+            Err(error) => error.message.len(),
+        })?;
+        let outcome = outcome.map_err(|error| crate::listeners::McpError {
+            code: error.code,
+            message: error.message,
+        });
+        result(self.listeners.respond(call_id, outcome))
+    }
+
+    fn notify(
+        &mut self,
+        listener: String,
+        connection: Option<u64>,
+        method: String,
+        params: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(listener.len() + method.len() + params.len())?;
+        result(
+            self.listeners
+                .notify(&listener, connection, &method, &params),
+        )
+    }
+
+    fn send(
+        &mut self,
+        listener: String,
+        connection: u64,
+        text: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(listener.len() + text.len())?;
+        result(self.listeners.send(&listener, connection, &text))
+    }
+
+    fn reply(
+        &mut self,
+        request_id: u64,
+        status: u16,
+        body: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(body.len())?;
+        result(self.listeners.reply(request_id, status, body))
+    }
 }

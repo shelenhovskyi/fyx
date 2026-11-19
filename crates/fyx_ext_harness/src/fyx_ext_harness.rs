@@ -57,6 +57,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
 mod compile_cache;
+mod listeners;
 mod notifications;
 mod terminals;
 mod v0_2;
@@ -67,6 +68,7 @@ pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
 };
 pub use compile_cache::cache_compiled_components;
+pub use listeners::{ListenerEvent, McpCall, McpError, ToolDef};
 pub use terminals::{FakeTerminal, plain_text};
 
 use api_state::ApiState;
@@ -313,6 +315,8 @@ pub(crate) struct State {
     api: ApiState,
     /// 0.4 terminals.
     terminals: terminals::FakeTerminals,
+    /// 0.4 `network:listen`.
+    listeners: listeners::FakeListeners,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -550,6 +554,7 @@ enum Bindings {
 enum HostIo {
     Model(ui_ext::network::IoEvent),
     Terminal(ui_ext::terminal::TerminalEvent),
+    Listener(listeners::ListenerEvent),
 }
 
 /// An event for `handle-io` in the component's world.
@@ -851,8 +856,11 @@ impl Bindings {
             (Self::V0_4(_), HostIo::Terminal(event)) => {
                 Some(WorldIo::V0_4(v0_4::terminal_io_event(event)))
             }
+            (Self::V0_4(_), HostIo::Listener(event)) => {
+                Some(WorldIo::V0_4(v0_4::listener_io_event(event)))
+            }
             (_, HostIo::Model(event)) => v0_3::io_event(event).map(WorldIo::V0_3),
-            (_, HostIo::Terminal(_)) => None,
+            (_, HostIo::Terminal(_) | HostIo::Listener(_)) => None,
         }
     }
 
@@ -1096,6 +1104,35 @@ impl Harness {
 
     /// Like [`Harness::load`], with the `[fyx_ui].capabilities` of a manifest.
     pub fn load_with_capabilities(wasm: &[u8], capabilities: &[&str]) -> Result<Self> {
+        Self::load_with_listeners(wasm, capabilities, Vec::new())
+    }
+
+    /// Like [`Harness::load_with_capabilities`], with the `[[fyx_ui.listeners]]` of a manifest
+    /// (0.4, design.md B.7), checked as the host checks them: `network:listen` is declared and
+    /// `ui_ext::integration::IntegrationTables::check` passes. They are known before the
+    /// component is instantiated, so its constructor may register tools.
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn load_with_listeners(
+        wasm: &[u8],
+        capabilities: &[&str],
+        listeners: Vec<ui_ext::integration::ListenerSpec>,
+    ) -> Result<Self> {
+        if !listeners.is_empty() {
+            if !capabilities.contains(&ui_ext::integration::CAPABILITY_NETWORK_LISTEN) {
+                anyhow::bail!(
+                    "[[fyx_ui.listeners]] needs the {} capability",
+                    ui_ext::integration::CAPABILITY_NETWORK_LISTEN
+                );
+            }
+            ui_ext::integration::IntegrationTables {
+                listeners: &listeners,
+                ..Default::default()
+            }
+            .check()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        }
+        let mut fake_listeners = listeners::FakeListeners::default();
+        fake_listeners.set_specs(listeners);
         let runtime = runtime()?;
         let section_version = api_version_section(wasm)?;
         let component = compile_cache::compile(&runtime.engine, wasm)?;
@@ -1142,6 +1179,7 @@ impl Harness {
                         .collect::<Vec<_>>(),
                     Vec::new(),
                 ),
+                listeners: fake_listeners,
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1273,7 +1311,14 @@ impl Harness {
         let component_path = dir.join(&component);
         let wasm = std::fs::read(&component_path)
             .with_context(|| format!("reading {component_path:?}"))?;
-        let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
+        let listeners: Vec<ui_ext::integration::ListenerSpec> = match table.get("listeners") {
+            Some(listeners) => listeners
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.listeners]] in {manifest_path:?}"))?,
+            None => Vec::new(),
+        };
+        let mut harness = Self::load_with_listeners(&wasm, &capabilities, listeners)
             .with_context(|| format!("loading {dir:?}"))?;
         let version = table
             .get("api_version")
@@ -1330,6 +1375,9 @@ impl Harness {
             harness = harness
                 .with_terminal_profiles(profiles)
                 .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(id) = manifest.get("id").and_then(toml::Value::as_str) {
+            harness.store.data_mut().listeners.set_extension_id(id);
         }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
@@ -1570,13 +1618,13 @@ impl Harness {
     /// `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the
     /// host does.
     pub fn profile_command_line(&self, id: &str) -> Result<(String, Vec<String>)> {
-        struct Cx(String);
+        struct Cx(String, BTreeMap<String, u16>);
         impl ui_ext::terminal::TemplateContext for Cx {
             fn package(&self) -> Option<String> {
                 Some(self.0.clone())
             }
-            fn listen_port(&self, _: &str) -> Option<u16> {
-                None
+            fn listen_port(&self, name: &str) -> Option<u16> {
+                self.1.get(name).copied()
             }
             fn listen_token(&self, _: &str) -> Option<String> {
                 None
@@ -1593,10 +1641,19 @@ impl Harness {
             .iter()
             .find(|profile| profile.id == id)
             .with_context(|| format!("{id:?} is not in [[fyx_ui.terminal_profiles]]"))?;
-        let cx = Cx(self.package.as_ref().map_or_else(
-            || "<package>".to_owned(),
-            |dir| dir.to_string_lossy().replace('\\', "/"),
-        ));
+        let listeners = &self.store.data().listeners;
+        let ports = listeners
+            .specs()
+            .iter()
+            .filter_map(|spec| Some((spec.name.clone(), listeners.port(&spec.name)?)))
+            .collect();
+        let cx = Cx(
+            self.package.as_ref().map_or_else(
+                || "<package>".to_owned(),
+                |dir| dir.to_string_lossy().replace('\\', "/"),
+            ),
+            ports,
+        );
         let args = profile
             .args
             .iter()
@@ -1660,6 +1717,86 @@ impl Harness {
             .iter()
             .filter_map(|node| v0_4::terminal_node_handle(&node.props))
             .collect()
+    }
+
+    /// The tools the extension registered on listener `name` (0.4), in its order.
+    pub fn registered_tools(&self, name: &str) -> Vec<ToolDef> {
+        self.store.data().listeners.tools(name).to_vec()
+    }
+
+    /// Whether listener `name` is open: declared and granted.
+    pub fn listener_open(&self, name: &str) -> bool {
+        self.store.data().listeners.is_open(name)
+    }
+
+    /// `${listen.<name>.port}` while the listener is open: a fake port, no socket.
+    pub fn listener_port(&self, name: &str) -> Option<u16> {
+        self.store.data().listeners.port(name)
+    }
+
+    /// Grants or revokes `network:listen#<name>`. Revoking closes the listener: its connections
+    /// end, and [`Harness::deliver_io`] delivers `mcp-cancelled` for their open calls.
+    pub fn set_listener_granted(&mut self, name: &str, granted: bool) {
+        self.store.data_mut().listeners.set_granted(name, granted);
+    }
+
+    /// A client connects to the websocket kind `name` (`mcp-websocket`, `mcp-streamable-http`
+    /// as one session, or `websocket`), having passed the host's token, `Origin` and `Host`
+    /// checks. Returns the connection id the extension sees.
+    pub fn connect(&mut self, name: &str) -> Result<u64> {
+        self.store
+            .data_mut()
+            .listeners
+            .connect(name)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The client closes `connection`; [`Harness::deliver_io`] delivers `mcp-cancelled` for its
+    /// open calls.
+    pub fn disconnect(&mut self, connection: u64) {
+        self.store.data_mut().listeners.disconnect(connection);
+    }
+
+    /// The client sends one text frame. On an `mcp-*` listener it is a JSON-RPC message: the
+    /// host's methods are answered at once, and a `tools/call` reaches the extension as
+    /// `mcp-call` on [`Harness::deliver_io`]. On a `websocket` listener it is
+    /// `listener-message`.
+    pub fn client_send(&mut self, connection: u64, text: &str) -> Result<()> {
+        self.store
+            .data_mut()
+            .listeners
+            .client_send(connection, text)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// What the client got since the last call, in order: the host's answers, the extension's
+    /// `respond`, `notify` and `send`.
+    pub fn client_received(&mut self, connection: u64) -> Result<Vec<String>> {
+        self.store
+            .data_mut()
+            .listeners
+            .received(connection)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// A request to the `http` listener `name`; [`Harness::deliver_io`] delivers it as
+    /// `listener-request`. Returns its id.
+    pub fn http_request(&mut self, name: &str, path: &str, body: &str) -> Result<u64> {
+        self.store
+            .data_mut()
+            .listeners
+            .http_request(name, path, body)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The extension's `reply` to request `id`, once.
+    pub fn http_reply(&mut self, id: u64) -> Option<(u16, String)> {
+        self.store.data_mut().listeners.take_reply(id)
+    }
+
+    /// The MCP calls the extension has not answered, by call id.
+    pub fn open_mcp_calls(&self) -> Vec<u64> {
+        self.store.data().listeners.open_calls()
     }
 
     /// Keys or text the user types into a pseudo-terminal; [`Harness::deliver_io`] hands them to
@@ -1840,6 +1977,16 @@ impl Harness {
                 .extension
                 .world_io(HostIo::Model(ui_ext::network::IoEvent::Agent(event)))
             else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(event) = self.store.data_mut().listeners.events.pop_front() {
+            let Some(event) = self.extension.world_io(HostIo::Listener(event)) else {
                 continue;
             };
             let (value, effects) =
