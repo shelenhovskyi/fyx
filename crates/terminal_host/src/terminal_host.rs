@@ -84,6 +84,7 @@ fn run(command: host::Command, cx: &mut App) {
         }
         host::Command::OpenCreated(open) => created::open(open, cx),
         host::Command::Input(id, bytes) => created::input(id, bytes, cx),
+        host::Command::Paste(id, bytes) => created::paste(id, bytes, cx),
         host::Command::Close(id) => {
             if !created::cancel(id, cx) {
                 pseudo::close(id, cx);
