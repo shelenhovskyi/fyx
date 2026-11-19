@@ -538,9 +538,8 @@ The 24 h gate counts from the later of `published_at` and when this client first
   plus one (subdomains only); IP literals, ports, `localhost`, `*` and `*.<tld>` are ignored and
   returned by `set` for logging. A listed name that the extension also declares may resolve to
   RFC 1918, `100.64/10` and `fc00::/7` (`is_private_network`), never loopback or link-local;
-  `https` is still required. The refusal names the setting. **For W3:** add
-  `fyx.extensions.network.private_hosts: Option<Vec<String>>` (`settings_content/src/fyx.rs`,
-  as a `network` sub-table) and call `PrivateHosts::set` on every settings change.
+  `https` is still required. The refusal names the setting. W3 wired the setting in 1534a1e7de:
+  user settings only, one global set on every change, both load paths pass it. Q4 is done.
 - **P5 5.5, step 1 (2026-11-19): `ui_ext::terminal`** (behind `t2`; W0 may add a
   `terminal = ["t2"]` alias). Contents: the types of the 0.4 `terminals` interface, the
   `TerminalHost` trait and `TerminalSink`, the limits, the
