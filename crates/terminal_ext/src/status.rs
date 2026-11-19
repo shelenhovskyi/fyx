@@ -34,12 +34,15 @@ pub enum StatusSource {
         protocol: Protocol,
         app: Option<String>,
     },
+    /// Set by a UI extension (`terminals.set-status`, `fyx:ui@0.4`). `id` is the extension id.
+    Extension { id: String },
 }
 
 impl StatusSource {
     /// "Claude Code via OSC 7501", "via OSC 9;4".
     pub fn describe(&self) -> String {
         match self {
+            Self::Extension { id } => format!("from extension {id}"),
             Self::Program { protocol, app } => {
                 let via = match protocol {
                     Protocol::Osc7501 => "OSC 7501",
@@ -62,6 +65,7 @@ impl StatusSource {
     pub fn app(&self) -> Option<&str> {
         match self {
             Self::Program { app, .. } => app.as_deref(),
+            Self::Extension { .. } => None,
         }
     }
 }
@@ -82,11 +86,32 @@ struct Record {
     updated: Instant,
 }
 
+/// A status an extension sets on a terminal. Checked by the caller (`ui_ext::terminal`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionStatus {
+    pub state: StatusState,
+    pub label: String,
+    pub detail: Option<String>,
+    pub progress: Option<u8>,
+    pub attention: bool,
+}
+
+#[derive(Debug)]
+struct ExtensionRecord {
+    extension: String,
+    status: ExtensionStatus,
+    updated: Instant,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct StatusModel {
     records: Vec<Record>,
     progress: Option<(Progress, Instant)>,
     attention: bool,
+    extensions: Vec<ExtensionRecord>,
+    /// When the user last looked at the terminal: an extension's `attention` older than that is
+    /// shown as seen.
+    seen_at: Option<Instant>,
 }
 
 fn needs_attention(state: StatusState) -> bool {
@@ -175,11 +200,51 @@ impl StatusModel {
 
     pub(crate) fn clear_attention(&mut self) {
         self.attention = false;
+        self.seen_at = Some(Instant::now());
+    }
+
+    pub(crate) fn set_extension_status(
+        &mut self,
+        extension: &str,
+        status: Option<ExtensionStatus>,
+        now: Instant,
+    ) {
+        self.extensions
+            .retain(|record| record.extension != extension);
+        if let Some(status) = status {
+            self.extensions.push(ExtensionRecord {
+                extension: extension.to_owned(),
+                status,
+                updated: now,
+            });
+        }
+    }
+
+    /// What the tab shows: of the program status and the extension statuses, the one that needs
+    /// attention, then the newest.
+    pub(crate) fn current(&self) -> Option<TerminalStatus> {
+        let extensions = self.extensions.iter().map(|record| TerminalStatus {
+            state: record.status.state,
+            kind: None,
+            label: Some(record.status.label.clone()).filter(|label| !label.is_empty()),
+            detail: record.status.detail.clone(),
+            progress: record.status.progress,
+            attention: record.status.attention
+                && self.seen_at.is_none_or(|seen| seen < record.updated),
+            source: StatusSource::Extension {
+                id: record.extension.clone(),
+            },
+            updated: record.updated,
+        });
+        self.program_status()
+            .into_iter()
+            .chain(extensions)
+            .max_by_key(|status| (status.attention, status.updated))
     }
 
     /// The status to show: the most urgent record (blocked, error, working, done, idle; the most
     /// recent first among equals), else OSC 9;4 progress.
-    pub(crate) fn current(&self) -> Option<TerminalStatus> {
+    fn program_status(&self) -> Option<TerminalStatus> {
         let rank = |state: StatusState| match state {
             StatusState::Blocked => 4,
             StatusState::Error => 3,
@@ -330,6 +395,44 @@ mod tests {
         assert_eq!(model.current().unwrap().state, StatusState::Working);
         apply(&mut model, "133;A", start);
         assert_eq!(model.current().unwrap().state, StatusState::Done);
+    }
+
+    #[test]
+    fn extension_statuses_show_beside_the_programs() {
+        let start = Instant::now();
+        let mut model = StatusModel::default();
+        apply(&mut model, "7501;state=working:app=claude-code", start);
+        let status = |state, attention| ExtensionStatus {
+            state,
+            label: "Review".into(),
+            detail: None,
+            progress: None,
+            attention,
+        };
+        let later = |seconds| start + Duration::from_secs(seconds);
+        model.set_extension_status("acme", Some(status(StatusState::Done, false)), later(1));
+        let shown = model.current().unwrap();
+        assert_eq!(shown.source.describe(), "from extension acme");
+        assert_eq!(shown.label.as_deref(), Some("Review"));
+
+        // A newer program report wins over an older extension status without attention.
+        apply(&mut model, "7501;state=working:app=claude-code", later(2));
+        assert_eq!(
+            model.current().unwrap().source.describe(),
+            "Claude Code via OSC 7501"
+        );
+
+        // Attention wins; looking at the terminal shows it as seen.
+        model.set_extension_status("acme", Some(status(StatusState::Blocked, true)), later(3));
+        assert!(model.current().unwrap().attention);
+        model.seen_at = Some(later(4));
+        assert!(!model.current().unwrap().attention);
+
+        model.set_extension_status("acme", None, start);
+        assert_eq!(
+            model.current().unwrap().source.describe(),
+            "Claude Code via OSC 7501"
+        );
     }
 
     #[test]

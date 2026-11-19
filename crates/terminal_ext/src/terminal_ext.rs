@@ -19,11 +19,11 @@ mod terminal_id;
 pub use decorations::{TerminalDecorations, set_decorations, tab_indicator};
 pub use osc::OscEvent;
 pub use osc_scan::{MAX_OSC_PAYLOAD, OscScanner};
-pub use status::{StatusSource, TerminalStatus};
+pub use status::{ExtensionStatus, StatusSource, TerminalStatus};
 pub use tee_pty::{OscObserver, OscReplies, TeePty, tee, tee_with};
 pub use terminal_id::{
-    BLANKED_INHERITED_ENV, TERMINAL_ID_ENV, TERMINAL_TOKEN_ENV, TerminalExt, TerminalId,
-    TerminalToken, terminal_for_token,
+    BLANKED_INHERITED_ENV, StatusHandle, TERMINAL_ID_ENV, TERMINAL_TOKEN_ENV, TerminalExt,
+    TerminalId, TerminalToken, terminal_for_token,
 };
 
 /// OSC 7501 "Program Status" (rev 0.4, superlogical.com/rex/docs/build/program-status).

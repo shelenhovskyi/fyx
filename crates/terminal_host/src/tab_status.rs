@@ -1,10 +1,10 @@
 //! The status icon on a terminal's tab, with a tooltip that always names where the status came from.
 
-use gpui::{AnyElement, App, Focusable as _, IntoElement as _};
-use terminal::Event as TerminalEvent;
+use gpui::{AnyElement, App, Entity, Focusable as _, IntoElement as _};
+use terminal::{Event as TerminalEvent, Terminal};
 use terminal_ext::osc::{BlockedKind, StatusState};
 use terminal_ext::status::app_display_name;
-use terminal_ext::{TerminalDecorations, TerminalExt, TerminalStatus};
+use terminal_ext::{StatusSource, TerminalDecorations, TerminalExt, TerminalStatus};
 use terminal_view::TerminalView;
 use ui::{CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
 
@@ -22,6 +22,18 @@ pub(crate) fn init(cx: &mut App) {
             let view = cx.weak_entity();
             let window = window.window_handle();
             sessions.update(cx, |sessions, _| sessions.register(view, window));
+        }
+        let terminal_entity = view.terminal().clone();
+        let id = terminal_entity.read(cx).fyx.id();
+        crate::remember_terminal(id, terminal_entity.downgrade(), cx);
+        let front = crate::front(cx);
+        if let Some(front) = &front {
+            let (title, cwd) = title_and_cwd(&terminal_entity, cx);
+            let status = terminal_entity.read(cx).fyx.status_handle();
+            front.terminal_opened(status, None, title, cwd);
+            let front = front.clone();
+            cx.on_release(move |_, _| front.terminal_closed(id))
+                .detach();
         }
         let focus_handle = view.focus_handle(cx);
         cx.on_focus_in(&focus_handle, window, |view, _, cx| {
@@ -41,6 +53,10 @@ pub(crate) fn init(cx: &mut App) {
                 if focused {
                     terminal.read(cx).fyx.clear_attention();
                 }
+                if let Some(front) = &front {
+                    let (title, cwd) = title_and_cwd(terminal, cx);
+                    front.terminal_changed(terminal.read(cx).fyx.id(), title, cwd);
+                }
                 if let Some(sessions) = &sessions {
                     let status = terminal.read(cx).fyx.status();
                     let this = cx.entity();
@@ -54,6 +70,16 @@ pub(crate) fn init(cx: &mut App) {
         .detach();
     })
     .detach();
+}
+
+fn title_and_cwd(terminal: &Entity<Terminal>, cx: &App) -> (String, Option<String>) {
+    let terminal = terminal.read(cx);
+    (
+        terminal.title(true),
+        terminal
+            .working_directory()
+            .map(|cwd| cwd.to_string_lossy().into_owned()),
+    )
 }
 
 struct TabStatus;
@@ -110,9 +136,10 @@ pub(crate) fn tooltip_text(status: &TerminalStatus) -> (String, String) {
         (StatusState::Error, _) => "failed",
         (StatusState::Idle | StatusState::Clear, _) => "idle",
     };
-    let mut title = match status.source.app() {
-        Some(app) => format!("{}: {state}", app_display_name(app)),
-        None => capitalize(state),
+    let mut title = match (&status.source, status.source.app()) {
+        (_, Some(app)) => format!("{}: {state}", app_display_name(app)),
+        (StatusSource::Extension { id }, None) => format!("{id}: {state}"),
+        (StatusSource::Program { .. }, None) => capitalize(state),
     };
     if let Some(label) = &status.label {
         title.push_str(" — ");
@@ -145,7 +172,6 @@ fn capitalize(text: &str) -> String {
 mod tests {
     use std::time::Instant;
 
-    use terminal_ext::StatusSource;
     use terminal_ext::osc::Protocol;
 
     use super::*;
