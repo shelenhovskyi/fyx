@@ -172,6 +172,8 @@ pub struct UiExtensionRegistry {
     relay_observer: Option<RelayObserver>,
     /// What [`Self::relay_observer`] was last told, by extension.
     relay_published: HashMap<Arc<str>, Vec<RelayChannelSpec>>,
+    /// Re-checks the channels on every notify: grants and revokes end in one.
+    _relay_sync: Option<gpui::Subscription>,
 }
 
 /// Gets an extension's granted relay channels whenever they change; an empty list on unload,
@@ -728,9 +730,10 @@ impl UiExtensionRegistry {
     /// Where the relay endpoint learns the granted channels (`terminal_host::set_relay_channels`).
     /// It is told every extension's channels now, and each change after: a load or reload, a
     /// grant or revoke of `relay:hooks`, and an empty list when the extension goes.
-    pub fn set_relay_observer(&mut self, observer: RelayObserver, cx: &App) {
+    pub fn set_relay_observer(&mut self, observer: RelayObserver, cx: &mut Context<Self>) {
         self.relay_observer = Some(observer);
         self.relay_published.clear();
+        self._relay_sync = Some(cx.observe_self(|this, cx| this.sync_relay_channels(cx)));
         self.sync_relay_channels(cx);
     }
 
@@ -2990,11 +2993,6 @@ pub fn init(cx: &mut App) {
         registry.start_permission_prompts(cx);
         registry.start_t3_prompts(cx);
     });
-    // Grants and revokes of `relay:hooks` end in a notify (§B.9).
-    cx.observe(&registry, |registry, cx| {
-        registry.update(cx, |registry, cx| registry.sync_relay_channels(cx));
-    })
-    .detach();
     cx.set_global(GlobalRegistry(registry));
 
     cx.observe_new(|workspace: &mut Workspace, window, cx| {

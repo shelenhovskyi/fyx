@@ -87,8 +87,8 @@ pub use panel::{
     SurfaceInfo,
 };
 pub use registry::{
-    DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver, T3ShareTarget,
-    UiExtensionRegistry,
+    DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver,
+    T3ShareTarget, UiExtensionRegistry,
 };
 pub use store_actions::{
     InstallUiExtensionFromFile, OpenExtensionPanel, RestartUiExtension,
