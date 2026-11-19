@@ -15,6 +15,7 @@ pub const CAPABILITY_RELAY_HOOKS: &str = "relay:hooks";
 pub const CAPABILITY_REVIEW_PROPOSE: &str = "review:propose";
 pub const CAPABILITY_CONTEXT_EDITOR: &str = "context:editor";
 pub const CAPABILITY_WORKSPACE_OPEN: &str = "workspace:open";
+pub const CAPABILITY_WORKSPACE_DIAGNOSTICS: &str = "workspace:diagnostics";
 pub const CAPABILITY_APPROVALS: &str = "ui:approvals";
 
 /// §B.7.
