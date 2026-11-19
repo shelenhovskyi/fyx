@@ -60,6 +60,8 @@ use std::ops::Range;
 
 #[cfg(feature = "fyx-ui-0-3")]
 mod canvas;
+#[cfg(feature = "fyx-ui-0-4")]
+pub mod context;
 mod host;
 mod host_model;
 #[cfg(feature = "fyx-ui-0-4")]
@@ -105,8 +107,8 @@ pub mod bindings {
     });
 }
 
-/// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`] and
-/// [`listeners`].
+/// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
+/// [`listeners`] and [`context`].
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod bindings {
     wit_bindgen::generate!({
@@ -518,6 +520,7 @@ macro_rules! __fyx_host_shims {
             $crate::__fyx_image_shims!($world);
             $crate::__fyx_terminal_shims!($world);
             $crate::__fyx_listener_shims!($world);
+            $crate::__fyx_context_shims!($world);
         };
     };
 }
@@ -886,10 +889,55 @@ macro_rules! __fyx_listener_shims {
     ($world:ident) => {};
 }
 
+/// The shims of the 0.4 [`context`] functions; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_context_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_watch(on: bool) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::watch(on)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_open(
+            path: &$crate::FileRef,
+            range: ::std::option::Option<$crate::TextRange>,
+            focus: bool,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::open(path, range, focus)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_to_file_ref(
+            absolute: &str,
+        ) -> ::std::result::Result<$crate::FileRef, $crate::HostError> {
+            $crate::__private::context::$world::to_file_ref(absolute)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_absolute_path(
+            path: &$crate::FileRef,
+        ) -> ::std::result::Result<::std::string::String, $crate::HostError> {
+            $crate::__private::context::$world::absolute_path(path)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_context_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
 
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::context::glue as context;
     pub use crate::host::newest;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::listeners::glue as listeners;
