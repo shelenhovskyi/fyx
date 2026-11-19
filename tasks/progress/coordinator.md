@@ -79,8 +79,8 @@ W5 (agent_review) and W7 (judge) were archived by the owner. Their folders are s
 
 ## Waiting for the owner
 
-- **fyx-extensions 92e1e02 → its `main`:** not merged without the owner's OK. The registry repo
-  is private, its Actions workflows are disabled, and turning them on is also the owner's call.
+- **fyx-extensions:** 92e1e02 is already in its `main` (2b97f3d). The repo is private, its Actions
+  workflows are disabled, and turning them on is the owner's call.
 - **Optional:** a live Gemini CLI compat recording (needs the owner's Google sign-in).
 - **Before going public:** move `.claude/settings.json` and `assets/fyx/icon-concepts` out of the repo.
 
