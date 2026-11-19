@@ -44,7 +44,7 @@ use ui_ext::v0_2::{
 use ui_ext_wasm::{
     CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, UiExtension,
     UiManifest,
-    permissions::{Tier, tier_of},
+    permissions::{T3Answer, T3Capability, Tier, tier_of},
 };
 use workspace::{
     Workspace, WorkspaceSettings,
@@ -154,6 +154,26 @@ pub struct UiExtensionRegistry {
     dev_reloads: HashMap<PathBuf, Task<()>>,
     /// The last revoke's write to the install store's approvals (each waits for the one before).
     approval_writes: Option<futures::future::Shared<Task<()>>>,
+    /// T3 cards (§C.3) until the workspace takes them to draw, by the registry's id.
+    t3_requests: HashMap<u64, crate::consent::T3PromptRequest>,
+    next_t3_request: u64,
+    /// Which read share each (extension, terminal) got from the terminal's menu, Once or until
+    /// it closes; the consent store says whether it still holds.
+    t3_share_kinds: HashMap<(String, u64), T3Answer>,
+    /// Where the terminal host reports closed terminals ([`Self::t3_terminal_closed_hook`]).
+    t3_closed: Option<futures::channel::mpsc::UnboundedSender<u64>>,
+    /// Told when an extension's listener opens or closes (§B.7, §B.8): W1's discovery-file
+    /// writer. One shared observer for every load, so a reload's listeners reach the same one.
+    listener_observer: Option<Arc<dyn ui_ext::integration::ListenerObserver>>,
+}
+
+/// A loaded extension a terminal can be shared with (§C.3), for the terminal's menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct T3ShareTarget {
+    pub extension_id: String,
+    pub extension_name: SharedString,
+    pub can_read: bool,
+    pub can_write: bool,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -197,6 +217,8 @@ pub enum RegistryEvent {
         id: u64,
         workspace: gpui::EntityId,
     },
+    /// A T3 request (0.4, §C.3): the workspace named shows its card (the active window's).
+    ShowT3 { id: u64, workspace: gpui::EntityId },
 }
 
 /// An approval card from `approvals.ask` until it is answered or closed.
@@ -671,6 +693,19 @@ impl UiExtensionRegistry {
     pub fn set_journal_store(&mut self, store: Arc<crate::journal::JournalStore>) {
         self.consent.set_journal(store.clone());
         self.journal_store = Some(store);
+    }
+
+    /// The observer every later load passes as `LoadOptions::listener_observer` (§B.8). Set it
+    /// before the first scan; extensions already loaded keep the one they loaded with.
+    pub fn set_listener_observer(
+        &mut self,
+        observer: Arc<dyn ui_ext::integration::ListenerObserver>,
+    ) {
+        self.listener_observer = Some(observer);
+    }
+
+    pub fn listener_observer(&self) -> Option<Arc<dyn ui_ext::integration::ListenerObserver>> {
+        self.listener_observer.clone()
     }
 
     pub(crate) fn journal_sink(&self) -> Option<Arc<dyn ui_ext_wasm::journal::Journal>> {
@@ -1208,6 +1243,201 @@ impl UiExtensionRegistry {
         .detach();
     }
 
+    /// Routes T3 requests (§C.3) to a card in the active window. Called once when the registry
+    /// is set up; without it every T3 request is `Deny`.
+    pub fn start_t3_prompts(&mut self, cx: &mut Context<Self>) {
+        let (sender, mut requests) = futures::channel::mpsc::unbounded();
+        self.consent.set_t3_prompter(sender);
+        cx.spawn(async move |this, cx| {
+            while let Some(request) = requests.next().await {
+                if this
+                    .update(cx, |this, cx| this.show_t3_prompt(request, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The loaded extensions that declare `terminal:read` or `terminal:write`, by id.
+    pub fn t3_share_targets(&self) -> Vec<T3ShareTarget> {
+        let mut targets: Vec<T3ShareTarget> = self
+            .backends
+            .keys()
+            .filter_map(|id| {
+                let declared = self.consent.declared(id);
+                let declares =
+                    |capability: T3Capability| declared.iter().any(|c| c == capability.name());
+                let (can_read, can_write) =
+                    (declares(T3Capability::Read), declares(T3Capability::Write));
+                (can_read || can_write).then(|| T3ShareTarget {
+                    extension_id: id.to_string(),
+                    extension_name: self.provenance_name(id),
+                    can_read,
+                    can_write,
+                })
+            })
+            .collect();
+        targets.sort_by(|a, b| a.extension_id.cmp(&b.extension_id));
+        targets
+    }
+
+    /// What is shared from a terminal now, per extension: a read `Once` or `UntilClosed`, a write
+    /// `Once` (each write still has its card).
+    pub fn t3_shared(&self, terminal: u64) -> Vec<(String, T3Capability, T3Answer)> {
+        self.consent
+            .shared(terminal)
+            .into_iter()
+            .map(|(id, capability)| {
+                let answer = match capability {
+                    // A card's "until it closes" is shared too, and never Once.
+                    T3Capability::Read => self
+                        .t3_share_kinds
+                        .get(&(id.clone(), terminal))
+                        .copied()
+                        .unwrap_or(T3Answer::UntilClosed),
+                    T3Capability::Write => T3Answer::Once,
+                };
+                (id, capability, answer)
+            })
+            .collect()
+    }
+
+    /// The terminal menu's "Share with <extension>" (§C.3); `Deny` takes it back.
+    pub fn t3_share_terminal(
+        &mut self,
+        extension_id: &str,
+        terminal: u64,
+        capability: T3Capability,
+        answer: T3Answer,
+        cx: &mut Context<Self>,
+    ) {
+        if capability == T3Capability::Read {
+            let key = (extension_id.to_string(), terminal);
+            if answer == T3Answer::Deny {
+                self.t3_share_kinds.remove(&key);
+            } else {
+                self.t3_share_kinds.insert(key, answer);
+            }
+        }
+        self.consent
+            .share_terminal(extension_id, terminal, capability, answer);
+        cx.notify();
+    }
+
+    /// For the terminal host: call it with a terminal's id when it closes. Its shares go and its
+    /// open T3 cards end with `Deny`. Callable from any thread.
+    pub fn t3_terminal_closed_hook(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> std::sync::Arc<dyn Fn(u64) + Send + Sync> {
+        let sender = match &self.t3_closed {
+            Some(sender) => sender.clone(),
+            None => {
+                let (sender, mut closed) = futures::channel::mpsc::unbounded::<u64>();
+                cx.spawn(async move |this, cx| {
+                    while let Some(terminal) = closed.next().await {
+                        if this
+                            .update(cx, |this, cx| this.t3_terminal_closed(terminal, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                self.t3_closed = Some(sender.clone());
+                sender
+            }
+        };
+        std::sync::Arc::new(move |terminal| {
+            sender.unbounded_send(terminal).ok();
+        })
+    }
+
+    fn t3_terminal_closed(&mut self, terminal: u64, cx: &mut Context<Self>) {
+        self.t3_share_kinds
+            .retain(|(_, shared_terminal), _| *shared_terminal != terminal);
+        self.consent.terminal_closed(terminal);
+        cx.notify();
+    }
+
+    /// With no window the request is dropped: `Deny`.
+    fn show_t3_prompt(&mut self, request: crate::consent::T3PromptRequest, cx: &mut Context<Self>) {
+        let Some(workspace) = self.active_workspace else {
+            log::info!(
+                "fyx:ui: {} asks for {} with no window to ask in",
+                request.0,
+                request.1.capability.name()
+            );
+            return;
+        };
+        self.next_t3_request += 1;
+        let id = self.next_t3_request;
+        self.t3_requests.insert(id, request);
+        cx.emit(RegistryEvent::ShowT3 { id, workspace });
+    }
+
+    /// The request behind a [`RegistryEvent::ShowT3`], once, with the provenance name and
+    /// whether "Always allow" can be offered.
+    pub(crate) fn take_t3_request(
+        &mut self,
+        id: u64,
+    ) -> Option<(crate::consent::T3PromptRequest, SharedString, bool)> {
+        let request = self.t3_requests.remove(&id)?;
+        let name = self.provenance_name(&request.0);
+        let can_always_allow = self.consent.can_always_allow(&request.0);
+        Some((request, name, can_always_allow))
+    }
+
+    /// T3 "Always allow" on or off (§C.3), from a card, the extensions page or the status bar.
+    /// Returns whether it was saved.
+    pub fn set_always_allow(
+        &mut self,
+        extension_id: &str,
+        capability: ui_ext_wasm::permissions::T3Capability,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.consent.set_always_allow(extension_id, capability, on) {
+            Ok(write) => {
+                if let Some((path, text)) = write {
+                    let fs = <dyn Fs>::global(cx);
+                    cx.background_spawn(
+                        async move { consent::save(path, text, fs.as_ref()).await },
+                    )
+                    .detach();
+                }
+                log::info!(
+                    "fyx:ui: {extension_id}: always allow {} {}",
+                    capability.name(),
+                    if on { "on" } else { "off" }
+                );
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                log::error!(
+                    "fyx:ui: {}",
+                    ui_ext::sanitize_for_log(&format!("{error:#}"))
+                );
+                false
+            }
+        }
+    }
+
+    /// Every T3 "Always allow" that holds now.
+    pub fn always_allowed(&self) -> Vec<(String, ui_ext_wasm::permissions::T3Capability)> {
+        self.consent.always_allowed()
+    }
+
+    /// Whether "Always allow" can be given to the extension: a component, not a dev folder.
+    pub fn can_always_allow(&self, extension_id: &str) -> bool {
+        self.consent.can_always_allow(extension_id)
+    }
+
     fn show_permission_prompt(
         &mut self,
         request: crate::consent::PromptRequest,
@@ -1512,6 +1742,11 @@ Environment it may pass: {}",
             .ok();
         })
         .detach();
+    }
+
+    /// The workspace whose window was active last (`context:editor` follows it).
+    pub(crate) fn active_workspace(&self) -> Option<gpui::EntityId> {
+        self.active_workspace
     }
 
     /// The workspace whose window became active; modals open there.
@@ -1871,6 +2106,18 @@ Environment it may pass: {}",
                             .read_with(cx, |this, _| this.journal_sink())
                             .ok()
                             .flatten(),
+                        listener_observer: this
+                            .read_with(cx, |this, _| this.listener_observer())
+                            .ok()
+                            .flatten(),
+                        // context:editor and workspace:open (plan 5.13).
+                        context: Some(cx.update(|cx| {
+                            crate::context_host::for_extension(&found.extension_id, cx)
+                        })),
+                        // review:propose (plan 5.13).
+                        review: Some(cx.update(|cx| {
+                            crate::review_bridge::for_extension(&found.extension_id, cx)
+                        })),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2623,7 +2870,8 @@ pub fn init(cx: &mut App) {
         registry.set_journal_store(crate::journal::JournalStore::at(
             crate::journal::JournalStore::default_dir(),
         ));
-        registry.start_permission_prompts(cx)
+        registry.start_permission_prompts(cx);
+        registry.start_t3_prompts(cx);
     });
     cx.set_global(GlobalRegistry(registry));
 
@@ -2901,6 +3149,15 @@ fn attach_to_workspace(
                     }
                     return;
                 }
+                RegistryEvent::ShowT3 {
+                    id,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        show_t3_card(workspace, &registry, *id, cx);
+                    }
+                    return;
+                }
                 RegistryEvent::PermissionPrompt {
                     extension_id,
                     capability,
@@ -2991,6 +3248,12 @@ fn attach_to_workspace(
         );
     }
 
+    // T3 "Always allow" (§C.3): who has terminal access, with one-click revoke.
+    let access = cx.new(|cx| crate::t3_cards::T3AccessStatus::new(registry.clone(), cx));
+    workspace.status_bar().update(cx, |status_bar, cx| {
+        status_bar.add_right_item(access, window, cx)
+    });
+
     // Extension progress in the status bar (design.md M.2), one item for all extensions.
     if let Some(progresses) = Progresses::global(cx) {
         let item = cx.new(|cx| ExtensionProgressStatus::new(progresses, cx));
@@ -3034,6 +3297,8 @@ fn attach_to_workspace(
             workspace.project().downgrade(),
             cx,
         );
+        // context:editor and workspace:open (plan 5.13).
+        crate::context_host::watch_workspace(workspace, window, cx);
         let project = workspace.project().clone();
         cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
             .detach();
@@ -3142,6 +3407,38 @@ fn show_approval_card(
         registry.set_approval_view(&extension_id, id, view.downgrade())
     });
     workspace.show_notification(notification_id, cx, |_| view);
+}
+
+/// A T3 request (§C.3): a [`crate::t3_cards::T3Card`] in the workspace's notification stack.
+fn show_t3_card(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    id: u64,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(((extension_id, prompt, answer), name, can_always_allow)) =
+        registry.update(cx, |registry, _| registry.take_t3_request(id))
+    else {
+        return;
+    };
+    let notification_id = NotificationId::composite::<crate::t3_cards::T3Card>(SharedString::from(
+        format!("{extension_id}/{id}"),
+    ));
+    let extension_id: Arc<str> = extension_id.into();
+    let registry = registry.downgrade();
+    workspace.show_notification(notification_id, cx, move |cx| {
+        cx.new(|cx| {
+            crate::t3_cards::T3Card::new(
+                extension_id,
+                name,
+                prompt,
+                answer,
+                can_always_allow,
+                registry,
+                cx,
+            )
+        })
+    });
 }
 
 /// The T2 first-use prompt (decision Q10): a [`crate::notifications::PermissionCard`] in the
@@ -3277,6 +3574,7 @@ pub(crate) fn ask_pending_consent(
             title,
             notes,
             confirm: confirm.into(),
+            update,
         },
         lines,
         window,
@@ -3580,6 +3878,16 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         proxy: Some(cx.update(extension_proxy)),
         private_hosts: Some(cx.update(extension_private_hosts)),
         terminals: cx.update(|cx| crate::terminal_host(cx)),
+        listener_observer: cx.update(|cx| {
+            UiExtensionRegistry::global(cx)
+                .and_then(|registry| registry.read(cx).listener_observer())
+        }),
+        context: Some(
+            cx.update(|cx| crate::context_host::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        review: Some(
+            cx.update(|cx| crate::review_bridge::for_extension(&path.to_string_lossy(), cx)),
+        ),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

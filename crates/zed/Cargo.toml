@@ -222,6 +222,7 @@ tracing.workspace = true
 ui.workspace = true
 # fyx: native UI extensions (W3)
 ui_ext_host.workspace = true
+ui_ext_wasm.workspace = true # fyx: T3Capability, T3Answer for fyx_t3
 ui_prompt.workspace = true
 url.workspace = true
 urlencoding.workspace = true

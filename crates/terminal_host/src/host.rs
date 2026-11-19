@@ -13,13 +13,14 @@ use terminal_ext::inbox::{Rate, RateLimiter};
 use terminal_ext::{ExtensionStatus, OutputSanitizer, StatusHandle, StatusSource, TerminalId, osc};
 use ui_ext::terminal::{
     CreateCommand, MAX_CREATED_TERMINALS, MAX_PASTE_BYTES, MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND,
-    MAX_SEND_INPUT_BYTES, MAX_STATUS_UPDATES_PER_SECOND, MAX_WRITE_OUTPUT_BYTES, PseudoRequest,
-    StatusState, TerminalError, TerminalEvent, TerminalHandle, TerminalHost, TerminalInfo,
-    TerminalOrigin, TerminalSink, TerminalStatus,
+    MAX_READ_LINES, MAX_SEND_INPUT_BYTES, MAX_STATUS_UPDATES_PER_SECOND, MAX_WRITE_OUTPUT_BYTES,
+    PseudoRequest, ReadScope, StatusState, T3Target, TerminalError, TerminalEvent, TerminalHandle,
+    TerminalHost, TerminalInfo, TerminalOrigin, TerminalSink, TerminalStatus,
 };
 
 use crate::created::{CreatedOpen, OutputTap};
 use crate::pseudo::{self, PseudoOpen};
+use crate::t3::T3Reply;
 
 /// The title another extension sees for a terminal that is not its own (W2c, 282e99d69a).
 pub const REDACTED: &str = "•••";
@@ -43,7 +44,25 @@ pub(crate) enum Command {
     Close(TerminalId),
     /// An extension's profiles and env; an empty one removes them.
     Integration(String, crate::TerminalIntegration),
+    /// §C.3, after the card: the terminal's text for a T3 read.
+    Read {
+        id: TerminalId,
+        scope: ReadScope,
+        lines: u16,
+        reply: T3Reply,
+    },
+    /// §C.3, after the card: type the confirmed text for `extension`.
+    Write {
+        id: TerminalId,
+        extension: String,
+        text: String,
+        submit: bool,
+        reply: T3Reply,
+    },
 }
+
+/// Told the host's id ([`TerminalId::as_u64`]) of every terminal that closes, from any thread.
+pub type TerminalClosedHook = Arc<dyn Fn(u64) + Send + Sync>;
 
 /// Whether a terminal's program has bracketed paste on, read live from any thread.
 pub(crate) type PasteProbe = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -152,6 +171,7 @@ struct State {
 pub struct HostFront {
     state: Mutex<State>,
     commands: UnboundedSender<Command>,
+    closed_hook: Mutex<Option<TerminalClosedHook>>,
 }
 
 fn status_rate() -> Rate {
@@ -234,19 +254,20 @@ impl Known {
 }
 
 impl HostFront {
-    /// An extension's profiles and granted `terminal:env` (design §B.1, §B.4), set by the runtime
-    /// on every load; an empty integration removes them, and so does [`TerminalHost::close_all`].
-    /// Terminals already open keep their environment.
-    pub fn set_integration(&self, ext: &str, integration: crate::TerminalIntegration) {
-        self.send(Command::Integration(ext.to_owned(), integration))
-            .ok();
-    }
-
     pub(crate) fn new(commands: UnboundedSender<Command>) -> Self {
         Self {
             state: Mutex::default(),
             commands,
+            closed_hook: Mutex::default(),
         }
+    }
+
+    /// §C.3: the consent broker forgets a closed terminal's shares and ends its open cards.
+    pub(crate) fn set_closed_hook(&self, hook: TerminalClosedHook) {
+        *self
+            .closed_hook
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -337,6 +358,14 @@ impl HostFront {
     /// handles are forgotten (and never reused); the owner of a pseudo-terminal hears through the
     /// terminal's own sink, everyone else through `observe`.
     pub(crate) fn terminal_closed(&self, id: TerminalId) {
+        let hook = self
+            .closed_hook
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(id.as_u64());
+        }
         let events = {
             let mut state = self.lock();
             let Some(known) = state.terminals.remove(&id) else {
@@ -419,6 +448,22 @@ impl HostFront {
             .filter(|pseudo| pseudo.extension == ext)
             .ok_or(TerminalError::NotFound)?;
         Ok((id, pseudo))
+    }
+
+    /// §C.3: any terminal `ext` has a handle for (from `observe`, or its own), except another
+    /// extension's pseudo or created terminal: T3 is for the user's terminals.
+    fn t3_terminal(&self, ext: &str, handle: TerminalHandle) -> Result<TerminalId, TerminalError> {
+        let state = self.lock();
+        let id = *state
+            .extensions
+            .get(ext)
+            .and_then(|extension| extension.handles.get(&handle))
+            .ok_or(TerminalError::NotFound)?;
+        let known = state.terminals.get(&id).ok_or(TerminalError::NotFound)?;
+        match known.owning_extension() {
+            Some(owner) if owner != ext => Err(TerminalError::Denied),
+            _ => Ok(id),
+        }
     }
 
     /// For `ui_ext_host`'s `terminal` node: the terminal behind `ext`'s own `handle`.
@@ -717,6 +762,113 @@ impl TerminalHost for HostFront {
             .collect();
         infos.sort_by_key(|info| info.handle);
         infos
+    }
+
+    /// An extension's profiles and granted `terminal:env` (design §B.1, §B.4), set by the runtime
+    /// on every load; an empty integration removes them, and so does [`TerminalHost::close_all`].
+    /// Terminals already open keep their environment. Menu entries name the extension by its id
+    /// until the runtime passes a display name.
+    fn set_integration(&self, ext: &str, integration: ui_ext::terminal::TerminalIntegration) {
+        let ui_ext::terminal::TerminalIntegration {
+            profiles,
+            env,
+            env_all_new,
+            package_dir,
+        } = integration;
+        let integration = crate::TerminalIntegration {
+            extension_name: ext.to_owned(),
+            profiles,
+            env,
+            env_all_new,
+            package_dir,
+        };
+        self.send(Command::Integration(ext.to_owned(), integration))
+            .ok();
+    }
+
+    fn t3_target(&self, ext: &str, handle: TerminalHandle) -> Result<T3Target, TerminalError> {
+        let id = self.t3_terminal(ext, handle)?;
+        let state = self.lock();
+        let known = state.terminals.get(&id).ok_or(TerminalError::NotFound)?;
+        let origin = match &known.owner {
+            Some(owner) if owner.extension == ext || owner.origin == TerminalOrigin::Profile => {
+                owner.origin
+            }
+            _ => TerminalOrigin::User,
+        };
+        Ok(T3Target {
+            terminal: id.as_u64(),
+            origin,
+            title: known.title.clone(),
+            cwd: known.cwd.as_ref().map(std::path::PathBuf::from),
+        })
+    }
+
+    fn read(
+        &self,
+        ext: &str,
+        handle: TerminalHandle,
+        scope: ReadScope,
+        lines: u16,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        let terminal = match self.t3_terminal(ext, handle) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                sink(TerminalEvent::ReadDone(id, Err(error.to_string())));
+                return;
+            }
+        };
+        let command = Command::Read {
+            id: terminal,
+            scope,
+            lines: lines.clamp(1, MAX_READ_LINES),
+            reply: T3Reply { id, sink },
+        };
+        if let Err(error) = self.commands.unbounded_send(command)
+            && let Command::Read { reply, .. } = error.into_inner()
+        {
+            (reply.sink)(TerminalEvent::ReadDone(id, Err("unavailable".into())));
+        }
+    }
+
+    fn write(
+        &self,
+        ext: &str,
+        handle: TerminalHandle,
+        text: String,
+        submit: bool,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        let checked = self
+            .t3_terminal(ext, handle)
+            .map_err(|error| error.to_string())
+            .and_then(|terminal| {
+                ui_ext::terminal::check_write_text(&text)
+                    .map(|()| terminal)
+                    .map_err(|error| error.message)
+            });
+        let terminal = match checked {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                sink(TerminalEvent::WriteDone(id, Err(error)));
+                return;
+            }
+        };
+        let command = Command::Write {
+            id: terminal,
+            extension: ext.to_owned(),
+            text,
+            submit,
+            reply: T3Reply { id, sink },
+        };
+        if let Err(error) = self.commands.unbounded_send(command)
+            && let Command::Write { reply, .. } = error.into_inner()
+        {
+            (reply.sink)(TerminalEvent::WriteDone(id, Err("unavailable".into())));
+        }
     }
 
     fn close_all(&self, ext: &str) {
@@ -1221,5 +1373,102 @@ mod tests {
             })
             .collect();
         assert_eq!(closed, [ids["a"]]);
+    }
+
+    #[test]
+    fn t3_targets_reads_and_writes_go_to_user_terminals_only() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let closed = Arc::new(Mutex::new(Vec::new()));
+        host.set_closed_hook(Arc::new({
+            let closed = closed.clone();
+            move |id| closed.lock().unwrap().push(id)
+        }));
+        let user = TerminalExt::new();
+        host.terminal_opened(
+            user.status_handle(),
+            None,
+            "vim notes".into(),
+            Some("/w".into()),
+        );
+        let (pseudo_sink, _) = recorder();
+        host.open_pseudo("acme", pseudo_request("ssh box"), pseudo_sink)
+            .unwrap();
+        while queued.try_recv().is_ok() {}
+
+        let (observer, _) = recorder();
+        let infos = host.observe("other", Some(observer));
+        let user_handle = infos[0].handle;
+        let acme_handle = infos[1].handle;
+
+        // The card shows the real title; observers saw it redacted.
+        assert_eq!(infos[0].title, REDACTED);
+        let target = host.t3_target("other", user_handle).unwrap();
+        assert_eq!(
+            target,
+            T3Target {
+                terminal: user.id().as_u64(),
+                origin: TerminalOrigin::User,
+                title: "vim notes".into(),
+                cwd: Some("/w".into()),
+            }
+        );
+        assert_eq!(
+            host.t3_target("other", acme_handle),
+            Err(TerminalError::Denied),
+            "another extension's terminal"
+        );
+        assert_eq!(
+            host.t3_target("other", TerminalHandle(99)),
+            Err(TerminalError::NotFound)
+        );
+
+        let (sink, answers) = recorder();
+        host.read(
+            "other",
+            user_handle,
+            ReadScope::LastLines,
+            9999,
+            1,
+            sink.clone(),
+        );
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(Command::Read { id, lines: MAX_READ_LINES, reply, .. })
+                if id == user.id() && reply.id == 1
+        ));
+        host.read(
+            "other",
+            acme_handle,
+            ReadScope::LastLines,
+            5,
+            2,
+            sink.clone(),
+        );
+        host.write(
+            "other",
+            user_handle,
+            "rm -rf /".into(),
+            true,
+            3,
+            sink.clone(),
+        );
+        host.write("other", user_handle, "ls	-la".into(), true, 4, sink);
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(Command::Write { id, extension, submit: true, reply, .. })
+                if id == user.id() && extension == "other" && reply.id == 4
+        ));
+        let answers = answers.lock().unwrap().clone();
+        assert!(matches!(
+            answers.as_slice(),
+            [
+                TerminalEvent::ReadDone(2, Err(_)),
+                TerminalEvent::WriteDone(3, Err(_)),
+            ]
+        ));
+
+        host.terminal_closed(user.id());
+        assert_eq!(*closed.lock().unwrap(), [user.id().as_u64()]);
     }
 }

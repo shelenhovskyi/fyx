@@ -24,6 +24,7 @@ pub mod consent_dialog;
 pub mod consent_model;
 #[cfg(test)]
 mod consent_ui_tests;
+mod context_host;
 mod decorations;
 pub mod fyx_extensions_page;
 mod icons;
@@ -34,6 +35,7 @@ pub mod install_store;
 // fyx: the 0.4 usage journal's store (W2c, design wit-0.4 §C.4).
 pub mod journal;
 mod keyboard;
+mod main_thread;
 mod modal;
 pub mod notifications;
 mod panel;
@@ -42,8 +44,11 @@ mod registry;
 pub mod registry_service;
 #[cfg(test)]
 mod registry_service_tests;
+pub mod review_bridge;
 mod store_actions;
 mod surface;
+pub mod t3_cards;
+mod unified_diff;
 mod view;
 mod workspace_edit;
 mod worktrees;
@@ -54,6 +59,8 @@ mod decoration_tests;
 mod decoration_wasm_tests;
 #[cfg(test)]
 mod primitive_tests;
+#[cfg(test)]
+mod t3_card_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -80,7 +87,8 @@ pub use panel::{
     SurfaceInfo,
 };
 pub use registry::{
-    DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, UiExtensionRegistry,
+    DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, T3ShareTarget,
+    UiExtensionRegistry,
 };
 pub use store_actions::{
     InstallUiExtensionFromFile, OpenExtensionPanel, RestartUiExtension,

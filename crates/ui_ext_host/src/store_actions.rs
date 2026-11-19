@@ -452,6 +452,7 @@ fn install_package(
                 title: format!("Install {} {}?", info.extension_id, info.version),
                 notes,
                 confirm: "Install".into(),
+                update: current.is_some(),
             };
             let answer = workspace.update_in(cx, |workspace, window, cx| {
                 crate::consent_dialog::ask_consent(workspace, text, lines.clone(), window, cx)

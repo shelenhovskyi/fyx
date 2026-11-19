@@ -15,12 +15,17 @@
 //! - **Compat test** (`compat`): recorded protocol transcripts of a pinned Claude Code version,
 //!   replayed against [`ide`] and [`hooks`].
 //!
-//! This is the skeleton without host dependencies: the protocol core is plain Rust, tested
-//! natively. Wiring it to `io-event::mcp-call`, `relay-request`, `review-decided` and
-//! `context-changed` waits for the SDK's listeners, relay, review and context (plan 5.14).
+//! The protocol core is plain Rust, tested natively. Built for 0.4, the extension registers
+//! [`ide::tools`] on the `ide` listener and answers `io-event::mcp-call` through
+//! [`ide::Server`] ([`wired`]); Claude's paths map to worktree files through `context`, which
+//! also feeds `selection_changed`, and `openDiff` is a proposal in agent review (`review`),
+//! withdrawn when Claude closes its tab first. The hooks arrive with the relay. The staged 0.4
+//! WIT has no diagnostics source yet, so `getDiagnostics` answers an empty list.
 
 pub mod hooks;
 pub mod ide;
+#[cfg(feature = "fyx-ui-0-4")]
+mod wired;
 
 #[cfg(test)]
 mod compat;
@@ -39,13 +44,61 @@ pub const FEATURES: [&str; 4] = [
 
 pub struct ClaudeCode {
     sessions: hooks::Sessions,
+    #[cfg(feature = "fyx-ui-0-4")]
+    ide: ide::Server,
+    /// The last `selection_changed` params sent, so an unchanged selection is not sent again.
+    #[cfg(feature = "fyx-ui-0-4")]
+    selection: Option<String>,
 }
 
 impl Extension for ClaudeCode {
     fn new() -> Self {
+        // Registered before the listener opens; the host offers them when it does.
+        #[cfg(feature = "fyx-ui-0-4")]
+        {
+            wired::register_tools();
+            wired::watch_context();
+        }
         Self {
             sessions: hooks::Sessions::default(),
+            #[cfg(feature = "fyx-ui-0-4")]
+            ide: ide::Server::default(),
+            #[cfg(feature = "fyx-ui-0-4")]
+            selection: None,
         }
+    }
+
+    #[cfg(feature = "fyx-ui-0-4")]
+    fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+        match event {
+            IoEvent::McpCall(call) if call.listener == ide::LISTENER => {
+                self.ide.call(
+                    &mut wired::SdkHost,
+                    call.call_id,
+                    &call.tool,
+                    &call.arguments,
+                );
+            }
+            IoEvent::McpCancelled(call) => self.ide.cancelled(&mut wired::SdkHost, call),
+            IoEvent::ReviewDecided((proposal, outcome)) => {
+                let answer = wired::diff_answer(outcome);
+                self.ide
+                    .review_decided(&mut wired::SdkHost, proposal, &answer);
+            }
+            IoEvent::ContextChanged(editor) => {
+                let params = wired::selection_changed(editor);
+                if let Some(params) = &params
+                    && self.selection.as_ref() != Some(params)
+                {
+                    wired::notify_selection(params);
+                }
+                if params.is_some() {
+                    self.selection = params;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn surfaces(&self) -> Vec<Surface> {

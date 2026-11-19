@@ -13,7 +13,8 @@ to code style. Fyx-specific rules:
 - Do not open this repository in a dev build of Fyx/Zed: it triggers rebuilds of the root crates.
 - Rust comes from rustup; `rust-toolchain.toml` pins the version and targets. If `cargo` is not on
   `PATH`, add rustup's bin dir (`~/.cargo/bin`; on macOS with keg-only Homebrew rustup,
-  `/opt/homebrew/opt/rustup/bin`). `sccache` must be on `PATH` too (`.cargo/config.toml` uses it).
+  `/opt/homebrew/opt/rustup/bin`). No sccache: `.cargo/config.toml` sets no `rustc-wrapper`
+  (2% cache hits with one target dir per worktree); do not set `RUSTC_WRAPPER` either.
 
 ## Autonomy (multi-session work)
 
@@ -25,3 +26,20 @@ to code style. Fyx-specific rules:
 - `.claude/settings.json` allows shell commands without a prompt and denies the common ways to
   force-push, push `main`, push tags or delete branches. The deny list cannot cover every
   spelling (for example `git -C <dir> push`); the rule above still applies.
+
+## Efficiency
+
+Every tool round re-reads the whole context, so fewer rounds and a smaller context save the most.
+
+- Batch independent calls (reads, searches, commands) into one message.
+- Read with `offset`/`limit` or search with `rg`; no `sed -n` chains, no whole big files.
+- No `sleep` polling: run long commands with `run_in_background` and wait for the notification,
+  or use Monitor. A hook denies foreground sleeps over 30 s.
+- Iterate with `cargo check -p <crate>` and filtered nextest; run the whole crate's tests, clippy
+  and fmt once, before "ready".
+- Progress files keep a Handoff of at most 3 KB at the top; history goes to
+  `tasks/progress/archive/`.
+- At ~200k context, write the Handoff, push, and ask the coordinator to clear you.
+- `.claude/hooks/session-env.sh` already puts cargo, CMake and WinGet on `PATH` and sets
+  `CARGO_TARGET_DIR` (from `.claude/fyx-targets.json`) and `CARGO_BUILD_JOBS` for Bash calls; do not
+  re-export them.

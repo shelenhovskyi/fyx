@@ -57,7 +57,10 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
 mod compile_cache;
+mod context;
+mod listeners;
 mod notifications;
+mod review;
 mod terminals;
 mod v0_2;
 mod v0_3;
@@ -67,6 +70,9 @@ pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
 };
 pub use compile_cache::cache_compiled_components;
+pub use context::OpenedFile;
+pub use listeners::{ListenerEvent, McpCall, McpError, ToolDef};
+pub use review::ReviewTurn;
 pub use terminals::{FakeTerminal, plain_text};
 
 use api_state::ApiState;
@@ -313,6 +319,12 @@ pub(crate) struct State {
     api: ApiState,
     /// 0.4 terminals.
     terminals: terminals::FakeTerminals,
+    /// 0.4 `network:listen`.
+    listeners: listeners::FakeListeners,
+    /// 0.4 `context`.
+    context: context::FakeContext,
+    /// 0.4 `review`.
+    review: review::FakeReview,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -556,6 +568,41 @@ enum HostIo {
 enum WorldIo {
     V0_3(v0_3::bindings::fyx::ui::io::IoEvent),
     V0_4(v0_4::bindings::fyx::ui::io::IoEvent),
+}
+
+/// `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]`, as the host's
+/// `UiManifest::check_t2_reasons` checks it: from 0.4 every T2 item has one line of at most
+/// 200 bytes (design wit-0.4 §C.2); below 0.4 the key does not exist.
+fn check_t2_reasons(table: &toml::Table, version: &Version) -> Result<()> {
+    fn reason_of(item: &toml::Value) -> Option<Option<&str>> {
+        item.get("reason").map(toml::Value::as_str)
+    }
+    let processes = table
+        .get("processes")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|spec| {
+            let name = spec.get("name").and_then(toml::Value::as_str).unwrap_or("");
+            (format!("[[fyx_ui.processes]] {name:?}"), reason_of(spec))
+        });
+    let network = table
+        .get("network")
+        .map(|network| ("[fyx_ui.network]".to_owned(), reason_of(network)));
+    for (what, reason) in processes.chain(network) {
+        if *version < Version::new(0, 4, 0) {
+            anyhow::ensure!(
+                reason.is_none(),
+                "{what}: reason needs fyx:ui 0.4; this extension targets {version}"
+            );
+        } else {
+            let reason = reason
+                .with_context(|| format!("{what}: a reason is required (fyx:ui 0.4)"))?
+                .with_context(|| format!("{what}: reason must be a string"))?;
+            ui_ext::terminal::check_reason(&what, reason).map_err(anyhow::Error::msg)?;
+        }
+    }
+    Ok(())
 }
 
 /// A 0.4 tree's `terminal` nodes: the extension's own terminals, one node each.
@@ -1061,6 +1108,35 @@ impl Harness {
 
     /// Like [`Harness::load`], with the `[fyx_ui].capabilities` of a manifest.
     pub fn load_with_capabilities(wasm: &[u8], capabilities: &[&str]) -> Result<Self> {
+        Self::load_with_listeners(wasm, capabilities, Vec::new())
+    }
+
+    /// Like [`Harness::load_with_capabilities`], with the `[[fyx_ui.listeners]]` of a manifest
+    /// (0.4, design.md B.7), checked as the host checks them: `network:listen` is declared and
+    /// `ui_ext::integration::IntegrationTables::check` passes. They are known before the
+    /// component is instantiated, so its constructor may register tools.
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn load_with_listeners(
+        wasm: &[u8],
+        capabilities: &[&str],
+        listeners: Vec<ui_ext::integration::ListenerSpec>,
+    ) -> Result<Self> {
+        if !listeners.is_empty() {
+            if !capabilities.contains(&ui_ext::integration::CAPABILITY_NETWORK_LISTEN) {
+                anyhow::bail!(
+                    "[[fyx_ui.listeners]] needs the {} capability",
+                    ui_ext::integration::CAPABILITY_NETWORK_LISTEN
+                );
+            }
+            ui_ext::integration::IntegrationTables {
+                listeners: &listeners,
+                ..Default::default()
+            }
+            .check()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        }
+        let mut fake_listeners = listeners::FakeListeners::default();
+        fake_listeners.set_specs(listeners);
         let runtime = runtime()?;
         let section_version = api_version_section(wasm)?;
         let component = compile_cache::compile(&runtime.engine, wasm)?;
@@ -1107,6 +1183,9 @@ impl Harness {
                         .collect::<Vec<_>>(),
                     Vec::new(),
                 ),
+                listeners: fake_listeners,
+                context: context::FakeContext::default(),
+                review: review::FakeReview::default(),
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1238,8 +1317,21 @@ impl Harness {
         let component_path = dir.join(&component);
         let wasm = std::fs::read(&component_path)
             .with_context(|| format!("reading {component_path:?}"))?;
-        let mut harness = Self::load_with_capabilities(&wasm, &capabilities)
+        let listeners: Vec<ui_ext::integration::ListenerSpec> = match table.get("listeners") {
+            Some(listeners) => listeners
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.listeners]] in {manifest_path:?}"))?,
+            None => Vec::new(),
+        };
+        let mut harness = Self::load_with_listeners(&wasm, &capabilities, listeners)
             .with_context(|| format!("loading {dir:?}"))?;
+        let version = table
+            .get("api_version")
+            .and_then(toml::Value::as_str)
+            .and_then(|version| Version::parse(version).ok())
+            .unwrap_or_else(|| harness.api_version.clone());
+        check_t2_reasons(table, &version).with_context(|| format!("in {manifest_path:?}"))?;
         if let Some(domains) = table
             .get("network")
             .and_then(toml::Value::as_table)
@@ -1289,6 +1381,9 @@ impl Harness {
             harness = harness
                 .with_terminal_profiles(profiles)
                 .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(id) = manifest.get("id").and_then(toml::Value::as_str) {
+            harness.store.data_mut().listeners.set_extension_id(id);
         }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
@@ -1529,13 +1624,13 @@ impl Harness {
     /// `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the
     /// host does.
     pub fn profile_command_line(&self, id: &str) -> Result<(String, Vec<String>)> {
-        struct Cx(String);
+        struct Cx(String, BTreeMap<String, u16>);
         impl ui_ext::terminal::TemplateContext for Cx {
             fn package(&self) -> Option<String> {
                 Some(self.0.clone())
             }
-            fn listen_port(&self, _: &str) -> Option<u16> {
-                None
+            fn listen_port(&self, name: &str) -> Option<u16> {
+                self.1.get(name).copied()
             }
             fn listen_token(&self, _: &str) -> Option<String> {
                 None
@@ -1552,10 +1647,19 @@ impl Harness {
             .iter()
             .find(|profile| profile.id == id)
             .with_context(|| format!("{id:?} is not in [[fyx_ui.terminal_profiles]]"))?;
-        let cx = Cx(self.package.as_ref().map_or_else(
-            || "<package>".to_owned(),
-            |dir| dir.to_string_lossy().replace('\\', "/"),
-        ));
+        let listeners = &self.store.data().listeners;
+        let ports = listeners
+            .specs()
+            .iter()
+            .filter_map(|spec| Some((spec.name.clone(), listeners.port(&spec.name)?)))
+            .collect();
+        let cx = Cx(
+            self.package.as_ref().map_or_else(
+                || "<package>".to_owned(),
+                |dir| dir.to_string_lossy().replace('\\', "/"),
+            ),
+            ports,
+        );
         let args = profile
             .args
             .iter()
@@ -1619,6 +1723,160 @@ impl Harness {
             .iter()
             .filter_map(|node| v0_4::terminal_node_handle(&node.props))
             .collect()
+    }
+
+    /// The tools the extension registered on listener `name` (0.4), in its order.
+    pub fn registered_tools(&self, name: &str) -> Vec<ToolDef> {
+        self.store.data().listeners.tools(name).to_vec()
+    }
+
+    /// Whether listener `name` is open: declared and granted.
+    pub fn listener_open(&self, name: &str) -> bool {
+        self.store.data().listeners.is_open(name)
+    }
+
+    /// `${listen.<name>.port}` while the listener is open: a fake port, no socket.
+    pub fn listener_port(&self, name: &str) -> Option<u16> {
+        self.store.data().listeners.port(name)
+    }
+
+    /// Grants or revokes `network:listen#<name>`. Revoking closes the listener: its connections
+    /// end, and [`Harness::deliver_io`] delivers `mcp-cancelled` for their open calls.
+    pub fn set_listener_granted(&mut self, name: &str, granted: bool) {
+        self.store.data_mut().listeners.set_granted(name, granted);
+    }
+
+    /// A client connects to the websocket kind `name` (`mcp-websocket`, `mcp-streamable-http`
+    /// as one session, or `websocket`), having passed the host's token, `Origin` and `Host`
+    /// checks. Returns the connection id the extension sees.
+    pub fn connect(&mut self, name: &str) -> Result<u64> {
+        self.store
+            .data_mut()
+            .listeners
+            .connect(name)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The client closes `connection`; [`Harness::deliver_io`] delivers `mcp-cancelled` for its
+    /// open calls.
+    pub fn disconnect(&mut self, connection: u64) {
+        self.store.data_mut().listeners.disconnect(connection);
+    }
+
+    /// The client sends one text frame. On an `mcp-*` listener it is a JSON-RPC message: the
+    /// host's methods are answered at once, and a `tools/call` reaches the extension as
+    /// `mcp-call` on [`Harness::deliver_io`]. On a `websocket` listener it is
+    /// `listener-message`.
+    pub fn client_send(&mut self, connection: u64, text: &str) -> Result<()> {
+        self.store
+            .data_mut()
+            .listeners
+            .client_send(connection, text)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// What the client got since the last call, in order: the host's answers, the extension's
+    /// `respond`, `notify` and `send`.
+    pub fn client_received(&mut self, connection: u64) -> Result<Vec<String>> {
+        self.store
+            .data_mut()
+            .listeners
+            .received(connection)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// A request to the `http` listener `name`; [`Harness::deliver_io`] delivers it as
+    /// `listener-request`. Returns its id.
+    pub fn http_request(&mut self, name: &str, path: &str, body: &str) -> Result<u64> {
+        self.store
+            .data_mut()
+            .listeners
+            .http_request(name, path, body)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The extension's `reply` to request `id`, once.
+    pub fn http_reply(&mut self, id: u64) -> Option<(u16, String)> {
+        self.store.data_mut().listeners.take_reply(id)
+    }
+
+    /// The open worktrees for `context` (0.4): (id, root as the host spells it, `\` or `/`).
+    /// The roots need not exist.
+    pub fn set_worktrees(&mut self, roots: &[(u64, &str)]) {
+        self.store.data_mut().context.set_roots(
+            roots
+                .iter()
+                .map(|(id, root)| (*id, (*root).to_owned()))
+                .collect(),
+        );
+    }
+
+    /// A file the user keeps private: `to-file-ref` and `absolute-path` refuse it, and the
+    /// context carries no selection text of it.
+    pub fn set_private_file(&mut self, worktree: u64, path: &str) {
+        self.store.data_mut().context.set_private(worktree, path);
+    }
+
+    /// What the editor shows now; while the extension watches, [`Harness::deliver_io`]
+    /// delivers it, filtered as the host filters it, as `context-changed`.
+    pub fn set_editor_context(&mut self, context: ui_ext::context::EditorContext) {
+        self.store.data_mut().context.set_context(context);
+    }
+
+    /// Whether the extension watches the editor context.
+    pub fn watching_context(&self) -> bool {
+        self.store.data().context.is_watching()
+    }
+
+    /// Every `context.open` the extension made, in order.
+    pub fn opened_files(&self) -> Vec<OpenedFile> {
+        self.store.data().context.opened.clone()
+    }
+
+    /// The undecided `review` proposals (0.4), by id. Their paths need
+    /// [`Harness::set_worktrees`].
+    pub fn proposals(&self) -> Vec<(u64, ui_ext::review::Proposal)> {
+        self.store.data().review.proposals()
+    }
+
+    /// The user decides proposal `id` in agent review; [`Harness::deliver_io`] delivers
+    /// `review-decided`. False when `id` is not open (withdrawn, or decided already).
+    pub fn decide_review(
+        &mut self,
+        id: u64,
+        decision: ui_ext::review::Decision,
+        final_content: &str,
+    ) -> bool {
+        let outcome = ui_ext::review::ReviewOutcome {
+            decision,
+            final_content: final_content.to_owned(),
+        };
+        self.store.data_mut().review.end(id, Ok(outcome))
+    }
+
+    /// Proposal `id`'s review ends undecided (its file went away): `review-decided` with `Err`.
+    pub fn fail_review(&mut self, id: u64, reason: &str) -> bool {
+        self.store.data_mut().review.end(id, Err(reason.to_owned()))
+    }
+
+    /// The user edits proposal `id`'s text; `withdraw` returns it.
+    pub fn edit_review(&mut self, id: u64, text: &str) -> bool {
+        self.store.data_mut().review.edit(id, text)
+    }
+
+    /// The proposals the extension withdrew, in order.
+    pub fn withdrawn_reviews(&self) -> Vec<u64> {
+        self.store.data().review.withdrawn.clone()
+    }
+
+    /// The extension's `begin-turn` and `end-turn` calls, in order.
+    pub fn review_turns(&self) -> Vec<ReviewTurn> {
+        self.store.data().review.turns.clone()
+    }
+
+    /// The MCP calls the extension has not answered, by call id.
+    pub fn open_mcp_calls(&self) -> Vec<u64> {
+        self.store.data().listeners.open_calls()
     }
 
     /// Keys or text the user types into a pseudo-terminal; [`Harness::deliver_io`] hands them to
@@ -1799,6 +2057,39 @@ impl Harness {
                 .extension
                 .world_io(HostIo::Model(ui_ext::network::IoEvent::Agent(event)))
             else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(event) = self.store.data_mut().listeners.events.pop_front() {
+            let event = ui_ext::network::IoEvent::Listener(event);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(event) = self.store.data_mut().context.events.pop_front() {
+            let event = ui_ext::network::IoEvent::Context(event);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some((id, outcome)) = self.store.data_mut().review.events.pop_front() {
+            let event = ui_ext::network::IoEvent::ReviewDecided(id, outcome);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
             let (value, effects) =

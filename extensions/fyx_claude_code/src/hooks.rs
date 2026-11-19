@@ -201,7 +201,48 @@ impl Sessions {
         self.sessions.len()
     }
 
-    /// The effects of one hook. `to_ref` maps Claude's absolute paths to worktree files; a write
+    /// The user rejected an `openDiff` in Fyx, and the extension answered `DIFF_REJECTED`. Claude
+    /// 2.1.326 then ends the turn with no `Stop` hook (live recording, 2026-11-19), so the
+    /// extension ends it here. The turn is the one session whose current tool is an edit; with
+    /// none or several, nothing happens, and the next prompt or `Stop` closes the turn.
+    pub fn diff_rejected(&mut self) -> Vec<Effect> {
+        let editing: Vec<&String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.in_turn
+                    && session
+                        .tool
+                        .as_deref()
+                        .is_some_and(|tool| WRITE_TOOLS.contains(&tool))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let [id] = editing[..] else {
+            return Vec::new();
+        };
+        let id = id.clone();
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return Vec::new();
+        };
+        session.in_turn = false;
+        session.tool = None;
+        vec![
+            Effect::EndTurn {
+                session: id,
+                changed: std::mem::take(&mut session.changed).into_iter().collect(),
+            },
+            Effect::Status(Some(Status {
+                state: StatusState::Done,
+                label: "Edit rejected".into(),
+                detail: None,
+                attention: false,
+            })),
+        ]
+    }
+
+    /// The effects of one hook. `to_ref` maps Claude's absolute paths, in
+    /// [`crate::ide::normalize_path`]'s form, to worktree files; a write
     /// outside every worktree is not part of the turn's changes.
     pub fn apply(
         &mut self,
@@ -250,7 +291,11 @@ impl Sessions {
             }
             Channel::PostTool => {
                 session.tool = None;
-                if let Some(file) = input.edited_path.as_deref().and_then(&to_ref) {
+                if let Some(file) = input
+                    .edited_path
+                    .as_deref()
+                    .and_then(|path| to_ref(&crate::ide::normalize_path(path)))
+                {
                     session.changed.insert(file);
                 }
                 vec![Effect::Status(Some(Status {
@@ -402,6 +447,52 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::EndTurn { .. }))
         );
         assert_eq!(sessions.get("s1").unwrap().turns, 1);
+    }
+
+    #[test]
+    fn a_rejected_diff_ends_the_editing_turn() {
+        let mut sessions = Sessions::default();
+        // Nothing is editing: nothing ends.
+        assert!(sessions.diff_rejected().is_empty());
+        sessions.apply(&input(Channel::UserPrompt, r#","prompt":"fix""#), to_ref);
+        // A Windows path from Claude is normalized before `to_ref`.
+        let windows = |path: &str| {
+            path.strip_prefix("C:/work/app/").map(|path| FileRef {
+                worktree: Some(1),
+                path: path.into(),
+            })
+        };
+        sessions.apply(
+            &input(
+                Channel::PostTool,
+                r#","tool_name":"Write","tool_input":{"file_path":"c:\\work\\app\\b.rs"}"#,
+            ),
+            windows,
+        );
+        sessions.apply(&input(Channel::PreTool, r#","tool_name":"Edit""#), to_ref);
+        let effects = sessions.diff_rejected();
+        assert_eq!(
+            effects[0],
+            Effect::EndTurn {
+                session: "s1".into(),
+                changed: vec![FileRef {
+                    worktree: Some(1),
+                    path: "b.rs".into()
+                }],
+            }
+        );
+        let Effect::Status(Some(status)) = &effects[1] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(status.state, StatusState::Done);
+        // The turn is over: neither a second rejection nor the next prompt ends it again.
+        assert!(sessions.diff_rejected().is_empty());
+        let next = sessions.apply(&input(Channel::UserPrompt, r#","prompt":"go""#), to_ref);
+        assert!(
+            !next
+                .iter()
+                .any(|effect| matches!(effect, Effect::EndTurn { .. }))
+        );
     }
 
     #[test]

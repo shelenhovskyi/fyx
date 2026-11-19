@@ -54,7 +54,7 @@ content does not change.
 | B.8 | Discovery files | 5.11 | `fs:discovery-file` T2 |
 | B.9 | `fyx-relay` for command hooks | 5.11 | `relay:hooks` T2 |
 | B.10 | Proposed edits through agent review | 5.12 | `review:propose` T1 |
-| B.11 | Editor context, opening files, pasting into a tool | 5.13 | `context:editor` T1, `workspace:open` T1 |
+| B.11 | Editor context, opening files, pasting into a tool | 5.13 | `context:editor` T1, `workspace:open` T1, `workspace:diagnostics` T1 |
 | B.12 | Approval cards for a tool's own permission prompts | 5.13 | `ui:approvals` T0 |
 | C.1–C.5 | Consent: T2 accepted at install with checkboxes, T3 at the moment of action, journal, update diff | 5.5–5.7 | `terminal:read` T3, `terminal:write` T3 |
 | C.6 | Multiple accounts: forbidden auth and config-dir names, account profiles, Fyx profiles (variant A) | 5.5, 5.20 | none |
@@ -410,6 +410,10 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   current text, with the user's edits so far, without a `review-decided`. Gemini's `closeDiff`
   needs exactly that (close the diff, return the text), and Claude's `close_tab` and
   `closeAllDiffTabs` need the closing.
+- **A decided proposal is never withdrawn.** After the user decides, a tool may still ask to close
+  the diff (Claude Code sends `closeAllDiffTabs` at every prompt and `close_tab` twice after each
+  answered diff). The extension answers these from its own state; it calls `review.withdraw` only
+  for a proposal that is still open.
 - **The outcome** comes later: `io-event::review-decided(id, result<review-outcome,
   review-error>)`. `review-outcome` has `decision` (`accepted`, `partial`, `rejected`) and
   `final-content`, the text after the user's choices and edits. A blocking protocol (Claude's
@@ -423,6 +427,26 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   `agent_review`'s `begin_turn` / `end_turn` / `note_changed_paths`
   (`crates/agent_review/src/agent_review.rs:560-634`). Files the tool changed during a turn without
   a proposal show as "changed without review".
+- **Two paths for a tool that has hooks** (Claude Code, 2.1.326 live recording):
+  - **Post-hoc (primary).** `PreToolUse` and `PostToolUse` hooks reach the extension through
+    `fyx-relay` (§B.9). The extension takes a snapshot of the file before the tool writes it and
+    proposes the diff afterwards, so the change reaches agent review hunk by hunk whatever the
+    tool's permission mode. It is after the fact: the tool has already written the file.
+    - **Reject restores the before-snapshot.** If the file changed after the agent's write (the
+      user typed in it, another tool wrote it), Fyx shows a conflict view and never overwrites
+      silently.
+    - **Fyx tells the agent what was reverted.** The default channel is the hook's
+      `additionalContext`: on the next `UserPromptSubmit`, or on `PostToolUse` when "hold edits"
+      is on. Pasting the note into the tool's terminal (§B.11) happens only if the user chooses it.
+  - **`openDiff` (bonus).** The tool's own IDE protocol proposes the edit before it writes
+    (`apply = false`, a blocking call). It happens only when the tool asks, which for Claude Code
+    is manual (`default`) permission mode only; `auto` is Claude's default mode now, so this path
+    is the exception.
+  - **Hold edits for review (optional, a 5.15 follow-up, not in the first cut).** A setting turns
+    on a blocking `PreToolUse` hook: the relay request waits, Fyx shows the diff, and the answer
+    allows or denies the tool call, under the channel's timeout and `on_failure` (§B.9). It is the
+    only way to review before the write in `auto` mode, and it fails open by default like any
+    relay channel.
 - **Provenance:** the review panel names the extension and the tool session. Accepting or
   rejecting stays the user's; the extension cannot answer a review (spec §5, agent review policy
   stays with W5).
@@ -451,7 +475,30 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   `context.absolute-path(file-ref)` goes the other way. The host does the conversion, so the
   extension still never learns a path outside the worktrees: a path that is in no worktree, or is
   private (`is_private_path`), is an error, not a `file-ref`.
-- **`workspace:diagnostics`** stays T1 (0.3).
+- **Diagnostics read (`workspace:diagnostics`, T1).** Claude Code calls `getDiagnostics` about
+  four times a turn (around each edit, for one file and for all files), and diffs the answers
+  ("Found 1 new diagnostic issue"). The 0.3 WIT only passes diagnostics inside provider requests,
+  so a tool extension had nothing to answer with. 0.4 adds a pull read and a change event to the
+  `context` interface:
+  - `context.diagnostics(path: option<file-ref>)` returns a snapshot. With a `file-ref` it is that
+    one file; with `none` it is every worktree file of the window that has diagnostics (what the
+    editor's language servers report, open or not).
+  - Each entry has `range` (a `text-range`, **0-based**, columns in UTF-8 bytes as everywhere in
+    the WIT), `severity` (`error`, `warning`, `information`, `hint`), `message`, `source` (the
+    server, such as `rust-analyzer`) and `code`, both optional. A message is cut at 2 KiB.
+  - **Worktree files only.** A private file (`is_private_path`) is `not-permitted` when asked for
+    by name and is left out of the all-files answer without a trace (no entry, no count). A
+    `file-ref` that is in no worktree is `invalid-argument`; the extension never gets a path
+    outside the worktrees. A file with no diagnostics returns an empty list.
+  - **Capped at 500 entries** in one answer, errors first, then warnings, information and hints,
+    then by path and line. `truncated` is true when entries were left out.
+  - **`diagnostics-changed` (optional).** `context.watch-diagnostics(on)` subscribes to
+    `io-event::diagnostics-changed(list<file-ref>)`: the files whose diagnostics changed,
+    debounced 300 ms, at most 200 files per event (a larger change sends an empty list: "everything
+    may have changed"). It carries no entries, so a caller caches the last snapshot and re-reads
+    only when told. Without a subscription `diagnostics` still works; it is a fresh read.
+  - The install dialog's combination warning (above) applies: diagnostics can carry source text
+    in messages.
 - **Paste into a tool:** `terminals.paste(handle, text)` into the extension's profile terminal
   (§B.1) or own terminal. Only after a gesture in the extension's UI or a command the user ran
   ("Send selection to Claude"). Only while the terminal's foreground program has bracketed-paste
@@ -489,11 +536,14 @@ can run any program on your computer" (0.3 Q2).
 
 ### C.2 T2 at install, with checkboxes
 
-The install dialog (file, dev UI, registry) has four groups:
+The install dialog (file, dev UI, registry) has four groups, named by how consent works:
 
 1. **Shows in Fyx** (T0): one line.
-2. **Reads** (T1): one line per capability, no checkbox.
-3. **Can run code or reach outside Fyx** (T2): a checkbox per item, unticked:
+2. **Allowed without asking** (T1): one line per capability, no checkbox. T1 includes
+   `terminal:pseudo`, `terminal:status`, `workspace:open` and `review:propose` (and the other T1
+   capabilities of §C.1), so this group is not only reading. `terminal:observe` is not here: it
+   is a read-only T2 item, in the next group, with a checkbox.
+3. **Off unless you tick it** (T2): a checkbox per item, unticked:
    - one per program for `process:spawn` and `terminal:create`, with its argument patterns;
    - one per listener for `network:listen`, and one per discovery file, with its path;
    - one for `network:fetch` with its domain list, one for `terminal:env` with every name and
@@ -508,6 +558,8 @@ The install dialog (file, dev UI, registry) has four groups:
 - **Buttons:** "Install" installs with what is ticked. A T2 item left unticked is `denied`; the
   extension sees `denied` and should say what it cannot do. Every checkbox ignores clicks for 1 s
   after the dialog appears.
+- **Updates:** the update dialog (§C.5) shows only the groups that have changes, with no empty
+  groups.
 - **Later:** the extension page lists every item with its state and a switch; turning a T2 item
   on asks once more, with the same text and the 1 s guard.
 - **Dev installs without a dialog** (`FYX_UI_DEV_EXTENSIONS`, dev builds only) keep 0.3's
@@ -757,6 +809,25 @@ interface context {
         selection: option<tuple<text-range, option<string>>>,   // text absent for private files
     }
     watch: func(on: bool) -> result<_, host-error>;                                      // context:editor
+
+    /// 0.4. Diagnostics (§B.11, `workspace:diagnostics`, T1).
+    enum severity { error, warning, information, hint }
+    record diagnostic {
+        range: text-range,                                      // zero-based, UTF-8 byte columns
+        severity: severity,
+        message: string,                                        // cut at 2 KiB
+        source: option<string>,                                 // the language server, e.g. "rust-analyzer"
+        code: option<string>,                                   // numeric codes as text
+    }
+    record file-diagnostics { path: file-ref, diagnostics: list<diagnostic> }
+    record diagnostics-snapshot {
+        files: list<file-diagnostics>,                          // only files with at least one entry
+        truncated: bool,                                        // more than 500 entries; errors kept first
+    }
+    /// `some` = that file (private: not-permitted; in no worktree: invalid-argument);
+    /// `none` = every worktree file with diagnostics (private files left out).
+    diagnostics: func(path: option<file-ref>) -> result<diagnostics-snapshot, host-error>;
+    watch-diagnostics: func(on: bool) -> result<_, host-error>;                          // workspace:diagnostics
     open: func(path: file-ref, range: option<text-range>, focus: bool) -> result<_, host-error>;  // workspace:open
     to-file-ref: func(abs-path: string) -> result<file-ref, host-error>;                 // context:editor
     absolute-path: func(path: file-ref) -> result<string, host-error>;                   // context:editor
@@ -778,6 +849,7 @@ interface approvals {
 //   listener-request(tuple<u64, string, string, string> /* id, listener, path, body */),
 //   relay-request(tuple<u64, string, option<u64>, list<string>, string>),
 //   review-decided(tuple<u64, result<review-outcome, string>>), context-changed(editor-context),
+//   diagnostics-changed(list<file-ref> /* empty = anything may have changed */),
 //   approval-answered(tuple<u64, option<approval-option>>)
 //
 // permissions: t2-capability gains network-listen, terminal-create, terminal-env, terminal-observe,
@@ -807,12 +879,27 @@ lists.
 3. `network:listen` (`mcp-websocket`) + `fs:discovery-file` `${account.claude}/ide/${port}.lock` +
    env `CLAUDE_CODE_SSE_PORT`, `ENABLE_IDE_INTEGRATION=true` → the IDE protocol:
    `selection_changed`, `at_mentioned`, `getDiagnostics`, `openFile`, and `openDiff` →
-   `review:propose` (blocking).
-4. Turns: `UserPromptSubmit` → `begin-turn`, `Stop` → `end-turn`.
+   `review:propose` (blocking). **Print and SDK runs never connect to the IDE:** `claude -p` and
+   Agent SDK runs open no WebSocket even with `--ide`; they get hooks only, so turns, status and
+   review for them come from hooks (item 4 and §B.10). The IDE protocol is for interactive runs.
+   Edge behaviour of 2.1.326: `closeAllDiffTabs` and a duplicate `close_tab` after a decision
+   answer without withdrawing (§B.10); `getDiagnostics` gets a file URI in two Windows forms,
+   `file:///C:/work/app.py` and `file://C:\work\app.py`, and the extension accepts both (through
+   `context.to-file-ref`, §B.11); paths in `openDiff` and `at_mentioned` carry backslashes. `getDiagnostics` answers from
+   `context.diagnostics` (§B.11); the extension keeps the last snapshot and refreshes it on
+   `diagnostics-changed`, so the four calls a turn are cheap and stable.
+4. Turns: `UserPromptSubmit` → `begin-turn`, `Stop` → `end-turn`. **After the user rejects a
+   diff (`DIFF_REJECTED`) Claude ends the turn with no `Stop` hook,** so the extension also ends
+   the turn when it answers a rejection. **Review is post-hoc first:** `PreToolUse` and
+   `PostToolUse` through `fyx-relay` snapshot the file before and propose the diff after
+   (§B.10), because `auto` is now Claude's default permission mode and `openDiff` comes only in
+   manual mode. `openDiff` is the bonus path. "Hold edits for review", a blocking `PreToolUse`
+   hook where Fyx allows or denies under a timeout, is an optional setting and a 5.15 follow-up.
 5. **Compat test:** a recorded protocol transcript from a pinned Claude Code version, replayed
    against the extension in the harness; a scheduled manual check against the newest CLI before
-   each release. Known gaps: in `acceptEdits` and `auto` modes Claude writes without `openDiff`,
-   so those edits show as "changed without review"; the protocol is reverse-engineered [RE].
+   each release. Known gaps: in `acceptEdits` and `auto` modes (and in print and SDK runs) Claude
+   writes without `openDiff`, which the post-hoc path covers after the fact; the protocol is
+   reverse-engineered [RE].
 
 **`fyx_gemini_cli`** (plan 5.16, W4; skeleton 81be13f34b): the documented IDE companion spec over
 `mcp-streamable-http` (path `/mcp`) with a Bearer token, the discovery file in

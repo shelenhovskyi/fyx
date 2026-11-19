@@ -11,12 +11,20 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"
-# On the Windows dev box a FULL run, green or red, ends by sweeping and pruning the target dirs
-# (script/fyx-disk-guard; tasks/W0-integrator.md, "Disk"). Never in CI.
-if [[ "${FULL:-0}" == "1" && "${CI:-}" != "true" && -x script/fyx-disk-guard ]] \
-    && command -v powershell >/dev/null 2>&1; then
-    trap 'script/fyx-disk-guard || true' EXIT
-fi
+# Measurement (tasks/W0-integrator.md, "Gate modes"): every run, green or red, ends with its wall
+# time.
+gate_started=$SECONDS
+gate_report() {
+    local elapsed=$((SECONDS - gate_started))
+    echo "gate: wall time $((elapsed / 60))m $((elapsed % 60))s"
+    # On the Windows dev box a FULL run, green or red, ends by sweeping and pruning the target dirs
+    # (script/fyx-disk-guard; tasks/W0-integrator.md, "Disk"). Never in CI.
+    if [[ "${FULL:-0}" == "1" && "${CI:-}" != "true" && -x script/fyx-disk-guard ]] \
+        && command -v powershell >/dev/null 2>&1; then
+        script/fyx-disk-guard || true
+    fi
+}
+trap gate_report EXIT
 
 # Workspace-wide checks (spec decision 27). They do not depend on which crates changed, so they
 # run first and on every gate, even one with no crate changes. See docs/fyx/ci.md.
@@ -83,14 +91,16 @@ echo "gate: ${changed_crates//$'\n'/ }"
 # Known local issue (docs/fyx/ci.md, "Known local issues"): on a machine whose DNS answers
 # example.com with a loopback address, upstream's fetch-tool redirect tests fail because they
 # resolve example.com for real. Skip exactly those, loudly, and never in CI. Checked before the
-# build: under the gate's full load the lookup can time out and the skip silently not apply.
+# build. A lookup that fails every time skips too: on 5a62615004 the skip did not apply and the
+# tests failed, most likely a lookup that timed out under load, and they cannot pass without a
+# real answer anyway. Only a real, non-loopback answer runs them.
 nextest_filter=()
 if [[ "${CI:-}" != "true" && " ${pkgs[*]} " == *" agent "* ]] \
-    && powershell -NoProfile -Command "for (\$i = 0; \$i -lt 3; \$i++) { try { if ([System.Net.Dns]::GetHostAddresses('example.com') | Where-Object { \$_.ToString() -match '^127\.' }) { exit 0 } } catch {}; Start-Sleep -Milliseconds 500 }; exit 1" 2>/dev/null; then
-    echo "gate: WARNING: example.com resolves to loopback here; skipping agent's 3 fetch-tool redirect tests (CI runs them)"
+    && powershell -NoProfile -Command "for (\$i = 0; \$i -lt 5; \$i++) { try { \$a = [System.Net.Dns]::GetHostAddresses('example.com'); if (\$a | Where-Object { \$_.ToString() -match '^127\.' }) { exit 0 }; if (\$a) { exit 1 } } catch {}; Start-Sleep -Milliseconds 1000 }; exit 0" 2>/dev/null; then
+    echo "gate: WARNING: example.com resolves to loopback here (or not at all); skipping agent's 3 fetch-tool redirect tests (CI runs them)"
     nextest_filter=(-E 'not (test(test_fetch_tool_follows_same_host_redirect) | test(test_fetch_tool_refuses_redirect_to_loopback) | test(test_fetch_tool_reauthorizes_redirect_to_new_host))')
 fi
-cargo check "${pkgs[@]}" 2>&1 | tail -20
+# No separate `cargo check`: clippy type-checks the same packages, all targets included.
 cargo clippy "${pkgs[@]}" --all-targets -- --deny warnings 2>&1 | tail -30
 # Tests must never touch the user's real Fyx profile (two leaks on 2026-11-18, docs/fyx/ci.md).
 # 1. nextest gets a throwaway HOME and data/config dirs. Cargo and rustup are pinned first, so
@@ -126,12 +136,26 @@ win_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else p
 CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
     LOCALAPPDATA="$(win_path "$test_home/LocalAppData")" APPDATA="$(win_path "$test_home/AppData")" \
     XDG_DATA_HOME="$test_home/xdg-data" XDG_CONFIG_HOME="$test_home/xdg-config" \
-    cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast "${nextest_filter[@]}" 2>&1 | tail -60
+    cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast --timings "${nextest_filter[@]}" 2>&1 | tail -60
 app_started=""
 for dir in "${profile_candidates[@]}"; do
     [[ -n "$(find "$dir/logs" -maxdepth 1 -name '*.log' -newer "$test_home/.started" 2>/dev/null)" ]] && app_started=1
 done
 rm -rf "$test_home"
+# Cargo's timing report of a build step (`--timings`), one copy per commit and step outside the
+# target dir: FYX_GATE_TIMINGS_DIR, on the Windows dev box D:\fyx-builds\gate-timings.
+timings_dir="${FYX_GATE_TIMINGS_DIR:-}"
+if [[ -z "$timings_dir" && -d /d/fyx-builds ]]; then timings_dir=/d/fyx-builds/gate-timings; fi
+keep_timings() {
+    local report copy
+    report=$(ls -t "${CARGO_TARGET_DIR:-target}"/cargo-timings/cargo-timing*.html 2>/dev/null | head -1)
+    [[ -n "$timings_dir" && -n "$report" ]] || return 0
+    mkdir -p "$timings_dir"
+    copy="$timings_dir/$(git rev-parse --short=10 HEAD)-$1.html"
+    cp "$report" "$copy"
+    echo "gate: cargo timings ($1): $(win_path "$copy")"
+}
+keep_timings test
 # Per-test timing (.config/nextest.toml writes junit.xml): keep one copy per commit outside the
 # target dir, which gets pruned. FYX_GATE_JUNIT_DIR overrides; on the Windows dev box the default
 # is D:\fyx-builds\gate-junit.
@@ -163,7 +187,8 @@ else
 fi
 
 if [[ "${FULL:-0}" == "1" ]]; then
-    cargo build -p zed 2>&1 | grep -E '^(error|warning: unused)|Finished' | tail -20
+    cargo build -p zed --timings 2>&1 | grep -E '^(error|warning: unused)|Finished' | tail -20
+    keep_timings zed
 fi
 
 # A lockfile that cargo rewrote during the run is not committed, so `--locked` builds of a fresh

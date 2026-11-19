@@ -94,6 +94,16 @@ struct TabStatus;
 impl TerminalDecorations for TabStatus {
     fn tab_indicator(&self, terminal: &TerminalExt, cx: &App) -> Option<AnyElement> {
         let status = status_indicator(terminal);
+        let status = match crate::t3::typed_by(terminal.id(), cx) {
+            Some(extension) => Some(typed_by_marker(terminal, extension, status)),
+            None => status,
+        };
+        let access = crate::t3::access(terminal, cx);
+        let status = if access.is_empty() {
+            status
+        } else {
+            Some(access_marker(terminal, access, status))
+        };
         let accounts = terminal.accounts();
         if accounts.is_empty() {
             return status;
@@ -119,6 +129,10 @@ impl TerminalDecorations for TabStatus {
         )
     }
 
+    fn terminal_menu(&self, terminal: &TerminalExt, cx: &App) -> Vec<terminal_ext::MenuEntry> {
+        crate::t3::menu_entries(terminal, cx)
+    }
+
     fn new_terminal_menu(&self, window: &Window, cx: &App) -> Vec<terminal_ext::MenuEntry> {
         let mut entries = crate::profiles::menu_entries(cx);
         entries.extend(crate::accounts::menu_entries(window, cx));
@@ -126,6 +140,57 @@ impl TerminalDecorations for TabStatus {
     }
 }
 
+/// §C.3: "typed by <extension>" for 5 s after a T3 write, before the rest.
+fn typed_by_marker(
+    terminal: &TerminalExt,
+    extension: String,
+    rest: Option<AnyElement>,
+) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .child(
+            h_flex()
+                .id(("fyx-terminal-typed-by", terminal.id().as_u64()))
+                .gap_0p5()
+                .child(
+                    Icon::new(IconName::Keyboard)
+                        .size(IconSize::Small)
+                        .color(Color::Warning),
+                )
+                .child(
+                    Label::new(format!("typed by {extension}"))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+                .tooltip(Tooltip::text(format!(
+                    "{extension} typed into this terminal after you confirmed it"
+                ))),
+        )
+        .children(rest)
+        .into_any_element()
+}
+
+/// §C.3: an eye on a user terminal that an extension may read or type into now.
+fn access_marker(
+    terminal: &TerminalExt,
+    access: Vec<String>,
+    rest: Option<AnyElement>,
+) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .child(
+            div()
+                .id(("fyx-terminal-access", terminal.id().as_u64()))
+                .child(
+                    Icon::new(IconName::Eye)
+                        .size(IconSize::Small)
+                        .color(Color::Warning),
+                )
+                .tooltip(Tooltip::text(access.join("\n"))),
+        )
+        .children(rest)
+        .into_any_element()
+}
 /// The program's status, else the extension's mark.
 fn status_indicator(terminal: &TerminalExt) -> Option<AnyElement> {
     let origin = terminal.origin();

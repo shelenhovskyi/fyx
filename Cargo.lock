@@ -7006,6 +7006,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "semver",
+ "serde_json",
  "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",
@@ -18291,12 +18292,16 @@ version = "0.1.0"
 dependencies = [
  "futures 0.3.34",
  "gpui",
+ "libc",
  "log",
  "project",
  "release_channel",
+ "serde",
+ "serde_json",
  "settings",
  "sysinfo 0.39.6",
  "task",
+ "tempfile",
  "terminal",
  "terminal_ext",
  "terminal_view",
@@ -18304,6 +18309,7 @@ dependencies = [
  "ui",
  "ui_ext",
  "util",
+ "windows 0.62.2",
  "workspace",
 ]
 
@@ -22999,6 +23005,7 @@ dependencies = [
  "tracing",
  "ui",
  "ui_ext_host",
+ "ui_ext_wasm",
  "ui_prompt",
  "url",
  "urlencoding",

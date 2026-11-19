@@ -31,6 +31,7 @@ pub const BLANKED_INHERITED_ENV: &[&str] = &[
     PARKED_TERMINAL_ENV,
     ACCOUNT_CHOICE_ENV,
     PARKED_ACCOUNTS_ENV,
+    crate::shell_integration::NONCE_ENV,
 ];
 
 /// Env entry naming a [`ParkedTerminal`]. [`TerminalExt::insert_env`] removes it, so the program
@@ -163,6 +164,9 @@ impl ExtensionOrigin {
 /// State shared between the terminal and its pty tap on the IO thread.
 #[derive(Debug)]
 pub(crate) struct Shared {
+    /// Given to Fyx's shell integration script (plan 5.17); a command line with it is trusted.
+    pub(crate) shell_nonce: String,
+    pub(crate) blocks: Mutex<crate::blocks::Blocks>,
     pub(crate) inbox: Mutex<Inbox>,
     pub(crate) status: Mutex<StatusModel>,
     pub(crate) origin: Mutex<Option<ExtensionOrigin>>,
@@ -318,6 +322,8 @@ impl TerminalExt {
             id,
             token,
             shared: Arc::new(Shared {
+                shell_nonce: random_hex(),
+                blocks: Mutex::default(),
                 inbox: Mutex::default(),
                 status: Mutex::default(),
                 origin: Mutex::default(),
@@ -330,6 +336,16 @@ impl TerminalExt {
 
     pub fn id(&self) -> TerminalId {
         self.id
+    }
+
+    /// For [`crate::ShellIntegration::inject`]: the nonce the script gets in its environment.
+    pub fn shell_nonce(&self) -> &str {
+        &self.shared.shell_nonce
+    }
+
+    /// §C.3 `last-command`: the last finished command block, from shell integration.
+    pub fn last_command_block(&self) -> Option<crate::CommandBlock> {
+        lock(&self.shared.blocks).last()
     }
 
     pub fn token(&self) -> Option<&TerminalToken> {

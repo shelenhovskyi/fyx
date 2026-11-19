@@ -202,6 +202,11 @@ impl ProposedEdit {
         if let Resolution::Pending { undecided } = self.resolution() {
             return Err(anyhow!("{undecided} hunks are still undecided"));
         }
+        self.apply_accepted_so_far()
+    }
+
+    /// The old text with the hunks accepted so far applied; undecided hunks are left out.
+    pub fn apply_accepted_so_far(&self) -> Result<String> {
         apply_hunks(&self.old_text, &self.new_text, &self.hunks, |hunk| {
             hunk.decision == HunkDecision::Accepted
         })

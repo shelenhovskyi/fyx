@@ -2,7 +2,7 @@
 //! §B.1) and their `terminal:env` (§B.4).
 //!
 //! The runtime hands the host each loaded extension's checked profiles and granted env
-//! ([`TerminalIntegration`], through `HostFront::set_integration`). A profile terminal belongs to
+//! ([`TerminalIntegration`], through `TerminalHost::set_integration`). A profile terminal belongs to
 //! the user: the user starts it from the menu, it has no extension origin and no tap. Its program
 //! is found on `PATH` outside the worktrees, or at its declared `path` in a trusted worktree; no
 //! shell is started unless the profile names one.
@@ -681,7 +681,17 @@ mod tests {
     fn close_all_removes_the_integration() {
         let (commands, mut queued) = futures::channel::mpsc::unbounded();
         let host = crate::HostFront::new(commands);
-        host.set_integration("claude", integration(&[]));
+        let integration = integration(&[]);
+        ui_ext::terminal::TerminalHost::set_integration(
+            &host,
+            "claude",
+            ui_ext::terminal::TerminalIntegration {
+                profiles: integration.profiles,
+                env: integration.env,
+                env_all_new: integration.env_all_new,
+                package_dir: integration.package_dir,
+            },
+        );
         ui_ext::terminal::TerminalHost::close_all(&host, "claude");
         let mut integrations = Vec::new();
         while let Ok(command) = queued.try_recv() {

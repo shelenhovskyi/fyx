@@ -15,10 +15,12 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::CancelFetch` | variant |  |
 | `HostEffect::CancelTick` | variant |  |
 | `HostEffect::CloseStdin` | variant |  |
+| `HostEffect::Context` | variant | A `crate::context` function (`fyx:ui` 0.4). |
 | `HostEffect::DismissNotification` | variant |  |
 | `HostEffect::Fetch` | variant | `fetch`; off WASM the ids are the shared 1, 2, … of `notify`. |
 | `HostEffect::HideSurface` | variant |  |
 | `HostEffect::Kill` | variant |  |
+| `HostEffect::Listener` | variant | A `crate::listeners` function (`fyx:ui` 0.4). |
 | `HostEffect::Notify` | variant | `notify`; off WASM the ids are 1, 2, … shared with `progress_start`. |
 | `HostEffect::PlaceDecoration` | variant |  |
 | `HostEffect::ProgressEnd` | variant |  |
@@ -30,6 +32,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::RemoveSurface` | variant |  |
 | `HostEffect::RequestPermission` | variant | `request_permission`. |
 | `HostEffect::RequestTick` | variant |  |
+| `HostEffect::Review` | variant | A `crate::review` function (`fyx:ui` 0.4). |
 | `HostEffect::ShowSurface` | variant |  |
 | `HostEffect::Spawn` | variant | `spawn`; ids are the shared 1, 2, …. |
 | `HostEffect::StartObserving` | variant |  |

@@ -140,7 +140,10 @@ impl<P: EventedPty> Read for TeePty<P> {
             limits,
             ..
         } = self;
-        scanner.feed(&buf[..read], |payload| {
+        let bytes = &buf[..read];
+        // Output up to here goes to the running command block, if any (plan 5.17).
+        let mut block_start = 0;
+        scanner.feed_at(bytes, |payload, end| {
             observer(payload);
             if program_status::is_query(payload) {
                 if !limits.query_reply.allow() {
@@ -158,6 +161,14 @@ impl<P: EventedPty> Read for TeePty<P> {
             let Some(event) = osc::parse(payload) else {
                 return;
             };
+            if matches!(event, OscEvent::Shell { .. } | OscEvent::CommandLine { .. }) {
+                let mut blocks = lock(&shared.blocks);
+                if blocks.recording() {
+                    blocks.output(&bytes[block_start..end]);
+                }
+                block_start = crate::blocks::after_terminator(bytes, end);
+                blocks.mark(&event, &shared.shell_nonce);
+            }
             if !limits.allow(&event) {
                 lock(&shared.inbox).note_dropped();
                 return;
@@ -165,6 +176,12 @@ impl<P: EventedPty> Read for TeePty<P> {
             lock(&shared.status).apply(&event, std::time::Instant::now());
             lock(&shared.inbox).push(event);
         });
+        if let Some(shared) = shared {
+            let mut blocks = lock(&shared.blocks);
+            if blocks.recording() {
+                blocks.output(&bytes[block_start..]);
+            }
+        }
         Ok(read)
     }
 }
@@ -394,5 +411,49 @@ mod tests {
         );
         assert_eq!(dropped, 0);
         assert_eq!(ext.take_osc_events(), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn the_last_command_block_is_recorded_with_its_nonce() {
+        let ext = TerminalExt::new();
+        let run = |output: Vec<u8>| {
+            let (mut pty, _) = tee(
+                FakePty {
+                    output: Cursor::new(output.clone()),
+                    input: Vec::new(),
+                },
+                &ext,
+            );
+            let mut read = Vec::new();
+            pty.read_to_end(&mut read).unwrap();
+            assert_eq!(read, output, "the tap must not change the output");
+            ext.last_command_block().unwrap()
+        };
+        let block = run(format!(
+            "$ \x1b]633;E;cargo test;{}\x07\x1b]633;C\x1b\\\r\n\x1b[32mok\x1b[0m\r\n\x1b]633;D;0\x07\x1b]633;A\x07$ ",
+            ext.shell_nonce()
+        )
+        .into_bytes());
+        assert_eq!(
+            (
+                block.command_line.as_deref(),
+                block.trusted,
+                block.exit_code
+            ),
+            (Some("cargo test"), true, Some(0))
+        );
+        assert_eq!(block.output, "ok");
+        // A program can print marks too; without the nonce its command line is not trusted.
+        let forged =
+            run(b"\x1b]633;E;sudo rm -rf /;guess\x07\x1b]133;C\x07fake\x1b]133;D;0\x07".to_vec());
+        assert_eq!(
+            (
+                forged.command_line.as_deref(),
+                forged.trusted,
+                forged.output.as_str()
+            ),
+            (Some("sudo rm -rf /"), false, "fake")
+        );
+        assert_eq!(ext.shell_nonce().len(), 64);
     }
 }
