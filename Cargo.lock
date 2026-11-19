@@ -6959,6 +6959,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_terminal_profiles"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_todo"
 version = "0.1.0"
 dependencies = [

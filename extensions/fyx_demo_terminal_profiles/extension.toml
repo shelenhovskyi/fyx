@@ -1,0 +1,35 @@
+id = "fyx-demo-terminal-profiles"
+name = "Terminal profiles demo"
+description = "Fyx UI demo: two terminal profiles in the terminal panel's + menu, one of them running a script shipped in the package (fyx:ui 0.4 only)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Read by Fyx's extension host (`fyx_ui::UiManifest`); upstream ignores the table.
+# This demo exists only for the staged fyx:ui 0.4: `script/fyx-build-demos --fyx-ui-0-4` builds it
+# into <target>/fyx-demos-v0_4/fyx_demo_terminal_profiles/, and the older modes leave it out.
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+# terminal:profiles (T1) puts the profiles in "+"; package:files (T0) lets `${package}` name
+# this extension's installed folder in their arguments.
+capabilities = ["ui:panel", "terminal:profiles", "package:files"]
+
+# The terminals these start belong to the user: the extension cannot read or write them.
+[[fyx_ui.terminal_profiles]]
+id = "git-history"
+name = "Git history"
+icon = "git-commit"
+program = "git"
+args = ["log", "--graph", "--oneline", "--decorate", "-n", "200"]
+cwd = "worktree"
+
+# "+" marks both entries "runs any command you type": Python runs what you type, and git's
+# pager runs `!command`.
+[[fyx_ui.terminal_profiles]]
+id = "python-welcome"
+name = "Python with a welcome"
+icon = "terminal"
+program = "python"
+args = ["-i", "${package}/scripts/welcome.py"]
+cwd = "home"
