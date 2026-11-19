@@ -89,6 +89,12 @@
       "hidden_status_items": [],
       // The Fyx extension registry (https://, http://localhost or file://). Empty: off.
       "registry_url": "",
+      "network": {
+        // Host names UI extensions may reach on your private network (10/8, 172.16/12,
+        // 192.168/16, 100.64/10, fc00::/7) when they also declare them; "*.corp.example"
+        // matches subdomains. Loopback and link-local addresses are never allowed.
+        "private_hosts": [],
+      },
     },
   },
 }

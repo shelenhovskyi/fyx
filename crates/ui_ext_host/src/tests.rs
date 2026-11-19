@@ -3207,6 +3207,45 @@ fn test_extension_proxy_follows_the_setting(cx: &mut TestAppContext) {
     assert_eq!(proxy.get(), None);
 }
 
+/// 0.3 Q4: the private hosts every load gets follow `fyx.extensions.network.private_hosts`;
+/// invalid entries are ignored (and logged), the others apply.
+#[gpui::test]
+fn test_private_hosts_follow_the_setting(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(crate::registry::follow_private_hosts_setting);
+    let hosts = cx.update(crate::registry::extension_private_hosts);
+    assert!(!hosts.allows("build.corp.example"), "none by default");
+    let set = |entries: Option<Vec<&str>>, cx: &mut TestAppContext| {
+        let entries = entries.map(|entries| entries.into_iter().map(String::from).collect());
+        cx.update(|cx| {
+            gpui::BorrowAppContext::update_global::<SettingsStore, _>(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .fyx
+                        .get_or_insert_default()
+                        .extensions
+                        .get_or_insert_default()
+                        .network
+                        .get_or_insert_default()
+                        .private_hosts = entries
+                })
+            })
+        });
+    };
+    set(
+        Some(vec!["*.corp.example", "nas.home.example", "127.0.0.1"]),
+        cx,
+    );
+    assert!(hosts.allows("build.corp.example"));
+    assert!(!hosts.allows("corp.example"), "*. is the subdomains only");
+    assert!(hosts.allows("nas.home.example"));
+    assert!(!hosts.allows("127.0.0.1"), "an IP literal is ignored");
+    // A load made earlier holds the same list, so it sees the change.
+    let later = cx.update(crate::registry::extension_private_hosts);
+    set(None, cx);
+    assert!(!hosts.allows("build.corp.example") && !later.allows("nas.home.example"));
+}
+
 /// integration-5 L1: a reload (`replace_backend`) drops the old instance's pending tick; neither
 /// instance is ticked for it, and the new one asks for its own.
 #[gpui::test]

@@ -1484,6 +1484,7 @@ Environment it may pass: {}",
                             crate::agent_observe::for_extension(&found.extension_id, cx)
                         }),
                         proxy: Some(cx.update(extension_proxy)),
+                        private_hosts: Some(cx.update(extension_private_hosts)),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -2232,6 +2233,7 @@ pub fn init(cx: &mut App) {
     }
     follow_dev_paths_setting(cx);
     follow_proxy_setting(cx);
+    follow_private_hosts_setting(cx);
     watch_installed_extensions(cx);
 }
 
@@ -2292,6 +2294,41 @@ pub(crate) fn follow_proxy_setting(cx: &mut App) {
 /// The proxy cell every load gets.
 pub(crate) fn extension_proxy(cx: &mut App) -> ui_ext_wasm::network::ProxySetting {
     cx.default_global::<ExtensionProxy>().0.clone()
+}
+
+/// `fyx.extensions.network.private_hosts` for `network:fetch` (0.3 Q4), one list shared by every
+/// load and kept current. User settings only: project settings have no `fyx` key.
+#[derive(Clone, Default)]
+struct ExtensionPrivateHosts(ui_ext_wasm::network::PrivateHosts);
+
+impl Global for ExtensionPrivateHosts {}
+
+pub(crate) fn follow_private_hosts_setting(cx: &mut App) {
+    let hosts = cx.default_global::<ExtensionPrivateHosts>().0.clone();
+    let apply = move |cx: &mut App| {
+        let entries = if cx.has_global::<settings::SettingsStore>() {
+            crate::install::FyxExtensionsSettings::get_global(cx)
+                .private_hosts
+                .clone()
+        } else {
+            Vec::new()
+        };
+        for ignored in hosts.set(entries.iter().map(String::as_str)) {
+            log::warn!(
+                "fyx:ui: fyx.extensions.network.private_hosts: ignoring {ignored:?} (a host name, \
+                 or *. and a name)"
+            );
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
+    }
+}
+
+/// The private hosts every load gets.
+pub(crate) fn extension_private_hosts(cx: &mut App) -> ui_ext_wasm::network::PrivateHosts {
+    cx.default_global::<ExtensionPrivateHosts>().0.clone()
 }
 
 fn follow_dev_paths_setting(cx: &mut App) {
@@ -2996,6 +3033,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         agent_reviews: cx
             .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
         proxy: Some(cx.update(extension_proxy)),
+        private_hosts: Some(cx.update(extension_private_hosts)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
