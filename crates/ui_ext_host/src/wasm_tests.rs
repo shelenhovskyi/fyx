@@ -1332,3 +1332,129 @@ async fn test_decoration_closed_reaches_the_instance(cx: &mut TestAppContext) {
     let report = run(&extension, "place c src/a.rs 1; place d src/a.rs 1").await;
     assert!(report.ends_with("ok | limit-exceeded"), "{report}");
 }
+
+/// Plan 5.12 (§B.9): the relay endpoint is told an extension's channels while `relay:hooks` is
+/// granted, and an empty list once it is revoked or the extension goes; a request reaches the
+/// loaded instance as `io-event::relay-request`.
+#[gpui::test]
+async fn test_relay_channels_follow_grants(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let root = tempfile::tempdir().expect("temp dir");
+    let installed = root.path().join("installed");
+    let ui_dir = installed.join("probe-v0-4");
+    std::fs::create_dir_all(&ui_dir).expect("ui dir");
+    std::fs::write(
+        ui_dir.join("extension.toml"),
+        r#"id = "probe-v0-4"
+name = "Probe"
+version = "0.1.0"
+schema_version = 1
+
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+capabilities = ["ui:panel", "relay:hooks"]
+
+[[fyx_ui.relay_channels]]
+name = "pre-tool"
+timeout_ms = 30000
+on_failure = { exit = 2 }
+reason = "Checks tool calls."
+"#,
+    )
+    .expect("manifest");
+    std::fs::write(
+        ui_dir.join("fyx_ui.wasm"),
+        ui_ext_wasm::test_support::fixture_wasm("fyx_ui_test_probe_v0_4"),
+    )
+    .expect("component");
+    let fs: std::sync::Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+
+    let told: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>> = Default::default();
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    registry.update(cx, |registry, cx| {
+        let told = told.clone();
+        registry.set_relay_observer(
+            std::sync::Arc::new(move |extension_id, channels, _| {
+                told.lock().unwrap().push((
+                    extension_id.to_string(),
+                    channels
+                        .iter()
+                        .map(|channel| channel.name.clone())
+                        .collect(),
+                ))
+            }),
+            cx,
+        );
+        registry.scan_installed(installed.clone(), fs.clone(), cx)
+    });
+    let state = |cx: &mut TestAppContext| {
+        registry.read_with(cx, |registry, _| {
+            registry
+                .surface("probe-v0-4/probe")
+                .map(|surface| surface.state.clone())
+        })
+    };
+    run_until(cx, "the probe", |cx| state(cx).is_some());
+    let relay_request = |cx: &mut TestAppContext| {
+        registry.read_with(cx, |registry, _| {
+            registry.relay_request(
+                "probe-v0-4",
+                "pre-tool",
+                Some(ui_ext::terminal::TerminalHandle(3)),
+                vec!["--event".into()],
+                "{}".into(),
+                Box::new(|_| {}),
+            )
+        })
+    };
+    // Declared but not granted yet: the endpoint has nothing, and a request is refused.
+    assert!(registry.read_with(cx, |registry, _| registry.relay_channels().is_empty()));
+    assert!(told.lock().unwrap().is_empty());
+    assert!(relay_request(cx).is_err());
+
+    registry.update(cx, |registry, cx| {
+        registry.allow_t2("probe-v0-4", "relay:hooks", cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        told.lock().unwrap().drain(..).collect::<Vec<_>>(),
+        [("probe-v0-4".to_string(), vec!["pre-tool".to_string()])]
+    );
+    let id = relay_request(cx).expect("delivered");
+    let surface = state(cx).unwrap();
+    run_until(cx, "the probe's report", |cx| {
+        text_of(&surface, 1, cx).is_some_and(|text| text.starts_with(&format!("relay {id} ")))
+    });
+    assert_eq!(
+        text_of(&surface, 1, cx).unwrap(),
+        format!("relay {id} pre-tool 3 --event {{}}")
+    );
+    assert!(
+        registry
+            .read_with(cx, |registry, _| registry.relay_request(
+                "nobody",
+                "pre-tool",
+                None,
+                Vec::new(),
+                String::new(),
+                Box::new(|_| {})
+            ))
+            .is_err()
+    );
+
+    registry
+        .update(cx, |registry, cx| {
+            registry.revoke("probe-v0-4", "relay:hooks", fs.clone(), cx)
+        })
+        .expect("revokes");
+    cx.run_until_parked();
+    assert_eq!(
+        told.lock().unwrap().drain(..).collect::<Vec<_>>(),
+        [("probe-v0-4".to_string(), Vec::new())]
+    );
+    assert!(relay_request(cx).is_err());
+}
