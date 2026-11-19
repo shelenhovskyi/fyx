@@ -183,6 +183,5 @@ own prompt. W10 writes it into the design. It needs the listener's blocking rela
 - Claude 2.1.326 accepts `http` hooks only with a literal URL, and the listener's port changes
   every run. So the plugin uses command hooks through `fyx-relay` instead of the `http` hooks
   the design names.
-- Withdrawing an open proposal answers Claude's call, but nothing closes in Fyx yet. W2c is
-  staging `review.withdraw(id) -> result<string, host-error>` (the current text); the extension
-  wires it in plan 5.14.
+- A rejection ends the editing turn natively (`Sessions::diff_rejected`); the 0.4 build sends
+  those effects (`review.end-turn` and the terminal status) with the hooks, through the relay.

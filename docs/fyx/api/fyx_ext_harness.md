@@ -42,16 +42,19 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::close_notification` | method | Closes an open notification as the user (`User`), its timer (`Expired`) or its window (`WindowClosed`) would; its owner, which must be mounted, gets `notification-closed`. |
 | `Harness::close_profile` | method | The user closes a profile terminal; with `terminal:observe`, `Harness::deliver_io` delivers `terminal-closed`. |
 | `Harness::connect` | method | A client connects to the websocket kind `name` (`mcp-websocket`, `mcp-streamable-http` as one session, or `websocket`), having passed the host's token, `Origin` and `Host` checks. Returns the connection id the extension sees. |
+| `Harness::decide_review` | method | The user decides proposal `id` in agent review; `Harness::deliver_io` delivers `review-decided`. False when `id` is not open (withdrawn, or decided already). |
 | `Harness::decoration` | method | Where a live decoration is placed; its tree is `Harness::nodes` of its id. |
 | `Harness::decorations` | method | The live decoration ids. |
 | `Harness::deliver_io` | method | Delivers the outcome of every pending request through `handle-io`, oldest first, and applies each call's effects. A cancelled one ends `cancelled`. Otherwise the broker decides: an `Ask` state prompts once and takes the answer, a granted request gets the responder's answer, and anything else ends `denied`. Returns each call's effects and the extension's own result. |
 | `Harness::disabled` | method | Why the extension is disabled, after a trap or an overrun call. |
 | `Harness::disconnect` | method | The client closes `connection`; `Harness::deliver_io` delivers `mcp-cancelled` for its open calls. |
 | `Harness::dismiss` | method | Closes a shown modal as the user would: its tree and pending tick go first, then `dismissed(reason)` is sent. Its effects apply; its reply does not, and should be `unchanged` (the host ignores anything else). |
+| `Harness::edit_review` | method | The user edits proposal `id`'s text; `withdraw` returns it. |
 | `Harness::effects` | method | Every effect so far, in order, including those of loading. |
 | `Harness::event` | method | Sends one event to a mounted surface or decoration and applies its effects, then its reply. Typed text and a `row-selected` selection are written into the tree first. Use `Harness::dismiss` for `dismissed`. |
 | `Harness::event_v0_1` | method | `Harness::event` in the 0.1 model: the pushes and the reply only. |
 | `Harness::exit_terminal` | method | Ends a created terminal's program; `Harness::deliver_io` delivers `terminal-exited`. |
+| `Harness::fail_review` | method | Proposal `id`'s review ends undecided (its file went away): `review-decided` with `Err`. |
 | `Harness::fake_program` | method | Runs `program` for spawns of `name` instead of a real program. A declared program with no fake ends `spawn-failed(not-found)`. |
 | `Harness::find` | method | The first node in tree order whose props match. |
 | `Harness::find_button` | method |  |
@@ -81,23 +84,29 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::notifications` | method | The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or acted on. The harness has no clock, so `auto_dismiss` ones stay until `Harness::close_notification`. |
 | `Harness::open_mcp_calls` | method | The MCP calls the extension has not answered, by call id. |
 | `Harness::open_profile` | method | The user starts profile `id` from "+", with account profile `account` when the profile has an `account_tool` (design.md C.6; the extension sees only its name). With `terminal:observe`, `Harness::deliver_io` delivers `terminal-created`. Returns the extension's handle for it. |
+| `Harness::opened_files` | method | Every `context.open` the extension made, in order. |
 | `Harness::pending_fetches` | method | Requests `fetch` accepted that `Harness::deliver_io` has not delivered yet, oldest first. |
 | `Harness::pending_tick` | method | The delay of the surface's pending tick, already clamped up to `MIN_TICK_DELAY`. |
 | `Harness::processes` | method | Processes `spawn` accepted that have not finished, oldest first. |
 | `Harness::profile_command_line` | method | The command line the host would start for profile `id`: `${package}` is the package folder (`Harness::load_package`'s, or `<package>` for a harness loaded from bytes) and `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the host does. |
 | `Harness::progresses` | method | The running progresses (M.2), by id, with their last value and message. |
+| `Harness::proposals` | method | The undecided `review` proposals (0.4), by id. Their paths need `Harness::set_worktrees`. |
 | `Harness::props` | method | The props of one node of a mounted surface or decoration. |
 | `Harness::pushed_v0_1` | method | Every update pushed so far, in order, in the 0.1 model; `Harness::effects` holds them in the newest one. |
 | `Harness::registered_tools` | method | The tools the extension registered on listener `name` (0.4), in its order. |
 | `Harness::resize_terminal` | method | A new size for a terminal; `Harness::deliver_io` delivers the last one as `terminal-resized`. |
+| `Harness::review_turns` | method | The extension's `begin-turn` and `end-turn` calls, in order. |
 | `Harness::rows` | method | Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as the extension sent it. |
 | `Harness::rows_v0_1` | method | `Harness::rows` in the 0.1 model: each row's index and tree. |
 | `Harness::set_agent_reviews` | method | The host's open agent reviews, which `agent-observe.start` sends first as a snapshot (with this extension's opaque ids, cut as the host cuts them). `None`: there are no agent reviews here, so `start` is `unavailable`. |
 | `Harness::set_bracketed_paste` | method | Whether a profile terminal's program has bracketed paste on (it starts on); `paste` is `unavailable` while it is off (design.md B.11). |
 | `Harness::set_broker` | method | Installs the permission broker and network for `network:fetch`; see `TestBroker`. |
 | `Harness::set_edit_answer` | method | How the editor answers `workspace:edit` edits the user allowed; without one they apply. |
+| `Harness::set_editor_context` | method | What the editor shows now; while the extension watches, `Harness::deliver_io` delivers it, filtered as the host filters it, as `context-changed`. |
 | `Harness::set_listener_granted` | method | Grants or revokes `network:listen#<name>`. Revoking closes the listener: its connections end, and `Harness::deliver_io` delivers `mcp-cancelled` for their open calls. |
+| `Harness::set_private_file` | method | A file the user keeps private: `to-file-ref` and `absolute-path` refuse it, and the context carries no selection text of it. |
 | `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
+| `Harness::set_worktrees` | method | The open worktrees for `context` (0.4): (id, root as the host spells it, `\` or `/`). The roots need not exist. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |
 | `Harness::terminal` | method | One of the extension's 0.4 terminals (pseudo, created or profile), while it is open. |
@@ -109,11 +118,13 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::tree_v0_1` | method | The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds it. |
 | `Harness::type_into_terminal` | method | Keys or text the user types into a pseudo-terminal; `Harness::deliver_io` hands them to the extension as `terminal-input`. |
 | `Harness::ui_api_version` | method |  |
+| `Harness::watching_context` | method | Whether the extension watches the editor context. |
 | `Harness::with_network_domains` | method | The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them; `Harness::load_package` reads them from the manifest. |
 | `Harness::with_package_root` | method | Checks asset images against the extension folder `dir`, as `Harness::load_package` does, for a harness loaded from bytes. |
 | `Harness::with_processes` | method | The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env` declare them; `Harness::load_package` reads them from the manifest. |
 | `Harness::with_terminal_profiles` | method | The profiles the user can start from "+", as `[[fyx_ui.terminal_profiles]]` declares them (design.md B.1), with the host's checks: `terminal:profiles` is declared, the entries pass `ui_ext::terminal::check_profiles`, and `${package}` needs `package:files`. `Harness::load_package` reads them from the manifest. |
 | `Harness::with_terminal_programs` | method | The programs `terminal:create` may run, as `[[fyx_ui.terminal_programs]]` declares them; `Harness::load_package` reads them from the manifest. |
+| `Harness::withdrawn_reviews` | method | The proposals the extension withdrew, in order. |
 | `HostEffect` | re-export | `api_state::HostEffect` |
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
 | `INSTANCES_LIMIT` | const |  |
@@ -130,6 +141,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `MIN_TICK_DELAY` | re-export | `api_state::MIN_TICK_DELAY` |
 | `McpCall` | re-export | `listeners::McpCall` |
 | `McpError` | re-export | `listeners::McpError` |
+| `OpenedFile` | re-export | `context::OpenedFile` |
 | `Outcome` | struct | What one event or tick did. |
 | `Outcome::effects` | field | The call's effects, applied first, in order. |
 | `Outcome::invalidated` | field | The reply's `invalidate-rows` patches, in order. |
@@ -149,6 +161,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `RawReply` | struct | One export call as the host receives it, in the 0.1 model: the updates pushed during the call, and the guest's own result, whose `Err` is the message the guest returned. |
 | `RawReply::pushed` | field |  |
 | `RawReply::value` | field |  |
+| `ReviewTurn` | re-export | `review::ReviewTurn` |
 | `SUPPORTED_API_VERSIONS` | const | The `fyx:ui` versions the harness runs, the same as the host's supported range. |
 | `TABLES_LIMIT` | const |  |
 | `TABLE_ELEMENTS_LIMIT` | const |  |

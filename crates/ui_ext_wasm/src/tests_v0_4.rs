@@ -289,6 +289,7 @@ struct Setup {
     observer: Option<Arc<dyn ListenerObserver>>,
     context: Option<Arc<dyn ui_ext::context::ContextHost>>,
     review: Option<Arc<dyn ui_ext::review::ReviewHost>>,
+    diagnostics: Option<Arc<dyn ui_ext::context::DiagnosticsSource>>,
 }
 
 impl Default for Setup {
@@ -306,6 +307,7 @@ impl Default for Setup {
             observer: None,
             context: None,
             review: None,
+            diagnostics: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -383,6 +385,7 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         listener_observer: setup.observer.clone(),
         context: setup.context.clone(),
         review: setup.review.clone(),
+        diagnostics_source: setup.diagnostics.clone(),
         workspace: setup
             .workspace
             .clone()
@@ -2048,5 +2051,247 @@ async fn test_v0_4_review_rules_revocation_and_reloads(cx: &mut TestAppContext) 
         format!("decided {kept} accepted z")
     );
     drop(new);
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The language servers' side: answers with every file it has, whatever is asked, so the
+/// runtime's filtering shows; records the calls and keeps the change sink.
+#[derive(Default)]
+struct FakeDiagnostics {
+    files: Mutex<Vec<ui_ext::context::FileDiagnostics>>,
+    sink: Mutex<Option<ui_ext::context::DiagnosticsSink>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FakeDiagnostics {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn changed(&self, files: Vec<ui_ext::process::FileRef>) {
+        let sink = self.sink.lock().unwrap().clone().unwrap();
+        sink(files);
+    }
+}
+
+impl ui_ext::context::DiagnosticsSource for FakeDiagnostics {
+    fn diagnostics(
+        &self,
+        ext: &str,
+        path: Option<&ui_ext::process::FileRef>,
+    ) -> Vec<ui_ext::context::FileDiagnostics> {
+        self.calls.lock().unwrap().push(format!(
+            "diagnostics {ext} {}",
+            path.map_or("*".to_string(), |path| format!(
+                "{}:{}",
+                path.worktree.map_or("-".to_string(), |id| id.to_string()),
+                path.path
+            ))
+        ));
+        self.files.lock().unwrap().clone()
+    }
+
+    fn watch(&self, ext: &str, sink: Option<ui_ext::context::DiagnosticsSink>) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("watch {ext} {}", sink.is_some()));
+        *self.sink.lock().unwrap() = sink;
+    }
+
+    fn is_private(&self, absolute: &Path) -> bool {
+        absolute.file_name().is_some_and(|name| name == ".env")
+    }
+}
+
+fn diagnostic(
+    severity: ui_ext::context::DiagnosticSeverity,
+    line: u32,
+    message: &str,
+) -> ui_ext::context::Diagnostic {
+    let at = ui_ext::edit::Position { line, column: 2 };
+    ui_ext::context::Diagnostic {
+        range: ui_ext::edit::TextRange { start: at, end: at },
+        severity,
+        message: message.into(),
+        source: Some("rust-analyzer".into()),
+        code: Some("E0308".into()),
+    }
+}
+
+fn diagnostics_setup(source: &Arc<FakeDiagnostics>, root: &Path) -> Setup {
+    let editor = Arc::new(FakeEditor::default());
+    let mut setup = context_setup(&editor, root);
+    setup
+        .capabilities
+        .push(ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS);
+    setup.diagnostics = Some(source.clone());
+    setup
+}
+
+/// §B.11: `diagnostics` of one file or of all, errors first; private files are `not-permitted`
+/// by name and absent from the whole answer, like files in no worktree; `diagnostics-changed`
+/// is debounced 300 ms, names worktree files that are not private, and `*` (the empty list)
+/// stands for "anything", including more than 200 files.
+#[gpui::test]
+async fn test_v0_4_diagnostics(cx: &mut TestAppContext) {
+    use ui_ext::context::{DiagnosticSeverity::*, FileDiagnostics};
+    let source = Arc::new(FakeDiagnostics::default());
+    *source.files.lock().unwrap() = vec![
+        FileDiagnostics {
+            path: file("a.rs"),
+            diagnostics: vec![
+                diagnostic(Warning, 3, "unused"),
+                diagnostic(Error, 1, "types"),
+            ],
+        },
+        FileDiagnostics {
+            path: file("b.rs"),
+            diagnostics: vec![diagnostic(Hint, 0, "hint")],
+        },
+        FileDiagnostics {
+            path: file(".env"),
+            diagnostics: vec![diagnostic(Error, 0, "SECRET=1")],
+        },
+        FileDiagnostics {
+            path: ui_ext::process::FileRef {
+                worktree: Some(9),
+                path: "elsewhere.rs".into(),
+            },
+            diagnostics: vec![diagnostic(Error, 0, "elsewhere")],
+        },
+        FileDiagnostics {
+            path: file("../up.rs"),
+            diagnostics: vec![diagnostic(Error, 0, "up")],
+        },
+    ];
+    let root = context_worktree("diagnostics");
+    let setup = diagnostics_setup(&source, &root);
+    let extension = load(&setup, cx).await.unwrap();
+    assert!(extension.diagnostics_available());
+    let mut events = extension.take_io_events().unwrap();
+
+    assert_eq!(
+        command(&extension, "diag-all").await,
+        "a.rs:e1.2,w3.2;b.rs:h0.2|rust-analyzer|E0308|5"
+    );
+    assert_eq!(
+        command(&extension, "diag 1 a.rs").await,
+        "a.rs:e1.2,w3.2|rust-analyzer|E0308|5"
+    );
+    assert_eq!(
+        command(&extension, "diag - a.rs").await,
+        "a.rs:e1.2,w3.2|rust-analyzer|E0308|5"
+    );
+    assert_eq!(command(&extension, "diag 1 c.rs").await, "empty");
+    assert_eq!(command(&extension, "diag 1 .env").await, "not-permitted");
+    assert_eq!(command(&extension, "diag - .env").await, "not-permitted");
+    assert_eq!(command(&extension, "diag 7 a.rs").await, "invalid-argument");
+    assert_eq!(
+        command(&extension, "diag - nope.rs").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "diag 1 ../a.rs").await,
+        "invalid-argument"
+    );
+
+    assert_eq!(command(&extension, "watch-diag on").await, "done");
+    source.changed(vec![file("a.rs"), file(".env")]);
+    source.changed(vec![
+        file("b.rs"),
+        ui_ext::process::FileRef {
+            worktree: Some(9),
+            path: "elsewhere.rs".into(),
+        },
+        file("a.rs"),
+    ]);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        "diagnostics-changed a.rs,b.rs"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    // Only a private file: nothing to tell, so the next event is the one after it.
+    source.changed(vec![file(".env")]);
+    wait_for(cx, 500, || false);
+    source.changed(Vec::new());
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        "diagnostics-changed *"
+    );
+    source.changed(
+        (0..=ui_ext::context::MAX_CHANGED_DIAGNOSTIC_FILES)
+            .map(|index| file(&format!("f{index}.rs")))
+            .collect(),
+    );
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        "diagnostics-changed *"
+    );
+    assert_eq!(command(&extension, "watch-diag off").await, "done");
+    assert_eq!(
+        source.calls(),
+        [
+            "diagnostics probe-v0-4 *",
+            "diagnostics probe-v0-4 1:a.rs",
+            "diagnostics probe-v0-4 1:a.rs",
+            "diagnostics probe-v0-4 1:c.rs",
+            "watch probe-v0-4 true",
+            "watch probe-v0-4 false",
+        ]
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Without `workspace:diagnostics` both calls are refused, without a source they are
+/// `unavailable`; a reloaded instance's watch survives the old instance's drop.
+#[gpui::test]
+async fn test_v0_4_diagnostics_rules_and_reloads(cx: &mut TestAppContext) {
+    let source = Arc::new(FakeDiagnostics::default());
+    let root = context_worktree("diagnostics-rules");
+    let undeclared = Setup {
+        capabilities: vec!["ui:panel"],
+        ..diagnostics_setup(&source, &root)
+    };
+    let extension = load(&undeclared, cx).await.unwrap();
+    for refused in ["diag-all", "diag 1 a.rs", "watch-diag on"] {
+        assert_eq!(
+            command(&extension, refused).await,
+            "not-permitted",
+            "{refused}"
+        );
+    }
+    drop(extension);
+    let sourceless = Setup {
+        diagnostics: None,
+        ..diagnostics_setup(&source, &root)
+    };
+    let extension = load(&sourceless, cx).await.unwrap();
+    assert!(!extension.diagnostics_available());
+    for missing in ["diag-all", "watch-diag on"] {
+        assert_eq!(
+            command(&extension, missing).await,
+            "unavailable",
+            "{missing}"
+        );
+    }
+    drop(extension);
+
+    let setup = diagnostics_setup(&source, &root);
+    let old = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&old, "watch-diag on").await, "done");
+    let new = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&new, "watch-diag on").await, "done");
+    drop(old);
+    wait_for(cx, 2_000, || false);
+    assert_eq!(
+        source.calls(),
+        ["watch probe-v0-4 true", "watch probe-v0-4 true"]
+    );
+    drop(new);
+    wait_for(cx, 10_000, || source.calls().len() == 3);
+    assert_eq!(source.calls()[2], "watch probe-v0-4 false");
+    assert!(source.sink.lock().unwrap().is_none());
     std::fs::remove_dir_all(&root).ok();
 }

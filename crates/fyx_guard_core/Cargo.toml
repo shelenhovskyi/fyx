@@ -1,0 +1,26 @@
+[package]
+name = "fyx_guard_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "The pure rules of fyx_guard's security modes: path spellings, agent configs, account dirs, repository policies, secret variables, reasons and decisions; no GPUI, project or settings"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_guard_core.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+collections.workspace = true
+log.workspace = true
+serde.workspace = true
+toml = { workspace = true, features = ["display"] }
+ui_ext.workspace = true
+util.workspace = true
+
+[dev-dependencies]
+util = { workspace = true, features = ["test-support"] }

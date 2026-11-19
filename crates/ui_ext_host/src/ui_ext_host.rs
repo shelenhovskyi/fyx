@@ -24,7 +24,9 @@ pub mod consent_dialog;
 pub mod consent_model;
 #[cfg(test)]
 mod consent_ui_tests;
+mod context_host;
 mod decorations;
+mod diagnostics_host;
 pub mod fyx_extensions_page;
 mod icons;
 pub mod images;
@@ -34,6 +36,7 @@ pub mod install_store;
 // fyx: the 0.4 usage journal's store (W2c, design wit-0.4 §C.4).
 pub mod journal;
 mod keyboard;
+mod main_thread;
 mod modal;
 pub mod notifications;
 mod panel;
@@ -42,6 +45,7 @@ mod registry;
 pub mod registry_service;
 #[cfg(test)]
 mod registry_service_tests;
+pub mod review_bridge;
 mod store_actions;
 mod surface;
 pub mod t3_cards;

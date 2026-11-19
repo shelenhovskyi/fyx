@@ -274,6 +274,7 @@ fn claude_code_answers_on_its_ide_listener() {
 #[test]
 fn claude_code_replays_the_compat_transcripts_on_its_listener() {
     use serde_json::Value;
+    use std::collections::VecDeque;
     const TRANSCRIPTS: [(&str, &str); 4] = [
         (
             "turn-with-diff",
@@ -298,20 +299,86 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
             ),
         ),
     ];
-    const PATHLESS: [&str; 2] = ["close_tab", "closeAllDiffTabs"];
+    // `getDiagnostics` answers `[]` until 0.4 has a diagnostics read.
+    const COMPARED: [&str; 3] = ["openDiff", "close_tab", "closeAllDiffTabs"];
     let package = demo_package("fyx_claude_code");
     let mut compared = 0;
+    let mut notified = 0;
     for (name, text) in TRANSCRIPTS {
+        let header: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        let root = header["root"].as_str().expect("a root");
         let mut harness = Harness::load_package(&package).expect("loads");
+        harness.set_worktrees(&[(1, root)]);
         let connection = harness.connect("ide").unwrap();
         let mut tools = HashMap::new();
         let mut answers: HashMap<String, Value> = HashMap::new();
+        let mut notes: VecDeque<Value> = VecDeque::new();
+        // Each `openDiff` call's proposal, by JSON-RPC id.
+        let mut proposal_of: HashMap<String, u64> = HashMap::new();
+        let receive = |harness: &mut Harness,
+                       answers: &mut HashMap<String, Value>,
+                       notes: &mut VecDeque<Value>| {
+            for text in harness.client_received(connection).unwrap() {
+                let answer: Value = serde_json::from_str(&text).unwrap();
+                match answer.get("id") {
+                    Some(id) => {
+                        answers.insert(id.to_string(), answer);
+                    }
+                    None => notes.push_back(answer),
+                }
+            }
+        };
         for (number, line) in text.lines().enumerate().skip(1) {
             if line.trim().is_empty() {
                 continue;
             }
             let at = format!("{name}.jsonl:{}", number + 1);
             let event: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{at}: {e}"));
+            if event["t"] == "editor" {
+                let file = ui_ext::process::FileRef {
+                    worktree: Some(1),
+                    path: event["path"].as_str().unwrap().to_owned(),
+                };
+                let selection = &event["selection"];
+                let position = |at: &Value| ui_ext::edit::Position {
+                    line: at[0].as_u64().unwrap() as u32,
+                    column: at[1].as_u64().unwrap() as u32,
+                };
+                let range = ui_ext::edit::TextRange {
+                    start: position(&selection["start"]),
+                    end: position(&selection["end"]),
+                };
+                harness.set_editor_context(ui_ext::context::EditorContext {
+                    active: Some(file.clone()),
+                    open: vec![file],
+                    selection: Some((range, selection["text"].as_str().map(str::to_owned))),
+                    trusted: Some(true),
+                });
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                receive(&mut harness, &mut answers, &mut notes);
+                continue;
+            }
+            if event["t"] == "review" {
+                use ui_ext::review::Decision;
+                let call = event["call"].to_string();
+                let proposal = proposal_of[&call];
+                let final_content = event["final_content"].as_str().unwrap_or_default();
+                let decided = match event["decision"].as_str() {
+                    Some("accepted") => {
+                        harness.decide_review(proposal, Decision::Accepted, final_content)
+                    }
+                    Some("partial") => {
+                        harness.decide_review(proposal, Decision::Partial, final_content)
+                    }
+                    Some("rejected") => harness.decide_review(proposal, Decision::Rejected, ""),
+                    Some("closed") => harness.fail_review(proposal, "the file went away"),
+                    other => panic!("{at}: decision {other:?}"),
+                };
+                assert!(decided, "{at}: proposal {proposal} is not open");
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                receive(&mut harness, &mut answers, &mut notes);
+                continue;
+            }
             if event["t"] != "mcp" {
                 continue;
             }
@@ -326,22 +393,34 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                             .to_owned(),
                     );
                 }
+                let before: Vec<u64> = harness.proposals().iter().map(|(id, _)| *id).collect();
                 harness
                     .client_send(connection, &message.to_string())
                     .unwrap_or_else(|e| panic!("{at}: {e}"));
                 harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
-                for text in harness.client_received(connection).unwrap() {
-                    let answer: Value = serde_json::from_str(&text).unwrap();
-                    if let Some(id) = answer.get("id") {
-                        answers.insert(id.to_string(), answer);
-                    }
+                receive(&mut harness, &mut answers, &mut notes);
+                if message["params"]["name"] == "openDiff" {
+                    let (proposal, _) = harness
+                        .proposals()
+                        .into_iter()
+                        .find(|(id, _)| !before.contains(id))
+                        .unwrap_or_else(|| panic!("{at}: openDiff proposed nothing"));
+                    proposal_of.insert(message["id"].to_string(), proposal);
                 }
                 continue;
             }
-            // `selection_changed` and `at_mentioned` come from `context`.
             let Some(id) = message.get("id").map(Value::to_string) else {
+                // `at_mentioned` needs a gesture the harness does not have yet.
+                if message["method"] == "selection_changed" {
+                    let ours = notes
+                        .pop_front()
+                        .unwrap_or_else(|| panic!("{at}: no selection_changed"));
+                    assert_eq!(&ours, message, "{at}");
+                    notified += 1;
+                }
                 continue;
             };
+            let tool = tools.get(&id).map(String::as_str);
             let ours = answers
                 .get(&id)
                 .unwrap_or_else(|| panic!("{at}: no answer to {id}"));
@@ -359,10 +438,7 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                 };
                 let listed = ours["result"]["tools"].as_array().expect("tools");
                 assert_eq!(names(listed), names(recorded), "{at}");
-            } else if tools
-                .get(&id)
-                .is_some_and(|tool| PATHLESS.contains(&tool.as_str()))
-            {
+            } else if tool.is_some_and(|tool| COMPARED.contains(&tool)) {
                 assert_eq!(ours, message, "{at}");
                 compared += 1;
             }
@@ -374,8 +450,11 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
             );
         }
         assert!(harness.open_mcp_calls().is_empty(), "{name}");
+        assert!(harness.proposals().is_empty(), "{name}");
+        assert!(notes.is_empty(), "{name}: {notes:?} not in the transcript");
     }
     assert!(compared > 0, "no answer was compared");
+    assert!(notified > 0, "no selection_changed was compared");
 }
 
 /// The skeleton of plan 5.16: the manifest loads, and the profile runs `gemini` with the

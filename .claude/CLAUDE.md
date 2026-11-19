@@ -13,7 +13,8 @@ to code style. Fyx-specific rules:
 - Do not open this repository in a dev build of Fyx/Zed: it triggers rebuilds of the root crates.
 - Rust comes from rustup; `rust-toolchain.toml` pins the version and targets. If `cargo` is not on
   `PATH`, add rustup's bin dir (`~/.cargo/bin`; on macOS with keg-only Homebrew rustup,
-  `/opt/homebrew/opt/rustup/bin`). `sccache` must be on `PATH` too (`.cargo/config.toml` uses it).
+  `/opt/homebrew/opt/rustup/bin`). No sccache: `.cargo/config.toml` sets no `rustc-wrapper`
+  (2% cache hits with one target dir per worktree); do not set `RUSTC_WRAPPER` either.
 
 ## Autonomy (multi-session work)
 

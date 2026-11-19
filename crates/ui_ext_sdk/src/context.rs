@@ -1,0 +1,280 @@
+//! `fyx:ui` 0.4, staged: editor context and opening files (design.md B.11), with the
+//! `fyx-ui-0-4` feature.
+//!
+//! - [`watch`] (`context:editor`) starts the editor feed: `IoEvent::ContextChanged` arrives at
+//!   once and after each change (debounced 300 ms), with the active file, the open files and the
+//!   selection. Only worktree files appear; a private file's selection has no text.
+//! - [`to_file_ref`] and [`absolute_path`] (`context:editor`) map a tool's absolute paths and
+//!   `file://` URIs to worktree files and back. A private file is `not-permitted`.
+//! - [`open`] (`workspace:open`) opens a worktree file; `focus` needs a gesture or a recent
+//!   listener request while one of the extension's terminals has focus.
+//!
+//! Exported as 0.2 or 0.1, every function here fails with `unavailable`. Off WASM, [`watch`]
+//! and [`open`] record a [`HostEffect::Context`](crate::HostEffect::Context), and the path
+//! mapping uses the roots [`set_worktree_roots`] gave (none: everything is outside).
+
+pub use crate::bindings::fyx::ui::context::EditorContext;
+use crate::{FileRef, HostError, TextRange};
+
+#[cfg(target_arch = "wasm32")]
+unsafe extern "Rust" {
+    safe fn __fyx_ui_context_watch(on: bool) -> Result<(), HostError>;
+    safe fn __fyx_ui_context_open(
+        path: &FileRef,
+        range: Option<TextRange>,
+        focus: bool,
+    ) -> Result<(), HostError>;
+    safe fn __fyx_ui_context_to_file_ref(absolute: &str) -> Result<FileRef, HostError>;
+    safe fn __fyx_ui_context_absolute_path(path: &FileRef) -> Result<String, HostError>;
+}
+
+/// What a context function did, recorded off WASM in
+/// [`HostEffect::Context`](crate::HostEffect::Context).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContextEffect {
+    Watch(bool),
+    Open {
+        path: FileRef,
+        range: Option<TextRange>,
+        focus: bool,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static ROOTS: std::cell::RefCell<Vec<(u64, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Off WASM, the worktrees [`to_file_ref`] and [`absolute_path`] map against on this thread:
+/// (id, root as the host spells it, with `\` or `/`). For unit tests of an extension.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_worktree_roots(roots: &[(u64, &str)]) {
+    ROOTS.with_borrow_mut(|known| {
+        *known = roots
+            .iter()
+            .map(|(id, root)| (*id, (*root).to_owned()))
+            .collect();
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fake_error(code: crate::HostErrorCode, message: &str) -> HostError {
+    HostError {
+        code,
+        message: message.to_owned(),
+    }
+}
+
+/// `C:\a\b`, `file:///C:/a/b`, `file://C:\a\b` and `/a/b` as `/`-separated text, with the
+/// drive in upper case.
+#[cfg(not(target_arch = "wasm32"))]
+fn fake_normalize(path: &str) -> String {
+    let path = path
+        .strip_prefix("file://")
+        .unwrap_or(path)
+        .replace('\\', "/");
+    let path = match path.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => path[1..].to_owned(),
+        _ => path,
+    };
+    let mut path = path.trim_end_matches('/').to_owned();
+    if path.as_bytes().get(1) == Some(&b':') {
+        path[..1].make_ascii_uppercase();
+    }
+    path
+}
+
+/// `context:editor`: starts or stops the editor feed.
+pub fn watch(on: bool) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_watch(on);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(ContextEffect::Watch(on)))
+}
+
+/// `workspace:open`: opens an existing worktree file, selecting `range` if given.
+pub fn open(path: &FileRef, range: Option<TextRange>, focus: bool) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_open(path, range, focus);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(ContextEffect::Open {
+        path: path.clone(),
+        range,
+        focus,
+    }))
+}
+
+/// `context:editor`: the worktree file at a tool's absolute path or `file://` URI. Outside
+/// every open worktree is `invalid-argument`.
+pub fn to_file_ref(absolute: &str) -> Result<FileRef, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_to_file_ref(absolute);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = fake_normalize(absolute);
+        ROOTS
+            .with_borrow(|roots| {
+                roots.iter().find_map(|(id, root)| {
+                    let root = fake_normalize(root);
+                    let relative = path.strip_prefix(&root)?.strip_prefix('/')?;
+                    (!relative.is_empty()).then(|| FileRef {
+                        worktree: Some(*id),
+                        path: relative.to_owned(),
+                    })
+                })
+            })
+            .ok_or_else(|| {
+                fake_error(
+                    crate::HostErrorCode::InvalidArgument,
+                    "the path is outside every open worktree",
+                )
+            })
+    }
+}
+
+/// `context:editor`: the absolute path of a worktree file, for a tool's reply.
+pub fn absolute_path(path: &FileRef) -> Result<String, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_absolute_path(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    ROOTS.with_borrow(|roots| {
+        let root = match path.worktree {
+            Some(id) => roots.iter().find(|(root, _)| *root == id),
+            None if roots.len() == 1 => roots.first(),
+            None => None,
+        };
+        let (_, root) = root.ok_or_else(|| {
+            fake_error(crate::HostErrorCode::InvalidArgument, "an unknown worktree")
+        })?;
+        let separator = if root.contains('\\') { '\\' } else { '/' };
+        let mut absolute = root.trim_end_matches(['/', '\\']).to_owned();
+        for part in path.path.split('/').filter(|part| !part.is_empty()) {
+            absolute.push(separator);
+            absolute.push_str(part);
+        }
+        Ok(absolute)
+    })
+}
+
+/// What `register_extension!`'s context shims call, per exported world.
+#[doc(hidden)]
+pub mod glue {
+    /// The 0.4 imports.
+    pub mod newest {
+        use crate::bindings::fyx::ui::context as wit;
+        use crate::{FileRef, HostError, TextRange};
+
+        pub fn watch(on: bool) -> Result<(), HostError> {
+            wit::watch(on)
+        }
+
+        pub fn open(
+            path: &FileRef,
+            range: Option<TextRange>,
+            focus: bool,
+        ) -> Result<(), HostError> {
+            wit::open(path, range, focus)
+        }
+
+        pub fn to_file_ref(absolute: &str) -> Result<FileRef, HostError> {
+            wit::to_file_ref(absolute)
+        }
+
+        pub fn absolute_path(path: &FileRef) -> Result<String, HostError> {
+            wit::absolute_path(path)
+        }
+    }
+
+    /// Worlds without context: every call is `unavailable`.
+    macro_rules! older {
+        ($world:ident, $version:literal) => {
+            pub mod $world {
+                use crate::{FileRef, HostError, HostErrorCode, TextRange};
+
+                fn unavailable(what: &str) -> HostError {
+                    HostError {
+                        code: HostErrorCode::Unavailable,
+                        message: format!(
+                            "context::{what} needs fyx:ui 0.4; this extension is exported as {}",
+                            $version
+                        ),
+                    }
+                }
+
+                pub fn watch(_on: bool) -> Result<(), HostError> {
+                    Err(unavailable("watch"))
+                }
+
+                pub fn open(
+                    _path: &FileRef,
+                    _range: Option<TextRange>,
+                    _focus: bool,
+                ) -> Result<(), HostError> {
+                    Err(unavailable("open"))
+                }
+
+                pub fn to_file_ref(_absolute: &str) -> Result<FileRef, HostError> {
+                    Err(unavailable("to_file_ref"))
+                }
+
+                pub fn absolute_path(_path: &FileRef) -> Result<String, HostError> {
+                    Err(unavailable("absolute_path"))
+                }
+            }
+        };
+    }
+
+    older!(v0_2, "0.2");
+    older!(v0_1, "0.1");
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::{HostEffect, take_host_effects};
+
+    #[test]
+    fn context_calls_off_wasm() {
+        take_host_effects();
+        set_worktree_roots(&[(1, "/work/app"), (2, r"C:\work\lib")]);
+        let app = FileRef {
+            worktree: Some(1),
+            path: "src/a.rs".into(),
+        };
+        let lib = FileRef {
+            worktree: Some(2),
+            path: "b.rs".into(),
+        };
+        assert_eq!(to_file_ref("/work/app/src/a.rs").unwrap(), app);
+        assert_eq!(to_file_ref("file:///c:/work/lib/b.rs").unwrap(), lib);
+        assert_eq!(to_file_ref(r"C:\work\lib\b.rs").unwrap(), lib);
+        assert!(to_file_ref("/elsewhere/a").is_err());
+        assert_eq!(absolute_path(&lib).unwrap(), r"C:\work\lib\b.rs");
+        assert_eq!(absolute_path(&app).unwrap(), "/work/app/src/a.rs");
+        watch(true).unwrap();
+        open(&app, None, true).unwrap();
+        assert_eq!(
+            take_host_effects(),
+            [
+                HostEffect::Context(ContextEffect::Watch(true)),
+                HostEffect::Context(ContextEffect::Open {
+                    path: app,
+                    range: None,
+                    focus: true,
+                }),
+            ]
+        );
+        set_worktree_roots(&[]);
+    }
+
+    #[test]
+    fn older_worlds_have_no_context() {
+        let error = glue::v0_2::watch(true).unwrap_err();
+        assert_eq!(error.code, crate::HostErrorCode::Unavailable);
+        assert!(
+            error.message.contains("watch needs fyx:ui 0.4"),
+            "{error:?}"
+        );
+        assert!(glue::v0_1::to_file_ref("/a").is_err());
+    }
+}

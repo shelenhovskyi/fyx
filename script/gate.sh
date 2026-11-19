@@ -12,25 +12,11 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"
 # Measurement (tasks/W0-integrator.md, "Gate modes"): every run, green or red, ends with its wall
-# time and the sccache hits and misses during the run. The sccache server is shared by every
-# session on the machine, so other builds that ran meanwhile count too.
+# time.
 gate_started=$SECONDS
-sccache_counts() {
-    command -v sccache >/dev/null 2>&1 || return 0
-    sccache --show-stats --stats-format json 2>/dev/null | python -I -c '
-import json, sys
-s = json.load(sys.stdin)["stats"]
-print(sum(s["cache_hits"]["counts"].values()), sum(s["cache_misses"]["counts"].values()))' 2>/dev/null | tr -d '\r' || true
-}
-sccache_before=$(sccache_counts)
 gate_report() {
-    local elapsed=$((SECONDS - gate_started)) after
+    local elapsed=$((SECONDS - gate_started))
     echo "gate: wall time $((elapsed / 60))m $((elapsed % 60))s"
-    after=$(sccache_counts)
-    if [[ -n "$sccache_before" && -n "$after" ]]; then
-        echo "gate: sccache during the run (all sessions): $(( ${after% *} - ${sccache_before% *} )) hits," \
-            "$(( ${after#* } - ${sccache_before#* } )) misses"
-    fi
     # On the Windows dev box a FULL run, green or red, ends by sweeping and pruning the target dirs
     # (script/fyx-disk-guard; tasks/W0-integrator.md, "Disk"). Never in CI.
     if [[ "${FULL:-0}" == "1" && "${CI:-}" != "true" && -x script/fyx-disk-guard ]] \
@@ -114,7 +100,7 @@ if [[ "${CI:-}" != "true" && " ${pkgs[*]} " == *" agent "* ]] \
     echo "gate: WARNING: example.com resolves to loopback here (or not at all); skipping agent's 3 fetch-tool redirect tests (CI runs them)"
     nextest_filter=(-E 'not (test(test_fetch_tool_follows_same_host_redirect) | test(test_fetch_tool_refuses_redirect_to_loopback) | test(test_fetch_tool_reauthorizes_redirect_to_new_host))')
 fi
-cargo check "${pkgs[@]}" 2>&1 | tail -20
+# No separate `cargo check`: clippy type-checks the same packages, all targets included.
 cargo clippy "${pkgs[@]}" --all-targets -- --deny warnings 2>&1 | tail -30
 # Tests must never touch the user's real Fyx profile (two leaks on 2026-11-18, docs/fyx/ci.md).
 # 1. nextest gets a throwaway HOME and data/config dirs. Cargo and rustup are pinned first, so

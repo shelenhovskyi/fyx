@@ -92,6 +92,7 @@ members = [
     "crates/fyx_ext", # fyx
     "crates/fyx_ext_harness", # fyx
     "crates/fyx_guard", # fyx
+    "crates/fyx_guard_core", # fyx
     "crates/fyx_registry", # fyx
     "crates/fyx_relay", # fyx
     "crates/git",
@@ -395,6 +396,7 @@ fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
 fyx_ext_harness = { path = "crates/fyx_ext_harness" } # fyx
 fyx_guard = { path = "crates/fyx_guard" } # fyx
+fyx_guard_core = { path = "crates/fyx_guard_core" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 fyx_relay = { path = "crates/fyx_relay" } # fyx
 git = { path = "crates/git" }
