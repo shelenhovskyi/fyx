@@ -1180,6 +1180,14 @@ impl ReviewPane {
             let review = self.review.read(cx).review(id)?;
             Some(format!("Asked by rule {}", review.rule()?.describe()))
         });
+        let proposed_by = self.current_review_id().and_then(|id| {
+            match self.review.read(cx).review(id)?.source() {
+                ReviewSource::Extension { name, title } => {
+                    Some(format!("Proposed by {name}: {title}"))
+                }
+                _ => None,
+            }
+        });
         let operation = self.current_review_id().and_then(|id| {
             let review = self.review.read(cx).review(id)?;
             Some(format!(
@@ -1205,6 +1213,11 @@ impl ReviewPane {
                 h_flex()
                     .gap_2()
                     .child(Label::new(path).size(LabelSize::Small))
+                    .children(proposed_by.map(|proposed_by| {
+                        Label::new(proposed_by)
+                            .size(LabelSize::Small)
+                            .color(Color::Accent)
+                    }))
                     .children(
                         rule.map(|rule| {
                             Label::new(rule).size(LabelSize::Small).color(Color::Accent)
@@ -1420,7 +1433,7 @@ impl Item for ReviewPane {
 pub fn permission_card_notice(request_id: PermissionRequestId, cx: &App) -> Option<Div> {
     let review = AgentReview::global(cx)?;
     let preview = review.read(cx).reviews().iter().find(|review| {
-        review.source() == ReviewSource::Permission(request_id) && !review.is_submitted()
+        review.source() == &ReviewSource::Permission(request_id) && !review.is_submitted()
     })?;
     let file = file_name(preview.edit().abs_path());
     Some(

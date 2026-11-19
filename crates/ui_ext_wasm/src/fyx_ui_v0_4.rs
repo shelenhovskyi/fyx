@@ -222,9 +222,43 @@ fn context_io_event(context: ui_ext::context::EditorContext) -> Option<wit_io::I
     ))
 }
 
-/// The `diagnostics-changed` case (design wit-0.4 §B.11). Not staged yet.
-fn diagnostics_io_event(_: Vec<ui_ext::process::FileRef>) -> Option<wit_io::IoEvent> {
-    None
+/// The `diagnostics-changed` case (design wit-0.4 §B.11).
+fn diagnostics_io_event(files: Vec<ui_ext::process::FileRef>) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::DiagnosticsChanged(
+        files.into_iter().map(wit_file_ref).collect(),
+    ))
+}
+
+fn wit_diagnostics(
+    snapshot: ui_ext::context::DiagnosticsSnapshot,
+) -> wit_context::DiagnosticsSnapshot {
+    use ui_ext::context::DiagnosticSeverity;
+    wit_context::DiagnosticsSnapshot {
+        files: snapshot
+            .files
+            .into_iter()
+            .map(|file| wit_context::FileDiagnostics {
+                path: wit_file_ref(file.path),
+                diagnostics: file
+                    .diagnostics
+                    .into_iter()
+                    .map(|entry| wit_context::Diagnostic {
+                        range: wit_text_range(entry.range),
+                        severity: match entry.severity {
+                            DiagnosticSeverity::Error => wit_context::Severity::Error,
+                            DiagnosticSeverity::Warning => wit_context::Severity::Warning,
+                            DiagnosticSeverity::Information => wit_context::Severity::Information,
+                            DiagnosticSeverity::Hint => wit_context::Severity::Hint,
+                        },
+                        message: entry.message,
+                        source: entry.source,
+                        code: entry.code,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        truncated: snapshot.truncated,
+    }
 }
 
 /// The `review-decided` case (design wit-0.4 §B.10).
@@ -247,7 +281,8 @@ fn review_io_event(
 }
 
 /// `context` (design.md §B.11) over [`crate::editor_context::ContextHandle`]: `watch`,
-/// `to-file-ref` and `absolute-path` need `context:editor`, `open` needs `workspace:open`.
+/// `to-file-ref` and `absolute-path` need `context:editor`, `open` needs `workspace:open`,
+/// `diagnostics` and `watch-diagnostics` need `workspace:diagnostics`.
 impl wit_context::Host for UiState {
     fn watch(&mut self, on: bool) -> wasmtime::Result<Result<(), wit_host::HostError>> {
         if on && let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
@@ -300,6 +335,29 @@ impl wit_context::Host for UiState {
             .context
             .absolute_path(&file_ref(path))
             .map_err(Into::into))
+    }
+
+    fn diagnostics(
+        &mut self,
+        path: Option<wit::FileRef>,
+    ) -> wasmtime::Result<Result<wit_context::DiagnosticsSnapshot, wit_host::HostError>> {
+        self.count_lifted_text(path.as_ref().map_or(0, |path| path.path.len()))?;
+        if let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .context
+            .diagnostics(path.map(file_ref))
+            .map(wit_diagnostics)
+            .map_err(Into::into))
+    }
+
+    fn watch_diagnostics(&mut self, on: bool) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        if on && let Err(error) = self.permit_t1(ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS)
+        {
+            return Ok(Err(error.into()));
+        }
+        Ok(self.context.watch_diagnostics(on).map_err(Into::into))
     }
 }
 

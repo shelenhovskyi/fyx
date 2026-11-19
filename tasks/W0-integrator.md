@@ -19,9 +19,9 @@
     touches a crate with many dependents (`editor`, `workspace`, `project`, `gpui`).
   - Push `integration` after a green FAST gate. Fast-forward and push `fyx/main` only after a
     green FULL gate.
-  - Measurement: every gate prints its wall time and the sccache hits and misses during the run
-    (the server is shared, so other sessions' builds count too), and keeps cargo's timing report
-    of the test build (and of the `zed` build in FULL) in `D:\fyx-builds\gate-timings\<sha>-*.html`.
+  - Measurement: every gate prints its wall time and keeps cargo's timing report of the test
+    build (and of the `zed` build in FULL) in `D:\fyx-builds\gate-timings\<sha>-*.html`. No
+    sccache (2% hits, coordinator 2026-11-19) and no separate `cargo check` (clippy covers it).
 - Disk (coordinator, 2026-11-19; the user wants SSD-frugal builds): `script/fyx-disk-guard` runs
   after every FULL gate and every push (`cargo sweep --time 2` and `fyx-prune-target` on each idle
   target). Its WARN line (D: under 150 GB, E: under 40 GB) goes to the coordinator. When a worker
