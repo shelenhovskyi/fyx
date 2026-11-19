@@ -37,6 +37,7 @@ pub fn consent_tier(capability: &str) -> Option<ConsentTier> {
         Tier::T0 => ConsentTier::T0,
         Tier::T1 => ConsentTier::T1,
         Tier::T2 => ConsentTier::T2,
+        Tier::T3 => ConsentTier::T3,
     })
 }
 

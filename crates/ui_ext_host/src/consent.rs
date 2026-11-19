@@ -526,6 +526,9 @@ impl CapabilityCheck for Checker {
                 PermissionState::Denied => deny("denied"),
                 PermissionState::Unavailable => deny("unavailable"),
             },
+            // Fail closed until the T3 broker lands (plan 5.6); `consent_model` reports T3 as
+            // unavailable too.
+            Some(Tier::T3) => deny("unavailable"),
             None => deny("unknown capability"),
         }
     }
