@@ -76,6 +76,109 @@ fn is_global_v4(ip: Ipv4Addr) -> bool {
         || (a == 192 && b == 0 && c == 0))
 }
 
+/// Whether `ip` is a private network address that a host listed in
+/// `fyx.extensions.network.private_hosts` may resolve to (0.3 Q4): RFC 1918 (`10/8`,
+/// `172.16/12`, `192.168/16`), shared address space (`100.64/10`, VPNs such as Tailscale), and
+/// IPv6 unique-local (`fc00::/7`), or an IPv4-mapped form of these. Never loopback (only a
+/// declared `localhost` port reaches it), link-local (cloud metadata), unspecified, broadcast,
+/// multicast or reserved addresses.
+pub fn is_private_network(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_network_v4(ip),
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(v4) => is_private_network_v4(v4),
+            None => (ip.segments()[0] & 0xfe00) == 0xfc00,
+        },
+    }
+}
+
+fn is_private_network_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    ip.is_private() || (a == 100 && (b & 0xc0) == 64)
+}
+
+/// `fyx.extensions.network.private_hosts` (0.3 design §8, Q4): the names the user allows to
+/// resolve to a private network address ([`is_private_network`]). A name works only if the
+/// extension also declares it: the setting widens the address rule, never the domain list, and
+/// `https` is still required. The host keeps it current (`set` on every settings change); each
+/// request reads it.
+#[derive(Clone, Default)]
+pub struct PrivateHosts(Arc<std::sync::RwLock<Arc<[HostPattern]>>>);
+
+/// One `private_hosts` entry: a name, or `*.` and a name for its subdomains (not the name itself).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostPattern {
+    name: String,
+    subdomains: bool,
+}
+
+impl HostPattern {
+    /// A lowercase DNS name of at least two labels, or `*.` and one; no IP literal, port,
+    /// `localhost`, or `*` on its own or before a single label.
+    fn parse(entry: &str) -> Option<Self> {
+        let entry = entry.trim().trim_end_matches('.').to_ascii_lowercase();
+        let (subdomains, name) = match entry.strip_prefix("*.") {
+            Some(name) => (true, name),
+            None => (false, entry.as_str()),
+        };
+        let labels: Vec<&str> = name.split('.').collect();
+        let valid = labels.len() >= 2
+            && name.len() <= 253
+            && name.parse::<IpAddr>().is_err()
+            && labels.iter().all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+            && labels
+                .last()
+                .is_some_and(|tld| *tld != "localhost" && !tld.chars().all(|c| c.is_ascii_digit()));
+        valid.then(|| Self {
+            name: name.to_string(),
+            subdomains,
+        })
+    }
+
+    fn matches(&self, host: &str) -> bool {
+        if self.subdomains {
+            host.strip_suffix(self.name.as_str())
+                .is_some_and(|prefix| prefix.len() > 1 && prefix.ends_with('.'))
+        } else {
+            host == self.name
+        }
+    }
+}
+
+impl PrivateHosts {
+    /// Sets it from the setting's entries; returns the entries it ignored as invalid, for the
+    /// host to log.
+    pub fn set<'a>(&self, entries: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut patterns = Vec::new();
+        let mut ignored = Vec::new();
+        for entry in entries {
+            match HostPattern::parse(entry) {
+                Some(pattern) if !patterns.contains(&pattern) => patterns.push(pattern),
+                Some(_) => {}
+                None => ignored.push(entry.to_string()),
+            }
+        }
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = patterns.into();
+        ignored
+    }
+
+    /// Whether `host` (a name, as in a URL) is listed.
+    pub fn allows(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|pattern| pattern.matches(&host))
+    }
+}
+
 /// Name resolution, replaceable in tests.
 pub trait Resolve: Send + Sync + 'static {
     fn resolve(&self, host: &str, port: u16) -> BoxFuture<'static, io::Result<Vec<SocketAddr>>>;
@@ -172,6 +275,7 @@ pub struct Fetcher {
     #[cfg(test)]
     tls: Option<rustls::ClientConfig>,
     proxy: ProxySetting,
+    private_hosts: PrivateHosts,
 }
 
 /// The `user-agent` of an extension's requests (design.md §8): `Fyx/<major.minor> (extension
@@ -206,12 +310,20 @@ impl Fetcher {
             #[cfg(test)]
             tls: None,
             proxy: ProxySetting::default(),
+            private_hosts: PrivateHosts::default(),
         }
     }
 
     /// Sends requests through Fyx's proxy setting; `localhost` never goes through it.
     pub fn with_proxy(mut self, proxy: ProxySetting) -> Self {
         self.proxy = proxy;
+        self
+    }
+
+    /// Lets the names in `fyx.extensions.network.private_hosts` resolve to private network
+    /// addresses.
+    pub fn with_private_hosts(mut self, private_hosts: PrivateHosts) -> Self {
+        self.private_hosts = private_hosts;
         self
     }
 
@@ -348,14 +460,7 @@ impl Fetcher {
                 if addrs.is_empty() {
                     return Err(FetchError::Dns(format!("{host}: no address")));
                 }
-                // Every address must be global; one private answer is enough to refuse, so a
-                // name cannot mix a public and a private address to reach the local network.
-                if let Some(addr) = addrs.iter().find(|addr| !(self.is_global)(addr.ip())) {
-                    return Err(FetchError::HostNotAllowed(format!(
-                        "{host} (resolves to {})",
-                        addr.ip()
-                    )));
-                }
+                self.check_addresses(&host, &addrs)?;
                 addrs
             };
             // Connect to the checked addresses only: reqwest does not resolve this name again.
@@ -386,6 +491,28 @@ impl Fetcher {
             request = request.body(body);
         }
         request.send().await.map_err(send_error)
+    }
+
+    /// Every address of a declared domain must be global; one other answer is enough to refuse,
+    /// so a name cannot mix a public and a private address to reach the local network. A name the
+    /// user lists in `private_hosts` may also resolve to private network addresses (Q4), never to
+    /// loopback or link-local ones.
+    fn check_addresses(&self, host: &str, addrs: &[SocketAddr]) -> Result<(), FetchError> {
+        let listed = self.private_hosts.allows(host);
+        let Some(addr) = addrs.iter().find(|addr| {
+            !((self.is_global)(addr.ip()) || (listed && is_private_network(addr.ip())))
+        }) else {
+            return Ok(());
+        };
+        let hint = if is_private_network(addr.ip()) {
+            "; list the name in fyx.extensions.network.private_hosts to allow it"
+        } else {
+            ""
+        };
+        Err(FetchError::HostNotAllowed(format!(
+            "{host} (resolves to {}{hint})",
+            addr.ip()
+        )))
     }
 }
 
@@ -1479,6 +1606,101 @@ mod tests {
         assert_eq!(
             run(&domains, &fetcher(), slow).await,
             Err(FetchError::Timeout)
+        );
+    }
+
+    /// Q4: `private_hosts` entries, and what a listed name may resolve to.
+    #[test]
+    fn private_hosts() {
+        let hosts = PrivateHosts::default();
+        let ignored = hosts.set([
+            " Git.Corp.Example ",
+            "*.internal.example.",
+            "*.internal.example",
+            "*",
+            "*.com",
+            "corp",
+            "localhost",
+            "dev.localhost",
+            "10.0.0.1",
+            "1.2.3.4",
+            "[::1]",
+            "host.example:8080",
+            "-bad.example",
+            "a..example",
+        ]);
+        assert_eq!(
+            ignored,
+            [
+                "*",
+                "*.com",
+                "corp",
+                "localhost",
+                "dev.localhost",
+                "10.0.0.1",
+                "1.2.3.4",
+                "[::1]",
+                "host.example:8080",
+                "-bad.example",
+                "a..example"
+            ]
+        );
+        assert!(hosts.allows("git.corp.example"));
+        assert!(hosts.allows("GIT.corp.example."));
+        assert!(!hosts.allows("corp.example"));
+        assert!(!hosts.allows("evilgit.corp.example"));
+        assert!(hosts.allows("ci.internal.example"));
+        assert!(hosts.allows("a.b.internal.example"));
+        assert!(!hosts.allows("internal.example"), "`*.` is subdomains only");
+        assert!(!hosts.allows("xinternal.example"));
+
+        let fetcher = fetcher().with_private_hosts(hosts.clone());
+        let at = |ip: &str| [SocketAddr::new(ip.parse().unwrap(), 443)];
+        for private in [
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.1",
+            "100.100.1.1",
+            "fd00::1",
+            "::ffff:192.168.0.1",
+        ] {
+            assert_eq!(
+                fetcher.check_addresses("git.corp.example", &at(private)),
+                Ok(()),
+                "{private}"
+            );
+            let refused = fetcher.check_addresses("api.example.com", &at(private));
+            assert!(
+                matches!(&refused, Err(FetchError::HostNotAllowed(why)) if why.contains("private_hosts")),
+                "{private}: {refused:?}"
+            );
+        }
+        for never in [
+            "127.0.0.1",
+            "::1",
+            "169.254.169.254",
+            "fe80::1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::ffff:127.0.0.1",
+        ] {
+            let refused = fetcher.check_addresses("git.corp.example", &at(never));
+            assert!(
+                matches!(&refused, Err(FetchError::HostNotAllowed(why)) if !why.contains("private_hosts")),
+                "{never}: {refused:?}"
+            );
+        }
+        assert_eq!(
+            fetcher.check_addresses("git.corp.example", &at("93.184.216.34")),
+            Ok(())
+        );
+        // Clearing the setting applies to the next request.
+        assert!(hosts.set([]).is_empty());
+        assert!(
+            fetcher
+                .check_addresses("git.corp.example", &at("10.1.2.3"))
+                .is_err()
         );
     }
 
