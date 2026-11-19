@@ -58,6 +58,11 @@ pub trait ShareBridge: 'static {
     fn shared(&self, terminal: u64, cx: &App) -> Vec<(String, Share)>;
     /// Turns one share on or off. Reading once and reading until closed replace each other.
     fn share(&self, extension_id: &str, terminal: u64, share: Share, on: bool, cx: &mut App);
+    /// The names of the extensions that hold an "Always allow" for terminals: they may read and
+    /// type into every one, so every user terminal's tab says so.
+    fn always_allowed(&self, _cx: &App) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 struct GlobalShareBridge(Rc<dyn ShareBridge>);
@@ -216,4 +221,52 @@ pub(crate) fn menu_entries(terminal: &TerminalExt, cx: &App) -> Vec<MenuEntry> {
         entries.insert(0, MenuEntry::Separator);
     }
     entries
+}
+
+/// The consent broker changed: tabs redraw their access marks.
+pub fn shares_changed(cx: &mut App) {
+    let terminals: Vec<_> = cx
+        .try_global::<crate::TerminalsById>()
+        .map(|terminals| terminals.0.values().filter_map(|t| t.upgrade()).collect())
+        .unwrap_or_default();
+    for terminal in terminals {
+        terminal.update(cx, |_, cx| cx.emit(terminal::Event::Wakeup));
+    }
+}
+
+/// §C.3: who may read or type into this user terminal now, one line each, for its tab.
+pub(crate) fn access(terminal: &TerminalExt, cx: &App) -> Vec<String> {
+    let Some(bridge) = cx
+        .try_global::<GlobalShareBridge>()
+        .map(|bridge| bridge.0.clone())
+    else {
+        return Vec::new();
+    };
+    if terminal.origin().is_some() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = bridge
+        .always_allowed(cx)
+        .into_iter()
+        .map(|name| format!("{name} may read and type into every terminal (Always allow)"))
+        .collect();
+    let shared = bridge.shared(terminal.id().as_u64(), cx);
+    if !shared.is_empty() {
+        let targets = bridge.targets(cx);
+        let name = |id: &str| {
+            targets
+                .iter()
+                .find(|target| target.extension_id == id)
+                .map_or_else(|| id.to_owned(), |target| target.extension_name.clone())
+        };
+        lines.extend(shared.iter().map(|(id, share)| {
+            let what = match share {
+                Share::ReadOnce => "may read this terminal once",
+                Share::ReadUntilClosed => "may read this terminal until it closes",
+                Share::Write => "may type here, each command confirmed",
+            };
+            format!("{} {what}", name(id))
+        }));
+    }
+    lines
 }
