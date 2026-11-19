@@ -27,16 +27,14 @@ Older history: `archive/W2c.md`.
   (load_checked) and `relay_binary` (`${relay}` in terminal:env). A dropped reply means
   on_failure. W3 has the names and the glue recipe against W1's 9a28af71e0 API.
 - **Gap 8 (W4), f847ec1f86:** `ListenerEvent::McpInitialized(McpSession)` on
-  `notifications/initialized`, once per connection, with clientInfo. The WIT
-  `mcp-initialized(mcp-session)` is proposed to W0. Until it is staged, `fyx_ui_v0_4.rs`
-  maps it to `None`; then map it there, add a probe report and a tests_v0_4 test. W10 has
-  the §B.7 note.
+  `notifications/initialized`, once per connection, with clientInfo. WIT
+  `mcp-initialized(mcp-session)` staged and mapped by W0 (1a730599fa); probe report
+  `mcp-initialized <listener> <connection> <name> <version>`, asserted in
+  `test_v0_4_listeners`. W10 has §B.7.
 - **5.20 extension side:** `ui_ext::terminal::AccountDirs`, `ui_ext_wasm::set_account_dirs`
   (see the API note). W1 implements it from `FyxAccountsSettingsContent`.
 - **fyx_guard_core (7aa8211636):** root `Cargo.toml` member and workspace dep and
   `Cargo.lock` are local only until W0 merges them.
-- **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `RelayRequest` => None
-  and `McpInitialized` => unreachable (W0 has the diffs).
 - **Told W3:** ReviewHost, ContextHost, close(ids), DiagnosticsSource, relay hook contracts.
 - **Gotchas:** prefix every cargo command with `CARGO_TARGET_DIR=D:/fyx-targets/w2c`. Bash
   heredocs break here: write Python scripts with the Write tool. `cargo fmt` skips

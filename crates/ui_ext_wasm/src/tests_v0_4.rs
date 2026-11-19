@@ -1290,7 +1290,8 @@ async fn test_v0_4_listeners(cx: &mut TestAppContext) {
             ide.port,
             &ide.token,
             None,
-            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                "params":{"clientInfo":{"name":"probe-client","version":"1.2.3"}}}),
         ),
     )
     .join()
@@ -1302,6 +1303,32 @@ async fn test_v0_4_listeners(cx: &mut TestAppContext) {
         .unwrap()
         .trim()
         .to_owned();
+    // The handshake reaches `handle-io` once, with the client from `initialize`.
+    let (status, _, _) = http_exchange(
+        ide.port,
+        mcp_post(
+            ide.port,
+            &ide.token,
+            Some(&session),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        ),
+    )
+    .join()
+    .unwrap();
+    assert_eq!(status, 202);
+    let initialized = next_io_report(&extension, &mut events).await;
+    let initialized: Vec<&str> = initialized.split(' ').collect();
+    assert_eq!(
+        (
+            initialized[0],
+            initialized[1],
+            initialized[3],
+            initialized[4]
+        ),
+        ("mcp-initialized", "ide", "probe-client", "1.2.3"),
+        "{initialized:?}"
+    );
+    let connection = initialized[2].to_owned();
     let (_, _, list) = http_exchange(
         ide.port,
         mcp_post(
@@ -1330,6 +1357,10 @@ async fn test_v0_4_listeners(cx: &mut TestAppContext) {
         (words[0], words[2], words[4], words[5]),
         ("mcp-call", "ide", "openDiff", "{\"a\":1}"),
         "{report}"
+    );
+    assert_eq!(
+        words[3], connection,
+        "the call comes on the initialized connection"
     );
     assert_eq!(
         command(
