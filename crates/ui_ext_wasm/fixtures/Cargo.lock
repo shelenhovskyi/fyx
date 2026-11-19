@@ -199,6 +199,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_ui_test_probe_v0_4"
+version = "0.4.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "fyx_ui_test_status_item"
 version = "0.1.0"
 dependencies = [
