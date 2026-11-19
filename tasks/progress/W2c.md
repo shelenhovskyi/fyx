@@ -533,7 +533,14 @@ The 24 h gate counts from the later of `published_at` and when this client first
 - **Waiting for T2 in the registry:** Q2's registry part (registry review needs args patterns or
   a written reason for a "runs any code" program) and R7 (process args and env in the signed
   release). Releases list process names only, so the args go into the release first.
-- **Not built, additive:** Q4's `fyx.extensions.network.private_hosts` setting.
+- **Q4 `private_hosts` (2026-11-19):** `ui_ext_wasm::network::PrivateHosts` (shared handle, like
+  `ProxySetting`; `LoadOptions::private_hosts`). Entries are names of two or more labels or `*.`
+  plus one (subdomains only); IP literals, ports, `localhost`, `*` and `*.<tld>` are ignored and
+  returned by `set` for logging. A listed name that the extension also declares may resolve to
+  RFC 1918, `100.64/10` and `fc00::/7` (`is_private_network`), never loopback or link-local;
+  `https` is still required. The refusal names the setting. **For W3:** add
+  `fyx.extensions.network.private_hosts: Option<Vec<String>>` (`settings_content/src/fyx.rs`,
+  as a `network` sub-table) and call `PrivateHosts::set` on every settings change.
 - **Gotchas:**
   - Targets: `E:/fyx-targets/w2c` (release-fast build of ui_ext_wasm, for the bench and the
     suite) and `E:/fyx-targets/w2c-light` (fyx_registry and ui_ext only).
