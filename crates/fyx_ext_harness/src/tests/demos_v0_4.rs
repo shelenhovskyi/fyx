@@ -299,8 +299,12 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
             ),
         ),
     ];
-    // `getDiagnostics` answers `[]` until 0.4 has a diagnostics read.
-    const COMPARED: [&str; 3] = ["openDiff", "close_tab", "closeAllDiffTabs"];
+    const COMPARED: [&str; 4] = [
+        "openDiff",
+        "close_tab",
+        "closeAllDiffTabs",
+        "getDiagnostics",
+    ];
     let package = demo_package("fyx_claude_code");
     let mut compared = 0;
     let mut notified = 0;
@@ -354,6 +358,49 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                     selection: Some((range, selection["text"].as_str().map(str::to_owned))),
                     trusted: Some(true),
                 });
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                receive(&mut harness, &mut answers, &mut notes);
+                continue;
+            }
+            if event["t"] == "diagnostics" {
+                use ui_ext::context::{Diagnostic, DiagnosticSeverity, FileDiagnostics};
+                let position = |at: &Value| ui_ext::edit::Position {
+                    line: at[0].as_u64().unwrap() as u32,
+                    column: at[1].as_u64().unwrap() as u32,
+                };
+                let files = event["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|file| FileDiagnostics {
+                        path: ui_ext::process::FileRef {
+                            worktree: Some(1),
+                            path: file["path"].as_str().unwrap().to_owned(),
+                        },
+                        diagnostics: file["diagnostics"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|entry| Diagnostic {
+                                range: ui_ext::edit::TextRange {
+                                    start: position(&entry["range"]["start"]),
+                                    end: position(&entry["range"]["end"]),
+                                },
+                                severity: match entry["severity"].as_str() {
+                                    Some("Error") => DiagnosticSeverity::Error,
+                                    Some("Warning") => DiagnosticSeverity::Warning,
+                                    Some("Information") => DiagnosticSeverity::Information,
+                                    Some("Hint") => DiagnosticSeverity::Hint,
+                                    other => panic!("{at}: severity {other:?}"),
+                                },
+                                message: entry["message"].as_str().unwrap().to_owned(),
+                                source: entry["source"].as_str().map(str::to_owned),
+                                code: None,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                harness.set_diagnostics(files);
                 harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
                 receive(&mut harness, &mut answers, &mut notes);
                 continue;
