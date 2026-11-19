@@ -9,36 +9,78 @@ fn workspace_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// `<target>`: the cargo target directory of the test binary.
+fn test_target_dir() -> std::result::Result<PathBuf, String> {
+    // <target>/debug/deps/<test binary>
+    Ok(std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .ancestors()
+        .nth(3)
+        .ok_or("the test binary is not inside a cargo target directory")?
+        .to_path_buf())
+}
+
 /// Builds a guest for `wasm32-wasip2` with `cargo build <args>` in `dir`, into the target directory
 /// `target` next to the test binary's own, and returns `<target>/wasm32-wasip2/<output>`. Builds
 /// that differ only in features need targets of their own, or they overwrite each other's output.
+///
+/// Under nextest, which runs every test in a process of its own, the build runs once per guest and
+/// test run: the first process to take the guest's lock file builds it and stamps it with
+/// `NEXTEST_RUN_ID`, and the others find the stamp. The sources do not change during a run. It
+/// also turns on the harness's cache of compiled components, in `<target>/fyx-ext-harness-cache`.
 fn build_guest(
     dir: &Path,
     target: &str,
     args: &[&str],
     output: &str,
 ) -> std::result::Result<PathBuf, String> {
-    // <target>/debug/deps/<test binary>
-    let target_dir = std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .ancestors()
-        .nth(3)
-        .ok_or("the test binary is not inside a cargo target directory")?
-        .join(target);
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+
+    let test_target = test_target_dir()?;
+    cache_compiled_components(test_target.join("fyx-ext-harness-cache"));
+    let target_dir = test_target.join(target);
+    let built = target_dir.join("wasm32-wasip2").join(output);
+    let Ok(run_id) = std::env::var("NEXTEST_RUN_ID") else {
+        run_cargo_build(dir, &target_dir, args)?;
+        return Ok(built);
+    };
+    let mut hasher = DefaultHasher::new();
+    (dir, args, output).hash(&mut hasher);
+    let stamp = target_dir.join(format!("fyx-built-{:016x}", hasher.finish()));
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|error| format!("creating {target_dir:?}: {error}"))?;
+    let lock = std::fs::File::create(stamp.with_extension("lock"))
+        .map_err(|error| format!("creating the lock for {stamp:?}: {error}"))?;
+    // Held until this process has built the guest, or seen that another one did.
+    lock.lock()
+        .map_err(|error| format!("locking {stamp:?}: {error}"))?;
+    if std::fs::read_to_string(&stamp).is_ok_and(|stamped| stamped == run_id) && built.exists() {
+        return Ok(built);
+    }
+    run_cargo_build(dir, &target_dir, args)?;
+    std::fs::write(&stamp, &run_id).map_err(|error| format!("writing {stamp:?}: {error}"))?;
+    Ok(built)
+}
+
+fn run_cargo_build(
+    dir: &Path,
+    target_dir: &Path,
+    args: &[&str],
+) -> std::result::Result<(), String> {
     // Blocking is fine: it runs once per guest and test process, before any test work.
     #[allow(clippy::disallowed_methods)]
     let status = std::process::Command::new(option_env!("CARGO").unwrap_or("cargo"))
         .arg("build")
         .args(args)
         .args(["--locked", "--target", "wasm32-wasip2", "--target-dir"])
-        .arg(&target_dir)
+        .arg(target_dir)
         .current_dir(dir)
         .status()
         .map_err(|error| format!("running cargo: {error}"))?;
     if !status.success() {
         return Err(format!("cargo build {args:?} in {dir:?} failed: {status}"));
     }
-    Ok(target_dir.join("wasm32-wasip2").join(output))
+    Ok(())
 }
 
 fn read_guest(
@@ -52,47 +94,69 @@ fn read_guest(
     std::fs::read(path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
 }
 
+/// The demos the tests load as 0.1 and as 0.2. Each set is built with one `cargo build`, which
+/// gives the same components as building them one by one: their `fyx-ui-0-2` features change
+/// only the demo itself, not the crates they share.
+const DEMOS_V0_1: [&str; 3] = ["fyx_demo_counter", "fyx_demo_todo", "fyx_demo_decorations"];
+const DEMOS_V0_2: [&str; 3] = [
+    "fyx_demo_counter",
+    "fyx_demo_gallery",
+    "fyx_demo_decorations",
+];
+
 /// A demo's default (0.1) build, or with `v0_2` its `fyx-ui-0-2` build.
-fn demo(
-    crate_name: &'static str,
-    v0_2: bool,
-    built: &'static OnceLock<std::result::Result<PathBuf, String>>,
-) -> Vec<u8> {
-    let path = built
-        .get_or_init(|| {
-            let feature = format!("{crate_name}/fyx-ui-0-2");
-            let mut args = vec!["-p", crate_name];
-            let target = if v0_2 {
-                args.extend(["--features", &feature]);
-                "fyx-ui-fixtures-v0_2"
-            } else {
-                "fyx-ui-fixtures"
-            };
-            build_guest(
-                &workspace_dir(),
-                target,
-                &args,
-                &format!("debug/{crate_name}.wasm"),
-            )
-        })
+fn demo(crate_name: &'static str, v0_2: bool) -> Vec<u8> {
+    fn build(demos: [&str; 3], v0_2: bool) -> std::result::Result<PathBuf, String> {
+        let features = demos.map(|demo| format!("{demo}/fyx-ui-0-2")).join(",");
+        let mut args = Vec::new();
+        if v0_2 {
+            args.extend(["--features", &features]);
+        }
+        for demo in &demos {
+            args.extend(["-p", demo]);
+        }
+        let target = if v0_2 {
+            "fyx-ui-fixtures-v0_2"
+        } else {
+            "fyx-ui-fixtures"
+        };
+        let wasm = build_guest(
+            &workspace_dir(),
+            target,
+            &args,
+            &format!("debug/{}.wasm", demos[0]),
+        )?;
+        Ok(wasm.parent().ok_or("no output directory")?.to_path_buf())
+    }
+    static BUILT_V0_1: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
+    static BUILT_V0_2: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
+    let (demos, built) = if v0_2 {
+        (DEMOS_V0_2, &BUILT_V0_2)
+    } else {
+        (DEMOS_V0_1, &BUILT_V0_1)
+    };
+    assert!(
+        demos.contains(&crate_name),
+        "{crate_name} is not in the demo list for this build"
+    );
+    let dir = built
+        .get_or_init(|| build(demos, v0_2))
         .as_ref()
         .unwrap_or_else(|error| panic!("{error}"));
-    std::fs::read(path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
+    let path = dir.join(format!("{crate_name}.wasm"));
+    std::fs::read(&path).unwrap_or_else(|error| panic!("reading {path:?}: {error}"))
 }
 
 fn counter_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    demo("fyx_demo_counter", false, &BUILT)
+    demo("fyx_demo_counter", false)
 }
 
 fn counter_v0_2_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    demo("fyx_demo_counter", true, &BUILT)
+    demo("fyx_demo_counter", true)
 }
 
 fn todo_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    demo("fyx_demo_todo", false, &BUILT)
+    demo("fyx_demo_todo", false)
 }
 
 /// `fixtures/v0_2`, a 0.2 guest written with the SDK; its doc comment lists the node ids.

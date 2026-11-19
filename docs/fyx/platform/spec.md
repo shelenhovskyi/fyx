@@ -162,6 +162,13 @@ line decorations, code lenses, read-only documents, network and processes behind
       Extension, and one added to `dev_paths` by hand.
     - **After that, only T1 matters.** An update that adds T0 or changes the component loads
       silently. One that adds T1 is held until **Approve**.
+
+    **Changes with 0.4 (decided by the owner 2026-11-19, plan P5;
+    [wit-0.4/design.md §C](../wit-0.4/design.md#c-consent-in-04-layer-c)):** T2 is accepted at
+    install, one checkbox per item, unticked by default, and first use stays only for dev
+    installs without a dialog. A new tier **T3** (`terminal:read`, `terminal:write` on the user's
+    terminals) is asked at the moment of action, on one terminal. Extensions get a usage journal,
+    and a held update shows what is new. Until 0.4 ships, the table above is what the host does.
 22. Section M of 0.2, notifications and progress (design drafted 2026-11-18 in
     [wit-0.2/design.md §M](../wit-0.2/design.md#m-notifications-and-progress-fyxuinotifications)).
     `ui:notifications`, tier T0.

@@ -10,6 +10,9 @@ pub mod canvas;
 #[cfg(feature = "t2")]
 pub mod edit;
 pub mod image;
+/// fyx:ui 0.4 integration kit manifest tables (plan 5.5).
+#[cfg(feature = "t2")]
+pub mod integration;
 #[cfg(feature = "t2")]
 pub mod network;
 #[cfg(feature = "t2")]
@@ -17,6 +20,9 @@ pub mod observe;
 #[cfg(feature = "t2")]
 pub mod process;
 pub mod protected;
+/// fyx:ui 0.4 terminals (plan 5.5); behind `t2` until W0 adds a `terminal` feature alias.
+#[cfg(feature = "t2")]
+pub mod terminal;
 mod tree;
 mod types;
 pub mod v0_2;
@@ -72,3 +78,5 @@ pub const WIT_DIR_V0_1_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
 pub const WIT_DIR_V0_2_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit/since_v0.2.0");
 /// The staged 0.3 world (docs/fyx/wit-0.3/design.md); its images model is in [`image`].
 pub const WIT_DIR_V0_3_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit/since_v0.3.0");
+/// The staged 0.4 world (docs/fyx/wit-0.4/design.md); its terminal model is in `terminal` (feature `t2`).
+pub const WIT_DIR_V0_4_0: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit/since_v0.4.0");

@@ -313,7 +313,7 @@ fn main() {
             app_version,
             app_commit_sha,
             *release_channel::RELEASE_CHANNEL,
-            client::telemetry::os_name(),
+            client::telemetry::guessed_os_name(),
             client::telemetry::os_version(),
         );
         println!("Fyx System Specs (from CLI):\n{}", system_specs); // fyx: product name
@@ -746,10 +746,12 @@ fn main() {
         tab_switcher::init(cx);
         outline::init(cx);
         call_hierarchy::init(cx);
+        project_bookmarks::init(cx);
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
         ui_ext_host::init(cx); // fyx: extension panels and status items
+        terminal_host::init(cx); // fyx: terminal status on tabs
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
@@ -1246,8 +1248,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                         sha,
                                         repo.downgrade(),
                                         workspace.weak_handle(),
-                                        None,
-                                        None,
+                                        Default::default(),
                                         window,
                                         cx,
                                     );

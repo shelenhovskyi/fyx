@@ -538,10 +538,81 @@ The 24 h gate counts from the later of `published_at` and when this client first
   plus one (subdomains only); IP literals, ports, `localhost`, `*` and `*.<tld>` are ignored and
   returned by `set` for logging. A listed name that the extension also declares may resolve to
   RFC 1918, `100.64/10` and `fc00::/7` (`is_private_network`), never loopback or link-local;
-  `https` is still required. The refusal names the setting. **For W3:** add
-  `fyx.extensions.network.private_hosts: Option<Vec<String>>` (`settings_content/src/fyx.rs`,
-  as a `network` sub-table) and call `PrivateHosts::set` on every settings change.
+  `https` is still required. The refusal names the setting. W3 wired the setting in 1534a1e7de:
+  user settings only, one global set on every change, both load paths pass it. Q4 is done.
+- **P5 5.5, step 1 (2026-11-19): `ui_ext::terminal`** (behind `t2`; W0 may add a
+  `terminal = ["t2"]` alias). Contents: the types of the 0.4 `terminals` interface, the
+  `TerminalHost` trait and `TerminalSink`, the limits, the
+  profile/program/env tables with `reason`, `Template` and `TemplateContext`,
+  `is_forbidden_terminal_env`/`is_account_env`, and `ACCOUNT_DIR_ENV_NAMES` and
+  `CREDENTIAL_ENV_NAMES`. Agreed with W1:
+  - W1 implements `TerminalHost` in a new `terminal_host` crate; terminal_ext stays a leaf.
+  - A sink may be called from any thread and only queues.
+  - W1 allocates handles and never reuses them in one load.
+  - **Decision (mine):** a name with a credential suffix (`_TOKEN`, …) may carry exactly one
+    `${listen.<n>.token}` of a `token_in_env` listener: that is Fyx's own per-run secret. The
+    explicit credential names, the account-dir names and `FYX_*` stay refused.
+  - Profile icons are frozen `Icon` names and optional.
+- **P5 5.5, step 2: the WIT draft** `tasks/wit/fyx-ui-0.4.wit` (145f748bbf), generated from
+  0.3 plus the design's diff. `wasm-tools component wit` parses it. Keyword renames: `%list`, and
+  `respond(…, outcome)`. It went to W0 to stage as `since_v0.4.0`; the corrections went to W10.
+  Plan 4.2–4.4's parts are not in it yet.
+- **P5 5.5, step 3: 0.4 in the loader** (W0 staged the WIT as bce8df3b54, merged via
+  fyx/main):
+  - `ApiVersion::V0_4_0` with `WIT_DIR_V0_4_0`. `ui_ext_wasm::MAX_VERSION` is 0.4.0 (staged);
+    `MAX_FROZEN_VERSION` stays 0.3.0.
+  - `dispatch.rs` refuses to instantiate a 0.4 component: "this build does not run 0.4
+    components yet". No 0.4 bindings exist yet.
+  - New `ui_ext::integration` module: `ListenerSpec`, `DiscoveryFileSpec` and
+    `RelayChannelSpec` with their checks, and `IntegrationTables::listener` for the templates.
+  - `UiManifest` gains the six 0.4 tables, each refused below 0.4.
+  - `UiManifest::check_terminals`, called from `read`: each table goes with its capability,
+    plus the `ui_ext::terminal` and `ui_ext::integration` checks.
+  - `world_capabilities` has a `V0_4` list. The new capabilities have T0, T1 and T2 tiers in
+    `permissions.rs`. `terminal:read` and `terminal:write` (T3) are refused as unknown until
+    5.6.
+  - Tests: `tests_v0_3::test_v0_4_manifest_tables` covers the plan's acceptance cases. The
+    gating and load-from-dir tests now use 0.5.0 as the unknown version.
+- **Breaks sent to W4** (merge with or after their fix):
+  - `fyx_ext_harness.rs:~1009` and `api_state.rs:242`: an `ApiVersion::V0_4_0` arm is missing;
+  - `tests.rs` `harness_conformance::limits_match` asserts `MAX_VERSION == 0.3`;
+  - the mirror list for `fyx_ext/src/manifest.rs` and the harness.
+
+## Handoff (2026-11-19, third context clear)
+
+- **Branch:** claude/fyx-w2c-host-0-2-cbde2c, pushed, with fyx/main merged.
+- **Ready at the gatekeeper:** 22dbc5ea54 (Q4), ba7186021a (`ui_ext::terminal`) and the 5.5
+  step 3 commit (see the ready message); 282e99d69a (title rule) rides along.
+- **Next turn, after the clear:**
+  1. The 0.4 import side in ui_ext_wasm:
+     - bindgen for `since_v0.4.0`, and `dispatch.rs` `V0_4` built from the 0.3 linker plus the
+       new interfaces;
+     - the `terminals` import over `ui_ext::terminal::TerminalHost` (`LoadOptions::terminals`);
+     - the who-checks-what split agreed with W1 (top of `terminal.rs`);
+     - the io events from `TerminalSink`;
+     - stubs that trap for listeners, relay, review, context and approvals until 5.11 and 5.13.
+  2. 5.6, the broker:
+     - `Tier::T3`;
+     - T2 at install with per-item grants;
+     - "Always allow" bound to the component hash;
+     - the journal store (`<data_dir>/extensions/fyx/journal/<id>.jsonl`, never terminal
+       content);
+     - revocation that calls `TerminalHost::close_all`;
+     - the consent items of the 0.4 tables for the update diff (§C.5).
+     - `ui_ext_host`'s `consent.rs` and `permissions.rs` are W3's crate: agree the API with W3
+       first.
+  3. `reason` for `[[fyx_ui.processes]]` and `[fyx_ui.network]` in 0.4 manifests. It is not done,
+     because `ProcessSpec` has 13 struct literals in other crates. Add it as a 0.4-only field
+     that is refused below 0.4.
+  4. `fyx_registry`'s capability tiers and `capability-tiers.json` for the 0.4 capabilities,
+     with W10's 5.21: T3 counts as T2 for the release tier.
+- **W1** implements `TerminalHost` in `terminal_host` (phase 2). Agreed: observe redacts titles
+  to `•••`, except profile names and the extension's own terminals.
 - **Gotchas:**
+  - `ui_ext_wasm`'s tests need `fyx_ext_harness` to compile. Until W4 adds the `V0_4_0` arms,
+    patch the harness locally for a run and revert it with `git checkout -- crates/fyx_ext_harness`.
+  - PowerShell `.Replace` with `` `n `` misses lines in CRLF files; use the Edit tool.
+- **Gotchas (older):**
   - Targets: `E:/fyx-targets/w2c` (release-fast build of ui_ext_wasm, for the bench and the
     suite) and `E:/fyx-targets/w2c-light` (fyx_registry and ui_ext only).
   - ui_ext's t2 modules are tested only with `--all-features`.

@@ -61,17 +61,18 @@ pkgs=()
 for c in $changed_crates; do pkgs+=(-p "$c"); done
 echo "gate: ${changed_crates//$'\n'/ }"
 
-cargo check "${pkgs[@]}" 2>&1 | tail -20
-cargo clippy "${pkgs[@]}" --all-targets -- --deny warnings 2>&1 | tail -30
 # Known local issue (docs/fyx/ci.md, "Known local issues"): on a machine whose DNS answers
 # example.com with a loopback address, upstream's fetch-tool redirect tests fail because they
-# resolve example.com for real. Skip exactly those, loudly, and never in CI.
+# resolve example.com for real. Skip exactly those, loudly, and never in CI. Checked before the
+# build: under the gate's full load the lookup can time out and the skip silently not apply.
 nextest_filter=()
 if [[ "${CI:-}" != "true" && " ${pkgs[*]} " == *" agent "* ]] \
     && powershell -NoProfile -Command "for (\$i = 0; \$i -lt 3; \$i++) { try { if ([System.Net.Dns]::GetHostAddresses('example.com') | Where-Object { \$_.ToString() -match '^127\.' }) { exit 0 } } catch {}; Start-Sleep -Milliseconds 500 }; exit 1" 2>/dev/null; then
     echo "gate: WARNING: example.com resolves to loopback here; skipping agent's 3 fetch-tool redirect tests (CI runs them)"
     nextest_filter=(-E 'not (test(test_fetch_tool_follows_same_host_redirect) | test(test_fetch_tool_refuses_redirect_to_loopback) | test(test_fetch_tool_reauthorizes_redirect_to_new_host))')
 fi
+cargo check "${pkgs[@]}" 2>&1 | tail -20
+cargo clippy "${pkgs[@]}" --all-targets -- --deny warnings 2>&1 | tail -30
 # Tests must never touch the user's real Fyx profile (two leaks on 2026-11-18, docs/fyx/ci.md).
 # 1. nextest gets a throwaway HOME and data/config dirs. Cargo and rustup are pinned first, so
 #    tests that build guests still find the toolchain.
