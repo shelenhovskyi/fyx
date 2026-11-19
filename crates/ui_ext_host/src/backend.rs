@@ -179,7 +179,14 @@ pub trait UiBackend: 'static {
     fn decoration_closed(&self, _id: &str) {}
     /// The user answered an approval card (`Some`), or it closed unanswered (`None`): the
     /// instance delivers `io-event::approval-answered` and frees the slot (fyx:ui 0.4, §B.12).
-    fn answer_approval(&self, _id: u64, _answer: Option<crate::approvals::ApprovalChoice>) {}
+    /// The registry spawns the future; it is safe for an id that is not open.
+    fn answer_approval(
+        &self,
+        _id: u64,
+        _answer: Option<crate::approvals::ApprovalOption>,
+    ) -> LocalBoxFuture<'static, ()> {
+        async {}.boxed_local()
+    }
     /// Recent calls, `log` output and capability checks, for the Extension Inspector.
     fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
         None
@@ -271,5 +278,14 @@ impl UiBackend for UiExtension {
 
     fn decoration_closed(&self, id: &str) {
         UiExtension::decoration_closed(self, id)
+    }
+
+    fn answer_approval(
+        &self,
+        id: u64,
+        answer: Option<crate::approvals::ApprovalOption>,
+    ) -> LocalBoxFuture<'static, ()> {
+        let this = self.clone();
+        async move { UiExtension::answer_approval(&this, id, answer).await }.boxed_local()
     }
 }
