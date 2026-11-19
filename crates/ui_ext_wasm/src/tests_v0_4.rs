@@ -9,16 +9,18 @@ use std::{
 use gpui::TestAppContext;
 use ui_ext::{
     terminal::{
-        self, CreateCommand, PseudoRequest, TerminalError, TerminalEvent, TerminalHandle,
-        TerminalHost, TerminalInfo, TerminalIntegration, TerminalOrigin, TerminalSink,
-        TerminalStatus,
+        self, CreateCommand, PseudoRequest, ReadScope, T3Target, TerminalError, TerminalEvent,
+        TerminalHandle, TerminalHost, TerminalInfo, TerminalIntegration, TerminalOrigin,
+        TerminalSink, TerminalStatus,
     },
     v0_2::{Props, UiEvent, Update},
 };
 
 use super::*;
 use crate::{
-    permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
+    permissions::{
+        CapabilityCheck, CapabilityDenied, PermissionState, T3Answer, T3Capability, T3Prompt,
+    },
     process::{Workspace, WorktreeRoot},
 };
 
@@ -31,6 +33,8 @@ struct FakeHost {
     calls: Mutex<Vec<String>>,
     sinks: Mutex<HashMap<u64, TerminalSink>>,
     created: Mutex<Vec<CreateCommand>>,
+    /// The working directory of user terminal 50, for the T3 cards.
+    t3_cwd: Mutex<Option<PathBuf>>,
     integrations: Mutex<Vec<(String, TerminalIntegration)>>,
 }
 
@@ -155,6 +159,44 @@ impl TerminalHost for FakeHost {
         self.record(format!("close-all {ext}"));
     }
 
+    fn t3_target(&self, _: &str, handle: TerminalHandle) -> Result<T3Target, TerminalError> {
+        if handle != TerminalHandle(50) {
+            return Err(TerminalError::NotFound);
+        }
+        Ok(T3Target {
+            terminal: 500,
+            origin: TerminalOrigin::User,
+            title: "zsh".into(),
+            cwd: self.t3_cwd.lock().unwrap().clone(),
+        })
+    }
+
+    fn read(
+        &self,
+        _: &str,
+        handle: TerminalHandle,
+        scope: ReadScope,
+        lines: u16,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        self.record(format!("read {} {scope:?} {lines} {id}", handle.0));
+        sink(TerminalEvent::ReadDone(id, Ok("$ ls\nsrc".into())));
+    }
+
+    fn write(
+        &self,
+        _: &str,
+        handle: TerminalHandle,
+        text: String,
+        submit: bool,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        self.record(format!("write {} {text} {submit} {id}", handle.0));
+        sink(TerminalEvent::WriteDone(id, Ok(())));
+    }
+
     fn set_integration(&self, ext: &str, integration: TerminalIntegration) {
         self.integrations
             .lock()
@@ -163,8 +205,13 @@ impl TerminalHost for FakeHost {
     }
 }
 
-/// A broker that grants T1 and answers T2 from a map (`granted` when absent).
-struct Broker(HashMap<&'static str, PermissionState>);
+/// A broker that grants T1, answers T2 from a map (`granted` when absent), and answers every
+/// T3 card with the second field, keeping the cards in the third.
+struct Broker(
+    HashMap<&'static str, PermissionState>,
+    T3Answer,
+    Arc<Mutex<Vec<T3Prompt>>>,
+);
 
 impl CapabilityCheck for Broker {
     fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
@@ -187,6 +234,15 @@ impl CapabilityCheck for Broker {
             Some(state) => *state,
             None => self.state(extension_id, item.capability()),
         }
+    }
+
+    fn t3_request(
+        &self,
+        _: &str,
+        prompt: T3Prompt,
+    ) -> futures::future::BoxFuture<'static, T3Answer> {
+        self.2.lock().unwrap().push(prompt);
+        futures::future::ready(self.1).boxed()
     }
 }
 
@@ -218,6 +274,8 @@ struct Setup {
     workspace: Option<Vec<WorktreeRoot>>,
     capabilities: Vec<&'static str>,
     journal: Arc<Recorder>,
+    t3: T3Answer,
+    cards: Arc<Mutex<Vec<T3Prompt>>>,
     /// In place of a [`Broker`] over `states`.
     broker: Option<Arc<dyn CapabilityCheck>>,
 }
@@ -228,6 +286,8 @@ impl Default for Setup {
             host: Arc::default(),
             states: Vec::new(),
             journal: Arc::default(),
+            t3: T3Answer::Once,
+            cards: Arc::default(),
             broker: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
@@ -262,7 +322,11 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         allow_staged: Some(true),
         capabilities: Some(setup.capabilities.iter().map(|c| c.to_string()).collect()),
         capability_check: Some(setup.broker.clone().unwrap_or_else(|| {
-            Arc::new(Broker(setup.states.iter().copied().collect())) as Arc<dyn CapabilityCheck>
+            Arc::new(Broker(
+                setup.states.iter().copied().collect(),
+                setup.t3,
+                setup.cards.clone(),
+            )) as Arc<dyn CapabilityCheck>
         })),
         terminals: Some(setup.host.clone()),
         terminal_programs: Some(vec![terminal::TerminalProgramSpec {
@@ -536,7 +600,11 @@ async fn test_v0_4_without_a_host_terminals_are_unavailable(cx: &mut TestAppCont
                 LoadOptions {
                     allow_staged: Some(true),
                     capabilities: Some(vec!["ui:panel".into(), "terminal:pseudo".into()]),
-                    capability_check: Some(Arc::new(Broker(HashMap::new()))),
+                    capability_check: Some(Arc::new(Broker(
+                        HashMap::new(),
+                        T3Answer::Deny,
+                        Arc::default(),
+                    ))),
                     ..LoadOptions::default()
                 },
                 &cx.to_async(),
@@ -575,6 +643,180 @@ async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext
         format!("{error:#}").contains("not implemented by this build"),
         "{error:#}"
     );
+}
+
+/// Runs `command` from a click, a gesture.
+async fn click(extension: &UiExtension, command: &str) -> String {
+    let armed = extension
+        .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, format!("arm {command}")))
+        .await
+        .unwrap();
+    assert_eq!(report(&armed.value), "armed");
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::Click(1))
+        .await
+        .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+    report(&reply.value)
+}
+
+/// The next `count` reports `handle-io` pushes.
+async fn pushed(
+    extension: &UiExtension,
+    events: &mut (impl futures::Stream<Item = crate::network::IoEvent> + Unpin),
+    count: usize,
+) -> Vec<String> {
+    let mut seen = Vec::new();
+    while seen.len() < count {
+        let event = events.next().await.unwrap();
+        let reply = extension.handle_io(event).await.unwrap();
+        seen.extend(reply.effects.iter().filter_map(|effect| match effect {
+            HostEffect::Push { update, .. } => Some(report(update)),
+            _ => None,
+        }));
+    }
+    seen
+}
+
+fn t3_setup(t3: T3Answer) -> Setup {
+    let mut setup = Setup {
+        t3,
+        ..Setup::default()
+    };
+    setup
+        .capabilities
+        .extend([terminal::CAPABILITY_READ, terminal::CAPABILITY_WRITE]);
+    setup
+}
+
+fn t3_calls(host: &FakeHost) -> Vec<String> {
+    host.calls()
+        .into_iter()
+        .filter(|call| call.starts_with("read ") || call.starts_with("write "))
+        .collect()
+}
+
+#[gpui::test]
+async fn test_v0_4_t3_requests(cx: &mut TestAppContext) {
+    let setup = t3_setup(T3Answer::Once);
+    let extension = load(&setup, cx).await.unwrap();
+    let mut events = extension.take_io_events().unwrap();
+
+    // Without a gesture, past 500 lines, or with control characters: refused at the call.
+    assert_eq!(command(&extension, "read 50").await, "not-permitted");
+    assert_eq!(command(&extension, "write 50 ls").await, "not-permitted");
+    assert_eq!(click(&extension, "read 50 501").await, "invalid-argument");
+    assert_eq!(click(&extension, "read 50 0").await, "invalid-argument");
+    assert_eq!(
+        click(&extension, "write 50 \u{1b}[A").await,
+        "invalid-argument"
+    );
+    // A terminal the host does not share (another profile's, or none).
+    assert_eq!(click(&extension, "read 7").await, "invalid-argument");
+
+    // A card on the user's terminal, then the host's read; the journal has the size only.
+    assert_eq!(click(&extension, "read 50 20").await, "1");
+    assert_eq!(
+        pushed(&extension, &mut events, 1).await,
+        ["read-done 1 $ ls\nsrc"]
+    );
+    assert_eq!(click(&extension, "write-enter 50 git status").await, "2");
+    assert_eq!(
+        pushed(&extension, &mut events, 1).await,
+        ["write-done 2 done"]
+    );
+    assert_eq!(
+        *setup.cards.lock().unwrap(),
+        [
+            T3Prompt {
+                capability: T3Capability::Read,
+                terminal: 500,
+                terminal_title: "zsh".into(),
+                scope: Some((ReadScope::LastLines, 20)),
+                text: None,
+                submit: false,
+            },
+            T3Prompt {
+                capability: T3Capability::Write,
+                terminal: 500,
+                terminal_title: "zsh".into(),
+                scope: None,
+                text: Some("git status".into()),
+                submit: true,
+            },
+        ]
+    );
+    assert_eq!(
+        t3_calls(&setup.host),
+        ["read 50 LastLines 20 1", "write 50 git status true 2"]
+    );
+    let journal: Vec<_> = setup
+        .journal
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, kind)| kind.clone())
+        .collect();
+    assert_eq!(
+        journal,
+        [
+            crate::journal::JournalKind::TerminalRead {
+                terminal: "zsh".into(),
+                scope: "last 20 lines".into(),
+                bytes: 8,
+            },
+            crate::journal::JournalKind::TerminalWrite {
+                terminal: "zsh".into(),
+                text: "git status".into(),
+                submit: true,
+            },
+        ]
+    );
+
+    // Its own terminal needs no card.
+    assert_eq!(command(&extension, "pseudo own").await, "1");
+    assert_eq!(click(&extension, "read-command 1").await, "3");
+    assert_eq!(
+        pushed(&extension, &mut events, 1).await,
+        ["read-done 3 $ ls\nsrc"]
+    );
+    assert_eq!(setup.cards.lock().unwrap().len(), 2);
+}
+
+#[gpui::test]
+async fn test_v0_4_t3_denied_and_untrusted(cx: &mut TestAppContext) {
+    let setup = t3_setup(T3Answer::Deny);
+    let extension = load(&setup, cx).await.unwrap();
+    let mut events = extension.take_io_events().unwrap();
+    assert_eq!(click(&extension, "read 50").await, "1");
+    assert_eq!(click(&extension, "write 50 ls").await, "2");
+    let mut seen = pushed(&extension, &mut events, 2).await;
+    seen.sort();
+    assert_eq!(
+        seen,
+        ["read-done 1 error: denied", "write-done 2 error: denied"]
+    );
+    assert!(t3_calls(&setup.host).is_empty());
+    assert!(setup.journal.0.lock().unwrap().is_empty());
+
+    // Never in a restricted worktree, and no card for it.
+    let root = tempfile::tempdir().unwrap();
+    let setup = Setup {
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: root.path().into(),
+            trusted: false,
+        }]),
+        ..t3_setup(T3Answer::Once)
+    };
+    *setup.host.t3_cwd.lock().unwrap() = Some(root.path().join("src"));
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(click(&extension, "read 50").await, "untrusted-worktree");
+    assert!(setup.cards.lock().unwrap().is_empty());
+
+    // Not declared.
+    let extension = load(&Setup::default(), cx).await.unwrap();
+    assert_eq!(click(&extension, "read 50").await, "not-permitted");
 }
 
 #[gpui::test]
