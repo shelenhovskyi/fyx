@@ -27,6 +27,7 @@ to code style. Fyx-specific rules:
   force-push, push `main`, push tags or delete branches; `.claude/hooks/guard-commands.sh` also
   catches other spellings (`git -C <dir> push`, a bare `git push` on `fyx/main`) and
   `cargo add/remove/update`. No hook covers every spelling; the rule above still applies.
+  With `FYX_INTEGRATOR=1` it lets W0 push `fyx/main` after a green FULL gate (never `main`).
 - `.claude/hooks/protect-integrator-files.sh` denies edits of the root `Cargo.toml`, any
   `Cargo.lock` and `crates/ui_ext/wit/`; W0 (or a stream given integrator lines) sets
   `"env": { "FYX_INTEGRATOR": "1" }` in its `.claude/settings.local.json`. Edited `.rs` files are

@@ -6,10 +6,14 @@
 #   cannot.
 # - `cargo add/remove/update/generate-lockfile`: they change Cargo.toml/Cargo.lock (W0 only).
 #   FYX_INTEGRATOR=1 in the session's env (.claude/settings.local.json "env") allows them.
+#   It also allows pushing fyx/main (W0, after a green FULL gate); main is never allowed.
 # Never fails a tool call on its own error: any error exits 0 (= no decision). Runs git only
 # when the command has a `push`.
 trap 'exit 0' ERR
 protected_branches=" main fyx/main "
+# W0 (FYX_INTEGRATOR=1) pushes fyx/main after a green FULL gate (owner, 2026-11-20); main stays
+# the user's.
+[[ "${FYX_INTEGRATOR:-}" == 1 ]] && protected_branches=" main "
 
 input=""
 IFS= read -r -d '' input || true
