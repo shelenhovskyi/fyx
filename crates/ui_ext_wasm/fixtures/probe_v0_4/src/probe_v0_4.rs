@@ -35,7 +35,8 @@
 //! `created <h>`, `closed <h>`, `status-changed <h>`, `permission <capability> <state>`,
 //! `approval <id> <once|always|deny|none>`, `read-done <id> <text|error: why>`,
 //! `write-done <id> <done|error: why>`, `mcp-call <id> <listener> <connection> <tool> <arguments>`,
-//! `mcp-cancelled <id>`, `message <listener> <connection> <text>`,
+//! `mcp-cancelled <id>`, `mcp-initialized <listener> <connection> <client-name> <client-version>`,
+//! `message <listener> <connection> <text>`,
 //! `request <id> <listener> <path> <body>`,
 //! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`,
 //! `diagnostics-changed <path,...|*>` (`*` for the empty list),
@@ -514,6 +515,10 @@ impl Guest for Probe {
                 call.call_id, call.listener, call.connection, call.tool, call.arguments
             ),
             Io::McpCancelled(id) => format!("mcp-cancelled {id}"),
+            Io::McpInitialized(session) => format!(
+                "mcp-initialized {} {} {} {}",
+                session.listener, session.connection, session.client_name, session.client_version
+            ),
             Io::DiagnosticsChanged(files) if files.is_empty() => "diagnostics-changed *".into(),
             Io::DiagnosticsChanged(files) => format!(
                 "diagnostics-changed {}",
