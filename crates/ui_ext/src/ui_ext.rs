@@ -17,6 +17,9 @@ pub mod observe;
 #[cfg(feature = "t2")]
 pub mod process;
 pub mod protected;
+/// fyx:ui 0.4 terminals (plan 5.5); behind `t2` until W0 adds a `terminal` feature alias.
+#[cfg(feature = "t2")]
+pub mod terminal;
 mod tree;
 mod types;
 pub mod v0_2;

@@ -541,6 +541,21 @@ The 24 h gate counts from the later of `published_at` and when this client first
   `https` is still required. The refusal names the setting. **For W3:** add
   `fyx.extensions.network.private_hosts: Option<Vec<String>>` (`settings_content/src/fyx.rs`,
   as a `network` sub-table) and call `PrivateHosts::set` on every settings change.
+- **P5 5.5, step 1 (2026-11-19): `ui_ext::terminal`** (behind `t2`; W0 may add a
+  `terminal = ["t2"]` alias). Contents: the types of the 0.4 `terminals` interface, the
+  `TerminalHost` trait and `TerminalSink`, the limits, the
+  profile/program/env tables with `reason`, `Template` and `TemplateContext`,
+  `is_forbidden_terminal_env`/`is_account_env`, and `ACCOUNT_DIR_ENV_NAMES` and
+  `CREDENTIAL_ENV_NAMES`. Agreed with W1:
+  - W1 implements `TerminalHost` in a new `terminal_host` crate; terminal_ext stays a leaf.
+  - A sink may be called from any thread and only queues.
+  - W1 allocates handles and never reuses them in one load.
+  - **Decision (mine):** a name with a credential suffix (`_TOKEN`, …) may carry exactly one
+    `${listen.<n>.token}` of a `token_in_env` listener: that is Fyx's own per-run secret. The
+    explicit credential names, the account-dir names and `FYX_*` stay refused.
+  - Profile icons are frozen `Icon` names and optional.
+  - Not done yet: the manifest loader wiring (refuse the tables below 0.4), `world_capabilities`,
+    the WIT diff and the import side.
 - **Gotchas:**
   - Targets: `E:/fyx-targets/w2c` (release-fast build of ui_ext_wasm, for the bench and the
     suite) and `E:/fyx-targets/w2c-light` (fyx_registry and ui_ext only).
