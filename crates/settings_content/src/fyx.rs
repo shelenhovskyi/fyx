@@ -111,4 +111,18 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: ""
     pub registry_url: Option<String>,
+    /// What UI extensions may reach over the network.
+    pub network: Option<FyxExtensionsNetworkSettingsContent>,
+}
+
+/// `fyx.extensions.network`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxExtensionsNetworkSettingsContent {
+    /// Host names that UI extensions may reach on your private network (10/8, 172.16/12,
+    /// 192.168/16, 100.64/10, fc00::/7), when the extension also declares them.
+    /// `*.corp.example` matches subdomains. Loopback and link-local addresses are never allowed.
+    ///
+    /// Default: []
+    pub private_hosts: Option<Vec<String>>,
 }

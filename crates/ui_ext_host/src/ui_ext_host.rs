@@ -13,11 +13,16 @@
 //! [`DEV_DECORATIONS_ENV`].
 
 mod agent_observe;
+pub mod approvals;
 mod backend;
 mod canvas;
 mod canvas_texture;
 mod choice;
 mod consent;
+pub mod consent_dialog;
+pub mod consent_model;
+#[cfg(test)]
+mod consent_ui_tests;
 mod decorations;
 pub mod fyx_extensions_page;
 mod icons;
@@ -140,4 +145,24 @@ pub fn init(cx: &mut App) {
     cx.set_global(workspace::FyxPackageDrop(
         store_actions::install_dropped_package,
     ));
+}
+
+/// The terminal host the runtime gets for 0.4's `terminals` imports (W1's `terminal_host`).
+struct GlobalTerminalHost(std::sync::Arc<dyn ui_ext::terminal::TerminalHost>);
+
+impl gpui::Global for GlobalTerminalHost {}
+
+/// Sets the terminal host passed to every extension loaded from now on, as
+/// `LoadOptions::terminals`. Call it before the first registry scan (W1 does, from
+/// `crates/zed/src/main.rs`); a later call applies to later loads only.
+pub fn set_terminal_host(host: std::sync::Arc<dyn ui_ext::terminal::TerminalHost>, cx: &mut App) {
+    cx.set_global(GlobalTerminalHost(host));
+}
+
+/// The terminal host set by [`set_terminal_host`], if any.
+pub(crate) fn terminal_host(
+    cx: &App,
+) -> Option<std::sync::Arc<dyn ui_ext::terminal::TerminalHost>> {
+    cx.try_global::<GlobalTerminalHost>()
+        .map(|host| host.0.clone())
 }

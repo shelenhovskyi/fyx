@@ -293,6 +293,27 @@ impl InstallStore {
         self.write_state(&state, fs).await
     }
 
+    /// Takes one capability out of an installed id's approval, read and written under the store
+    /// lock so a concurrent install or approval is not overwritten. `false` when the id is not
+    /// installed or its approval did not have the capability.
+    pub async fn take_back_approval(
+        &self,
+        extension_id: &str,
+        capability: &str,
+        fs: &dyn Fs,
+    ) -> Result<bool> {
+        let _guard = self.lock.lock().await;
+        let mut state = self.state(fs).await?;
+        let Some(entry) = state.extensions.get_mut(extension_id) else {
+            return Ok(false);
+        };
+        if !entry.approved.capabilities.remove(capability) {
+            return Ok(false);
+        }
+        self.write_state(&state, fs).await?;
+        Ok(true)
+    }
+
     /// Every installed id as the registry's update planning sees it (`plan_updates`). An id the
     /// registry would not accept is left out.
     pub async fn installed_extensions(&self, fs: &dyn Fs) -> Result<Vec<InstalledExtension>> {
@@ -907,6 +928,8 @@ mod tests {
                     path: folder.clone(),
                 },
             },
+            lines: Vec::new(),
+            diff: Default::default(),
         };
         assert!(crate::registry::consent_card_text(&pending(true)).contains(ZED_EXTENSION_WARNING));
         assert!(

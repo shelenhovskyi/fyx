@@ -139,9 +139,18 @@ pub struct UiExtensionRegistry {
     next_io_epoch: u64,
     /// Open extension notifications, by extension and the id its instance gave them.
     notifications: HashMap<(Arc<str>, u64), OpenNotification>,
+    /// Approval cards from `approvals.ask` until they are answered or closed (0.4, §B.12).
+    approvals: HashMap<(Arc<str>, u64), OpenApproval>,
+    /// The consent lines of each loaded extension's manifest (0.4, §C.2), for its page.
+    consent_lines: HashMap<Arc<str>, Vec<crate::consent_model::ItemLine>>,
+    /// The usage journal (§C.4). A stand-in until W2c's `JournalStore` is written by the
+    /// runtime; the page reads it the same way.
+    journals: HashMap<Arc<str>, crate::consent_model::JournalPage>,
     /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
     /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
     dev_reloads: HashMap<PathBuf, Task<()>>,
+    /// The last revoke's write to the install store's approvals (each waits for the one before).
+    approval_writes: Option<futures::future::Shared<Task<()>>>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -179,6 +188,19 @@ pub enum RegistryEvent {
         id: u64,
         workspace: gpui::EntityId,
     },
+    /// `approvals.ask` (0.4, §B.12): the workspace named shows the card (the active window's).
+    ShowApproval {
+        extension_id: Arc<str>,
+        id: u64,
+        workspace: gpui::EntityId,
+    },
+}
+
+/// An approval card from `approvals.ask` until it is answered or closed.
+struct OpenApproval {
+    /// Until the workspace takes it to draw.
+    pending: Option<crate::approvals::ApprovalRequest>,
+    view: Option<WeakEntity<crate::approvals::ApprovalCard>>,
 }
 
 /// An extension notification from `notify` until it closes (design.md M.1).
@@ -219,6 +241,10 @@ pub struct PendingConsent {
     /// Its folder also holds a Zed extension (`extension.wasm`, decision Q1).
     pub zed_extension: bool,
     pub(crate) record: ConsentRecord,
+    /// The 0.4 consent lines of the version that waits (§C.2).
+    pub lines: Vec<crate::consent_model::ItemLine>,
+    /// For a held update: what it adds or widens and what it removes (§C.5).
+    pub diff: crate::consent_model::ConsentDiff,
 }
 
 /// How a watched dev extension is loaded again.
@@ -280,6 +306,16 @@ impl UiExtensionRegistry {
     pub fn with_store(mut self, store: InstallStore) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Resolves once every revoke made so far is written to the install store's approvals.
+    pub fn approval_writes_done(&self) -> impl std::future::Future<Output = ()> + use<> {
+        let writes = self.approval_writes.clone();
+        async move {
+            if let Some(writes) = writes {
+                writes.await;
+            }
+        }
     }
 
     pub fn install_store(&self) -> Option<&InstallStore> {
@@ -418,20 +454,16 @@ impl UiExtensionRegistry {
         // instead of it coming back silently (integration-5 R4).
         if let Some(store) = self.install_store().cloned() {
             let (extension_id, capability) = (extension_id.to_string(), capability.to_string());
-            cx.background_spawn(async move {
-                let Ok(installed) = store.installed_extensions(fs.as_ref()).await else {
-                    return;
-                };
-                let Some(mut approved) = installed
-                    .into_iter()
-                    .find(|installed| installed.id.as_str() == extension_id)
-                    .map(|installed| installed.approved)
-                else {
-                    return;
-                };
-                if approved.capabilities.remove(&capability) {
+            // Chained after the previous one, so revokes are written in the order they were made;
+            // kept (not detached) so a test can wait for it.
+            let previous = self.approval_writes.take();
+            self.approval_writes = Some(
+                cx.background_spawn(async move {
+                    if let Some(previous) = previous {
+                        previous.await;
+                    }
                     if let Err(error) = store
-                        .set_approved(&extension_id, approved, fs.as_ref())
+                        .take_back_approval(&extension_id, &capability, fs.as_ref())
                         .await
                     {
                         log::error!(
@@ -439,9 +471,9 @@ impl UiExtensionRegistry {
                             ui_ext::sanitize_for_log(&format!("{error:#}"))
                         );
                     }
-                }
-            })
-            .detach();
+                })
+                .shared(),
+            );
         }
         log::info!("fyx:ui: revoked {capability} from {extension_id}");
         cx.notify();
@@ -454,6 +486,8 @@ impl UiExtensionRegistry {
             cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
                 .detach();
         }
+        // §C.4: the journal is cleared on uninstall.
+        self.journals.remove(extension_id);
         log::info!("fyx:ui: forgot the permissions of {extension_id}");
         cx.notify();
     }
@@ -502,6 +536,103 @@ impl UiExtensionRegistry {
         cx.notify();
     }
 
+    /// The stand-in for W2c's `NeedsApproval { diff }` (§C.5): the lines that own one of the
+    /// 0.3 store's new consent strings; a line whose capability the extension already held is
+    /// widened, any other is added. Removals need the granted lines, which the record does not
+    /// keep yet, so none are listed.
+    pub(crate) fn held_update_diff(
+        &self,
+        extension_id: &str,
+        lines: &[crate::consent_model::ItemLine],
+        new_capabilities: &[String],
+    ) -> crate::consent_model::ConsentDiff {
+        use crate::consent_model::{ConsentItem, ConsentTier};
+        let mut diff = crate::consent_model::ConsentDiff::default();
+        for line in lines.iter().filter(|line| line.tier != ConsentTier::T0) {
+            let capability = line.item.capability();
+            let owns = |item: &String| {
+                let (base, rest) = item.split_once('@').unwrap_or((item.as_str(), ""));
+                let base = match base {
+                    "process:args" | "process:env" => "process:spawn",
+                    "network:fetch" => "network:fetch",
+                    other => other,
+                };
+                base == capability
+                    && match &line.item {
+                        ConsentItem::Program { name, .. } => {
+                            rest.is_empty() || rest == name || rest.starts_with(&format!("{name} "))
+                        }
+                        _ => true,
+                    }
+            };
+            if !new_capabilities.iter().any(owns) {
+                continue;
+            }
+            let held_before = self.consent.is_granted(extension_id, capability)
+                || self.consent.t2_state(extension_id, capability)
+                    == ui_ext_wasm::permissions::PermissionState::Granted;
+            if held_before {
+                diff.widened.push(line.clone());
+            } else {
+                diff.added.push(line.clone());
+            }
+        }
+        diff
+    }
+
+    /// The grouped dialog's answer for an extension that waits for "Enable" or a held update's
+    /// "Approve and Update": the ticked items, plus the items it already holds that the diff does
+    /// not touch (they stay on); then it loads.
+    pub fn approve_pending(
+        &mut self,
+        extension_id: &str,
+        ticked: &[crate::consent_model::ConsentItem],
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::consent_model::ConsentBroker as _;
+        let Some(index) = self
+            .pending_consent
+            .iter()
+            .position(|pending| pending.extension_id.as_ref() == extension_id)
+        else {
+            return;
+        };
+        let pending = self.pending_consent.remove(index);
+        let in_diff = |item: &crate::consent_model::ConsentItem| {
+            pending
+                .diff
+                .added
+                .iter()
+                .chain(&pending.diff.widened)
+                .any(|line| &line.item == item)
+        };
+        let mut all_ticked = ticked.to_vec();
+        for line in pending.lines.iter().filter(|line| line.has_checkbox()) {
+            if !in_diff(&line.item)
+                && !all_ticked.contains(&line.item)
+                && self.consent.item_state(extension_id, &line.item)
+                    == ui_ext_wasm::permissions::PermissionState::Granted
+            {
+                all_ticked.push(line.item.clone());
+            }
+        }
+        log::info!(
+            "fyx:ui: {extension_id} approved with {:?}",
+            all_ticked.iter().map(|item| item.key()).collect::<Vec<_>>()
+        );
+        self.install_consent(
+            extension_id,
+            pending.record,
+            &pending.lines,
+            &all_ticked,
+            fs.clone(),
+            cx,
+        );
+        self.scan_installed(pending.installed_dir, fs, cx);
+        cx.notify();
+    }
+
     /// Records consent the user gave elsewhere (the install confirmation).
     pub fn grant_consent(
         &mut self,
@@ -514,6 +645,88 @@ impl UiExtensionRegistry {
             cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
                 .detach();
         }
+    }
+
+    /// The install dialog's answer (0.4, §C.2): the record, and each T2 item ticked or not.
+    pub fn install_consent(
+        &mut self,
+        extension_id: &str,
+        record: ConsentRecord,
+        lines: &[crate::consent_model::ItemLine],
+        ticked: &[crate::consent_model::ConsentItem],
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::consent_model::ConsentBroker as _;
+        if let Some((path, text)) = self.consent.install(extension_id, record, lines, ticked) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        cx.notify();
+    }
+
+    /// The extension page's switch for one item (0.4, §C.2 "Later").
+    pub fn set_consent_item(
+        &mut self,
+        extension_id: &str,
+        lines: &[crate::consent_model::ItemLine],
+        item: &crate::consent_model::ConsentItem,
+        allowed: bool,
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::consent_model::ConsentBroker as _;
+        if let Some((path, text)) = self.consent.set_item(extension_id, lines, item, allowed) {
+            cx.background_spawn(async move { consent::save(path, text, fs.as_ref()).await })
+                .detach();
+        }
+        log::info!(
+            "fyx:ui: {extension_id}: {} {}",
+            item.key(),
+            if allowed { "allowed" } else { "turned off" }
+        );
+        cx.notify();
+    }
+
+    /// The consent lines of a loaded extension, for its page (empty when it is not loaded).
+    pub fn consent_lines(&self, extension_id: &str) -> Vec<crate::consent_model::ItemLine> {
+        self.consent_lines
+            .get(extension_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The usage journal of an extension (§C.4), newest last.
+    pub fn journal(&self, extension_id: &str) -> crate::consent_model::JournalPage {
+        self.journals.get(extension_id).cloned().unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_journal(
+        &mut self,
+        extension_id: &str,
+        page: crate::consent_model::JournalPage,
+    ) {
+        self.journals.insert(extension_id.into(), page);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_consent_lines(
+        &mut self,
+        extension_id: &str,
+        lines: Vec<crate::consent_model::ItemLine>,
+    ) {
+        self.consent_lines.insert(extension_id.into(), lines);
+    }
+
+    /// The state of one consent item, for the extension page.
+    pub fn consent_item_state(
+        &self,
+        extension_id: &str,
+        item: &crate::consent_model::ConsentItem,
+    ) -> ui_ext_wasm::permissions::PermissionState {
+        use crate::consent_model::ConsentBroker as _;
+        self.consent.item_state(extension_id, item)
     }
 
     pub fn global(cx: &App) -> Option<Entity<Self>> {
@@ -810,6 +1023,140 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// `approvals.ask` (0.4, §B.12): a card in the active window. With no window, past
+    /// [`crate::approvals::MAX_OPEN_APPROVALS`] open cards, with no option, or for an id already
+    /// open, it is answered `none` at once.
+    pub fn ask_approval(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        request: crate::approvals::ApprovalRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (Arc::<str>::from(extension_id), id);
+        let open = self
+            .approvals
+            .keys()
+            .filter(|(open, _)| open.as_ref() == extension_id)
+            .count();
+        let refused = if self.approvals.contains_key(&key) {
+            Some("its id is already open")
+        } else if open >= crate::approvals::MAX_OPEN_APPROVALS {
+            Some("too many open approval cards")
+        } else if request.options.is_empty() {
+            Some("no options")
+        } else {
+            None
+        };
+        let workspace = match (refused, self.active_workspace) {
+            (None, Some(workspace)) => workspace,
+            (refused, _) => {
+                log::info!(
+                    "fyx:ui: {extension_id}: approval {} not shown: {}",
+                    ui_ext::sanitize_for_log(&request.title),
+                    refused.unwrap_or("no workspace window")
+                );
+                if let Some(backend) = self.backends.get(extension_id) {
+                    backend.answer_approval(id, None);
+                }
+                return;
+            }
+        };
+        self.approvals.insert(
+            key.clone(),
+            OpenApproval {
+                pending: Some(request),
+                view: None,
+            },
+        );
+        cx.emit(RegistryEvent::ShowApproval {
+            extension_id: key.0,
+            id,
+            workspace,
+        });
+    }
+
+    /// For the workspace drawing an approval card: what to draw, and the provenance name.
+    pub(crate) fn take_pending_approval(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+    ) -> Option<(SharedString, crate::approvals::ApprovalRequest)> {
+        let request = self
+            .approvals
+            .get_mut(&(Arc::from(extension_id), id))?
+            .pending
+            .take()?;
+        let name = crate::notifications::provenance_name(
+            self.backends
+                .get(extension_id)
+                .and_then(|backend| backend.display_name()),
+            extension_id,
+        );
+        Some((name, request))
+    }
+
+    pub(crate) fn set_approval_view(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        view: WeakEntity<crate::approvals::ApprovalCard>,
+    ) {
+        if let Some(open) = self.approvals.get_mut(&(Arc::from(extension_id), id)) {
+            open.view = Some(view);
+        }
+    }
+
+    /// The card was answered (`Some`) or closed unanswered (`None`, also when its window or the
+    /// notification stack went away): the instance is told once.
+    pub(crate) fn approval_answered(
+        &mut self,
+        extension_id: &str,
+        id: u64,
+        answer: Option<crate::approvals::ApprovalChoice>,
+    ) {
+        if self
+            .approvals
+            .remove(&(Arc::from(extension_id), id))
+            .is_some()
+            && let Some(backend) = self.backends.get(extension_id)
+        {
+            backend.answer_approval(id, answer);
+        }
+    }
+
+    /// The open approval cards of an extension, for tests and the Inspector.
+    pub fn open_approvals(&self, extension_id: &str) -> Vec<u64> {
+        let mut ids: Vec<u64> = self
+            .approvals
+            .keys()
+            .filter(|(id, _)| id.as_ref() == extension_id)
+            .map(|(_, id)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The instance is gone or replaced: its cards close with no answer.
+    fn close_approvals_of(&mut self, extension_id: &str, cx: &mut Context<Self>) {
+        let closing: Vec<(Arc<str>, u64)> = self
+            .approvals
+            .keys()
+            .filter(|(id, _)| id.as_ref() == extension_id)
+            .cloned()
+            .collect();
+        for key in closing {
+            if let Some(view) = self
+                .approvals
+                .remove(&key)
+                .and_then(|open| open.view)
+                .and_then(|view| view.upgrade())
+            {
+                view.update(cx, |view, cx| view.close_by_host(cx));
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn consent_mut(&mut self) -> &mut ConsentStore {
         &mut self.consent
@@ -1039,6 +1386,9 @@ Environment it may pass: {}",
         owner: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        if owner.is_none() {
+            self.close_approvals_of(extension_id, cx);
+        }
         if let Some(progresses) = Progresses::global(cx) {
             progresses.update(cx, |progresses, cx| {
                 progresses.end_of(extension_id, owner, cx)
@@ -1484,6 +1834,8 @@ Environment it may pass: {}",
                             crate::agent_observe::for_extension(&found.extension_id, cx)
                         }),
                         proxy: Some(cx.update(extension_proxy)),
+                        private_hosts: Some(cx.update(extension_private_hosts)),
+                        terminals: cx.update(|cx| crate::terminal_host(cx)),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -1527,6 +1879,10 @@ Environment it may pass: {}",
                                     .insert(found.extension_id.clone(), found.fingerprint.clone());
                                 this.consent
                                     .declare(&found.extension_id, found.capabilities.clone());
+                                this.consent_lines.insert(
+                                    found.extension_id.clone(),
+                                    crate::consent_model::consent_items(&found.manifest),
+                                );
                                 set_image_dir(&found.extension_id, found.dir.clone(), cx);
                                 this.register_extension(extension, pushed, cx);
                                 if found.is_dev {
@@ -1685,6 +2041,12 @@ Environment it may pass: {}",
                 new_capabilities
             }
         };
+        let lines = crate::consent_model::consent_items(&found.manifest);
+        let diff = if new_capabilities.is_empty() {
+            crate::consent_model::ConsentDiff::default()
+        } else {
+            self.held_update_diff(&found.extension_id, &lines, &new_capabilities)
+        };
         self.pending_consent.push(PendingConsent {
             extension_id: found.extension_id.clone(),
             dir: found.dir.clone(),
@@ -1694,6 +2056,8 @@ Environment it may pass: {}",
             new_capabilities,
             zed_extension: found.zed_extension,
             record,
+            lines,
+            diff,
         });
         cx.notify();
         false
@@ -2232,6 +2596,7 @@ pub fn init(cx: &mut App) {
     }
     follow_dev_paths_setting(cx);
     follow_proxy_setting(cx);
+    follow_private_hosts_setting(cx);
     watch_installed_extensions(cx);
 }
 
@@ -2292,6 +2657,41 @@ pub(crate) fn follow_proxy_setting(cx: &mut App) {
 /// The proxy cell every load gets.
 pub(crate) fn extension_proxy(cx: &mut App) -> ui_ext_wasm::network::ProxySetting {
     cx.default_global::<ExtensionProxy>().0.clone()
+}
+
+/// `fyx.extensions.network.private_hosts` for `network:fetch` (0.3 Q4), one list shared by every
+/// load and kept current. User settings only: project settings have no `fyx` key.
+#[derive(Clone, Default)]
+struct ExtensionPrivateHosts(ui_ext_wasm::network::PrivateHosts);
+
+impl Global for ExtensionPrivateHosts {}
+
+pub(crate) fn follow_private_hosts_setting(cx: &mut App) {
+    let hosts = cx.default_global::<ExtensionPrivateHosts>().0.clone();
+    let apply = move |cx: &mut App| {
+        let entries = if cx.has_global::<settings::SettingsStore>() {
+            crate::install::FyxExtensionsSettings::get_global(cx)
+                .private_hosts
+                .clone()
+        } else {
+            Vec::new()
+        };
+        for ignored in hosts.set(entries.iter().map(String::as_str)) {
+            log::warn!(
+                "fyx:ui: fyx.extensions.network.private_hosts: ignoring {ignored:?} (a host name, \
+                 or *. and a name)"
+            );
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
+    }
+}
+
+/// The private hosts every load gets.
+pub(crate) fn extension_private_hosts(cx: &mut App) -> ui_ext_wasm::network::PrivateHosts {
+    cx.default_global::<ExtensionPrivateHosts>().0.clone()
 }
 
 fn follow_dev_paths_setting(cx: &mut App) {
@@ -2438,6 +2838,16 @@ fn attach_to_workspace(
                             window,
                             cx,
                         );
+                    }
+                    return;
+                }
+                RegistryEvent::ShowApproval {
+                    extension_id,
+                    id,
+                    workspace: target,
+                } => {
+                    if *target == cx.entity_id() {
+                        show_approval_card(workspace, &registry, extension_id.clone(), *id, cx);
                     }
                     return;
                 }
@@ -2651,6 +3061,39 @@ fn show_extension_notification(
     );
 }
 
+/// `approvals.ask` (0.4, §B.12): an [`crate::approvals::ApprovalCard`] in the workspace's
+/// notification stack, one per extension and id.
+fn show_approval_card(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: Arc<str>,
+    id: u64,
+    cx: &mut Context<Workspace>,
+) {
+    let Some((name, request)) = registry.update(cx, |registry, _| {
+        registry.take_pending_approval(&extension_id, id)
+    }) else {
+        return;
+    };
+    let notification_id = NotificationId::composite::<crate::approvals::ApprovalCard>(
+        SharedString::from(format!("{extension_id}/{id}")),
+    );
+    let view = cx.new(|cx| {
+        crate::approvals::ApprovalCard::new(
+            extension_id.clone(),
+            id,
+            name,
+            request,
+            registry.downgrade(),
+            cx,
+        )
+    });
+    registry.update(cx, |registry, _| {
+        registry.set_approval_view(&extension_id, id, view.downgrade())
+    });
+    workspace.show_notification(notification_id, cx, |_| view);
+}
+
 /// The T2 first-use prompt (decision Q10): a [`crate::notifications::PermissionCard`] in the
 /// workspace's notification stack, one per extension and capability; never a modal dialog.
 fn ask_permission(
@@ -2710,6 +3153,12 @@ pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
             pending.extension_id,
             crate::install::describe_capability_ids(&pending.capabilities).join("; "),
         )
+    } else if pending.diff.needs_approval() {
+        format!(
+            "An update of the UI extension {} needs approval. {}{zed}{folder}",
+            pending.extension_id,
+            crate::consent_model::diff_text(&pending.diff),
+        )
     } else {
         format!(
             "An update of the UI extension {} needs approval. It now also asks for: {}.{zed}{folder}",
@@ -2717,6 +3166,91 @@ pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
             crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
         )
     }
+}
+
+/// The grouped dialog for an extension waiting in `pending_consent` (§C.2, §C.5): every line to
+/// enable it, or a held update's added and widened lines; its answer goes to
+/// [`UiExtensionRegistry::approve_pending`].
+pub(crate) fn ask_pending_consent(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(pending) = registry
+        .read(cx)
+        .pending_consent()
+        .iter()
+        .find(|pending| pending.extension_id.as_ref() == extension_id)
+        .cloned()
+    else {
+        return;
+    };
+    let update = !pending.new_capabilities.is_empty();
+    let mut notes = Vec::new();
+    if pending.zed_extension {
+        notes.push(crate::install::ZED_EXTENSION_WARNING.to_string());
+    }
+    if pending.is_dev {
+        notes.push(format!("Folder: {}", pending.dir.display()));
+    }
+    let (title, confirm, lines) = if update {
+        if !pending.diff.removed.is_empty() {
+            notes.push(format!(
+                "Removed: {}.",
+                pending
+                    .diff
+                    .removed
+                    .iter()
+                    .map(|line| line.title.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let lines: Vec<_> = pending
+            .diff
+            .added
+            .iter()
+            .chain(&pending.diff.widened)
+            .cloned()
+            .collect();
+        (
+            format!("Approve the update of {extension_id}?"),
+            "Approve and Update",
+            lines,
+        )
+    } else {
+        (
+            format!("Enable the UI extension {extension_id}?"),
+            "Enable",
+            pending.lines,
+        )
+    };
+    let answer = crate::consent_dialog::ask_consent(
+        workspace,
+        crate::consent_dialog::ConsentDialogText {
+            title,
+            notes,
+            confirm: confirm.into(),
+        },
+        lines,
+        window,
+        cx,
+    );
+    let (registry, extension_id) = (registry.downgrade(), extension_id.to_string());
+    let fs = workspace.app_state().fs.clone();
+    cx.spawn(async move |_, cx| {
+        let Ok(ticked) = answer.await else {
+            return;
+        };
+        registry
+            .update(cx, |registry, cx| {
+                registry.approve_pending(&extension_id, &ticked, fs, cx)
+            })
+            .ok();
+    })
+    .detach();
 }
 
 /// One notification per installed extension waiting for consent, once per workspace: what it
@@ -2743,7 +3277,7 @@ fn offer_consent(
         let update = !pending.new_capabilities.is_empty();
         let extension_id = pending.extension_id.clone();
         let registry = registry.downgrade();
-        let fs = workspace.app_state().fs.clone();
+        let workspace_handle = workspace.weak_handle();
         workspace.show_notification(
             NotificationId::named(format!("fyx-ui-consent-{extension_id}").into()),
             cx,
@@ -2751,12 +3285,16 @@ fn offer_consent(
                 cx.new(|cx| {
                     MessageNotification::new(message, cx)
                         .primary_message(if update { "Approve" } else { "Enable" })
-                        .primary_on_click(move |_, cx| {
-                            registry
-                                .update(cx, |registry, cx| {
-                                    registry.enable(&extension_id, fs.clone(), cx)
-                                })
-                                .ok();
+                        // The grouped dialog (§C.2), ticked item by item.
+                        .primary_on_click(move |window, cx| {
+                            let (Some(registry), Some(workspace)) =
+                                (registry.upgrade(), workspace_handle.upgrade())
+                            else {
+                                return;
+                            };
+                            workspace.update(cx, |workspace, cx| {
+                                ask_pending_consent(workspace, &registry, &extension_id, window, cx)
+                            });
                         })
                         .secondary_message("Not now")
                 })
@@ -2996,13 +3534,17 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         agent_reviews: cx
             .update(|cx| crate::agent_observe::for_extension(&path.to_string_lossy(), cx)),
         proxy: Some(cx.update(extension_proxy)),
+        private_hosts: Some(cx.update(extension_private_hosts)),
+        terminals: cx.update(|cx| crate::terminal_host(cx)),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();
+    let mut lines = Vec::new();
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
         if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
             declared = manifest.consent_items();
+            lines = crate::consent_model::consent_items(&manifest);
         }
         UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?
@@ -3041,6 +3583,7 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             };
             registry.claim_extension_id(&extension_id, source)?;
             registry.consent.declare(&extension_id, declared);
+            registry.consent_lines.insert(extension_id.clone(), lines);
             if reload_path.is_dir() {
                 set_image_dir(&extension_id, reload_path.clone(), cx);
             }

@@ -7,6 +7,8 @@ use anyhow::{Context as _, Result};
 use semver::Version;
 use serde::Deserialize;
 
+use ui_ext::{integration, terminal};
+
 use crate::Report;
 
 pub const MANIFEST_FILE: &str = "extension.toml";
@@ -17,6 +19,7 @@ pub const SUPPORTED_API_VERSIONS: &[Version] = &[
     Version::new(0, 1, 0),
     Version::new(0, 2, 0),
     Version::new(0, 3, 0),
+    Version::new(0, 4, 0),
 ];
 
 /// The newest frozen version, the host's `MAX_FROZEN_VERSION`. Newer ones are staged: dev builds
@@ -60,7 +63,38 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         "workspace:edit",
         "agent:observe",
     ];
-    if *version >= Version::new(0, 3, 0) {
+    // Staged: 0.3 plus the terminal and integration capabilities (plan P5 5.5).
+    // `terminal:read` and `terminal:write` are not in it yet.
+    const V0_4: &[&str] = &[
+        "ui:panel",
+        "ui:status-bar",
+        "ui:modal",
+        "ui:editor-decorations",
+        "ui:notifications",
+        "ui:images",
+        "ui:canvas",
+        NETWORK_FETCH,
+        PROCESS_SPAWN,
+        "workspace:edit",
+        "agent:observe",
+        terminal::CAPABILITY_PROFILES,
+        terminal::CAPABILITY_PSEUDO,
+        terminal::CAPABILITY_CREATE,
+        terminal::CAPABILITY_ENV,
+        terminal::CAPABILITY_STATUS,
+        terminal::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_PACKAGE_FILES,
+        integration::CAPABILITY_NETWORK_LISTEN,
+        integration::CAPABILITY_DISCOVERY_FILE,
+        integration::CAPABILITY_RELAY_HOOKS,
+        integration::CAPABILITY_REVIEW_PROPOSE,
+        integration::CAPABILITY_CONTEXT_EDITOR,
+        integration::CAPABILITY_WORKSPACE_OPEN,
+        integration::CAPABILITY_APPROVALS,
+    ];
+    if *version >= Version::new(0, 4, 0) {
+        Some(V0_4)
+    } else if *version >= Version::new(0, 3, 0) {
         Some(V0_3)
     } else if *version >= Version::new(0, 2, 0) {
         Some(V0_2)
@@ -121,7 +155,31 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
         "agent:observe",
         CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
+    (terminal::CAPABILITY_PROFILES, SINCE_V0_4),
+    (terminal::CAPABILITY_PSEUDO, SINCE_V0_4),
+    (terminal::CAPABILITY_CREATE, SINCE_V0_4),
+    (terminal::CAPABILITY_ENV, SINCE_V0_4),
+    (terminal::CAPABILITY_STATUS, SINCE_V0_4),
+    (terminal::CAPABILITY_OBSERVE, SINCE_V0_4),
+    (
+        terminal::CAPABILITY_READ,
+        CapabilityStatus::Planned("a later release"),
+    ),
+    (
+        terminal::CAPABILITY_WRITE,
+        CapabilityStatus::Planned("a later release"),
+    ),
+    (terminal::CAPABILITY_PACKAGE_FILES, SINCE_V0_4),
+    (integration::CAPABILITY_NETWORK_LISTEN, SINCE_V0_4),
+    (integration::CAPABILITY_DISCOVERY_FILE, SINCE_V0_4),
+    (integration::CAPABILITY_RELAY_HOOKS, SINCE_V0_4),
+    (integration::CAPABILITY_REVIEW_PROPOSE, SINCE_V0_4),
+    (integration::CAPABILITY_CONTEXT_EDITOR, SINCE_V0_4),
+    (integration::CAPABILITY_WORKSPACE_OPEN, SINCE_V0_4),
+    (integration::CAPABILITY_APPROVALS, SINCE_V0_4),
 ];
+
+const SINCE_V0_4: CapabilityStatus = CapabilityStatus::Since(Version::new(0, 4, 0));
 
 /// Capabilities that a surface kind needs, so they are used by `surfaces()` rather than by an
 /// import.
@@ -172,6 +230,24 @@ pub struct FyxUiTable {
     /// 0.3, with `process:spawn`: the environment names passed through.
     #[serde(default)]
     pub process: Option<ProcessTable>,
+    /// 0.4, with `terminal:profiles`.
+    #[serde(default)]
+    pub terminal_profiles: Vec<terminal::TerminalProfileSpec>,
+    /// 0.4, with `terminal:create`.
+    #[serde(default)]
+    pub terminal_programs: Vec<terminal::TerminalProgramSpec>,
+    /// 0.4, with `terminal:env`.
+    #[serde(default)]
+    pub terminal_env: Option<terminal::TerminalEnvSpec>,
+    /// 0.4, with `network:listen`.
+    #[serde(default)]
+    pub listeners: Vec<integration::ListenerSpec>,
+    /// 0.4, with `fs:discovery-file`.
+    #[serde(default)]
+    pub discovery_files: Vec<integration::DiscoveryFileSpec>,
+    /// 0.4, with `relay:hooks`.
+    #[serde(default)]
+    pub relay_channels: Vec<integration::RelayChannelSpec>,
 }
 
 /// `[fyx_ui.process]`.
@@ -348,6 +424,7 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
     }
     check_network(&table, report);
     check_processes(&table, report);
+    check_terminals(&table, report);
 
     Ok(Manifest {
         dir: dir.to_path_buf(),
@@ -359,21 +436,93 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
     })
 }
 
-/// The 0.3 tables only from 0.3 on, as the host's `UiManifest::check_world`.
+/// Each world's tables only from that world on, as the host's `UiManifest::check_world`.
 fn check_world_tables(table: &FyxUiTable, version: &Version, report: &mut Report) {
-    if *version >= Version::new(0, 3, 0) {
-        return;
-    }
-    for (present, name) in [
-        (table.network.is_some(), "[fyx_ui.network]"),
-        (!table.processes.is_empty(), "[[fyx_ui.processes]]"),
-        (table.process.is_some(), "[fyx_ui.process]"),
-    ] {
-        if present {
+    let v0_3 = Version::new(0, 3, 0);
+    let v0_4 = Version::new(0, 4, 0);
+    let mut tables = vec![
+        (table.network.is_some(), "[fyx_ui.network]", &v0_3),
+        (!table.processes.is_empty(), "[[fyx_ui.processes]]", &v0_3),
+        (table.process.is_some(), "[fyx_ui.process]", &v0_3),
+    ];
+    tables.extend(
+        terminal_tables(table)
+            .into_iter()
+            .map(|(present, name, _)| (present, name, &v0_4)),
+    );
+    for (present, name, since) in tables {
+        if present && version < since {
             report.error(format!(
-                "{name} needs fyx:ui 0.3.0; this extension targets {version}"
+                "{name} needs fyx:ui {since}; this extension targets {version}"
             ));
         }
+    }
+}
+
+/// The 0.4 tables: whether each is present, its name and the capability it goes with.
+fn terminal_tables(table: &FyxUiTable) -> [(bool, &'static str, &'static str); 6] {
+    [
+        (
+            !table.terminal_profiles.is_empty(),
+            "[[fyx_ui.terminal_profiles]]",
+            terminal::CAPABILITY_PROFILES,
+        ),
+        (
+            !table.terminal_programs.is_empty(),
+            "[[fyx_ui.terminal_programs]]",
+            terminal::CAPABILITY_CREATE,
+        ),
+        (
+            table.terminal_env.is_some(),
+            "[fyx_ui.terminal_env]",
+            terminal::CAPABILITY_ENV,
+        ),
+        (
+            !table.listeners.is_empty(),
+            "[[fyx_ui.listeners]]",
+            integration::CAPABILITY_NETWORK_LISTEN,
+        ),
+        (
+            !table.discovery_files.is_empty(),
+            "[[fyx_ui.discovery_files]]",
+            integration::CAPABILITY_DISCOVERY_FILE,
+        ),
+        (
+            !table.relay_channels.is_empty(),
+            "[[fyx_ui.relay_channels]]",
+            integration::CAPABILITY_RELAY_HOOKS,
+        ),
+    ]
+}
+
+/// The 0.4 terminal and integration tables against their capabilities, with the host's entry
+/// checks (`UiManifest::check_terminals`).
+fn check_terminals(table: &FyxUiTable, report: &mut Report) {
+    let declares = |capability: &str| table.capabilities.iter().any(|name| name == capability);
+    for (present, name, capability) in terminal_tables(table) {
+        match (present, declares(capability)) {
+            (true, false) => report.error(format!(
+                "{name} needs {capability:?} in [fyx_ui].capabilities"
+            )),
+            (false, true) => report.error(format!("capability {capability:?} needs {name}")),
+            _ => {}
+        }
+    }
+    let integration = integration::IntegrationTables {
+        listeners: &table.listeners,
+        discovery_files: &table.discovery_files,
+        relay_channels: &table.relay_channels,
+    };
+    let checks = [
+        terminal::check_profiles(table.terminal_profiles.clone()).map(drop),
+        terminal::check_programs(&table.terminal_programs),
+        integration.check(),
+        table.terminal_env.clone().map_or(Ok(()), |env| {
+            terminal::check_terminal_env(env, &|name| integration.listener(name)).map(drop)
+        }),
+    ];
+    for error in checks.into_iter().filter_map(Result::err) {
+        report.error(error);
     }
 }
 
@@ -707,6 +856,91 @@ capabilities = ["ui:panel"]
         assert!(report.errors.is_empty(), "{report:?}");
         assert_eq!(report.warnings.len(), 2, "{report:?}");
         assert!(report.warnings[0].contains("accepted but unused until fyx:ui 0.2.0"));
+    }
+
+    #[test]
+    fn v0_4_tables_go_with_their_capabilities() {
+        const LISTENER: &str = "[[fyx_ui.listeners]]\nname = \"ide\"\nprotocol = \"mcp-websocket\"\n\
+             auth = { header = \"x-ide-authorization\" }\nreason = \"lets the CLI connect\"\n";
+        let manifest = |api_version: &str, capabilities: &str, tables: &str| {
+            VALID
+                .replace(
+                    "api_version = \"0.1.0\"",
+                    &format!("api_version = \"{api_version}\""),
+                )
+                .replace("[\"ui:panel\"]", &format!("[\"ui:panel\"{capabilities}]"))
+                + tables
+        };
+        let tables = format!(
+            "\n[[fyx_ui.terminal_profiles]]\nid = \"cli\"\nname = \"CLI\"\nprogram = \"cli\"\n\
+             [[fyx_ui.terminal_programs]]\nname = \"tool\"\nargs = [\"**\"]\nreason = \"runs the tool\"\n\
+             [fyx_ui.terminal_env]\nvars = {{ CLI_PORT = \"${{listen.ide.port}}\" }}\nreason = \"connects the CLI\"\n\
+             {LISTENER}"
+        );
+        let capabilities =
+            ", \"terminal:profiles\", \"terminal:create\", \"terminal:env\", \"network:listen\"";
+
+        let (_, report) = check(&manifest("0.4.0", capabilities, &tables));
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.warnings.len(), 1, "{report:?}");
+        assert!(report.warnings[0].contains("0.4.0 is staged"), "{report:?}");
+
+        // Below 0.4 the tables and their capabilities are refused.
+        let (_, report) = check(&manifest("0.3.0", capabilities, &tables));
+        for table in [
+            "[[fyx_ui.terminal_profiles]]",
+            "[[fyx_ui.terminal_programs]]",
+            "[fyx_ui.terminal_env]",
+            "[[fyx_ui.listeners]]",
+        ] {
+            let expected = format!("{table} needs fyx:ui 0.4.0; this extension targets 0.3.0");
+            assert!(
+                report.errors.iter().any(|error| error.contains(&expected)),
+                "{expected}: {report:?}"
+            );
+        }
+        assert!(
+            report.errors.iter().any(|error| error
+                .contains("\"terminal:env\" needs fyx:ui 0.4.0; this extension targets 0.3.0")),
+            "{report:?}"
+        );
+
+        // Each table needs its capability, and each capability its table.
+        let (_, report) = check(&manifest(
+            "0.4.0",
+            ", \"terminal:env\", \"relay:hooks\"",
+            &tables,
+        ));
+        for expected in [
+            "[[fyx_ui.terminal_profiles]] needs \"terminal:profiles\"",
+            "[[fyx_ui.listeners]] needs \"network:listen\"",
+            "capability \"relay:hooks\" needs [[fyx_ui.relay_channels]]",
+        ] {
+            assert!(
+                report.errors.iter().any(|error| error.contains(expected)),
+                "{expected}: {report:?}"
+            );
+        }
+
+        // The host's entry checks: a template naming no listener.
+        let unknown = tables.replace("${listen.ide.port}", "${listen.other.port}");
+        let (_, report) = check(&manifest("0.4.0", capabilities, &unknown));
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+
+        // T2 entries need a reason.
+        let (parsed, _) = check(&manifest(
+            "0.4.0",
+            capabilities,
+            &tables.replace("reason = \"runs the tool\"\n", ""),
+        ));
+        assert!(parsed.is_err());
+
+        // terminal:read and terminal:write are not in 0.4 yet.
+        let (_, report) = check(&manifest("0.4.0", ", \"terminal:read\"", ""));
+        assert!(
+            report.errors[0].contains("\"terminal:read\" is not in fyx:ui 0.4.0"),
+            "{report:?}"
+        );
     }
 
     #[test]

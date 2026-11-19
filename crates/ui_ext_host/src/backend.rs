@@ -177,6 +177,9 @@ pub trait UiBackend: 'static {
     /// The renderer removed a decoration that failed to mount: the host should stop counting it
     /// toward the decoration cap and close what it owns (integration-5 M2).
     fn decoration_closed(&self, _id: &str) {}
+    /// The user answered an approval card (`Some`), or it closed unanswered (`None`): the
+    /// instance delivers `io-event::approval-answered` and frees the slot (fyx:ui 0.4, §B.12).
+    fn answer_approval(&self, _id: u64, _answer: Option<crate::approvals::ApprovalChoice>) {}
     /// Recent calls, `log` output and capability checks, for the Extension Inspector.
     fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
         None

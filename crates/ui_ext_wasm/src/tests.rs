@@ -245,7 +245,7 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     .await;
     let future = write(
         "/extensions/future",
-        &table("\"ui:panel\"", "fyx_ui.wasm", "0.4.0"),
+        &table("\"ui:panel\"", "fyx_ui.wasm", "0.5.0"),
     )
     .await;
     let mismatch = write(
@@ -273,7 +273,7 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     assert!(load(plain).await.expect("reads").is_none());
     for (dir, message) in [
         (escaping, "must be a relative path inside the extension"),
-        (future, "targets fyx:ui 0.4.0"),
+        (future, "targets fyx:ui 0.5.0"),
         (
             mismatch,
             "extension.toml says fyx:ui 0.2.0, the component targets 0.1.0",
@@ -619,7 +619,7 @@ async fn test_precompiled_cache(cx: &mut TestAppContext) {
 fn test_api_version_gating() {
     assert!(is_supported_api_version(&Version::new(0, 1, 0)));
     assert!(is_supported_api_version(&Version::new(0, 2, 0)));
-    for unknown in [(0, 0, 9), (0, 1, 1), (0, 4, 0), (1, 0, 0)] {
+    for unknown in [(0, 0, 9), (0, 1, 1), (0, 5, 0), (1, 0, 0)] {
         let version = Version::new(unknown.0, unknown.1, unknown.2);
         assert!(!is_supported_api_version(&version), "{version}");
     }
@@ -632,7 +632,13 @@ fn test_api_version_gating() {
     assert!(api_version_range(false).contains(&Version::new(0, 2, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 1, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 3, 0)));
-    assert_eq!(api_version_range(false), api_version_range(true));
+    // 0.4 is staged (plan P5): known, and loaded only where staged versions may.
+    assert_eq!(
+        known_api_version(&Version::new(0, 4, 0)),
+        Some(ApiVersion::V0_4_0)
+    );
+    assert!(!api_version_range(false).contains(&Version::new(0, 4, 0)));
+    assert!(api_version_range(true).contains(&Version::new(0, 4, 0)));
     assert!(!staged_api_allowed(false, false));
     assert!(staged_api_allowed(true, false));
     assert!(staged_api_allowed(false, true));
@@ -833,15 +839,16 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
-        // The harness runs every version the host runs (plan 4.12): the ranges are equal again.
+        // The harness runs every frozen version the host runs; the staged 0.4 joins once the
+        // harness runs it (P5 5.5).
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(
             harness_versions,
-            [MIN_VERSION, Version::new(0, 2, 0), MAX_VERSION]
+            [MIN_VERSION, Version::new(0, 2, 0), MAX_FROZEN_VERSION]
         );
         assert!(harness_versions.iter().all(is_supported_api_version));
-        assert!(harness_versions.contains(&MAX_FROZEN_VERSION));
-        assert_eq!(MAX_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_VERSION, Version::new(0, 4, 0));
     }
 
     #[gpui::test]

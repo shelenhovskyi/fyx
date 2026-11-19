@@ -39,6 +39,8 @@ pub struct FyxExtensionsSettings {
     pub developer_mode: bool,
     pub hidden_status_items: Vec<String>,
     pub registry_url: String,
+    /// `fyx.extensions.network.private_hosts` (0.3 Q4), as written; `PrivateHosts::set` checks it.
+    pub private_hosts: Vec<String>,
 }
 
 impl Settings for FyxExtensionsSettings {
@@ -68,6 +70,13 @@ impl Settings for FyxExtensionsSettings {
                 .as_ref()
                 .and_then(|fyx| fyx.extensions.as_ref())
                 .and_then(|extensions| extensions.registry_url.clone())
+                .unwrap_or_default(),
+            private_hosts: content
+                .fyx
+                .as_ref()
+                .and_then(|fyx| fyx.extensions.as_ref())
+                .and_then(|extensions| extensions.network.as_ref())
+                .and_then(|network| network.private_hosts.clone())
                 .unwrap_or_default(),
         }
     }
@@ -264,20 +273,19 @@ pub(crate) fn prompt_and_install(
             let source = fs.canonicalize(&source).await.unwrap_or(source);
             let (extension_id, manifest) = check_dev_folder(&source, fs.as_ref()).await?;
             let zed_extension = has_zed_extension(&source, fs.as_ref()).await;
-            let detail = dev_install_detail(&manifest, &source, zed_extension);
+            // The grouped dialog of §C.2: T2 items are ticked one by one.
+            let lines = crate::consent_model::consent_items(&manifest);
+            let text = crate::consent_dialog::ConsentDialogText {
+                title: format!("Install the dev UI extension {extension_id}?"),
+                notes: dev_install_notes(&manifest, &source, zed_extension),
+                confirm: "Install".into(),
+            };
             let answer = workspace.update_in(cx, |workspace, window, cx| {
-                crate::choice::confirm(
-                    workspace,
-                    &format!("Install the dev UI extension {extension_id}?"),
-                    Some(&detail),
-                    &["Install", "Cancel"],
-                    window,
-                    cx,
-                )
+                crate::consent_dialog::ask_consent(workspace, text, lines.clone(), window, cx)
             })?;
-            if answer.await != Ok(0) {
+            let Ok(ticked) = answer.await else {
                 return Ok(None);
-            }
+            };
             // The user just confirmed these capabilities for this folder.
             let record = ConsentRecord::current(
                 &source,
@@ -292,7 +300,14 @@ pub(crate) fn prompt_and_install(
             cx.update(|_, cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
                     registry.update(cx, |registry, cx| {
-                        registry.grant_consent(&extension_id, record, fs.clone(), cx)
+                        registry.install_consent(
+                            &extension_id,
+                            record,
+                            &lines,
+                            &ticked,
+                            fs.clone(),
+                            cx,
+                        )
                     });
                 }
                 // The registry follows the setting.
@@ -468,6 +483,26 @@ pub(crate) fn dev_install_detail(
         manifest.component,
         source.display()
     )
+}
+
+/// The notes under the dev install dialog's groups: the Zed-extension warning, the component and
+/// the folder.
+pub(crate) fn dev_install_notes(
+    manifest: &UiManifest,
+    source: &Path,
+    zed_extension: bool,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if zed_extension {
+        notes.push(ZED_EXTENSION_WARNING.to_string());
+    }
+    notes.push(format!(
+        "Component: {}. Folder: {}. Fyx loads it on every start and reloads it when the \
+         component is rebuilt.",
+        manifest.component,
+        source.display()
+    ));
+    notes
 }
 
 /// The action: pick one of the dev paths and take it off the list.

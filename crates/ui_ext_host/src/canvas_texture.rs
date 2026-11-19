@@ -5,11 +5,17 @@
 //!
 //! - **Route:** [`route`]. Costs from the bench: a quad 1, a line 2, a text 8; direct while the sum
 //!   is at most [`DIRECT_PAINT_BUDGET`] (about 2 ms), and never with a path.
-//! - **Raster:** on the CPU, off the main thread. The draw list becomes an SVG (colours resolved
-//!   for the theme on the main thread; GPUI's inside borders mimicked), which resvg draws at the
-//!   device-pixel size of the painted box, with Fyx's bundled fonts only.
+//! - **Raster:** on the CPU, off the main thread, at the device-pixel size of the painted box, op
+//!   by op (colours resolved for the theme on the main thread; GPUI's inside borders mimicked).
+//!   Small rounded boxes, circles and lines get their per-pixel coverage, as GPUI's quad shader
+//!   computes it; plain rectangles, large shapes and paths go through tiny-skia. Each distinct
+//!   label is shaped and outlined once by usvg (Fyx's bundled fonts only), drawn once per colour
+//!   and quarter-pixel x (the baseline on a whole pixel, as GPUI places glyphs), and blitted. A
+//!   large texture is drawn as bands of rows on up to 8 threads, each band drawing the ops that
+//!   reach it, in order. The bench's 16384-op lists take 6–40 ms at 2× (`canvas::bench`).
 //! - **Updates:** the old texture keeps being drawn (scaled into the new box) until the new one is
-//!   ready; at most one raster runs per canvas, and the newest list is rasterised when it ends.
+//!   ready; at most one raster runs per canvas, and when it ends only the newest list is
+//!   rasterised (the updates in between are dropped).
 //!   A result whose generation is no longer the slot's is dropped.
 //! - **Budget:** at most [`TEXTURE_BUDGET`] across all canvases, least recently painted first,
 //!   never one painted in the current pass (on screen). One texture is at most
@@ -24,6 +30,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, ContentMask, Corners, Global, Hsla, Pixels,
     RenderImage, Window,
 };
+use resvg::tiny_skia as skia;
 use theme::{ActiveTheme as _, Appearance, Theme};
 use ui_ext::{
     ColorToken,
@@ -387,6 +394,22 @@ pub(crate) fn drawn_from_for_bench(props: &Arc<Props>, cx: &App) -> bool {
     })
 }
 
+/// Tests and the bench: the bundled UI and buffer fonts, read from `assets/fonts`.
+#[cfg(test)]
+pub(crate) fn test_fonts() -> Arc<usvg::fontdb::Database> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let mut fonts = usvg::fontdb::Database::new();
+    for (dir, file) in [
+        ("ibm-plex-sans", "IBMPlexSans-Regular.ttf"),
+        ("lilex", "Lilex-Regular.ttf"),
+    ] {
+        fonts.load_font_data(std::fs::read(root.join(dir).join(file)).expect("bundled font"));
+    }
+    fonts.set_sans_serif_family("IBM Plex Sans");
+    fonts.set_monospace_family("Lilex");
+    Arc::new(fonts)
+}
+
 /// The device-pixel size a box is rasterised at: the box × the scale factor, within
 /// [`MAX_TEXTURE_BYTES`].
 pub(crate) fn device_size(bounds: Bounds<Pixels>, scale_factor: f32) -> (u32, u32) {
@@ -486,8 +509,7 @@ fn start_raster(
         let ui_ext::v0_2::Props::Canvas(props) = &*shared else {
             anyhow::bail!("not a canvas");
         };
-        let svg = to_svg(props, &palette);
-        rasterize(&svg, device, fonts)
+        rasterize(props, &palette, device, fonts)
     });
     cx.spawn(async move |cx| {
         let result = task.await;
@@ -553,21 +575,6 @@ impl Palette {
     }
 }
 
-/// ` fill="#rrggbb" fill-opacity="a"` (or `stroke`).
-fn write_paint(out: &mut String, attribute: &str, color: Hsla) {
-    let rgba = color.to_rgb();
-    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
-    write!(
-        out,
-        r##" {attribute}="#{:02x}{:02x}{:02x}" {attribute}-opacity="{}""##,
-        channel(rgba.r),
-        channel(rgba.g),
-        channel(rgba.b),
-        rgba.a.clamp(0., 1.)
-    )
-    .ok();
-}
-
 fn n(value: f32) -> f32 {
     if value.is_finite() { value } else { 0. }
 }
@@ -587,50 +594,6 @@ fn normalized(rect: &ui_ext::canvas::Rect) -> (f32, f32, f32, f32) {
     (n(x), n(y), n(width), n(height))
 }
 
-/// A box like GPUI's quad: the fill over the whole box, the border inside it.
-fn write_box(
-    out: &mut String,
-    (x, y, width, height): (f32, f32, f32, f32),
-    radius: f32,
-    fill: Option<Hsla>,
-    stroke: Option<(f32, Hsla)>,
-) {
-    if let Some(fill) = fill {
-        write!(
-            out,
-            r#"<rect x="{x}" y="{y}" width="{width}" height="{height}" rx="{radius}""#
-        )
-        .ok();
-        write_paint(out, "fill", fill);
-        out.push_str("/>");
-    }
-    if let Some((stroke_width, color)) = stroke {
-        if stroke_width * 2. >= width.min(height) {
-            // The border covers the whole box.
-            write!(
-                out,
-                r#"<rect x="{x}" y="{y}" width="{width}" height="{height}" rx="{radius}""#
-            )
-            .ok();
-            write_paint(out, "fill", color);
-        } else {
-            let half = stroke_width / 2.;
-            write!(
-                out,
-                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="{}" fill="none" stroke-width="{stroke_width}""#,
-                x + half,
-                y + half,
-                width - stroke_width,
-                height - stroke_width,
-                (radius - half).max(0.),
-            )
-            .ok();
-            write_paint(out, "stroke", color);
-        }
-        out.push_str("/>");
-    }
-}
-
 /// Text as XML character data: escaped, without the control characters XML forbids.
 fn write_text(out: &mut String, text: &str) {
     for c in text.chars() {
@@ -645,41 +608,685 @@ fn write_text(out: &mut String, text: &str) {
     }
 }
 
-/// The draw list as an SVG in canvas coordinates.
-pub(crate) fn to_svg(props: &CanvasProps, palette: &Palette) -> String {
-    let mut out = String::with_capacity(256 + props.ops.len() * 128);
-    write!(
-        out,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{0}" height="{1}" viewBox="0 0 {0} {1}">"#,
-        props.width, props.height
-    )
-    .ok();
-    for op in &props.ops {
-        match op {
-            DrawOp::Line { from, to, stroke } => {
-                write!(
-                    out,
-                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke-width="{}""#,
-                    n(from.x.0),
-                    n(from.y.0),
-                    n(to.x.0),
-                    n(to.y.0),
-                    n(stroke.width.0)
-                )
-                .ok();
-                write_paint(&mut out, "stroke", palette.color(stroke.paint));
-                out.push_str("/>");
+/// A label: what a text op shapes to. Ops that show the same label share one shaping.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct LabelKey<'a> {
+    text: &'a str,
+    size: CanvasTextSize,
+    anchor: TextAnchor,
+    monospace: bool,
+}
+
+/// Labels as an SVG for usvg to shape and outline, each `<text id="l<label>">` at the origin.
+fn labels_svg<'a>(
+    labels: impl IntoIterator<Item = (usize, LabelKey<'a>)>,
+    font_size: f32,
+) -> String {
+    let mut out = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">"#);
+    for (id, label) in labels {
+        let factor = match label.size {
+            CanvasTextSize::Small => 0.85,
+            CanvasTextSize::Medium => 1.,
+            CanvasTextSize::Large => 1.2,
+        };
+        let anchor = match label.anchor {
+            TextAnchor::Start => "start",
+            TextAnchor::Middle => "middle",
+            TextAnchor::End => "end",
+        };
+        let family = if label.monospace {
+            "Lilex"
+        } else {
+            "IBM Plex Sans"
+        };
+        write!(
+            out,
+            r#"<text id="l{id}" x="0" y="0" font-family="{family}" font-size="{}" text-anchor="{anchor}" xml:space="preserve">"#,
+            font_size * factor,
+        )
+        .ok();
+        write_text(&mut out, label.text);
+        out.push_str("</text>");
+    }
+    out.push_str("</svg>");
+    out
+}
+
+/// Shapes `svg` ([`labels_svg`]) and returns the tree with, for each label in it, the path of
+/// child indices to its text node.
+fn shape_labels(
+    svg: &str,
+    fonts: Arc<usvg::fontdb::Database>,
+) -> Result<(usvg::Tree, Vec<(usize, Vec<usize>)>)> {
+    let options = usvg::Options {
+        resources_dir: None,
+        fontdb: fonts,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_str(svg, &options).context("shaping the canvas text")?;
+    fn walk(group: &usvg::Group, trail: &mut Vec<usize>, found: &mut Vec<(usize, Vec<usize>)>) {
+        for (child, node) in group.children().iter().enumerate() {
+            trail.push(child);
+            match node {
+                usvg::Node::Text(text) => {
+                    if let Some(id) = text.id().strip_prefix('l').and_then(|id| id.parse().ok()) {
+                        found.push((id, trail.clone()));
+                    }
+                }
+                usvg::Node::Group(group) => walk(group, trail, found),
+                _ => {}
             }
+            trail.pop();
+        }
+    }
+    let mut found = Vec::new();
+    walk(tree.root(), &mut Vec::new(), &mut found);
+    Ok((tree, found))
+}
+
+fn text_node<'a>(tree: &'a usvg::Tree, trail: &[usize]) -> Option<&'a usvg::Text> {
+    let mut group = tree.root();
+    let (last, parents) = trail.split_last()?;
+    for child in parents {
+        match group.children().get(*child)? {
+            usvg::Node::Group(inner) => group = inner,
+            _ => return None,
+        }
+    }
+    match group.children().get(*last)? {
+        usvg::Node::Text(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn skia_paint(color: Hsla) -> skia::Paint<'static> {
+    let rgba = color.to_rgb();
+    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    let mut paint = skia::Paint::default();
+    paint.set_color_rgba8(
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        channel(rgba.a),
+    );
+    paint.anti_alias = true;
+    paint
+}
+
+/// A rounded rectangle (`radius` 0: a plain one) as a subpath.
+fn push_rounded(path: &mut skia::PathBuilder, x: f32, y: f32, width: f32, height: f32, r: f32) {
+    if r <= 0. {
+        if let Some(rect) = skia::Rect::from_xywh(x, y, width, height) {
+            path.push_rect(rect);
+        }
+        return;
+    }
+    // Quarter circles as cubics.
+    let k = r * 0.552_284_8;
+    let (right, bottom) = (x + width, y + height);
+    path.move_to(x + r, y);
+    path.line_to(right - r, y);
+    path.cubic_to(right - r + k, y, right, y + r - k, right, y + r);
+    path.line_to(right, bottom - r);
+    path.cubic_to(
+        right,
+        bottom - r + k,
+        right - r + k,
+        bottom,
+        right - r,
+        bottom,
+    );
+    path.line_to(x + r, bottom);
+    path.cubic_to(x + r - k, bottom, x, bottom - r + k, x, bottom - r);
+    path.line_to(x, y + r);
+    path.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    path.close();
+}
+
+/// The canvas → device mapping of one band of rows, `oy` device pixels down.
+#[derive(Clone, Copy)]
+struct Mapping {
+    sx: f32,
+    sy: f32,
+    /// Lengths (stroke widths, radii): the mean of the two scales.
+    s: f32,
+    oy: f32,
+}
+
+impl Mapping {
+    fn x(&self, x: f32) -> f32 {
+        x * self.sx
+    }
+
+    fn y(&self, y: f32) -> f32 {
+        y * self.sy - self.oy
+    }
+}
+
+/// An op's rows in device pixels (before the band offset), padded for antialiasing, or `None`
+/// when it draws nothing.
+fn op_rows(op: &DrawOp, at: Mapping, sprite: Option<Placement>) -> Option<(f32, f32)> {
+    let (top, bottom) = match op {
+        DrawOp::Line { from, to, stroke } => {
+            let pad = n(stroke.width.0) * at.s / 2.;
+            let (a, b) = (at.y(n(from.y.0)), at.y(n(to.y.0)));
+            (a.min(b) - pad, a.max(b) + pad)
+        }
+        DrawOp::Rect { bounds, .. } | DrawOp::RoundedRect { bounds, .. } => {
+            let (_, y, _, height) = normalized(bounds);
+            (at.y(y), at.y(y + height))
+        }
+        DrawOp::Circle { center, radius, .. } => {
+            let r = n(radius.0).max(0.);
+            (at.y(n(center.y.0) - r), at.y(n(center.y.0) + r))
+        }
+        DrawOp::Path {
+            segments, stroke, ..
+        } => {
+            let pad = stroke.map_or(0., |stroke| n(stroke.width.0) * at.s);
+            let (mut top, mut bottom) = (at.y(0.), at.y(0.));
+            let mut first = !matches!(segments.first(), Some(PathSegment::MoveTo(_)));
+            let mut add = |p: &ui_ext::canvas::Point| {
+                let y = at.y(n(p.y.0));
+                if !first {
+                    (top, bottom) = (y, y);
+                    first = true;
+                }
+                top = top.min(y);
+                bottom = bottom.max(y);
+            };
+            for segment in segments {
+                match segment {
+                    PathSegment::MoveTo(p) | PathSegment::LineTo(p) => add(p),
+                    PathSegment::QuadTo(c, p) => {
+                        add(c);
+                        add(p)
+                    }
+                    PathSegment::CubicTo(a, b, p) => {
+                        add(a);
+                        add(b);
+                        add(p)
+                    }
+                    PathSegment::Close => {}
+                }
+            }
+            // A miter can reach a few widths past the outline.
+            (top - pad * 4., bottom + pad * 4.)
+        }
+        DrawOp::Text { .. } => {
+            let (sprite, _, y) = sprite?;
+            let top = (y + sprite.top) as f32 - at.oy;
+            (top, top + sprite.pixmap.height() as f32)
+        }
+    };
+    Some((top - 1., bottom + 1.))
+}
+
+/// tiny-skia logs a warning for every path with no area it is asked to fill.
+fn fillable(path: &skia::Path) -> bool {
+    let bounds = path.bounds();
+    bounds.width() > f32::EPSILON && bounds.height() > f32::EPSILON
+}
+
+/// Device pixels up to which a rounded box, circle or line is drawn by its per-pixel coverage
+/// (like GPUI's quad shader) rather than through tiny-skia, whose fixed cost per path dominates
+/// small shapes.
+const MAX_COVERAGE_AREA: f32 = 16384.;
+
+/// How much of a pixel centred `offset` from a span's middle the span of half-length `half`
+/// covers, along one axis.
+fn overlap(offset: f32, half: f32) -> f32 {
+    ((offset + 0.5).min(half) - (offset - 0.5).max(-half)).clamp(0., 1.)
+}
+
+/// The coverage of the pixel centred at `(px, py)` by a box centred at `(cx, cy)` with half
+/// extents `(hx, hy)` and corner radius `r`: from its signed distance, as GPUI's quads do, and
+/// exact along straight edges.
+fn box_coverage(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
+    if hx <= 0. || hy <= 0. {
+        return 0.;
+    }
+    let r = r.min(hx).min(hy);
+    if r <= 0. {
+        return overlap(px - cx, hx) * overlap(py - cy, hy);
+    }
+    let qx = (px - cx).abs() - hx + r;
+    let qy = (py - cy).abs() - hy + r;
+    let outside = (qx.max(0.) * qx.max(0.) + qy.max(0.) * qy.max(0.)).sqrt();
+    let distance = outside + qx.max(qy).min(0.) - r;
+    (0.5 - distance).clamp(0., 1.)
+}
+
+/// Source-over of a premultiplied colour at `coverage` onto a premultiplied RGBA8 pixel.
+/// `value / 255`, rounded, for `value` up to 255².
+fn div255(value: u32) -> u32 {
+    let value = value + 128;
+    (value + (value >> 8)) >> 8
+}
+
+/// Source-over of a premultiplied RGBA8 colour at `coverage` (0 to 256) onto a premultiplied
+/// RGBA8 pixel.
+fn blend(pixel: &mut [u8], color: [u32; 4], coverage: u32) {
+    if coverage >= 256 && color[3] == 255 {
+        for (channel, source) in pixel.iter_mut().zip(color) {
+            *channel = source as u8;
+        }
+        return;
+    }
+    let source = color.map(|channel| (channel * coverage) >> 8);
+    let keep = 255 - source[3];
+    for (channel, source) in pixel.iter_mut().zip(source) {
+        *channel = (source + div255(*channel as u32 * keep)).min(255) as u8;
+    }
+}
+
+fn premultiplied(color: Hsla) -> [u32; 4] {
+    let rgba = color.to_rgb();
+    let alpha = rgba.a.clamp(0., 1.);
+    let channel = |value: f32| (value.clamp(0., 1.) * alpha * 255.).round() as u32;
+    [
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b),
+        (alpha * 255.).round() as u32,
+    ]
+}
+
+/// A label drawn once for one colour and quarter-pixel position, blitted wherever it is shown.
+struct Sprite {
+    pixmap: skia::Pixmap,
+    /// Its top-left corner from the label's origin (whole device pixels).
+    left: i64,
+    top: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SpriteKey {
+    label: usize,
+    color: [u8; 4],
+    /// The origin's x within its pixel, in quarters (GPUI's four subpixel variants).
+    quarter: u8,
+}
+
+/// Where a text op shows its sprite: the sprite and the label origin in whole device pixels
+/// (before the band offset).
+type Placement<'a> = (&'a Sprite, i64, i64);
+
+/// A text op's sprite key and origin: x to a quarter pixel, the baseline to a whole one (as GPUI
+/// places glyphs).
+fn text_origin(
+    op: &DrawOp,
+    at: Mapping,
+    label: usize,
+    color: Hsla,
+) -> Option<(SpriteKey, i64, i64)> {
+    let DrawOp::Text { at: origin, .. } = op else {
+        return None;
+    };
+    let quarters = (at.x(n(origin.x.0)) * 4.).floor();
+    let y = (n(origin.y.0) * at.sy).round();
+    if !quarters.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let quarters = quarters as i64;
+    let rgba = color.to_rgb();
+    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    Some((
+        SpriteKey {
+            label,
+            color: [
+                channel(rgba.r),
+                channel(rgba.g),
+                channel(rgba.b),
+                channel(rgba.a),
+            ],
+            quarter: quarters.rem_euclid(4) as u8,
+        },
+        quarters.div_euclid(4),
+        y as i64,
+    ))
+}
+
+fn draw_sprite(text: &usvg::Text, key: SpriteKey, at: Mapping) -> Option<Sprite> {
+    let bounds = text.abs_bounding_box();
+    let shift = f32::from(key.quarter) / 4.;
+    let left = (bounds.left() * at.sx + shift).floor() as i64 - 1;
+    let top = (bounds.top() * at.sy).floor() as i64 - 1;
+    let right = (bounds.right() * at.sx + shift).ceil() as i64 + 1;
+    let bottom = (bounds.bottom() * at.sy).ceil() as i64 + 1;
+    let mut pixmap = skia::Pixmap::new(
+        u32::try_from(right - left).ok()?,
+        u32::try_from(bottom - top).ok()?,
+    )?;
+    let [r, g, b, a] = key.color;
+    let mut paint = skia::Paint::default();
+    paint.set_color_rgba8(r, g, b, a);
+    paint.anti_alias = true;
+    let base = skia::Transform::from_row(at.sx, 0., 0., at.sy, shift - left as f32, -top as f32);
+    fn walk(
+        group: &usvg::Group,
+        pixmap: &mut skia::Pixmap,
+        paint: &skia::Paint,
+        base: skia::Transform,
+    ) {
+        for node in group.children() {
+            match node {
+                usvg::Node::Path(path) => pixmap.fill_path(
+                    path.data(),
+                    paint,
+                    skia::FillRule::Winding,
+                    base.pre_concat(path.abs_transform()),
+                    None,
+                ),
+                usvg::Node::Group(group) => walk(group, pixmap, paint, base),
+                _ => {}
+            }
+        }
+    }
+    walk(text.flattened(), &mut pixmap, &paint, base);
+    Some(Sprite { pixmap, left, top })
+}
+
+struct Raster<'a> {
+    pixmap: skia::PixmapMut<'a>,
+    at: Mapping,
+}
+
+impl Raster<'_> {
+    /// Blends `color` at `coverage(pixel centre)` over the pixels of `bounds` (device, band
+    /// offset applied), padded by one pixel for antialiasing.
+    /// Blends `under` then `over` at the coverages `coverage(pixel centre)` returns over the
+    /// pixels of `bounds` (device, band offset applied), padded by one pixel for antialiasing.
+    fn cover(
+        &mut self,
+        (x0, y0, x1, y1): (f32, f32, f32, f32),
+        under: Option<Hsla>,
+        over: Option<Hsla>,
+        coverage: impl Fn(f32, f32) -> (f32, f32),
+    ) {
+        let (width, height) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
+        let xs = ((x0 - 1.).floor() as i64).max(0);
+        let xe = ((x1 + 1.).ceil() as i64).min(width);
+        let ys = ((y0 - 1.).floor() as i64).max(0);
+        let ye = ((y1 + 1.).ceil() as i64).min(height);
+        if xs >= xe || ys >= ye {
+            return;
+        }
+        let (under, over) = (under.map(premultiplied), over.map(premultiplied));
+        let fixed = |k: f32| (k.clamp(0., 1.) * 256.).round() as u32;
+        let data = self.pixmap.data_mut();
+        for y in ys..ye {
+            let py = y as f32 + 0.5;
+            let row = (y * width) as usize * 4;
+            for x in xs..xe {
+                let (k_under, k_over) = coverage(x as f32 + 0.5, py);
+                let pixel = &mut data[row + x as usize * 4..][..4];
+                if let Some(color) = under
+                    && k_under > 0.
+                {
+                    blend(pixel, color, fixed(k_under));
+                }
+                if let Some(color) = over
+                    && k_over > 0.
+                {
+                    blend(pixel, color, fixed(k_over));
+                }
+            }
+        }
+    }
+
+    /// A sprite with its label origin at device pixel `(x, y)` (before the band offset).
+    fn blit(&mut self, sprite: &Sprite, x: i64, y: i64) {
+        let (width, height) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
+        let left = x + sprite.left;
+        let top = y + sprite.top - self.at.oy as i64;
+        let (sw, sh) = (sprite.pixmap.width() as i64, sprite.pixmap.height() as i64);
+        let source = sprite.pixmap.data();
+        let data = self.pixmap.data_mut();
+        for sy in (0.max(-top))..sh.min(height - top) {
+            let dy = top + sy;
+            for sx in (0.max(-left))..sw.min(width - left) {
+                let from = ((sy * sw + sx) * 4) as usize;
+                let alpha = source[from + 3];
+                if alpha == 0 {
+                    continue;
+                }
+                let to = ((dy * width + left + sx) * 4) as usize;
+                let keep = 255 - alpha as u32;
+                for channel in 0..4 {
+                    let blended = source[from + channel] as u32
+                        + (data[to + channel] as u32 * keep + 127) / 255;
+                    data[to + channel] = blended.min(255) as u8;
+                }
+            }
+        }
+    }
+
+    fn fill(&mut self, path: Option<skia::Path>, color: Hsla, rule: skia::FillRule) {
+        if let Some(path) = path
+            && fillable(&path)
+        {
+            self.pixmap.fill_path(
+                &path,
+                &skia_paint(color),
+                rule,
+                skia::Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    /// A box like GPUI's quad: the fill over the whole box, the border inside it.
+    fn draw_box(
+        &mut self,
+        (x, y, width, height): (f32, f32, f32, f32),
+        radius: f32,
+        fill: Option<Hsla>,
+        stroke: Option<(f32, Hsla)>,
+    ) {
+        let at = self.at;
+        let (x, y, width, height) = (at.x(x), at.y(y), width * at.sx, height * at.sy);
+        let radius = radius * at.s;
+        if width <= 0. || height <= 0. {
+            return;
+        }
+        // Rounded boxes and circles: per-pixel coverage, fill and border in one pass. Plain
+        // rectangles stay with tiny-skia, whose rect fill is faster still.
+        if radius > 0. && width * height <= MAX_COVERAGE_AREA {
+            let (cx, cy, hx, hy) = (x + width / 2., y + height / 2., width / 2., height / 2.);
+            let bounds = (x, y, x + width, y + height);
+            let border = stroke.map(|(stroke_width, _)| stroke_width * at.s);
+            let inner = border
+                .filter(|border| border * 2. < width.min(height))
+                .map(|border| (hx - border, hy - border, (radius - border).max(0.)));
+            self.cover(bounds, fill, stroke.map(|(_, color)| color), |px, py| {
+                let outer = box_coverage(px, py, cx, cy, hx, hy, radius);
+                let ring = match inner {
+                    Some((ix, iy, ir)) => outer - box_coverage(px, py, cx, cy, ix, iy, ir),
+                    None => outer,
+                };
+                (outer, ring)
+            });
+            return;
+        }
+        if let Some(fill) = fill {
+            if radius <= 0. {
+                if let Some(rect) = skia::Rect::from_xywh(x, y, width, height) {
+                    self.pixmap.fill_rect(
+                        rect,
+                        &skia_paint(fill),
+                        skia::Transform::identity(),
+                        None,
+                    );
+                }
+            } else {
+                let mut path = skia::PathBuilder::new();
+                push_rounded(&mut path, x, y, width, height, radius);
+                self.fill(path.finish(), fill, skia::FillRule::Winding);
+            }
+        }
+        if let Some((stroke_width, color)) = stroke {
+            let border = stroke_width * at.s;
+            if radius <= 0. && border * 2. < width.min(height) {
+                // Four strips: much cheaper than a path.
+                let paint = skia_paint(color);
+                let inner = height - 2. * border;
+                for (x, y, width, height) in [
+                    (x, y, width, border),
+                    (x, y + height - border, width, border),
+                    (x, y + border, border, inner),
+                    (x + width - border, y + border, border, inner),
+                ] {
+                    if let Some(rect) = skia::Rect::from_xywh(x, y, width, height) {
+                        self.pixmap
+                            .fill_rect(rect, &paint, skia::Transform::identity(), None);
+                    }
+                }
+                return;
+            }
+            let mut path = skia::PathBuilder::new();
+            push_rounded(&mut path, x, y, width, height, radius);
+            if border * 2. < width.min(height) {
+                // The ring between the box and the box inset by the border.
+                push_rounded(
+                    &mut path,
+                    x + border,
+                    y + border,
+                    width - 2. * border,
+                    height - 2. * border,
+                    (radius - border).max(0.),
+                );
+            }
+            self.fill(path.finish(), color, skia::FillRule::EvenOdd);
+        }
+    }
+
+    fn draw_line(&mut self, from: (f32, f32), to: (f32, f32), width: f32, color: Hsla) {
+        let at = self.at;
+        let (x0, y0) = (at.x(from.0), at.y(from.1));
+        let (x1, y1) = (at.x(to.0), at.y(to.1));
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let length = (dx * dx + dy * dy).sqrt();
+        if length == 0. || !length.is_finite() {
+            return;
+        }
+        // A butt-capped stroke is a quad around the segment.
+        let half = width * at.s / 2.;
+        if (dx.abs() + 2. * half) * (dy.abs() + 2. * half) <= MAX_COVERAGE_AREA {
+            let (ux, uy) = (dx / length, dy / length);
+            let (mx, my) = ((x0 + x1) / 2., (y0 + y1) / 2.);
+            let half_length = length / 2.;
+            let bounds = (
+                x0.min(x1) - half,
+                y0.min(y1) - half,
+                x0.max(x1) + half,
+                y0.max(y1) + half,
+            );
+            self.cover(bounds, None, Some(color), |px, py| {
+                let (rx, ry) = (px - mx, py - my);
+                // Along the segment and across it, each as the pixel's overlap with the stroke.
+                let along = rx * ux + ry * uy;
+                let across = ry * ux - rx * uy;
+                (0., overlap(along, half_length) * overlap(across, half))
+            });
+            return;
+        }
+        let (nx, ny) = (-dy / length * half, dx / length * half);
+        let mut path = skia::PathBuilder::new();
+        path.move_to(x0 + nx, y0 + ny);
+        path.line_to(x1 + nx, y1 + ny);
+        path.line_to(x1 - nx, y1 - ny);
+        path.line_to(x0 - nx, y0 - ny);
+        path.close();
+        self.fill(path.finish(), color, skia::FillRule::Winding);
+    }
+
+    fn draw_path(
+        &mut self,
+        segments: &[PathSegment],
+        fill: Option<Hsla>,
+        stroke: Option<(f32, Hsla)>,
+    ) {
+        let at = self.at;
+        let point = |p: &ui_ext::canvas::Point| (at.x(n(p.x.0)), at.y(n(p.y.0)));
+        let mut path = skia::PathBuilder::new();
+        if !matches!(segments.first(), Some(PathSegment::MoveTo(_))) {
+            path.move_to(at.x(0.), at.y(0.));
+        }
+        for segment in segments {
+            match segment {
+                PathSegment::MoveTo(p) => {
+                    let (x, y) = point(p);
+                    path.move_to(x, y)
+                }
+                PathSegment::LineTo(p) => {
+                    let (x, y) = point(p);
+                    path.line_to(x, y)
+                }
+                PathSegment::QuadTo(c, p) => {
+                    let ((cx, cy), (x, y)) = (point(c), point(p));
+                    path.quad_to(cx, cy, x, y)
+                }
+                PathSegment::CubicTo(a, b, p) => {
+                    let ((ax, ay), (bx, by), (x, y)) = (point(a), point(b), point(p));
+                    path.cubic_to(ax, ay, bx, by, x, y)
+                }
+                PathSegment::Close => path.close(),
+            }
+        }
+        let Some(path) = path.finish() else {
+            return;
+        };
+        if let Some(fill) = fill
+            && fillable(&path)
+        {
+            self.pixmap.fill_path(
+                &path,
+                &skia_paint(fill),
+                skia::FillRule::Winding,
+                skia::Transform::identity(),
+                None,
+            );
+        }
+        if let Some((width, color)) = stroke {
+            let stroke = skia::Stroke {
+                width: width * at.s,
+                ..skia::Stroke::default()
+            };
+            self.pixmap.stroke_path(
+                &path,
+                &skia_paint(color),
+                &stroke,
+                skia::Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    fn draw_op(&mut self, op: &DrawOp, palette: &Palette, sprite: Option<Placement>) {
+        let stroke_of = |stroke: &Option<ui_ext::canvas::Stroke>| {
+            stroke.map(|stroke| (n(stroke.width.0), palette.color(stroke.paint)))
+        };
+        match op {
+            DrawOp::Line { from, to, stroke } => self.draw_line(
+                (n(from.x.0), n(from.y.0)),
+                (n(to.x.0), n(to.y.0)),
+                n(stroke.width.0),
+                palette.color(stroke.paint),
+            ),
             DrawOp::Rect {
                 bounds,
                 fill,
                 stroke,
-            } => write_box(
-                &mut out,
+            } => self.draw_box(
                 normalized(bounds),
                 0.,
                 fill.map(|fill| palette.color(fill)),
-                stroke.map(|stroke| (n(stroke.width.0), palette.color(stroke.paint))),
+                stroke_of(stroke),
             ),
             DrawOp::RoundedRect {
                 bounds,
@@ -689,12 +1296,11 @@ pub(crate) fn to_svg(props: &CanvasProps, palette: &Palette) -> String {
             } => {
                 let rect = normalized(bounds);
                 let radius = n(radius.0).min(rect.2 / 2.).min(rect.3 / 2.).max(0.);
-                write_box(
-                    &mut out,
+                self.draw_box(
                     rect,
                     radius,
                     fill.map(|fill| palette.color(fill)),
-                    stroke.map(|stroke| (n(stroke.width.0), palette.color(stroke.paint))),
+                    stroke_of(stroke),
                 )
             }
             DrawOp::Circle {
@@ -705,120 +1311,231 @@ pub(crate) fn to_svg(props: &CanvasProps, palette: &Palette) -> String {
             } => {
                 let r = n(radius.0).max(0.);
                 let (cx, cy) = (n(center.x.0), n(center.y.0));
-                write_box(
-                    &mut out,
+                self.draw_box(
                     (cx - r, cy - r, 2. * r, 2. * r),
                     r,
                     fill.map(|fill| palette.color(fill)),
-                    stroke.map(|stroke| (n(stroke.width.0), palette.color(stroke.paint))),
+                    stroke_of(stroke),
                 )
             }
             DrawOp::Path {
                 segments,
                 fill,
                 stroke,
-            } => {
-                out.push_str(r#"<path d=""#);
-                if !matches!(segments.first(), Some(PathSegment::MoveTo(_))) {
-                    out.push_str("M0 0");
+            } => self.draw_path(
+                segments,
+                fill.map(|fill| palette.color(fill)),
+                stroke_of(stroke),
+            ),
+            DrawOp::Text { .. } => {
+                if let Some((sprite, x, y)) = sprite {
+                    self.blit(sprite, x, y);
                 }
-                for segment in segments {
-                    match segment {
-                        PathSegment::MoveTo(p) => write!(out, "M{} {}", n(p.x.0), n(p.y.0)),
-                        PathSegment::LineTo(p) => write!(out, "L{} {}", n(p.x.0), n(p.y.0)),
-                        PathSegment::QuadTo(c, p) => {
-                            write!(out, "Q{} {} {} {}", n(c.x.0), n(c.y.0), n(p.x.0), n(p.y.0))
-                        }
-                        PathSegment::CubicTo(a, b, p) => write!(
-                            out,
-                            "C{} {} {} {} {} {}",
-                            n(a.x.0),
-                            n(a.y.0),
-                            n(b.x.0),
-                            n(b.y.0),
-                            n(p.x.0),
-                            n(p.y.0)
-                        ),
-                        PathSegment::Close => write!(out, "Z"),
-                    }
-                    .ok();
-                }
-                out.push('"');
-                match fill {
-                    Some(fill) => write_paint(&mut out, "fill", palette.color(*fill)),
-                    None => out.push_str(r#" fill="none""#),
-                }
-                if let Some(stroke) = stroke {
-                    write!(out, r#" stroke-width="{}""#, n(stroke.width.0)).ok();
-                    write_paint(&mut out, "stroke", palette.color(stroke.paint));
-                }
-                out.push_str("/>");
-            }
-            DrawOp::Text {
-                at,
-                text,
-                paint,
-                size,
-                anchor,
-                monospace,
-            } => {
-                let factor = match size {
-                    CanvasTextSize::Small => 0.85,
-                    CanvasTextSize::Medium => 1.,
-                    CanvasTextSize::Large => 1.2,
-                };
-                let anchor = match anchor {
-                    TextAnchor::Start => "start",
-                    TextAnchor::Middle => "middle",
-                    TextAnchor::End => "end",
-                };
-                let family = if *monospace { "Lilex" } else { "IBM Plex Sans" };
-                write!(
-                    out,
-                    r#"<text x="{}" y="{}" font-family="{family}" font-size="{}" text-anchor="{anchor}" xml:space="preserve""#,
-                    n(at.x.0),
-                    n(at.y.0),
-                    palette.font_size * factor,
-                )
-                .ok();
-                write_paint(&mut out, "fill", palette.color(*paint));
-                out.push('>');
-                write_text(&mut out, text);
-                out.push_str("</text>");
             }
         }
     }
-    out.push_str("</svg>");
-    out
 }
 
-/// Draws a canvas SVG at `device` pixels, as BGRA. No href is resolved; text uses `fonts` only.
+/// Threads one raster uses: its rows are split into bands drawn at once, and its labels are
+/// shaped in as many parts.
+fn raster_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |threads| threads.get().clamp(1, 8))
+}
+
+/// Draws a draw list at `device` pixels, as BGRA, op by op in order: small boxes, circles and
+/// lines by their per-pixel coverage, other shapes with tiny-skia. Every label is shaped and
+/// outlined once by usvg with `fonts` only (Fyx's bundled fonts), drawn once per colour and
+/// quarter-pixel position, and blitted. Large textures are drawn as bands of rows on several
+/// threads, each band drawing only the ops that reach it.
 pub(crate) fn rasterize(
-    svg: &str,
-    (width, height): (u32, u32),
+    props: &CanvasProps,
+    palette: &Palette,
+    device: (u32, u32),
     fonts: Arc<usvg::fontdb::Database>,
 ) -> Result<(RenderImage, u64)> {
-    let options = usvg::Options {
-        resources_dir: None,
-        fontdb: fonts,
-        image_href_resolver: usvg::ImageHrefResolver {
-            resolve_data: Box::new(|_, _, _| None),
-            resolve_string: Box::new(|_, _| None),
-        },
-        ..usvg::Options::default()
+    rasterize_on(props, palette, device, fonts, raster_threads())
+}
+
+/// [`rasterize`] on at most `threads` threads.
+pub(crate) fn rasterize_on(
+    props: &CanvasProps,
+    palette: &Palette,
+    (width, height): (u32, u32),
+    fonts: Arc<usvg::fontdb::Database>,
+    threads: usize,
+) -> Result<(RenderImage, u64)> {
+    let threads = threads.max(1);
+    let sx = width as f32 / props.width as f32;
+    let sy = height as f32 / props.height as f32;
+    let at = Mapping {
+        sx,
+        sy,
+        s: (sx + sy) / 2.,
+        oy: 0.,
     };
-    let tree = usvg::Tree::from_str(svg, &options).context("parsing the canvas SVG")?;
-    let size = tree.size();
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(width, height).context("allocating the canvas texture")?;
-    let transform = resvg::tiny_skia::Transform::from_scale(
-        width as f32 / size.width(),
-        height as f32 / size.height(),
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    let mut data = pixmap.take();
-    for pixel in data.chunks_exact_mut(4) {
-        gpui::swap_rgba_pa_to_bgra(pixel);
+
+    // The labels, each shaped once, in parts on several threads.
+    let mut label_ids: HashMap<LabelKey, usize> = HashMap::default();
+    let mut op_labels: Vec<Option<usize>> = Vec::with_capacity(props.ops.len());
+    for op in &props.ops {
+        op_labels.push(match op {
+            DrawOp::Text {
+                text,
+                size,
+                anchor,
+                monospace,
+                ..
+            } if !text.trim().is_empty() => {
+                let key = LabelKey {
+                    text,
+                    size: *size,
+                    anchor: *anchor,
+                    monospace: *monospace,
+                };
+                let next = label_ids.len();
+                Some(*label_ids.entry(key).or_insert(next))
+            }
+            _ => None,
+        });
+    }
+    let mut labels: Vec<(usize, LabelKey)> = label_ids.into_iter().map(|(k, id)| (id, k)).collect();
+    labels.sort_by_key(|(id, _)| *id);
+    let parts = if labels.is_empty() {
+        Vec::new()
+    } else {
+        let chunk = labels
+            .len()
+            .div_ceil(threads.min(labels.len().div_ceil(64)).max(1));
+        let svgs: Vec<String> = labels
+            .chunks(chunk)
+            .map(|part| labels_svg(part.iter().copied(), palette.font_size))
+            .collect();
+        std::thread::scope(|scope| {
+            let shaping: Vec<_> = svgs
+                .iter()
+                .map(|svg| {
+                    let fonts = fonts.clone();
+                    scope.spawn(move || shape_labels(svg, fonts))
+                })
+                .collect();
+            shaping
+                .into_iter()
+                .map(|part| {
+                    part.join()
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("panicked")))
+                })
+                .collect::<Result<Vec<_>>>()
+        })?
+    };
+    let mut shaped: Vec<Option<&usvg::Text>> = vec![None; labels.len()];
+    for (tree, found) in &parts {
+        for (id, trail) in found {
+            if let Some(slot) = shaped.get_mut(*id) {
+                *slot = text_node(tree, trail);
+            }
+        }
+    }
+
+    // Each label drawn once per colour and quarter-pixel position, in parts on several threads.
+    let mut sprite_ids: HashMap<SpriteKey, usize> = HashMap::default();
+    let mut op_sprites: Vec<Option<(usize, i64, i64)>> = Vec::with_capacity(props.ops.len());
+    for (index, op) in props.ops.iter().enumerate() {
+        let placed = match (op, op_labels[index]) {
+            (DrawOp::Text { paint, .. }, Some(label)) if shaped[label].is_some() => {
+                text_origin(op, at, label, palette.color(*paint))
+            }
+            _ => None,
+        };
+        op_sprites.push(placed.map(|(key, x, y)| {
+            let next = sprite_ids.len();
+            (*sprite_ids.entry(key).or_insert(next), x, y)
+        }));
+    }
+    let mut keys: Vec<(usize, SpriteKey)> = sprite_ids.into_iter().map(|(k, id)| (id, k)).collect();
+    keys.sort_by_key(|(id, _)| *id);
+    let draw_sprites = |part: &[(usize, SpriteKey)]| -> Vec<Option<Sprite>> {
+        part.iter()
+            .map(|(_, key)| draw_sprite(shaped[key.label]?, *key, at))
+            .collect()
+    };
+    let sprites: Vec<Option<Sprite>> = if keys.len() <= 64 || threads == 1 {
+        draw_sprites(&keys)
+    } else {
+        let chunk = keys.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            let drawing: Vec<_> = keys
+                .chunks(chunk)
+                .map(|part| scope.spawn(move || draw_sprites(part)))
+                .collect();
+            drawing
+                .into_iter()
+                .flat_map(|part| part.join().unwrap_or_default())
+                .collect()
+        })
+    };
+    let sprite_of = |index: usize| -> Option<Placement> {
+        let (id, x, y) = op_sprites[index]?;
+        Some((sprites.get(id)?.as_ref()?, x, y))
+    };
+
+    // Each op's rows, once.
+    let rows: Vec<Option<(f32, f32)>> = props
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(index, op)| op_rows(op, at, sprite_of(index)))
+        .collect();
+
+    let bands = threads.min((height / 128).max(1) as usize).max(1);
+    let band_height = height.div_ceil(bands as u32);
+    let mut data = vec![0u8; width as usize * height as usize * 4];
+    // Each band draws into its own rows of the texture, then turns them into straight BGRA.
+    let draw_band = |top: u32, rows_here: &mut [u8]| -> Result<()> {
+        let band_rows = (rows_here.len() / 4 / width as usize) as u32;
+        let mut raster = Raster {
+            pixmap: skia::PixmapMut::from_bytes(rows_here, width, band_rows)
+                .context("the canvas texture's rows")?,
+            at: Mapping {
+                oy: top as f32,
+                ..at
+            },
+        };
+        let (band_top, band_bottom) = (top as f32, (top + band_rows) as f32);
+        for (index, op) in props.ops.iter().enumerate() {
+            if let Some((op_top, op_bottom)) = rows[index]
+                && op_bottom >= band_top
+                && op_top <= band_bottom
+            {
+                raster.draw_op(op, palette, sprite_of(index));
+            }
+        }
+        for pixel in rows_here.chunks_exact_mut(4) {
+            match pixel[3] {
+                0 => {}
+                255 => pixel.swap(0, 2),
+                _ => gpui::swap_rgba_pa_to_bgra(pixel),
+            }
+        }
+        Ok(())
+    };
+    let band_bytes = band_height as usize * width as usize * 4;
+    if bands == 1 {
+        draw_band(0, &mut data)?;
+    } else {
+        std::thread::scope(|scope| {
+            let drawing: Vec<_> = data
+                .chunks_mut(band_bytes)
+                .enumerate()
+                .map(|(band, rows_here)| {
+                    let top = band as u32 * band_height;
+                    scope.spawn(move || draw_band(top, rows_here))
+                })
+                .collect();
+            drawing.into_iter().try_for_each(|band| {
+                band.join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("a raster band panicked")))
+            })
+        })?;
     }
     let bytes = data.len() as u64;
     let buffer = image::RgbaImage::from_raw(width, height, data).context("the canvas texture")?;
@@ -950,9 +1667,13 @@ mod tests {
     #[test]
     fn test_texture_draws_boxes_like_gpui() {
         let props = canvas_props(vec![rect(0.)]);
-        let svg = to_svg(&props, &palette());
-        let (image, bytes) =
-            rasterize(&svg, (200, 200), Arc::new(usvg::fontdb::Database::new())).unwrap();
+        let (image, bytes) = rasterize(
+            &props,
+            &palette(),
+            (200, 200),
+            Arc::new(usvg::fontdb::Database::new()),
+        )
+        .unwrap();
         assert_eq!(bytes, 200 * 200 * 4);
         let data = image.as_bytes(0).unwrap();
         let pixel = |x: usize, y: usize| -> [u8; 4] {
@@ -984,9 +1705,269 @@ mod tests {
     #[test]
     fn test_text_is_escaped_into_the_svg() {
         let props = canvas_props(vec![text("<a> & \"b\"\u{0}\u{7}\n")]);
-        let svg = to_svg(&props, &palette());
+        let DrawOp::Text {
+            text,
+            size,
+            anchor,
+            monospace,
+            ..
+        } = &props.ops[0]
+        else {
+            unreachable!()
+        };
+        let label = LabelKey {
+            text,
+            size: *size,
+            anchor: *anchor,
+            monospace: *monospace,
+        };
+        let svg = labels_svg([(0, label)], 14.);
         assert!(svg.contains(">&lt;a&gt; &amp; \"b\" </text>"), "{svg}");
-        rasterize(&svg, (100, 100), Arc::new(usvg::fontdb::Database::new())).unwrap();
+        rasterize(
+            &props,
+            &palette(),
+            (100, 100),
+            Arc::new(usvg::fontdb::Database::new()),
+        )
+        .unwrap();
+    }
+
+    /// Text in the bundled font, at its anchor, in op order: a later box covers it.
+    #[test]
+    fn test_text_draws_with_the_bundled_fonts_in_op_order() {
+        let ink = |ops: Vec<DrawOp>| {
+            let (image, _) =
+                rasterize(&canvas_props(ops), &palette(), (100, 100), test_fonts()).unwrap();
+            let data = image.as_bytes(0).unwrap().to_vec();
+            let inked = |x0: usize, x1: usize| {
+                (0..100)
+                    .flat_map(|y| (x0..x1).map(move |x| (y * 100 + x) * 4 + 3))
+                    .filter(|at| data[*at] > 0)
+                    .count()
+            };
+            (inked(0, 50), inked(50, 100))
+        };
+        let label = |anchor: TextAnchor| DrawOp::Text {
+            at: p(50., 30.),
+            text: "Wide".into(),
+            paint: paint(DataColor::Series1),
+            size: CanvasTextSize::Large,
+            anchor,
+            monospace: false,
+        };
+        let (left, right) = ink(vec![label(TextAnchor::Start)]);
+        assert!(
+            left == 0 && right > 20,
+            "start: right of x ({left}, {right})"
+        );
+        let (left, right) = ink(vec![label(TextAnchor::End)]);
+        assert!(left > 20 && right == 0, "end: left of x ({left}, {right})");
+        let (left, right) = ink(vec![label(TextAnchor::Middle)]);
+        assert!(
+            left > 10 && right > 10,
+            "middle: both sides ({left}, {right})"
+        );
+        let cover = DrawOp::Rect {
+            bounds: Rect {
+                x: Num(0.),
+                y: Num(0.),
+                width: Num(100.),
+                height: Num(100.),
+            },
+            fill: Some(paint(DataColor::Series2)),
+            stroke: None,
+        };
+        let (image, _) = rasterize(
+            &canvas_props(vec![label(TextAnchor::Start), cover]),
+            &palette(),
+            (100, 100),
+            test_fonts(),
+        )
+        .unwrap();
+        let data = image.as_bytes(0).unwrap();
+        let first = &data[0..4];
+        assert!(
+            data.chunks_exact(4).all(|pixel| pixel == first),
+            "the later box covers the text"
+        );
+    }
+
+    /// Bands drawn on several threads give the same pixels as one band: shapes and labels that
+    /// cross a band edge, in op order.
+    #[test]
+    fn test_bands_match_one_band() {
+        let mut ops = Vec::new();
+        for i in 0..64 {
+            let y = i as f32 * 15.;
+            ops.push(DrawOp::Circle {
+                center: p(20. + i as f32, y),
+                radius: Num(9.),
+                fill: Some(paint(DataColor::Series4)),
+                stroke: Some(Stroke {
+                    paint: paint(DataColor::Series5),
+                    width: Num(1.5),
+                }),
+            });
+            ops.push(rect(i as f32 * 3.));
+            ops.push(DrawOp::Line {
+                from: p(0., y),
+                to: p(100., 1000. - y),
+                stroke: Stroke {
+                    paint: paint(DataColor::Series6),
+                    width: Num(1.),
+                },
+            });
+            ops.push(DrawOp::Text {
+                at: p(50., y + 4.),
+                text: (i % 7).to_string(),
+                paint: paint(DataColor::Series1),
+                size: CanvasTextSize::Large,
+                anchor: TextAnchor::Middle,
+                monospace: i % 2 == 0,
+            });
+        }
+        ops.push(DrawOp::Path {
+            segments: vec![
+                PathSegment::MoveTo(p(0., 0.)),
+                PathSegment::CubicTo(p(100., 200.), p(0., 800.), p(100., 1000.)),
+            ],
+            fill: None,
+            stroke: Some(Stroke {
+                paint: paint(DataColor::Series2),
+                width: Num(3.),
+            }),
+        });
+        let props = CanvasProps {
+            width: 100,
+            height: 1000,
+            ..canvas_props(ops)
+        };
+        let draw = |threads| {
+            let (image, _) =
+                rasterize_on(&props, &palette(), (200, 2000), test_fonts(), threads).unwrap();
+            image.as_bytes(0).unwrap().to_vec()
+        };
+        let one = draw(1);
+        assert!(one.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        // tiny-skia clips each path to its band, so antialiasing differs a little along shapes that
+        // cross a band edge (long thin lines most): a few per cent of the pixels, very few by much.
+        let eight = draw(8);
+        let (mut differ, mut far) = (0, 0);
+        for (a, b) in one.chunks_exact(4).zip(eight.chunks_exact(4)) {
+            let most = a
+                .iter()
+                .zip(b)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            differ += usize::from(most > 0);
+            far += usize::from(most > 32);
+        }
+        let inked = one.chunks_exact(4).filter(|pixel| pixel[3] > 0).count();
+        assert!(differ * 20 <= inked, "{differ} of {inked} pixels differ");
+        assert!(
+            far * 500 <= inked,
+            "{far} of {inked} pixels differ by more than 32"
+        );
+    }
+
+    /// The rows an op is culled to cover every row it inks.
+    #[test]
+    fn test_op_rows_cover_the_ink() {
+        let ops = [
+            rect(10.),
+            DrawOp::Circle {
+                center: p(50., 50.),
+                radius: Num(20.),
+                fill: None,
+                stroke: Some(Stroke {
+                    paint: paint(DataColor::Series5),
+                    width: Num(2.),
+                }),
+            },
+            DrawOp::Line {
+                from: p(10., 90.),
+                to: p(90., 10.),
+                stroke: Stroke {
+                    paint: paint(DataColor::Series6),
+                    width: Num(8.),
+                },
+            },
+            // A sharp miter.
+            DrawOp::Path {
+                segments: vec![
+                    PathSegment::MoveTo(p(20., 80.)),
+                    PathSegment::LineTo(p(50., 30.)),
+                    PathSegment::LineTo(p(80., 80.)),
+                ],
+                fill: None,
+                stroke: Some(Stroke {
+                    paint: paint(DataColor::Series2),
+                    width: Num(10.),
+                }),
+            },
+            DrawOp::Path {
+                segments: vec![
+                    PathSegment::MoveTo(p(10., 50.)),
+                    PathSegment::QuadTo(p(50., -20.), p(90., 50.)),
+                    PathSegment::Close,
+                ],
+                fill: Some(paint(DataColor::Series3)),
+                stroke: None,
+            },
+            DrawOp::Text {
+                at: p(50., 60.),
+                text: "Ågjy".into(),
+                paint: paint(DataColor::Series1),
+                size: CanvasTextSize::Large,
+                anchor: TextAnchor::Middle,
+                monospace: false,
+            },
+        ];
+        for op in ops {
+            let props = canvas_props(vec![op.clone()]);
+            let (image, _) = rasterize_on(&props, &palette(), (200, 200), test_fonts(), 1).unwrap();
+            let data = image.as_bytes(0).unwrap();
+            let inked: Vec<usize> = (0..200)
+                .filter(|y| (0..200).any(|x| data[(y * 200 + x) * 4 + 3] > 0))
+                .collect();
+            let (first, last) = (inked[0] as f32, (*inked.last().unwrap() + 1) as f32);
+            let at = Mapping {
+                sx: 2.,
+                sy: 2.,
+                s: 2.,
+                oy: 0.,
+            };
+            let label = match &op {
+                DrawOp::Text {
+                    text,
+                    size,
+                    anchor,
+                    monospace,
+                    ..
+                } => {
+                    let key = LabelKey {
+                        text,
+                        size: *size,
+                        anchor: *anchor,
+                        monospace: *monospace,
+                    };
+                    Some(shape_labels(&labels_svg([(0, key)], 14.), test_fonts()).unwrap())
+                }
+                _ => None,
+            };
+            let sprite = label.as_ref().and_then(|(tree, found)| {
+                let text = text_node(tree, &found[0].1)?;
+                let (key, x, y) = text_origin(&op, at, 0, gpui::black())?;
+                Some((draw_sprite(text, key, at)?, x, y))
+            });
+            let (top, bottom) =
+                op_rows(&op, at, sprite.as_ref().map(|(s, x, y)| (s, *x, *y))).unwrap();
+            assert!(
+                top <= first && bottom >= last,
+                "{op:?}: culled to {top}..{bottom}, inks {first}..{last}"
+            );
+        }
     }
 
     fn slot(node: u32) -> SlotKey {
