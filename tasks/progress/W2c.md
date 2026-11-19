@@ -2,31 +2,27 @@
 
 Older history: `archive/W2c.md`.
 
-## Handoff (2026-11-19, eighth context clear)
+## Handoff (2026-11-19, ninth context clear)
 
-- **Branch** claude/fyx-w2c-host-0-2-cbde2c, on fyx/main b481177ef9 (04bb5cd126 merged there).
-- **Done since the last clear** (not at W0 yet):
-  - d1b1a881e6 fyx_guard: `fyx.accounts` dirs are protected (§C.6 rule 5), reads and writes.
-  - 98777859a4 integrator lines: ui_ext_wasm deps async-tungstenite (tokio-runtime), rand,
-    serde_json.
-  - a7255411a9 5.11 core: `ui_ext_wasm/src/listeners.rs` `ListenerSet` (admission, MCP over
-    websocket and streamable HTTP, raw kinds; 7 tests). `ui_ext::integration` ListenerEvent,
-    McpCall, ToolDef, McpError, OpenListener, ListenerObserver; IoEvent::Listener.
-  - WIT fix for W0: side-session-notes `W2c-wit-0.4-withdraw.diff`: `review.withdraw ->
-    result<string, host-error>` (current text, no review-decided; staged dc04464ee8 was
-    `result<_>` + err("withdrawn")). W4 confirmed the shape; sent to W0 to stage.
-- **Next:**
-  1. Wire 5.11: LoadOptions `listener_observer: Option<Arc<dyn ListenerObserver>>`; a
-     ListenerSet per instance in ui_ext_wasm.rs (next to TerminalsHandle ~:1962), sink to
-     `running.deliver(IoEvent::Listener(..))` like terminals; open each granted
-     `network:listen#<name>` (ConsentItem::Listener) at start on the tokio runtime, with its
-     granted `fs:discovery-file#<spec.name>` files; `impl wit_listeners::Host` in
-     fyx_ui_v0_4.rs (+ add to `add_to_linker`'s list ~:431); watch_permissions (network.rs
-     ~:979): revoke of `network:listen[#n]` -> close, grant -> open, discovery item change ->
-     reopen with the new list; `${listen.<n>.port/token}` in terminals.rs PackageContext.
-  2. 5.13 review/context runtime (after W0 applies the withdraw diff).
-- **Local-only, never commit:** `IoEvent::Listener(..) => None` in W4's fyx_ext_harness
-  v0_3.rs/v0_4.rs (W0 adds it at integration).
-- **Gotchas:** target `D:/fyx-targets/w2c` (a sweep once emptied .fingerprint mid-build:
-  rerun). Write python scripts with the Write tool, not heredocs. async-tungstenite's
-  `split()` halves have inherent `send`/`close(None)`. `cargo fmt` skips `t2_shared.rs`.
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c. W0 merged eb33909735 (1bd717ba64), staged the
+  Listener harness arms (072f0c8833) and `review.withdraw -> result<string, host-error>`
+  (442b742a4e); FULL gate on 442b742a4e was running.
+- **Ready, not yet at W0:** d6f0d4b8c6 5.11 wiring. `listeners::ListenersHandle` (open on
+  `activate_terminals`, refresh on any `network:listen*`/`fs:discovery-file*` change via
+  `resend_integration`, reload takeover keyed by (observer ptr, ext id), tools kept across
+  close); the `wit_listeners::Host` impl; LoadOptions `listeners`, `discovery_files`,
+  `listener_observer`; `${listen.*}` in created terminals' env; MCP 2025-11-25 first. Tests:
+  `test_v0_4_listeners`, `test_v0_4_listener_grants_and_reloads`, `mcp_initialize_2025_11_25`.
+- **Told:** W1 the observer contract (opened/closed semantics, reload order, profiles resolve
+  `${listen.*}` from OpenListener); W3 to pass `listener_observer` in the registry.
+- **Next: 5.13** (B.10 review, B.11 context). Plan: model traits in `ui_ext` (`review`:
+  propose/withdraw/begin_turn/end_turn + ReviewDecided sink; `context`: watch/open/
+  to_file_ref/absolute_path + ContextChanged), IoEvent cases, LoadOptions hosts, WIT impls in
+  fyx_ui_v0_4.rs, LINKED_INTERFACES. Bridge over `agent_review` lives in `ui_ext_host` (W3's
+  crate): ask the coordinator who writes it. Coordinator (b): `context.to-file-ref` must
+  accept `file:///C:/…`, `file://C:\…` and backslash paths, a test each. Build `review` on the
+  staged withdraw shape (442b742a4e) once it is on fyx/main.
+- **Local-only, never commit:** `IoEvent::Listener(..) => None` in fyx_ext_harness
+  v0_3.rs/v0_4.rs (drop them once 072f0c8833 is merged here).
+- **Gotchas:** target `D:/fyx-targets/w2c`. Write python scripts with the Write tool, not
+  heredocs. `cargo fmt` skips `t2_shared.rs`. HashMap order: close listeners in spec order.
