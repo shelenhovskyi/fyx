@@ -9,6 +9,7 @@ pub mod observe;
 mod proposed_edit;
 mod review_pane;
 mod review_rules;
+mod unified_diff;
 // dev-only: never compiled into release builds unless the `review-script` feature asks for it, because a
 // script can approve agent edits the user never saw.
 #[cfg(any(debug_assertions, feature = "review-script"))]
@@ -55,6 +56,7 @@ pub use review_pane::{
 };
 use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
+pub use unified_diff::{PatchError, apply_unified_diff};
 
 /// What review mode covers, for the status bar and the docs.
 pub const COVERAGE: &str = "Agent review covers edits that ACP agents propose with a diff (v1 \
@@ -1242,8 +1244,11 @@ impl AgentReview {
 
     /// Closes a review without a decision. A held write then fails without touching the file. A
     /// preview whose accepted hunks are being written goes once that finished, so its outcome is
-    /// recorded and the agent's note kept.
+    /// recorded and the agent's note kept. A proposal whose review is not open yet never opens.
     pub fn close(&mut self, id: ReviewId, cx: &mut Context<Self>) {
+        if self.pending_proposals.remove(&id).is_some() {
+            return;
+        }
         if let Some(review) = self
             .reviews
             .iter_mut()
@@ -4756,6 +4761,67 @@ mod tests {
             assert!(review.withdraw(id, cx).is_err());
             assert_eq!(review.reviews().len(), 1);
         });
+    }
+
+    #[gpui::test]
+    async fn closing_a_proposal_before_its_review_opens(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        let proposal = extension_proposal("/p/a.txt", cx);
+        let proposal = review.update(cx, |review, cx| {
+            let proposal = review.propose(proposal, cx);
+            review.close(proposal.id, cx);
+            proposal
+        });
+        cx.run_until_parked();
+        assert!(proposal.outcome.await.is_err());
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+        assert!(events.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    async fn a_proposal_from_a_unified_diff(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let buffer = cx.new(|cx| Buffer::local(OLD, cx));
+        let proposal = cx.update(|cx| {
+            ExtensionProposal::from_unified_diff(
+                acp_v2::SessionId::new("fyx-ext:demo:tool"),
+                PathBuf::from("/p/a.txt"),
+                buffer.clone(),
+                "@@ -4,2 +4,2 @@\n four\n-five\n+FIVE\n",
+                "Demo".into(),
+                "Shout".into(),
+                cx,
+            )
+            .unwrap()
+        });
+        assert_eq!(proposal.write.old_text, OLD);
+        assert_eq!(proposal.write.new_text, "one\ntwo\nthree\nfour\nFIVE\n");
+        let proposal = review.update(cx, |review, cx| review.propose(proposal, cx));
+        cx.run_until_parked();
+        review.update(cx, |review, cx| {
+            review
+                .decide_all(proposal.id, HunkDecision::Accepted, cx)
+                .unwrap();
+            review.submit(proposal.id, cx).unwrap();
+        });
+        let outcome = proposal.outcome.await.unwrap();
+        assert_eq!(outcome.final_content, "one\ntwo\nthree\nfour\nFIVE\n");
+
+        // The buffer changed since the diff was made: the diff no longer applies.
+        buffer.update(cx, |buffer, cx| buffer.edit([(0..3, "uno")], None, cx));
+        let conflict = cx.update(|cx| {
+            ExtensionProposal::from_unified_diff(
+                acp_v2::SessionId::new("fyx-ext:demo:tool"),
+                PathBuf::from("/p/a.txt"),
+                buffer.clone(),
+                "@@ -1,2 +1,2 @@\n-one\n+ONE\n two\n",
+                "Demo".into(),
+                "Shout".into(),
+                cx,
+            )
+            .err()
+        });
+        assert_eq!(conflict, Some(PatchError::Conflict { hunk: 1 }));
     }
 
     #[gpui::test]
