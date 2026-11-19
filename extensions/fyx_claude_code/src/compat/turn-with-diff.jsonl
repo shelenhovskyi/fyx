@@ -17,6 +17,14 @@
 {"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"FILE_SAVED"},{"type":"text","text":"/// Adds.\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n"}]}}}
 {"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","method":"tools/call","id":4,"params":{"name":"close_tab","arguments":{"tab_name":"✻ [Claude Code] lib.rs (5f0c) ⧉"}}}}
 {"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"TAB_CLOSED"}]}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","method":"tools/call","id":5,"params":{"name":"openDiff","arguments":{"old_file_path":"/work/app/src/lib.rs","new_file_path":"/work/app/src/lib.rs","new_file_contents":"pub fn add(a: i32, b: i32) -> i32 {\n    a + b + 0\n}\n","tab_name":"✻ [Claude Code] lib.rs (5f0d) ⧉"}}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","method":"tools/call","id":6,"params":{"name":"close_tab","arguments":{"tab_name":"✻ [Claude Code] lib.rs (5f0d) ⧉"}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"TAB_CLOSED"}]}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"TAB_CLOSED"}]}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","method":"tools/call","id":7,"params":{"name":"close_tab","arguments":{"tab_name":"✻ [Claude Code] lib.rs (5f0d) ⧉"}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"TAB_CLOSED"}]}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","method":"tools/call","id":8,"params":{"name":"closeAllDiffTabs","arguments":{}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":8,"result":{"content":[{"type":"text","text":"CLOSED_ALL_DIFF_TABS"}]}}}
 {"t":"hook","channel":"fyx-claude-code/post-tool","stdin":{"session_id":"5f0c-synthetic","transcript_path":"/tmp/claude-config/projects/-work-app/5f0c-synthetic.jsonl","cwd":"/work/app","hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"/work/app/src/lib.rs"},"tool_response":{"filePath":"/work/app/src/lib.rs"}},"expect":[{"status":{"state":"working","label":"Thinking"}}]}
 {"t":"hook","channel":"fyx-claude-code/notification","stdin":{"session_id":"5f0c-synthetic","transcript_path":"/tmp/claude-config/projects/-work-app/5f0c-synthetic.jsonl","cwd":"/work/app","hook_event_name":"Notification","message":"Claude is waiting for your input"},"expect":[{"status":{"state":"blocked","label":"Waiting for you"}}]}
 {"t":"hook","channel":"fyx-claude-code/stop","stdin":{"session_id":"5f0c-synthetic","transcript_path":"/tmp/claude-config/projects/-work-app/5f0c-synthetic.jsonl","cwd":"/work/app","hook_event_name":"Stop","stop_hook_active":false},"expect":[{"end-turn":{"session":"5f0c-synthetic","changed":["src/lib.rs"]}},{"status":{"state":"done","label":"Done"}}]}

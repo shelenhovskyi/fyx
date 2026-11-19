@@ -395,6 +395,44 @@ fn a_runaway_call_is_stopped_by_the_budget() {
     assert!(harness.disabled().is_some());
 }
 
+/// `load_package`'s `reason` check, as the host's: required on 0.4 T2 items, refused below.
+#[test]
+fn t2_items_need_a_reason_from_0_4_and_refuse_it_below() {
+    let table = |reasons: (&str, &str)| -> toml::Table {
+        format!(
+            "[network]\ndomains = [\"api.github.com\"]\n{}\n\
+             [[processes]]\nname = \"git\"\n{}\n",
+            reasons.0, reasons.1
+        )
+        .parse()
+        .expect("toml")
+    };
+    let v0_3 = Version::new(0, 3, 0);
+    let v0_4 = Version::new(0, 4, 0);
+    let reason = "reason = \"Fetches a line of zen.\"";
+
+    check_t2_reasons(&table(("", "")), &v0_3).expect("0.3 has no reasons");
+    check_t2_reasons(&table((reason, reason)), &v0_4).expect("0.4 with reasons");
+
+    let error = check_t2_reasons(&table((reason, "")), &v0_4).expect_err("process reason");
+    assert!(
+        error
+            .to_string()
+            .contains("[[fyx_ui.processes]] \"git\": a reason is required"),
+        "{error}"
+    );
+    let error = check_t2_reasons(&table(("", reason)), &v0_4).expect_err("network reason");
+    assert!(error.to_string().contains("[fyx_ui.network]"), "{error}");
+    let error = check_t2_reasons(&table((reason, "")), &v0_3).expect_err("not in 0.3");
+    assert!(
+        error.to_string().contains("reason needs fyx:ui 0.4"),
+        "{error}"
+    );
+    let long = format!("reason = \"{}\"", "x".repeat(201));
+    check_t2_reasons(&table((reason, &long)), &v0_4).expect_err("over 200 bytes");
+    check_t2_reasons(&table((reason, "reason = \"\"")), &v0_4).expect_err("empty");
+}
+
 #[test]
 fn reads_the_version_section() {
     assert_eq!(

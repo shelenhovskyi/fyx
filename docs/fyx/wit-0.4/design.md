@@ -410,6 +410,10 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   current text, with the user's edits so far, without a `review-decided`. Gemini's `closeDiff`
   needs exactly that (close the diff, return the text), and Claude's `close_tab` and
   `closeAllDiffTabs` need the closing.
+- **A decided proposal is never withdrawn.** After the user decides, a tool may still ask to close
+  the diff (Claude Code sends `closeAllDiffTabs` at every prompt and `close_tab` twice after each
+  answered diff). The extension answers these from its own state; it calls `review.withdraw` only
+  for a proposal that is still open.
 - **The outcome** comes later: `io-event::review-decided(id, result<review-outcome,
   review-error>)`. `review-outcome` has `decision` (`accepted`, `partial`, `rejected`) and
   `final-content`, the text after the user's choices and edits. A blocking protocol (Claude's
@@ -423,6 +427,26 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   `agent_review`'s `begin_turn` / `end_turn` / `note_changed_paths`
   (`crates/agent_review/src/agent_review.rs:560-634`). Files the tool changed during a turn without
   a proposal show as "changed without review".
+- **Two paths for a tool that has hooks** (Claude Code, 2.1.326 live recording):
+  - **Post-hoc (primary).** `PreToolUse` and `PostToolUse` hooks reach the extension through
+    `fyx-relay` (§B.9). The extension takes a snapshot of the file before the tool writes it and
+    proposes the diff afterwards, so the change reaches agent review hunk by hunk whatever the
+    tool's permission mode. It is after the fact: the tool has already written the file.
+    - **Reject restores the before-snapshot.** If the file changed after the agent's write (the
+      user typed in it, another tool wrote it), Fyx shows a conflict view and never overwrites
+      silently.
+    - **Fyx tells the agent what was reverted.** The default channel is the hook's
+      `additionalContext`: on the next `UserPromptSubmit`, or on `PostToolUse` when "hold edits"
+      is on. Pasting the note into the tool's terminal (§B.11) happens only if the user chooses it.
+  - **`openDiff` (bonus).** The tool's own IDE protocol proposes the edit before it writes
+    (`apply = false`, a blocking call). It happens only when the tool asks, which for Claude Code
+    is manual (`default`) permission mode only; `auto` is Claude's default mode now, so this path
+    is the exception.
+  - **Hold edits for review (optional, a 5.15 follow-up, not in the first cut).** A setting turns
+    on a blocking `PreToolUse` hook: the relay request waits, Fyx shows the diff, and the answer
+    allows or denies the tool call, under the channel's timeout and `on_failure` (§B.9). It is the
+    only way to review before the write in `auto` mode, and it fails open by default like any
+    relay channel.
 - **Provenance:** the review panel names the extension and the tool session. Accepting or
   rejecting stays the user's; the extension cannot answer a review (spec §5, agent review policy
   stays with W5).
@@ -489,11 +513,14 @@ can run any program on your computer" (0.3 Q2).
 
 ### C.2 T2 at install, with checkboxes
 
-The install dialog (file, dev UI, registry) has four groups:
+The install dialog (file, dev UI, registry) has four groups, named by how consent works:
 
 1. **Shows in Fyx** (T0): one line.
-2. **Reads** (T1): one line per capability, no checkbox.
-3. **Can run code or reach outside Fyx** (T2): a checkbox per item, unticked:
+2. **Allowed without asking** (T1): one line per capability, no checkbox. T1 includes
+   `terminal:pseudo`, `terminal:status`, `workspace:open` and `review:propose` (and the other T1
+   capabilities of §C.1), so this group is not only reading. `terminal:observe` is not here: it
+   is a read-only T2 item, in the next group, with a checkbox.
+3. **Off unless you tick it** (T2): a checkbox per item, unticked:
    - one per program for `process:spawn` and `terminal:create`, with its argument patterns;
    - one per listener for `network:listen`, and one per discovery file, with its path;
    - one for `network:fetch` with its domain list, one for `terminal:env` with every name and
@@ -508,6 +535,8 @@ The install dialog (file, dev UI, registry) has four groups:
 - **Buttons:** "Install" installs with what is ticked. A T2 item left unticked is `denied`; the
   extension sees `denied` and should say what it cannot do. Every checkbox ignores clicks for 1 s
   after the dialog appears.
+- **Updates:** the update dialog (§C.5) shows only the groups that have changes, with no empty
+  groups.
 - **Later:** the extension page lists every item with its state and a switch; turning a T2 item
   on asks once more, with the same text and the 1 s guard.
 - **Dev installs without a dialog** (`FYX_UI_DEV_EXTENSIONS`, dev builds only) keep 0.3's
@@ -807,12 +836,25 @@ lists.
 3. `network:listen` (`mcp-websocket`) + `fs:discovery-file` `${account.claude}/ide/${port}.lock` +
    env `CLAUDE_CODE_SSE_PORT`, `ENABLE_IDE_INTEGRATION=true` → the IDE protocol:
    `selection_changed`, `at_mentioned`, `getDiagnostics`, `openFile`, and `openDiff` →
-   `review:propose` (blocking).
-4. Turns: `UserPromptSubmit` → `begin-turn`, `Stop` → `end-turn`.
+   `review:propose` (blocking). **Print and SDK runs never connect to the IDE:** `claude -p` and
+   Agent SDK runs open no WebSocket even with `--ide`; they get hooks only, so turns, status and
+   review for them come from hooks (item 4 and §B.10). The IDE protocol is for interactive runs.
+   Edge behaviour of 2.1.326: `closeAllDiffTabs` and a duplicate `close_tab` after a decision
+   answer without withdrawing (§B.10); `getDiagnostics` gets a file URI in two Windows forms,
+   `file:///C:/work/app.py` and `file://C:\work\app.py`, and the extension accepts both (through
+   `context.to-file-ref`, §B.11); paths in `openDiff` and `at_mentioned` carry backslashes.
+4. Turns: `UserPromptSubmit` → `begin-turn`, `Stop` → `end-turn`. **After the user rejects a
+   diff (`DIFF_REJECTED`) Claude ends the turn with no `Stop` hook,** so the extension also ends
+   the turn when it answers a rejection. **Review is post-hoc first:** `PreToolUse` and
+   `PostToolUse` through `fyx-relay` snapshot the file before and propose the diff after
+   (§B.10), because `auto` is now Claude's default permission mode and `openDiff` comes only in
+   manual mode. `openDiff` is the bonus path. "Hold edits for review", a blocking `PreToolUse`
+   hook where Fyx allows or denies under a timeout, is an optional setting and a 5.15 follow-up.
 5. **Compat test:** a recorded protocol transcript from a pinned Claude Code version, replayed
    against the extension in the harness; a scheduled manual check against the newest CLI before
-   each release. Known gaps: in `acceptEdits` and `auto` modes Claude writes without `openDiff`,
-   so those edits show as "changed without review"; the protocol is reverse-engineered [RE].
+   each release. Known gaps: in `acceptEdits` and `auto` modes (and in print and SDK runs) Claude
+   writes without `openDiff`, which the post-hoc path covers after the fact; the protocol is
+   reverse-engineered [RE].
 
 **`fyx_gemini_cli`** (plan 5.16, W4; skeleton 81be13f34b): the documented IDE companion spec over
 `mcp-streamable-http` (path `/mcp`) with a Bearer token, the discovery file in
