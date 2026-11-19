@@ -520,6 +520,8 @@ fn event_handle(event: &TerminalEvent) -> Option<u64> {
         | TerminalEvent::Exited(handle, _)
         | TerminalEvent::Closed(handle) => Some(handle.0),
         TerminalEvent::Created(info) | TerminalEvent::StatusChanged(info) => Some(info.handle.0),
+        // §C.3 answers carry a request id, not a terminal handle.
+        TerminalEvent::ReadDone(..) | TerminalEvent::WriteDone(..) => None,
     }
 }
 

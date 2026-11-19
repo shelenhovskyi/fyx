@@ -1105,6 +1105,8 @@ pub(crate) fn terminal_io_event(event: ui_ext::terminal::TerminalEvent) -> wit_i
         TerminalEvent::StatusChanged(info) => {
             wit_io::IoEvent::TerminalStatusChanged(wit_terminal_info(info))
         }
+        TerminalEvent::ReadDone(id, result) => wit_io::IoEvent::TerminalReadDone((id, result)),
+        TerminalEvent::WriteDone(id, result) => wit_io::IoEvent::TerminalWriteDone((id, result)),
     }
 }
 
