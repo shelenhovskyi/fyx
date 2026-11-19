@@ -2,29 +2,27 @@
 
 Older history: `archive/W2c.md`.
 
-## Handoff (2026-11-19, seventh context clear)
+## Handoff (2026-11-19, ninth context clear)
 
-- **Branch** claude/fyx-w2c-host-0-2-cbde2c; fyx/main merged at cb5b9d7e1d (4d23d31ffb).
-- **Done since the last clear** (ready at W0 with a4fcba01b1):
-  - 8a5bfc9968 T3 runtime: request-read/write (declared, gesture, lines, check_write_text,
-    t3_target, untrusted cwd), queued per call, started after it on tokio: broker.t3_request
-    (no card on own terminals), host.read/write, journal TerminalRead/Write; aborted on drop.
-  - 8c7ac0c31f `${pid}` (TemplateContext::pid defaults to this process).
-  - 75d2762cf0 `reason` on processes/network, required from 0.4, refused below.
-  - WIT batch for W0: side-session-notes `W2c-wit-0.4-batch.diff` (review.withdraw,
-    editor-context.trusted + MRU, context.to-file-ref/absolute-path). Runtime after W0 applies.
-- **Next:**
-  1. 5.11 listeners + MCP wrapper (§B.7): subprotocol "mcp" + `X-Claude-Code-Ide-Authorization`
-     for mcp-websocket, `/mcp` for streamable-http; confirm mcp.respond (full CallToolResult) to
-     W4; revocation of `network:listen#<n>`/`fs:discovery-file#<n>` closes listeners and removes
-     discovery files (network.rs watch_permissions).
-  2. context/review runtime for the WIT batch, once applied.
-  3. fyx_guard: account dirs as protected paths, once W1's 4637d43836 (fyx.accounts) lands in
-     fyx/main: `FyxAccountsSettingsContent::accounts()[].dir` into `write_denial_of` and reads.
-  4. 5.13 (with W4: IDE connection to hook session_id).
-- **Local-only, never commit:** the ReadDone/WriteDone arms in W4's `fyx_ext_harness`
-  (terminals.rs event_handle, v0_4.rs terminal_io_event); `ui_ext_host` does not build on
-  fyx/main + this branch until W3's consent port (e66159d3c6, W3 branch) is integrated.
-- **Gotchas:** target `D:/fyx-targets/w2c`. Bash heredocs break on quotes: write python
-  scripts with the Write tool; open files with `encoding='utf-8'`. `cargo fmt` skips
-  `t2_shared.rs`: `rustfmt --edition 2024` it.
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c. W0 merged eb33909735 (1bd717ba64), staged the
+  Listener harness arms (072f0c8833) and `review.withdraw -> result<string, host-error>`
+  (442b742a4e); FULL gate on 442b742a4e was running.
+- **Ready, not yet at W0:** d6f0d4b8c6 5.11 wiring. `listeners::ListenersHandle` (open on
+  `activate_terminals`, refresh on any `network:listen*`/`fs:discovery-file*` change via
+  `resend_integration`, reload takeover keyed by (observer ptr, ext id), tools kept across
+  close); the `wit_listeners::Host` impl; LoadOptions `listeners`, `discovery_files`,
+  `listener_observer`; `${listen.*}` in created terminals' env; MCP 2025-11-25 first. Tests:
+  `test_v0_4_listeners`, `test_v0_4_listener_grants_and_reloads`, `mcp_initialize_2025_11_25`.
+- **Told:** W1 the observer contract (opened/closed semantics, reload order, profiles resolve
+  `${listen.*}` from OpenListener); W3 to pass `listener_observer` in the registry.
+- **Next: 5.13** (B.10 review, B.11 context). Plan: model traits in `ui_ext` (`review`:
+  propose/withdraw/begin_turn/end_turn + ReviewDecided sink; `context`: watch/open/
+  to_file_ref/absolute_path + ContextChanged), IoEvent cases, LoadOptions hosts, WIT impls in
+  fyx_ui_v0_4.rs, LINKED_INTERFACES. Bridge over `agent_review` lives in `ui_ext_host` (W3's
+  crate): ask the coordinator who writes it. Coordinator (b): `context.to-file-ref` must
+  accept `file:///C:/…`, `file://C:\…` and backslash paths, a test each. Build `review` on the
+  staged withdraw shape (442b742a4e) once it is on fyx/main.
+- **Local-only, never commit:** `IoEvent::Listener(..) => None` in fyx_ext_harness
+  v0_3.rs/v0_4.rs (drop them once 072f0c8833 is merged here).
+- **Gotchas:** target `D:/fyx-targets/w2c`. Write python scripts with the Write tool, not
+  heredocs. `cargo fmt` skips `t2_shared.rs`. HashMap order: close listeners in spec order.

@@ -69,6 +69,9 @@ mod fyx_ui_v0_3;
 mod fyx_ui_v0_4;
 pub mod images;
 pub mod journal;
+// The WIT imports, the load options and revocation wire it next (plan 5.11).
+#[cfg_attr(not(test), allow(dead_code))]
+mod listeners;
 pub mod network;
 pub mod observe;
 pub mod process;
@@ -912,6 +915,8 @@ pub struct UiState {
     observe: observe::ObserveState,
     /// The 0.4 `terminals` import: the extension's own terminals.
     terminals: terminals::TerminalState,
+    /// The 0.4 `listeners` import (§B.7).
+    listeners: Arc<listeners::ListenersHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -928,6 +933,7 @@ struct IoStates {
     edit: edit::EditState,
     observe: observe::ObserveState,
     terminals: terminals::TerminalState,
+    listeners: Arc<listeners::ListenersHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -981,12 +987,14 @@ impl UiState {
             edit,
             observe,
             terminals,
+            listeners,
             journal,
         } = io;
         Self {
             edit,
             observe,
             terminals,
+            listeners,
             journal,
             capability_check,
             diagnostics,
@@ -1607,6 +1615,8 @@ pub struct UiExtension {
     observer: Arc<observe::ObserveHandle>,
     /// The 0.4 terminals; dropping the last clone closes them all.
     terminals: Arc<terminals::TerminalsHandle>,
+    /// The 0.4 listeners; they close when the instance goes.
+    listeners: Arc<listeners::ListenersHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1756,6 +1766,15 @@ pub struct LoadOptions {
     pub package_dir: Option<PathBuf>,
     /// 0.4 (design §C.4): the usage journal. Without one nothing is recorded.
     pub journal: Option<Arc<dyn journal::Journal>>,
+    /// `[[fyx_ui.listeners]]`; set by [`UiExtension::load_checked`]. Applies only to a 0.4
+    /// component that declares `network:listen` (§B.7).
+    pub listeners: Option<Vec<ui_ext::integration::ListenerSpec>>,
+    /// `[[fyx_ui.discovery_files]]`; set by [`UiExtension::load_checked`]. Applies only when
+    /// `fs:discovery-file` is declared too (§B.8).
+    pub discovery_files: Option<Vec<ui_ext::integration::DiscoveryFileSpec>>,
+    /// Told when a listener opens, changes its granted discovery files, and closes: the
+    /// discovery-file writer (§B.8, plan 5.12, W1) and the profiles' `${listen.*}`.
+    pub listener_observer: Option<Arc<dyn ui_ext::integration::ListenerObserver>>,
 }
 
 impl UiExtension {
@@ -1821,6 +1840,9 @@ impl UiExtension {
             terminal_profiles,
             package_dir,
             journal,
+            listeners: listener_specs,
+            discovery_files,
+            listener_observer,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1977,6 +1999,18 @@ impl UiExtension {
             } else {
                 terminals::TerminalPolicy::default()
             });
+            // 0.4 `network:listen` (§B.7): the declared listeners, and their discovery files
+            // when `fs:discovery-file` is declared too.
+            let listens = is_v0_4 && declares(ui_ext::integration::CAPABILITY_NETWORK_LISTEN);
+            let listeners = Arc::new(listeners::ListenersHandle::new(
+                extension_id.clone(),
+                listener_specs.filter(|_| listens).unwrap_or_default(),
+                discovery_files
+                    .filter(|_| listens && declares(ui_ext::integration::CAPABILITY_DISCOVERY_FILE))
+                    .unwrap_or_default(),
+                capability_check.clone(),
+                listener_observer,
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -1987,12 +2021,14 @@ impl UiExtension {
                 let network = network.clone();
                 let process_set = process_set.clone();
                 let terminals = terminals.clone();
+                let listeners = listeners.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
                     edits: Arc::downgrade(&edit_set),
                     observer: Arc::downgrade(&observer),
                     terminals: Arc::downgrade(&terminals),
+                    listeners: Arc::downgrade(&listeners),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
@@ -2001,6 +2037,7 @@ impl UiExtension {
                     }
                     if is_v0_4 {
                         terminals.forward(&running);
+                        listeners.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -2035,7 +2072,9 @@ impl UiExtension {
                                     terminal_policy,
                                     workspace_for_terminals,
                                     terminal_environment,
+                                    listeners.clone(),
                                 ),
+                                listeners,
                                 journal,
                             },
                         ),
@@ -2127,6 +2166,7 @@ impl UiExtension {
                     edits,
                     observer,
                     terminals,
+                    listeners,
                 },
                 pushed_rx,
             ))
@@ -2189,6 +2229,8 @@ impl UiExtension {
             terminal_programs: Some(manifest.terminal_programs.clone()),
             terminal_env: manifest.checked_terminal_env(),
             terminal_profiles: terminal::check_profiles(manifest.terminal_profiles.clone()).ok(),
+            listeners: Some(manifest.listeners.clone()),
+            discovery_files: Some(manifest.discovery_files.clone()),
             ..options
         };
         let (mut extension, pushed) =
@@ -2213,8 +2255,17 @@ impl UiExtension {
     /// the one that speaks to the terminal host for the extension, and sends the host its
     /// profiles and env as granted (again whenever a grant changes; emptied when the instance
     /// goes). An instance it replaced no longer closes terminals when it is dropped.
+    ///
+    /// 0.4 `network:listen` (§B.7): the replaced instance closes its listeners and this one
+    /// opens the granted ones, which then follow the grants until the instance goes.
     pub fn activate_terminals(&self) {
         self.terminals.activate();
+        self.listeners.activate();
+    }
+
+    /// `${listen.<name>.port}` while the listener is open (tests and the Extension Inspector).
+    pub fn listener_port(&self, name: &str) -> Option<u16> {
+        self.listeners.port(name)
     }
 
     /// Whether the 0.4 `terminals` import has a terminal host (a 0.4 component loaded with

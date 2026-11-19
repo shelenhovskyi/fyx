@@ -129,6 +129,8 @@ pub enum IoEvent {
     Terminal(crate::terminal::TerminalEvent),
     /// fyx:ui 0.4 `ui:approvals`: the card `id` was answered, or closed unanswered (`None`).
     ApprovalAnswered(u64, Option<crate::approvals::ApprovalOption>),
+    /// fyx:ui 0.4 `network:listen`: what a listener's clients sent (design wit-0.4 §B.7).
+    Listener(crate::integration::ListenerEvent),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).

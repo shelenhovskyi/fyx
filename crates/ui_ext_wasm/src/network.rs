@@ -906,6 +906,13 @@ fn resend_integration(revocable: &Revocable, capability: &str) {
     {
         terminals.send_integration();
     }
+    // §B.7, §B.8: a grant opens a listener, a revocation closes it (its connections and open
+    // calls with it), and a change of a discovery file changes what the observer writes.
+    if crate::listeners::ListenersHandle::affected_by(capability)
+        && let Some(listeners) = revocable.listeners.upgrade()
+    {
+        listeners.refresh();
+    }
 }
 
 pub(crate) struct Revocable {
@@ -913,6 +920,7 @@ pub(crate) struct Revocable {
     pub(crate) edits: std::sync::Weak<crate::edit::EditSet>,
     pub(crate) observer: std::sync::Weak<crate::observe::ObserveHandle>,
     pub(crate) terminals: std::sync::Weak<crate::terminals::TerminalsHandle>,
+    pub(crate) listeners: std::sync::Weak<crate::listeners::ListenersHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
