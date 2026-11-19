@@ -34,6 +34,20 @@ Older history: `archive/W2c.md`.
   3. 5.11 loopback listeners + MCP wrapper (§B.7), with item revocation for `network:listen#<name>`
      and `fs:discovery-file#<name>` in network.rs watch_permissions.
   4. Whole-crate tests, clippy and fmt, then "ready" to W0 and the coordinator.
+- **Queued by the coordinator** (do these after the T3 runtime, step 1):
+  - `TerminalHost::set_integration(ext, TerminalIntegration { profiles, env, env_all_new,
+    package_dir })`, a default no-op that close_all clears. Then send "ready" to W0 and tell W1
+    and W3.
+  - fyx_guard: the `fyx.accounts` dirs (W1 4637d43836) become protected paths (§C.6).
+  - WIT diffs for since_v0.4.0, sent to W0 together:
+    - `context.to-file-ref(abs) -> option<file-ref>` and `absolute-path(file-ref)`, both behind
+      context:editor;
+    - `review.withdraw(id) -> result<string>`;
+    - `editor-context.trusted: option<bool>`, with files in most-recent-focus order.
+  - A `${pid}` template (TemplateContext, together with W1).
+  - In 5.11: mcp-websocket takes subprotocol "mcp" and `X-Claude-Code-Ide-Authorization`;
+    streamable-http serves `/mcp`. Confirm the mcp.respond shape (full CallToolResult) to W4.
+  - Settle with W4 for 5.13/5.14: IDE connection ↔ hook session_id.
 - **Local-only patches** (never commit):
   - `<scratchpad>/host_local.diff` (W3's Props::Terminal arms) and `harness_local.diff`. Apply
     with `git apply --ignore-whitespace`.
@@ -42,7 +56,7 @@ Older history: `archive/W2c.md`.
   - Revert: `git checkout -- crates/fyx_ext_harness crates/ui_ext_host/src/{decorations,inspector,view}.rs`
     and remove that arm. registry.rs holds my committed `..` hook, so do not checkout registry.rs.
 - **Gotchas:**
-  - Targets `E:/fyx-targets/w2c`.
+  - Targets `D:/fyx-targets/w2c` and `w2c-light` (E: is the same storage).
   - Edit files with python scripts written by the Write tool (bash heredocs break on quotes). Keep
     CRLF and use `chr(9)` for tabs.
   - `cargo fmt` skips `t2_shared.rs`: run `rustfmt --edition 2024` on it.
