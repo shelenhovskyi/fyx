@@ -16,7 +16,7 @@ doctest = false
 
 [features]
 # The manifest's tables are fyx:ui 0.4's, so the extension is built for 0.4
-# (`script/fyx-build-demos --fyx-ui-0-4`). The protocol core (`ide`, `hooks`, `session`) needs no
+# (`script/fyx-build-demos --fyx-ui-0-4`). The protocol core (`ide`, `hooks`) needs no
 # host and is tested natively, with the compat transcripts. The newest world wins when several
 # are on.
 fyx-ui-0-2 = []

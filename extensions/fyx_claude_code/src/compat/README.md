@@ -90,3 +90,6 @@ transcript does not replay, the protocol changed: fix the extension, then move t
 - Claude 2.1.326 accepts `http` hooks only with a literal URL, and the listener's port changes
   every run. So the plugin uses command hooks through `fyx-relay` instead of the `http` hooks
   the design names.
+- `close_tab` and `closeAllDiffTabs` answer without closing anything in Fyx. `review` cannot
+  withdraw a proposal yet; `fyx_gemini_cli`'s compat README, gap 4, proposes
+  `review.withdraw`.
