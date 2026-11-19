@@ -70,3 +70,8 @@ retries = 2
 [[profile.default.overrides]]
 filter = 'package(terminal) and test(test_terminal_no_exit_on_spawn_failure)'
 slow-timeout = { period = "180s", terminate-after = 1 }
+
+# fyx: another randomized upstream editor test, like the two above; past 60 s under the gate's load.
+[[profile.default.overrides]]
+filter = 'package(editor) and test(test_random_columnar_selections)'
+slow-timeout = { period = "300s", terminate-after = 1 }
