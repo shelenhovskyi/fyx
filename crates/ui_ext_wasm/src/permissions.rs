@@ -152,6 +152,7 @@ pub use ui_ext::network::PermissionState;
 pub use crate::consent_items::{
     ConsentDiff, ConsentItem, ItemLine, PLUGIN_ENV_NAMES, WARNING_RUNS_ANY_CODE, Widened,
     consent_diff, consent_diff_lines, consent_items, consent_warnings,
+    title_of as capability_title,
 };
 
 /// The two T3 capabilities.

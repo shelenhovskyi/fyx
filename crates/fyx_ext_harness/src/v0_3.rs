@@ -300,6 +300,7 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         // 0.4 only.
         net::IoEvent::Terminal(_) => None,
         net::IoEvent::ApprovalAnswered(..) => None,
+        net::IoEvent::Listener(..) => None,
         net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
             id,
             result
