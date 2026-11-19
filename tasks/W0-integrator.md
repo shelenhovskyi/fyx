@@ -5,17 +5,23 @@
 **Deliverable**
 - Merge worker branches into `integration` only through `script/gate.sh` (wasmtime backend policy + `cargo deny` advisories, then check + clippy + nextest on changed crates + license check). Red is never merged.
 - `FULL=1 script/gate.sh` (full `zed` build) on a schedule, not per merge.
-- Gate modes (coordinator, 2026-11-19):
-  - **FAST** (`FAST=1 script/gate.sh`) accepts a batch into `integration`. It tests the crates
+- Gate modes (coordinator with the user, 2026-11-19, second revision):
+  - **FAST** (`FAST=1 script/gate.sh`) accepts every batch into `integration`. It tests the crates
     changed since the last green `fyx/main` plus their workspace reverse dependencies, limited to
-    the crates Fyx changed since `FYX_UPSTREAM` (`script/fyx-gate-crates`). The workspace-wide
-    steps (wasmtime policy, `cargo deny`, API docs, template tests, licenses, lockfiles) still run.
+    the crates Fyx changed since `FYX_UPSTREAM` (`script/fyx-gate-crates`; `zed` is in it whenever
+    the `ui_ext` family changes). The workspace-wide steps (wasmtime policy, `cargo deny`, API docs,
+    template tests, licenses, lockfiles) still run. WIT changes and new dependencies of Fyx crates
+    need only FAST.
   - **FULL** (`FULL=1 script/gate.sh`): every crate Fyx changed since `FYX_UPSTREAM`, plus the
-    `zed` build. Run it before a push to `fyx/main`: at most once per ~3 FAST-green batches or
-    ~3 h, and always when a batch touches `Cargo.lock`, `crates/ui_ext/wit/`, or an upstream
-    `fyx:` hook in `editor`, `workspace` or `terminal`.
+    `zed` build. It runs only before a push to `fyx/main`, at most twice a day: one batch around
+    midday, one at the end of the day, or when the user needs a build. A batch also needs FULL
+    when `Cargo.lock` changes the version of an existing crate, or when an upstream `fyx:` hook
+    touches a crate with many dependents (`editor`, `workspace`, `project`, `gpui`).
   - Push `integration` after a green FAST gate. Fast-forward and push `fyx/main` only after a
     green FULL gate.
+  - Measurement: every gate prints its wall time and the sccache hits and misses during the run
+    (the server is shared, so other sessions' builds count too), and keeps cargo's timing report
+    of the test build (and of the `zed` build in FULL) in `D:\fyx-builds\gate-timings\<sha>-*.html`.
 - Disk (coordinator, 2026-11-19; the user wants SSD-frugal builds): `script/fyx-disk-guard` runs
   after every FULL gate and every push (`cargo sweep --time 2` and `fyx-prune-target` on each idle
   target). Its WARN line (D: under 150 GB, E: under 40 GB) goes to the coordinator. When a worker
