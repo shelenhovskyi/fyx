@@ -168,6 +168,18 @@ fn claude_code_loads_with_its_profile_and_plugin() {
         (program.as_str(), args),
         ("claude", vec!["--ide".to_owned()])
     );
+    // The profile's terminal finds the IDE server and loads the plugin shipped in the package.
+    let env: HashMap<String, String> = harness.profile_env("claude").unwrap().into_iter().collect();
+    assert_eq!(
+        env["CLAUDE_CODE_SSE_PORT"],
+        harness.listener_port("ide").unwrap().to_string()
+    );
+    assert_eq!(env["ENABLE_IDE_INTEGRATION"], "true");
+    let plugin = PathBuf::from(&env["CLAUDE_CODE_PLUGIN_DIRS"]);
+    assert!(
+        plugin.join(".claude-plugin/plugin.json").is_file(),
+        "{plugin:?} is not the package's plugin"
+    );
 
     let handle = harness.open_profile("claude", Some("Work")).unwrap();
     let terminal = harness.terminal(handle).unwrap();
@@ -520,6 +532,13 @@ fn gemini_cli_loads_with_its_profile() {
     );
     let (program, args) = harness.profile_command_line("gemini").unwrap();
     assert_eq!((program.as_str(), args.len()), ("gemini", 0));
+    assert_eq!(
+        harness.profile_env("gemini").unwrap(),
+        [(
+            "GEMINI_CLI_IDE_SERVER_PORT".to_owned(),
+            harness.listener_port("ide").unwrap().to_string()
+        )]
+    );
     let handle = harness.open_profile("gemini", Some("Personal")).unwrap();
     assert_eq!(
         harness.terminal(handle).unwrap().account.as_deref(),
