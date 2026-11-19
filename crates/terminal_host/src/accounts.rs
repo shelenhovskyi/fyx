@@ -347,6 +347,27 @@ mod tests {
     }
 
     #[test]
+    fn fyx_defaults_have_the_tool_presets() {
+        let (content, _) = settings::fallible_options::parse_json::<settings::SettingsContent>(
+            include_str!("../../../assets/settings/fyx.json"),
+        );
+        let accounts = content.unwrap().fyx.unwrap().accounts.unwrap();
+        let tools = accounts.tools.as_ref().unwrap();
+        for (tool, env) in [
+            ("claude", "CLAUDE_CONFIG_DIR"),
+            ("codex", "CODEX_HOME"),
+            ("gemini", "GEMINI_CLI_HOME"),
+            ("copilot", "COPILOT_HOME"),
+            ("opencode", "OPENCODE_CONFIG_DIR"),
+        ] {
+            assert_eq!(tools[tool].env.as_deref(), Some(env));
+            assert!(ui_ext::terminal::is_account_env(env), "{env} is refused for extensions");
+        }
+        assert_eq!(accounts.tool_for_agent("claude-acp"), Some("claude"));
+        assert!(accounts.accounts().is_empty());
+    }
+
+    #[test]
     fn terminals_get_the_project_account_or_the_one_they_were_opened_for() {
         let settings = two();
         let request = |cwd: &'static str, choice: Option<&'static str>| EnvRequest {
