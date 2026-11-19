@@ -61,10 +61,10 @@ mod notifications;
 mod v0_2;
 mod v0_3;
 
-pub use compile_cache::cache_compiled_components;
 pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
 };
+pub use compile_cache::cache_compiled_components;
 
 use api_state::ApiState;
 
