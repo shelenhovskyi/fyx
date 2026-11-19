@@ -1674,6 +1674,7 @@ impl Item for TerminalView {
                         )
                     }),
             )
+            .children(terminal_ext::tab_indicator(&terminal.fyx, cx)) // fyx: program status
             .child(
                 div()
                     .relative()
