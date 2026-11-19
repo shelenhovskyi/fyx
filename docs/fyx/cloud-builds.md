@@ -51,8 +51,9 @@ on work too; `script/fyx-build-demos` builds them for `wasm32-wasip2` with the r
   there still needs a check on the PC or in `fyx_gate.yml` (Windows runner). The reverse also
   holds: a cloud run covers `cfg(unix)` code the PC never builds.
 - **`cargo-deny` has no prebuilt download here**: the network policy refuses GitHub release
-  downloads (HTTP 403), so `cargo install cargo-deny --locked` builds it from crates.io. Without it
-  `gate.sh` only warns; CI runs the advisory check.
+  downloads (HTTP 403), so `cargo install cargo-deny --locked` builds it from crates.io (2 m 9 s).
+  Then `cargo deny --locked --config script/fyx-deny.toml check advisories bans` passes in 5 s.
+  Without it `gate.sh` only warns; CI runs the advisory check.
 
 ## Setup
 
