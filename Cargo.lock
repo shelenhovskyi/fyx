@@ -6884,6 +6884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_claude_code"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_charts"
 version = "0.1.0"
 dependencies = [
@@ -18276,8 +18284,11 @@ dependencies = [
  "futures 0.3.34",
  "gpui",
  "log",
+ "project",
  "release_channel",
  "settings",
+ "sysinfo 0.39.6",
+ "task",
  "terminal",
  "terminal_ext",
  "terminal_view",
