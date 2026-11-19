@@ -71,6 +71,9 @@ retries = 2
 [[profile.default.overrides]]
 filter = 'package(terminal) and test(test_terminal_no_exit_on_spawn_failure)'
 slow-timeout = { period = "180s", terminate-after = 1 }
+# Its own wait gives up after ~30 s: under the FULL gate's load it failed at 29.6 s (5a62615004)
+# and passed alone in 22 s.
+retries = 2
 
 # fyx: another randomized upstream editor test, like the two above; past 60 s under the gate's load.
 [[profile.default.overrides]]
