@@ -447,6 +447,17 @@ impl IdeHost for ReplayHost<'_> {
         Ok(())
     }
 
+    /// The transcript's `review` events name the `openDiff` call, not a proposal.
+    fn propose(
+        &mut self,
+        _file: &ide::FileRef,
+        _new_contents: &str,
+    ) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
+
+    fn withdraw(&mut self, _proposal: u64) {}
+
     fn respond(&mut self, call: u64, outcome: Result<String, ide::McpError>) {
         let id = self.calls.get(&call).cloned().unwrap_or(Value::Null);
         self.out.push(match outcome {

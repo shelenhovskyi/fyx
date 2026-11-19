@@ -1,8 +1,9 @@
 //! The staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
 //! `v0_3` runs them (this file started as a copy of it), plus `terminals` on the fakes of
-//! [`crate::terminals`] (plan 5.10), `listeners` on those of [`crate::listeners`] and
-//! `context` on [`crate::context`] (plan 5.14). The other 0.4 interfaces (`relay`, `review`,
-//! `approvals`) trap when called ([`define_unlinked_as_traps`]) until the rest of plan 5.14.
+//! [`crate::terminals`] (plan 5.10), `listeners` on those of [`crate::listeners`], `context`
+//! on [`crate::context`] and `review` on [`crate::review`] (plan 5.14). The other 0.4
+//! interfaces (`relay`, `approvals`) trap when called ([`define_unlinked_as_traps`]) until the
+//! rest of plan 5.14.
 //!
 //! A `terminal` node becomes `ui_ext::v0_2::Props::Terminal`; [`terminal_node_handle`] reads its
 //! handle.
@@ -27,7 +28,8 @@ use bindings::fyx::ui::{
     agent_observe as wit_observe, context as wit_context, decorations as wit_decorations,
     host as wit_host, images as wit_images, io as wit_io, listeners as wit_listeners,
     network as wit_network, notifications as wit_notifications, permissions as wit_permissions,
-    process as wit_process, terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
+    process as wit_process, review as wit_review, terminals as wit_terminals, types as wit,
+    workspace_edit as wit_edit,
 };
 
 fn result(
@@ -60,6 +62,7 @@ pub(crate) fn add_to_linker(
     wit_terminals::add_to_linker::<_, State>(linker, |state| state)?;
     wit_listeners::add_to_linker::<_, State>(linker, |state| state)?;
     wit_context::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_review::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
@@ -407,8 +410,13 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         net::IoEvent::Context(context) => {
             Some(wit_io::IoEvent::ContextChanged(wit_editor_context(context)))
         }
-        // `review` traps here until its part of plan 5.14.
-        net::IoEvent::ReviewDecided(..) => None,
+        net::IoEvent::ReviewDecided(id, outcome) => Some(wit_io::IoEvent::ReviewDecided((
+            id,
+            outcome.map(wit_review_outcome),
+        ))),
+        // The harness's `context.diagnostics` answers `unavailable` (staged ahead of it), so no
+        // change is ever reported.
+        net::IoEvent::DiagnosticsChanged(_) => None,
     }
 }
 
@@ -512,10 +520,11 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.4 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 13] = [
+const LINKED_INTERFACES: [&str; 14] = [
     "terminals",
     "listeners",
     "context",
+    "review",
     "decorations",
     "permissions",
     "types",
@@ -1525,5 +1534,85 @@ fn diagnostics_unavailable() -> wit_host::HostError {
     wit_host::HostError {
         code: wit_host::HostErrorCode::Unavailable,
         message: "diagnostics are not available yet".into(),
+    }
+}
+
+fn wit_review_outcome(outcome: ui_ext::review::ReviewOutcome) -> wit_review::ReviewOutcome {
+    use ui_ext::review::Decision;
+    wit_review::ReviewOutcome {
+        decision: match outcome.decision {
+            Decision::Accepted => wit_review::Decision::Accepted,
+            Decision::Partial => wit_review::Decision::Partial,
+            Decision::Rejected => wit_review::Decision::Rejected,
+        },
+        final_content: outcome.final_content,
+    }
+}
+
+/// `review`, on [`crate::review::FakeReview`]: everything needs `review:propose`.
+impl wit_review::Host for State {
+    fn propose(
+        &mut self,
+        request: wit_review::Proposal,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        let (wit_review::Proposed::NewContent(text) | wit_review::Proposed::UnifiedDiff(text)) =
+            &request.change;
+        self.count_lifted_text(
+            text.len() + request.title.len() + request.session.len() + request.path.path.len(),
+        )?;
+        if let Err(error) = self.permit(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error));
+        }
+        let proposal = ui_ext::review::Proposal {
+            path: model_file_ref(request.path),
+            change: match request.change {
+                wit_review::Proposed::NewContent(text) => {
+                    ui_ext::review::Proposed::NewContent(text)
+                }
+                wit_review::Proposed::UnifiedDiff(text) => {
+                    ui_ext::review::Proposed::UnifiedDiff(text)
+                }
+            },
+            title: request.title,
+            session: request.session,
+            apply: request.apply,
+        };
+        Ok(self
+            .review
+            .propose(&self.context, proposal)
+            .map_err(Into::into))
+    }
+
+    fn withdraw(&mut self, id: u64) -> wasmtime::Result<Result<String, wit_host::HostError>> {
+        if let Err(error) = self.permit(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error));
+        }
+        Ok(self.review.withdraw(id).map_err(Into::into))
+    }
+
+    fn begin_turn(&mut self, session: String) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(session.len())?;
+        if let Err(error) = self.permit(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error));
+        }
+        Ok(self.review.begin_turn(session).map_err(Into::into))
+    }
+
+    fn end_turn(
+        &mut self,
+        session: String,
+        changed: Vec<wit::FileRef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            session.len() + changed.iter().map(|file| file.path.len()).sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error));
+        }
+        let changed = changed.into_iter().map(model_file_ref).collect();
+        Ok(self
+            .review
+            .end_turn(&self.context, session, changed)
+            .map_err(Into::into))
     }
 }

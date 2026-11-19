@@ -67,6 +67,8 @@ mod host_model;
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod listeners;
 #[cfg(feature = "fyx-ui-0-4")]
+pub mod review;
+#[cfg(feature = "fyx-ui-0-4")]
 pub mod terminals;
 mod v0_1;
 #[cfg(feature = "fyx-ui-0-3")]
@@ -108,7 +110,7 @@ pub mod bindings {
 }
 
 /// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
-/// [`listeners`] and [`context`].
+/// [`listeners`], [`context`] and [`review`].
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod bindings {
     wit_bindgen::generate!({
@@ -521,6 +523,7 @@ macro_rules! __fyx_host_shims {
             $crate::__fyx_terminal_shims!($world);
             $crate::__fyx_listener_shims!($world);
             $crate::__fyx_context_shims!($world);
+            $crate::__fyx_review_shims!($world);
         };
     };
 }
@@ -932,6 +935,50 @@ macro_rules! __fyx_context_shims {
     ($world:ident) => {};
 }
 
+/// The shims of the 0.4 [`review`] functions; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_review_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_review_propose(
+            request: &$crate::review::Proposal,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::review::$world::propose(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_review_withdraw(
+            id: u64,
+        ) -> ::std::result::Result<::std::string::String, $crate::HostError> {
+            $crate::__private::review::$world::withdraw(id)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_review_begin_turn(
+            session: &str,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::review::$world::begin_turn(session)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_review_end_turn(
+            session: &str,
+            changed: &[$crate::FileRef],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::review::$world::end_turn(session, changed)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_review_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
@@ -941,6 +988,8 @@ pub mod __private {
     pub use crate::host::newest;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::listeners::glue as listeners;
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::review::glue as review;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::terminals::glue as terminals;
     pub use crate::v0_1::glue as v0_1;

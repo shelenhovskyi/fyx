@@ -60,7 +60,7 @@ impl FakeContext {
         self.watching
     }
 
-    fn is_private(&self, file: &FileRef) -> bool {
+    pub(crate) fn is_private(&self, file: &FileRef) -> bool {
         file.worktree
             .is_some_and(|id| self.private.contains(&(id, file.path.clone())))
     }

@@ -18,9 +18,9 @@
 //! The protocol core is plain Rust, tested natively. Built for 0.4, the extension registers
 //! [`ide::tools`] on the `ide` listener and answers `io-event::mcp-call` through
 //! [`ide::Server`] ([`wired`]); Claude's paths map to worktree files through `context`, which
-//! also feeds `selection_changed`. `openDiff` becomes a proposal with `review`, and the hooks
-//! arrive with the relay. The staged 0.4 WIT has no diagnostics source yet, so
-//! `getDiagnostics` answers an empty list.
+//! also feeds `selection_changed`, and `openDiff` is a proposal in agent review (`review`),
+//! withdrawn when Claude closes its tab first. The hooks arrive with the relay. The staged 0.4
+//! WIT has no diagnostics source yet, so `getDiagnostics` answers an empty list.
 
 pub mod hooks;
 pub mod ide;
@@ -79,7 +79,12 @@ impl Extension for ClaudeCode {
                     &call.arguments,
                 );
             }
-            IoEvent::McpCancelled(call) => self.ide.cancelled(call),
+            IoEvent::McpCancelled(call) => self.ide.cancelled(&mut wired::SdkHost, call),
+            IoEvent::ReviewDecided((proposal, outcome)) => {
+                let answer = wired::diff_answer(outcome);
+                self.ide
+                    .review_decided(&mut wired::SdkHost, proposal, &answer);
+            }
             IoEvent::ContextChanged(editor) => {
                 let params = wired::selection_changed(editor);
                 if let Some(params) = &params
