@@ -133,6 +133,9 @@ pub enum IoEvent {
     Listener(crate::integration::ListenerEvent),
     /// fyx:ui 0.4 `context:editor`: the editor context changed, while watching (§B.11).
     Context(crate::context::EditorContext),
+    /// fyx:ui 0.4 `workspace:diagnostics`: these files' diagnostics changed, while watching;
+    /// empty means anything may have changed (§B.11).
+    DiagnosticsChanged(Vec<crate::process::FileRef>),
     /// fyx:ui 0.4 `review:propose`: proposal `id` was decided, or its review ended without a
     /// decision (§B.10).
     ReviewDecided(u64, Result<crate::review::ReviewOutcome, String>),

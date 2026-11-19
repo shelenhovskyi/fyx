@@ -1,10 +1,11 @@
-//! The fyx:ui 0.4 `context` import over [`ContextHost`] (design wit-0.4 §B.11, plan 5.13):
-//! `context:editor` (the feed and the path conversions) and `workspace:open`. This side checks
-//! the capabilities, the paths and the focus rule, and keeps private files' text out of the
-//! feed whatever the host sends; the host debounces and knows the editor.
+//! The fyx:ui 0.4 `context` import over [`ContextHost`] and [`DiagnosticsSource`] (design wit-0.4
+//! §B.11, plan 5.13): `context:editor` (the feed and the path conversions), `workspace:open` and
+//! `workspace:diagnostics`. This side checks the capabilities, the paths and the focus rule, and
+//! keeps private files out whatever the host sends; the context host debounces its feed, the
+//! diagnostics changes are debounced here.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::PathBuf,
     sync::{
         Arc, LazyLock, Mutex, PoisonError,
@@ -14,7 +15,7 @@ use std::{
 
 use futures::{StreamExt as _, channel::mpsc};
 use ui_ext::{
-    context::{self, ContextHost, EditorContext},
+    context::{self, ContextHost, DiagnosticsSnapshot, DiagnosticsSource, EditorContext},
     edit::TextRange,
     process::FileRef,
     v0_2::{HostError, HostErrorCode},
@@ -36,6 +37,11 @@ fn error(code: HostErrorCode, message: impl Into<String>) -> HostError {
 /// Which instance of an extension watches the context, by host and extension id: a reloaded
 /// instance's `watch` replaces the old one's sink, and the old one, dropped later, leaves it.
 static WATCHING: LazyLock<Mutex<HashMap<(usize, Arc<str>), u64>>> = LazyLock::new(Default::default);
+/// The same for `watch-diagnostics`, by diagnostics source.
+static WATCHING_DIAGNOSTICS: LazyLock<Mutex<HashMap<(usize, Arc<str>), u64>>> =
+    LazyLock::new(Default::default);
+/// Distinct files one debounce window collects before it reports "anything may have changed".
+const MAX_PENDING_DIAGNOSTIC_FILES: usize = 16 * context::MAX_CHANGED_DIAGNOSTIC_FILES;
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 /// One instance's tie to the editor host.
@@ -48,6 +54,10 @@ pub(crate) struct ContextHandle {
     receiver: Mutex<Option<mpsc::UnboundedReceiver<EditorContext>>>,
     instance: u64,
     watching: AtomicBool,
+    diagnostics: Option<Arc<dyn DiagnosticsSource>>,
+    diagnostics_sender: mpsc::UnboundedSender<Vec<FileRef>>,
+    diagnostics_receiver: Mutex<Option<mpsc::UnboundedReceiver<Vec<FileRef>>>>,
+    watching_diagnostics: Arc<AtomicBool>,
 }
 
 impl ContextHandle {
@@ -56,8 +66,10 @@ impl ContextHandle {
         host: Option<Arc<dyn ContextHost>>,
         workspace: Option<Arc<dyn Workspace>>,
         listeners: Arc<ListenersHandle>,
+        diagnostics: Option<Arc<dyn DiagnosticsSource>>,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
+        let (diagnostics_sender, diagnostics_receiver) = mpsc::unbounded();
         Self {
             extension_id,
             host,
@@ -67,11 +79,28 @@ impl ContextHandle {
             receiver: Mutex::new(Some(receiver)),
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             watching: AtomicBool::new(false),
+            diagnostics,
+            diagnostics_sender,
+            diagnostics_receiver: Mutex::new(Some(diagnostics_receiver)),
+            watching_diagnostics: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub(crate) fn available(&self) -> bool {
         self.host.is_some()
+    }
+
+    pub(crate) fn diagnostics_available(&self) -> bool {
+        self.diagnostics.is_some()
+    }
+
+    fn diagnostics_source(&self) -> Result<&Arc<dyn DiagnosticsSource>, HostError> {
+        self.diagnostics.as_ref().ok_or_else(|| {
+            error(
+                HostErrorCode::Unavailable,
+                "diagnostics are not available in this window",
+            )
+        })
     }
 
     fn host(&self) -> Result<&Arc<dyn ContextHost>, HostError> {
@@ -90,8 +119,10 @@ impl ContextHandle {
         )
     }
 
-    /// Moves the host's contexts onto the io channel, on the current tokio runtime. Once.
+    /// Moves the host's contexts and the debounced diagnostics changes onto the io channel, on
+    /// the current tokio runtime. Once.
     pub(crate) fn forward(&self, running: &Arc<Running>) {
+        self.forward_diagnostics(running);
         let Some(mut receiver) = self
             .receiver
             .lock()
@@ -152,6 +183,120 @@ impl ContextHandle {
             watching.remove(&key);
             drop(watching);
             host.watch(&self.extension_id, None);
+        }
+    }
+
+    fn forward_diagnostics(&self, running: &Arc<Running>) {
+        let Some(source) = self.diagnostics.clone() else {
+            return;
+        };
+        let Some(receiver) = self
+            .diagnostics_receiver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let running = Arc::downgrade(running);
+        let watching = self.watching_diagnostics.clone();
+        let filter = ChangedFilter {
+            source,
+            workspace: self.workspace.clone(),
+        };
+        tokio::spawn(async move {
+            let mut changes = std::pin::pin!(debounced_changes(receiver));
+            while let Some(changed) = changes.next().await {
+                if !watching.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let Some(files) = filter.apply(changed) else {
+                    continue;
+                };
+                let Some(running) = running.upgrade() else {
+                    return;
+                };
+                running.deliver(IoEvent::DiagnosticsChanged(files)).await;
+            }
+        });
+    }
+
+    /// `context.diagnostics`: one worktree file's (`Some`), or those of every worktree file with
+    /// any; a private file is `not-permitted` by name and left out of the whole answer.
+    pub(crate) fn diagnostics(
+        &self,
+        path: Option<FileRef>,
+    ) -> Result<DiagnosticsSnapshot, HostError> {
+        let source = self.diagnostics_source()?;
+        let roots = self.roots()?;
+        let files = match path {
+            Some(path) => {
+                path.check()?;
+                let (worktree, full) = resolve(&roots, &path)?;
+                if source.is_private(&full) {
+                    return Err(error(HostErrorCode::NotPermitted, "a private file"));
+                }
+                let path = FileRef {
+                    worktree: Some(worktree),
+                    path: path.path,
+                };
+                let mut files = source.diagnostics(&self.extension_id, Some(&path));
+                files.retain(|file| file.path == path);
+                files
+            }
+            None => {
+                let mut files = source.diagnostics(&self.extension_id, None);
+                files.retain_mut(|file| {
+                    let Some((worktree, full)) = worktree_file(&roots, &file.path) else {
+                        return false;
+                    };
+                    file.path.worktree = Some(worktree);
+                    !source.is_private(&full)
+                });
+                files
+            }
+        };
+        Ok(context::diagnostics_snapshot(files))
+    }
+
+    /// `context.watch-diagnostics`.
+    pub(crate) fn watch_diagnostics(&self, on: bool) -> Result<(), HostError> {
+        let source = self.diagnostics_source()?;
+        if !on {
+            self.stop_diagnostics();
+            return Ok(());
+        }
+        let sender = self.diagnostics_sender.clone();
+        source.watch(
+            &self.extension_id,
+            Some(Arc::new(move |files| {
+                sender.unbounded_send(files).ok();
+            })),
+        );
+        WATCHING_DIAGNOSTICS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(source_key(source, &self.extension_id), self.instance);
+        self.watching_diagnostics.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Stops this instance's diagnostics feed, if it is the one watching.
+    pub(crate) fn stop_diagnostics(&self) {
+        let Some(source) = &self.diagnostics else {
+            return;
+        };
+        if !self.watching_diagnostics.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let key = source_key(source, &self.extension_id);
+        let mut watching = WATCHING_DIAGNOSTICS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if watching.get(&key) == Some(&self.instance) {
+            watching.remove(&key);
+            drop(watching);
+            source.watch(&self.extension_id, None);
         }
     }
 
@@ -232,9 +377,10 @@ impl ContextHandle {
 }
 
 impl Drop for ContextHandle {
-    /// The instance is gone: its feed stops, unless a newer instance took it over.
+    /// The instance is gone: its feeds stop, unless a newer instance took them over.
     fn drop(&mut self) {
         self.stop();
+        self.stop_diagnostics();
     }
 }
 
@@ -254,8 +400,27 @@ pub(crate) fn roots(workspace: Option<&dyn Workspace>) -> Result<Vec<(u64, PathB
     Ok(roots)
 }
 
+fn source_key(source: &Arc<dyn DiagnosticsSource>, extension_id: &Arc<str>) -> (usize, Arc<str>) {
+    (
+        Arc::as_ptr(source) as *const () as usize,
+        extension_id.clone(),
+    )
+}
+
 /// A checked `file-ref`'s absolute path: in its worktree, or in the one worktree that has it.
 pub(crate) fn absolute(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<PathBuf, HostError> {
+    resolve(roots, path).map(|(_, full)| full)
+}
+
+/// A host's `file-ref`, if it is a valid path in a known worktree: that worktree and the
+/// absolute path.
+fn worktree_file(roots: &[(u64, PathBuf)], path: &FileRef) -> Option<(u64, PathBuf)> {
+    path.check().ok()?;
+    resolve(roots, path).ok()
+}
+
+/// [`absolute`], with the worktree that holds the file.
+fn resolve(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<(u64, PathBuf), HostError> {
     let join = |root: &PathBuf| {
         path.path
             .split('/')
@@ -266,15 +431,15 @@ pub(crate) fn absolute(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<PathB
         Some(id) => roots
             .iter()
             .find(|(root_id, _)| *root_id == id)
-            .map(|(_, root)| join(root))
+            .map(|(id, root)| (*id, join(root)))
             .ok_or_else(|| error(HostErrorCode::InvalidArgument, "an unknown worktree")),
         None => {
             let mut found = roots
                 .iter()
-                .map(|(_, root)| join(root))
-                .filter(|full| full.exists());
+                .map(|(id, root)| (*id, join(root)))
+                .filter(|(_, full)| full.exists());
             match (found.next(), found.next()) {
-                (Some(full), None) => Ok(full),
+                (Some(found), None) => Ok(found),
                 (None, _) => Err(error(
                     HostErrorCode::InvalidArgument,
                     format!("no worktree has {:?}", path.path),
@@ -320,5 +485,148 @@ impl PrivacyFilter {
             }
         }
         context
+    }
+}
+
+/// One debounce window's changes: the distinct files, or anything.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Changed {
+    anything: bool,
+    files: BTreeSet<(Option<u64>, String)>,
+}
+
+impl Changed {
+    fn add(&mut self, files: Vec<FileRef>) {
+        if files.is_empty() {
+            self.anything = true;
+        }
+        if self.anything {
+            self.files.clear();
+            return;
+        }
+        self.files
+            .extend(files.into_iter().map(|file| (file.worktree, file.path)));
+        if self.files.len() > MAX_PENDING_DIAGNOSTIC_FILES {
+            self.anything = true;
+            self.files.clear();
+        }
+    }
+}
+
+/// The host's change reports, collected for [`context::DIAGNOSTICS_DEBOUNCE`] from the first
+/// report of each window.
+fn debounced_changes(
+    receiver: mpsc::UnboundedReceiver<Vec<FileRef>>,
+) -> impl futures::Stream<Item = Changed> {
+    futures::stream::unfold(receiver, |mut receiver| async move {
+        let first = receiver.next().await?;
+        let mut changed = Changed::default();
+        changed.add(first);
+        let deadline = tokio::time::Instant::now() + context::DIAGNOSTICS_DEBOUNCE;
+        while let Ok(Some(more)) = tokio::time::timeout_at(deadline, receiver.next()).await {
+            changed.add(more);
+        }
+        Some((changed, receiver))
+    })
+}
+
+/// What a `diagnostics-changed` names: worktree files that are not private, at most
+/// [`context::MAX_CHANGED_DIAGNOSTIC_FILES`] (more, or anything, is the empty list). `None` when
+/// nothing is left to tell.
+struct ChangedFilter {
+    source: Arc<dyn DiagnosticsSource>,
+    workspace: Option<Arc<dyn Workspace>>,
+}
+
+impl ChangedFilter {
+    fn apply(&self, changed: Changed) -> Option<Vec<FileRef>> {
+        if changed.anything {
+            return Some(Vec::new());
+        }
+        let roots = roots(self.workspace.as_deref()).ok()?;
+        let mut files: Vec<FileRef> = Vec::new();
+        for (worktree, path) in changed.files {
+            let Some((worktree, full)) = worktree_file(
+                &roots,
+                &FileRef {
+                    worktree,
+                    path: path.clone(),
+                },
+            ) else {
+                continue;
+            };
+            let file = FileRef {
+                worktree: Some(worktree),
+                path,
+            };
+            if !self.source.is_private(&full) && !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        if files.len() > context::MAX_CHANGED_DIAGNOSTIC_FILES {
+            return Some(Vec::new());
+        }
+        (!files.is_empty()).then_some(files)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str) -> FileRef {
+        FileRef {
+            worktree: Some(1),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn changes_collect_distinct_files_or_anything() {
+        let mut changed = Changed::default();
+        changed.add(vec![file("a.rs"), file("b.rs")]);
+        changed.add(vec![file("a.rs")]);
+        assert_eq!(changed.files.len(), 2);
+        assert!(!changed.anything);
+        changed.add(Vec::new());
+        changed.add(vec![file("c.rs")]);
+        assert!(changed.anything && changed.files.is_empty());
+
+        let mut many = Changed::default();
+        many.add(
+            (0..=MAX_PENDING_DIAGNOSTIC_FILES)
+                .map(|index| file(&format!("{index}.rs")))
+                .collect(),
+        );
+        assert!(many.anything && many.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changes_are_debounced_from_the_first_report() {
+        let (sender, receiver) = mpsc::unbounded();
+        let mut changes = std::pin::pin!(debounced_changes(receiver));
+        let started = std::time::Instant::now();
+        sender.unbounded_send(vec![file("a.rs")]).unwrap();
+        let later = sender.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            later.unbounded_send(vec![file("b.rs")]).unwrap();
+        });
+        let first = changes.next().await.unwrap();
+        let waited = started.elapsed();
+        assert!(waited >= context::DIAGNOSTICS_DEBOUNCE, "{waited:?}");
+        assert_eq!(
+            first
+                .files
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>(),
+            ["a.rs", "b.rs"]
+        );
+        sender.unbounded_send(vec![file("c.rs")]).unwrap();
+        drop(sender);
+        let second = changes.next().await.unwrap();
+        assert_eq!(second.files.len(), 1);
+        assert!(changes.next().await.is_none());
     }
 }
