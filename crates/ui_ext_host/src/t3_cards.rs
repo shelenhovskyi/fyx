@@ -340,13 +340,16 @@ impl Render for T3Card {
             .child(
                 h_flex()
                     .gap_2()
+                    .items_start()
+                    .flex_1()
                     .min_w_0()
                     .child(
                         Icon::new(IconName::Terminal)
                             .size(IconSize::Small)
                             .color(Color::Warning),
                     )
-                    .child(Label::new(self.title())),
+                    // A long terminal title wraps instead of running past the card's edge.
+                    .child(div().flex_1().min_w_0().child(Label::new(self.title()))),
             )
             .child(
                 IconButton::new("fyx-ui-t3-close", IconName::Close)
