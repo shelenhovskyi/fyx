@@ -1833,6 +1833,18 @@ impl Harness {
         self.store.data().context.opened.clone()
     }
 
+    /// What the language servers report (0.4 `context.diagnostics`); while the extension
+    /// watches, [`Harness::deliver_io`] delivers `diagnostics-changed` with the files whose
+    /// entries changed.
+    pub fn set_diagnostics(&mut self, files: Vec<ui_ext::context::FileDiagnostics>) {
+        self.store.data_mut().context.set_diagnostics(files);
+    }
+
+    /// Whether the extension watches diagnostics.
+    pub fn watching_diagnostics(&self) -> bool {
+        self.store.data().context.is_watching_diagnostics()
+    }
+
     /// The undecided `review` proposals (0.4), by id. Their paths need
     /// [`Harness::set_worktrees`].
     pub fn proposals(&self) -> Vec<(u64, ui_ext::review::Proposal)> {
@@ -2078,6 +2090,17 @@ impl Harness {
         }
         while let Some(event) = self.store.data_mut().context.events.pop_front() {
             let event = ui_ext::network::IoEvent::Context(event);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(files) = self.store.data_mut().context.diagnostics_events.pop_front() {
+            let event = ui_ext::network::IoEvent::DiagnosticsChanged(files);
             let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };

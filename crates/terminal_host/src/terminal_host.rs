@@ -8,6 +8,7 @@ mod host;
 mod notification;
 mod profiles;
 mod pseudo;
+mod relay;
 mod sessions;
 mod sessions_panel;
 mod settings;
@@ -23,6 +24,9 @@ pub use discovery::{
     init_discovery,
 };
 pub use profiles::TerminalIntegration;
+pub use relay::{
+    RelayDelivery, RelayReply, init_relay, relay_binary, set_relay_channels, take_relay_requests,
+};
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
 pub use settings::{FyxTerminalSettings, init_shell_integration};
 pub use t3::{Share, ShareBridge, ShareTarget, set_share_bridge, shares_changed};

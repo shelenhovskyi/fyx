@@ -410,13 +410,13 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         net::IoEvent::Context(context) => {
             Some(wit_io::IoEvent::ContextChanged(wit_editor_context(context)))
         }
+        net::IoEvent::DiagnosticsChanged(files) => Some(wit_io::IoEvent::DiagnosticsChanged(
+            files.into_iter().map(wit_file_ref).collect(),
+        )),
         net::IoEvent::ReviewDecided(id, outcome) => Some(wit_io::IoEvent::ReviewDecided((
             id,
             outcome.map(wit_review_outcome),
         ))),
-        // The harness's `context.diagnostics` answers `unavailable` (staged ahead of it), so no
-        // change is ever reported.
-        net::IoEvent::DiagnosticsChanged(_) => None,
     }
 }
 
@@ -1514,26 +1514,61 @@ impl wit_context::Host for State {
             .map_err(Into::into))
     }
 
-    // Staged in the 0.4 WIT ahead of the host side (design.md §B.11), as in the host.
+    /// `workspace:diagnostics`, on [`crate::context::FakeContext`]'s report.
     fn diagnostics(
         &mut self,
-        _path: Option<wit::FileRef>,
+        path: Option<wit::FileRef>,
     ) -> wasmtime::Result<Result<wit_context::DiagnosticsSnapshot, wit_host::HostError>> {
-        Ok(Err(diagnostics_unavailable()))
+        self.count_lifted_text(path.as_ref().map_or(0, |path| path.path.len()))?;
+        if let Err(error) = self.permit(ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS) {
+            return Ok(Err(error));
+        }
+        let path = path.map(model_file_ref);
+        Ok(self
+            .context
+            .diagnostics(path.as_ref())
+            .map(wit_diagnostics_snapshot)
+            .map_err(Into::into))
     }
 
-    fn watch_diagnostics(
-        &mut self,
-        _on: bool,
-    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
-        Ok(Err(diagnostics_unavailable()))
+    fn watch_diagnostics(&mut self, on: bool) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        if on && let Err(error) = self.permit(ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS) {
+            return Ok(Err(error));
+        }
+        self.context.watch_diagnostics(on);
+        Ok(Ok(()))
     }
 }
 
-fn diagnostics_unavailable() -> wit_host::HostError {
-    wit_host::HostError {
-        code: wit_host::HostErrorCode::Unavailable,
-        message: "diagnostics are not available yet".into(),
+fn wit_diagnostics_snapshot(
+    snapshot: ui_ext::context::DiagnosticsSnapshot,
+) -> wit_context::DiagnosticsSnapshot {
+    use ui_ext::context::DiagnosticSeverity;
+    wit_context::DiagnosticsSnapshot {
+        files: snapshot
+            .files
+            .into_iter()
+            .map(|file| wit_context::FileDiagnostics {
+                path: wit_file_ref(file.path),
+                diagnostics: file
+                    .diagnostics
+                    .into_iter()
+                    .map(|entry| wit_context::Diagnostic {
+                        range: wit_text_range(entry.range),
+                        severity: match entry.severity {
+                            DiagnosticSeverity::Error => wit_context::Severity::Error,
+                            DiagnosticSeverity::Warning => wit_context::Severity::Warning,
+                            DiagnosticSeverity::Information => wit_context::Severity::Information,
+                            DiagnosticSeverity::Hint => wit_context::Severity::Hint,
+                        },
+                        message: entry.message,
+                        source: entry.source,
+                        code: entry.code,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        truncated: snapshot.truncated,
     }
 }
 

@@ -7,7 +7,7 @@ use ui_ext_sdk::{LogLevel, context, listeners, log, review};
 
 use crate::ide::{
     self, Diagnostic, DiffAnswer, FileRef, IdeHost, McpError, Position, ReviewDecision, Roots,
-    TextRange,
+    Severity, TextRange,
 };
 
 /// The tool session agent review names `openDiff`'s proposals by, until the hooks (through the
@@ -55,6 +55,25 @@ pub(crate) fn register_tools() {
             LogLevel::Warn,
             &format!("the IDE tools were not registered: {}", error.message),
         );
+    }
+}
+
+/// Starts `diagnostics-changed`, which refreshes the cached `getDiagnostics` answers.
+pub(crate) fn watch_diagnostics() {
+    if let Err(error) = context::watch_diagnostics(true) {
+        log(
+            LogLevel::Warn,
+            &format!("diagnostics changes are not watched: {}", error.message),
+        );
+    }
+}
+
+fn severity(severity: context::Severity) -> Severity {
+    match severity {
+        context::Severity::Error => Severity::Error,
+        context::Severity::Warning => Severity::Warning,
+        context::Severity::Information => Severity::Information,
+        context::Severity::Hint => Severity::Hint,
     }
 }
 
@@ -151,9 +170,37 @@ impl IdeHost for SdkHost {
         }
     }
 
-    /// The staged 0.4 WIT has no diagnostics source yet (a `context` read is planned).
-    fn diagnostics(&self, _only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)> {
-        Vec::new()
+    /// `context.diagnostics`, by absolute path; a refused read answers no files.
+    fn diagnostics(&self, only: Option<&FileRef>) -> Vec<(String, Vec<Diagnostic>)> {
+        let only = only.map(sdk_file_ref);
+        let snapshot = match context::diagnostics(only.as_ref()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log(
+                    LogLevel::Warn,
+                    &format!("diagnostics are not readable: {}", error.message),
+                );
+                return Vec::new();
+            }
+        };
+        snapshot
+            .files
+            .into_iter()
+            .filter_map(|file| {
+                let absolute = context::absolute_path(&file.path).ok()?;
+                let entries = file
+                    .diagnostics
+                    .into_iter()
+                    .map(|entry| Diagnostic {
+                        range: text_range(entry.range),
+                        severity: severity(entry.severity),
+                        message: entry.message,
+                        source: entry.source,
+                    })
+                    .collect();
+                Some((absolute, entries))
+            })
+            .collect()
     }
 
     fn open(&mut self, file: &FileRef, focus: bool) -> Result<(), String> {
@@ -223,6 +270,7 @@ mod tests {
         let [
             HostEffect::Listener(ListenerEffect::RegisterTools { listener, tools }),
             HostEffect::Context(ContextEffect::Watch(true)),
+            HostEffect::Context(ContextEffect::WatchDiagnostics(true)),
         ] = effects.as_slice()
         else {
             panic!("{effects:?}");
@@ -316,6 +364,61 @@ mod tests {
             .handle_io(IoEvent::ContextChanged(editor))
             .unwrap();
         assert!(take_host_effects().is_empty());
+        set_worktree_roots(&[]);
+    }
+
+    #[test]
+    fn diagnostics_are_read_and_refreshed() {
+        use ui_ext_sdk::context::{Diagnostic, FileDiagnostics, Severity, set_diagnostics};
+        set_worktree_roots(&[(1, "/work/app")]);
+        let report = |message: &str| {
+            vec![FileDiagnostics {
+                path: ui_ext_sdk::FileRef {
+                    worktree: Some(1),
+                    path: "src/a.rs".into(),
+                },
+                diagnostics: vec![Diagnostic {
+                    range: ui_ext_sdk::TextRange {
+                        start: ui_ext_sdk::Position { line: 3, column: 4 },
+                        end: ui_ext_sdk::Position { line: 3, column: 9 },
+                    },
+                    severity: Severity::Error,
+                    message: message.into(),
+                    source: Some("rustc".into()),
+                    code: Some("E0308".into()),
+                }],
+            }]
+        };
+        let mut extension = ClaudeCode::new();
+        set_diagnostics(report("mismatched types"));
+        take_host_effects();
+        let answer = |extension: &mut ClaudeCode, call_id| {
+            extension
+                .handle_io(call(call_id, "getDiagnostics", "{}"))
+                .unwrap();
+            let answers = responses(take_host_effects());
+            let [(_, Ok(result))] = answers.as_slice() else {
+                panic!("one answer");
+            };
+            let result: serde_json::Value = serde_json::from_str(result).unwrap();
+            let text = result["content"][0]["text"].as_str().unwrap().to_owned();
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()
+        };
+        let first = answer(&mut extension, 1);
+        assert_eq!(first[0]["uri"], "file:///work/app/src/a.rs", "{first}");
+        assert_eq!(first[0]["diagnostics"][0]["message"], "mismatched types");
+        // Cached until the host says the diagnostics changed.
+        set_diagnostics(report("fixed differently"));
+        assert_eq!(answer(&mut extension, 2), first);
+        extension
+            .handle_io(IoEvent::DiagnosticsChanged(Vec::new()))
+            .unwrap();
+        let refreshed = answer(&mut extension, 3);
+        assert_eq!(
+            refreshed[0]["diagnostics"][0]["message"],
+            "fixed differently"
+        );
+        set_diagnostics(Vec::new());
         set_worktree_roots(&[]);
     }
 

@@ -70,6 +70,9 @@ enum Job {
 /// The discovery-file writer. Cheap to call from any thread.
 pub struct DiscoveryWriter {
     jobs: Mutex<mpsc::Sender<Job>>,
+    /// Open listeners' port and token, for `${listen.<name>.…}` in terminal env; kept here, not on
+    /// the writer thread, so a terminal started right after `opened` sees it.
+    listeners: Mutex<BTreeMap<Key, (u16, String)>>,
 }
 
 impl DiscoveryWriter {
@@ -91,6 +94,7 @@ impl DiscoveryWriter {
             .expect("spawn the discovery-file writer");
         Arc::new(Self {
             jobs: Mutex::new(jobs),
+            listeners: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -102,11 +106,20 @@ impl DiscoveryWriter {
 
     /// A listener opened, or its granted files changed: write exactly `listener.files`.
     pub fn opened(&self, extension_id: &str, listener: OpenListener) {
+        if let Ok(mut listeners) = self.listeners.lock() {
+            listeners.insert(
+                (extension_id.to_owned(), listener.name.clone()),
+                (listener.port, listener.token.clone()),
+            );
+        }
         self.send(Job::Opened(extension_id.to_owned(), listener));
     }
 
     /// A listener closed: remove every file written for it.
     pub fn closed(&self, extension_id: &str, listener: &str) {
+        if let Ok(mut listeners) = self.listeners.lock() {
+            listeners.remove(&(extension_id.to_owned(), listener.to_owned()));
+        }
         self.send(Job::Closed(extension_id.to_owned(), listener.to_owned()));
     }
 
@@ -114,8 +127,20 @@ impl DiscoveryWriter {
         self.send(Job::Context(context));
     }
 
+    /// `extension_id`'s open listener `name`: its port and host token.
+    pub fn listener(&self, extension_id: &str, name: &str) -> Option<(u16, String)> {
+        self.listeners
+            .lock()
+            .ok()?
+            .get(&(extension_id.to_owned(), name.to_owned()))
+            .cloned()
+    }
+
     /// Removes every file, waiting at most `timeout`.
     pub fn close_all(&self, timeout: Duration) {
+        if let Ok(mut listeners) = self.listeners.lock() {
+            listeners.clear();
+        }
         let (done, wait) = mpsc::channel();
         self.send(Job::CloseAll(done));
         wait.recv_timeout(timeout).ok();
@@ -565,6 +590,12 @@ mod tests {
             accounts: BTreeMap::new(),
         });
         discovery.opened("fyx-claude-code", listener(4100, vec![claude_lock()]));
+        assert_eq!(
+            discovery.listener("fyx-claude-code", "ide"),
+            Some((4100, "secret".into())),
+            "known at once, for `${{listen.ide.port}}`"
+        );
+        assert_eq!(discovery.listener("other", "ide"), None);
         discovery.flush();
         let default = home.join(".claude/ide/4100.lock");
         assert_eq!(
@@ -616,6 +647,7 @@ mod tests {
             },
         );
         discovery.closed("fyx-claude-code", "ide");
+        assert_eq!(discovery.listener("fyx-claude-code", "ide"), None);
         discovery.flush();
         assert!(!work.join("ide/4200.lock").exists());
         let gemini = tmp.join(format!(

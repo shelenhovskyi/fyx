@@ -51,14 +51,19 @@ token_in_env = false
 reason = "Lets Gemini CLI in your terminal read your open files and propose edits."
 
 # The CLI wants {port: number, workspacePath: "<root>:<root>", authToken, ideInfo: {name,
-# displayName}}; without ideInfo it refuses IDE mode outside the editors it knows. The kit
-# cannot write a number, a nested object or a delimiter-joined list yet. The spec's POSIX dir,
-# gemini-ide-<uid>, puts a placeholder inside a folder name, which the kit refuses. So this
-# uses ${tmp}/gemini/ide, which the CLI reads on every OS (on Windows it is the spec's dir; on
-# POSIX it is the CLI's fallback). See the gaps in src/compat/README.md.
+# displayName}}; without ideInfo it refuses IDE mode outside the editors it knows. A whole
+# "${port}" is written as a number, and "${worktrees.joined}" joins the roots with the OS path
+# delimiter. The spec's POSIX dir, gemini-ide-<uid>, puts a placeholder inside a folder name,
+# which the kit refuses. So this uses ${tmp}/gemini/ide, which the CLI reads on every OS (on
+# Windows it is the spec's dir; on POSIX it is the CLI's fallback). See src/compat/README.md.
 [[fyx_ui.discovery_files]]
 listener = "ide"
 dir = "${tmp}/gemini/ide"
 name = "gemini-ide-server-${pid}-${port}.json"
-content = { port = "${port}", workspacePath = "${worktrees}", authToken = "${token}" }
 reason = "Gemini CLI finds Fyx's IDE server through this file."
+
+[fyx_ui.discovery_files.content]
+port = "${port}"
+workspacePath = "${worktrees.joined}"
+authToken = "${token}"
+ideInfo = { name = "fyx", displayName = "Fyx" }
