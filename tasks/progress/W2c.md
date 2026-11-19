@@ -31,8 +31,7 @@ Older history: `archive/W2c.md`.
   3. `reason` for `[[fyx_ui.processes]]` and `[fyx_ui.network]`, 0.4-only. `fyx_ext/src/manifest.rs`
      (W4) also parses `processes`. Plan: a `deserialize_with` that strips `reason` before
      `ProcessSpec` (deny_unknown_fields), with the reasons kept beside it; refused below 0.4.
-  4. `fyx_registry` tiers and `capability-tiers.json` for the 0.4 capabilities, with W10's 5.21
-     (local_d0b39c8a-…): T3 counts as T2 for the release tier.
+  4. Done: fyx_registry tiers for 0.4 (294ce6935c, which pairs with W10 9bdf8903a4).
 - **Gotchas:** for ui_ext_wasm tests, patch `fyx_ext_harness` locally with the arms above, then
   `git checkout -- crates/fyx_ext_harness`. Targets: `E:/fyx-targets/w2c` (ui_ext_wasm,
   ui_ext_host) and `E:/fyx-targets/w2c-light` (ui_ext, fyx_registry). Bash heredocs with
