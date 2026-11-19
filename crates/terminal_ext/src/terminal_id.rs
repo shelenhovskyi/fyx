@@ -90,6 +90,49 @@ pub struct TerminalExt {
     id: TerminalId,
     token: Option<TerminalToken>,
     pub(crate) shared: Arc<Shared>,
+    pseudo: Option<Pseudo>,
+}
+
+/// The backend of a pseudo-terminal (`fyx:ui` §B.2): an extension. It gets what the user types and
+/// the size; upstream never calls it with the terminal's own answers to output.
+pub trait PseudoBackend: Send + Sync + 'static {
+    /// Called on the main thread; must only queue.
+    fn input(&self, bytes: &[u8]);
+    /// Called on the main thread whenever the grid's size changes; must only queue.
+    fn resized(&self, cols: u16, rows: u16);
+}
+
+struct Pseudo(Arc<dyn PseudoBackend>);
+
+impl fmt::Debug for Pseudo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Pseudo(..)")
+    }
+}
+
+/// Which extension a terminal belongs to, for the tab's source line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionOrigin {
+    /// The extension is the backend (§B.2).
+    Pseudo { extension: String },
+    /// The extension started a declared program in it (§B.3).
+    Created { extension: String },
+}
+
+impl ExtensionOrigin {
+    pub fn extension(&self) -> &str {
+        match self {
+            Self::Pseudo { extension } | Self::Created { extension } => extension,
+        }
+    }
+
+    /// "pseudo-terminal of extension acme", "started by extension acme".
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Pseudo { extension } => format!("pseudo-terminal of extension {extension}"),
+            Self::Created { extension } => format!("started by extension {extension}"),
+        }
+    }
 }
 
 /// State shared between the terminal and its pty tap on the IO thread.
@@ -97,12 +140,57 @@ pub struct TerminalExt {
 pub(crate) struct Shared {
     pub(crate) inbox: Mutex<Inbox>,
     pub(crate) status: Mutex<StatusModel>,
+    pub(crate) origin: Mutex<Option<ExtensionOrigin>>,
 }
 
 impl TerminalExt {
     /// For terminals without a process (display-only, pseudo-terminals): an id, no token, no env.
     pub fn new() -> Self {
         Self::with_token(None)
+    }
+
+    /// For a pseudo-terminal: no token, no env, and input and resizes go to `backend`. The host
+    /// builds a display-only `Terminal` and puts this in its `fyx` field.
+    pub fn pseudo(extension: &str, backend: Arc<dyn PseudoBackend>) -> Self {
+        let mut this = Self::with_token(None);
+        this.pseudo = Some(Pseudo(backend));
+        this.set_origin(Some(ExtensionOrigin::Pseudo {
+            extension: extension.to_owned(),
+        }));
+        this
+    }
+
+    pub fn is_pseudo(&self) -> bool {
+        self.pseudo.is_some()
+    }
+
+    /// Upstream hook in `Terminal::write_to_pty`: a pseudo-terminal's input goes to its backend.
+    /// Returns whether it did (then nothing else must see it).
+    pub fn forward_input(&self, bytes: &[u8]) -> bool {
+        match &self.pseudo {
+            Some(Pseudo(backend)) => {
+                backend.input(bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Upstream hook where the grid is resized.
+    pub fn forward_resize(&self, cols: usize, rows: usize) {
+        if let Some(Pseudo(backend)) = &self.pseudo {
+            let clamp = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
+            backend.resized(clamp(cols), clamp(rows));
+        }
+    }
+
+    /// The extension the terminal belongs to, drawn on its tab.
+    pub fn origin(&self) -> Option<ExtensionOrigin> {
+        lock(&self.shared.origin).clone()
+    }
+
+    pub fn set_origin(&self, origin: Option<ExtensionOrigin>) {
+        *lock(&self.shared.origin) = origin;
     }
 
     /// For local pty terminals: allocates the id and token and writes Fyx's variables into the
@@ -135,7 +223,9 @@ impl TerminalExt {
             shared: Arc::new(Shared {
                 inbox: Mutex::default(),
                 status: Mutex::default(),
+                origin: Mutex::default(),
             }),
+            pseudo: None,
         }
     }
 

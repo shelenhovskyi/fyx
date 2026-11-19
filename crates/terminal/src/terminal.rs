@@ -1657,6 +1657,19 @@ impl Terminal {
     }
 
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
+        // fyx: a pseudo-terminal never answers its extension's output (clipboard, reports)
+        if self.fyx.is_pseudo()
+            && matches!(
+                event,
+                TerminalBackendEvent::ClipboardStore(_)
+                    | TerminalBackendEvent::ClipboardLoad(_)
+                    | TerminalBackendEvent::PtyWrite(_)
+                    | TerminalBackendEvent::TextAreaSizeRequest(_)
+                    | TerminalBackendEvent::ColorRequest(..)
+            )
+        {
+            return;
+        }
         match event {
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
@@ -1754,6 +1767,9 @@ impl Terminal {
                 let columns_changed =
                     self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
+                // fyx: a pseudo-terminal's size goes to its extension
+                let (cols, rows) = (new_bounds.num_columns(), new_bounds.num_lines());
+                self.fyx.forward_resize(cols, rows);
 
                 if let TerminalType::Pty {
                     resources: PtyResources::Active(pty_tx),
@@ -2207,6 +2223,10 @@ impl Terminal {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.pty_write_log.borrow_mut().push(input.to_vec());
+        // fyx: a pseudo-terminal's input goes to its extension
+        if self.fyx.forward_input(&input) {
+            return;
+        }
         if let TerminalType::Pty {
             resources: PtyResources::Active(pty_tx),
             ..

@@ -52,11 +52,16 @@ impl RateLimiter {
     }
 
     pub fn allow_at(&mut self, now: Instant) -> bool {
+        self.allow_cost_at(1.0, now)
+    }
+
+    /// Takes `cost` tokens (e.g. bytes) if there are that many.
+    pub fn allow_cost_at(&mut self, cost: f64, now: Instant) -> bool {
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         self.last = now;
         self.tokens = (self.tokens + elapsed * self.rate.per_second).min(self.rate.burst);
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
+        if self.tokens >= cost {
+            self.tokens -= cost;
             true
         } else {
             false
