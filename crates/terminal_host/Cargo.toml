@@ -14,7 +14,9 @@ path = "src/terminal_host.rs"
 doctest = false
 
 [dependencies]
+futures.workspace = true
 gpui.workspace = true
+ui_ext = { workspace = true, features = ["t2"] }
 log.workspace = true
 release_channel.workspace = true
 settings.workspace = true

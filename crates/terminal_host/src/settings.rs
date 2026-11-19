@@ -41,7 +41,10 @@ mod tests {
         assert!(notifications_enabled(cx), "on by default");
         SettingsStore::update_global(cx, |store, cx| {
             store
-                .set_user_settings(r#"{ "fyx": { "terminal": { "notifications": false } } }"#, cx)
+                .set_user_settings(
+                    r#"{ "fyx": { "terminal": { "notifications": false } } }"#,
+                    cx,
+                )
                 .result()
                 .unwrap();
         });

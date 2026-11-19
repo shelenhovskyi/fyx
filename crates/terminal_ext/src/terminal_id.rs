@@ -5,12 +5,13 @@ use std::fmt;
 use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use rand::TryRngCore as _;
 
 use crate::inbox::Inbox;
 use crate::osc::OscEvent;
-use crate::status::{StatusModel, TerminalStatus};
+use crate::status::{ExtensionStatus, StatusModel, TerminalStatus};
 use rand::rngs::OsRng;
 
 /// Env var with the terminal's [`TerminalId`], in decimal.
@@ -154,6 +155,14 @@ impl TerminalExt {
         lock(&self.shared.status).current()
     }
 
+    /// A `Send + Sync` handle to this terminal's status, for hosts off the main thread.
+    pub fn status_handle(&self) -> StatusHandle {
+        StatusHandle {
+            id: self.id,
+            shared: self.shared.clone(),
+        }
+    }
+
     /// The user has seen the terminal (it got focus).
     pub fn clear_attention(&self) {
         lock(&self.shared.status).clear_attention();
@@ -165,6 +174,29 @@ impl TerminalExt {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .drain()
+    }
+}
+
+/// See [`TerminalExt::status_handle`]. Setting a status does not repaint the tab: the caller
+/// sends the terminal a `Wakeup`.
+#[derive(Clone, Debug)]
+pub struct StatusHandle {
+    id: TerminalId,
+    shared: Arc<Shared>,
+}
+
+impl StatusHandle {
+    pub fn id(&self) -> TerminalId {
+        self.id
+    }
+
+    pub fn status(&self) -> Option<TerminalStatus> {
+        lock(&self.shared.status).current()
+    }
+
+    /// `None` removes the extension's status.
+    pub fn set_extension_status(&self, extension: &str, status: Option<ExtensionStatus>) {
+        lock(&self.shared.status).set_extension_status(extension, status, Instant::now());
     }
 }
 
