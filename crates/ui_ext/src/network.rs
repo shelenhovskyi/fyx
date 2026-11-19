@@ -131,6 +131,11 @@ pub enum IoEvent {
     ApprovalAnswered(u64, Option<crate::approvals::ApprovalOption>),
     /// fyx:ui 0.4 `network:listen`: what a listener's clients sent (design wit-0.4 §B.7).
     Listener(crate::integration::ListenerEvent),
+    /// fyx:ui 0.4 `context:editor`: the editor context changed, while watching (§B.11).
+    Context(crate::context::EditorContext),
+    /// fyx:ui 0.4 `review:propose`: proposal `id` was decided, or its review ended without a
+    /// decision (§B.10).
+    ReviewDecided(u64, Result<crate::review::ReviewOutcome, String>),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).

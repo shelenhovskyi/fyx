@@ -56,7 +56,8 @@ pub(crate) const MCP_PATH: &str = "/mcp";
 /// What Claude Code asks for on its IDE websocket.
 pub(crate) const MCP_SUBPROTOCOL: &str = "mcp";
 /// Supported MCP revisions, newest first; `initialize` echoes the client's when it is one.
-pub(crate) const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+pub(crate) const PROTOCOL_VERSIONS: [&str; 4] =
+    ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const SESSION_HEADER: &str = "mcp-session-id";
 const MAX_HEAD_BYTES: usize = 16 << 10;
 const MAX_NOTIFICATION_METHOD_BYTES: usize = 128;
@@ -93,6 +94,50 @@ fn is_mcp(protocol: ListenerProtocol) -> bool {
         protocol,
         ListenerProtocol::McpWebsocket | ListenerProtocol::McpStreamableHttp
     )
+}
+
+/// `listeners.register-tools`' checks: an `mcp-*` listener, at most [`MAX_TOOLS`] uniquely named
+/// tools, each with a JSON object schema.
+fn check_tools(spec: &ListenerSpec, tools: &[ToolDef]) -> Result<(), HostError> {
+    let name = &spec.name;
+    if !is_mcp(spec.protocol) {
+        return Err(invalid(format!("listener {name:?} does not speak MCP")));
+    }
+    if tools.len() > MAX_TOOLS {
+        return Err(host_error(
+            HostErrorCode::LimitExceeded,
+            format!("{} tools, at most {MAX_TOOLS}", tools.len()),
+        ));
+    }
+    for (index, tool) in tools.iter().enumerate() {
+        if !is_tool_name(&tool.name) {
+            return Err(invalid(format!(
+                "tool name {:?} must be [A-Za-z0-9_-]{{1,64}}",
+                tool.name
+            )));
+        }
+        if tools[..index].iter().any(|other| other.name == tool.name) {
+            return Err(invalid(format!("tool {:?} is registered twice", tool.name)));
+        }
+        if tool.description.len() > MAX_TOOL_DESCRIPTION_BYTES
+            || tool.input_schema.len() > MAX_MESSAGE_BYTES
+        {
+            return Err(host_error(
+                HostErrorCode::LimitExceeded,
+                format!("tool {:?} is too large", tool.name),
+            ));
+        }
+        match serde_json::from_str::<Value>(&tool.input_schema) {
+            Ok(Value::Object(_)) => {}
+            _ => {
+                return Err(invalid(format!(
+                    "tool {:?}: the input schema must be a JSON object",
+                    tool.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Why a connection is refused before the extension sees it: an HTTP status.
@@ -529,11 +574,16 @@ impl ListenerSet {
         discovery_files: Vec<DiscoveryFileSpec>,
     ) -> std::io::Result<u16> {
         if let Ok(open) = self.inner.listener(&spec.name) {
-            *open
-                .discovery_files
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = discovery_files;
-            if let Some(observer) = &self.inner.observer {
+            let changed = {
+                let mut files = open
+                    .discovery_files
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let changed = *files != discovery_files;
+                *files = discovery_files;
+                changed
+            };
+            if changed && let Some(observer) = &self.inner.observer {
                 observer.opened(&self.inner.extension_id, &open.open_listener());
             }
             return Ok(open.port);
@@ -648,43 +698,7 @@ impl ListenerSet {
     /// `notifications/tools/list_changed`.
     pub(crate) fn register_tools(&self, name: &str, tools: Vec<ToolDef>) -> Result<(), HostError> {
         let listener = self.inner.listener(name)?;
-        if !is_mcp(listener.spec.protocol) {
-            return Err(invalid(format!("listener {name:?} does not speak MCP")));
-        }
-        if tools.len() > MAX_TOOLS {
-            return Err(host_error(
-                HostErrorCode::LimitExceeded,
-                format!("{} tools, at most {MAX_TOOLS}", tools.len()),
-            ));
-        }
-        for (index, tool) in tools.iter().enumerate() {
-            if !is_tool_name(&tool.name) {
-                return Err(invalid(format!(
-                    "tool name {:?} must be [A-Za-z0-9_-]{{1,64}}",
-                    tool.name
-                )));
-            }
-            if tools[..index].iter().any(|other| other.name == tool.name) {
-                return Err(invalid(format!("tool {:?} is registered twice", tool.name)));
-            }
-            if tool.description.len() > MAX_TOOL_DESCRIPTION_BYTES
-                || tool.input_schema.len() > MAX_MESSAGE_BYTES
-            {
-                return Err(host_error(
-                    HostErrorCode::LimitExceeded,
-                    format!("tool {:?} is too large", tool.name),
-                ));
-            }
-            match serde_json::from_str::<Value>(&tool.input_schema) {
-                Ok(Value::Object(_)) => {}
-                _ => {
-                    return Err(invalid(format!(
-                        "tool {:?}: the input schema must be a JSON object",
-                        tool.name
-                    )));
-                }
-            }
-        }
+        check_tools(&listener.spec, &tools)?;
         let changed = {
             let mut registered = listener
                 .tools
@@ -813,6 +827,340 @@ impl ListenerSet {
 impl Drop for ListenerSet {
     fn drop(&mut self) {
         self.close_all();
+    }
+}
+
+/// The instance of each extension whose listeners are open, by observer and extension id: a
+/// reloaded instance takes over when the registry starts it ([`ListenersHandle::activate`]), and
+/// the old one closes its listeners first, so the observer hears `closed` before the new
+/// `opened`. Without an observer there is no takeover (tests).
+type ActiveInstances = HashMap<(usize, Arc<str>), (u64, Weak<ListenersHandle>)>;
+static ACTIVE_INSTANCES: std::sync::LazyLock<Mutex<ActiveInstances>> =
+    std::sync::LazyLock::new(Default::default);
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+/// One instance's `network:listen` (plan 5.11): the manifest's listeners and discovery files,
+/// the grants that decide which are open, and the tools registered for each. Listeners open when
+/// the registry starts the instance, after consent, and follow the grants from then on; they all
+/// close when the instance goes. Events reach `handle-io` in order ([`ListenersHandle::forward`]).
+pub(crate) struct ListenersHandle {
+    extension_id: Arc<str>,
+    specs: Vec<ListenerSpec>,
+    discovery_files: Vec<DiscoveryFileSpec>,
+    broker: Option<Arc<dyn crate::permissions::CapabilityCheck>>,
+    observer: Option<Arc<dyn ListenerObserver>>,
+    set: ListenerSet,
+    receiver: Mutex<Option<mpsc::UnboundedReceiver<ListenerEvent>>>,
+    /// The tokio runtime the instance runs on, taken in [`ListenersHandle::forward`].
+    runtime: Mutex<Option<tokio::runtime::Handle>>,
+    /// `register-tools` by listener, kept across a close so a listener granted again has them.
+    tools: Mutex<HashMap<String, Vec<ToolDef>>>,
+    instance: u64,
+    active: std::sync::atomic::AtomicBool,
+    /// Held while the open listeners are brought in line with the grants.
+    refreshing: Mutex<()>,
+    /// When a client last sent something the extension handles (§B.11's focus rule).
+    last_request: Arc<Mutex<Option<Instant>>>,
+}
+
+impl ListenersHandle {
+    /// `specs` and `discovery_files` are empty for a component without the 0.4 `listeners`
+    /// import or one that does not declare `network:listen`.
+    pub(crate) fn new(
+        extension_id: Arc<str>,
+        specs: Vec<ListenerSpec>,
+        discovery_files: Vec<DiscoveryFileSpec>,
+        broker: Option<Arc<dyn crate::permissions::CapabilityCheck>>,
+        observer: Option<Arc<dyn ListenerObserver>>,
+    ) -> Self {
+        let (sender, receiver) = mpsc::unbounded();
+        let last_request: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let set = ListenerSet::new(
+            extension_id.clone(),
+            Arc::new({
+                let last_request = last_request.clone();
+                move |event| {
+                    if !matches!(event, ListenerEvent::McpCancelled(_)) {
+                        *last_request.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(Instant::now());
+                    }
+                    sender.unbounded_send(event).ok();
+                }
+            }),
+            observer.clone(),
+        );
+        Self {
+            extension_id,
+            specs,
+            discovery_files,
+            broker,
+            observer,
+            set,
+            receiver: Mutex::new(Some(receiver)),
+            runtime: Mutex::default(),
+            tools: Mutex::default(),
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            active: Default::default(),
+            refreshing: Mutex::default(),
+            last_request,
+        }
+    }
+
+    /// Whether a client of one of the listeners sent a call, request or message within `window`.
+    pub(crate) fn requested_within(&self, window: Duration) -> bool {
+        self.last_request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|at| at.elapsed() < window)
+    }
+
+    /// Moves the listeners' events onto the io channel, on the current tokio runtime, which the
+    /// listeners then run on. Once.
+    pub(crate) fn forward(&self, running: &Arc<crate::network::Running>) {
+        *self.runtime.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(tokio::runtime::Handle::current());
+        let Some(mut receiver) = self
+            .receiver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let running = Arc::downgrade(running);
+        tokio::spawn(async move {
+            while let Some(event) = receiver.next().await {
+                let Some(running) = running.upgrade() else {
+                    return;
+                };
+                running
+                    .deliver(crate::network::IoEvent::Listener(event))
+                    .await;
+            }
+        });
+    }
+
+    fn observer_key(&self) -> Option<(usize, Arc<str>)> {
+        self.observer.as_ref().map(|observer| {
+            (
+                Arc::as_ptr(observer) as *const () as usize,
+                self.extension_id.clone(),
+            )
+        })
+    }
+
+    /// The registry started this instance (after consent, at every load and reload): the
+    /// instance it replaced closes its listeners, and this one opens the granted ones.
+    pub(crate) fn activate(self: &Arc<Self>) {
+        if self.specs.is_empty() {
+            return;
+        }
+        if let Some(key) = self.observer_key() {
+            let replaced = ACTIVE_INSTANCES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(key, (self.instance, Arc::downgrade(self)));
+            if let Some((instance, replaced)) = replaced
+                && instance != self.instance
+                && let Some(replaced) = replaced.upgrade()
+            {
+                replaced.deactivate();
+            }
+        }
+        self.active.store(true, Ordering::SeqCst);
+        self.refresh();
+    }
+
+    fn deactivate(&self) {
+        self.active.store(false, Ordering::SeqCst);
+        let _refreshing = self
+            .refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // In manifest order, like the opening.
+        for spec in &self.specs {
+            self.set.close(&spec.name);
+        }
+    }
+
+    fn granted(&self, item: &crate::permissions::ConsentItem) -> bool {
+        use crate::permissions::PermissionState::Granted;
+        self.broker.as_ref().is_some_and(|broker| {
+            broker.state(&self.extension_id, item.capability()) == Granted
+                && broker.item_state(&self.extension_id, item) == Granted
+        })
+    }
+
+    /// Whether a change of `capability` (or one of its items, `network:listen#ide`) may open,
+    /// close or change a listener.
+    pub(crate) fn affected_by(capability: &str) -> bool {
+        let capability = capability
+            .split_once('#')
+            .map_or(capability, |(capability, _)| capability);
+        capability == ui_ext::integration::CAPABILITY_NETWORK_LISTEN
+            || capability == ui_ext::integration::CAPABILITY_DISCOVERY_FILE
+    }
+
+    /// Brings the open listeners in line with the grants: each granted `network:listen#<name>`
+    /// is open with its granted `fs:discovery-file#<name>` files, every other one is closed. An
+    /// open listener keeps its port and token. Nothing opens before [`ListenersHandle::activate`].
+    pub(crate) fn refresh(&self) {
+        use crate::permissions::ConsentItem;
+        let _refreshing = self
+            .refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let active = self.active.load(Ordering::SeqCst);
+        for spec in &self.specs {
+            let runtime = match &runtime {
+                Some(runtime) if active => runtime,
+                _ => {
+                    self.set.close(&spec.name);
+                    continue;
+                }
+            };
+            if !self.granted(&ConsentItem::Listener(spec.name.clone())) {
+                self.set.close(&spec.name);
+                continue;
+            }
+            let files = self
+                .discovery_files
+                .iter()
+                .filter(|file| {
+                    file.listener == spec.name
+                        && self.granted(&ConsentItem::DiscoveryFile(file.name.clone()))
+                })
+                .cloned()
+                .collect();
+            let was_open = self.set.is_open(&spec.name);
+            match self.set.open(runtime, spec, files) {
+                Ok(_) if !was_open => {
+                    let tools = self
+                        .tools
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&spec.name)
+                        .cloned();
+                    if let Some(tools) = tools {
+                        self.set.register_tools(&spec.name, tools).ok();
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!(
+                    "extension {}: listener {:?} did not open: {error}",
+                    self.extension_id,
+                    spec.name
+                ),
+            }
+        }
+    }
+
+    /// The declared listener `name`, if `network:listen` is granted now.
+    fn spec(&self, name: &str) -> Result<&ListenerSpec, HostError> {
+        let spec = self
+            .specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .ok_or_else(|| {
+                host_error(
+                    HostErrorCode::NotPermitted,
+                    format!("no listener {name:?} is declared"),
+                )
+            })?;
+        if !self.granted(&crate::permissions::ConsentItem::Listener(name.into())) {
+            return Err(host_error(
+                HostErrorCode::Denied,
+                format!("listener {name:?} is not granted"),
+            ));
+        }
+        Ok(spec)
+    }
+
+    /// `listeners.register-tools`: kept for the listener, and live at once when it is open.
+    pub(crate) fn register_tools(&self, name: &str, tools: Vec<ToolDef>) -> Result<(), HostError> {
+        let spec = self.spec(name)?;
+        check_tools(spec, &tools)?;
+        self.tools
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.into(), tools.clone());
+        if self.set.is_open(name) {
+            self.set.register_tools(name, tools)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn respond(
+        &self,
+        call_id: u64,
+        outcome: Result<String, McpError>,
+    ) -> Result<(), HostError> {
+        self.set.respond(call_id, outcome)
+    }
+
+    pub(crate) fn notify(
+        &self,
+        name: &str,
+        connection: Option<u64>,
+        method: &str,
+        params: &str,
+    ) -> Result<(), HostError> {
+        self.spec(name)?;
+        self.set.notify(name, connection, method, params)
+    }
+
+    pub(crate) fn send(&self, name: &str, connection: u64, text: &str) -> Result<(), HostError> {
+        self.spec(name)?;
+        self.set.send(name, connection, text)
+    }
+
+    pub(crate) fn reply(
+        &self,
+        request_id: u64,
+        status: u16,
+        body: String,
+    ) -> Result<(), HostError> {
+        self.set.reply(request_id, status, body)
+    }
+
+    /// `${listen.<name>.port}`: only while the listener is open.
+    pub(crate) fn port(&self, name: &str) -> Option<u16> {
+        self.set.port(name)
+    }
+
+    /// `${listen.<name>.token}`: only while it is open, and only for `token_in_env = true`.
+    pub(crate) fn token_for_env(&self, name: &str) -> Option<String> {
+        self.specs
+            .iter()
+            .any(|spec| spec.name == name && spec.token_in_env)
+            .then(|| self.set.token(name))
+            .flatten()
+    }
+}
+
+impl Drop for ListenersHandle {
+    /// The instance is gone (reload, disable, uninstall): its listeners close, in manifest order.
+    fn drop(&mut self) {
+        for spec in &self.specs {
+            self.set.close(&spec.name);
+        }
+        let Some(key) = self.observer_key() else {
+            return;
+        };
+        let mut active = ACTIVE_INSTANCES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if active
+            .get(&key)
+            .is_some_and(|(instance, _)| *instance == self.instance)
+        {
+            active.remove(&key);
+        }
     }
 }
 
@@ -2010,6 +2358,33 @@ mod tests {
                 .await
                 .0,
             404
+        );
+    }
+
+    /// Claude Code 2.1.326's `initialize` as recorded (extensions/fyx_claude_code/src/compat):
+    /// protocol 2025-11-25 with roots, elicitation and tasks. The revision is echoed and only
+    /// `tools` is declared, so the client expects no roots, elicitation or task requests from us.
+    #[tokio::test]
+    async fn mcp_initialize_2025_11_25() {
+        let spec = spec(ListenerProtocol::McpStreamableHttp, bearer_auth());
+        let setup = setup(&spec);
+        let initialize = json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25",
+            "capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}},
+                "tasks":{"requests":{"elicitation":{"create":{}}}}},
+            "clientInfo":{"name":"claude-code","version":"2.1.326"}}});
+        let (status, _, body) = http(
+            setup.port,
+            &post(setup.port, &setup.token, None, &initialize),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let reply: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(reply["id"], 0);
+        assert_eq!(reply["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(
+            reply["result"]["capabilities"],
+            json!({ "tools": { "listChanged": true } })
         );
     }
 
