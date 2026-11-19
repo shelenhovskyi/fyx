@@ -1,9 +1,8 @@
 {
-  "_comment": "Cargo target dir per worktree dir name (.claude/worktrees/<name>), read by .claude/hooks/session-env.sh. Unknown names get no CARGO_TARGET_DIR. On this PC D:/fyx-targets is a junction to E:/fyx-targets.",
+  "_comment": "Cargo target dir per worktree dir name (.claude/worktrees/<name>), read by .claude/hooks/session-env.sh. Unknown names, or a target folder that does not exist, get no CARGO_TARGET_DIR. On this PC D:/fyx-targets/w1..w4 are junctions to D:/fyx-targets-cold.",
   "fyx-w1-rebrand-904c67": "D:/fyx-targets/w1",
-  "fyx-w2-wit-bindings-6f6739": "D:/fyx-targets/w2",
   "fyx-w3-renderer-e20d2b": "D:/fyx-targets/w3",
   "fyx-w4-sdk-demos-5d1497": "D:/fyx-targets/w4",
   "fyx-w5-agent-review-45eb11": "D:/fyx-targets/w5",
-  "fyx-w8-vscode-adapter-6395b4": "E:/fyx-targets/w2c"
+  "fyx-w8-vscode-adapter-6395b4": "D:/fyx-targets/w2c"
 }
