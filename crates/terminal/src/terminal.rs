@@ -1026,6 +1026,7 @@ impl TerminalBuilder {
         );
 
         let terminal = Terminal {
+            fyx: terminal_ext::TerminalExt::new(), // fyx
             task: None,
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
@@ -1147,6 +1148,7 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+            let fyx = terminal_ext::TerminalExt::insert_env(&mut env); // fyx: FYX_TERMINAL_ID/TOKEN
 
             #[derive(Default)]
             struct ShellParams {
@@ -1302,8 +1304,13 @@ impl TerminalBuilder {
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
 
                 //And connect them together
-                let pty_tx =
-                    spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+                let pty_tx = spawn_event_loop(
+                    term.clone(),
+                    events_tx,
+                    pty,
+                    pty_options.drain_on_exit,
+                    &fyx,
+                )?; // fyx
 
                 (
                     TerminalType::Pty {
@@ -1316,6 +1323,7 @@ impl TerminalBuilder {
 
             let no_task = task.is_none();
             let terminal = Terminal {
+                fyx, // fyx
                 task,
                 terminal_type,
                 subprocess,
@@ -1520,6 +1528,7 @@ enum TerminalType {
 }
 
 pub struct Terminal {
+    pub fyx: terminal_ext::TerminalExt, // fyx: Fyx's per-terminal state (id, token, status)
     terminal_type: TerminalType,
     /// Set for non-PTY terminals (see [`HeadlessTerminal`]); owns the spawned
     /// subprocess and the task pumping its output into the grid.
