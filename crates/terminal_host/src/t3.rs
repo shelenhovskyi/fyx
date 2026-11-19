@@ -91,10 +91,15 @@ pub(crate) fn read(id: TerminalId, scope: ReadScope, lines: u16, reply: T3Reply,
                 ReadScope::LastLines => Ok(terminal
                     .last_n_non_empty_lines(usize::from(lines))
                     .join("\n")),
-                // Until shell integration records command blocks (plan 5.17).
-                ReadScope::LastCommand => Err(
-                    "the last command block needs shell integration in this terminal".to_owned(),
-                ),
+                ReadScope::LastCommand => terminal
+                    .fyx
+                    .last_command_block()
+                    .map(|block| block.output)
+                    .ok_or_else(|| {
+                        "no finished command block: the last command needs shell integration in \
+                         this terminal"
+                            .to_owned()
+                    }),
             }
         }
     };

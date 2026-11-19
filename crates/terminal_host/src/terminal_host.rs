@@ -19,7 +19,7 @@ use workspace::Workspace;
 pub use accounts::{FyxAccountsSettings, account_choice};
 pub use profiles::TerminalIntegration;
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
-pub use settings::FyxTerminalSettings;
+pub use settings::{FyxTerminalSettings, init_shell_integration};
 pub use t3::{Share, ShareBridge, ShareTarget, set_share_bridge};
 
 use std::collections::HashMap;

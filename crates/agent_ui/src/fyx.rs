@@ -57,7 +57,7 @@ pub(crate) fn account_badge(
             .gap_0p5()
             .child(Indicator::dot().color(Color::Custom(color(account.account.color, cx))))
             .child(
-                Label::new(account.account.name.clone())
+                Label::new(account.account.name)
                     .size(LabelSize::XSmall)
                     .color(Color::Muted)
                     .single_line(),

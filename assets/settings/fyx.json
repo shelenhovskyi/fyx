@@ -100,6 +100,9 @@
       // Pop up a notification when a terminal program (Claude Code through OSC 7501, for
       // example) waits for you or finishes while the window is in the background.
       "notifications": true,
+      // Load Fyx's shell integration (command blocks, prompt marks) into zsh, bash, fish and
+      // PowerShell. Your own startup files are sourced first and never changed.
+      "shell_integration": true,
     },
     // Several accounts of one tool, each in its own config dir. Fyx only sets the tool's
     // config-dir variable in a terminal or an agent; sign in with the tool's own command.
