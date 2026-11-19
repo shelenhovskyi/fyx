@@ -470,7 +470,8 @@ async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
     };
     let wait = |cx: &mut gpui::TestAppContext| {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while hub.read_with(cx, |hub, _| hub.is_refreshing()) && std::time::Instant::now() < deadline
+        while hub.read_with(cx, |hub, _| hub.is_refreshing())
+            && std::time::Instant::now() < deadline
         {
             cx.run_until_parked();
             std::thread::sleep(Duration::from_millis(10));
@@ -481,7 +482,10 @@ async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
     assert!(!hub.read_with(cx, |hub, _| blocked(hub)), "not due yet");
     hub.update(cx, |hub, cx| hub.refresh_now(cx));
     wait(cx);
-    assert!(hub.read_with(cx, |hub, _| blocked(hub)), "Refresh fetches it");
+    assert!(
+        hub.read_with(cx, |hub, _| blocked(hub)),
+        "Refresh fetches it"
+    );
 }
 
 /// Day 2: after a block of the installed version, the Available row (an older version, still
@@ -1079,7 +1083,12 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
     let written = registry.read_with(cx, |registry, _| registry.approval_writes_done());
     written.await;
     let installed = store.installed_extensions(fs.as_ref()).await.unwrap();
-    assert!(!installed[0].approved.capabilities.contains("workspace:edit"));
+    assert!(
+        !installed[0]
+            .approved
+            .capabilities
+            .contains("workspace:edit")
+    );
     assert!(installed[0].approved.capabilities.contains("ui:status-bar"));
 }
 

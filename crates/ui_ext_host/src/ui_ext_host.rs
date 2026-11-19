@@ -13,6 +13,7 @@
 //! [`DEV_DECORATIONS_ENV`].
 
 mod agent_observe;
+pub mod approvals;
 mod backend;
 mod canvas;
 mod canvas_texture;
