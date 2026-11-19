@@ -18,24 +18,30 @@ Older history: `archive/W2c.md`.
     one.
   - `ui_ext::terminal::in_account_dirs(path, dirs)` compares paths as written and as resolved.
 
-## Handoff (2026-11-19, twelfth context)
+## Handoff (2026-11-20, final before the move to a Claude Project)
 
-- **Branch** claude/fyx-w2c-host-0-2-cbde2c (push every ready before reporting it).
-- **5.12 relay, extension side (§B.9), 38a8d578db:** `ui_ext_wasm/src/relay.rs` RelayHandle;
-  `UiExtension::relay_request(channel, terminal, argv, stdin, RelayReply) -> Result<u64,
-  String>`, `relay_channels()`, `relay_granted()`; `LoadOptions` `relay_channels`
-  (load_checked) and `relay_binary` (`${relay}` in terminal:env). A dropped reply means
-  on_failure. W3 has the names and the glue recipe against W1's 9a28af71e0 API.
-- **Gap 8 (W4), f847ec1f86:** `ListenerEvent::McpInitialized(McpSession)` on
-  `notifications/initialized`, once per connection, with clientInfo. WIT
-  `mcp-initialized(mcp-session)` staged and mapped by W0 (1a730599fa); probe report
-  `mcp-initialized <listener> <connection> <name> <version>`, asserted in
-  `test_v0_4_listeners`. W10 has §B.7.
-- **5.20 extension side:** `ui_ext::terminal::AccountDirs`, `ui_ext_wasm::set_account_dirs`
-  (see the API note). W1 implements it from `FyxAccountsSettingsContent`.
-- **fyx_guard_core (7aa8211636):** root `Cargo.toml` member and workspace dep and
-  `Cargo.lock` are local only until W0 merges them.
-- **Told W3:** ReviewHost, ContextHost, close(ids), DiagnosticsSource, relay hook contracts.
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c. Last ready 9d0e1e6365 (contains 768aa26cdd),
+  sent to W0; it merges integration 1a730599fa.
+- **Done:**
+  - 5.12 relay, extension side (§B.9, 38a8d578db): `ui_ext_wasm/src/relay.rs` RelayHandle;
+    `UiExtension::relay_request / relay_channels / relay_granted`; `LoadOptions`
+    `relay_channels`, `relay_binary` (`${relay}`). A dropped reply means on_failure.
+  - Gap 8 (f847ec1f86, 9d0e1e6365): `ListenerEvent::McpInitialized(McpSession)` once per
+    connection after `notifications/initialized`; WIT and mapping staged by W0; probe report
+    `mcp-initialized <listener> <connection> <name> <version>` in `test_v0_4_listeners`.
+  - 5.20 extension side (768aa26cdd): see the API note; test `test_v0_4_account_profiles`
+    (temp dirs only). The model, presets, resolver, ACP hook and rule-5 lists are W1's
+    4637d43836.
+- **Open (others' crates):**
+  - Host glue for `set_account_dirs` (W1/W3, ~20 lines). Recipe in the notes folder,
+    `W2c-account-dirs-glue.md`. Until it lands, account-dir protection and `${account.*}`
+    are inactive.
+  - W3's workspace-edit host should also refuse files in account dirs (edits apply
+    host-side; `in_account_dirs` or fyx_guard's `account_dir` rule).
+  - Relay host glue (W3) against W1's `terminal_host` relay API (9a28af71e0).
+  - fyx_guard_core (7aa8211636): root `Cargo.toml` member and `Cargo.lock` need W0.
+- **Next steps:** none assigned. Take new items from the Coordinator. After a WIT change,
+  check `fyx_ui_v0_4.rs` mappings, the probe fixture and `LINKED_INTERFACES`.
 - **Gotchas:** prefix every cargo command with `CARGO_TARGET_DIR=D:/fyx-targets/w2c`. Bash
   heredocs break here: write Python scripts with the Write tool. `cargo fmt` skips
   `t2_shared.rs` and the probe fixture (use `rustfmt --edition 2024`). Close listeners in spec
