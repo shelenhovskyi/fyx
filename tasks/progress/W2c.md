@@ -8,6 +8,7 @@ Older history: `archive/W2c.md`.
   host arms and W4's 1068bcf7ff): 4ecc5ae40e WIT `approvals.ask(tool, …)`; 7862b91cab approvals
   runtime; 3b26fdd9c5 `Props::Terminal`; 4e89dc1e8d 5.6 wasm side (not yet announced "ready");
   409504e1b2 `${package}` needs `package:files`.
+  W0 staged the WIT as a158d6869a (identical to 4ecc5ae40e): merge fyx/main once W0 pushes it.
 - **W3 must add arms** in ui_ext_host: registry.rs `HostEffect::AskApproval`, and
   `Props::Terminal` in decorations.rs:706, inspector.rs:92, view.rs:248, view.rs:924 (told).
 - **5.6 wasm side done** (`permissions.rs` + `consent_items.rs` + `journal.rs`): ConsentItem/key,
