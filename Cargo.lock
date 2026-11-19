@@ -6884,6 +6884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_claude_code"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_charts"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,7 @@
 //! The 0.4-only demos' `fyx-ui-0-4` builds, loaded as packages (plan 5.10): the pseudo-terminal
 //! demo's shell runs headless on the harness's fake terminals, and the profile demo's
-//! `[[fyx_ui.terminal_profiles]]` start fake profile terminals.
+//! `[[fyx_ui.terminal_profiles]]` start fake profile terminals. `fyx_claude_code` (plan 5.15)
+//! loads with its whole 0.4 manifest, and its profile asks for an account.
 
 use std::sync::OnceLock;
 
@@ -10,7 +11,11 @@ const PANEL: &str = "pseudo-terminal";
 
 /// The demos that exist only for 0.4, built together: the SDK's 0.4 feature must not reach the
 /// 0.3 demos, so they get a target directory of their own.
-const DEMOS_V0_4: [&str; 2] = ["fyx_demo_pseudo_terminal", "fyx_demo_terminal_profiles"];
+const DEMOS_V0_4: [&str; 3] = [
+    "fyx_demo_pseudo_terminal",
+    "fyx_demo_terminal_profiles",
+    "fyx_claude_code",
+];
 
 /// `extensions/<demo>` with its 0.4 component, in a folder of the test target directory, as
 /// `script/fyx-build-demos --fyx-ui-0-4` lays it out: the manifest, the component, and every
@@ -133,6 +138,55 @@ fn the_profiles_demo_starts_profile_terminals() {
     assert!(harness.open_profile("unknown", None).is_err());
     harness.close_profile(handle).unwrap();
     assert!(harness.terminal(handle).is_none());
+}
+
+/// The skeleton of plan 5.15: the manifest loads, the plugin ships in the package, and the
+/// profile runs `claude --ide` with the account the user picks. Its listener, relay and review
+/// wiring is tested natively (`extensions/fyx_claude_code`) until the harness has them (5.14).
+#[test]
+fn claude_code_loads_with_its_profile_and_plugin() {
+    let package = demo_package("fyx_claude_code");
+    let mut harness = Harness::load_package(&package).expect("loads");
+    for file in [
+        "claude-plugin/.claude-plugin/plugin.json",
+        "claude-plugin/hooks/hooks.json",
+    ] {
+        assert!(package.join(file).is_file(), "{file} is not in the package");
+    }
+    let profiles = harness.terminal_profiles();
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile.account_tool.as_deref()))
+            .collect::<Vec<_>>(),
+        [("claude", Some("claude"))]
+    );
+    let (program, args) = harness.profile_command_line("claude").unwrap();
+    assert_eq!(
+        (program.as_str(), args),
+        ("claude", vec!["--ide".to_owned()])
+    );
+
+    let handle = harness.open_profile("claude", Some("Work")).unwrap();
+    let terminal = harness.terminal(handle).unwrap();
+    assert_eq!(terminal.origin, ui_ext::terminal::TerminalOrigin::Profile);
+    assert_eq!(terminal.account.as_deref(), Some("Work"));
+    harness.close_profile(handle).unwrap();
+
+    harness.mount("claude-code").expect("mounts");
+    let texts: Vec<String> = harness
+        .nodes("claude-code")
+        .unwrap()
+        .into_iter()
+        .filter_map(|node| match node.props {
+            model::Props::Text(text) => Some(text.content),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.contains(&"No Claude session is running.".to_owned()),
+        "{texts:?}"
+    );
 }
 
 #[test]
