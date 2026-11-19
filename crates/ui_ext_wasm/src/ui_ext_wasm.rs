@@ -420,6 +420,10 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
 #[serde(deny_unknown_fields)]
 pub struct NetworkManifest {
     pub domains: Vec<String>,
+    /// 0.4 (design wit-0.4 §C.2): the author's one line under the item at install, required
+    /// there and refused below 0.4.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// One `[[fyx_ui.processes]]` entry, shared with the harness.
@@ -548,6 +552,39 @@ impl UiManifest {
                     !present,
                     "{table} needs fyx:ui 0.4; this extension targets {version}"
                 );
+            }
+        }
+        self.check_t2_reasons(version)
+    }
+
+    /// `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]`: from 0.4 every T2 item has
+    /// one (design wit-0.4 §C.2); below 0.4 the key does not exist.
+    fn check_t2_reasons(&self, version: &Version) -> Result<()> {
+        let items = self
+            .processes
+            .iter()
+            .map(|spec| {
+                (
+                    format!("[[fyx_ui.processes]] {:?}", spec.name),
+                    &spec.reason,
+                )
+            })
+            .chain(
+                self.network
+                    .iter()
+                    .map(|network| ("[fyx_ui.network]".to_string(), &network.reason)),
+            );
+        for (what, reason) in items {
+            if *version < Version::new(0, 4, 0) {
+                anyhow::ensure!(
+                    reason.is_none(),
+                    "{what}: reason needs fyx:ui 0.4; this extension targets {version}"
+                );
+            } else {
+                let reason = reason
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("{what}: a reason is required (fyx:ui 0.4)"))?;
+                terminal::check_reason(&what, reason).map_err(anyhow::Error::msg)?;
             }
         }
         Ok(())

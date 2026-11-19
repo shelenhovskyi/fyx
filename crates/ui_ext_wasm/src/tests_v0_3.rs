@@ -1070,6 +1070,23 @@ async fn test_v0_4_manifest_tables(cx: &mut TestAppContext) {
     read(&env("TOOL_IDE_PORT = \"${listen.ide.port}\""))
         .await
         .unwrap_or_else(|error| panic!("{error:#}"));
+    // From 0.4 every T2 item says why (§C.2), processes and the network included.
+    let (_, manifest) = read(
+        "api_version = \"0.4.0\"\ncapabilities = [\"process:spawn\", \"network:fetch\"]\n\
+         [[fyx_ui.processes]]\nname = \"git\"\nreason = \"shows the branch\"\n\
+         [fyx_ui.network]\ndomains = [\"api.example.com\"]\nreason = \"checks for updates\"\n",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error:#}"))
+    .expect("a fyx_ui table");
+    assert_eq!(
+        manifest.processes[0].reason.as_deref(),
+        Some("shows the branch")
+    );
+    assert_eq!(
+        manifest.network.unwrap().reason.as_deref(),
+        Some("checks for updates")
+    );
     // T3 (§C.3) is declared like any capability; the cards ask at the moment of action.
     let (_, manifest) = read(
         "api_version = \"0.4.0\"
@@ -1119,6 +1136,24 @@ capabilities = [\"terminal:read\", \"terminal:write\"]
         (
             env("TOOL_PORT = \"${listen.other.port}\""),
             "no listener named".to_string(),
+        ),
+        (
+            "api_version = \"0.4.0\"\ncapabilities = [\"process:spawn\"]\n\
+             [[fyx_ui.processes]]\nname = \"git\"\n"
+                .to_string(),
+            "[[fyx_ui.processes]] \"git\": a reason is required".to_string(),
+        ),
+        (
+            "api_version = \"0.4.0\"\ncapabilities = [\"network:fetch\"]\n\
+             [fyx_ui.network]\ndomains = [\"a.example.com\"]\nreason = \"a\\tb\"\n"
+                .to_string(),
+            "the reason must be one line".to_string(),
+        ),
+        (
+            "api_version = \"0.3.0\"\ncapabilities = [\"network:fetch\"]\n\
+             [fyx_ui.network]\ndomains = [\"a.example.com\"]\nreason = \"r\"\n"
+                .to_string(),
+            "[fyx_ui.network]: reason needs fyx:ui 0.4".to_string(),
         ),
     ];
     for name in [
@@ -1232,6 +1267,7 @@ mod process_spawn {
             name: name.into(),
             args: vec!["**".into()],
             path: None,
+            reason: None,
         }
     }
 
@@ -2044,12 +2080,14 @@ mod harness_conformance_process {
                 name: MISSING.into(),
                 args: vec!["status".into(), "**".into()],
                 path: None,
+                reason: None,
             },
             // Any arguments: without patterns a program runs with none (integration-5 S6).
             ProcessSpec {
                 name: format!("{MISSING}-2"),
                 args: vec!["**".into()],
                 path: None,
+                reason: None,
             },
         ]
     }

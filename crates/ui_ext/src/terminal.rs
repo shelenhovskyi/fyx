@@ -667,6 +667,7 @@ impl TerminalProfile {
             name: self.program.clone(),
             args: vec!["**".into()],
             path: self.path.clone(),
+            reason: None,
         })
     }
 }
@@ -747,6 +748,7 @@ impl TerminalProgramSpec {
             name: self.name.clone(),
             args: self.args.clone(),
             path: self.path.clone(),
+            reason: Some(self.reason.clone()),
         }
     }
 }
