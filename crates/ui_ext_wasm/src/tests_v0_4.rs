@@ -1172,7 +1172,7 @@ fn listening_setup(observer: &Arc<Observer>) -> Setup {
             dir: "${tmp}/probe".into(),
             default_dir: None,
             name: "${port}.lock".into(),
-            content: [("port".to_string(), "${port}".to_string())].into(),
+            content: [("port".to_string(), "${port}".into())].into(),
             reason: "the IDE finds Fyx".into(),
         }],
         observer: Some(observer.clone()),
