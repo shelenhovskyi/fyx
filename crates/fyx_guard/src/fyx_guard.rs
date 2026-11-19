@@ -275,7 +275,10 @@ fn resolve_path(project: &Project, abs_path: &Path) -> paths::ResolvedPath {
 fn private_denial(path: &ProjectPath, project: &Project, cx: &App) -> Option<String> {
     project_path_spellings(project, path, cx)
         .iter()
-        .find_map(|spelling| private_denial_of(spelling, cx))
+        .find_map(|spelling| {
+            private_denial_of(spelling, cx)
+                .or_else(|| account_dir(&project.absolute_path(spelling, cx)?, cx))
+        })
 }
 
 fn private_denial_of(path: &ProjectPath, cx: &App) -> Option<String> {
@@ -476,6 +479,7 @@ fn write_denial_of(project: &Project, path: &Path, cx: &App) -> Option<String> {
     protected
         .or_else(|| user_config(path))
         .map(read_only_config)
+        .or_else(|| account_dir(path, cx))
         .or_else(|| {
             let project_path = project_path.as_ref()?;
             repo_denial(project_path.worktree_id, cx, |state| {
@@ -497,6 +501,33 @@ fn user_config(path: &Path) -> Option<String> {
     }
     let confirmed = ::paths::data_dir().join(CONFIRMED_FILE);
     policy::is_within(&path, &confirmed).then(|| confirmed.display().to_string())
+}
+
+/// An account dir of `fyx.accounts` (design wit-0.4 §C.6, rule 5): only the tool itself signs in
+/// and keeps its credentials there, so agents and extensions neither read nor write in it. The
+/// reason names the account, never the dir: an extension sees only an account's name.
+fn account_dir(path: &Path, cx: &App) -> Option<String> {
+    let path = match path.strip_prefix("~") {
+        Ok(rest) => util::paths::home_dir().join(rest),
+        Err(_) => path.to_path_buf(),
+    };
+    let accounts = cx
+        .try_global::<SettingsStore>()?
+        .merged_settings()
+        .fyx
+        .as_ref()?
+        .accounts
+        .as_ref()?
+        .accounts();
+    accounts
+        .iter()
+        .find(|account| policy::is_within(&path, &account.dir))
+        .map(|account| {
+            format!(
+                "it is in the {} account dir of \"{}\", which only the tool itself uses",
+                account.tool, account.name
+            )
+        })
 }
 
 /// Hook for the environment an agent terminal inherits, applied before the variables the agent
@@ -1254,6 +1285,113 @@ mod tests {
         assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Audit);
         set_mode(FyxSecurityMode::Shield, cx);
         assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Shield);
+        drop(project);
+    }
+
+    /// Design wit-0.4 §C.6 rule 5: account dirs are off limits like `.claude/`, for agents under
+    /// the shield and for extensions in every mode, and the reason names the account, not the dir.
+    #[gpui::test]
+    async fn account_dirs_are_protected(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let accounts = settings
+                        .fyx
+                        .get_or_insert_default()
+                        .accounts
+                        .get_or_insert_default();
+                    accounts.tools = Some(
+                        [(
+                            "claude".to_string(),
+                            settings::FyxAccountToolContent {
+                                env: Some("CLAUDE_CONFIG_DIR".into()),
+                                ..Default::default()
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                    );
+                    accounts.profiles = Some(vec![
+                        settings::FyxAccountProfileContent {
+                            name: Some("Work".into()),
+                            tool: Some("claude".into()),
+                            dir: Some(path!("/p/accounts/work").into()),
+                            color: None,
+                        },
+                        settings::FyxAccountProfileContent {
+                            name: Some("Home".into()),
+                            tool: Some("claude".into()),
+                            dir: Some("~/.claude-fyx-guard-test".into()),
+                            color: None,
+                        },
+                    ]);
+                });
+            });
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/p"),
+            json!({
+                "accounts": { "work": { ".credentials.json": "{}" }, "notes.md": "" },
+                "src": { "main.rs": "" },
+            }),
+        )
+        .await;
+        let project = Project::test(fs, [path!("/p").as_ref()], cx).await;
+        cx.run_until_parked();
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        let project_path = |path: &str| ProjectPath {
+            worktree_id,
+            path: rel_path(path).into(),
+        };
+        let extension_read = |path: &str, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                extension_read_denial(project, &project_path(path), cx)
+            })
+        };
+        let extension_write = |path: &str, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                extension_write_denial(project, Path::new(path), cx)
+            })
+        };
+
+        // Extensions: in every mode.
+        let reason = extension_read("accounts/work/.credentials.json", cx).expect("read refused");
+        assert!(reason.contains("\"Work\""), "{reason}");
+        assert!(
+            !reason.contains("accounts"),
+            "the dir stays hidden: {reason}"
+        );
+        assert!(extension_read("accounts/notes.md", cx).is_none());
+        assert!(extension_read("src/main.rs", cx).is_none());
+        assert!(extension_write(path!("/p/accounts/work/settings.json"), cx).is_some());
+        assert!(extension_write(path!("/p/Accounts/Work/settings.json"), cx).is_some());
+        assert!(extension_write(path!("/p/accounts/notes.md"), cx).is_none());
+        let home = util::paths::home_dir().join(".claude-fyx-guard-test");
+        assert!(extension_write(&home.join("x.json").to_string_lossy(), cx).is_some());
+        assert!(extension_write("~/.claude-fyx-guard-test/x.json", cx).is_some());
+
+        // Agents: only under the shield.
+        let agent_read = |path: &str, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_private_path(project, &project_path(path), cx).is_ok()
+            })
+        };
+        let agent_write = |path: &str, cx: &mut TestAppContext| {
+            project.read_with(cx, |project, cx| {
+                check_config_write(project, Path::new(path), cx).is_ok()
+            })
+        };
+        assert!(agent_read("accounts/work/.credentials.json", cx));
+        set_mode(FyxSecurityMode::Shield, cx);
+        assert!(!agent_read("accounts/work/.credentials.json", cx));
+        assert!(agent_read("accounts/notes.md", cx));
+        assert!(!agent_write(path!("/p/accounts/work/settings.json"), cx));
+        assert!(!agent_write("~/.claude-fyx-guard-test/x.json", cx));
+        assert!(agent_write(path!("/p/src/main.rs"), cx));
         drop(project);
     }
 
