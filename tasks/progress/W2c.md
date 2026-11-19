@@ -554,8 +554,16 @@ The 24 h gate counts from the later of `published_at` and when this client first
     `${listen.<n>.token}` of a `token_in_env` listener: that is Fyx's own per-run secret. The
     explicit credential names, the account-dir names and `FYX_*` stay refused.
   - Profile icons are frozen `Icon` names and optional.
-  - Not done yet: the manifest loader wiring (refuse the tables below 0.4), `world_capabilities`,
-    the WIT diff and the import side.
+- **P5 5.5, step 2: the WIT draft** `tasks/wit/fyx-ui-0.4.wit` (145f748bbf), generated from
+  0.3 plus the design's diff. `wasm-tools component wit` parses it. Keyword renames: `%list`, and
+  `respond(…, outcome)`. It went to W0 to stage as `since_v0.4.0`; the corrections went to W10.
+  Plan 4.2–4.4's parts are not in it yet.
+- **Next (after W0 stages it):**
+  - `ApiVersion::V0_4_0` (staged);
+  - the 0.4 manifest tables in `UiManifest`, refused below 0.4, and `world_capabilities` with
+    the 0.4 capabilities;
+  - the mirror list for W4 (`fyx_ext/src/manifest.rs`, harness);
+  - then the import side and 5.6.
 - **Gotchas:**
   - Targets: `E:/fyx-targets/w2c` (release-fast build of ui_ext_wasm, for the bench and the
     suite) and `E:/fyx-targets/w2c-light` (fyx_registry and ui_ext only).
