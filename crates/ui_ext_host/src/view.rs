@@ -1386,7 +1386,15 @@ impl Renderer<'_, '_> {
                     .ok();
                 }) as std::rc::Rc<dyn Fn(f32, f32, &mut Window, &mut App)>
             });
-        crate::canvas::canvas_element(scope.element_id(id), shared, on_click)
+        // Q14: a texture per canvas node, kept across frames.
+        let slot = crate::canvas_texture::CanvasSlot {
+            key: crate::canvas_texture::SlotKey {
+                view: self.cx.entity().entity_id().as_u64(),
+                node: id,
+            },
+            extension_id: self.state.extension_id().into(),
+        };
+        crate::canvas::canvas_element(scope.element_id(id), shared, Some(slot), on_click)
     }
 
     fn icon(&self, props: &IconProps) -> AnyElement {

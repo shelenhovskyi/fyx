@@ -2682,6 +2682,7 @@ fn clear_images(extension_id: &str, cx: &mut App) {
     if let Some(images) = crate::images::ImageCache::global(cx) {
         images.update(cx, |images, cx| images.clear(extension_id, cx));
     }
+    crate::canvas_texture::clear(extension_id, cx);
 }
 
 fn close_notification_view(open: OpenNotification, cx: &mut App) {

@@ -1,23 +1,18 @@
 //! The demos' `fyx-ui-0-2` builds, which show what 0.2 adds: the dev-build demos for the 0.2
 //! renderer.
 
-use std::sync::OnceLock;
-
 use super::*;
 
 fn gallery_v0_2_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    demo("fyx_demo_gallery", true, &BUILT)
+    demo("fyx_demo_gallery", true)
 }
 
 fn decorations_v0_2_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    demo("fyx_demo_decorations", true, &BUILT)
+    demo("fyx_demo_decorations", true)
 }
 
 fn decorations_wasm() -> Vec<u8> {
-    static BUILT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    demo("fyx_demo_decorations", false, &BUILT)
+    demo("fyx_demo_decorations", false)
 }
 
 /// The first text node of the surface that starts with `prefix`.
