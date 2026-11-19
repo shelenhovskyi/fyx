@@ -76,6 +76,7 @@ mod listeners;
 pub mod network;
 pub mod observe;
 pub mod process;
+mod proposals;
 mod stderr;
 mod terminals;
 pub mod ticks;
@@ -920,6 +921,8 @@ pub struct UiState {
     listeners: Arc<listeners::ListenersHandle>,
     /// The 0.4 `context` import (§B.11).
     context: Arc<editor_context::ContextHandle>,
+    /// The 0.4 `review` import (§B.10).
+    review: Arc<proposals::ReviewHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -938,6 +941,7 @@ struct IoStates {
     terminals: terminals::TerminalState,
     listeners: Arc<listeners::ListenersHandle>,
     context: Arc<editor_context::ContextHandle>,
+    review: Arc<proposals::ReviewHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -993,6 +997,7 @@ impl UiState {
             terminals,
             listeners,
             context,
+            review,
             journal,
         } = io;
         Self {
@@ -1001,6 +1006,7 @@ impl UiState {
             terminals,
             listeners,
             context,
+            review,
             journal,
             capability_check,
             diagnostics,
@@ -1625,6 +1631,8 @@ pub struct UiExtension {
     listeners: Arc<listeners::ListenersHandle>,
     /// The 0.4 editor context; its feed stops when the instance goes.
     context: Arc<editor_context::ContextHandle>,
+    /// The 0.4 proposals; their reviews close when the instance goes.
+    review: Arc<proposals::ReviewHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1786,6 +1794,9 @@ pub struct LoadOptions {
     /// The editor side of the 0.4 `context` import (§B.11). Without it, the import is
     /// `unavailable`.
     pub context: Option<Arc<dyn ui_ext::context::ContextHost>>,
+    /// The review bridge of the 0.4 `review` import (§B.10). Without it, the import is
+    /// `unavailable`.
+    pub review: Option<Arc<dyn ui_ext::review::ReviewHost>>,
 }
 
 impl UiExtension {
@@ -1855,6 +1866,7 @@ impl UiExtension {
             discovery_files,
             listener_observer,
             context: context_host,
+            review: review_host,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -2029,6 +2041,11 @@ impl UiExtension {
                 workspace.clone(),
                 listeners.clone(),
             ));
+            let review = Arc::new(proposals::ReviewHandle::new(
+                extension_id.clone(),
+                review_host.filter(|_| is_v0_4),
+                workspace.clone(),
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -2041,6 +2058,7 @@ impl UiExtension {
                 let terminals = terminals.clone();
                 let listeners = listeners.clone();
                 let context = context.clone();
+                let review = review.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
@@ -2049,6 +2067,7 @@ impl UiExtension {
                     terminals: Arc::downgrade(&terminals),
                     listeners: Arc::downgrade(&listeners),
                     context: Arc::downgrade(&context),
+                    review: Arc::downgrade(&review),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
@@ -2059,6 +2078,7 @@ impl UiExtension {
                         terminals.forward(&running);
                         listeners.forward(&running);
                         context.forward(&running);
+                        review.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -2097,6 +2117,7 @@ impl UiExtension {
                                 ),
                                 listeners,
                                 context,
+                                review,
                                 journal,
                             },
                         ),
@@ -2190,6 +2211,7 @@ impl UiExtension {
                     terminals,
                     listeners,
                     context,
+                    review,
                 },
                 pushed_rx,
             ))
@@ -2289,6 +2311,11 @@ impl UiExtension {
     /// Whether the 0.4 `context` import has an editor host ([`LoadOptions::context`]).
     pub fn context_available(&self) -> bool {
         self.context.available()
+    }
+
+    /// Whether the 0.4 `review` import has a review bridge.
+    pub fn review_available(&self) -> bool {
+        self.review.available()
     }
 
     /// `${listen.<name>.port}` while the listener is open (tests and the Extension Inspector).

@@ -55,7 +55,7 @@ pub struct ReviewOutcome {
 pub type ReviewSink = Arc<dyn Fn(u64, Result<ReviewOutcome, String>) + Send + Sync>;
 
 /// The review side of `review` (`ui_ext_host` over `agent_review`). Ids are the runtime's, unique
-/// per instance; the runtime has checked the capability, the path (a worktree file, not
+/// in the process (a reloaded instance never reuses one); the runtime has checked the capability, the path (a worktree file, not
 /// protected), the sizes and the per-extension limit.
 pub trait ReviewHost: Send + Sync + 'static {
     /// Opens the review. `Err` is shown as `unavailable` (a private file, a diff that does not
@@ -75,7 +75,8 @@ pub trait ReviewHost: Send + Sync + 'static {
     /// `end_turn` and `note_changed_paths`: files changed in the turn without a proposal show as
     /// "changed without review".
     fn end_turn(&self, extension_id: &str, session: &str, changed: Vec<FileRef>);
-    /// The instance is gone or `review:propose` was turned off: its open reviews close, nothing
-    /// applied, and no outcome is sent.
-    fn close_all(&self, extension_id: &str);
+    /// The instance is gone or `review:propose` was turned off: these open reviews (all of that
+    /// instance's) close, nothing applied, and no outcome is sent. A reloaded instance's reviews
+    /// are not among them.
+    fn close(&self, extension_id: &str, ids: &[u64]);
 }
