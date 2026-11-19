@@ -403,6 +403,20 @@ mod tests {
                 "isTrusted": true,
             }})
         );
+        // A client that finishes the handshake later gets it on its connection.
+        extension
+            .handle_io(IoEvent::McpInitialized(ui_ext_sdk::listeners::McpSession {
+                listener: companion::LISTENER.into(),
+                connection: 9,
+                client_name: "gemini-cli-ide-client".into(),
+                client_version: "0.69.0".into(),
+            }))
+            .unwrap();
+        let initial = sent(take_host_effects());
+        assert_eq!(
+            initial,
+            [("ide/contextUpdate".to_owned(), Some(9), params.clone())]
+        );
         // The same context is not sent again.
         extension
             .handle_io(IoEvent::ContextChanged(editor))

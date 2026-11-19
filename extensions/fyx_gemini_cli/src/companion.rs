@@ -371,6 +371,26 @@ impl Server {
         }
     }
 
+    /// `io-event::mcp-initialized`: the last context, to the connection that just finished
+    /// the handshake, unless no file is open (a new connection knows nothing either way).
+    pub fn initialized(&mut self, host: &mut dyn CompanionHost, connection: u64) {
+        let Some(params) = &self.context else {
+            return;
+        };
+        let has_files = serde_json::from_str::<Value>(params).is_ok_and(|params| {
+            params["workspaceState"]["openFiles"]
+                .as_array()
+                .is_some_and(|files| !files.is_empty())
+        });
+        if has_files {
+            host.notify(Notify {
+                connection,
+                method: "ide/contextUpdate",
+                params: params.clone(),
+            });
+        }
+    }
+
     /// `io-event::context-changed`, as [`context_update`]'s params: sent to every connection
     /// unless it equals the last one sent.
     pub fn context_changed(&mut self, host: &mut dyn CompanionHost, params: String) {

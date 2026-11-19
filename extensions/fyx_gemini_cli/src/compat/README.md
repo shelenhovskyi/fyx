@@ -80,11 +80,9 @@ closed them.
    - The CLI posts to `/mcp`, so the `mcp-streamable-http` listener must serve that path.
    - In Gemini's sandbox (Docker) the CLI uses `host.docker.internal`, which the `Host` check
      refuses. That is a known limitation and stays one.
-8. **The context on a new connection (W2c).** The CLI connects when `/ide enable` runs (or at
-   start), but the extension hears of a connection only through its first `tools/call`. So the
-   CLI gets `ide/contextUpdate` at the next editor change, not at once. An `mcp-connected
-   (listener, connection)` event, or the host sending a listener's last broadcast to a new
-   connection, would close it.
+8. **The context on a new connection: closed (W0, `io-event::mcp-initialized`).** The CLI
+   connects when `/ide enable` runs (or at start); once it finishes the handshake, the
+   extension sends it the last `ide/contextUpdate` (unless no file is open).
 
 ## Hooks and turns: decided, built after the skeleton
 

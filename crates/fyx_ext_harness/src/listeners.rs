@@ -13,7 +13,8 @@
 //! - On the `mcp-*` kinds the fake speaks MCP as the host does: it answers `initialize`
 //!   ([`PROTOCOL_VERSIONS`]), `ping` and `tools/list` from the registered tools, and turns a
 //!   `tools/call` of a registered tool into `io-event::mcp-call`, whose `respond` becomes the
-//!   JSON-RPC answer. [`crate::Harness::disconnect`] cancels the connection's open calls.
+//!   JSON-RPC answer. `notifications/initialized` after `initialize` is one
+//!   `io-event::mcp-initialized` per connection, with the `clientInfo` cut as the host cuts it. [`crate::Harness::disconnect`] cancels the connection's open calls.
 //! - On a `websocket` listener each frame is `io-event::listener-message`; on an `http` listener
 //!   [`crate::Harness::http_request`] is `io-event::listener-request`, and
 //!   [`crate::Harness::http_reply`] reads the `reply`.
@@ -23,7 +24,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Value, json};
-pub use ui_ext::integration::{ListenerEvent, MAX_TOOLS, McpCall, McpError, ToolDef};
+use ui_ext::integration::MAX_MCP_CLIENT_INFO_BYTES;
+pub use ui_ext::integration::{ListenerEvent, MAX_TOOLS, McpCall, McpError, McpSession, ToolDef};
 use ui_ext::integration::{ListenerProtocol, ListenerSpec, is_tool_name};
 use ui_ext::v0_2::{HostError, HostErrorCode};
 
@@ -74,6 +76,8 @@ struct Connection {
     listener: String,
     /// What the client got and has not taken, in order.
     received: Vec<String>,
+    /// `initialize`'s `clientInfo` (name, version), until `notifications/initialized` takes it.
+    client: Option<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -385,6 +389,7 @@ impl FakeListeners {
             Connection {
                 listener: name.to_owned(),
                 received: Vec::new(),
+                client: None,
             },
         );
         Ok(id)
@@ -461,6 +466,20 @@ impl FakeListeners {
         let method = message.get("method").and_then(Value::as_str)?;
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let Some(id) = id else {
+            if method == "notifications/initialized"
+                && let Some((client_name, client_version)) = self
+                    .connections
+                    .get_mut(&connection)
+                    .and_then(|entry| entry.client.take())
+            {
+                self.events
+                    .push_back(ListenerEvent::McpInitialized(McpSession {
+                        listener: listener.to_owned(),
+                        connection,
+                        client_name,
+                        client_version,
+                    }));
+            }
             if method == "notifications/cancelled"
                 && let Some(request_id) = params.get("requestId")
             {
@@ -481,6 +500,22 @@ impl FakeListeners {
         };
         match method {
             "initialize" => {
+                let info = |key: &str| {
+                    let text = params
+                        .get("clientInfo")
+                        .and_then(|info| info.get(key))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let mut end = text.len().min(MAX_MCP_CLIENT_INFO_BYTES);
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text[..end].to_owned()
+                };
+                let client = (info("name"), info("version"));
+                if let Some(entry) = self.connections.get_mut(&connection) {
+                    entry.client = Some(client);
+                }
                 let requested = params.get("protocolVersion").and_then(Value::as_str);
                 let version = requested
                     .filter(|requested| PROTOCOL_VERSIONS.contains(requested))
@@ -706,6 +741,33 @@ mod tests {
         );
         assert!(listeners.notify("ide", None, "x", "1").is_err());
         assert!(listeners.send("ide", connection, "x").is_err());
+    }
+
+    #[test]
+    fn the_handshake_is_one_mcp_initialized_per_connection() {
+        let mut listeners = listeners();
+        let connection = listeners.connect("ide").unwrap();
+        let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        listeners.client_send(connection, initialized).unwrap();
+        assert!(listeners.events.is_empty(), "no initialize yet");
+        let name = "é".repeat(200);
+        let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "clientInfo": { "name": name, "version": "0.69.0" } } });
+        listeners
+            .client_send(connection, &initialize.to_string())
+            .unwrap();
+        listeners.client_send(connection, initialized).unwrap();
+        listeners.client_send(connection, initialized).unwrap();
+        let events: Vec<ListenerEvent> = listeners.events.drain(..).collect();
+        let [ListenerEvent::McpInitialized(session)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            (session.listener.as_str(), session.connection),
+            ("ide", connection)
+        );
+        assert_eq!(session.client_name.len(), MAX_MCP_CLIENT_INFO_BYTES);
+        assert_eq!(session.client_version, "0.69.0");
     }
 
     #[test]

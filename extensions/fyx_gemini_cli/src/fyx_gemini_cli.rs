@@ -62,6 +62,10 @@ impl Extension for GeminiCli {
                     &call.arguments,
                 );
             }
+            IoEvent::McpInitialized(session) if session.listener == companion::LISTENER => {
+                self.server
+                    .initialized(&mut wired::SdkHost, session.connection);
+            }
             IoEvent::ReviewDecided((proposal, outcome)) => {
                 self.server.review_decided(
                     &mut wired::SdkHost,

@@ -1095,6 +1095,8 @@ pub struct Harness {
     disabled: Option<String>,
     /// The extension folder of `load_package`, for asset images.
     package: Option<PathBuf>,
+    /// `[fyx_ui.terminal_env]`, checked, from `load_package`.
+    terminal_env: Option<ui_ext::terminal::TerminalEnv>,
     /// What the renderer would draw as alt text: assets that are missing or bad, dead handles.
     image_failures: Vec<String>,
 }
@@ -1271,6 +1273,7 @@ impl Harness {
             logs,
             disabled: None,
             package: None,
+            terminal_env: None,
             image_failures: Vec::new(),
         };
         harness.record(&effects);
@@ -1324,8 +1327,31 @@ impl Harness {
                 .with_context(|| format!("[[fyx_ui.listeners]] in {manifest_path:?}"))?,
             None => Vec::new(),
         };
+        let terminal_env = match table.get("terminal_env") {
+            Some(env) => {
+                if !capabilities.contains(&ui_ext::terminal::CAPABILITY_ENV) {
+                    anyhow::bail!(
+                        "[fyx_ui.terminal_env] in {manifest_path:?} needs the {} capability",
+                        ui_ext::terminal::CAPABILITY_ENV
+                    );
+                }
+                let spec: ui_ext::terminal::TerminalEnvSpec = env
+                    .clone()
+                    .try_into()
+                    .with_context(|| format!("[fyx_ui.terminal_env] in {manifest_path:?}"))?;
+                let tables = ui_ext::integration::IntegrationTables {
+                    listeners: &listeners,
+                    ..Default::default()
+                };
+                let env = ui_ext::terminal::check_terminal_env(spec, &|name| tables.listener(name))
+                    .map_err(|why| anyhow::anyhow!("in {manifest_path:?}: {why}"))?;
+                Some(env)
+            }
+            None => None,
+        };
         let mut harness = Self::load_with_listeners(&wasm, &capabilities, listeners)
             .with_context(|| format!("loading {dir:?}"))?;
+        harness.terminal_env = terminal_env;
         let version = table
             .get("api_version")
             .and_then(toml::Value::as_str)
@@ -1624,6 +1650,43 @@ impl Harness {
     /// `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the
     /// host does.
     pub fn profile_command_line(&self, id: &str) -> Result<(String, Vec<String>)> {
+        let profile = self.profile(id)?;
+        let cx = self.template_context();
+        let args = profile
+            .args
+            .iter()
+            .filter_map(|arg| arg.resolve(&cx))
+            .collect();
+        Ok((profile.program.clone(), args))
+    }
+
+    /// The `[fyx_ui.terminal_env]` variables the host would set in profile `id`'s terminal, as
+    /// [`Harness::profile_command_line`] fills templates (`${listen.<name>.token}` is
+    /// `<token>`); a variable whose placeholder has no value is left out. Empty without
+    /// `terminal_env` (only [`Harness::load_package`] reads it).
+    pub fn profile_env(&self, id: &str) -> Result<Vec<(String, String)>> {
+        self.profile(id)?;
+        let cx = self.template_context();
+        Ok(self
+            .terminal_env
+            .as_ref()
+            .map(|env| env.resolve(&cx))
+            .unwrap_or_default())
+    }
+
+    fn profile(&self, id: &str) -> Result<&ui_ext::terminal::TerminalProfile> {
+        self.store
+            .data()
+            .terminals
+            .profiles()
+            .iter()
+            .find(|profile| profile.id == id)
+            .with_context(|| format!("{id:?} is not in [[fyx_ui.terminal_profiles]]"))
+    }
+
+    /// `${package}` is the package folder (or `<package>`), `${relay}` is `fyx-relay`, ports are
+    /// the fake listeners', a token is `<token>` and no account dir has a value.
+    fn template_context(&self) -> impl ui_ext::terminal::TemplateContext {
         struct Cx(String, BTreeMap<String, u16>);
         impl ui_ext::terminal::TemplateContext for Cx {
             fn package(&self) -> Option<String> {
@@ -1632,8 +1695,8 @@ impl Harness {
             fn listen_port(&self, name: &str) -> Option<u16> {
                 self.1.get(name).copied()
             }
-            fn listen_token(&self, _: &str) -> Option<String> {
-                None
+            fn listen_token(&self, name: &str) -> Option<String> {
+                self.1.contains_key(name).then(|| "<token>".to_owned())
             }
             fn relay(&self) -> Option<String> {
                 Some("fyx-relay".into())
@@ -1642,30 +1705,19 @@ impl Harness {
                 None
             }
         }
-        let profiles = self.store.data().terminals.profiles();
-        let profile = profiles
-            .iter()
-            .find(|profile| profile.id == id)
-            .with_context(|| format!("{id:?} is not in [[fyx_ui.terminal_profiles]]"))?;
         let listeners = &self.store.data().listeners;
         let ports = listeners
             .specs()
             .iter()
             .filter_map(|spec| Some((spec.name.clone(), listeners.port(&spec.name)?)))
             .collect();
-        let cx = Cx(
+        Cx(
             self.package.as_ref().map_or_else(
                 || "<package>".to_owned(),
                 |dir| dir.to_string_lossy().replace('\\', "/"),
             ),
             ports,
-        );
-        let args = profile
-            .args
-            .iter()
-            .filter_map(|arg| arg.resolve(&cx))
-            .collect();
-        Ok((profile.program.clone(), args))
+        )
     }
 
     /// The user starts profile `id` from "+", with account profile `account` when the profile

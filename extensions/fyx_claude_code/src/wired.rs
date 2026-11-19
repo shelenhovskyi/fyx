@@ -134,9 +134,9 @@ pub(crate) fn selection_changed(editor: context::EditorContext) -> Option<String
     ide::selection_changed(&active, text_range(range), text.as_deref(), &ContextRoots)
 }
 
-/// Sends `params` to every connection of the `ide` listener.
-pub(crate) fn notify_selection(params: &str) {
-    if let Err(error) = listeners::notify(ide::LISTENER, None, "selection_changed", params) {
+/// Sends `params` to `connection`, or to every connection of the `ide` listener.
+pub(crate) fn notify_selection(connection: Option<u64>, params: &str) {
+    if let Err(error) = listeners::notify(ide::LISTENER, connection, "selection_changed", params) {
         log(
             LogLevel::Warn,
             &format!("selection_changed was not sent: {}", error.message),
@@ -364,6 +364,26 @@ mod tests {
             .handle_io(IoEvent::ContextChanged(editor))
             .unwrap();
         assert!(take_host_effects().is_empty());
+        // A client that finishes the handshake later gets it on its connection.
+        extension
+            .handle_io(IoEvent::McpInitialized(ui_ext_sdk::listeners::McpSession {
+                listener: ide::LISTENER.into(),
+                connection: 5,
+                client_name: "claude-code".into(),
+                client_version: "2.1.326".into(),
+            }))
+            .unwrap();
+        assert!(
+            matches!(
+                take_host_effects().as_slice(),
+                [HostEffect::Listener(ListenerEffect::Notify {
+                    connection: Some(5),
+                    method,
+                    ..
+                })] if method == "selection_changed"
+            ),
+            "the selection again"
+        );
         set_worktree_roots(&[]);
     }
 

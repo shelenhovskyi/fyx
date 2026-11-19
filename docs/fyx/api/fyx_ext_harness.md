@@ -89,6 +89,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::pending_tick` | method | The delay of the surface's pending tick, already clamped up to `MIN_TICK_DELAY`. |
 | `Harness::processes` | method | Processes `spawn` accepted that have not finished, oldest first. |
 | `Harness::profile_command_line` | method | The command line the host would start for profile `id`: `${package}` is the package folder (`Harness::load_package`'s, or `<package>` for a harness loaded from bytes) and `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the host does. |
+| `Harness::profile_env` | method | The `[fyx_ui.terminal_env]` variables the host would set in profile `id`'s terminal, as `Harness::profile_command_line` fills templates (`${listen.<name>.token}` is `<token>`); a variable whose placeholder has no value is left out. Empty without `terminal_env` (only `Harness::load_package` reads it). |
 | `Harness::progresses` | method | The running progresses (M.2), by id, with their last value and message. |
 | `Harness::proposals` | method | The undecided `review` proposals (0.4), by id. Their paths need `Harness::set_worktrees`. |
 | `Harness::props` | method | The props of one node of a mounted surface or decoration. |
