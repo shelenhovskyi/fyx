@@ -218,8 +218,17 @@ async fn test_withdraw_and_close(cx: &mut TestAppContext) {
         review(cx).read_with(cx, |review, _| review.reviews().len()),
         2
     );
-    assert_eq!(host.withdraw("ext", 1), Ok("1\n".into()));
-    assert!(host.withdraw("ext", 1).is_err(), "only once");
+    // `ReviewHost::withdraw` waits for the main thread: here the job runs inline.
+    let withdrawn = cx.update(|cx| withdraw(&host.open, 1, cx));
+    assert_eq!(
+        withdrawn,
+        Ok("one\ntwo\nthree\n".into()),
+        "nothing accepted yet"
+    );
+    assert!(
+        cx.update(|cx| withdraw(&host.open, 1, cx)).is_err(),
+        "only once"
+    );
     cx.run_until_parked();
     assert_eq!(
         review(cx).read_with(cx, |review, _| review.reviews().len()),
@@ -234,16 +243,33 @@ async fn test_withdraw_and_close(cx: &mut TestAppContext) {
     assert!(outcomes.lock().unwrap().is_empty(), "no outcome for either");
 }
 
-/// Refused before a review opens: review mode off, a diff that does not apply, a private file.
+/// Always reviewed: with review mode off, and with `auto_accept` matching every file (W5's
+/// `propose`, coordinator decision).
+#[gpui::test]
+async fn test_always_reviewed(cx: &mut TestAppContext) {
+    let (_, _project) = setup(false, cx).await;
+    review(cx).update(cx, |review, cx| {
+        review.set_user_auto_accept(&["**".to_string()], cx)
+    });
+    let (outcomes, open) = (Outcomes::default(), OpenReviews::default());
+    let new = Proposed::NewContent("x\n".into());
+    propose(1, proposal("a.txt", new, true), &outcomes, &open, cx)
+        .await
+        .unwrap();
+    assert_eq!(
+        review(cx).read_with(cx, |review, _| review.reviews().len()),
+        1,
+        "a review opened"
+    );
+    assert!(outcomes.lock().unwrap().is_empty(), "nothing decided");
+}
+
+/// Refused before a review opens: a diff that does not apply, a private file.
 #[gpui::test]
 async fn test_refusals(cx: &mut TestAppContext) {
-    let (_, _project) = setup(false, cx).await;
+    let (_, _project) = setup(true, cx).await;
     let (outcomes, open) = (Outcomes::default(), OpenReviews::default());
     let new = || Proposed::NewContent("x\n".into());
-    let off = propose(1, proposal("a.txt", new(), true), &outcomes, &open, cx).await;
-    assert!(off.unwrap_err().contains("review mode is off"));
-
-    review(cx).update(cx, |review, cx| review.set_enabled(true, cx));
     let diff = Proposed::UnifiedDiff("@@ -1,1 +1,1 @@\n-uno\n+1\n".into());
     let stale = propose(2, proposal("a.txt", diff, true), &outcomes, &open, cx).await;
     assert!(stale.unwrap_err().contains("the diff does not apply"));

@@ -2,20 +2,19 @@
 //! 5.13): an extension's proposed edit opens a review in `agent_review`, and the user's decision
 //! goes back to the extension. Accepting stays the user's.
 //!
-//! A proposal goes through `AgentReview::review_write` as a write of the session
-//! `fyx-ext:<extension>:<session>`, so the review rules, the turn summary and "changed without
-//! review" apply as to an agent's write. The target is checked as a `workspace:edit` target is
-//! (trust, links, exclusions, `private_files`, `fyx_guard`, size); a diff is applied strictly to
-//! the file's current text ([`crate::unified_diff`]). Review mode off refuses the proposal:
-//! `review_write` would let it through unseen.
+//! A proposal goes through W5's `AgentReview::propose` as the session
+//! `fyx-ext:<extension>:<session>`: it is always reviewed (review mode off included), never
+//! auto-accepted (`auto_accept` patterns and "accept all in turn" do not apply), and a Deny rule
+//! rejects it at once. The target is checked as a `workspace:edit` target is (trust, links,
+//! exclusions, `private_files` with the user's own patterns, `fyx_guard`, size); a diff is applied
+//! strictly to the file's current text ([`crate::unified_diff`]).
 //!
-//! The outcome is the content the review gives back: none is `rejected`, the proposal itself is
-//! `accepted`, anything else `partial`. With `apply`, the accepted text replaces the buffer's as
-//! one undo step, never saved; without it nothing is touched. Withdrawing, a revocation and the
-//! instance's end drop the review's task, which closes the review without applying anything.
+//! With `apply`, the accepted text replaces the buffer's as one undo step, never saved, and is
+//! refused when the buffer changed during the review; without it nothing is touched. `withdraw`
+//! closes the review and returns its text with the hunks accepted so far; `close` drops the
+//! outcomes of the given reviews, which closes them. Neither sends an outcome.
 //!
-//! Each load has its own host object; ids are unique in the process, and `close` names the
-//! reviews to close, so an old instance's close after a reload never touches the new one's.
+//! Each load has its own host object; ids are unique in the process.
 
 use std::{
     collections::HashMap,
@@ -24,7 +23,7 @@ use std::{
 };
 
 use acp_thread::fyx_review::AgentWrite;
-use agent_review::AgentReview;
+use agent_review::{AgentReview, ExtensionProposal, ProposalDecision, ReviewId};
 use futures::{
     FutureExt as _,
     channel::oneshot,
@@ -41,10 +40,11 @@ use crate::main_thread::MainThread;
 
 /// How long an extension thread waits for a review to open (the file may have to load).
 const PROPOSE_TIMEOUT: Duration = Duration::from_secs(20);
+const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// An open review: the proposed text (what `withdraw` returns), and the signal that closes it.
+/// An open review: its id in agent review, and the signal that drops its outcome (closing it).
 struct Open {
-    proposed: String,
+    review: ReviewId,
     close: oneshot::Sender<()>,
 }
 
@@ -105,11 +105,12 @@ impl ReviewHost for ExtensionReviews {
     }
 
     fn withdraw(&self, _extension_id: &str, id: u64) -> Result<String, String> {
-        let review = lock(&self.open)
-            .remove(&id)
-            .ok_or("no open review with that id")?;
-        review.close.send(()).ok();
-        Ok(review.proposed)
+        let open = self.open.clone();
+        self.main
+            .call(WITHDRAW_TIMEOUT, move |cx, reply| {
+                reply.send(withdraw(&open, id, cx));
+            })
+            .unwrap_or_else(|| Err("the review did not answer in time".into()))
     }
 
     fn begin_turn(&self, extension_id: &str, session: &str) {
@@ -170,11 +171,6 @@ async fn open_review(
     let review = cx
         .update(|cx| AgentReview::global(cx))
         .ok_or("agent review is not available")?;
-    if !review.read_with(cx, |review, _| review.is_enabled()) {
-        return Err(
-            "review mode is off: turn on agent review to see this extension's proposals".into(),
-        );
-    }
     let create = matches!(proposal.change, Proposed::NewContent(_));
     let file = crate::workspace_edit::resolve_file(key, proposal.path.clone(), create, cx)
         .await
@@ -197,14 +193,29 @@ async fn open_review(
         abs_path: file.abs_path,
         buffer: buffer.clone(),
         old_text: old_text.clone(),
-        new_text: new_text.clone(),
+        new_text,
     };
-    let decided = review.update(cx, |review, cx| review.review_write(write, cx));
+    let extension = cx.update(|cx| {
+        crate::UiExtensionRegistry::global(cx)
+            .map(|registry| registry.read(cx).provenance_name(extension_id))
+            .unwrap_or_else(|| extension_id.to_string().into())
+    });
+    let proposed = review.update(cx, |review, cx| {
+        review.propose(
+            ExtensionProposal {
+                write,
+                extension,
+                title: proposal.title.clone().into(),
+            },
+            cx,
+        )
+    });
+    let decided = proposed.outcome;
     let (close, closed) = oneshot::channel();
     lock(open).insert(
         id,
         Open {
-            proposed: new_text.clone(),
+            review: proposed.id,
             close,
         },
     );
@@ -221,14 +232,13 @@ async fn open_review(
         }
         let outcome = match result {
             Err(error) => Err(format!("{error:#}")),
-            Ok(written) => {
-                let final_content = written.content.clone().unwrap_or_else(|| old_text.clone());
-                let decision = match &written.content {
-                    None => Decision::Rejected,
-                    Some(content) if *content == new_text => Decision::Accepted,
-                    Some(_) => Decision::Partial,
+            Ok(decided) => {
+                let decision = match decided.decision {
+                    ProposalDecision::Accepted => Decision::Accepted,
+                    ProposalDecision::Partial => Decision::Partial,
+                    ProposalDecision::Rejected => Decision::Rejected,
                 };
-                let applied = match (&written.content, apply) {
+                let applied = match (&decided.content, apply) {
                     (Some(content), true) if *content != old_text => {
                         cx.update(|cx| apply_to_buffer(&buffer, &old_text, content, cx))
                     }
@@ -236,7 +246,7 @@ async fn open_review(
                 };
                 applied.map(|()| ReviewOutcome {
                     decision,
-                    final_content,
+                    final_content: decided.final_content,
                 })
             }
         };
@@ -245,6 +255,21 @@ async fn open_review(
     })
     .detach();
     Ok(())
+}
+
+/// `withdraw` on the main thread: the review closes and its text so far comes back; an id that
+/// is not open, or a review already decided, is an error (its outcome still arrives then).
+fn withdraw(open: &OpenReviews, id: u64, cx: &mut App) -> Result<String, String> {
+    let review = lock(open)
+        .get(&id)
+        .map(|open| open.review)
+        .ok_or("no open review with that id")?;
+    let agent_review = AgentReview::global(cx).ok_or("agent review is not available")?;
+    let text = agent_review
+        .update(cx, |agent_review, cx| agent_review.withdraw(review, cx))
+        .map_err(|error| format!("{error:#}"))?;
+    lock(open).remove(&id);
+    Ok(text)
 }
 
 /// The byte ranges `old` and `new` differ in, trimmed of their common start and end at character
