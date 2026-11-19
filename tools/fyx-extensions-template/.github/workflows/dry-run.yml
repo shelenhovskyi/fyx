@@ -18,7 +18,7 @@ jobs:
         with:
           persist-credentials: false
           path: registry
-      - name: Fyx at the sample's commit (fyx-registry, the demo source)
+      - name: Fyx at the sample's commit (the demo source)
         run: |
           repository=$(python3 -c 'import tomllib; print(tomllib.load(open("registry/extensions/fyx-demo-counter.toml", "rb"))["source"]["repository"])')
           commit=$(python3 -c 'import tomllib; print(tomllib.load(open("registry/extensions/fyx-demo-counter.toml", "rb"))["source"]["commit"])')
@@ -30,10 +30,28 @@ jobs:
           cp -r registry fyx/tools/fyx-extensions-template
       - name: Build the demo component
         working-directory: fyx
+        env:
+          # Older Fyx commits set `rustc-wrapper = "sccache"` in .cargo/config.toml; the runner has
+          # no sccache.
+          RUSTC_WRAPPER: ""
         run: |
           rustup show active-toolchain
           rustup target add wasm32-wasip2
           script/fyx-build-demos
+      - name: fyx-registry from Fyx's default branch
+        env:
+          RUSTC_WRAPPER: ""
+        run: |
+          # The sample's commit is pinned and older than the dry run's `fyx-registry` commands
+          # (`verify client`), so the tool comes from the current default branch instead.
+          repository=$(python3 -c 'import tomllib; print(tomllib.load(open("registry/extensions/fyx-demo-counter.toml", "rb"))["source"]["repository"])')
+          git init -q fyx-tool
+          git -C fyx-tool fetch -q --depth 1 "$repository" HEAD
+          git -C fyx-tool checkout -q FETCH_HEAD
+          cargo build -q --manifest-path fyx-tool/Cargo.toml -p fyx_registry --bin fyx-registry
+          target=$(cargo metadata -q --format-version 1 --no-deps --manifest-path fyx-tool/Cargo.toml \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+          echo "FYX_REGISTRY=$target/debug/fyx-registry" >> "$GITHUB_ENV"
       - name: Dry run
         working-directory: fyx
         run: tools/fyx-extensions-template/scripts/dry-run.sh --keep "$RUNNER_TEMP/published"
