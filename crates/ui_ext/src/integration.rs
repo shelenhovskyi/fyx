@@ -24,6 +24,12 @@ pub const MAX_LISTENERS: usize = 4;
 pub const MAX_RELAY_CHANNELS: usize = 16;
 pub const MAX_RELAY_TIMEOUT_MS: u32 = 600_000;
 pub const DEFAULT_RELAY_TIMEOUT_MS: u32 = 30_000;
+/// §B.9: requests in flight per extension; one more is refused (and fails open).
+pub const MAX_RELAY_IN_FLIGHT: usize = 8;
+/// §B.9: what `fyx-relay` reads: its stdin, and its argv counted with it.
+pub const MAX_RELAY_INPUT_BYTES: usize = 1 << 20;
+/// §B.9: an answer's stdout and stderr together.
+pub const MAX_RELAY_ANSWER_BYTES: usize = 1 << 20;
 /// One discovery file per listener and account dir; the manifest declares at most this many.
 pub const MAX_DISCOVERY_FILES: usize = 8;
 
@@ -94,6 +100,34 @@ pub struct RelayChannelSpec {
 fn default_relay_timeout() -> u32 {
     DEFAULT_RELAY_TIMEOUT_MS
 }
+
+/// §B.9: what a hook sent through `fyx-relay`, as `io-event::relay-request`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayRequest {
+    /// Assigned by the runtime, unique per instance; `relay.respond` names it.
+    pub id: u64,
+    /// The channel's `name`, without the `<extension-id>/` the hook passes.
+    pub channel: String,
+    /// The terminal the hook ran in, as this extension's handle for it; `None` when the
+    /// extension has none for it.
+    pub terminal: Option<crate::terminal::TerminalHandle>,
+    pub argv: Vec<String>,
+    pub stdin: String,
+}
+
+/// §B.9: the extension's `relay.respond`, which the relay prints before it exits with `exit`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelayAnswer {
+    pub exit: u8,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Called at most once, with the extension's answer. Dropped without a call when there is none:
+/// the request was refused, timed out, the capability was revoked or the instance went (unload,
+/// reload). The relay endpoint then answers the channel's `on_failure`. It runs inside the
+/// extension's call, so it must not block (send it on a channel).
+pub type RelayReply = Box<dyn FnOnce(RelayAnswer) + Send>;
 
 /// One `[[fyx_ui.discovery_files]]` entry (§B.8): a template the host fills and writes.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

@@ -139,6 +139,8 @@ pub enum IoEvent {
     /// fyx:ui 0.4 `review:propose`: proposal `id` was decided, or its review ended without a
     /// decision (§B.10).
     ReviewDecided(u64, Result<crate::review::ReviewOutcome, String>),
+    /// fyx:ui 0.4 `relay:hooks`: a hook ran `fyx-relay` on a declared channel (§B.9).
+    RelayRequest(crate::integration::RelayRequest),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).
