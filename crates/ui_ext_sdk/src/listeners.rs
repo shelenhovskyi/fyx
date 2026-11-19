@@ -11,6 +11,9 @@
 //!   [`Extension::handle_io`](crate::Extension) as `IoEvent::McpCall` and answers it with
 //!   [`respond`], now or later: a call stays open until answered, and `IoEvent::McpCancelled`
 //!   says its connection closed or the client gave up;
+//! - hears `IoEvent::McpInitialized` ([`McpSession`]: the connection and the client's
+//!   `clientInfo`) once a client finishes the handshake, the moment to push its first context
+//!   with [`notify`] to that connection;
 //! - sends MCP notifications with [`notify`];
 //! - on a raw `websocket` listener gets `IoEvent::ListenerMessage` and answers with [`send`]; on
 //!   an `http` listener gets `IoEvent::ListenerRequest` and answers with [`reply`].
@@ -23,7 +26,7 @@
 //! [`HostEffect::Listener`](crate::HostEffect::Listener) and succeeds.
 
 use crate::HostError;
-pub use crate::bindings::fyx::ui::listeners::{McpCall, McpError, ToolDef};
+pub use crate::bindings::fyx::ui::listeners::{McpCall, McpError, McpSession, ToolDef};
 
 /// JSON-RPC's "invalid params", for a call whose arguments the extension refuses.
 pub const INVALID_PARAMS: i32 = -32602;
