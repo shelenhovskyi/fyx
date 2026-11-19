@@ -4,12 +4,14 @@
 mod notification;
 mod sessions;
 mod sessions_panel;
+mod settings;
 mod tab_status;
 
 use gpui::App;
 use workspace::Workspace;
 
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
+pub use settings::FyxTerminalSettings;
 
 pub fn init(cx: &mut App) {
     sessions::init(cx);
