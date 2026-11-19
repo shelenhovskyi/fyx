@@ -20,6 +20,9 @@
 //!   `respond <call-id> <json>`: `respond` with a result; `respond-err <call-id> <code> <message>`
 //!   with an MCP error; `notify <listener> <method>`: `notify` everyone with `{}`;
 //!   `send <listener> <connection> <text>`: `send`; `reply <id> <status> <body>`: `reply`;
+//! - `watch <on|off>`: `context.watch`; `open <worktree|-> <path> <0|1>`: `workspace.open`
+//!   with `focus`; `to-ref <absolute>`: `context.to-file-ref` as `<worktree|->:<path>`;
+//!   `abs <worktree|-> <path>`: `context.absolute-path`;
 //! - `relay`: a call into `relay`, which traps in this build;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
@@ -29,7 +32,8 @@
 //! `approval <id> <once|always|deny|none>`, `read-done <id> <text|error: why>`,
 //! `write-done <id> <done|error: why>`, `mcp-call <id> <listener> <connection> <tool> <arguments>`,
 //! `mcp-cancelled <id>`, `message <listener> <connection> <text>`,
-//! `request <id> <listener> <path> <body>`.
+//! `request <id> <listener> <path> <body>`,
+//! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -134,6 +138,16 @@ fn state(state: permissions::PermissionState) -> &'static str {
         permissions::PermissionState::Ask => "ask",
         permissions::PermissionState::Unavailable => "unavailable",
     }
+}
+
+fn file(worktree: &str, path: &str) -> Result<FileRef, String> {
+    Ok(FileRef {
+        worktree: match worktree {
+            "-" => None,
+            id => Some(id.parse().map_err(|_| "worktree")?),
+        },
+        path: path.into(),
+    })
 }
 
 fn run(words: &[&str]) -> Result<String, String> {
@@ -260,6 +274,24 @@ fn run(words: &[&str]) -> Result<String, String> {
             status.parse().map_err(|_| "status")?,
             &body.join(" "),
         )),
+        ["watch", on] => done(fyx::ui::context::watch(*on == "on")),
+        ["open", worktree, path, focus] => done(fyx::ui::context::open(
+            &file(worktree, path)?,
+            None,
+            *focus == "1",
+        )),
+        ["to-ref", absolute] => match fyx::ui::context::to_file_ref(absolute) {
+            Ok(file) => format!(
+                "{}:{}",
+                file.worktree.map_or("-".to_string(), |id| id.to_string()),
+                file.path
+            ),
+            Err(error) => code(&error).into(),
+        },
+        ["abs", worktree, path] => match fyx::ui::context::absolute_path(&file(worktree, path)?) {
+            Ok(path) => path,
+            Err(error) => code(&error).into(),
+        },
         ["relay"] => done(fyx::ui::relay::respond(1, 0, "", "")),
         _ => return Err(format!("unknown command {words:?}")),
     })
@@ -353,6 +385,24 @@ impl Guest for Probe {
                 call.call_id, call.listener, call.connection, call.tool, call.arguments
             ),
             Io::McpCancelled(id) => format!("mcp-cancelled {id}"),
+            Io::ContextChanged(context) => format!(
+                "context {} {} {} {}",
+                context.active.map_or("-".to_string(), |file| file.path),
+                context
+                    .open
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                match context.selection {
+                    Some((_, Some(text))) => text.len().to_string(),
+                    Some((_, None)) => "none".into(),
+                    None => "-".into(),
+                },
+                context
+                    .trusted
+                    .map_or("-".to_string(), |trusted| trusted.to_string()),
+            ),
             Io::ListenerMessage((listener, connection, text)) => {
                 format!("message {listener} {connection} {text}")
             }

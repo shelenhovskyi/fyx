@@ -287,6 +287,7 @@ struct Setup {
     listeners: Vec<ListenerSpec>,
     discovery_files: Vec<DiscoveryFileSpec>,
     observer: Option<Arc<dyn ListenerObserver>>,
+    context: Option<Arc<dyn ui_ext::context::ContextHost>>,
 }
 
 impl Default for Setup {
@@ -302,6 +303,7 @@ impl Default for Setup {
             listeners: Vec::new(),
             discovery_files: Vec::new(),
             observer: None,
+            context: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -377,6 +379,7 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         listeners: Some(setup.listeners.clone()),
         discovery_files: Some(setup.discovery_files.clone()),
         listener_observer: setup.observer.clone(),
+        context: setup.context.clone(),
         workspace: setup
             .workspace
             .clone()
@@ -1484,4 +1487,235 @@ async fn test_v0_4_listener_grants_and_reloads(cx: &mut TestAppContext) {
         observer.heard()[13..],
         ["closed probe-v0-4 ide", "closed probe-v0-4 hooks"]
     );
+}
+
+/// The editor side of `context`: keeps the sink, records `open` and `watch`; `.env` is private.
+#[derive(Default)]
+struct FakeEditor {
+    sink: Mutex<Option<ui_ext::context::ContextSink>>,
+    calls: Mutex<Vec<String>>,
+    terminal_focused: std::sync::atomic::AtomicBool,
+}
+
+impl FakeEditor {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn send(&self, context: ui_ext::context::EditorContext) {
+        let sink = self.sink.lock().unwrap().clone().unwrap();
+        sink(context);
+    }
+}
+
+impl ui_ext::context::ContextHost for FakeEditor {
+    fn watch(&self, ext: &str, sink: Option<ui_ext::context::ContextSink>) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("watch {ext} {}", sink.is_some()));
+        *self.sink.lock().unwrap() = sink;
+    }
+
+    fn open(
+        &self,
+        _: &str,
+        path: ui_ext::process::FileRef,
+        _: Option<ui_ext::edit::TextRange>,
+        focus: bool,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("open {} {focus}", path.path));
+        Ok(())
+    }
+
+    fn is_private(&self, absolute: &Path) -> bool {
+        absolute.file_name().is_some_and(|name| name == ".env")
+    }
+
+    fn terminal_focused(&self, _: &str) -> bool {
+        self.terminal_focused
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A fresh worktree with `a.rs` and a private `.env`.
+fn context_worktree(name: &str) -> PathBuf {
+    let root =
+        std::env::temp_dir().join(format!("fyx-probe-context-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn main() {}").unwrap();
+    std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+    root
+}
+
+fn context_setup(editor: &Arc<FakeEditor>, root: &Path) -> Setup {
+    let mut capabilities = Setup::default().capabilities;
+    capabilities.extend([
+        ui_ext::context::CAPABILITY_CONTEXT_EDITOR,
+        ui_ext::context::CAPABILITY_WORKSPACE_OPEN,
+    ]);
+    Setup {
+        capabilities,
+        context: Some(editor.clone()),
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: root.to_path_buf(),
+            trusted: true,
+        }]),
+        ..Setup::default()
+    }
+}
+
+fn file(path: &str) -> ui_ext::process::FileRef {
+    ui_ext::process::FileRef {
+        worktree: Some(1),
+        path: path.into(),
+    }
+}
+
+fn selection(text: Option<String>) -> Option<(ui_ext::edit::TextRange, Option<String>)> {
+    let at = ui_ext::edit::Position { line: 0, column: 0 };
+    Some((ui_ext::edit::TextRange { start: at, end: at }, text))
+}
+
+/// §B.11: the feed carries worktree files only, never a private file's text, and at most
+/// 64 KiB of selection; a tool's paths and URIs (both Windows spellings Claude Code sends) turn
+/// into `file-ref`s and back; `open` keeps `focus` only with a gesture or a recent listener
+/// request while a terminal has focus.
+#[gpui::test]
+async fn test_v0_4_editor_context(cx: &mut TestAppContext) {
+    let editor = Arc::new(FakeEditor::default());
+    let root = context_worktree("feed");
+    let setup = context_setup(&editor, &root);
+    let extension = load(&setup, cx).await.unwrap();
+    assert!(extension.context_available());
+    let mut events = extension.take_io_events().unwrap();
+
+    assert_eq!(command(&extension, "watch on").await, "done");
+    editor.send(ui_ext::context::EditorContext {
+        active: Some(file("a.rs")),
+        open: vec![
+            file("a.rs"),
+            ui_ext::process::FileRef {
+                worktree: Some(9),
+                path: "elsewhere.rs".into(),
+            },
+            file(".env"),
+        ],
+        selection: selection(Some("x".repeat(70_000))),
+        trusted: Some(true),
+    });
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        format!(
+            "context a.rs a.rs,.env {} true",
+            ui_ext::context::MAX_SELECTION_BYTES
+        )
+    );
+    editor.send(ui_ext::context::EditorContext {
+        active: Some(file(".env")),
+        open: vec![file(".env")],
+        selection: selection(Some("SECRET=1".into())),
+        trusted: Some(true),
+    });
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        "context .env .env none true"
+    );
+
+    // Paths in, `file-ref`s out: a plain path, `file:///C:/…` and `file://C:\…` alike.
+    let plain = root.join("a.rs").to_string_lossy().into_owned();
+    let forward = plain.replace('\\', "/");
+    let slashed = format!("file:///{}", forward.trim_start_matches('/'));
+    let raw = format!("file://{plain}");
+    for input in [&plain, &slashed, &raw] {
+        assert_eq!(
+            command(&extension, &format!("to-ref {input}")).await,
+            "1:a.rs",
+            "{input}"
+        );
+    }
+    let private = root.join(".env").to_string_lossy().into_owned();
+    assert_eq!(
+        command(&extension, &format!("to-ref {private}")).await,
+        "not-permitted"
+    );
+    let outside = std::env::temp_dir()
+        .join("x.rs")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        command(&extension, &format!("to-ref {outside}")).await,
+        "invalid-argument"
+    );
+    assert_eq!(command(&extension, "to-ref a.rs").await, "invalid-argument");
+    assert_eq!(command(&extension, "abs 1 a.rs").await, plain);
+    assert_eq!(command(&extension, "abs - a.rs").await, plain);
+    assert_eq!(command(&extension, "abs 1 .env").await, "not-permitted");
+    assert_eq!(command(&extension, "abs 7 a.rs").await, "invalid-argument");
+
+    // Focus needs a gesture, or a recent listener request while a terminal has focus.
+    assert_eq!(command(&extension, "open 1 a.rs 1").await, "done");
+    assert_eq!(click(&extension, "open 1 a.rs 1").await, "done");
+    assert_eq!(
+        command(&extension, "open 1 nope.rs 0").await,
+        "invalid-argument"
+    );
+    editor
+        .terminal_focused
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // No listener has had a request.
+    assert_eq!(command(&extension, "open 1 a.rs 1").await, "done");
+    assert_eq!(command(&extension, "watch off").await, "done");
+    assert_eq!(
+        editor.calls(),
+        [
+            "watch probe-v0-4 true",
+            "open a.rs false",
+            "open a.rs true",
+            "open a.rs false",
+            "watch probe-v0-4 false",
+        ]
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Without the capabilities the calls are refused; a reloaded instance's watch survives the old
+/// instance's drop.
+#[gpui::test]
+async fn test_v0_4_editor_context_rules_and_reloads(cx: &mut TestAppContext) {
+    let editor = Arc::new(FakeEditor::default());
+    let root = context_worktree("rules");
+    let undeclared = Setup {
+        capabilities: vec!["ui:panel"],
+        ..context_setup(&editor, &root)
+    };
+    let extension = load(&undeclared, cx).await.unwrap();
+    for refused in ["watch on", "open 1 a.rs 0", "abs 1 a.rs", "to-ref /a.rs"] {
+        assert_eq!(
+            command(&extension, refused).await,
+            "not-permitted",
+            "{refused}"
+        );
+    }
+    drop(extension);
+
+    let setup = context_setup(&editor, &root);
+    let old = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&old, "watch on").await, "done");
+    let new = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&new, "watch on").await, "done");
+    drop(old);
+    wait_for(cx, 2_000, || false);
+    assert_eq!(
+        editor.calls(),
+        ["watch probe-v0-4 true", "watch probe-v0-4 true"]
+    );
+    drop(new);
+    wait_for(cx, 10_000, || editor.calls().len() == 3);
+    assert_eq!(editor.calls()[2], "watch probe-v0-4 false");
+    std::fs::remove_dir_all(&root).ok();
 }
