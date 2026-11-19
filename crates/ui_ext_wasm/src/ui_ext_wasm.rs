@@ -1415,6 +1415,9 @@ pub struct LoadOptions {
     /// Fyx's `proxy` setting for `network:fetch`, kept current by the host; `None` goes direct.
     /// Environment proxies are never used.
     pub proxy: Option<network::ProxySetting>,
+    /// `fyx.extensions.network.private_hosts` for `network:fetch`, kept current by the host;
+    /// `None` lists no name.
+    pub private_hosts: Option<network::PrivateHosts>,
     /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
     pub resolver: Option<Arc<dyn network::Resolve>>,
     /// `[[fyx_ui.processes]]`; [`UiExtension::load_checked`] sets it from the manifest. Applies
@@ -1482,6 +1485,7 @@ impl UiExtension {
             network_domains,
             extension_version,
             proxy,
+            private_hosts,
             resolver,
             processes,
             process_env,
@@ -1561,7 +1565,8 @@ impl UiExtension {
                 network::user_agent(&app_version, &extension_id, extension_version.as_deref()),
                 resolver,
             )
-            .with_proxy(proxy.unwrap_or_default());
+            .with_proxy(proxy.unwrap_or_default())
+            .with_private_hosts(private_hosts.unwrap_or_default());
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
             // Only a 0.3 component has the `network` import.
