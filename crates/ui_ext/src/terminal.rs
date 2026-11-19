@@ -64,6 +64,8 @@ pub const MAX_ENV_VALUE_BYTES: usize = 4096;
 pub const MAX_PASTE_BYTES: usize = 16 * 1024;
 /// §C.3: `request-read` with `last-lines`.
 pub const MAX_READ_LINES: u16 = 500;
+/// §C.3: one `request-write`, whose card shows the exact text.
+pub const MAX_T3_WRITE_BYTES: usize = 16 * 1024;
 
 // ---------------------------------------------------------------------------------------------
 // Types (the WIT `terminals` interface, design "WIT diff")
@@ -197,6 +199,37 @@ pub enum TerminalEvent {
     Created(TerminalInfo),
     Closed(TerminalHandle),
     StatusChanged(TerminalInfo),
+    /// §C.3: the answer to `request-read` (by its id): the text, or why not.
+    ReadDone(u64, Result<String, String>),
+    /// §C.3: the answer to `request-write`.
+    WriteDone(u64, Result<(), String>),
+}
+
+/// §C.3: what a T3 card and the import's checks need about a terminal the extension names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct T3Target {
+    /// The host's id of the terminal (`ui_ext_wasm::permissions::HostTerminalId`).
+    pub terminal: u64,
+    pub origin: TerminalOrigin,
+    /// Not redacted: the card shows it to the user.
+    pub title: String,
+    /// The terminal's working directory, for the untrusted-worktree check.
+    pub cwd: Option<PathBuf>,
+}
+
+/// §C.3: `request-write` text is printable, with tab; no control keys, no ESC.
+pub fn check_write_text(text: &str) -> Result<(), HostError> {
+    if text.len() > MAX_T3_WRITE_BYTES {
+        return Err(invalid(format!(
+            "request-write text is at most {MAX_T3_WRITE_BYTES} bytes"
+        )));
+    }
+    if text.chars().any(|c| c != '\t' && c.is_control()) {
+        return Err(invalid(
+            "request-write text is printable characters and tab only (submit adds Enter)",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -285,6 +318,42 @@ pub trait TerminalHost: Send + Sync + 'static {
     /// Reload, disable, uninstall, revocation: every terminal of `ext` closes, created ones with
     /// their process trees, and observing stops.
     fn close_all(&self, ext: &str);
+    /// §C.3: the terminal behind a handle from `observe` or `list`, for a T3 card.
+    fn t3_target(&self, ext: &str, handle: TerminalHandle) -> Result<T3Target, TerminalError> {
+        let _ = (ext, handle);
+        Err(TerminalError::Unavailable(
+            "this window cannot share terminals".into(),
+        ))
+    }
+    /// §C.3, after the user agreed: the text as plain text without ANSI, sent as
+    /// [`TerminalEvent::ReadDone`] through `sink`.
+    fn read(
+        &self,
+        ext: &str,
+        handle: TerminalHandle,
+        scope: ReadScope,
+        lines: u16,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        let _ = (ext, handle, scope, lines);
+        sink(TerminalEvent::ReadDone(id, Err("unavailable".into())));
+    }
+    /// §C.3, after the card confirmed the exact text (checked by [`check_write_text`]): typed,
+    /// with Enter when `submit`; the tab shows "typed by <extension>" for 5 s. Answered with
+    /// [`TerminalEvent::WriteDone`] through `sink`.
+    fn write(
+        &self,
+        ext: &str,
+        handle: TerminalHandle,
+        text: String,
+        submit: bool,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        let _ = (ext, handle, text, submit);
+        sink(TerminalEvent::WriteDone(id, Err("unavailable".into())));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
