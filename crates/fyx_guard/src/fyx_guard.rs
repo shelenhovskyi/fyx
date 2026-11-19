@@ -5,13 +5,13 @@
 //! `fyx_security` key, so a repository can neither raise nor lower it. A repository can only
 //! tighten, through `.fyx/security.toml` (see [`RepoPolicy`]). A settings change that lowers
 //! protection waits for the user's confirmation, while Fyx runs and across restarts (see
-//! [`init`]).
+//! [`init`]). The rules themselves are in `fyx_guard_core`, without GPUI; this crate applies
+//! them to projects, settings and agents, and re-exports them.
 
 pub mod paths;
-mod policy;
 
 use std::{
-    cmp::Ordering,
+    ops::Deref,
     path::{Path, PathBuf},
 };
 
@@ -26,81 +26,35 @@ use project::{
 use settings::{FyxSecurityMode, RegisterSetting, Settings, SettingsStore};
 use util::rel_path::RelPath;
 
-pub use policy::{
-    RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, env_name_matches, is_credential_url,
-    protected_config, protected_config_rel, sanitize_for_log, secret_env_names, secret_env_vars,
+use fyx_guard_core::{AccountDir, CONFIRMED_FILE, enforce, scrub};
+pub use fyx_guard_core::{
+    RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, SecurityConfig, SecurityMode,
+    env_name_matches, is_credential_url, protected_config, protected_config_rel, sanitize_for_log,
+    secret_env_names, secret_env_vars,
 };
-
-/// Where the last settings the user accepted are kept, so a lowering they declined does not apply
-/// silently at the next start (security-2 T3).
-const CONFIRMED_FILE: &str = "fyx_security_confirmed.toml";
-
-/// Ordered by strength: `Off < Audit < Shield`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SecurityMode {
-    Off,
-    /// Shield as a dry run: log what would be blocked, block nothing.
-    Audit,
-    Shield,
-}
 
 /// `fyx_security` in user settings (schema in `settings_content::FyxSecuritySettingsContent`,
 /// default in `assets/settings/fyx.json`).
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
-pub struct SecuritySettings {
-    pub mode: SecurityMode,
-    pub allow_env: Vec<String>,
-}
+pub struct SecuritySettings(pub SecurityConfig);
 
-/// [`SecuritySettings`] as stored in [`CONFIRMED_FILE`].
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ConfirmedFile {
-    mode: String,
-    allow_env: Vec<String>,
-}
+impl Deref for SecuritySettings {
+    type Target = SecurityConfig;
 
-impl SecuritySettings {
-    fn to_confirmed_toml(&self) -> Option<Vec<u8>> {
-        let mode = match self.mode {
-            SecurityMode::Off => "off",
-            SecurityMode::Audit => "audit",
-            SecurityMode::Shield => "shield",
-        };
-        toml::to_string(&ConfirmedFile {
-            mode: mode.into(),
-            allow_env: self.allow_env.clone(),
-        })
-        .ok()
-        .map(String::into_bytes)
-    }
-
-    /// An unreadable or unknown file counts as `shield` with no `allow_env`: whoever damaged it
-    /// does not get a lower mode for it.
-    fn from_confirmed_toml(bytes: &[u8]) -> Self {
-        let file = std::str::from_utf8(bytes)
-            .ok()
-            .and_then(|text| toml::from_str::<ConfirmedFile>(text).ok());
-        let mode = match file.as_ref().map(|file| file.mode.as_str()) {
-            Some("off") => SecurityMode::Off,
-            Some("audit") => SecurityMode::Audit,
-            _ => SecurityMode::Shield,
-        };
-        Self {
-            mode,
-            allow_env: file.map(|file| file.allow_env).unwrap_or_default(),
-        }
+    fn deref(&self) -> &SecurityConfig {
+        &self.0
     }
 }
 
 impl Settings for SecuritySettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let security = content.fyx_security.as_ref();
-        Self {
+        Self(SecurityConfig {
             mode: mode_from_content(security.and_then(|security| security.mode)),
             allow_env: security
                 .and_then(|security| security.allow_env.clone())
                 .unwrap_or_default(),
-        }
+        })
     }
 }
 
@@ -133,40 +87,6 @@ fn active(cx: &App) -> Option<&SecuritySettings> {
 /// The active mode.
 pub fn mode(cx: &App) -> SecurityMode {
     active(cx).map_or(SecurityMode::Off, |settings| settings.mode)
-}
-
-/// Applies `mode` to a denial: shield turns it into the message for the agent, audit only logs it.
-fn enforce(
-    mode: SecurityMode,
-    action: impl FnOnce() -> String,
-    denial: Option<String>,
-) -> Result<(), String> {
-    let Some(reason) = denial else {
-        return Ok(());
-    };
-    match mode {
-        SecurityMode::Off => Ok(()),
-        SecurityMode::Audit => {
-            log::warn!(
-                "fyx_guard audit: would block {}: {}",
-                sanitize_for_log(&action()),
-                sanitize_for_log(&reason)
-            );
-            Ok(())
-        }
-        SecurityMode::Shield => {
-            let action = action();
-            log::warn!(
-                "fyx_guard: blocked {}: {}",
-                sanitize_for_log(&action),
-                sanitize_for_log(&reason)
-            );
-            Err(format!(
-                "Fyx's security shield blocked {action}: {reason}. Do not retry or work around \
-                 this; ask the user if the task needs it."
-            ))
-        }
-    }
 }
 
 /// Hook for ACP `fs/read_text_file`: Zed's `private_files` (the same check as the built-in agent's
@@ -283,10 +203,10 @@ fn private_denial(path: &ProjectPath, project: &Project, cx: &App) -> Option<Str
 
 fn private_denial_of(path: &ProjectPath, cx: &App) -> Option<String> {
     if WorktreeSettings::get_global(cx).is_path_private(&path.path) {
-        return Some("it matches the global `private_files` setting".into());
+        return Some(fyx_guard_core::GLOBAL_PRIVATE_DENIAL.into());
     }
     if WorktreeSettings::get(Some(path.into()), cx).is_path_private(&path.path) {
-        return Some("it matches the worktree `private_files` setting".into());
+        return Some(fyx_guard_core::WORKTREE_PRIVATE_DENIAL.into());
     }
     repo_denial(path.worktree_id, cx, |state| state.read_denial(&path.path))
 }
@@ -427,17 +347,13 @@ fn write_check(project: &Project, path: &Path, cx: &App) -> Result<(), String> {
 fn write_denial(project: &Project, path: &Path, cx: &App) -> Option<String> {
     let resolved = resolve_path(project, path);
     if resolved.has_windows_alias() {
-        return Some(
-            "its name uses a spelling Windows rewrites (a trailing dot or space, or ':'), so it \
-             could name a protected file"
-                .into(),
-        );
+        return Some(fyx_guard_core::WINDOWS_ALIAS_DENIAL.into());
     }
     if let Some(canonical) = &resolved.canonical
         && project.find_project_path(&resolved.lexical, cx).is_some()
         && !inside_worktrees(project, canonical, cx)
     {
-        return Some("it resolves outside the project through a link".into());
+        return Some(fyx_guard_core::LINK_OUT_DENIAL.into());
     }
     let mut spellings: Vec<PathBuf> = resolved
         .candidates()
@@ -470,15 +386,13 @@ fn inside_worktrees(project: &Project, path: &Path, cx: &App) -> bool {
 
 fn write_denial_of(project: &Project, path: &Path, cx: &App) -> Option<String> {
     let project_path = project.find_project_path(path, cx);
-    let read_only_config =
-        |rule: String| format!("agent configs ({rule}) are read-only for agents");
     let protected = match &project_path {
         Some(project_path) => protected_config_rel(&project_path.path),
         None => protected_config(path),
     };
     protected
         .or_else(|| user_config(path))
-        .map(read_only_config)
+        .map(|rule| fyx_guard_core::read_only_config_denial(&rule))
         .or_else(|| account_dir(path, cx))
         .or_else(|| {
             let project_path = project_path.as_ref()?;
@@ -488,29 +402,13 @@ fn write_denial_of(project: &Project, path: &Path, cx: &App) -> Option<String> {
         })
 }
 
-/// Fyx's own config directory: the user settings file sets the mode, and `tasks.json` and
-/// `keymap.json` there run commands, like `.zed/` does for a project.
+/// Fyx's own config directory and confirmed file ([`fyx_guard_core::user_config_rule`]).
 fn user_config(path: &Path) -> Option<String> {
-    let path = match path.strip_prefix("~") {
-        Ok(rest) => util::paths::home_dir().join(rest),
-        Err(_) => path.to_path_buf(),
-    };
-    let config_dir = ::paths::config_dir();
-    if policy::is_within(&path, config_dir) {
-        return Some(format!("{}/", config_dir.display()));
-    }
-    let confirmed = ::paths::data_dir().join(CONFIRMED_FILE);
-    policy::is_within(&path, &confirmed).then(|| confirmed.display().to_string())
+    fyx_guard_core::user_config_rule(path, ::paths::config_dir(), ::paths::data_dir())
 }
 
-/// An account dir of `fyx.accounts` (design wit-0.4 §C.6, rule 5): only the tool itself signs in
-/// and keeps its credentials there, so agents and extensions neither read nor write in it. The
-/// reason names the account, never the dir: an extension sees only an account's name.
+/// An account dir of `fyx.accounts` ([`fyx_guard_core::account_dir_denial`]).
 fn account_dir(path: &Path, cx: &App) -> Option<String> {
-    let path = match path.strip_prefix("~") {
-        Ok(rest) => util::paths::home_dir().join(rest),
-        Err(_) => path.to_path_buf(),
-    };
     let accounts = cx
         .try_global::<SettingsStore>()?
         .merged_settings()
@@ -519,15 +417,14 @@ fn account_dir(path: &Path, cx: &App) -> Option<String> {
         .accounts
         .as_ref()?
         .accounts();
-    accounts
-        .iter()
-        .find(|account| policy::is_within(&path, &account.dir))
-        .map(|account| {
-            format!(
-                "it is in the {} account dir of \"{}\", which only the tool itself uses",
-                account.tool, account.name
-            )
-        })
+    fyx_guard_core::account_dir_denial(
+        path,
+        accounts.iter().map(|account| AccountDir {
+            tool: &account.tool,
+            name: &account.name,
+            dir: &account.dir,
+        }),
+    )
 }
 
 /// Hook for the environment an agent terminal inherits, applied before the variables the agent
@@ -545,45 +442,6 @@ pub fn scrub_env(env: &mut HashMap<String, String>, cx: &App) {
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok())))
         .collect::<Vec<_>>();
     scrub(env, &inherited, settings.mode, &settings.allow_env);
-}
-
-/// `inherited` is Fyx's own environment, with values where they are UTF-8: a value that is a
-/// credential URL is secret whatever the variable is called.
-fn scrub(
-    env: &mut HashMap<String, String>,
-    inherited: &[(String, Option<String>)],
-    mode: SecurityMode,
-    allow: &[String],
-) -> Vec<String> {
-    let vars = env
-        .iter()
-        .map(|(name, value)| (name, Some(value.as_str())))
-        .chain(
-            inherited
-                .iter()
-                .map(|(name, value)| (name, value.as_deref())),
-        );
-    let secret = secret_env_vars(vars, allow);
-    if secret.is_empty() {
-        return secret;
-    }
-    match mode {
-        SecurityMode::Off => {}
-        SecurityMode::Audit => log::warn!(
-            "fyx_guard audit: would blank in an agent terminal: {}",
-            secret.join(", ")
-        ),
-        SecurityMode::Shield => {
-            for name in &secret {
-                env.insert(name.clone(), String::new());
-            }
-            log::info!(
-                "fyx_guard: blanked in an agent terminal: {}",
-                secret.join(", ")
-            );
-        }
-    }
-    secret
 }
 
 /// Step 2 (`tasks/W9-security.md`), not wired and not isolation yet: returns the command
@@ -664,7 +522,7 @@ fn init_with_confirmed_file(confirmed_file: Option<PathBuf>, cx: &mut App) {
     let confirmed = confirmed_file
         .as_ref()
         .and_then(|path| std::fs::read(path).ok())
-        .map(|bytes| SecuritySettings::from_confirmed_toml(&bytes));
+        .map(|bytes| SecuritySettings(SecurityConfig::from_confirmed_toml(&bytes)));
     cx.set_global(Guard {
         confirmed_file,
         ..Guard::default()
@@ -707,33 +565,13 @@ fn track_project(project: Entity<Project>, cx: &mut App) {
     }
 }
 
-/// Whether `requested` protects less than `current`. A higher mode protects more whatever its
-/// `allow_env`, since a lower mode blanks nothing.
+/// Whether `requested` protects less than `current` ([`SecurityConfig::lowered_by`]).
 fn lowers(current: &SecuritySettings, requested: &SecuritySettings) -> bool {
-    match requested.mode.cmp(&current.mode) {
-        Ordering::Less => true,
-        Ordering::Greater => false,
-        Ordering::Equal => {
-            current.mode != SecurityMode::Off
-                && requested
-                    .allow_env
-                    .iter()
-                    .any(|entry| !current.allow_env.contains(entry))
-        }
-    }
+    current.lowered_by(requested)
 }
 
 fn describe(settings: &SecuritySettings) -> String {
-    let mode = match settings.mode {
-        SecurityMode::Off => "off",
-        SecurityMode::Audit => "audit",
-        SecurityMode::Shield => "shield",
-    };
-    if settings.allow_env.is_empty() || settings.mode == SecurityMode::Off {
-        format!("\"{mode}\"")
-    } else {
-        format!("\"{mode}\" with allow_env {:?}", settings.allow_env)
-    }
+    settings.describe()
 }
 
 fn on_settings_changed(cx: &mut App) {
@@ -1028,79 +866,6 @@ mod tests {
         assert_eq!(parsed.mode, Some(FyxSecurityMode::Unrecognized));
     }
 
-    #[test]
-    fn enforce_blocks_only_in_shield() {
-        let denial = || Some("it matches `private_files`".to_string());
-        let action = || "a read".to_string();
-        assert!(enforce(SecurityMode::Off, action, denial()).is_ok());
-        assert!(enforce(SecurityMode::Audit, action, denial()).is_ok());
-        let error = enforce(SecurityMode::Shield, action, denial()).unwrap_err();
-        assert!(error.contains("private_files"), "{error}");
-        assert!(enforce(SecurityMode::Shield, action, None).is_ok());
-        assert!(
-            enforce(
-                SecurityMode::Shield,
-                || panic!("the action is described only for a denial"),
-                None
-            )
-            .is_ok()
-        );
-    }
-
-    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn scrub_blanks_in_shield_and_only_logs_in_audit() {
-        let original = env(&[
-            ("PATH", "/usr/bin"),
-            ("GITHUB_TOKEN", "ghp_x"),
-            ("OPENAI_API_KEY", "sk-x"),
-            ("SSH_AUTH_SOCK", "/tmp/agent"),
-        ]);
-        let inherited = [
-            ("AWS_SECRET_ACCESS_KEY".to_string(), Some("x".to_string())),
-            ("HOME".to_string(), Some("/home/u".to_string())),
-            (
-                "CI_REPOSITORY".to_string(),
-                Some("https://ci:glpat-x@gitlab.example/a.git".to_string()),
-            ),
-        ];
-
-        let mut audited = original.clone();
-        let secret = scrub(&mut audited, &inherited, SecurityMode::Audit, &[]);
-        assert_eq!(audited, original);
-        assert_eq!(
-            secret,
-            [
-                "AWS_SECRET_ACCESS_KEY",
-                "CI_REPOSITORY",
-                "GITHUB_TOKEN",
-                "OPENAI_API_KEY",
-                "SSH_AUTH_SOCK"
-            ]
-        );
-
-        let mut shielded = original;
-        scrub(
-            &mut shielded,
-            &inherited,
-            SecurityMode::Shield,
-            &["GITHUB_TOKEN".to_string()],
-        );
-        assert_eq!(shielded["PATH"], "/usr/bin");
-        assert_eq!(shielded["GITHUB_TOKEN"], "ghp_x");
-        assert_eq!(shielded["OPENAI_API_KEY"], "");
-        assert_eq!(shielded["SSH_AUTH_SOCK"], "");
-        // Only inherited by the PTY from Fyx's own environment: overridden with an empty value.
-        assert_eq!(shielded["AWS_SECRET_ACCESS_KEY"], "");
-        assert!(!shielded.contains_key("HOME"));
-    }
-
     /// [`init`] without a confirmed file: tests must not read or write the user's data folder.
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -1232,7 +997,7 @@ mod tests {
         assert_eq!(cx.update(|cx| mode(cx)), SecurityMode::Shield);
         let saved = std::fs::read(&confirmed).expect("saved");
         assert_eq!(
-            SecuritySettings::from_confirmed_toml(&saved).mode,
+            SecurityConfig::from_confirmed_toml(&saved).mode,
             SecurityMode::Shield
         );
 
@@ -1251,7 +1016,7 @@ mod tests {
 
         // A damaged file counts as shield.
         assert_eq!(
-            SecuritySettings::from_confirmed_toml(b"{nope").mode,
+            SecurityConfig::from_confirmed_toml(b"{nope").mode,
             SecurityMode::Shield
         );
         std::fs::remove_dir_all(&directory).ok();
