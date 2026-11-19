@@ -233,7 +233,7 @@ pub(crate) fn update_lines(
     before: &[crate::consent_model::ItemLine],
     after: Vec<crate::consent_model::ItemLine>,
 ) -> (Vec<crate::consent_model::ItemLine>, Option<String>) {
-    let diff = crate::consent_model::consent_diff(before, &[], &after);
+    let diff = crate::consent_model::consent_diff_lines(before, &after);
     let removed = (!diff.removed.is_empty()).then(|| {
         let titles: Vec<&str> = diff
             .removed
@@ -242,10 +242,7 @@ pub(crate) fn update_lines(
             .collect();
         format!("No longer asks for: {}.", titles.join("; "))
     });
-    (
-        diff.added.into_iter().chain(diff.widened).collect(),
-        removed,
-    )
+    (crate::consent_model::new_lines(&diff), removed)
 }
 
 /// The manifest of the active version of an installed extension.
