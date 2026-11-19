@@ -455,6 +455,58 @@ async fn test_hub_lists_the_index(cx: &mut gpui::TestAppContext) {
     // A refresh is a check: the 6 h timer counts from it, across restarts.
     let last = RegistryStateDir(state.path().to_path_buf()).last_check();
     assert!(last.is_some_and(|last| now().0 - last.0 < 60), "{last:?}");
+
+    // Day 2: a new block of "demo". The automatic refresh (the page opening) waits until the
+    // block list is due; the Refresh button fetches it now.
+    test_registry.write_blocklist(blocklist_blocking("demo", 2));
+    let blocked = |hub: &RegistryHub| {
+        hub.listing.iter().any(|listed| {
+            listed.release.id.as_str() == "demo"
+                && matches!(
+                    listed.refusal,
+                    Some(fyx_registry::InstallRefusal::Blocked { .. })
+                )
+        })
+    };
+    let wait = |cx: &mut gpui::TestAppContext| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while hub.read_with(cx, |hub, _| hub.is_refreshing()) && std::time::Instant::now() < deadline
+        {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    hub.update(cx, |hub, cx| hub.refresh(cx));
+    wait(cx);
+    assert!(!hub.read_with(cx, |hub, _| blocked(hub)), "not due yet");
+    hub.update(cx, |hub, cx| hub.refresh_now(cx));
+    wait(cx);
+    assert!(hub.read_with(cx, |hub, _| blocked(hub)), "Refresh fetches it");
+}
+
+/// Day 2: after a block of the installed version, the Available row (an older version, still
+/// installable) says which version is installed and that it is disabled.
+#[test]
+fn test_available_row_of_a_blocked_install() {
+    use crate::fyx_extensions_page::installed_row_state;
+    let version = |text: &str| semver::Version::parse(text).unwrap();
+    let (label, note) = installed_row_state(
+        &version("0.1.0"),
+        &version("0.1.1"),
+        Some("blocked: crashes on start"),
+    );
+    assert_eq!(label, "Disabled");
+    let (note, color) = note.expect("a note");
+    assert_eq!(note, "Installed 0.1.1: disabled, blocked: crashes on start");
+    assert_eq!(color, ui::Color::Error);
+    assert_eq!(
+        installed_row_state(&version("0.1.0"), &version("0.1.1"), None),
+        ("Installed 0.1.1".to_string(), None)
+    );
+    assert_eq!(
+        installed_row_state(&version("0.1.1"), &version("0.1.1"), None),
+        ("Installed".to_string(), None)
+    );
 }
 
 /// Plan 3.4: the update check updates a registry install, rolls a blocked version back,
@@ -1022,24 +1074,87 @@ async fn test_revoke_takes_back_the_approval(cx: &mut gpui::TestAppContext) {
             .revoke("demo", "workspace:edit", fs.clone(), cx)
             .expect("revoked");
     });
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        cx.run_until_parked();
-        let installed = store.installed_extensions(fs.as_ref()).await.unwrap();
-        if !installed[0]
-            .approved
-            .capabilities
-            .contains("workspace:edit")
-        {
-            assert!(installed[0].approved.capabilities.contains("ui:status-bar"));
-            break;
+    // Waits on the write itself: reading the state file while it is replaced (Windows'
+    // `ReplaceFileW`) failed under load, and the write was not ordered with others before.
+    let written = registry.read_with(cx, |registry, _| registry.approval_writes_done());
+    written.await;
+    let installed = store.installed_extensions(fs.as_ref()).await.unwrap();
+    assert!(!installed[0].approved.capabilities.contains("workspace:edit"));
+    assert!(installed[0].approved.capabilities.contains("ui:status-bar"));
+}
+
+/// Two revokes in a row both reach the approval: the second write waits for the first, so it
+/// cannot write back the capability the first one took out.
+#[gpui::test]
+async fn test_revokes_in_a_row_both_reach_the_approval(cx: &mut gpui::TestAppContext) {
+    use crate::install_store::test_support::{manifest, zip};
+    use gpui::AppContext as _;
+    cx.executor().allow_parking();
+    crate::tests::init_test(cx);
+    let revoked = ["workspace:edit", "agent:observe"];
+    let capabilities = ["ui:status-bar", revoked[0], revoked[1]];
+    let mut test_registry = TestRegistry::new();
+    let package = zip(&[
+        (
+            "extension.toml",
+            manifest(
+                "demo",
+                "1.0.0",
+                "\"ui:status-bar\", \"workspace:edit\", \"agent:observe\"",
+            )
+            .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
+            .as_bytes(),
+        ),
+        ("fyx_ui.wasm", b"component"),
+    ])
+    .await;
+    test_registry.publish("demo", "1.0.0", &package, &capabilities);
+    let state = tempfile::tempdir().unwrap();
+    let registry_client = open(&test_registry, state.path());
+    registry_client.refresh(now()).await;
+    let (release, bytes) = registry_client
+        .download_for_install(&ExtensionId::new("demo").unwrap(), now())
+        .await
+        .unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = crate::install_store::InstallStore::new(store_dir.path().to_path_buf());
+    let fs: Arc<dyn fs::Fs> = fs::RealFs::new(None, cx.executor());
+    store
+        .install_registry_package(
+            bytes,
+            &release,
+            Some(Permissions::of(&release)),
+            fs.as_ref(),
+        )
+        .await
+        .unwrap();
+    let consent_dir = tempfile::tempdir().unwrap();
+    let registry = cx.new(|_| {
+        crate::UiExtensionRegistry::new(consent_dir.path().join("consent.json"))
+            .with_store(store.clone())
+    });
+    registry.update(cx, |registry, cx| {
+        <dyn fs::Fs>::set_global(fs.clone(), cx);
+        registry
+            .consent_mut()
+            .declare("demo", capabilities.iter().map(|c| c.to_string()).collect());
+        for capability in revoked {
+            registry.allow_t2("demo", capability, cx);
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the approval was not taken back"
-        );
-        std::thread::sleep(Duration::from_millis(10));
+        for capability in revoked {
+            registry
+                .revoke("demo", capability, fs.clone(), cx)
+                .expect("revoked");
+        }
+    });
+    let written = registry.read_with(cx, |registry, _| registry.approval_writes_done());
+    written.await;
+    let installed = store.installed_extensions(fs.as_ref()).await.unwrap();
+    let approved = &installed[0].approved.capabilities;
+    for capability in revoked {
+        assert!(!approved.contains(capability), "{approved:?}");
     }
+    assert!(approved.contains("ui:status-bar"), "{approved:?}");
 }
 
 /// integration-6 R9: a release keyset in which one key has two signing roles is refused like

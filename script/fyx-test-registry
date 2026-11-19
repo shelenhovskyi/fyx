@@ -12,9 +12,10 @@
 #               1  every demo at its own version; the block list names only versions older than
 #                  any release (it is never empty).
 #               2  stage 1, plus for each demo the next patch version with the same declarations
-#                  (updates by itself); the last demo's also asks for workspace:read-files (T1),
-#                  so it waits for "Approve and Update"; the first demo also gets the next minor
-#                  version, published now, so it waits out the 24 h gate.
+#                  (updates by itself); the last demo's also declares the network domain
+#                  example.com (and network:fetch if it had none), so it waits for "Approve and
+#                  Update"; the first demo also gets the next minor version, published now, so it
+#                  waits out the 24 h gate.
 #               3  stage 2, and the block list blocks the first demo's patch version (rolled
 #                  back to its stage-1 version).
 #   OUT_DIR     where to write it (default: target/fyx-test-registry); it is replaced.
@@ -119,8 +120,21 @@ new = {"none": version, "patch": f"{major}.{minor}.{patch + 1}",
 text, count = re.subn(r'(?m)^version = "[^"]*"$', f'version = "{new}"', text, count=1)
 assert count == 1, "no version line"
 if extra:
-    text, count = re.subn(r'(?m)^(capabilities = \[.*)\]$', rf'\1, "{extra}"]', text, count=1)
-    assert count == 1, "no one-line capabilities list"
+    # A new network domain: fyx:ui 0.3 has no T1 capability left to add, and a new domain is
+    # a change of permissions the user approves.
+    capabilities = tomllib.loads(text).get("fyx_ui", {}).get("capabilities", [])
+    if "network:fetch" not in capabilities:
+        text, count = re.subn(r'(?m)^(capabilities = \[.*)\]$', r'\1, "network:fetch"]', text,
+                              count=1)
+        assert count == 1, "no one-line capabilities list"
+    if re.search(r'(?m)^\[fyx_ui\.network\]$', text):
+        text, count = re.subn(r'(?ms)^(\[fyx_ui\.network\]\n(?:[^\[].*?\n)*?domains = \[.*?)\]$',
+                              rf'\1, "{extra}"]', text, count=1)
+        assert count == 1, "no one-line domains list in [fyx_ui.network]"
+    else:
+        text = text.rstrip("\n") + f'\n\n[fyx_ui.network]\ndomains = ["{extra}"]\n'
+    domains = tomllib.loads(text)["fyx_ui"]["network"]["domains"]
+    assert extra in domains, domains
 open(path, "w", encoding="utf-8").write(text)
 EOF
     # The demo is built already; fyx-ext checks and packs it as it is.
@@ -186,7 +200,7 @@ for demo in "${demos[@]}"; do
     [ "$demo" = "$first" ] && blocks+=("$id|<$version|Builds before $version are withdrawn (test entry).")
     if [ "$stage" -ge 2 ]; then
         extra=""
-        [ "$demo" = "$last" ] && extra=workspace:read-files
+        [ "$demo" = "$last" ] && extra=example.com
         publish "$demo" patch "$aged" "$extra"
         read -r id patched < "$work/published"
         if [ "$demo" = "$first" ]; then
