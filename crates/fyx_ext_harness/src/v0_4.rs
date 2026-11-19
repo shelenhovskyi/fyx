@@ -305,6 +305,7 @@ impl wit_network::Host for State {
 pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEvent> {
     use ui_ext::network as net;
     match event {
+        net::IoEvent::Terminal(event) => Some(terminal_io_event(event)),
         net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
             id,
             result
