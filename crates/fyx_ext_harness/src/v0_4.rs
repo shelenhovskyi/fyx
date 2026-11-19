@@ -410,8 +410,6 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         net::IoEvent::Context(context) => {
             Some(wit_io::IoEvent::ContextChanged(wit_editor_context(context)))
         }
-        // The staged WIT has no `diagnostics-changed` yet (W10's spec, §B.11).
-        net::IoEvent::DiagnosticsChanged(_) => None,
         net::IoEvent::ReviewDecided(id, outcome) => Some(wit_io::IoEvent::ReviewDecided((
             id,
             outcome.map(wit_review_outcome),
