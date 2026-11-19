@@ -241,6 +241,10 @@ pub struct PendingConsent {
     /// Its folder also holds a Zed extension (`extension.wasm`, decision Q1).
     pub zed_extension: bool,
     pub(crate) record: ConsentRecord,
+    /// The 0.4 consent lines of the version that waits (§C.2).
+    pub lines: Vec<crate::consent_model::ItemLine>,
+    /// For a held update: what it adds or widens and what it removes (§C.5).
+    pub diff: crate::consent_model::ConsentDiff,
 }
 
 /// How a watched dev extension is loaded again.
@@ -528,6 +532,103 @@ impl UiExtensionRegistry {
             pending.capabilities
         );
         self.grant_consent(extension_id, pending.record, fs.clone(), cx);
+        self.scan_installed(pending.installed_dir, fs, cx);
+        cx.notify();
+    }
+
+    /// The stand-in for W2c's `NeedsApproval { diff }` (§C.5): the lines that own one of the
+    /// 0.3 store's new consent strings; a line whose capability the extension already held is
+    /// widened, any other is added. Removals need the granted lines, which the record does not
+    /// keep yet, so none are listed.
+    pub(crate) fn held_update_diff(
+        &self,
+        extension_id: &str,
+        lines: &[crate::consent_model::ItemLine],
+        new_capabilities: &[String],
+    ) -> crate::consent_model::ConsentDiff {
+        use crate::consent_model::{ConsentItem, ConsentTier};
+        let mut diff = crate::consent_model::ConsentDiff::default();
+        for line in lines.iter().filter(|line| line.tier != ConsentTier::T0) {
+            let capability = line.item.capability();
+            let owns = |item: &String| {
+                let (base, rest) = item.split_once('@').unwrap_or((item.as_str(), ""));
+                let base = match base {
+                    "process:args" | "process:env" => "process:spawn",
+                    "network:fetch" => "network:fetch",
+                    other => other,
+                };
+                base == capability
+                    && match &line.item {
+                        ConsentItem::Program { name, .. } => {
+                            rest.is_empty() || rest == name || rest.starts_with(&format!("{name} "))
+                        }
+                        _ => true,
+                    }
+            };
+            if !new_capabilities.iter().any(owns) {
+                continue;
+            }
+            let held_before = self.consent.is_granted(extension_id, capability)
+                || self.consent.t2_state(extension_id, capability)
+                    == ui_ext_wasm::permissions::PermissionState::Granted;
+            if held_before {
+                diff.widened.push(line.clone());
+            } else {
+                diff.added.push(line.clone());
+            }
+        }
+        diff
+    }
+
+    /// The grouped dialog's answer for an extension that waits for "Enable" or a held update's
+    /// "Approve and Update": the ticked items, plus the items it already holds that the diff does
+    /// not touch (they stay on); then it loads.
+    pub fn approve_pending(
+        &mut self,
+        extension_id: &str,
+        ticked: &[crate::consent_model::ConsentItem],
+        fs: Arc<dyn Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::consent_model::ConsentBroker as _;
+        let Some(index) = self
+            .pending_consent
+            .iter()
+            .position(|pending| pending.extension_id.as_ref() == extension_id)
+        else {
+            return;
+        };
+        let pending = self.pending_consent.remove(index);
+        let in_diff = |item: &crate::consent_model::ConsentItem| {
+            pending
+                .diff
+                .added
+                .iter()
+                .chain(&pending.diff.widened)
+                .any(|line| &line.item == item)
+        };
+        let mut all_ticked = ticked.to_vec();
+        for line in pending.lines.iter().filter(|line| line.has_checkbox()) {
+            if !in_diff(&line.item)
+                && !all_ticked.contains(&line.item)
+                && self.consent.item_state(extension_id, &line.item)
+                    == ui_ext_wasm::permissions::PermissionState::Granted
+            {
+                all_ticked.push(line.item.clone());
+            }
+        }
+        log::info!(
+            "fyx:ui: {extension_id} approved with {:?}",
+            all_ticked.iter().map(|item| item.key()).collect::<Vec<_>>()
+        );
+        self.install_consent(
+            extension_id,
+            pending.record,
+            &pending.lines,
+            &all_ticked,
+            fs.clone(),
+            cx,
+        );
         self.scan_installed(pending.installed_dir, fs, cx);
         cx.notify();
     }
@@ -1939,6 +2040,12 @@ Environment it may pass: {}",
                 new_capabilities
             }
         };
+        let lines = crate::consent_model::consent_items(&found.manifest);
+        let diff = if new_capabilities.is_empty() {
+            crate::consent_model::ConsentDiff::default()
+        } else {
+            self.held_update_diff(&found.extension_id, &lines, &new_capabilities)
+        };
         self.pending_consent.push(PendingConsent {
             extension_id: found.extension_id.clone(),
             dir: found.dir.clone(),
@@ -1948,6 +2055,8 @@ Environment it may pass: {}",
             new_capabilities,
             zed_extension: found.zed_extension,
             record,
+            lines,
+            diff,
         });
         cx.notify();
         false
@@ -3043,6 +3152,12 @@ pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
             pending.extension_id,
             crate::install::describe_capability_ids(&pending.capabilities).join("; "),
         )
+    } else if pending.diff.needs_approval() {
+        format!(
+            "An update of the UI extension {} needs approval. {}{zed}{folder}",
+            pending.extension_id,
+            crate::consent_model::diff_text(&pending.diff),
+        )
     } else {
         format!(
             "An update of the UI extension {} needs approval. It now also asks for: {}.{zed}{folder}",
@@ -3050,6 +3165,91 @@ pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
             crate::install::describe_capability_ids(&pending.new_capabilities).join("; "),
         )
     }
+}
+
+/// The grouped dialog for an extension waiting in `pending_consent` (§C.2, §C.5): every line to
+/// enable it, or a held update's added and widened lines; its answer goes to
+/// [`UiExtensionRegistry::approve_pending`].
+pub(crate) fn ask_pending_consent(
+    workspace: &mut Workspace,
+    registry: &Entity<UiExtensionRegistry>,
+    extension_id: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(pending) = registry
+        .read(cx)
+        .pending_consent()
+        .iter()
+        .find(|pending| pending.extension_id.as_ref() == extension_id)
+        .cloned()
+    else {
+        return;
+    };
+    let update = !pending.new_capabilities.is_empty();
+    let mut notes = Vec::new();
+    if pending.zed_extension {
+        notes.push(crate::install::ZED_EXTENSION_WARNING.to_string());
+    }
+    if pending.is_dev {
+        notes.push(format!("Folder: {}", pending.dir.display()));
+    }
+    let (title, confirm, lines) = if update {
+        if !pending.diff.removed.is_empty() {
+            notes.push(format!(
+                "Removed: {}.",
+                pending
+                    .diff
+                    .removed
+                    .iter()
+                    .map(|line| line.title.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let lines: Vec<_> = pending
+            .diff
+            .added
+            .iter()
+            .chain(&pending.diff.widened)
+            .cloned()
+            .collect();
+        (
+            format!("Approve the update of {extension_id}?"),
+            "Approve and Update",
+            lines,
+        )
+    } else {
+        (
+            format!("Enable the UI extension {extension_id}?"),
+            "Enable",
+            pending.lines,
+        )
+    };
+    let answer = crate::consent_dialog::ask_consent(
+        workspace,
+        crate::consent_dialog::ConsentDialogText {
+            title,
+            notes,
+            confirm: confirm.into(),
+        },
+        lines,
+        window,
+        cx,
+    );
+    let (registry, extension_id) = (registry.downgrade(), extension_id.to_string());
+    let fs = workspace.app_state().fs.clone();
+    cx.spawn(async move |_, cx| {
+        let Ok(ticked) = answer.await else {
+            return;
+        };
+        registry
+            .update(cx, |registry, cx| {
+                registry.approve_pending(&extension_id, &ticked, fs, cx)
+            })
+            .ok();
+    })
+    .detach();
 }
 
 /// One notification per installed extension waiting for consent, once per workspace: what it
@@ -3076,7 +3276,7 @@ fn offer_consent(
         let update = !pending.new_capabilities.is_empty();
         let extension_id = pending.extension_id.clone();
         let registry = registry.downgrade();
-        let fs = workspace.app_state().fs.clone();
+        let workspace_handle = workspace.weak_handle();
         workspace.show_notification(
             NotificationId::named(format!("fyx-ui-consent-{extension_id}").into()),
             cx,
@@ -3084,12 +3284,16 @@ fn offer_consent(
                 cx.new(|cx| {
                     MessageNotification::new(message, cx)
                         .primary_message(if update { "Approve" } else { "Enable" })
-                        .primary_on_click(move |_, cx| {
-                            registry
-                                .update(cx, |registry, cx| {
-                                    registry.enable(&extension_id, fs.clone(), cx)
-                                })
-                                .ok();
+                        // The grouped dialog (§C.2), ticked item by item.
+                        .primary_on_click(move |window, cx| {
+                            let (Some(registry), Some(workspace)) =
+                                (registry.upgrade(), workspace_handle.upgrade())
+                            else {
+                                return;
+                            };
+                            workspace.update(cx, |workspace, cx| {
+                                ask_pending_consent(workspace, &registry, &extension_id, window, cx)
+                            });
                         })
                         .secondary_message("Not now")
                 })

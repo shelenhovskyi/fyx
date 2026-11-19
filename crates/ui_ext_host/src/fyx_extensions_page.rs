@@ -1320,6 +1320,7 @@ impl FyxExtensionsPage {
             "Installed folder, not from the registry"
         };
         let pending = local.pending.clone();
+        let workspace = self.workspace.clone();
         v_flex()
             .p_3()
             .gap_1()
@@ -1345,12 +1346,18 @@ impl FyxExtensionsPage {
                             )
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
-                            .on_click(move |_, _, cx| {
-                                let fs = <dyn Fs>::global(cx);
-                                if let Some(registry) = UiExtensionRegistry::global(cx) {
-                                    registry
-                                        .update(cx, |registry, cx| registry.enable(&id, fs, cx));
-                                }
+                            // The grouped dialog (§C.2), ticked item by item.
+                            .on_click(move |_, window, cx| {
+                                let (Some(registry), Some(workspace)) =
+                                    (UiExtensionRegistry::global(cx), workspace.upgrade())
+                                else {
+                                    return;
+                                };
+                                workspace.update(cx, |workspace, cx| {
+                                    crate::registry::ask_pending_consent(
+                                        workspace, &registry, &id, window, cx,
+                                    )
+                                });
                             }),
                         )
                     }),

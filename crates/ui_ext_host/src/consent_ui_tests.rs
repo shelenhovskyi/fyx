@@ -371,3 +371,75 @@ async fn test_journal_lines_and_uninstall(cx: &mut TestAppContext) {
         assert_eq!(registry.journal("demo"), JournalPage::default());
     });
 }
+
+/// Plan 5.7's check: a new program in an update shows in the diff, the card says so, and the
+/// dialog for it lists only what is new.
+#[gpui::test]
+async fn test_held_update_shows_a_new_program(cx: &mut TestAppContext) {
+    let old = manifest(
+        r#"
+api_version = "0.3.0"
+component = "x.wasm"
+capabilities = ["ui:panel", "process:spawn", "network:fetch"]
+[network]
+domains = ["api.example.com"]
+[[processes]]
+name = "codex"
+"#,
+    );
+    let mut new = old.clone();
+    new.processes.push(ui_ext::process::ProcessSpec {
+        name: "git".into(),
+        args: vec!["status".into()],
+        path: None,
+    });
+    let new_capabilities: Vec<String> = new
+        .consent_items()
+        .into_iter()
+        .filter(|item| !old.consent_items().contains(item))
+        .collect();
+    assert!(!new_capabilities.is_empty());
+    crate::tests::init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    let lines = consent_items(&new);
+    let diff = registry.update(cx, |registry, _| {
+        let consent = registry.consent_mut();
+        consent.declare("demo", new.consent_items());
+        consent.grant(
+            "demo",
+            ConsentRecord {
+                capabilities: old.consent_items(),
+                grant: Grant::Component {
+                    sha256: "abc".into(),
+                },
+            },
+        );
+        consent.set_t2("demo", "process:spawn", true);
+        registry.held_update_diff("demo", &lines, &new_capabilities)
+    });
+    let keys: Vec<String> = diff
+        .added
+        .iter()
+        .chain(&diff.widened)
+        .map(|line| line.item.key())
+        .collect();
+    assert_eq!(keys, ["process:spawn#git"], "only the new program");
+    assert!(diff.needs_approval());
+    let pending = crate::registry::PendingConsent {
+        extension_id: "demo".into(),
+        dir: "D:/demo".into(),
+        installed_dir: "D:/installed".into(),
+        capabilities: new.capabilities.clone(),
+        is_dev: false,
+        new_capabilities,
+        zed_extension: false,
+        record: record(),
+        lines,
+        diff,
+    };
+    let text = crate::registry::consent_card_text(&pending);
+    assert!(
+        text.contains("New in this version: Runs git (status)."),
+        "{text}"
+    );
+}

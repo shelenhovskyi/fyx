@@ -321,6 +321,33 @@ impl ConsentDiff {
     }
 }
 
+/// The held update in words (§C.5): "New in this version: runs codex (-c, notify=*). Removed:
+/// Connects to the internet."
+pub fn diff_text(diff: &ConsentDiff) -> String {
+    let describe = |line: &ItemLine| {
+        if line.details.is_empty() {
+            line.title.clone()
+        } else {
+            format!("{} ({})", line.title, line.details.join(", "))
+        }
+    };
+    let mut parts = Vec::new();
+    let new: Vec<String> = diff
+        .added
+        .iter()
+        .chain(&diff.widened)
+        .map(describe)
+        .collect();
+    if !new.is_empty() {
+        parts.push(format!("New in this version: {}.", new.join("; ")));
+    }
+    if !diff.removed.is_empty() {
+        let removed: Vec<String> = diff.removed.iter().map(|line| line.title.clone()).collect();
+        parts.push(format!("Removed: {}.", removed.join("; ")));
+    }
+    parts.join(" ")
+}
+
 /// `granted`: the lines the user agreed to (stored in the record); `new`: the update's. An item
 /// the user denied is neither added nor widened: it stays denied.
 pub fn consent_diff(granted: &[ItemLine], denied: &[ConsentItem], new: &[ItemLine]) -> ConsentDiff {
