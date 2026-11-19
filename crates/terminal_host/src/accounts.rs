@@ -36,7 +36,7 @@ pub(crate) fn init(cx: &mut App) {
     terminal_ext::set_env_hook(AccountsEnv, cx);
 }
 
-fn settings(cx: &App) -> FyxAccountsSettingsContent {
+pub(crate) fn settings(cx: &App) -> FyxAccountsSettingsContent {
     if cx.has_global::<SettingsStore>() {
         FyxAccountsSettings::get_global(cx).0.clone()
     } else {
@@ -47,6 +47,22 @@ fn settings(cx: &App) -> FyxAccountsSettingsContent {
 /// [`terminal_ext::ACCOUNT_CHOICE_ENV`] for a terminal opened for `account`.
 pub fn account_choice(account: &FyxAccount) -> String {
     format!("{}={}", account.tool, account.name)
+}
+
+/// [`terminal_accounts`] for a local terminal.
+pub(crate) fn accounts_for(
+    settings: &FyxAccountsSettingsContent,
+    cwd: Option<&Path>,
+    account_choice: Option<&str>,
+) -> Vec<FyxAccount> {
+    terminal_accounts(
+        settings,
+        &EnvRequest {
+            cwd,
+            remote: false,
+            account_choice,
+        },
+    )
 }
 
 /// The accounts a new terminal gets: none on another machine or when opened for none; else the
@@ -86,9 +102,28 @@ struct AccountsEnv;
 
 impl TerminalEnvHook for AccountsEnv {
     fn env_for(&self, request: &EnvRequest<'_>, cx: &App) -> EnvAdditions {
-        let accounts = terminal_accounts(&settings(cx), request);
+        let settings = settings(cx);
+        let accounts = terminal_accounts(&settings, request);
+        let mut vars = accounts
+            .iter()
+            .map(FyxAccount::env_entry)
+            .collect::<Vec<_>>();
+        if !request.remote {
+            // Extensions the user allowed into every new terminal (§B.4), after the accounts so
+            // they cannot replace an account's variable.
+            let names = vars
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            vars.splice(
+                0..0,
+                crate::profiles::all_new_env(&accounts, &settings, cx)
+                    .into_iter()
+                    .filter(|(name, _)| !names.iter().any(|own| own.eq_ignore_ascii_case(name))),
+            );
+        }
         EnvAdditions {
-            vars: accounts.iter().map(FyxAccount::env_entry).collect(),
+            vars,
             accounts: accounts.iter().map(badge_of).collect(),
         }
     }

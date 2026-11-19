@@ -154,7 +154,7 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
-                                let fyx_entries = terminal_ext::new_terminal_menu(window, cx); // fyx: account profiles
+                                let fyx_entries = terminal_ext::new_terminal_menu(window, cx); // fyx: profiles, accounts
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
                                     let menu = menu
                                         .context(focus_handle.clone())
@@ -1875,11 +1875,14 @@ impl RenderOnce for InlineAssistTabBarButton {
     }
 }
 
-/// fyx: the "+" menu entries `terminal_host` adds (account profiles, design §C.6).
+/// fyx: the "+" menu entries `terminal_host` adds (profiles §B.1, accounts §C.6).
 fn fyx_menu(menu: ContextMenu, entries: Vec<terminal_ext::MenuEntry>) -> ContextMenu {
     entries.into_iter().fold(menu, |menu, entry| match entry {
         terminal_ext::MenuEntry::Separator => menu.separator(),
         terminal_ext::MenuEntry::Header(title) => menu.header(title),
+        terminal_ext::MenuEntry::Entry { label, on_select } => {
+            menu.entry(label, None, move |window, cx| on_select(window, cx))
+        }
         terminal_ext::MenuEntry::Toggle {
             label,
             checked,

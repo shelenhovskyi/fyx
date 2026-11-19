@@ -120,7 +120,9 @@ impl TerminalDecorations for TabStatus {
     }
 
     fn new_terminal_menu(&self, window: &Window, cx: &App) -> Vec<terminal_ext::MenuEntry> {
-        crate::accounts::menu_entries(window, cx)
+        let mut entries = crate::profiles::menu_entries(cx);
+        entries.extend(crate::accounts::menu_entries(window, cx));
+        entries
     }
 }
 

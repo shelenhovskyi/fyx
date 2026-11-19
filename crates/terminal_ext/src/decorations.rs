@@ -12,7 +12,7 @@ pub trait TerminalDecorations: 'static {
     /// An element drawn after the tab's icon, e.g. the status icon with a tooltip naming its source.
     fn tab_indicator(&self, terminal: &TerminalExt, cx: &App) -> Option<AnyElement>;
 
-    /// Entries added after the terminal panel's "+" menu's own (account profiles, §C.6).
+    /// Entries added after the terminal panel's "+" menu's own (profiles §B.1, accounts §C.6).
     fn new_terminal_menu(&self, _window: &Window, _cx: &App) -> Vec<MenuEntry> {
         Vec::new()
     }
@@ -23,6 +23,10 @@ pub trait TerminalDecorations: 'static {
 pub enum MenuEntry {
     Separator,
     Header(SharedString),
+    Entry {
+        label: SharedString,
+        on_select: Rc<dyn Fn(&mut Window, &mut App)>,
+    },
     Toggle {
         label: SharedString,
         checked: bool,

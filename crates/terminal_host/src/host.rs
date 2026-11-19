@@ -41,6 +41,8 @@ pub(crate) enum Command {
     Paste(TerminalId, Vec<u8>),
     /// Close an extension's terminal (its tab, or the one the host holds for a panel).
     Close(TerminalId),
+    /// An extension's profiles and env; an empty one removes them.
+    Integration(String, crate::TerminalIntegration),
 }
 
 /// Whether a terminal's program has bracketed paste on, read live from any thread.
@@ -232,6 +234,14 @@ impl Known {
 }
 
 impl HostFront {
+    /// An extension's profiles and granted `terminal:env` (design §B.1, §B.4), set by the runtime
+    /// on every load; an empty integration removes them, and so does [`TerminalHost::close_all`].
+    /// Terminals already open keep their environment.
+    pub fn set_integration(&self, ext: &str, integration: crate::TerminalIntegration) {
+        self.send(Command::Integration(ext.to_owned(), integration))
+            .ok();
+    }
+
     pub(crate) fn new(commands: UnboundedSender<Command>) -> Self {
         Self {
             state: Mutex::default(),
@@ -727,6 +737,11 @@ impl TerminalHost for HostFront {
             (statuses, owned, extension)
         };
         drop(extension);
+        self.send(Command::Integration(
+            ext.to_owned(),
+            crate::TerminalIntegration::default(),
+        ))
+        .ok();
         for id in owned {
             self.send(Command::Close(id)).ok();
         }

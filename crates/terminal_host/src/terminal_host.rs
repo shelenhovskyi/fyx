@@ -5,6 +5,7 @@ mod accounts;
 mod created;
 mod host;
 mod notification;
+mod profiles;
 mod pseudo;
 mod sessions;
 mod sessions_panel;
@@ -15,6 +16,7 @@ use gpui::App;
 use workspace::Workspace;
 
 pub use accounts::{FyxAccountsSettings, account_choice};
+pub use profiles::TerminalIntegration;
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
 pub use settings::FyxTerminalSettings;
 
@@ -85,6 +87,7 @@ fn run(command: host::Command, cx: &mut App) {
             }
         }
         host::Command::OpenCreated(open) => created::open(open, cx),
+        host::Command::Integration(ext, integration) => profiles::set(ext, integration, cx),
         host::Command::Input(id, bytes) => created::input(id, bytes, cx),
         host::Command::Paste(id, bytes) => created::paste(id, bytes, cx),
         host::Command::Close(id) => {
