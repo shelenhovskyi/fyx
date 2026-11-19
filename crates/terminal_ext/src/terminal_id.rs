@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use rand::TryRngCore as _;
+
+use crate::inbox::Inbox;
+use crate::osc::OscEvent;
 use rand::rngs::OsRng;
 
 /// Env var with the terminal's [`TerminalId`], in decimal.
@@ -90,8 +93,7 @@ pub struct TerminalExt {
 /// State shared between the terminal and its pty tap on the IO thread.
 #[derive(Debug)]
 pub(crate) struct Shared {
-    #[allow(dead_code, reason = "the OSC parser (phase 1, step 3) reports with it")]
-    pub(crate) id: TerminalId,
+    pub(crate) inbox: Mutex<Inbox>,
 }
 
 impl TerminalExt {
@@ -127,7 +129,9 @@ impl TerminalExt {
         Self {
             id,
             token,
-            shared: Arc::new(Shared { id }),
+            shared: Arc::new(Shared {
+                inbox: Mutex::default(),
+            }),
         }
     }
 
@@ -137,6 +141,17 @@ impl TerminalExt {
 
     pub fn token(&self) -> Option<&TerminalToken> {
         self.token.as_ref()
+    }
+
+    /// OSC events parsed on the IO thread since the last call, oldest first, and how many were
+    /// dropped by rate limits or a full queue. Call it on the terminal's `Wakeup`: alacritty sends
+    /// one after every read, so every queued event is followed by one.
+    pub fn take_osc_events(&self) -> (Vec<OscEvent>, u64) {
+        self.shared
+            .inbox
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain()
     }
 }
 

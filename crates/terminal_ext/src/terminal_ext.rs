@@ -8,10 +8,13 @@
 //! The only bytes the tap ever writes back to the pty are constant feature-detection replies (the
 //! OSC 7501 support query); nothing in a reply is built from program output.
 
+pub mod inbox;
+pub mod osc;
 mod osc_scan;
 mod tee_pty;
 mod terminal_id;
 
+pub use osc::OscEvent;
 pub use osc_scan::{MAX_OSC_PAYLOAD, OscScanner};
 pub use tee_pty::{OscObserver, OscReplies, TeePty, tee, tee_with};
 pub use terminal_id::{
