@@ -6239,6 +6239,12 @@ impl AgentPanel {
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
                         .child(selected_agent.into_any_element())
+                        .children(crate::fyx::account_badge(
+                            &self.selected_agent,
+                            &self.project,
+                            showing_terminal,
+                            cx,
+                        )) // fyx: account (§C.6)
                         .child(match empty_thread_title {
                             Some(title) => title,
                             None => self.render_title_view(window, cx),

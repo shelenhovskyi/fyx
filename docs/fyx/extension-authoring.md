@@ -376,7 +376,7 @@ the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown
 
 | Key | Rule |
 |---|---|
-| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. `0.4.0` (terminals and CLI integrations) is staged after it, and only its manifest loads so far. |
+| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`, which works on Dev and Nightly builds only; on an older Stable-channel build set `ZED_RELEASE_CHANNEL=dev` at runtime), and `fyx-ext check` warns. `0.4.0` (terminals and CLI integrations) is staged after it, and only its manifest loads so far. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. Each `api_version` takes its own capabilities (see [the `fyx-ext` commands](#the-fyx-ext-commands)); a capability the world does not take fails the load with `<capability> needs fyx:ui 0.3; this extension targets <version>`. |
 
@@ -484,7 +484,9 @@ package"), from Zed's installed-extensions directory, and from the environment v
   (decided, integration-6 R9).
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
   It works in dev builds only (ignored, with a log line, in Preview and Stable), and every window
-  shows a banner while it is set.
+  shows a banner while it is set. Fyx's own builds are on the Dev channel (`crates/zed/RELEASE_CHANNEL`
+  is `dev`), so the variable and the staged worlds work on Dev and Nightly builds. For an older
+  Stable-channel build, set `ZED_RELEASE_CHANNEL=dev` at runtime.
 
 ### Extension Inspector
 

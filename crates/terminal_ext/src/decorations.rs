@@ -1,4 +1,5 @@
-//! The hooks `terminal_view` calls to decorate a terminal's tab and the terminal panel's "+" menu.
+//! The hooks `terminal_view` calls to decorate a terminal's tab, its right-click menu and the
+//! terminal panel's "+" menu.
 //! `terminal_host` provides them; with no provider set (tests, other binaries) both look as they do
 //! upstream.
 
@@ -14,6 +15,11 @@ pub trait TerminalDecorations: 'static {
 
     /// Entries added after the terminal panel's "+" menu's own (profiles §B.1, accounts §C.6).
     fn new_terminal_menu(&self, _window: &Window, _cx: &App) -> Vec<MenuEntry> {
+        Vec::new()
+    }
+
+    /// Entries added to a terminal's right-click menu ("Share with <extension>…", §C.3).
+    fn terminal_menu(&self, _terminal: &TerminalExt, _cx: &App) -> Vec<MenuEntry> {
         Vec::new()
     }
 }
@@ -51,5 +57,12 @@ pub fn new_terminal_menu(window: &Window, cx: &App) -> Vec<MenuEntry> {
     cx.try_global::<GlobalTerminalDecorations>()
         .map(|decorations| decorations.0.clone())
         .map(|decorations| decorations.new_terminal_menu(window, cx))
+        .unwrap_or_default()
+}
+
+pub fn terminal_menu(terminal: &TerminalExt, cx: &App) -> Vec<MenuEntry> {
+    cx.try_global::<GlobalTerminalDecorations>()
+        .map(|decorations| decorations.0.clone())
+        .map(|decorations| decorations.terminal_menu(terminal, cx))
         .unwrap_or_default()
 }

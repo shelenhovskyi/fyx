@@ -1875,8 +1875,9 @@ impl RenderOnce for InlineAssistTabBarButton {
     }
 }
 
-/// fyx: the "+" menu entries `terminal_host` adds (profiles §B.1, accounts §C.6).
-fn fyx_menu(menu: ContextMenu, entries: Vec<terminal_ext::MenuEntry>) -> ContextMenu {
+/// fyx: the menu entries `terminal_host` adds ("+": profiles §B.1, accounts §C.6; a terminal's
+/// right-click menu: sharing §C.3).
+pub(crate) fn fyx_menu(menu: ContextMenu, entries: Vec<terminal_ext::MenuEntry>) -> ContextMenu {
     entries.into_iter().fold(menu, |menu, entry| match entry {
         terminal_ext::MenuEntry::Separator => menu.separator(),
         terminal_ext::MenuEntry::Header(title) => menu.header(title),

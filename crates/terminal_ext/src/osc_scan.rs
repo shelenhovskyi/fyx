@@ -48,7 +48,13 @@ impl OscScanner {
 
     /// Scans `bytes`, calling `on_osc` with each complete payload (without `ESC ]` and terminator).
     pub fn feed(&mut self, bytes: &[u8], mut on_osc: impl FnMut(&[u8])) {
-        for &byte in bytes {
+        self.feed_at(bytes, |payload, _| on_osc(payload));
+    }
+
+    /// Like [`OscScanner::feed`], with the offset in `bytes` just past each payload's terminator
+    /// (for `ESC \`, past the `ESC`; the `\` that follows is not part of any output).
+    pub fn feed_at(&mut self, bytes: &[u8], mut on_osc: impl FnMut(&[u8], usize)) {
+        for (index, &byte) in bytes.iter().enumerate() {
             match self.state {
                 State::Ground => {
                     if byte == ESC {
@@ -67,12 +73,12 @@ impl OscScanner {
                 }
                 State::Osc => match byte {
                     BEL => {
-                        on_osc(&self.payload);
+                        on_osc(&self.payload, index + 1);
                         self.state = State::Ground;
                     }
                     // vte ends the OSC string on any ESC (`ESC \` is ST) and dispatches it.
                     ESC => {
-                        on_osc(&self.payload);
+                        on_osc(&self.payload, index + 1);
                         self.state = State::Escape;
                     }
                     CAN | SUB => self.state = State::Ground,

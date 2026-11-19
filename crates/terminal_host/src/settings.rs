@@ -7,18 +7,37 @@ use settings::{RegisterSetting, Settings};
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct FyxTerminalSettings {
     pub notifications: bool,
+    pub shell_integration: bool,
 }
 
 impl Settings for FyxTerminalSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
+        let terminal = content.fyx.as_ref().and_then(|fyx| fyx.terminal.as_ref());
         Self {
-            notifications: content
-                .fyx
-                .as_ref()
-                .and_then(|fyx| fyx.terminal.as_ref())
+            notifications: terminal
                 .and_then(|terminal| terminal.notifications)
                 .unwrap_or(true),
+            shell_integration: terminal
+                .and_then(|terminal| terminal.shell_integration)
+                .unwrap_or(true),
         }
+    }
+}
+
+/// Plan 5.17: keeps `terminal_ext`'s shell integration on in `dir` while the setting says so.
+pub fn init_shell_integration(dir: std::path::PathBuf, cx: &mut App) {
+    let apply = move |cx: &mut App| {
+        let enabled = !cx.has_global::<settings::SettingsStore>()
+            || FyxTerminalSettings::get_global(cx).shell_integration;
+        let wanted = enabled.then(|| dir.clone());
+        let current = terminal_ext::shell_integration(cx).map(|shell| shell.dir().to_path_buf());
+        if wanted != current {
+            terminal_ext::set_shell_integration(wanted, cx);
+        }
+    };
+    apply(cx);
+    if cx.has_global::<settings::SettingsStore>() {
+        cx.observe_global::<settings::SettingsStore>(apply).detach();
     }
 }
 
@@ -49,5 +68,31 @@ mod tests {
                 .unwrap();
         });
         assert!(!notifications_enabled(cx));
+    }
+
+    #[gpui::test]
+    fn shell_integration_follows_the_setting(cx: &mut gpui::TestAppContext) {
+        let dir = std::path::PathBuf::from("/data/shell");
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            init_shell_integration(dir.clone(), cx);
+        });
+        let current = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| terminal_ext::shell_integration(cx).map(|s| s.dir().to_path_buf()))
+        };
+        assert_eq!(current(cx), Some(dir), "on by default");
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store
+                    .set_user_settings(
+                        r#"{ "fyx": { "terminal": { "shell_integration": false } } }"#,
+                        cx,
+                    )
+                    .result()
+                    .unwrap();
+            });
+        });
+        assert_eq!(current(cx), None);
     }
 }

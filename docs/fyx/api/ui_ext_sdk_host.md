@@ -19,6 +19,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::Fetch` | variant | `fetch`; off WASM the ids are the shared 1, 2, … of `notify`. |
 | `HostEffect::HideSurface` | variant |  |
 | `HostEffect::Kill` | variant |  |
+| `HostEffect::Listener` | variant | A `crate::listeners` function (`fyx:ui` 0.4). |
 | `HostEffect::Notify` | variant | `notify`; off WASM the ids are 1, 2, … shared with `progress_start`. |
 | `HostEffect::PlaceDecoration` | variant |  |
 | `HostEffect::ProgressEnd` | variant |  |

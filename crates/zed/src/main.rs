@@ -751,10 +751,14 @@ fn main() {
         project_panel::init(cx);
         outline_panel::init(cx);
         terminal_host::init(cx); // fyx: terminal status on tabs, the fyx:ui terminal host
+        terminal_host::init_shell_integration(paths::data_dir().join("shell_integration"), cx); // fyx: plan 5.17
         if let Some(host) = terminal_host::host(cx) {
             ui_ext_host::set_terminal_host(host, cx); // fyx: before ui_ext_host loads any extension
         }
-        ui_ext_host::set_terminal_node_views(std::rc::Rc::new(terminal_host::extension_terminal_view), cx); // fyx: terminal nodes in extension panels
+        ui_ext_host::set_terminal_node_views(
+            std::rc::Rc::new(terminal_host::extension_terminal_view),
+            cx,
+        ); // fyx: terminal nodes in extension panels
         ui_ext_host::init(cx); // fyx: extension panels and status items
         tasks_ui::init(cx);
         snippets_ui::init(cx);
