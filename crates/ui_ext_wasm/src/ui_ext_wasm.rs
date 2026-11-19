@@ -71,6 +71,7 @@ pub mod images;
 pub mod journal;
 // The WIT imports, the load options and revocation wire it next (plan 5.11).
 #[cfg_attr(not(test), allow(dead_code))]
+mod editor_context;
 mod listeners;
 pub mod network;
 pub mod observe;
@@ -917,6 +918,8 @@ pub struct UiState {
     terminals: terminals::TerminalState,
     /// The 0.4 `listeners` import (§B.7).
     listeners: Arc<listeners::ListenersHandle>,
+    /// The 0.4 `context` import (§B.11).
+    context: Arc<editor_context::ContextHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -934,6 +937,7 @@ struct IoStates {
     observe: observe::ObserveState,
     terminals: terminals::TerminalState,
     listeners: Arc<listeners::ListenersHandle>,
+    context: Arc<editor_context::ContextHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -988,6 +992,7 @@ impl UiState {
             observe,
             terminals,
             listeners,
+            context,
             journal,
         } = io;
         Self {
@@ -995,6 +1000,7 @@ impl UiState {
             observe,
             terminals,
             listeners,
+            context,
             journal,
             capability_check,
             diagnostics,
@@ -1617,6 +1623,8 @@ pub struct UiExtension {
     terminals: Arc<terminals::TerminalsHandle>,
     /// The 0.4 listeners; they close when the instance goes.
     listeners: Arc<listeners::ListenersHandle>,
+    /// The 0.4 editor context; its feed stops when the instance goes.
+    context: Arc<editor_context::ContextHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1775,6 +1783,9 @@ pub struct LoadOptions {
     /// Told when a listener opens, changes its granted discovery files, and closes: the
     /// discovery-file writer (§B.8, plan 5.12, W1) and the profiles' `${listen.*}`.
     pub listener_observer: Option<Arc<dyn ui_ext::integration::ListenerObserver>>,
+    /// The editor side of the 0.4 `context` import (§B.11). Without it, the import is
+    /// `unavailable`.
+    pub context: Option<Arc<dyn ui_ext::context::ContextHost>>,
 }
 
 impl UiExtension {
@@ -1843,6 +1854,7 @@ impl UiExtension {
             listeners: listener_specs,
             discovery_files,
             listener_observer,
+            context: context_host,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -2011,6 +2023,12 @@ impl UiExtension {
                 capability_check.clone(),
                 listener_observer,
             ));
+            let context = Arc::new(editor_context::ContextHandle::new(
+                extension_id.clone(),
+                context_host.filter(|_| is_v0_4),
+                workspace.clone(),
+                listeners.clone(),
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -2022,6 +2040,7 @@ impl UiExtension {
                 let process_set = process_set.clone();
                 let terminals = terminals.clone();
                 let listeners = listeners.clone();
+                let context = context.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
@@ -2029,6 +2048,7 @@ impl UiExtension {
                     observer: Arc::downgrade(&observer),
                     terminals: Arc::downgrade(&terminals),
                     listeners: Arc::downgrade(&listeners),
+                    context: Arc::downgrade(&context),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
@@ -2038,6 +2058,7 @@ impl UiExtension {
                     if is_v0_4 {
                         terminals.forward(&running);
                         listeners.forward(&running);
+                        context.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -2075,6 +2096,7 @@ impl UiExtension {
                                     listeners.clone(),
                                 ),
                                 listeners,
+                                context,
                                 journal,
                             },
                         ),
@@ -2167,6 +2189,7 @@ impl UiExtension {
                     observer,
                     terminals,
                     listeners,
+                    context,
                 },
                 pushed_rx,
             ))
@@ -2261,6 +2284,11 @@ impl UiExtension {
     pub fn activate_terminals(&self) {
         self.terminals.activate();
         self.listeners.activate();
+    }
+
+    /// Whether the 0.4 `context` import has an editor host ([`LoadOptions::context`]).
+    pub fn context_available(&self) -> bool {
+        self.context.available()
     }
 
     /// `${listen.<name>.port}` while the listener is open (tests and the Extension Inspector).

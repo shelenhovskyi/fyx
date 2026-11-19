@@ -859,6 +859,8 @@ pub(crate) struct ListenersHandle {
     active: std::sync::atomic::AtomicBool,
     /// Held while the open listeners are brought in line with the grants.
     refreshing: Mutex<()>,
+    /// When a client last sent something the extension handles (§B.11's focus rule).
+    last_request: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ListenersHandle {
@@ -872,10 +874,18 @@ impl ListenersHandle {
         observer: Option<Arc<dyn ListenerObserver>>,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
+        let last_request: Arc<Mutex<Option<Instant>>> = Arc::default();
         let set = ListenerSet::new(
             extension_id.clone(),
-            Arc::new(move |event| {
-                sender.unbounded_send(event).ok();
+            Arc::new({
+                let last_request = last_request.clone();
+                move |event| {
+                    if !matches!(event, ListenerEvent::McpCancelled(_)) {
+                        *last_request.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(Instant::now());
+                    }
+                    sender.unbounded_send(event).ok();
+                }
             }),
             observer.clone(),
         );
@@ -892,7 +902,16 @@ impl ListenersHandle {
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             active: Default::default(),
             refreshing: Mutex::default(),
+            last_request,
         }
+    }
+
+    /// Whether a client of one of the listeners sent a call, request or message within `window`.
+    pub(crate) fn requested_within(&self, window: Duration) -> bool {
+        self.last_request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|at| at.elapsed() < window)
     }
 
     /// Moves the listeners' events onto the io channel, on the current tokio runtime, which the

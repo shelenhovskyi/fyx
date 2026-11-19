@@ -921,6 +921,7 @@ pub(crate) struct Revocable {
     pub(crate) observer: std::sync::Weak<crate::observe::ObserveHandle>,
     pub(crate) terminals: std::sync::Weak<crate::terminals::TerminalsHandle>,
     pub(crate) listeners: std::sync::Weak<crate::listeners::ListenersHandle>,
+    pub(crate) context: std::sync::Weak<crate::editor_context::ContextHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
@@ -1043,6 +1044,12 @@ impl NetworkHandle {
                         ui_ext::terminal::CAPABILITY_CREATE | ui_ext::terminal::CAPABILITY_ENV => {
                             if let Some(terminals) = revocable.terminals.upgrade() {
                                 terminals.close_all();
+                            }
+                        }
+                        // §B.11: the feed stops; the extension may watch again once granted.
+                        ui_ext::context::CAPABILITY_CONTEXT_EDITOR => {
+                            if let Some(context) = revocable.context.upgrade() {
+                                context.stop();
                             }
                         }
                         ui_ext::terminal::CAPABILITY_OBSERVE => {
