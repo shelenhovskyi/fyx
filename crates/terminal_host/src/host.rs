@@ -166,6 +166,8 @@ impl Extension {
 struct State {
     terminals: HashMap<TerminalId, Known>,
     extensions: HashMap<String, Extension>,
+    /// The terminal whose view has keyboard focus, if any (§B.11 focus rule).
+    focused: Option<TerminalId>,
 }
 
 pub struct HostFront {
@@ -262,6 +264,38 @@ impl HostFront {
         }
     }
 
+    /// A terminal view gained (`true`) or lost focus. A loss clears only that terminal, so a
+    /// later gain elsewhere is never undone by the old view's focus-out.
+    pub(crate) fn terminal_focus_changed(&self, id: TerminalId, focused: bool) {
+        let mut state = self.lock();
+        if focused {
+            state.focused = Some(id);
+        } else if state.focused == Some(id) {
+            state.focused = None;
+        }
+    }
+
+    /// §B.11: whether the focused terminal is one of `ext`'s: its pseudo or created terminal, or
+    /// a terminal of one of its profiles.
+    pub fn extension_terminal_focused(&self, ext: &str) -> bool {
+        let state = self.lock();
+        state
+            .focused
+            .and_then(|id| state.terminals.get(&id))
+            .and_then(|known| known.owner.as_ref())
+            .is_some_and(|owner| owner.extension == ext)
+    }
+
+    /// Plan 5.12: the handle `ext` already holds for `id`, for a relay request from that
+    /// terminal. Never allocates one: a hook does not tell an extension of a terminal it has not
+    /// seen (through `observe`, or as its own).
+    pub(crate) fn existing_handle(&self, ext: &str, id: TerminalId) -> Option<TerminalHandle> {
+        self.lock()
+            .extensions
+            .get(ext)
+            .and_then(|extension| extension.ids.get(&id).copied())
+    }
+
     /// §C.3: the consent broker forgets a closed terminal's shares and ends its open cards.
     pub(crate) fn set_closed_hook(&self, hook: TerminalClosedHook) {
         *self
@@ -306,6 +340,7 @@ impl HostFront {
             let State {
                 terminals,
                 extensions,
+                ..
             } = &mut *state;
             let events: Vec<_> = extensions
                 .iter_mut()
@@ -328,6 +363,7 @@ impl HostFront {
             let State {
                 terminals,
                 extensions,
+                ..
             } = &mut *state;
             let Some(known) = terminals.get_mut(&id) else {
                 return;
@@ -368,6 +404,9 @@ impl HostFront {
         }
         let events = {
             let mut state = self.lock();
+            if state.focused == Some(id) {
+                state.focused = None;
+            }
             let Some(known) = state.terminals.remove(&id) else {
                 return;
             };
@@ -499,6 +538,7 @@ impl TerminalHost for HostFront {
             let State {
                 terminals,
                 extensions,
+                ..
             } = &mut *state;
             let handle = extensions.entry(ext.to_owned()).or_default().handle_for(id);
             let known = Known {
@@ -566,6 +606,7 @@ impl TerminalHost for HostFront {
             let State {
                 terminals,
                 extensions,
+                ..
             } = &mut *state;
             let created = terminals
                 .values()
@@ -696,6 +737,7 @@ impl TerminalHost for HostFront {
             let State {
                 terminals,
                 extensions,
+                ..
             } = &mut *state;
             let extension = extensions.get_mut(ext).ok_or(TerminalError::NotFound)?;
             let id = *extension
@@ -746,6 +788,7 @@ impl TerminalHost for HostFront {
         let State {
             terminals,
             extensions,
+            ..
         } = &mut *state;
         let extension = extensions.entry(ext.to_owned()).or_default();
         let observing = sink.is_some();
@@ -1470,5 +1513,47 @@ mod tests {
 
         host.terminal_closed(user.id());
         assert_eq!(*closed.lock().unwrap(), [user.id().as_u64()]);
+    }
+
+    #[test]
+    fn focus_rule_and_relay_handles() {
+        let (commands, _repaints) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let user = TerminalExt::new();
+        let profile = TerminalExt::new();
+        host.terminal_opened(user.status_handle(), None, "zsh".into(), None);
+        host.terminal_opened(
+            profile.status_handle(),
+            Some(Owner {
+                extension: "acme".into(),
+                origin: TerminalOrigin::Profile,
+                profile_name: Some("Claude Code".into()),
+            }),
+            "claude".into(),
+            None,
+        );
+        assert!(!host.extension_terminal_focused("acme"));
+
+        host.terminal_focus_changed(profile.id(), true);
+        assert!(host.extension_terminal_focused("acme"));
+        assert!(!host.extension_terminal_focused("other"));
+
+        // The new view's focus-in may come before the old one's focus-out.
+        host.terminal_focus_changed(user.id(), true);
+        host.terminal_focus_changed(profile.id(), false);
+        assert!(!host.extension_terminal_focused("acme"));
+        host.terminal_focus_changed(profile.id(), true);
+        host.terminal_closed(profile.id());
+        assert!(!host.extension_terminal_focused("acme"));
+
+        // A relay request names only a terminal the extension has a handle for.
+        assert_eq!(host.existing_handle("acme", user.id()), None);
+        let (sink, _) = recorder();
+        let infos = host.observe("acme", Some(sink));
+        assert_eq!(
+            host.existing_handle("acme", user.id()),
+            Some(infos[0].handle)
+        );
+        assert_eq!(host.existing_handle("other", user.id()), None);
     }
 }
