@@ -110,6 +110,31 @@ pub fn extension_terminal(
     pseudo::held_terminal(id, cx)
 }
 
+/// For `ui_ext_host::set_terminal_node_views`: [`extension_terminal`] in a terminal view of the
+/// window's workspace, for an extension panel's `terminal` node. The caller keeps the view while a
+/// node shows the handle.
+pub fn extension_terminal_view(
+    ext: &str,
+    handle: ui_ext::terminal::TerminalHandle,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> Option<gpui::AnyView> {
+    let terminal = extension_terminal(ext, handle, cx)?;
+    let workspace = Workspace::for_window(window, cx)?;
+    let (weak, database_id, project) = {
+        let workspace = workspace.read(cx);
+        (
+            workspace.weak_handle(),
+            workspace.database_id(),
+            workspace.project().downgrade(),
+        )
+    };
+    let view = gpui::AppContext::new(cx, |cx| {
+        terminal_view::TerminalView::new(terminal, weak, database_id, project, window, cx)
+    });
+    Some(view.into())
+}
+
 pub fn init(cx: &mut App) {
     init_host(cx);
     sessions::init(cx);
