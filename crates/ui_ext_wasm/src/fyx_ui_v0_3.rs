@@ -73,6 +73,14 @@ fn terminal_io_event(_: ui_ext::terminal::TerminalEvent) -> Option<wit_io::IoEve
     None
 }
 
+/// 0.3 has no approval cards.
+fn approval_io_event(
+    _: u64,
+    _: Option<ui_ext::approvals::ApprovalOption>,
+) -> Option<wit_io::IoEvent> {
+    None
+}
+
 conversions::conversions! {
     props: {
         wit::Props::Image(props) => Self::Image(model_image::ImageProps {

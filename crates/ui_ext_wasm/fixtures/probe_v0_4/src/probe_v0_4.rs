@@ -11,18 +11,22 @@
 //! - `paste <handle> <text>`: `paste` (`input-changed` is no gesture);
 //! - `read <handle>`: `request-read`; `close <handle>`: `close`, reported as `done`;
 //! - `perm <capability>`: `permissions.query` of a 0.4 T2 capability;
+//! - `ask <tool|-> <title> <once|always|deny>...`: `approvals.ask` (`-` for no tool), its id
+//!   or error code;
 //! - `listen`: a call into `listeners`, which traps in this build;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
 //! `resized <h> <cols> <rows>`, `output <h> <text> <dropped>`, `exited <h> <code|none>`,
-//! `created <h>`, `closed <h>`, `status-changed <h>`, `permission <capability> <state>`.
+//! `created <h>`, `closed <h>`, `status-changed <h>`, `permission <capability> <state>`,
+//! `approval <id> <once|always|deny|none>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
     world: "ui-extension",
 });
 
+use fyx::ui::approvals::{self, ApprovalOption};
 use fyx::ui::host::{self, HostError, HostErrorCode};
 use fyx::ui::io::IoEvent as Io;
 use fyx::ui::permissions::{self, T2Capability};
@@ -165,7 +169,11 @@ fn run(words: &[&str]) -> Result<String, String> {
             Err(error) => code(&error).into(),
         },
         ["paste", h, text] => done(terminals::paste(handle(h)?, text)),
-        ["read", h] => id(terminals::request_read(handle(h)?, ReadScope::LastLines, 10)),
+        ["read", h] => id(terminals::request_read(
+            handle(h)?,
+            ReadScope::LastLines,
+            10,
+        )),
         ["close", h] => {
             terminals::close(handle(h)?);
             "done".into()
@@ -173,6 +181,19 @@ fn run(words: &[&str]) -> Result<String, String> {
         ["perm", name] => {
             let capability = t2(name).ok_or("unknown capability")?;
             state(permissions::query(capability)).into()
+        }
+        ["ask", tool, title, options @ ..] => {
+            let options = options
+                .iter()
+                .map(|option| match *option {
+                    "once" => Ok(ApprovalOption::AllowOnce),
+                    "always" => Ok(ApprovalOption::AlwaysAllow),
+                    "deny" => Ok(ApprovalOption::Deny),
+                    other => Err(format!("unknown option {other}")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let tool = if *tool == "-" { "" } else { tool };
+            id(approvals::ask(tool, title, "detail", &options))
         }
         ["listen"] => done(fyx::ui::listeners::reply(1, 200, "")),
         _ => return Err(format!("unknown command {words:?}")),
@@ -212,7 +233,12 @@ impl Guest for Probe {
         Ok(Update::Replace(vec![text(1, &report)]))
     }
 
-    fn list_rows(_surface_id: String, _list_node: NodeId, _start: u32, _count: u32) -> Vec<ListRow> {
+    fn list_rows(
+        _surface_id: String,
+        _list_node: NodeId,
+        _start: u32,
+        _count: u32,
+    ) -> Vec<ListRow> {
         Vec::new()
     }
 
@@ -238,6 +264,15 @@ impl Guest for Probe {
             Io::PermissionChanged((capability, new_state)) => {
                 format!("permission {} {}", t2_name(capability), state(new_state))
             }
+            Io::ApprovalAnswered((id, answer)) => format!(
+                "approval {id} {}",
+                match answer {
+                    Some(ApprovalOption::AllowOnce) => "once",
+                    Some(ApprovalOption::AlwaysAllow) => "always",
+                    Some(ApprovalOption::Deny) => "deny",
+                    None => "none",
+                }
+            ),
             _ => "other".into(),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))

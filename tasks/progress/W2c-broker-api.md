@@ -66,3 +66,21 @@ This is my sketch, which W3 OK'd, with W3's changes applied. Names are mine to c
   this API; W3 adds nothing there.
 - The 0.3 prompter (`set_prompter`, `answer_prompt`) stays for FYX_UI_DEV_EXTENSIONS.
 - When the host side lands, send W3 the commit.
+
+## Approvals runtime (W3's request, 2026-11-19; W3's host side is 2c031e2898)
+1. Types in `ui_ext::approvals`:
+   - `ApprovalOption { AllowOnce, AlwaysAllow, Deny }`;
+   - `ApprovalRequest { title, detail, options }` with `check()`: title 1..=120 bytes on one line;
+     detail 0..=2000 bytes and at most 12 lines; plain text by the notifications check_text
+     rules; options 1..=3 with no duplicates;
+   - `MAX_OPEN_APPROVALS = 4`;
+   - `IoEvent::ApprovalAnswered(u64, Option<ApprovalOption>)`. This is a new IoEvent case: tell
+     W4 the harness needs an arm for it.
+2. `approvals.ask` in `fyx_ui_v0_4.rs`: check `ui:approvals` and the open cap (`limit-exceeded`),
+   record `HostEffect::AskApproval { id, request }`, and free the slot when ApprovalAnswered is
+   delivered in handle_io. Move "approvals" into LINKED_INTERFACES.
+3. `UiExtension::answer_approval(id, Option<ApprovalOption>)` sends that io event. W3 then maps
+   AskApproval to the registry.
+- WIT question for W0 (forwarded): add a `tool: string` argument to `ask` (§B.12 shows the
+  tool's name). W3's card takes `tool: Option<String>`.
+- Do this before or with 5.6; it is small.

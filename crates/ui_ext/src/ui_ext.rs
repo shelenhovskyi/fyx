@@ -6,6 +6,8 @@
 //! converts into. [`ApiVersion`] selects the rules that differ between the two.
 
 mod api_version;
+/// fyx:ui 0.4 approval cards (§B.12).
+pub mod approvals;
 pub mod canvas;
 #[cfg(feature = "t2")]
 pub mod edit;
