@@ -656,6 +656,7 @@ pub(crate) struct ProcessHandle {
     environment: Environment,
     declared_env: Arc<BTreeSet<String>>,
     running: Arc<Running>,
+    journal: Option<Arc<dyn crate::journal::Journal>>,
 }
 
 impl ProcessHandle {
@@ -667,8 +668,10 @@ impl ProcessHandle {
         environment: Option<Environment>,
         declared_env: Arc<BTreeSet<String>>,
         running: Arc<Running>,
+        journal: Option<Arc<dyn crate::journal::Journal>>,
     ) -> Self {
         Self {
+            journal,
             extension_id,
             set,
             broker,
@@ -703,6 +706,7 @@ impl ProcessHandle {
                 environment: self.environment.clone(),
                 declared_env: self.declared_env.clone(),
                 running: self.running.clone(),
+                journal: self.journal.clone(),
             };
             tokio::spawn(run(spawn, context));
         }
@@ -723,6 +727,7 @@ struct SpawnContext {
     environment: Environment,
     declared_env: Arc<BTreeSet<String>>,
     running: Arc<Running>,
+    journal: Option<Arc<dyn crate::journal::Journal>>,
 }
 
 /// The broker when the spawn is applied: granted runs, `ask` waits for the prompt.
@@ -781,6 +786,19 @@ async fn start(
         )));
     };
     if !consent(context.broker.as_ref(), &context.extension_id).await {
+        return Err(SpawnError::Denied);
+    }
+    // 0.4 (§C.2): the program's own checkbox.
+    let item = crate::permissions::ConsentItem::Program {
+        capability: CAPABILITY_PROCESS.into(),
+        name: spec.name.clone(),
+    };
+    if context.broker.as_ref().is_some_and(|broker| {
+        matches!(
+            broker.item_state(&context.extension_id, &item),
+            PermissionState::Denied | PermissionState::Unavailable
+        )
+    }) {
         return Err(SpawnError::Denied);
     }
     let worktrees = context
@@ -852,6 +870,17 @@ async fn start(
     let mut child = command
         .spawn()
         .map_err(|error| SpawnError::Io(format!("{}: {error}", program.display())))?;
+    if let Some(journal) = &context.journal {
+        journal.record(
+            &context.extension_id,
+            crate::journal::JournalKind::ProgramStarted {
+                capability: CAPABILITY_PROCESS.into(),
+                program: spec.name.clone(),
+                args: spawn.request.args.clone(),
+                cwd: Some(cwd.display().to_string()),
+            },
+        );
+    }
     let killer = Arc::new(make_killer(&child)?);
     {
         let mut entries = context.set.lock();
