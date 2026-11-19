@@ -12,10 +12,10 @@ use futures::channel::mpsc::UnboundedSender;
 use terminal_ext::inbox::{Rate, RateLimiter};
 use terminal_ext::{ExtensionStatus, OutputSanitizer, StatusHandle, StatusSource, TerminalId, osc};
 use ui_ext::terminal::{
-    CreateCommand, MAX_CREATED_TERMINALS, MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND, MAX_SEND_INPUT_BYTES,
-    MAX_STATUS_UPDATES_PER_SECOND, MAX_WRITE_OUTPUT_BYTES, PseudoRequest, StatusState,
-    TerminalError, TerminalEvent, TerminalHandle, TerminalHost, TerminalInfo, TerminalOrigin,
-    TerminalSink, TerminalStatus,
+    CreateCommand, MAX_CREATED_TERMINALS, MAX_PASTE_BYTES, MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND,
+    MAX_SEND_INPUT_BYTES, MAX_STATUS_UPDATES_PER_SECOND, MAX_WRITE_OUTPUT_BYTES, PseudoRequest,
+    StatusState, TerminalError, TerminalEvent, TerminalHandle, TerminalHost, TerminalInfo,
+    TerminalOrigin, TerminalSink, TerminalStatus,
 };
 
 use crate::created::{CreatedOpen, OutputTap};
@@ -37,8 +37,39 @@ pub(crate) enum Command {
     OpenCreated(CreatedOpen),
     /// An extension's input for its created terminal, at most [`MAX_SEND_INPUT_BYTES`].
     Input(TerminalId, Vec<u8>),
+    /// A bracketed paste ([`paste_bytes`]); dropped if the program turned bracketed paste off.
+    Paste(TerminalId, Vec<u8>),
     /// Close an extension's terminal (its tab, or the one the host holds for a panel).
     Close(TerminalId),
+}
+
+/// Whether a terminal's program has bracketed paste on, read live from any thread.
+pub(crate) type PasteProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// §B.11: the text without ESC or any other control character except tab and newline, at most
+/// [`MAX_PASTE_BYTES`] of it, between the bracketed-paste markers. `None` when nothing is left.
+pub(crate) fn paste_bytes(text: &str) -> Option<Vec<u8>> {
+    let mut clean = String::with_capacity(text.len().min(MAX_PASTE_BYTES));
+    for char in text
+        .chars()
+        .filter(|char| !char.is_control() || matches!(char, '\t' | '\n'))
+    {
+        if clean.len() + char.len_utf8() > MAX_PASTE_BYTES {
+            break;
+        }
+        clean.push(char);
+    }
+    if clean.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(PASTE_START.len() + clean.len() + PASTE_END.len());
+    bytes.extend_from_slice(PASTE_START);
+    bytes.extend_from_slice(clean.as_bytes());
+    bytes.extend_from_slice(PASTE_END);
+    Some(bytes)
 }
 
 /// The output side of a pseudo-terminal, owned by its extension.
@@ -74,6 +105,8 @@ struct Known {
     pseudo: Option<Arc<PseudoOutput>>,
     /// A created terminal's extension. It hears of the end through `Exited`, from the pty.
     created: Option<String>,
+    /// Set by the main thread once the terminal has a pty.
+    paste_probe: Option<PasteProbe>,
 }
 
 impl Known {
@@ -237,6 +270,7 @@ impl HostFront {
                 reported,
                 pseudo: None,
                 created: None,
+                paste_probe: None,
             };
             let State {
                 terminals,
@@ -316,6 +350,13 @@ impl HostFront {
             events
         };
         deliver(events);
+    }
+
+    /// Main thread: a created terminal's pty is up; `paste` may now check its mode.
+    pub(crate) fn set_paste_probe(&self, id: TerminalId, probe: PasteProbe) {
+        if let Some(known) = self.lock().terminals.get_mut(&id) {
+            known.paste_probe = Some(probe);
+        }
     }
 
     /// The pseudo or created terminal behind `ext`'s `handle`, if `ext` owns it.
@@ -416,6 +457,7 @@ impl TerminalHost for HostFront {
                 cwd: None,
                 reported: None,
                 created: None,
+                paste_probe: None,
                 pseudo: Some(Arc::new(PseudoOutput {
                     extension: ext.to_owned(),
                     handle,
@@ -492,6 +534,7 @@ impl TerminalHost for HostFront {
                 reported: None,
                 pseudo: None,
                 created: Some(ext.to_owned()),
+                paste_probe: None,
             };
             let events: Vec<_> = extensions
                 .iter_mut()
@@ -565,15 +608,26 @@ impl TerminalHost for HostFront {
         Ok(())
     }
 
-    fn paste(
-        &self,
-        _ext: &str,
-        _handle: TerminalHandle,
-        _text: String,
-    ) -> Result<(), TerminalError> {
-        Err(TerminalError::Unavailable(
-            "paste is not implemented yet".into(),
-        ))
+    /// Into the extension's created terminals (profile terminals join with P2.4). The import
+    /// checks the user's gesture; the host checks the mode, because a newline outside bracketed
+    /// paste would run a command.
+    fn paste(&self, ext: &str, handle: TerminalHandle, text: String) -> Result<(), TerminalError> {
+        let id = self.own_created(ext, handle)?;
+        let probe = self
+            .lock()
+            .terminals
+            .get(&id)
+            .and_then(|known| known.paste_probe.clone())
+            .ok_or_else(|| TerminalError::Unavailable("the terminal is still starting".into()))?;
+        if !probe() {
+            return Err(TerminalError::Unavailable(
+                "the program in the terminal has bracketed paste off".into(),
+            ));
+        }
+        match paste_bytes(&text) {
+            Some(bytes) => self.send(Command::Paste(id, bytes)),
+            None => Ok(()),
+        }
     }
 
     fn set_status(
@@ -1034,6 +1088,62 @@ mod tests {
             Err(TerminalError::NotFound)
         );
         drop(ext);
+    }
+
+    #[test]
+    fn pastes_are_bracketed_clean_and_capped() {
+        assert_eq!(
+            paste_bytes("@src/main.rs#L5-10\tok\n\x1b[201~rm -rf /\r\x07\u{9b}x").unwrap(),
+            b"\x1b[200~@src/main.rs#L5-10\tok\n[201~rm -rf /x\x1b[201~"
+        );
+        assert_eq!(paste_bytes("\x1b\x03\r"), None);
+        let long = "é".repeat(MAX_PASTE_BYTES);
+        let bytes = paste_bytes(&long).unwrap();
+        let inner = &bytes[PASTE_START.len()..bytes.len() - PASTE_END.len()];
+        assert!(inner.len() <= MAX_PASTE_BYTES && inner.len() > MAX_PASTE_BYTES - 2);
+        assert!(std::str::from_utf8(inner).is_ok());
+    }
+
+    #[test]
+    fn paste_goes_only_into_an_own_created_terminal_with_bracketed_paste_on() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let (sink, _) = recorder();
+        let handle = host.create("acme", create_command(None), sink).unwrap();
+        let Ok(Command::OpenCreated(open)) = queued.try_recv() else {
+            panic!("no open command");
+        };
+        assert!(matches!(
+            host.paste("acme", handle, "x".into()),
+            Err(TerminalError::Unavailable(_))
+        ));
+        let bracketed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        host.set_paste_probe(open.id, {
+            let bracketed = bracketed.clone();
+            Arc::new(move || bracketed.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        assert!(matches!(
+            host.paste("acme", handle, "x".into()),
+            Err(TerminalError::Unavailable(_))
+        ));
+        bracketed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            host.paste("other", handle, "x".into()),
+            Err(TerminalError::NotFound)
+        );
+        host.paste("acme", handle, "x\n".into()).unwrap();
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(Command::Paste(id, bytes)) if id == open.id && bytes == b"\x1b[200~x\n\x1b[201~"
+        ));
+        let (pseudo_sink, _) = recorder();
+        let pseudo = host
+            .open_pseudo("acme", pseudo_request("p"), pseudo_sink)
+            .unwrap();
+        assert_eq!(
+            host.paste("acme", pseudo, "x".into()),
+            Err(TerminalError::NotFound)
+        );
     }
 
     #[test]
