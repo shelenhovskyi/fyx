@@ -56,11 +56,13 @@ fn too_large(what: &str, max: usize) -> HostError {
     )
 }
 
-/// The `${package}` and `${listen.<name>.port|token}` of `terminal:env` values for a created
-/// terminal: a listener's only while it is open, its token only with `token_in_env`. The relay
-/// comes with plan 5.12, so a value that uses it is left out until then.
+/// The `${package}`, `${relay}` and `${listen.<name>.port|token}` of `terminal:env` values for
+/// a created terminal: a listener's only while it is open, its token only with `token_in_env`.
+/// Without the `fyx-relay` binary ([`crate::LoadOptions::relay_binary`]) a value that uses
+/// `${relay}` is left out.
 struct PackageContext<'a> {
     package: Option<String>,
+    relay: Option<String>,
     listeners: &'a crate::listeners::ListenersHandle,
 }
 
@@ -75,7 +77,7 @@ impl TemplateContext for PackageContext<'_> {
         self.listeners.token_for_env(name)
     }
     fn relay(&self) -> Option<String> {
-        None
+        self.relay.clone()
     }
     fn account_dir(&self, _: &str) -> Option<String> {
         None
@@ -91,6 +93,8 @@ pub(crate) struct TerminalPolicy {
     pub(crate) env: TerminalEnv,
     /// The extension's directory, for `${package}`.
     pub(crate) package_dir: Option<PathBuf>,
+    /// The `fyx-relay` binary, for `${relay}`.
+    pub(crate) relay: Option<PathBuf>,
 }
 
 impl TerminalPolicy {
@@ -98,6 +102,7 @@ impl TerminalPolicy {
         programs: &[TerminalProgramSpec],
         env: Option<TerminalEnv>,
         package_dir: Option<PathBuf>,
+        relay: Option<PathBuf>,
     ) -> Self {
         Self {
             programs: ProcessPolicy {
@@ -109,6 +114,7 @@ impl TerminalPolicy {
             },
             env: env.unwrap_or_default(),
             package_dir,
+            relay,
         }
     }
 }
@@ -634,6 +640,11 @@ impl TerminalState {
                     .package_dir
                     .as_ref()
                     .map(|dir| dir.to_string_lossy().into_owned()),
+                relay: self
+                    .policy
+                    .relay
+                    .as_ref()
+                    .map(|binary| binary.to_string_lossy().into_owned()),
                 listeners: &self.listeners,
             })
         } else {

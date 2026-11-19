@@ -58,8 +58,8 @@ impl UiBindings {
     ) -> wasmtime::Result<Self> {
         Ok(match version {
             ApiVersion::V0_4_0 => {
-                // `listeners`, `relay`, `review` and `context` trap when called
-                // until plan 5.11 and 5.13 build them.
+                // Every staged 0.4 interface is built; one the WIT stages later traps when
+                // called until it is.
                 let mut linker = runtime.linker_v0_4.clone();
                 let engine = store.engine().clone();
                 fyx_ui_v0_3::define_unbuilt_as_traps(

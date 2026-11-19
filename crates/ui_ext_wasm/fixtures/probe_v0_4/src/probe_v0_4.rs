@@ -26,7 +26,8 @@
 //!   `diag-all`: `context.diagnostics` as `<path>:<e|w|i|h><line>.<column>,...;...` (or `empty`),
 //!   then ` truncated` if so, then `|<source>|<code>|<message bytes>` of the first entry;
 //!   `watch-diag <on|off>`: `context.watch-diagnostics`;
-//! - `relay`: a call into `relay`, which traps in this build;
+//! - `relay-respond <id> <exit> <stdout|-> <stderr|->`: `relay.respond`; `relay-long <id>`
+//!   answers with 1 MiB and a byte of stdout;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
@@ -37,7 +38,8 @@
 //! `mcp-cancelled <id>`, `message <listener> <connection> <text>`,
 //! `request <id> <listener> <path> <body>`,
 //! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`,
-//! `diagnostics-changed <path,...|*>` (`*` for the empty list).
+//! `diagnostics-changed <path,...|*>` (`*` for the empty list),
+//! `relay <id> <channel> <terminal|-> <argv,...|-> <stdin>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -399,7 +401,27 @@ fn run(words: &[&str]) -> Result<String, String> {
                 .collect::<Result<Vec<_>, String>>()?;
             done(review::end_turn(session, &files))
         }
-        ["relay"] => done(fyx::ui::relay::respond(1, 0, "", "")),
+        ["relay-respond", id, exit, stdout, stderr] => {
+            let text = |word: &str| {
+                if word == "-" {
+                    String::new()
+                } else {
+                    word.into()
+                }
+            };
+            done(fyx::ui::relay::respond(
+                id.parse().map_err(|_| "id")?,
+                exit.parse().map_err(|_| "exit")?,
+                &text(stdout),
+                &text(stderr),
+            ))
+        }
+        ["relay-long", id] => done(fyx::ui::relay::respond(
+            id.parse().map_err(|_| "id")?,
+            0,
+            &"x".repeat((1 << 20) + 1),
+            "",
+        )),
         _ => return Err(format!("unknown command {words:?}")),
     })
 }
@@ -537,6 +559,15 @@ impl Guest for Probe {
             Io::ListenerRequest((id, listener, path, body)) => {
                 format!("request {id} {listener} {path} {body}")
             }
+            Io::RelayRequest((id, channel, terminal, argv, stdin)) => format!(
+                "relay {id} {channel} {} {} {stdin}",
+                terminal.map_or("-".to_string(), |handle| handle.to_string()),
+                if argv.is_empty() {
+                    "-".to_string()
+                } else {
+                    argv.join(",")
+                },
+            ),
             _ => "other".into(),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))
