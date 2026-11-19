@@ -1783,6 +1783,7 @@ impl AgentPanel {
         }
 
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
+        let fyx_new_account = crate::fyx::take_new_account_thread(cx); // fyx: §C.6 rule 3
 
         // If the user is viewing a *parked* draft and the ephemeral
         // new-draft slot is occupied, pressing `+` should just focus the
@@ -1794,6 +1795,7 @@ impl AgentPanel {
             && self.active_thread_is_draft(cx)
             && !self.active_view_is_new_draft(cx)
             && *draft.read(cx).agent_key() == self.selected_agent
+            && !fyx_new_account
         {
             self.set_base_view(
                 BaseView::AgentThread {
@@ -1812,7 +1814,8 @@ impl AgentPanel {
                 self.draft_thread = None;
                 self._draft_editor_observation = None;
                 self.insert_retained_thread(draft_id, draft, cx);
-            } else if *draft.read(cx).agent_key() != self.selected_agent {
+            } else if *draft.read(cx).agent_key() != self.selected_agent || fyx_new_account {
+                // fyx: an empty draft of another account's connection goes too (§C.6 rule 3)
                 let old_draft_id = draft.read(cx).thread_id;
                 ThreadMetadataStore::global(cx).update(cx, |store, cx| {
                     store.delete(old_draft_id, cx);
@@ -6084,6 +6087,14 @@ impl AgentPanel {
                                     });
 
                                 menu = menu.item(entry);
+                                menu = crate::fyx::account_entries(
+                                    menu,
+                                    &item.id,
+                                    &item.display_name,
+                                    &workspace,
+                                    is_via_collab,
+                                    cx,
+                                ); // fyx: "Claude Code — Work" (§C.6)
                             }
 
                             menu
