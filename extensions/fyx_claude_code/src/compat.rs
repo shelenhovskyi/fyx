@@ -443,6 +443,10 @@ impl IdeHost for ReplayHost<'_> {
         self.roots
     }
 
+    fn open(&mut self, _file: &ide::FileRef, _focus: bool) -> Result<(), String> {
+        Ok(())
+    }
+
     fn respond(&mut self, call: u64, outcome: Result<String, ide::McpError>) {
         let id = self.calls.get(&call).cloned().unwrap_or(Value::Null);
         self.out.push(match outcome {

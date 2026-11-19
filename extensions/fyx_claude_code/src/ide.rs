@@ -24,6 +24,8 @@ pub const LISTENER: &str = "ide";
 /// JSON-RPC's "invalid params" and "method not found", as MCP uses them.
 pub const INVALID_PARAMS: i32 = -32602;
 pub const UNKNOWN_TOOL: i32 = -32601;
+/// JSON-RPC's "internal error": the host refused what the call needs.
+pub const INTERNAL_ERROR: i32 = -32603;
 
 /// `listeners.tool-def`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,8 +75,8 @@ pub struct TextRange {
 
 /// Absolute paths, as Claude names files, against Fyx's worktree-relative [`FileRef`]s.
 ///
-/// The 0.4 WIT gives an extension no absolute paths, so this needs a host primitive (reported
-/// to the coordinator, 5.15); until then it is a trait the tests fill.
+/// Built for 0.4 it is `context.to-file-ref` and `context.absolute-path` (`wired`); the compat
+/// replay and the tests fill it with a fixed root.
 ///
 /// `to_ref` gets paths in [`normalize_path`]'s form; `to_absolute` gives the OS's own form, as
 /// Claude sends paths (with `\` on Windows).
@@ -498,6 +500,8 @@ pub trait IdeHost {
     /// What the host's diagnostics hold, by absolute path: of the file `only`, or of every file.
     /// A file with nothing is left out.
     fn diagnostics(&self, only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)>;
+    /// Opens `file` in the editor (`context.open`); the error is the host's message.
+    fn open(&mut self, file: &FileRef, focus: bool) -> Result<(), String>;
 }
 
 /// The extension's side of the `ide` listener: Claude's `tools/call`s by the host's call id,
@@ -538,7 +542,18 @@ impl Server {
                 });
                 host.respond(call, Ok(answer));
             }
-            Ok(IdeCall::OpenFile { .. }) => host.respond(call, Ok(text_result("OK"))),
+            // The selection Claude asks for (`startText`, `endText`) needs the file's text,
+            // which the extension cannot read; the file opens without one.
+            Ok(IdeCall::OpenFile { file, focus, .. }) => {
+                let outcome =
+                    host.open(&file, focus)
+                        .map(|()| text_result("OK"))
+                        .map_err(|message| McpError {
+                            code: INTERNAL_ERROR,
+                            message: format!("openFile: {message}"),
+                        });
+                host.respond(call, outcome);
+            }
             Err(error) => host.respond(call, Err(error)),
         }
     }
