@@ -125,6 +125,10 @@ pub enum IoEvent {
     EditDone(u64, Result<(), crate::edit::EditError>),
     /// `agent:observe`: one event, after `start`, beginning with a snapshot.
     Agent(crate::observe::AgentEvent),
+    /// fyx:ui 0.4: the extension's terminals and, with `terminal:observe`, everyone's.
+    Terminal(crate::terminal::TerminalEvent),
+    /// fyx:ui 0.4 `ui:approvals`: the card `id` was answered, or closed unanswered (`None`).
+    ApprovalAnswered(u64, Option<crate::approvals::ApprovalOption>),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).

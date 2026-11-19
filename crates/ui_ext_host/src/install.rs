@@ -464,27 +464,6 @@ pub fn runs_line(program: &str, runs_any_code: bool) -> String {
     }
 }
 
-/// The dev-folder install dialog's text.
-pub(crate) fn dev_install_detail(
-    manifest: &UiManifest,
-    source: &Path,
-    zed_extension: bool,
-) -> String {
-    format!(
-        "It asks for:\n{}\n{}\nComponent: {}\nFolder: {}\n\nFyx loads it on every start and \
-         reloads it when the component is rebuilt.",
-        // Every item it is granted, hosts and programs included, as the file install shows them.
-        describe_capability_ids(&manifest.consent_items()).join("\n"),
-        if zed_extension {
-            format!("{ZED_EXTENSION_WARNING}\n")
-        } else {
-            String::new()
-        },
-        manifest.component,
-        source.display()
-    )
-}
-
 /// The notes under the dev install dialog's groups: the Zed-extension warning, the component and
 /// the folder.
 pub(crate) fn dev_install_notes(

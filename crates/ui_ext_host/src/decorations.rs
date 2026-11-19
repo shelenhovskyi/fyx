@@ -719,6 +719,8 @@ pub(crate) fn estimate_lines(tree: &Tree) -> u32 {
             | Props::Icon(_)
             | Props::Image(_)
             | Props::Canvas(_) => 1,
+            // A pseudo-terminal needs room to be read (plan 5.9).
+            Props::Terminal(_) => 8,
         }
     }
     tree.roots()

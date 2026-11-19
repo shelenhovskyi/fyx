@@ -65,11 +65,13 @@ pub mod edit;
 mod effects;
 mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
+mod fyx_ui_v0_4;
 pub mod images;
 pub mod network;
 pub mod observe;
 pub mod process;
 mod stderr;
+mod terminals;
 pub mod ticks;
 
 pub use effects::{
@@ -548,6 +550,18 @@ impl UiManifest {
         Ok(())
     }
 
+    /// `[fyx_ui.terminal_env]`, checked as [`UiManifest::check_terminals`] does; `None` without
+    /// one or when it does not pass.
+    pub fn checked_terminal_env(&self) -> Option<terminal::TerminalEnv> {
+        let integration = integration::IntegrationTables {
+            listeners: &self.listeners,
+            discovery_files: &self.discovery_files,
+            relay_channels: &self.relay_channels,
+        };
+        let env = self.terminal_env.clone()?;
+        terminal::check_terminal_env(env, &|name| integration.listener(name)).ok()
+    }
+
     /// The 0.4 terminal and integration tables (design §B, plan 5.5): each goes with its
     /// capability, and their entries pass `ui_ext::terminal` and `ui_ext::integration`'s checks.
     pub fn check_terminals(&self) -> Result<()> {
@@ -828,6 +842,8 @@ pub struct UiState {
     edit: edit::EditState,
     /// What the running call asked of the 0.3 `agent-observe` feed.
     observe: observe::ObserveState,
+    /// The 0.4 `terminals` import: the extension's own terminals.
+    terminals: terminals::TerminalState,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
     /// sees one answer (design.md §7).
     permission_mirror: std::collections::HashMap<&'static str, permissions::PermissionState>,
@@ -841,6 +857,7 @@ struct IoStates {
     process: process::ProcessState,
     edit: edit::EditState,
     observe: observe::ObserveState,
+    terminals: terminals::TerminalState,
 }
 
 impl UiState {
@@ -892,10 +909,12 @@ impl UiState {
             process,
             edit,
             observe,
+            terminals,
         } = io;
         Self {
             edit,
             observe,
+            terminals,
             capability_check,
             diagnostics,
             api,
@@ -953,6 +972,58 @@ impl UiState {
         let state = self.permission_state(capability);
         self.permission_mirror.insert(capability, state);
         state
+    }
+
+    /// The manifest and the broker for a T2 capability at every call: `ask` is accepted (the
+    /// prompt comes when the operation is applied), `denied` and `unavailable` refuse.
+    fn permit_t2(&self, capability: &str) -> Result<(), ui_ext::v0_2::HostError> {
+        use ui_ext::v0_2::{HostError, HostErrorCode};
+        if !self.api.declares(capability) {
+            return Err(HostError {
+                code: HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            });
+        }
+        match self.permission_state(capability) {
+            permissions::PermissionState::Granted | permissions::PermissionState::Ask => Ok(()),
+            state => Err(HostError {
+                code: HostErrorCode::Denied,
+                message: format!("{capability} is {state:?}"),
+            }),
+        }
+    }
+
+    /// A T1 capability of the 0.4 `terminals` import: declared, and granted by the broker.
+    fn permit_t1(&self, capability: &str) -> Result<(), ui_ext::v0_2::HostError> {
+        if !self.api.declares(capability) {
+            return Err(ui_ext::v0_2::HostError {
+                code: ui_ext::v0_2::HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            });
+        }
+        self.permit(capability)
+    }
+
+    /// A T2 capability a synchronous 0.4 call needs now ([`terminals::t2_now`]).
+    fn permit_t2_now(&self, capability: &'static str) -> Result<(), ui_ext::v0_2::HostError> {
+        if !self.api.declares(capability) {
+            return Err(ui_ext::v0_2::HostError {
+                code: ui_ext::v0_2::HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            });
+        }
+        terminals::t2_now(
+            self.capability_check.as_ref(),
+            &self.extension_id,
+            self.permission_state(capability),
+            capability,
+        )
+    }
+
+    /// Whether a declared T2 capability is granted now.
+    fn t2_granted(&self, capability: &str) -> bool {
+        self.api.declares(capability)
+            && self.permission_state(capability) == permissions::PermissionState::Granted
     }
 
     fn count_lifted_text(&mut self, bytes: usize) -> wasmtime::Result<()> {
@@ -1102,6 +1173,8 @@ struct UiRuntime {
     /// Only what this build implements of the staged 0.3 world; instantiation adds traps for the
     /// rest.
     linker_v0_3: Linker<UiState>,
+    /// The staged 0.4 world, likewise.
+    linker_v0_4: Linker<UiState>,
 }
 
 fn ui_runtime() -> Result<&'static UiRuntime> {
@@ -1281,11 +1354,15 @@ fn build_ui_runtime() -> Result<UiRuntime> {
     let mut linker_v0_3 = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_3)?;
     fyx_ui_v0_3::add_to_linker(&mut linker_v0_3)?;
+    let mut linker_v0_4 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_4)?;
+    fyx_ui_v0_4::add_to_linker(&mut linker_v0_4)?;
     Ok(UiRuntime {
         engine,
         linker,
         linker_v0_2,
         linker_v0_3,
+        linker_v0_4,
     })
 }
 
@@ -1437,6 +1514,8 @@ pub struct UiExtension {
     edits: Arc<edit::EditHandle>,
     /// The `agent-observe` feed; dropping the last clone stops it.
     observer: Arc<observe::ObserveHandle>,
+    /// The 0.4 terminals; dropping the last clone closes them all.
+    terminals: Arc<terminals::TerminalsHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1570,9 +1649,17 @@ pub struct LoadOptions {
     pub workspace_edits: Option<Arc<dyn edit::WorkspaceEdits>>,
     /// The agent reviews for `agent:observe`. Without them, `start` is `unavailable`.
     pub agent_reviews: Option<Arc<dyn observe::AgentReviews>>,
-    /// The terminal host for 0.4's `terminals` imports (W1's `terminal_host`, set by
-    /// `ui_ext_host::set_terminal_host`). Without it, they are `unavailable`.
-    pub terminals: Option<Arc<dyn ui_ext::terminal::TerminalHost>>,
+    /// The terminal host for the 0.4 `terminals` import (`terminal_host`, W1). Without it, the
+    /// import is `unavailable`.
+    pub terminals: Option<Arc<dyn terminal::TerminalHost>>,
+    /// `[[fyx_ui.terminal_programs]]`; set by [`UiExtension::load_checked`]. Applies only to a
+    /// 0.4 component that declares `terminal:create`.
+    pub terminal_programs: Option<Vec<terminal::TerminalProgramSpec>>,
+    /// `[fyx_ui.terminal_env]`, checked; set by [`UiExtension::load_checked`].
+    pub terminal_env: Option<terminal::TerminalEnv>,
+    /// The extension's directory, for `${package}` in `terminal:env`; set by
+    /// [`UiExtension::load_from_dir_with_options`].
+    pub package_dir: Option<PathBuf>,
 }
 
 impl UiExtension {
@@ -1632,8 +1719,10 @@ impl UiExtension {
             process_environment,
             workspace_edits,
             agent_reviews,
-            // For 0.4's `terminals` imports, which W2c's 0.4 binding wires (plan 5.6).
-            terminals: _,
+            terminals: terminal_host,
+            terminal_programs,
+            terminal_env,
+            package_dir,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1710,8 +1799,9 @@ impl UiExtension {
             .with_private_hosts(private_hosts.unwrap_or_default());
             let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
-            // Only a 0.3 component has the `network` import.
-            let domains = Arc::new(if ui_api_version == ApiVersion::V0_3_0 {
+            // Only a 0.3 or 0.4 component has the T2 imports.
+            let has_io = ui_api_version >= ApiVersion::V0_3_0;
+            let domains = Arc::new(if has_io {
                 domains
             } else {
                 network::DomainList::default()
@@ -1724,13 +1814,13 @@ impl UiExtension {
                 capability_check.clone(),
                 running.clone(),
             ));
-            // Only a 0.3 component has the `process` import.
-            let process_policy = Arc::new(if ui_api_version == ApiVersion::V0_3_0 {
+            let process_policy = Arc::new(if has_io {
                 process_policy
             } else {
                 process::ProcessPolicy::default()
             });
             let process_set = Arc::new(process::ProcessSet::default());
+            let terminal_environment = process_environment.clone();
             let processes = Arc::new(process::ProcessHandle::new(
                 extension_id.clone(),
                 process_set.clone(),
@@ -1740,8 +1830,7 @@ impl UiExtension {
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
             ));
-            // Only a 0.3 component has the `workspace-edit` and `agent-observe` imports.
-            let is_v0_3 = ui_api_version == ApiVersion::V0_3_0;
+            let is_v0_3 = has_io;
             let edit_set = Arc::new(edit::EditSet::default());
             let edits = Arc::new(edit::EditHandle::new(
                 extension_id.clone(),
@@ -1756,6 +1845,26 @@ impl UiExtension {
                 agent_reviews.filter(|_| is_v0_3),
                 running.clone(),
             ));
+            // Only a 0.4 component has the `terminals` import.
+            let is_v0_4 = ui_api_version >= ApiVersion::V0_4_0;
+            let terminals = Arc::new(terminals::TerminalsHandle::new(
+                extension_id.clone(),
+                terminal_host.filter(|_| is_v0_4),
+            ));
+            let declares_create = capabilities
+                .iter()
+                .any(|capability| capability == terminal::CAPABILITY_CREATE);
+            let terminal_policy = Arc::new(if is_v0_4 {
+                terminals::TerminalPolicy::new(
+                    &terminal_programs
+                        .filter(|_| declares_create)
+                        .unwrap_or_default(),
+                    terminal_env,
+                    package_dir,
+                )
+            } else {
+                terminals::TerminalPolicy::default()
+            });
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -1765,15 +1874,21 @@ impl UiExtension {
                 let capabilities = capabilities.clone();
                 let network = network.clone();
                 let process_set = process_set.clone();
+                let terminals = terminals.clone();
+                let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
                     edits: Arc::downgrade(&edit_set),
                     observer: Arc::downgrade(&observer),
+                    terminals: Arc::downgrade(&terminals),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
-                    if ui_api_version == ApiVersion::V0_3_0 {
+                    if has_io {
                         network.watch_permissions(revocable);
+                    }
+                    if is_v0_4 {
+                        terminals.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -1788,7 +1903,7 @@ impl UiExtension {
                     let mut store = Store::new(
                         &runtime.engine,
                         UiState::new(
-                            extension_id,
+                            extension_id.clone(),
                             wasi.build(),
                             capability_check,
                             diagnostics.clone(),
@@ -1802,6 +1917,13 @@ impl UiExtension {
                                 ),
                                 edit: edit::EditState::new(edits_available),
                                 observe: observe::ObserveState::new(reviews_available),
+                                terminals: terminals::TerminalState::new(
+                                    extension_id.clone(),
+                                    terminals.clone(),
+                                    terminal_policy,
+                                    workspace_for_terminals,
+                                    terminal_environment,
+                                ),
                             },
                         ),
                     );
@@ -1891,6 +2013,7 @@ impl UiExtension {
                     processes,
                     edits,
                     observer,
+                    terminals,
                 },
                 pushed_rx,
             ))
@@ -1924,6 +2047,10 @@ impl UiExtension {
             .load_bytes(&component_path)
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
+        let options = LoadOptions {
+            package_dir: Some(extension_dir.to_path_buf()),
+            ..options
+        };
         Self::load_checked(extension_id, manifest, wasm_bytes, options, cx)
             .await
             .map(Some)
@@ -1946,6 +2073,8 @@ impl UiExtension {
             extension_version: manifest.version.clone(),
             processes: Some(manifest.processes.clone()),
             process_env: manifest.process.as_ref().map(|table| table.env.clone()),
+            terminal_programs: Some(manifest.terminal_programs.clone()),
+            terminal_env: manifest.checked_terminal_env(),
             ..options
         };
         let (mut extension, pushed) =
@@ -1964,6 +2093,12 @@ impl UiExtension {
 
     pub fn extension_id(&self) -> &Arc<str> {
         &self.extension_id
+    }
+
+    /// Whether the 0.4 `terminals` import has a terminal host (a 0.4 component loaded with
+    /// [`LoadOptions::terminals`]).
+    pub fn terminals_available(&self) -> bool {
+        self.terminals.available()
     }
 
     /// `extension.toml`'s `name` as its author wrote it (check it before showing it).
@@ -2262,3 +2397,6 @@ mod tests;
 mod tests_v0_2;
 #[cfg(test)]
 mod tests_v0_3;
+
+#[cfg(test)]
+mod tests_v0_4;

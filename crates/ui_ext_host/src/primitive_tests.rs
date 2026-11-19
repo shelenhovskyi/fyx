@@ -525,3 +525,126 @@ async fn bench_redraw_of_a_large_tree(cx: &mut TestAppContext) {
         eprintln!("redraw {round} of {count} nodes: {:?}", started.elapsed());
     }
 }
+
+/// A panel with two `terminal` nodes: handle 3 is one of the extension's in-panel terminals,
+/// handle 4 is not.
+struct TerminalBackend;
+
+impl UiBackend for TerminalBackend {
+    fn extension_id(&self) -> &str {
+        "terminals"
+    }
+
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        let terminal = |handle| Props::Terminal(ui_ext::v0_2::TerminalNodeProps { handle });
+        let nodes = vec![
+            node(
+                ROOT,
+                None,
+                Props::Flex(FlexProps {
+                    direction: FlexDirection::Column,
+                    ..FlexProps::default()
+                }),
+            ),
+            node(2, Some(ROOT), terminal(3)),
+            node(3, Some(ROOT), terminal(4)),
+        ];
+        let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
+        async move {
+            tree.map(|value| Reply {
+                effects: Vec::new(),
+                value,
+            })
+        }
+        .boxed_local()
+    }
+
+    fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        async move {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Update::Unchanged,
+            })
+        }
+        .boxed_local()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
+        async move {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Vec::new(),
+            })
+        }
+        .boxed_local()
+    }
+}
+
+struct FakeTerminalView;
+
+impl gpui::Render for FakeTerminalView {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::Styled as _;
+        gpui::div().size_full()
+    }
+}
+
+/// Plan 5.9: a `terminal` node draws the view `set_terminal_node_views` gives for the
+/// extension's handle, made once and kept across redraws; another handle draws a placeholder.
+#[gpui::test]
+async fn test_terminal_node_draws_the_extensions_terminal(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let asked: Rc<RefCell<Vec<(String, u64)>>> = Rc::default();
+    cx.update(|cx| {
+        let asked = asked.clone();
+        crate::set_terminal_node_views(
+            Rc::new(move |ext, handle, _, cx| {
+                asked.borrow_mut().push((ext.to_string(), handle.0));
+                (ext == "terminals" && handle.0 == 3).then(|| cx.new(|_| FakeTerminalView).into())
+            }),
+            cx,
+        );
+    });
+    let backend: Rc<dyn UiBackend> = Rc::new(TerminalBackend);
+    let surface = ui_ext::v0_2::Surface {
+        id: "terminals".into(),
+        title: "Terminals".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
+            default_size: 320,
+        }),
+    };
+    let state = cx.new(|cx| SurfaceState::new(backend, surface, None, cx));
+    cx.run_until_parked();
+    let (view, vcx) =
+        cx.add_window_view(|window, cx| SurfaceView::new(state.clone(), false, window, cx));
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+
+    let terminal = bounds("fyx-node-2".into(), vcx);
+    let placeholder = bounds("fyx-node-3".into(), vcx);
+    assert!(
+        terminal.size.height > placeholder.size.height * 4.0,
+        "terminal {terminal:?}, placeholder {placeholder:?}"
+    );
+    assert_eq!(
+        *asked.borrow(),
+        [("terminals".to_string(), 3), ("terminals".to_string(), 4)]
+    );
+    view.read_with(vcx, |view, _| {
+        assert!(view.terminals.get(&3).is_some_and(Option::is_some));
+        assert_eq!(view.terminals.get(&4), Some(&None));
+    });
+}

@@ -11,6 +11,7 @@ use std::{
 
 use ui_ext::{
     ApiError, ApiVersion, LiveIds, MAX_DECORATION_EFFECTS_PER_CALL, Placement,
+    approvals::{self, ApprovalRequest},
     image::{self, ImageFormat},
     v0_2::{
         self,
@@ -93,6 +94,10 @@ pub enum HostEffect {
     },
     /// `progress-end` of a running progress, with no event.
     ProgressEnd { id: u64 },
+    /// fyx:ui 0.4 `approvals.ask` (design.md §B.12): show a host-drawn card in the active
+    /// workspace window. Answer it, or report it closed, with
+    /// [`crate::UiExtension::answer_approval`]; `id` never repeats within an instance.
+    AskApproval { id: u64, request: ApprovalRequest },
 }
 
 /// The validated result of a call with the effects the guest made during it: apply `effects` in
@@ -164,6 +169,10 @@ pub(crate) struct ApiState {
     open_notifications: BTreeMap<u64, String>,
     running_progresses: BTreeMap<u64, String>,
     next_notification: u64,
+    /// Approval cards shown and not yet answered (0.4), at most
+    /// [`approvals::MAX_OPEN_APPROVALS`].
+    open_approvals: BTreeSet<u64>,
+    next_approval: u64,
     next_progress: u64,
     /// When the accepted `notify` and `progress-start` calls of the rolling window were made.
     notify_times: VecDeque<Instant>,
@@ -193,6 +202,8 @@ impl ApiState {
             open_notifications: BTreeMap::new(),
             running_progresses: BTreeMap::new(),
             next_notification: 1,
+            open_approvals: BTreeSet::new(),
+            next_approval: 1,
             next_progress: 1,
             notify_times: VecDeque::new(),
             progress_start_times: VecDeque::new(),
@@ -701,6 +712,44 @@ impl ApiState {
             .insert(id, notification.owner.clone());
         self.effects.push(HostEffect::Notify { id, notification });
         Ok(id)
+    }
+
+    /// `approvals.ask` (design.md §B.12), checked in this order: the capability, the text
+    /// rules, the open cap (`limit-exceeded`).
+    pub(crate) fn ask_approval(
+        &mut self,
+        request: ApprovalRequest,
+    ) -> Result<u64, v0_2::HostError> {
+        if !self.declares(approvals::CAPABILITY_APPROVALS) {
+            return Err(host_error(
+                v0_2::HostErrorCode::NotPermitted,
+                format!(
+                    "approval cards need {:?} in [fyx_ui].capabilities",
+                    approvals::CAPABILITY_APPROVALS
+                ),
+            ));
+        }
+        request.check()?;
+        if self.open_approvals.len() >= approvals::MAX_OPEN_APPROVALS {
+            return Err(host_error(
+                v0_2::HostErrorCode::LimitExceeded,
+                format!(
+                    "at most {} open approval cards per extension",
+                    approvals::MAX_OPEN_APPROVALS
+                ),
+            ));
+        }
+        let id = self.next_approval;
+        self.next_approval += 1;
+        self.open_approvals.insert(id);
+        self.effects.push(HostEffect::AskApproval { id, request });
+        Ok(id)
+    }
+
+    /// An answer to card `id` is about to be delivered: frees its slot. `false` for an id that
+    /// is not open (never asked, or answered already), whose answer is dropped.
+    pub(crate) fn approval_answered(&mut self, id: u64) -> bool {
+        self.open_approvals.remove(&id)
     }
 
     /// `dismiss-notification`: unknown or closed ids are ignored.

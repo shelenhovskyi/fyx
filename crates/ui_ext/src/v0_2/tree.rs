@@ -193,6 +193,12 @@ impl Tree {
         if let Some(canvas) = nodes.iter().find(|node| is_canvas(&node.props)) {
             return Err(TreeError::CanvasInRow(canvas.id));
         }
+        if let Some(terminal) = nodes
+            .iter()
+            .find(|node| matches!(node.props, Props::Terminal(_)))
+        {
+            return Err(TreeError::TerminalInRow(terminal.id));
+        }
         tree.replace(nodes)?;
         if tree.roots.len() != 1 {
             return Err(TreeError::RowRootCount(tree.roots.len()));
@@ -876,6 +882,28 @@ mod tests {
             )
             .unwrap_err(),
             TreeError::CanvasInRow(2)
+        );
+    }
+
+    /// 0.4 (§B.2): a terminal node is a leaf with no text, and never in a row.
+    #[test]
+    fn terminal_nodes() {
+        let terminal = || Props::Terminal(crate::v0_2::TerminalNodeProps { handle: 3 });
+        assert_eq!(terminal().text_len(), 0);
+        assert_eq!(terminal().kind_name(), "terminal");
+        assert!(!terminal().is_container());
+        Tree::from_nodes(
+            vec![flex(1, None), node(2, Some(1), terminal())],
+            TreeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            Tree::from_row(
+                vec![flex(1, None), node(2, Some(1), terminal())],
+                TreeLimits::default()
+            )
+            .unwrap_err(),
+            TreeError::TerminalInRow(2)
         );
     }
 

@@ -1057,7 +1057,8 @@ impl UiExtensionRegistry {
                     refused.unwrap_or("no workspace window")
                 );
                 if let Some(backend) = self.backends.get(extension_id) {
-                    backend.answer_approval(id, None);
+                    let answered = backend.answer_approval(id, None);
+                    cx.spawn(async move |_, _| answered.await).detach();
                 }
                 return;
             }
@@ -1113,7 +1114,8 @@ impl UiExtensionRegistry {
         &mut self,
         extension_id: &str,
         id: u64,
-        answer: Option<crate::approvals::ApprovalChoice>,
+        answer: Option<crate::approvals::ApprovalOption>,
+        cx: &mut Context<Self>,
     ) {
         if self
             .approvals
@@ -1121,7 +1123,8 @@ impl UiExtensionRegistry {
             .is_some()
             && let Some(backend) = self.backends.get(extension_id)
         {
-            backend.answer_approval(id, answer);
+            let answered = backend.answer_approval(id, answer);
+            cx.spawn(async move |_, _| answered.await).detach();
         }
     }
 
@@ -2312,6 +2315,9 @@ Environment it may pass: {}",
                 if let Some(progresses) = Progresses::global(cx) {
                     progresses.update(cx, |progresses, cx| progresses.end(extension_id, id, cx));
                 }
+            }
+            HostEffect::AskApproval { id, request } => {
+                self.ask_approval(extension_id, id, request, cx)
             }
         }
     }
