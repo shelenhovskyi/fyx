@@ -87,6 +87,12 @@ pub struct FyxTerminalSettingsContent {
     ///
     /// Default: true
     pub notifications: Option<bool>,
+    /// Load Fyx's shell integration into zsh, bash, fish and PowerShell terminals: command blocks
+    /// for "share the last command", prompt and exit-code marks. Fyx's scripts source your own
+    /// startup files first and never change them. Applies to terminals opened afterwards.
+    ///
+    /// Default: true
+    pub shell_integration: Option<bool>,
 }
 
 /// `fyx.extensions`.

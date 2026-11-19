@@ -1121,6 +1121,7 @@ impl TerminalBuilder {
             is_remote_terminal,
             cx,
         ); // fyx: accounts, terminal:env
+        let fyx_shell = terminal_ext::shell_integration(cx).filter(|_| !is_remote_terminal); // fyx: plan 5.17
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
@@ -1178,7 +1179,7 @@ impl TerminalBuilder {
                 }
             }
 
-            let shell_params = match shell.clone() {
+            let mut shell_params = match shell.clone() {
                 Shell::System => {
                     if cfg!(windows) {
                         Some(ShellParams::new(
@@ -1197,6 +1198,22 @@ impl TerminalBuilder {
                     title_override,
                 } => Some(ShellParams::new(program, Some(args), title_override)),
             };
+            // fyx: shell integration with a nonce (plan 5.17), interactive terminals only
+            if let Some(fyx_shell) = fyx_shell.as_ref().filter(|_| task.is_none()) {
+                let mut program = shell_params.as_ref().map(|params| {
+                    (
+                        params.program.clone(),
+                        params.args.clone().unwrap_or_default(),
+                    )
+                });
+                if fyx_shell.inject(&mut program, &mut env, fyx.shell_nonce())
+                    && let Some((program, args)) = program
+                {
+                    let title_override =
+                        shell_params.take().and_then(|params| params.title_override);
+                    shell_params = Some(ShellParams::new(program, Some(args), title_override));
+                }
+            }
             let terminal_title_override =
                 shell_params.as_ref().and_then(|e| e.title_override.clone());
 

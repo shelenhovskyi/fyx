@@ -596,6 +596,7 @@ impl TerminalView {
             .upgrade()
             .and_then(|workspace| workspace.read(cx).panel::<TerminalPanel>(cx))
             .is_some_and(|terminal_panel| terminal_panel.read(cx).assistant_enabled());
+        let fyx_entries = terminal_ext::terminal_menu(&self.terminal.read(cx).fyx, cx); // fyx: share with extensions
         let context_menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .when(self.shows_workspace_actions(), |menu| {
@@ -631,6 +632,7 @@ impl TerminalView {
                             })
                     },
                 )
+                .map(|menu| crate::terminal_panel::fyx_menu(menu, fyx_entries)) // fyx
                 .when(self.shows_workspace_actions(), |menu| {
                     menu.separator().action(
                         "Close Terminal Tab",

@@ -1,6 +1,7 @@
 mod acp;
 mod custom;
 mod fyx; // fyx: account profiles for agents
+pub use fyx::{AgentAccount, agent_account}; // fyx: the agent panel's account badge
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod e2e_tests;
