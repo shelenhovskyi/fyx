@@ -45,15 +45,13 @@ It also uses `ui:panel`, `terminal:profiles`, `package:files`, `review:propose`,
 
 ## Status
 
-This is the skeleton with no host dependency:
-- the manifest, which passes `fyx-ext check`;
-- the plugin;
-- the protocol core in plain Rust (`src/ide.rs`, `src/hooks.rs`), tested natively;
-- the compat test ([`src/compat/README.md`](src/compat/README.md)), pinned to Claude Code
-  2.1.326, with transcripts recorded live from that version on 2026-11-19.
-
-The core is wired to the host's `mcp-call`, `relay-request`, `review-decided` and
-`context-changed` events once the SDK has them (plan 5.14).
+Wired on the 0.4 SDK (`src/wired.rs`, plan 5.14): `mcp-call`, `mcp-initialized`,
+`review-decided`, `context-changed` and `diagnostics-changed` drive the IDE server
+(`src/ide.rs`). The profile, its env and the plugin in the package are checked in
+`fyx_ext_harness`, which also replays the compat transcripts
+([`src/compat/README.md`](src/compat/README.md), Claude Code 2.1.326, recorded live on
+2026-11-19) through the built component. The hooks (`src/hooks.rs`, tested natively) wait for
+the SDK's relay.
 
 ## Build and test
 

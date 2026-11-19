@@ -81,6 +81,12 @@ impl Extension for ClaudeCode {
                 );
             }
             IoEvent::McpCancelled(call) => self.ide.cancelled(&mut wired::SdkHost, call),
+            // A client that just finished the handshake gets the current selection.
+            IoEvent::McpInitialized(session) if session.listener == ide::LISTENER => {
+                if let Some(params) = &self.selection {
+                    wired::notify_selection(Some(session.connection), params);
+                }
+            }
             IoEvent::DiagnosticsChanged(_) => self.ide.invalidate_diagnostics(),
             IoEvent::ReviewDecided((proposal, outcome)) => {
                 let answer = wired::diff_answer(outcome);
@@ -92,7 +98,7 @@ impl Extension for ClaudeCode {
                 if let Some(params) = &params
                     && self.selection.as_ref() != Some(params)
                 {
-                    wired::notify_selection(params);
+                    wired::notify_selection(None, params);
                 }
                 if params.is_some() {
                     self.selection = params;
