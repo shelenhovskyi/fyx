@@ -238,7 +238,7 @@ impl Drop for ContextHandle {
     }
 }
 
-fn roots(workspace: Option<&dyn Workspace>) -> Result<Vec<(u64, PathBuf)>, HostError> {
+pub(crate) fn roots(workspace: Option<&dyn Workspace>) -> Result<Vec<(u64, PathBuf)>, HostError> {
     let roots: Vec<(u64, PathBuf)> = workspace
         .map(|workspace| {
             workspace
@@ -255,7 +255,7 @@ fn roots(workspace: Option<&dyn Workspace>) -> Result<Vec<(u64, PathBuf)>, HostE
 }
 
 /// A checked `file-ref`'s absolute path: in its worktree, or in the one worktree that has it.
-fn absolute(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<PathBuf, HostError> {
+pub(crate) fn absolute(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<PathBuf, HostError> {
     let join = |root: &PathBuf| {
         path.path
             .split('/')

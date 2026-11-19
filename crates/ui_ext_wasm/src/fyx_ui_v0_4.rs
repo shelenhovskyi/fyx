@@ -1,8 +1,8 @@
 //! Host side of the staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`,
 //! docs/fyx/wit-0.4/design.md): everything 0.3 has (`t2_shared.rs`), the ten T2 cases of
 //! `permissions`, `terminals` over [`crate::terminals`], `approvals` (§B.12) and `listeners`
-//! over [`crate::listeners`] (§B.7), and `context` over [`crate::editor_context`] (§B.11). `relay`
-//! and `review` trap when called until plan 5.12 and 5.13 build them
+//! over [`crate::listeners`] (§B.7), `context` over [`crate::editor_context`] (§B.11) and `review`
+//! over [`crate::proposals`] (§B.10). `relay` traps when called until plan 5.12 builds it
 //! (`define_unbuilt_as_traps`).
 //!
 //! A `terminal` node becomes [`model::Props::Terminal`]; the renderer resolves its handle.
@@ -294,6 +294,74 @@ impl wit_context::Host for UiState {
         Ok(self
             .context
             .absolute_path(&file_ref(path))
+            .map_err(Into::into))
+    }
+}
+
+/// `review` (design.md §B.10) over [`crate::proposals::ReviewHandle`]: every call needs
+/// `review:propose`; accepting or rejecting stays the user's.
+impl wit_review::Host for UiState {
+    fn propose(
+        &mut self,
+        request: wit_review::Proposal,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        let change_len = match &request.change {
+            wit_review::Proposed::NewContent(text) | wit_review::Proposed::UnifiedDiff(text) => {
+                text.len()
+            }
+        };
+        self.count_lifted_text(
+            request.path.path.len() + change_len + request.title.len() + request.session.len(),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error.into()));
+        }
+        let proposal = ui_ext::review::Proposal {
+            path: file_ref(request.path),
+            change: match request.change {
+                wit_review::Proposed::NewContent(text) => {
+                    ui_ext::review::Proposed::NewContent(text)
+                }
+                wit_review::Proposed::UnifiedDiff(text) => {
+                    ui_ext::review::Proposed::UnifiedDiff(text)
+                }
+            },
+            title: request.title,
+            session: request.session,
+            apply: request.apply,
+        };
+        Ok(self.review.propose(proposal).map_err(Into::into))
+    }
+
+    fn withdraw(&mut self, id: u64) -> wasmtime::Result<Result<String, wit_host::HostError>> {
+        if let Err(error) = self.permit_t1(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self.review.withdraw(id).map_err(Into::into))
+    }
+
+    fn begin_turn(&mut self, session: String) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(session.len())?;
+        if let Err(error) = self.permit_t1(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self.review.begin_turn(&session).map_err(Into::into))
+    }
+
+    fn end_turn(
+        &mut self,
+        session: String,
+        changed: Vec<wit::FileRef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            session.len() + changed.iter().map(|file| file.path.len()).sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::review::CAPABILITY_REVIEW_PROPOSE) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .review
+            .end_turn(&session, changed.into_iter().map(file_ref).collect())
             .map_err(Into::into))
     }
 }
@@ -668,6 +736,7 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "approvals",
     "listeners",
     "context",
+    "review",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -688,5 +757,6 @@ pub(crate) fn add_to_linker(
     wit_approvals::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_listeners::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_context::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_review::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

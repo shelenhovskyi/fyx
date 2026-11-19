@@ -1055,7 +1055,9 @@ async fn test_v0_4_manifest_tables(cx: &mut TestAppContext) {
          {LISTENER}\
          [[fyx_ui.discovery_files]]\nlistener = \"ide\"\ndir = \"${{account.claude}}/ide\"\n\
          default_dir = \"~/.claude/ide\"\nname = \"${{port}}.lock\"\n\
-         content = {{ pid = \"${{pid}}\", authToken = \"${{token}}\" }}\n\
+         content = {{ pid = \"${{pid}}\", authToken = \"${{token}}\", stdio = false, version = 2, \
+         folders = [\"${{worktrees.joined}}\"], windows = \"${{platform.windows}}\", \
+         ideInfo = {{ name = \"fyx\", displayName = \"Fyx\" }} }}\n\
          reason = \"Claude Code finds Fyx through it\"\n\
          [[fyx_ui.relay_channels]]\nname = \"pre-tool\"\non_failure = {{ exit = 0 }}\n\
          reason = \"the pre-tool hook\"\n"
@@ -1067,6 +1069,26 @@ async fn test_v0_4_manifest_tables(cx: &mut TestAppContext) {
     assert_eq!(manifest.terminal_profiles[0].id, "claude");
     assert_eq!(manifest.listeners[0].name, "ide");
     assert_eq!(manifest.relay_channels[0].timeout_ms, 30_000);
+    {
+        use ui_ext::integration::DiscoveryValue;
+        let content = &manifest.discovery_files[0].content;
+        assert_eq!(content["stdio"], DiscoveryValue::Bool(false));
+        assert_eq!(content["version"], DiscoveryValue::Integer(2));
+        assert_eq!(
+            content["folders"],
+            DiscoveryValue::Array(vec!["${worktrees.joined}".into()])
+        );
+        assert_eq!(
+            content["ideInfo"],
+            DiscoveryValue::Table(
+                [
+                    ("name".to_string(), "fyx".into()),
+                    ("displayName".to_string(), "Fyx".into()),
+                ]
+                .into()
+            )
+        );
+    }
     read(&env("TOOL_IDE_PORT = \"${listen.ide.port}\""))
         .await
         .unwrap_or_else(|error| panic!("{error:#}"));
