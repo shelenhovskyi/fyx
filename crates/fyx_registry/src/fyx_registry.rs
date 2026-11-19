@@ -195,8 +195,10 @@ impl Tier {
     }
 
     /// Every capability this version of Fyx knows, with its tier. The registry template's
-    /// `policy/capability-tiers.json` must list exactly these (a test checks it).
-    pub const KNOWN_CAPABILITIES: [(&'static str, Tier); 19] = [
+    /// `policy/capability-tiers.json` must list exactly these (a test checks it). The T3
+    /// capabilities of fyx:ui 0.4 ([`Tier::T3_CAPABILITIES`]) count as T2 here: a release's tier
+    /// has no T3 value (design wit-0.4 §C.1).
+    pub const KNOWN_CAPABILITIES: [(&'static str, Tier); 35] = [
         ("ui:panel", Tier::T0),
         ("ui:status-bar", Tier::T0),
         ("ui:modal", Tier::T0),
@@ -209,14 +211,37 @@ impl Tier {
         ("ui:commands", Tier::T0),
         ("ui:images", Tier::T0),
         ("ui:canvas", Tier::T0),
+        // fyx:ui 0.4.
+        ("package:files", Tier::T0),
+        ("ui:approvals", Tier::T0),
         ("workspace:read-buffers", Tier::T1),
         ("workspace:read-files", Tier::T1),
         ("workspace:diagnostics", Tier::T1),
+        // fyx:ui 0.4.
+        ("context:editor", Tier::T1),
+        ("workspace:open", Tier::T1),
+        ("terminal:profiles", Tier::T1),
+        ("terminal:pseudo", Tier::T1),
+        ("terminal:status", Tier::T1),
+        ("review:propose", Tier::T1),
         ("network:fetch", Tier::T2),
         ("process:spawn", Tier::T2),
         ("workspace:edit", Tier::T2),
         ("agent:observe", Tier::T2),
+        // fyx:ui 0.4.
+        ("network:listen", Tier::T2),
+        ("terminal:create", Tier::T2),
+        ("terminal:env", Tier::T2),
+        ("terminal:observe", Tier::T2),
+        ("fs:discovery-file", Tier::T2),
+        ("relay:hooks", Tier::T2),
+        ("terminal:read", Tier::T2),
+        ("terminal:write", Tier::T2),
     ];
+
+    /// Asked at the moment of action, never in advance (fyx:ui 0.4, design §C.3): `t3` in the
+    /// template's file, T2 for a release's tier.
+    pub const T3_CAPABILITIES: [&'static str; 2] = ["terminal:read", "terminal:write"];
 
     /// The tier of a capability this version of Fyx knows, `None` for any other.
     pub fn of_capability(capability: &str) -> Option<Tier> {
@@ -406,11 +431,20 @@ mod tests {
             "../../../tools/fyx-extensions-template/policy/capability-tiers.json"
         ))
         .expect("JSON");
-        let listed: std::collections::BTreeMap<String, Tier> =
+        let listed: std::collections::BTreeMap<String, String> =
             serde_json::from_value(file["capabilities"].clone()).expect("capability -> tier");
-        let known: std::collections::BTreeMap<String, Tier> = Tier::KNOWN_CAPABILITIES
+        // The file writes T3 as `t3`; a release counts it as T2.
+        let known: std::collections::BTreeMap<String, String> = Tier::KNOWN_CAPABILITIES
             .iter()
-            .map(|(capability, tier)| (capability.to_string(), *tier))
+            .map(|(capability, tier)| {
+                let tier = if Tier::T3_CAPABILITIES.contains(capability) {
+                    assert_eq!(*tier, Tier::T2, "{capability}");
+                    "t3"
+                } else {
+                    tier.as_str()
+                };
+                (capability.to_string(), tier.to_string())
+            })
             .collect();
         assert_eq!(listed, known);
     }

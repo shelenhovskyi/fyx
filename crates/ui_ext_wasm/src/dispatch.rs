@@ -58,7 +58,7 @@ impl UiBindings {
     ) -> wasmtime::Result<Self> {
         Ok(match version {
             ApiVersion::V0_4_0 => {
-                // `listeners`, `relay`, `review`, `context` and `approvals` trap when called
+                // `listeners`, `relay`, `review` and `context` trap when called
                 // until plan 5.11 and 5.13 build them.
                 let mut linker = runtime.linker_v0_4.clone();
                 let engine = store.engine().clone();
@@ -485,6 +485,13 @@ impl UiExtension {
                                 store.data_mut().terminals.delivered(&event);
                                 crate::network::IoEvent::Terminal(event)
                             }
+                            // A second answer, or one for a card never asked, is dropped.
+                            crate::network::IoEvent::ApprovalAnswered(id, answer) => {
+                                if !store.data_mut().api.approval_answered(id) {
+                                    return Ok(Ok(()));
+                                }
+                                crate::network::IoEvent::ApprovalAnswered(id, answer)
+                            }
                             other => other,
                         };
                         extension.call_handle_io(store, event).await
@@ -495,6 +502,20 @@ impl UiExtension {
             .await?;
         self.guest_result(result, &effects)?;
         Ok(EffectReply { effects, value: () })
+    }
+
+    /// The user answered approval card `id` ([`HostEffect::AskApproval`]), or it closed
+    /// unanswered (`None`: the window closed, the extension was disabled). The answer reaches the
+    /// guest through the io channel, like any outcome, so [`Self::take_io_events`]' consumer
+    /// delivers it with [`Self::handle_io`]. Only the first answer of an open card is delivered.
+    pub async fn answer_approval(
+        &self,
+        id: u64,
+        answer: Option<ui_ext::approvals::ApprovalOption>,
+    ) {
+        self.network
+            .deliver(crate::network::IoEvent::ApprovalAnswered(id, answer))
+            .await;
     }
 
     /// Tells the host that a modal is no longer shown although no `dismissed` event or
@@ -742,6 +763,11 @@ pub(crate) mod shim {
             // 0.3 only; so does a canvas's description.
             model::Props::Canvas(props) => ui_ext::Props::Text(ui_ext::TextProps {
                 content: props.description.clone(),
+                ..ui_ext::TextProps::default()
+            }),
+            // 0.4 only; a terminal has no text to stand in, so it is named.
+            model::Props::Terminal(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: format!("[terminal {}]", props.handle),
                 ..ui_ext::TextProps::default()
             }),
         }

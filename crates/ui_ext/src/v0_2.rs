@@ -3,7 +3,8 @@
 //! [`IconRef::Upstream`] and the 0.2-only fields empty.
 //!
 //! It is the newest model, including the staged 0.3 additions built so far: [`Props::Image`]
-//! (design.md §12), [`Props::Canvas`] and [`UiEvent::CanvasClick`] (§13). A 0.1 or 0.2 component cannot produce those, because its world has no such
+//! (design.md §12), [`Props::Canvas`] and [`UiEvent::CanvasClick`] (§13), and the 0.4
+//! [`Props::Terminal`]. A 0.1 or 0.2 component cannot produce those, because its world has no such
 //! case; only a 0.3 component's values convert into them.
 //!
 //! It is a module of its own rather than new fields and cases on the 0.1 types in
@@ -326,6 +327,18 @@ pub enum Props {
     /// [`crate::canvas::check_canvas_placement`] when the host applies the update; the tree
     /// allows [`crate::canvas::MAX_CANVASES_PER_SURFACE`] and none in a list row.
     Canvas(crate::canvas::CanvasProps),
+    /// 0.4 (docs/fyx/wit-0.4/design.md §B.2): the native view of one of the extension's own
+    /// terminals (a pseudo-terminal or one it created) inside its panel. Not in a list row. The
+    /// renderer resolves the handle within the extension, so another's terminal never shows,
+    /// and draws one node per handle; a handle shown in a node is not also a tab.
+    Terminal(TerminalNodeProps),
+}
+
+/// The WIT `terminal-props` (0.4): the extension's `terminal-handle`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TerminalNodeProps {
+    pub handle: u64,
 }
 
 impl Props {
@@ -343,7 +356,7 @@ impl Props {
             IconRef::Upstream(name) => name.len(),
         };
         match self {
-            Props::Flex(_) | Props::List(_) => 0,
+            Props::Flex(_) | Props::List(_) | Props::Terminal(_) => 0,
             Props::Text(props) => props.content.len(),
             Props::Button(props) => {
                 props.label.len()
@@ -384,6 +397,7 @@ impl Props {
             Props::DiffView(_) => "diff-view",
             Props::Image(_) => "image",
             Props::Canvas(_) => "canvas",
+            Props::Terminal(_) => "terminal",
         }
     }
 }

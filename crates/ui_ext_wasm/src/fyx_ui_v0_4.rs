@@ -1,10 +1,10 @@
 //! Host side of the staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`,
 //! docs/fyx/wit-0.4/design.md): everything 0.3 has (`t2_shared.rs`), the ten T2 cases of
-//! `permissions`, and `terminals` over [`crate::terminals`]. `listeners`, `relay`, `review`,
-//! `context` and `approvals` trap when called until plan 5.11 and 5.13 build them
+//! `permissions`, `terminals` over [`crate::terminals`], and `approvals` (§B.12). `listeners`,
+//! `relay`, `review` and `context` trap when called until plan 5.11 and 5.13 build them
 //! (`define_unbuilt_as_traps`).
 //!
-//! A `terminal` node is refused as the guest's error until the renderer draws it (plan 5.7).
+//! A `terminal` node becomes [`model::Props::Terminal`]; the renderer resolves its handle.
 
 use ui_ext::{
     canvas as model_canvas,
@@ -29,10 +29,10 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    agent_observe as wit_observe, decorations as wit_decorations, host as wit_host,
-    images as wit_images, io as wit_io, network as wit_network, notifications as wit_notifications,
-    permissions as wit_permissions, process as wit_process, terminals as wit_terminals,
-    types as wit, workspace_edit as wit_edit,
+    agent_observe as wit_observe, approvals as wit_approvals, decorations as wit_decorations,
+    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
+    notifications as wit_notifications, permissions as wit_permissions, process as wit_process,
+    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(
@@ -149,6 +149,51 @@ fn terminal_io_event(event: model_terminal::TerminalEvent) -> Option<wit_io::IoE
         Event::Closed(handle) => wit_io::IoEvent::TerminalClosed(handle.0),
         Event::StatusChanged(info) => wit_io::IoEvent::TerminalStatusChanged(wit_info(info)),
     })
+}
+
+fn approval_option(option: wit_approvals::ApprovalOption) -> ui_ext::approvals::ApprovalOption {
+    use ui_ext::approvals::ApprovalOption as Option;
+    match option {
+        wit_approvals::ApprovalOption::AllowOnce => Option::AllowOnce,
+        wit_approvals::ApprovalOption::AlwaysAllow => Option::AlwaysAllow,
+        wit_approvals::ApprovalOption::Deny => Option::Deny,
+    }
+}
+
+/// The `approval-answered` case; `None` when the card closed unanswered.
+fn approval_io_event(
+    id: u64,
+    answer: Option<ui_ext::approvals::ApprovalOption>,
+) -> Option<wit_io::IoEvent> {
+    use ui_ext::approvals::ApprovalOption as Answer;
+    Some(wit_io::IoEvent::ApprovalAnswered((
+        id,
+        answer.map(|answer| match answer {
+            Answer::AllowOnce => wit_approvals::ApprovalOption::AllowOnce,
+            Answer::AlwaysAllow => wit_approvals::ApprovalOption::AlwaysAllow,
+            Answer::Deny => wit_approvals::ApprovalOption::Deny,
+        }),
+    )))
+}
+
+/// `approvals` (design.md §B.12): a T0 card; the answer comes back through `handle-io`.
+impl wit_approvals::Host for UiState {
+    fn ask(
+        &mut self,
+        tool: String,
+        title: String,
+        detail: String,
+        options: Vec<wit_approvals::ApprovalOption>,
+    ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
+        self.count_lifted_text(tool.len() + title.len() + detail.len())?;
+        let request = ui_ext::approvals::ApprovalRequest {
+            tool: (!tool.is_empty()).then_some(tool),
+            title,
+            detail,
+            options: options.into_iter().map(approval_option).collect(),
+        };
+        Ok(self.api.ask_approval(request).map_err(Into::into))
+    }
 }
 
 /// `terminals` (design.md §B.1–§B.5, §B.11, §C.3) over [`crate::terminals::TerminalState`].
@@ -326,14 +371,9 @@ conversions::conversions! {
             tint: props.tint.map(Into::into),
         }),
         wit::Props::Canvas(props) => Self::Canvas(canvas(props)),
-        // The renderer draws `terminal` nodes with plan 5.7; until then the tree is the guest's
-        // error, so the call is rejected like a bad reply.
-        wit::Props::Terminal(_) => {
-            return Err(model::HostError {
-                code: model::HostErrorCode::Unavailable,
-                message: "terminal nodes are not drawn by this build of Fyx yet".into(),
-            });
-        }
+        wit::Props::Terminal(props) => Self::Terminal(model::TerminalNodeProps {
+            handle: props.handle,
+        }),
     }
     kinds: {}
     events: {
@@ -358,6 +398,7 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "agent-observe",
     "permissions",
     "terminals",
+    "approvals",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -375,5 +416,6 @@ pub(crate) fn add_to_linker(
     wit_observe::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_permissions::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_terminals::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_approvals::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }
