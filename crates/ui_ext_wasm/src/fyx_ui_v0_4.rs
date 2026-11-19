@@ -4,7 +4,7 @@
 //! `relay`, `review` and `context` trap when called until plan 5.11 and 5.13 build them
 //! (`define_unbuilt_as_traps`).
 //!
-//! A `terminal` node is refused as the guest's error until the renderer draws it (plan 5.7).
+//! A `terminal` node becomes [`model::Props::Terminal`]; the renderer resolves its handle.
 
 use ui_ext::{
     canvas as model_canvas,
@@ -371,14 +371,9 @@ conversions::conversions! {
             tint: props.tint.map(Into::into),
         }),
         wit::Props::Canvas(props) => Self::Canvas(canvas(props)),
-        // The renderer draws `terminal` nodes with plan 5.7; until then the tree is the guest's
-        // error, so the call is rejected like a bad reply.
-        wit::Props::Terminal(_) => {
-            return Err(model::HostError {
-                code: model::HostErrorCode::Unavailable,
-                message: "terminal nodes are not drawn by this build of Fyx yet".into(),
-            });
-        }
+        wit::Props::Terminal(props) => Self::Terminal(model::TerminalNodeProps {
+            handle: props.handle,
+        }),
     }
     kinds: {}
     events: {

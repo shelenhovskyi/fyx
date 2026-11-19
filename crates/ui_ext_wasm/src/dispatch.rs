@@ -765,6 +765,11 @@ pub(crate) mod shim {
                 content: props.description.clone(),
                 ..ui_ext::TextProps::default()
             }),
+            // 0.4 only; a terminal has no text to stand in, so it is named.
+            model::Props::Terminal(props) => ui_ext::Props::Text(ui_ext::TextProps {
+                content: format!("[terminal {}]", props.handle),
+                ..ui_ext::TextProps::default()
+            }),
         }
     }
 
