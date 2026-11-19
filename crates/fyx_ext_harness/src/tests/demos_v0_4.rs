@@ -143,8 +143,8 @@ fn the_profiles_demo_starts_profile_terminals() {
 }
 
 /// The skeleton of plan 5.15: the manifest loads, the plugin ships in the package, and the
-/// profile runs `claude --ide` with the account the user picks. Its listener, relay and review
-/// wiring is tested natively (`extensions/fyx_claude_code`) until the harness has them (5.14).
+/// profile runs `claude --ide` with the account the user picks. Its relay and review wiring is
+/// tested natively (`extensions/fyx_claude_code`) until the harness has them (5.14).
 #[test]
 fn claude_code_loads_with_its_profile_and_plugin() {
     let package = demo_package("fyx_claude_code");
@@ -189,6 +189,193 @@ fn claude_code_loads_with_its_profile_and_plugin() {
         texts.contains(&"No Claude session is running.".to_owned()),
         "{texts:?}"
     );
+}
+
+/// Plan 5.14's listeners: the component registers its IDE tools on `ide` while loading, the
+/// fake host speaks MCP for it, and the component answers `tools/call`s.
+#[test]
+fn claude_code_answers_on_its_ide_listener() {
+    let mut harness = Harness::load_package(demo_package("fyx_claude_code")).expect("loads");
+    assert!(harness.listener_open("ide"));
+    assert!(harness.listener_port("ide").is_some());
+    let tools: Vec<String> = harness
+        .registered_tools("ide")
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            "openFile",
+            "openDiff",
+            "close_tab",
+            "closeAllDiffTabs",
+            "getDiagnostics"
+        ]
+    );
+
+    let connection = harness.connect("ide").unwrap();
+    let mut exchange = |message: serde_json::Value| -> Vec<serde_json::Value> {
+        harness
+            .client_send(connection, &message.to_string())
+            .unwrap();
+        harness.deliver_io().unwrap();
+        harness
+            .client_received(connection)
+            .unwrap()
+            .iter()
+            .map(|text| serde_json::from_str(text).unwrap())
+            .collect()
+    };
+    let initialized = exchange(serde_json::json!({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25" },
+    }));
+    assert_eq!(initialized[0]["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(
+        initialized[0]["result"]["serverInfo"]["name"],
+        "fyx-claude-code"
+    );
+    let closed = exchange(serde_json::json!({
+        "jsonrpc": "2.0", "id": "a", "method": "tools/call",
+        "params": { "name": "closeAllDiffTabs", "arguments": {} },
+    }));
+    assert_eq!(
+        closed,
+        [serde_json::json!({
+            "jsonrpc": "2.0", "id": "a",
+            "result": { "content": [{ "type": "text", "text": "CLOSED_ALL_DIFF_TABS" }] },
+        })]
+    );
+    // No path maps to a worktree until the SDK has `context`.
+    let refused = exchange(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "openFile", "arguments": { "filePath": "/work/app/a.rs" } },
+    }));
+    assert_eq!(refused[0]["error"]["code"], -32602, "{refused:?}");
+    let unknown = exchange(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "nope" },
+    }));
+    assert_eq!(unknown[0]["error"]["code"], -32602, "{unknown:?}");
+    assert!(harness.open_mcp_calls().is_empty());
+
+    harness.set_listener_granted("ide", false);
+    assert!(!harness.listener_open("ide"));
+    assert!(harness.client_send(connection, "{}").is_err());
+    assert!(harness.connect("ide").is_err());
+}
+
+/// The compat transcripts (`extensions/fyx_claude_code/src/compat`), replayed through the
+/// harness against the built component, as far as listeners reach: every recorded message from
+/// Claude goes to the fake `ide` listener; the host's `initialize` and `tools/list` answers and
+/// the extension's answers to the calls that need no path must equal the recorded ones, and
+/// every call is answered. Hooks, review decisions, editor events and the calls with paths wait
+/// for the SDK's relay, review and context (the rest of 5.14).
+#[test]
+fn claude_code_replays_the_compat_transcripts_on_its_listener() {
+    use serde_json::Value;
+    const TRANSCRIPTS: [(&str, &str); 4] = [
+        (
+            "turn-with-diff",
+            include_str!("../../../../extensions/fyx_claude_code/src/compat/turn-with-diff.jsonl"),
+        ),
+        (
+            "live-interactive",
+            include_str!(
+                "../../../../extensions/fyx_claude_code/src/compat/live-interactive.jsonl"
+            ),
+        ),
+        (
+            "live-interactive-windows",
+            include_str!(
+                "../../../../extensions/fyx_claude_code/src/compat/live-interactive-windows.jsonl"
+            ),
+        ),
+        (
+            "live-print-hooks",
+            include_str!(
+                "../../../../extensions/fyx_claude_code/src/compat/live-print-hooks.jsonl"
+            ),
+        ),
+    ];
+    const PATHLESS: [&str; 2] = ["close_tab", "closeAllDiffTabs"];
+    let package = demo_package("fyx_claude_code");
+    let mut compared = 0;
+    for (name, text) in TRANSCRIPTS {
+        let mut harness = Harness::load_package(&package).expect("loads");
+        let connection = harness.connect("ide").unwrap();
+        let mut tools = HashMap::new();
+        let mut answers: HashMap<String, Value> = HashMap::new();
+        for (number, line) in text.lines().enumerate().skip(1) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let at = format!("{name}.jsonl:{}", number + 1);
+            let event: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{at}: {e}"));
+            if event["t"] != "mcp" {
+                continue;
+            }
+            let message = &event["msg"];
+            if event["dir"] == "in" {
+                if message["method"] == "tools/call" {
+                    tools.insert(
+                        message["id"].to_string(),
+                        message["params"]["name"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
+                harness
+                    .client_send(connection, &message.to_string())
+                    .unwrap_or_else(|e| panic!("{at}: {e}"));
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                for text in harness.client_received(connection).unwrap() {
+                    let answer: Value = serde_json::from_str(&text).unwrap();
+                    if let Some(id) = answer.get("id") {
+                        answers.insert(id.to_string(), answer);
+                    }
+                }
+                continue;
+            }
+            // `selection_changed` and `at_mentioned` come from `context`.
+            let Some(id) = message.get("id").map(Value::to_string) else {
+                continue;
+            };
+            let ours = answers
+                .get(&id)
+                .unwrap_or_else(|| panic!("{at}: no answer to {id}"));
+            if message["result"]["serverInfo"].is_object() {
+                assert_eq!(
+                    ours["result"]["protocolVersion"], message["result"]["protocolVersion"],
+                    "{at}"
+                );
+            } else if let Some(recorded) = message["result"]["tools"].as_array() {
+                let names = |tools: &[Value]| -> Vec<String> {
+                    tools
+                        .iter()
+                        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                        .collect()
+                };
+                let listed = ours["result"]["tools"].as_array().expect("tools");
+                assert_eq!(names(listed), names(recorded), "{at}");
+            } else if tools
+                .get(&id)
+                .is_some_and(|tool| PATHLESS.contains(&tool.as_str()))
+            {
+                assert_eq!(ours, message, "{at}");
+                compared += 1;
+            }
+        }
+        for id in tools.keys() {
+            assert!(
+                answers.contains_key(id),
+                "{name}: call {id} was never answered"
+            );
+        }
+        assert!(harness.open_mcp_calls().is_empty(), "{name}");
+    }
+    assert!(compared > 0, "no answer was compared");
 }
 
 /// The skeleton of plan 5.16: the manifest loads, and the profile runs `gemini` with the

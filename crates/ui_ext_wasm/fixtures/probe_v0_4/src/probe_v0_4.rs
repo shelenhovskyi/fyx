@@ -16,14 +16,24 @@
 //! - `perm <capability>`: `permissions.query` of a 0.4 T2 capability;
 //! - `ask <tool|-> <title> <once|always|deny>...`: `approvals.ask` (`-` for no tool), its id
 //!   or error code;
-//! - `listen`: a call into `listeners`, which traps in this build;
+//! - `tools <listener> <name>...`: `listeners.register-tools`, each with an object schema;
+//!   `respond <call-id> <json>`: `respond` with a result; `respond-err <call-id> <code> <message>`
+//!   with an MCP error; `notify <listener> <method>`: `notify` everyone with `{}`;
+//!   `send <listener> <connection> <text>`: `send`; `reply <id> <status> <body>`: `reply`;
+//! - `watch <on|off>`: `context.watch`; `open <worktree|-> <path> <0|1>`: `workspace.open`
+//!   with `focus`; `to-ref <absolute>`: `context.to-file-ref` as `<worktree|->:<path>`;
+//!   `abs <worktree|-> <path>`: `context.absolute-path`;
+//! - `relay`: a call into `relay`, which traps in this build;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
 //! `resized <h> <cols> <rows>`, `output <h> <text> <dropped>`, `exited <h> <code|none>`,
 //! `created <h>`, `closed <h>`, `status-changed <h>`, `permission <capability> <state>`,
 //! `approval <id> <once|always|deny|none>`, `read-done <id> <text|error: why>`,
-//! `write-done <id> <done|error: why>`.
+//! `write-done <id> <done|error: why>`, `mcp-call <id> <listener> <connection> <tool> <arguments>`,
+//! `mcp-cancelled <id>`, `message <listener> <connection> <text>`,
+//! `request <id> <listener> <path> <body>`,
+//! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -33,6 +43,7 @@ wit_bindgen::generate!({
 use fyx::ui::approvals::{self, ApprovalOption};
 use fyx::ui::host::{self, HostError, HostErrorCode};
 use fyx::ui::io::IoEvent as Io;
+use fyx::ui::listeners;
 use fyx::ui::permissions::{self, T2Capability};
 use fyx::ui::terminals::{self, ReadScope, StatusState, TerminalOrigin, TerminalStatus};
 use fyx::ui::types::*;
@@ -129,6 +140,16 @@ fn state(state: permissions::PermissionState) -> &'static str {
     }
 }
 
+fn file(worktree: &str, path: &str) -> Result<FileRef, String> {
+    Ok(FileRef {
+        worktree: match worktree {
+            "-" => None,
+            id => Some(id.parse().map_err(|_| "worktree")?),
+        },
+        path: path.into(),
+    })
+}
+
 fn run(words: &[&str]) -> Result<String, String> {
     Ok(match words {
         ["pseudo", title] => id(terminals::open_pseudo(&terminals::PseudoRequest {
@@ -220,7 +241,58 @@ fn run(words: &[&str]) -> Result<String, String> {
             let tool = if *tool == "-" { "" } else { tool };
             id(approvals::ask(tool, title, "detail", &options))
         }
-        ["listen"] => done(fyx::ui::listeners::reply(1, 200, "")),
+        ["tools", listener, names @ ..] => {
+            let tools: Vec<listeners::ToolDef> = names
+                .iter()
+                .map(|name| listeners::ToolDef {
+                    name: (*name).into(),
+                    description: format!("the {name} tool"),
+                    input_schema: r#"{"type":"object"}"#.into(),
+                })
+                .collect();
+            done(listeners::register_tools(listener, &tools))
+        }
+        ["respond", call, json] => done(listeners::respond(
+            call.parse().map_err(|_| "call id")?,
+            Ok(json),
+        )),
+        ["respond-err", call, error_code, message @ ..] => done(listeners::respond(
+            call.parse().map_err(|_| "call id")?,
+            Err(&listeners::McpError {
+                code: error_code.parse().map_err(|_| "code")?,
+                message: message.join(" "),
+            }),
+        )),
+        ["notify", listener, method] => done(listeners::notify(listener, None, method, "{}")),
+        ["send", listener, connection, text @ ..] => done(listeners::send(
+            listener,
+            connection.parse().map_err(|_| "connection")?,
+            &text.join(" "),
+        )),
+        ["reply", id, status, body @ ..] => done(listeners::reply(
+            id.parse().map_err(|_| "id")?,
+            status.parse().map_err(|_| "status")?,
+            &body.join(" "),
+        )),
+        ["watch", on] => done(fyx::ui::context::watch(*on == "on")),
+        ["open", worktree, path, focus] => done(fyx::ui::context::open(
+            &file(worktree, path)?,
+            None,
+            *focus == "1",
+        )),
+        ["to-ref", absolute] => match fyx::ui::context::to_file_ref(absolute) {
+            Ok(file) => format!(
+                "{}:{}",
+                file.worktree.map_or("-".to_string(), |id| id.to_string()),
+                file.path
+            ),
+            Err(error) => code(&error).into(),
+        },
+        ["abs", worktree, path] => match fyx::ui::context::absolute_path(&file(worktree, path)?) {
+            Ok(path) => path,
+            Err(error) => code(&error).into(),
+        },
+        ["relay"] => done(fyx::ui::relay::respond(1, 0, "", "")),
         _ => return Err(format!("unknown command {words:?}")),
     })
 }
@@ -308,6 +380,35 @@ impl Guest for Probe {
                 Ok(()) => format!("write-done {id} done"),
                 Err(why) => format!("write-done {id} error: {why}"),
             },
+            Io::McpCall(call) => format!(
+                "mcp-call {} {} {} {} {}",
+                call.call_id, call.listener, call.connection, call.tool, call.arguments
+            ),
+            Io::McpCancelled(id) => format!("mcp-cancelled {id}"),
+            Io::ContextChanged(context) => format!(
+                "context {} {} {} {}",
+                context.active.map_or("-".to_string(), |file| file.path),
+                context
+                    .open
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                match context.selection {
+                    Some((_, Some(text))) => text.len().to_string(),
+                    Some((_, None)) => "none".into(),
+                    None => "-".into(),
+                },
+                context
+                    .trusted
+                    .map_or("-".to_string(), |trusted| trusted.to_string()),
+            ),
+            Io::ListenerMessage((listener, connection, text)) => {
+                format!("message {listener} {connection} {text}")
+            }
+            Io::ListenerRequest((id, listener, path, body)) => {
+                format!("request {id} {listener} {path} {body}")
+            }
             _ => "other".into(),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))

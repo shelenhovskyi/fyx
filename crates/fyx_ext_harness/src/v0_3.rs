@@ -387,6 +387,9 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                 wit_permission_state(state),
             )))
         }
+        // 0.4 only.
+        net::IoEvent::Context(..) => None,
+        net::IoEvent::ReviewDecided(..) => None,
     }
 }
 

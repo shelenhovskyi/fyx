@@ -7006,6 +7006,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "semver",
+ "serde_json",
  "toml 0.9.8",
  "ui_ext",
  "wasmparser 0.254.2",

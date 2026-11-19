@@ -162,6 +162,9 @@ pub struct UiExtensionRegistry {
     t3_share_kinds: HashMap<(String, u64), T3Answer>,
     /// Where the terminal host reports closed terminals ([`Self::t3_terminal_closed_hook`]).
     t3_closed: Option<futures::channel::mpsc::UnboundedSender<u64>>,
+    /// Told when an extension's listener opens or closes (§B.7, §B.8): W1's discovery-file
+    /// writer. One shared observer for every load, so a reload's listeners reach the same one.
+    listener_observer: Option<Arc<dyn ui_ext::integration::ListenerObserver>>,
 }
 
 /// A loaded extension a terminal can be shared with (§C.3), for the terminal's menu.
@@ -690,6 +693,19 @@ impl UiExtensionRegistry {
     pub fn set_journal_store(&mut self, store: Arc<crate::journal::JournalStore>) {
         self.consent.set_journal(store.clone());
         self.journal_store = Some(store);
+    }
+
+    /// The observer every later load passes as `LoadOptions::listener_observer` (§B.8). Set it
+    /// before the first scan; extensions already loaded keep the one they loaded with.
+    pub fn set_listener_observer(
+        &mut self,
+        observer: Arc<dyn ui_ext::integration::ListenerObserver>,
+    ) {
+        self.listener_observer = Some(observer);
+    }
+
+    pub fn listener_observer(&self) -> Option<Arc<dyn ui_ext::integration::ListenerObserver>> {
+        self.listener_observer.clone()
     }
 
     pub(crate) fn journal_sink(&self) -> Option<Arc<dyn ui_ext_wasm::journal::Journal>> {
@@ -2083,6 +2099,10 @@ Environment it may pass: {}",
                         terminals: cx.update(|cx| crate::terminal_host(cx)),
                         journal: this
                             .read_with(cx, |this, _| this.journal_sink())
+                            .ok()
+                            .flatten(),
+                        listener_observer: this
+                            .read_with(cx, |this, _| this.listener_observer())
                             .ok()
                             .flatten(),
                         ..LoadOptions::default()
@@ -3843,6 +3863,10 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         proxy: Some(cx.update(extension_proxy)),
         private_hosts: Some(cx.update(extension_private_hosts)),
         terminals: cx.update(|cx| crate::terminal_host(cx)),
+        listener_observer: cx.update(|cx| {
+            UiExtensionRegistry::global(cx)
+                .and_then(|registry| registry.read(cx).listener_observer())
+        }),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

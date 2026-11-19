@@ -2,31 +2,25 @@
 
 Older history: `archive/W2c.md`.
 
-## Handoff (2026-11-19, eighth context clear)
+## Handoff (2026-11-19, tenth context)
 
-- **Branch** claude/fyx-w2c-host-0-2-cbde2c, on fyx/main b481177ef9 (04bb5cd126 merged there).
-- **Done since the last clear** (not at W0 yet):
-  - d1b1a881e6 fyx_guard: `fyx.accounts` dirs are protected (§C.6 rule 5), reads and writes.
-  - 98777859a4 integrator lines: ui_ext_wasm deps async-tungstenite (tokio-runtime), rand,
-    serde_json.
-  - a7255411a9 5.11 core: `ui_ext_wasm/src/listeners.rs` `ListenerSet` (admission, MCP over
-    websocket and streamable HTTP, raw kinds; 7 tests). `ui_ext::integration` ListenerEvent,
-    McpCall, ToolDef, McpError, OpenListener, ListenerObserver; IoEvent::Listener.
-  - WIT fix for W0: side-session-notes `W2c-wit-0.4-withdraw.diff`: `review.withdraw ->
-    result<string, host-error>` (current text, no review-decided; staged dc04464ee8 was
-    `result<_>` + err("withdrawn")). W4 confirmed the shape; sent to W0 to stage.
-- **Next:**
-  1. Wire 5.11: LoadOptions `listener_observer: Option<Arc<dyn ListenerObserver>>`; a
-     ListenerSet per instance in ui_ext_wasm.rs (next to TerminalsHandle ~:1962), sink to
-     `running.deliver(IoEvent::Listener(..))` like terminals; open each granted
-     `network:listen#<name>` (ConsentItem::Listener) at start on the tokio runtime, with its
-     granted `fs:discovery-file#<spec.name>` files; `impl wit_listeners::Host` in
-     fyx_ui_v0_4.rs (+ add to `add_to_linker`'s list ~:431); watch_permissions (network.rs
-     ~:979): revoke of `network:listen[#n]` -> close, grant -> open, discovery item change ->
-     reopen with the new list; `${listen.<n>.port/token}` in terminals.rs PackageContext.
-  2. 5.13 review/context runtime (after W0 applies the withdraw diff).
-- **Local-only, never commit:** `IoEvent::Listener(..) => None` in W4's fyx_ext_harness
-  v0_3.rs/v0_4.rs (W0 adds it at integration).
-- **Gotchas:** target `D:/fyx-targets/w2c` (a sweep once emptied .fingerprint mid-build:
-  rerun). Write python scripts with the Write tool, not heredocs. async-tungstenite's
-  `split()` halves have inherent `send`/`close(None)`. `cargo fmt` skips `t2_shared.rs`.
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c. W0 merged eb33909735; staged the Listener harness
+  arms (072f0c8833) and `review.withdraw -> result<string, host-error>` (442b742a4e).
+- **Ready, not yet at W0:** d6f0d4b8c6 5.11 wiring (ListenersHandle, `wit_listeners::Host`,
+  LoadOptions listeners/discovery_files/listener_observer, `${listen.*}`, MCP 2025-11-25) and
+  f0d1640700 5.13 context: `ui_ext::context` (ContextHost, `parse_tool_path` for
+  `file:///C:/`, `file://C:\`, backslash paths; `file_ref_in` deepest root), runtime
+  `editor_context::ContextHandle` (privacy filter, 64 KiB cap, watch takeover on reload, focus
+  rule via `ListenersHandle::requested_within`), `wit_context::Host`, LoadOptions `context`;
+  `ui_ext::review` model only (ReviewHost, Proposal, ReviewOutcome); IoEvent `Context` and
+  `ReviewDecided`. Tests `test_v0_4_editor_context`, `..._rules_and_reloads`, context.rs units.
+- **Next: 5.13 review runtime:** handle in ui_ext_wasm (ids, 64 open, 8 MiB, labels 256 B,
+  protected paths via `ui_ext::protected`, 1024 turn paths), LoadOptions `review`,
+  `wit_review::Host` (withdraw on the 442b742a4e shape: merge fyx/main once it lands),
+  revoke/drop -> close_all, probe commands + tests. Bridge over agent_review in ui_ext_host:
+  default W3 writes it (coordinator not yet answered).
+- **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `IoEvent::Listener`,
+  `Context`, `ReviewDecided` => None (drop once W0's arms are merged here).
+- **Gotchas:** target `D:/fyx-targets/w2c`. Python via Write-tool scripts. `cargo fmt` skips
+  `t2_shared.rs` (use `rustfmt --edition 2024 --check`). Close listeners in spec order.
+  `test_reload_kills_the_process_tree` (0.3) flakes under full-crate load, passes alone.

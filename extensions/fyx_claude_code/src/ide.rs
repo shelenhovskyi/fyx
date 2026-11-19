@@ -490,6 +490,84 @@ impl<K: Clone + PartialEq> Diffs<K> {
     }
 }
 
+/// What the IDE server needs from the host: the roots, the answers, and the diagnostics.
+pub trait IdeHost {
+    fn roots(&self) -> &dyn Roots;
+    /// The answer to call `call` (`listeners.respond`).
+    fn respond(&mut self, call: u64, outcome: Result<String, McpError>);
+    /// What the host's diagnostics hold, by absolute path: of the file `only`, or of every file.
+    /// A file with nothing is left out.
+    fn diagnostics(&self, only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)>;
+}
+
+/// The extension's side of the `ide` listener: Claude's `tools/call`s by the host's call id,
+/// the `openDiff` calls still open, and the diagnostics answers of this turn. The WASM side and
+/// the compat replay drive the same server.
+#[derive(Debug, Default)]
+pub struct Server {
+    diffs: Diffs<u64>,
+    cache: DiagnosticsCache,
+}
+
+impl Server {
+    /// `io-event::mcp-call` on [`LISTENER`]. Every call is answered now except `openDiff`, which
+    /// stays open until [`Server::decided`] or a close.
+    pub fn call(&mut self, host: &mut dyn IdeHost, call: u64, tool: &str, arguments: &str) {
+        match IdeCall::parse(tool, arguments, host.roots()) {
+            Ok(IdeCall::OpenDiff { tab, .. }) => self.diffs.opened(tab, call),
+            // A close withdraws only a proposal that is still open, whose call then ends with
+            // `TAB_CLOSED`; after a decision it is a no-op.
+            Ok(IdeCall::CloseTab { tab }) => {
+                if let Some(open) = self.diffs.close(&tab) {
+                    host.respond(open, Ok(DiffAnswer::TabClosed.result()));
+                }
+                host.respond(call, Ok(text_result("TAB_CLOSED")));
+            }
+            Ok(IdeCall::CloseAllDiffTabs) => {
+                for open in self.diffs.close_all() {
+                    host.respond(open, Ok(DiffAnswer::TabClosed.result()));
+                }
+                host.respond(call, Ok(text_result("CLOSED_ALL_DIFF_TABS")));
+            }
+            Ok(IdeCall::GetDiagnostics { file }) => {
+                let only = file
+                    .as_ref()
+                    .and_then(|file| host.roots().to_absolute(file));
+                let answer = self.cache.answer(file, || {
+                    diagnostics_result(&host.diagnostics(only.as_deref()))
+                });
+                host.respond(call, Ok(answer));
+            }
+            Ok(IdeCall::OpenFile { .. }) => host.respond(call, Ok(text_result("OK"))),
+            Err(error) => host.respond(call, Err(error)),
+        }
+    }
+
+    /// The user decided the `openDiff` call `call` in Fyx; false when it is not open.
+    pub fn decided(&mut self, host: &mut dyn IdeHost, call: u64, answer: &DiffAnswer) -> bool {
+        if !self.diffs.decided(&call) {
+            return false;
+        }
+        host.respond(call, Ok(answer.result()));
+        true
+    }
+
+    /// `io-event::mcp-cancelled`: the call's connection closed.
+    pub fn cancelled(&mut self, call: u64) {
+        self.diffs.decided(&call);
+    }
+
+    /// A turn began, or the host's diagnostics changed.
+    pub fn invalidate_diagnostics(&mut self) {
+        self.cache.invalidate();
+    }
+
+    /// The `openDiff` calls still open.
+    pub fn open_diffs(&self) -> Vec<u64> {
+        self.diffs.keys().copied().collect()
+    }
+}
+
 /// `selection_changed`'s params, from `context.editor-context`'s active file and selection.
 /// `None` when the file is outside every root.
 pub fn selection_changed(

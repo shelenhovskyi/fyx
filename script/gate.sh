@@ -11,12 +11,34 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"
-# On the Windows dev box a FULL run, green or red, ends by sweeping and pruning the target dirs
-# (script/fyx-disk-guard; tasks/W0-integrator.md, "Disk"). Never in CI.
-if [[ "${FULL:-0}" == "1" && "${CI:-}" != "true" && -x script/fyx-disk-guard ]] \
-    && command -v powershell >/dev/null 2>&1; then
-    trap 'script/fyx-disk-guard || true' EXIT
-fi
+# Measurement (tasks/W0-integrator.md, "Gate modes"): every run, green or red, ends with its wall
+# time and the sccache hits and misses during the run. The sccache server is shared by every
+# session on the machine, so other builds that ran meanwhile count too.
+gate_started=$SECONDS
+sccache_counts() {
+    command -v sccache >/dev/null 2>&1 || return 0
+    sccache --show-stats --stats-format json 2>/dev/null | python -I -c '
+import json, sys
+s = json.load(sys.stdin)["stats"]
+print(sum(s["cache_hits"]["counts"].values()), sum(s["cache_misses"]["counts"].values()))' 2>/dev/null | tr -d '\r' || true
+}
+sccache_before=$(sccache_counts)
+gate_report() {
+    local elapsed=$((SECONDS - gate_started)) after
+    echo "gate: wall time $((elapsed / 60))m $((elapsed % 60))s"
+    after=$(sccache_counts)
+    if [[ -n "$sccache_before" && -n "$after" ]]; then
+        echo "gate: sccache during the run (all sessions): $(( ${after% *} - ${sccache_before% *} )) hits," \
+            "$(( ${after#* } - ${sccache_before#* } )) misses"
+    fi
+    # On the Windows dev box a FULL run, green or red, ends by sweeping and pruning the target dirs
+    # (script/fyx-disk-guard; tasks/W0-integrator.md, "Disk"). Never in CI.
+    if [[ "${FULL:-0}" == "1" && "${CI:-}" != "true" && -x script/fyx-disk-guard ]] \
+        && command -v powershell >/dev/null 2>&1; then
+        script/fyx-disk-guard || true
+    fi
+}
+trap gate_report EXIT
 
 # Workspace-wide checks (spec decision 27). They do not depend on which crates changed, so they
 # run first and on every gate, even one with no crate changes. See docs/fyx/ci.md.
@@ -128,12 +150,26 @@ win_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else p
 CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
     LOCALAPPDATA="$(win_path "$test_home/LocalAppData")" APPDATA="$(win_path "$test_home/AppData")" \
     XDG_DATA_HOME="$test_home/xdg-data" XDG_CONFIG_HOME="$test_home/xdg-config" \
-    cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast "${nextest_filter[@]}" 2>&1 | tail -60
+    cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast --timings "${nextest_filter[@]}" 2>&1 | tail -60
 app_started=""
 for dir in "${profile_candidates[@]}"; do
     [[ -n "$(find "$dir/logs" -maxdepth 1 -name '*.log' -newer "$test_home/.started" 2>/dev/null)" ]] && app_started=1
 done
 rm -rf "$test_home"
+# Cargo's timing report of a build step (`--timings`), one copy per commit and step outside the
+# target dir: FYX_GATE_TIMINGS_DIR, on the Windows dev box D:\fyx-builds\gate-timings.
+timings_dir="${FYX_GATE_TIMINGS_DIR:-}"
+if [[ -z "$timings_dir" && -d /d/fyx-builds ]]; then timings_dir=/d/fyx-builds/gate-timings; fi
+keep_timings() {
+    local report copy
+    report=$(ls -t "${CARGO_TARGET_DIR:-target}"/cargo-timings/cargo-timing*.html 2>/dev/null | head -1)
+    [[ -n "$timings_dir" && -n "$report" ]] || return 0
+    mkdir -p "$timings_dir"
+    copy="$timings_dir/$(git rev-parse --short=10 HEAD)-$1.html"
+    cp "$report" "$copy"
+    echo "gate: cargo timings ($1): $(win_path "$copy")"
+}
+keep_timings test
 # Per-test timing (.config/nextest.toml writes junit.xml): keep one copy per commit outside the
 # target dir, which gets pruned. FYX_GATE_JUNIT_DIR overrides; on the Windows dev box the default
 # is D:\fyx-builds\gate-junit.
@@ -165,7 +201,8 @@ else
 fi
 
 if [[ "${FULL:-0}" == "1" ]]; then
-    cargo build -p zed 2>&1 | grep -E '^(error|warning: unused)|Finished' | tail -20
+    cargo build -p zed --timings 2>&1 | grep -E '^(error|warning: unused)|Finished' | tail -20
+    keep_timings zed
 fi
 
 # A lockfile that cargo rewrote during the run is not committed, so `--locked` builds of a fresh
