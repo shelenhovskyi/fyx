@@ -167,6 +167,14 @@ impl From<&Props> for ui_ext::Props {
                 bold: false,
                 monospace: false,
             }),
+            // Nor terminals: the native view stands for one line of text here.
+            #[cfg(feature = "fyx-ui-0-4")]
+            Props::Terminal(_) => Self::Text(ui_ext::TextProps {
+                content: "terminal".into(),
+                color: None,
+                bold: false,
+                monospace: false,
+            }),
         }
     }
 }

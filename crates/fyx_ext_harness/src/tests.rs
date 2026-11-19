@@ -791,3 +791,4 @@ fn the_counter_demo_runs_as_0_2() {
 
 mod demos_v0_2;
 mod demos_v0_3;
+mod demos_v0_4;

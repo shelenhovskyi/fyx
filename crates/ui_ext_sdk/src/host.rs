@@ -159,6 +159,9 @@ pub enum HostEffect {
     /// [`request_permission`].
     #[cfg(feature = "fyx-ui-0-3")]
     RequestPermission(T2Capability),
+    /// A [`crate::terminals`] function (`fyx:ui` 0.4).
+    #[cfg(feature = "fyx-ui-0-4")]
+    Terminal(crate::terminals::TerminalEffect),
 }
 
 #[cfg(all(feature = "fyx-ui-0-3", not(target_arch = "wasm32")))]
@@ -205,12 +208,12 @@ thread_local! {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn next_id() -> u64 {
+pub(crate) fn next_id() -> u64 {
     NEXT_ID.replace(NEXT_ID.get() + 1)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn record(effect: HostEffect) -> Result<(), HostError> {
+pub(crate) fn record(effect: HostEffect) -> Result<(), HostError> {
     EFFECTS.with_borrow_mut(|effects| effects.push(effect));
     Ok(())
 }
