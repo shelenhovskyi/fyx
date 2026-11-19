@@ -22,7 +22,10 @@
 //!   `send <listener> <connection> <text>`: `send`; `reply <id> <status> <body>`: `reply`;
 //! - `watch <on|off>`: `context.watch`; `open <worktree|-> <path> <0|1>`: `workspace.open`
 //!   with `focus`; `to-ref <absolute>`: `context.to-file-ref` as `<worktree|->:<path>`;
-//!   `abs <worktree|-> <path>`: `context.absolute-path`;
+//!   `abs <worktree|-> <path>`: `context.absolute-path`; `diag <worktree|-> <path>` and
+//!   `diag-all`: `context.diagnostics` as `<path>:<e|w|i|h><line>.<column>,...;...` (or `empty`),
+//!   then ` truncated` if so, then `|<source>|<code>|<message bytes>` of the first entry;
+//!   `watch-diag <on|off>`: `context.watch-diagnostics`;
 //! - `relay`: a call into `relay`, which traps in this build;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
@@ -33,7 +36,8 @@
 //! `write-done <id> <done|error: why>`, `mcp-call <id> <listener> <connection> <tool> <arguments>`,
 //! `mcp-cancelled <id>`, `message <listener> <connection> <text>`,
 //! `request <id> <listener> <path> <body>`,
-//! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`.
+//! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`,
+//! `diagnostics-changed <path,...|*>` (`*` for the empty list).
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -149,6 +153,58 @@ fn file(worktree: &str, path: &str) -> Result<FileRef, String> {
         },
         path: path.into(),
     })
+}
+
+fn diagnostics(result: Result<fyx::ui::context::DiagnosticsSnapshot, HostError>) -> String {
+    use fyx::ui::context::Severity;
+    let snapshot = match result {
+        Ok(snapshot) => snapshot,
+        Err(error) => return code(&error).into(),
+    };
+    let files: Vec<String> = snapshot
+        .files
+        .iter()
+        .map(|file| {
+            let entries: Vec<String> = file
+                .diagnostics
+                .iter()
+                .map(|entry| {
+                    let severity = match entry.severity {
+                        Severity::Error => "e",
+                        Severity::Warning => "w",
+                        Severity::Information => "i",
+                        Severity::Hint => "h",
+                    };
+                    format!(
+                        "{severity}{}.{}",
+                        entry.range.start.line, entry.range.start.column
+                    )
+                })
+                .collect();
+            format!("{}:{}", file.path.path, entries.join(","))
+        })
+        .collect();
+    let mut out = if files.is_empty() {
+        "empty".to_string()
+    } else {
+        files.join(";")
+    };
+    if snapshot.truncated {
+        out.push_str(" truncated");
+    }
+    if let Some(first) = snapshot
+        .files
+        .first()
+        .and_then(|file| file.diagnostics.first())
+    {
+        out.push_str(&format!(
+            "|{}|{}|{}",
+            first.source.as_deref().unwrap_or("-"),
+            first.code.as_deref().unwrap_or("-"),
+            first.message.len()
+        ));
+    }
+    out
 }
 
 fn run(words: &[&str]) -> Result<String, String> {
@@ -293,6 +349,11 @@ fn run(words: &[&str]) -> Result<String, String> {
             Ok(path) => path,
             Err(error) => code(&error).into(),
         },
+        ["diag", worktree, path] => {
+            diagnostics(fyx::ui::context::diagnostics(Some(&file(worktree, path)?)))
+        }
+        ["diag-all"] => diagnostics(fyx::ui::context::diagnostics(None)),
+        ["watch-diag", on] => done(fyx::ui::context::watch_diagnostics(*on == "on")),
         ["propose", worktree, path, kind, apply, session, text @ ..] => {
             let text = text.join(" ");
             id(review::propose(&review::Proposal {
@@ -431,6 +492,15 @@ impl Guest for Probe {
                 call.call_id, call.listener, call.connection, call.tool, call.arguments
             ),
             Io::McpCancelled(id) => format!("mcp-cancelled {id}"),
+            Io::DiagnosticsChanged(files) if files.is_empty() => "diagnostics-changed *".into(),
+            Io::DiagnosticsChanged(files) => format!(
+                "diagnostics-changed {}",
+                files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             Io::ContextChanged(context) => format!(
                 "context {} {} {} {}",
                 context.active.map_or("-".to_string(), |file| file.path),

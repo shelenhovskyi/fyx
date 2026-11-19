@@ -1053,6 +1053,12 @@ impl NetworkHandle {
                                 context.stop();
                             }
                         }
+                        // §B.11: the change feed stops; `diagnostics` is checked per call.
+                        ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS => {
+                            if let Some(context) = revocable.context.upgrade() {
+                                context.stop_diagnostics();
+                            }
+                        }
                         // §B.10: open reviews close unapplied; no outcome follows.
                         ui_ext::review::CAPABILITY_REVIEW_PROPOSE => {
                             if let Some(review) = revocable.review.upgrade() {
