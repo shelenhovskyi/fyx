@@ -8,18 +8,22 @@
 //! The only bytes the tap ever writes back to the pty are constant feature-detection replies (the
 //! OSC 7501 support query); nothing in a reply is built from program output.
 
+pub mod blocks;
 pub mod decorations;
 pub mod env_hook;
 pub mod inbox;
 pub mod osc;
 mod osc_scan;
 pub mod sanitize;
+pub mod shell_integration;
 pub mod status;
 mod tee_pty;
 mod terminal_id;
 
+pub use blocks::CommandBlock;
 pub use decorations::{
     MenuEntry, TerminalDecorations, new_terminal_menu, set_decorations, tab_indicator,
+    terminal_menu,
 };
 pub use env_hook::{
     ACCOUNT_CHOICE_ENV, AccountBadge, EnvAdditions, EnvRequest, TerminalEnvHook, apply_env_hook,
@@ -28,6 +32,7 @@ pub use env_hook::{
 pub use osc::OscEvent;
 pub use osc_scan::{MAX_OSC_PAYLOAD, OscScanner};
 pub use sanitize::OutputSanitizer;
+pub use shell_integration::{ShellIntegration, set_shell_integration, shell_integration};
 pub use status::{ExtensionStatus, StatusSource, TerminalStatus};
 pub use tee_pty::{OscObserver, OscReplies, TeePty, tee, tee_with};
 pub use terminal_id::{
