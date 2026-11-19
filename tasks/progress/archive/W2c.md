@@ -1,10 +1,104 @@
 # W2c progress archive (older history; the current handoff is in ../W2c.md)
 
+## Handoff (2026-11-19, sixth context clear; superseded)
+
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c. fyx/main merged at d354266a64. Sent W0 "ready 409504e1b2"
+  (5.6 wasm side and the `${package}` check).
+- **Done since the last clear:**
+  - f3f8c731bc: 5.6 broker host side in `ui_ext_host::consent` (now `pub`): install/set_item/
+    item_state/items/diff/state_with (`NeedsApproval { new_capabilities, diff }`)/always-allow.
+    Item answers live in the file's `items` map, not in ConsentRecord. `read_file` returns
+    `(records, Answers)`. Item changes stream as keys (`process:spawn#git`); network.rs
+    watch_permissions kills that program. Also `ui_ext_host::journal::JournalStore`. W3 has the
+    API and the wiring list (LoadOptions::journal, set_journal, state_with in check_consent).
+  - 695499d96f: T3 model: `TerminalHost::t3_target/read/write` (defaults), `TerminalEvent::
+    ReadDone/WriteDone`, `T3Target`, `check_write_text`. Broker: share_terminal/unshare/
+    terminal_closed/shared. The API went to W1; no answer yet. A menu share only pre-approves and
+    pushes no text (my decision).
+- **Next:**
+  1. Runtime T3 in `ui_ext_wasm/src/terminals.rs` and `fyx_ui_v0_4.rs`:
+     - request_read/request_write: declared, gesture (`api.take_activation`), lines 1..=500,
+       `check_write_text`, `t3_target`, and an untrusted cwd gives UntrustedWorktree. Own terminals
+       need no card.
+     - Queue ops; start them after the call next to `network.start`
+       (ui_ext_wasm.rs ~2247) on tokio.
+     - Await `broker.t3_request`. On Deny, send `ReadDone/WriteDone(id, Err("denied"))`.
+       Otherwise call host.read/write with a sink that journals TerminalRead{terminal,scope,bytes}
+       and TerminalWrite.
+     - Abort the tasks on drop.
+     - Add terminal:read/write to `world_capabilities` V0_4 (ui_ext_wasm.rs:377). Change the
+       refusal in tests_v0_3.rs:1111 to an accepted manifest.
+  2. `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]` (0.4 only), fed into consent_items.
+  3. 5.11 loopback listeners + MCP wrapper (§B.7), with item revocation for `network:listen#<name>`
+     and `fs:discovery-file#<name>` in network.rs watch_permissions.
+  4. Whole-crate tests, clippy and fmt, then "ready" to W0 and the coordinator.
+- **Ready at W0: a4fcba01b1** (f3f8c731bc, 695499d96f, and set_integration; 477 tests pass). W1 and W3 are told.
+- **Queued by the coordinator** (do these after the T3 runtime, step 1):
+  - fyx_guard: the `fyx.accounts` dirs (W1 4637d43836) become protected paths (§C.6).
+  - WIT diffs for since_v0.4.0, sent to W0 together:
+    - `context.to-file-ref(abs) -> option<file-ref>` and `absolute-path(file-ref)`, both behind
+      context:editor;
+    - `review.withdraw(id) -> result<string>`;
+    - `editor-context.trusted: option<bool>`, with files in most-recent-focus order.
+  - A `${pid}` template (TemplateContext, together with W1).
+  - In 5.11: mcp-websocket takes subprotocol "mcp" and `X-Claude-Code-Ide-Authorization`;
+    streamable-http serves `/mcp`. Confirm the mcp.respond shape (full CallToolResult) to W4.
+  - Settle with W4 for 5.13/5.14: IDE connection ↔ hook session_id.
+- **Local-only patches** (never commit):
+  - `<scratchpad>/host_local.diff` (W3's Props::Terminal arms) and `harness_local.diff`. Apply
+    with `git apply --ignore-whitespace`.
+  - The `HostEffect::AskApproval { .. } => {}` arm at registry.rs `match effect {`.
+  - `<scratchpad>/host_patch.py` recreates the host arms.
+  - Revert: `git checkout -- crates/fyx_ext_harness crates/ui_ext_host/src/{decorations,inspector,view}.rs`
+    and remove that arm. registry.rs holds my committed `..` hook, so do not checkout registry.rs.
+- **Gotchas:**
+  - Targets `D:/fyx-targets/w2c` and `w2c-light` (E: is the same storage).
+  - Edit files with python scripts written by the Write tool (bash heredocs break on quotes). Keep
+    CRLF and use `chr(9)` for tabs.
+  - `cargo fmt` skips `t2_shared.rs`: run `rustfmt --edition 2024` on it.
+
 # W2c progress: host side of `fyx:ui@0.2.0` (platform plan 2.2)
 
 Branch `claude/fyx-w2c-host-0-2-cbde2c`, on `integration` (with p2-wit) plus W3's
 `claude/fyx-w3-renderer-e20d2b` at `4ca0073db1` (cache, `CallBudget`, lifted-text cap, broker,
 Inspector diagnostics), as the coordinator asked.
+
+## Handoff (2026-11-19, fourth context clear; superseded)
+
+- **Branch:** claude/fyx-w2c-host-0-2-cbde2c, pushed at 54df51e48b.
+- **At W0:** 0e7d6a00bb (5.5 step 3) and 54df51e48b (the 0.4 import side) go in one gate with
+  W4's harness fix. The harness needs the two `V0_4_0` arms, `limits_match` (MAX 0.4) and
+  `net::IoEvent::Terminal(_) => None` in `fyx_ext_harness/src/v0_3.rs` `io_event`.
+- **Done in 54df51e48b:** `fyx_ui_v0_4.rs` (bindgen, `terminals` Host); the 0.3/0.4 shared
+  imports in `t2_shared.rs` (`include!`d); `terminals.rs` (checks; a sink to
+  `IoEvent::Terminal`; close_all on drop and on revoking create/env); fixture `probe_v0_4`;
+  `tests_v0_4.rs`. `terminal` nodes are refused until 5.7; T3 calls answer `not-permitted`.
+- **Next:**
+  1. 5.6, the broker. **W3 OK'd it with changes: follow `W2c-broker-api.md`**, which overrides
+     the summary below (W3 = local_31b10de5-…). Old summary:
+     - in ui_ext_wasm: `Tier::T3`; `ConsentItem` {Capability, Program{capability,name},
+       Listener, DiscoveryFile, EnvAllNew} with `key()`; `ItemLine`; `consent_items(&UiManifest)`
+       and `consent_diff(old, new)` (§C.5; extend the existing `UiManifest::consent_items`);
+       `CapabilityCheck::item_state` and `t3_request` as default methods; `T3Prompt` and
+       `T3Answer` {Once, UntilClosed, Deny}; `journal::JournalStore` (`LoadOptions::journal`,
+       `read`/`clear`, 2000 entries / 30 days, never terminal content);
+     - in ui_ext_host `permissions.rs`/`consent.rs`: `ConsentRecord.items` (serde default);
+       `install(ext, record, ticked)`; `set_item`; `item_state`; `items`;
+       `set_always_allow(ext, cap, sha)`, reset when the sha changes; `set_t3_prompter`;
+       `NeedsApproval { diff }`.
+  2. Then wire T3 in `fyx_ui_v0_4.rs` `request_read`/`request_write`. Allow `terminal:read` and
+     `terminal:write` in `world_capabilities` V0_4 and `permissions.rs` T3. The TerminalHost
+     trait has no read/write yet: agree it with W1.
+  3. `reason` for `[[fyx_ui.processes]]` and `[fyx_ui.network]`, 0.4-only. `fyx_ext/src/manifest.rs`
+     (W4) also parses `processes`. Plan: a `deserialize_with` that strips `reason` before
+     `ProcessSpec` (deny_unknown_fields), with the reasons kept beside it; refused below 0.4.
+  0. First, approvals runtime for W3 (see the end of `W2c-broker-api.md`).
+  4. Done: fyx_registry tiers for 0.4 (294ce6935c, which pairs with W10 9bdf8903a4).
+- **Gotchas:** for ui_ext_wasm tests, patch `fyx_ext_harness` locally with the arms above, then
+  `git checkout -- crates/fyx_ext_harness`. Targets: `E:/fyx-targets/w2c` (ui_ext_wasm,
+  ui_ext_host) and `E:/fyx-targets/w2c-light` (ui_ext, fyx_registry). Bash heredocs with
+  apostrophes can break: write scripts with the Write tool into the scratchpad.
+  `cargo fmt` skips `t2_shared.rs` (it is `include!`d), so run `rustfmt --edition 2024` on it.
 
 ## Done (2026-11-18)
 
@@ -620,3 +714,32 @@ The 24 h gate counts from the later of `published_at` and when this client first
   - ui_ext's t2 modules are tested only with `--all-features`.
   - Heredoc Python edits lose backslashes: build them with `chr(92)`.
   - Run `bash script/fyx-prune-target <target>` after tests.
+
+## Handoff of 2026-11-19 (fifth clear), superseded
+
+
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c, pushed at 409504e1b2. Ready at W0 (gate with W3's
+  host arms and W4's 1068bcf7ff): 4ecc5ae40e WIT `approvals.ask(tool, …)`; 7862b91cab approvals
+  runtime; 3b26fdd9c5 `Props::Terminal`; 4e89dc1e8d 5.6 wasm side (not yet announced "ready");
+  409504e1b2 `${package}` needs `package:files`.
+  W0 staged the WIT as a158d6869a (identical to 4ecc5ae40e): merge fyx/main once W0 pushes it.
+- **W3 must add arms** in ui_ext_host: registry.rs `HostEffect::AskApproval`, and
+  `Props::Terminal` in decorations.rs:706, inspector.rs:92, view.rs:248, view.rs:924 (told).
+- **5.6 wasm side done** (`permissions.rs` + `consent_items.rs` + `journal.rs`): ConsentItem/key,
+  ItemLine, consent_items, consent_warnings, consent_diff (granted lines vs new manifest; T1/T2
+  held; the Denied-widened rule is the broker's), T3Capability/T3Prompt/T3Answer (terminal id is
+  `HostTerminalId = u64` until W1 agrees), `item_state`/`t3_request` defaults, `Journal` sink in
+  `LoadOptions::journal` (no serde_json in ui_ext_wasm, so the file store goes to ui_ext_host).
+- **Next:**
+  1. 5.6 host side in ui_ext_host `permissions.rs`/`consent.rs` per `W2c-broker-api.md`, plus
+     `ui_ext_host::journal::JournalStore` (JSONL, 2000/30 days, `read`/`clear`, implements
+     `Journal`). Then tell W3 the commit and that JournalStore lives in ui_ext_host.
+  2. T3 wiring with W1 (TerminalHost read/write; `world_capabilities` V0_4 gets terminal:read/
+     write; update the `terminal:read` refusal in tests_v0_3 `test_v0_4_manifest_tables`).
+  3. `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]` (0.4 only; W4 parses processes
+     too), then feed it into `consent_items`.
+- **Gotchas:** harness local patch: `sh <scratchpad>/harness_patch.sh` (recreate from the
+  arms above if the scratchpad is gone), revert with `git checkout -- crates/fyx_ext_harness`;
+  `limits_match` fails until W4's MAX-0.4 arm lands (known). Targets `E:/fyx-targets/w2c` and
+  `w2c-light`. `cargo fmt` skips `t2_shared.rs`: `rustfmt --edition 2024` it. Edit scripts:
+  Write a python file to the scratchpad; never make edits "skip if applied" (it doubled them).

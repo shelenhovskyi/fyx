@@ -9,7 +9,10 @@
 //! - `status <handle> <label>`: `set-status`;
 //! - `list`: `list`, as `<handle>:<origin>:<title>` each, or the error code;
 //! - `paste <handle> <text>`: `paste` (`input-changed` is no gesture);
-//! - `read <handle>`: `request-read`; `close <handle>`: `close`, reported as `done`;
+//! - `read <handle> [<lines>]`: `request-read` of the last lines (10 by default);
+//!   `read-command <handle>`: of the last command; `write <handle> <text>`: `request-write`,
+//!   `write-enter <handle> <text>` with `submit`; `close <handle>`: `close`, reported as `done`;
+//! - `arm <command>`: keeps the command, which the next `click` on any node runs (a gesture);
 //! - `perm <capability>`: `permissions.query` of a 0.4 T2 capability;
 //! - `ask <tool|-> <title> <once|always|deny>...`: `approvals.ask` (`-` for no tool), its id
 //!   or error code;
@@ -19,7 +22,8 @@
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
 //! `resized <h> <cols> <rows>`, `output <h> <text> <dropped>`, `exited <h> <code|none>`,
 //! `created <h>`, `closed <h>`, `status-changed <h>`, `permission <capability> <state>`,
-//! `approval <id> <once|always|deny|none>`.
+//! `approval <id> <once|always|deny|none>`, `read-done <id> <text|error: why>`,
+//! `write-done <id> <done|error: why>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -37,6 +41,9 @@ use fyx::ui::types::*;
 #[unsafe(link_section = "fyx:ui-api-version")]
 #[used]
 static FYX_UI_API_VERSION: [u8; 6] = [0, 0, 0, 4, 0, 0];
+
+/// The command `arm` keeps for the next click.
+static ARMED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 const SURFACE_ID: &str = "probe";
 
@@ -174,6 +181,24 @@ fn run(words: &[&str]) -> Result<String, String> {
             ReadScope::LastLines,
             10,
         )),
+        ["read", h, lines] => id(terminals::request_read(
+            handle(h)?,
+            ReadScope::LastLines,
+            lines.parse().map_err(|_| "lines")?,
+        )),
+        ["read-command", h] => id(terminals::request_read(
+            handle(h)?,
+            ReadScope::LastCommand,
+            0,
+        )),
+        ["write", h, text @ ..] => id(terminals::request_write(handle(h)?, &text.join(" "), false)),
+        ["write-enter", h, text @ ..] => {
+            id(terminals::request_write(handle(h)?, &text.join(" "), true))
+        }
+        ["arm", command @ ..] => {
+            *ARMED.lock().unwrap() = command.join(" ");
+            "armed".into()
+        }
         ["close", h] => {
             terminals::close(handle(h)?);
             "done".into()
@@ -218,8 +243,10 @@ impl Guest for Probe {
     }
 
     fn handle_event(_surface_id: String, event: UiEvent) -> Result<Update, String> {
-        let UiEvent::InputChanged((_, command)) = event else {
-            return Ok(Update::Unchanged);
+        let command = match event {
+            UiEvent::InputChanged((_, command)) => command,
+            UiEvent::Click(_) => std::mem::take(&mut *ARMED.lock().unwrap()),
+            _ => return Ok(Update::Unchanged),
         };
         let words: Vec<&str> = command.split_whitespace().collect();
         if words == ["node"] {
@@ -273,6 +300,14 @@ impl Guest for Probe {
                     None => "none",
                 }
             ),
+            Io::TerminalReadDone((id, result)) => match result {
+                Ok(text) => format!("read-done {id} {text}"),
+                Err(why) => format!("read-done {id} error: {why}"),
+            },
+            Io::TerminalWriteDone((id, result)) => match result {
+                Ok(()) => format!("write-done {id} done"),
+                Err(why) => format!("write-done {id} error: {why}"),
+            },
             _ => "other".into(),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))

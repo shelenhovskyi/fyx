@@ -1,5 +1,6 @@
-//! `fyx-ext package`: `<id>-<version>.fyxext`, a zip of `extension.toml`, the component and an
-//! optional `assets/` directory (platform spec, decision 12). `signature.json` is added by the
+//! `fyx-ext package`: `<id>-<version>.fyxext`, a zip of `extension.toml`, the component, an
+//! optional `assets/` directory (platform spec, decision 12) and, for `package:files`, what
+//! `${package}/...` names (0.4 design B.6). `signature.json` is added by the
 //! registry's CI, never by the author.
 //!
 //! Nothing from outside the extension folder is ever packed (triage-3 #6). Every file is
@@ -70,44 +71,57 @@ fn collect_entries(dir: &Path, manifest: &Manifest) -> Result<Vec<(String, PathB
     })?;
     entries.add(component_name, &manifest.component_path())?;
 
-    let assets = dir.join(ASSETS_DIR);
-    if std::fs::symlink_metadata(&assets).is_ok() {
-        // Links are followed so that they can be resolved and checked; walkdir reports a loop
-        // and a broken link as errors.
-        for entry in walkdir::WalkDir::new(&assets)
-            .follow_links(true)
-            .sort_by_file_name()
-        {
-            let entry =
-                entry.with_context(|| format!("reading {assets:?} (a broken link or a loop?)"))?;
-            if entry.file_type().is_dir() {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(dir)
-                .context("an asset path outside the extension")?;
-            let mut parts = Vec::new();
-            for part in relative.components() {
-                let part = part
-                    .as_os_str()
-                    .to_str()
-                    .with_context(|| format!("{relative:?}: a file name that is not UTF-8"))?;
-                anyhow::ensure!(
-                    !part.contains('\\'),
-                    "{relative:?}: a file name with a backslash, which Windows reads as a folder \
-                     separator"
-                );
-                parts.push(part);
-            }
-            anyhow::ensure!(
-                entry.file_type().is_file(),
-                "{relative:?} is not a regular file"
-            );
-            entries.add(parts.join("/"), entry.path())?;
+    add_tree(dir, ASSETS_DIR, &mut entries)?;
+    // `package:files` (design B.6): what `${package}/...` names.
+    for name in &manifest.package_files {
+        if name != ASSETS_DIR {
+            add_tree(dir, name, &mut entries)?;
         }
     }
     Ok(entries.order)
+}
+
+/// Adds the file or folder `top` of the extension, if it exists, with links resolved.
+fn add_tree(dir: &Path, top: &str, entries: &mut Entries) -> Result<()> {
+    let tree = dir.join(top);
+    if std::fs::symlink_metadata(&tree).is_err() {
+        return Ok(());
+    }
+    // Links are followed so that they can be resolved and checked; walkdir reports a loop and a
+    // broken link as errors.
+    for entry in walkdir::WalkDir::new(&tree)
+        .follow_links(true)
+        .sort_by_file_name()
+    {
+        let entry =
+            entry.with_context(|| format!("reading {tree:?} (a broken link or a loop?)"))?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(dir)
+            .context("a path outside the extension")?;
+        let mut parts = Vec::new();
+        for part in relative.components() {
+            let part = part
+                .as_os_str()
+                .to_str()
+                .with_context(|| format!("{relative:?}: a file name that is not UTF-8"))?;
+            anyhow::ensure!(
+                !part.contains('\\'),
+                "{relative:?}: a file name with a backslash, which Windows reads as a folder \
+                 separator"
+            );
+            parts.push(part);
+        }
+        anyhow::ensure!(
+            entry.file_type().is_file(),
+            "{relative:?} is not a regular file"
+        );
+        entries.add(parts.join("/"), entry.path())?;
+    }
+    Ok(())
 }
 
 struct Entries {
@@ -263,6 +277,35 @@ mod tests {
         assert_eq!(
             entry_names(&package_path),
             ["extension.toml", "bin/fyx_ui.wasm", "assets/icons/a.svg"]
+        );
+    }
+
+    #[test]
+    fn packs_what_package_names() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        extension(root, "fyx_ui.wasm", "fyx_ui.wasm");
+        std::fs::create_dir_all(root.join("claude-plugin/hooks")).expect("mkdir");
+        std::fs::write(root.join("claude-plugin/hooks/hooks.json"), "{}").expect("hooks");
+        std::fs::write(root.join("welcome.py"), "print()").expect("script");
+        std::fs::write(root.join("README.md"), "not packed").expect("readme");
+        let mut report = crate::Report::default();
+        let mut manifest = crate::manifest::read(root, &mut report).expect("manifest");
+        manifest.package_files = vec!["claude-plugin".into(), "welcome.py".into()];
+
+        let names: Vec<String> = collect_entries(root, &manifest)
+            .expect("entries")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "extension.toml",
+                "fyx_ui.wasm",
+                "claude-plugin/hooks/hooks.json",
+                "welcome.py"
+            ]
         );
     }
 

@@ -6884,6 +6884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_claude_code"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_charts"
 version = "0.1.0"
 dependencies = [
@@ -6945,7 +6953,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_pseudo_terminal"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_t2"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
+name = "fyx_demo_terminal_profiles"
 version = "0.1.0"
 dependencies = [
  "ui_ext_sdk",
@@ -6989,6 +7011,14 @@ dependencies = [
  "wasmparser 0.254.2",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "fyx_gemini_cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ui_ext_sdk",
 ]
 
 [[package]]

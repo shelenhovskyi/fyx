@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # Builds the Fyx demo UI extensions for wasm32-wasip2 and copies each component next to its
 # extension.toml as fyx_ui.wasm, so each demo directory loads as a UI extension.
-# Usage: script/fyx-build-demos [--release] [--fyx-ui-0-2 | --fyx-ui-0-3] [extra cargo build args,
-# e.g. -j 2]
+# Usage: script/fyx-build-demos [--release] [--fyx-ui-0-2 | --fyx-ui-0-3 | --fyx-ui-0-4]
+# [extra cargo build args, e.g. -j 2]
 #
 # --fyx-ui-0-2 builds every demo's fyx:ui 0.2 world (its `fyx-ui-0-2` feature) instead, for a dev
 # build whose host runs 0.2. It leaves the repository alone: each demo goes to
 # <target>/fyx-demos-v0_2/<demo>/, with fyx_ui.wasm, a copy of extension.toml whose api_version
-# is 0.2.0, and a copy of its assets/ folder if it has one. The 0.2 builds use the target
-# directory <target>/fyx-demos-v0_2/target, so they do not overwrite the 0.1 ones.
+# is 0.2.0, and a copy of every folder of the demo but src/ (assets/, and the package files that
+# `${package}` names in 0.4). The 0.2 builds use the target directory
+# <target>/fyx-demos-v0_2/target, so they do not overwrite the 0.1 ones.
 # --fyx-ui-0-3 does the same for the staged 0.3 world (`fyx-ui-0-3`, api_version 0.3.0) in
-# <target>/fyx-demos-v0_3/; dev builds run staged worlds.
+# <target>/fyx-demos-v0_3/, and --fyx-ui-0-4 for the staged 0.4 world (`fyx-ui-0-4`, api_version
+# 0.4.0) in <target>/fyx-demos-v0_4/; dev builds run staged worlds. Each staged mode also builds
+# the demos that exist only from that world on (their manifest names it).
 #
 # Each world takes its own capabilities (the host's `UiManifest::check_world`). A manifest line
-# `# fyx-ui-0-2: capabilities = [...]` replaces the `capabilities` line in the 0.2 and 0.3 copies,
-# and `# fyx-ui-0-3: ...` in the 0.3 copy; the repository's manifest stays the 0.1 one.
+# `# fyx-ui-0-2: capabilities = [...]` replaces the `capabilities` line in the 0.2 and later
+# copies, `# fyx-ui-0-3: ...` in the 0.3 and 0.4 copies, and `# fyx-ui-0-4: ...` in the 0.4 copy;
+# the repository's manifest stays the 0.1 one.
 #
 # Then point the dev build at the directories it prints, e.g. on Windows:
 #   set FYX_UI_DEV_EXTENSIONS=<repo>\extensions\fyx_demo_counter;<repo>\extensions\fyx_demo_todo;...
@@ -34,9 +38,9 @@ while [[ $# -gt 0 ]]; do
             cargo_args+=(--release)
             shift
             ;;
-        --fyx-ui-0-2 | --fyx-ui-0-3)
+        --fyx-ui-0-2 | --fyx-ui-0-3 | --fyx-ui-0-4)
             if [[ -n "$world" ]]; then
-                echo "fyx-build-demos: pass at most one of --fyx-ui-0-2 and --fyx-ui-0-3" >&2
+                echo "fyx-build-demos: pass at most one of --fyx-ui-0-2, --fyx-ui-0-3 and --fyx-ui-0-4" >&2
                 exit 1
             fi
             world=${1#--fyx-ui-}
@@ -46,9 +50,12 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
-# Demos that exist only for the staged 0.3 world (their manifest says api_version 0.3.0).
-if [[ "$world" == "0_3" ]]; then
+# Demos that exist only from a staged world on (their manifest says that api_version).
+if [[ "$world" == "0_3" || "$world" == "0_4" ]]; then
     demos+=(fyx_demo_t2)
+fi
+if [[ "$world" == "0_4" ]]; then
+    demos+=(fyx_demo_pseudo_terminal fyx_demo_terminal_profiles fyx_claude_code fyx_gemini_cli)
 fi
 for demo in "${demos[@]}"; do
     cargo_args+=(-p "$demo")
@@ -82,6 +89,7 @@ cargo build --target wasm32-wasip2 "${cargo_args[@]}" "$@"
 world_manifest() {
     local manifest=$1 world=$2 markers line
     case "$world" in
+        0_4) markers=("fyx-ui-0-4" "fyx-ui-0-3" "fyx-ui-0-2") ;;
         0_3) markers=("fyx-ui-0-3" "fyx-ui-0-2") ;;
         *) markers=("fyx-ui-0-2") ;;
     esac
@@ -107,13 +115,20 @@ for demo in "${demos[@]}"; do
         dir="$out_root/$demo"
         mkdir -p "$dir"
         cp "$component" "$dir/fyx_ui.wasm"
-        rm -rf "$dir/assets"
-        if [[ -d "extensions/$demo/assets" ]]; then cp -R "extensions/$demo/assets" "$dir/assets"; fi
+        # Every folder but src/: assets/ and the package files `${package}` names.
+        for folder in "extensions/$demo"/*/; do
+            name=$(basename "$folder")
+            if [[ "$name" == "src" ]]; then continue; fi
+            rm -rf "${dir:?}/$name"
+            cp -R "extensions/$demo/$name" "$dir/$name"
+        done
+        # The repository's manifests name 0.1.0, or the world a demo needs; a demo is only built
+        # for that world or a newer one, so the copy always names the world built.
         world_manifest "extensions/$demo/extension.toml" "$world" \
-            | sed "s/^api_version = \"0\\.1\\.0\"\$/api_version = \"$version\"/" \
+            | sed "s/^api_version = \"0\\.[0-9]*\\.0\"\$/api_version = \"$version\"/" \
             > "$dir/extension.toml"
         if ! grep -q "^api_version = \"$version\"\$" "$dir/extension.toml"; then
-            echo "fyx-build-demos: extensions/$demo/extension.toml has no api_version = \"0.1.0\" line" >&2
+            echo "fyx-build-demos: extensions/$demo/extension.toml has no api_version = \"0.N.0\" line" >&2
             exit 1
         fi
     else

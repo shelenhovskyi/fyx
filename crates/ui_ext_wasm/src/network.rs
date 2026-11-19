@@ -898,6 +898,16 @@ impl NetworkState {
 }
 
 /// What a revocation stops besides the running requests (decision 26).
+/// P2.4: after a change of `terminal:env`, `terminal:profiles` or one of their items, the host
+/// gets the integration as granted now (after any cleanup above, which may have cleared it).
+fn resend_integration(revocable: &Revocable, capability: &str) {
+    if crate::terminals::TerminalsHandle::affects_integration(capability)
+        && let Some(terminals) = revocable.terminals.upgrade()
+    {
+        terminals.send_integration();
+    }
+}
+
 pub(crate) struct Revocable {
     pub(crate) processes: std::sync::Weak<crate::process::ProcessSet>,
     pub(crate) edits: std::sync::Weak<crate::edit::EditSet>,
@@ -978,6 +988,29 @@ impl NetworkHandle {
                 let Some(running) = running.upgrade() else {
                     return;
                 };
+                // 0.4 (§C.2): one item of a capability, by its key (`process:spawn#codex`). The
+                // extension hears only of capabilities, so this is cleanup alone.
+                if let Some((item_capability, name)) = capability.split_once('#') {
+                    if state != PermissionState::Granted {
+                        match item_capability {
+                            crate::process::CAPABILITY_PROCESS => {
+                                if let Some(processes) = revocable.processes.upgrade() {
+                                    processes.kill_program(name);
+                                }
+                            }
+                            // The host closes created terminals as a whole.
+                            ui_ext::terminal::CAPABILITY_CREATE
+                            | ui_ext::terminal::CAPABILITY_ENV => {
+                                if let Some(terminals) = revocable.terminals.upgrade() {
+                                    terminals.close_all();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    resend_integration(&revocable, &capability);
+                    continue;
+                }
                 if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
                     running.revoke_all();
                 }
@@ -1012,6 +1045,7 @@ impl NetworkHandle {
                         _ => {}
                     }
                 }
+                resend_integration(&revocable, &capability);
                 running
                     .deliver(IoEvent::PermissionChanged(capability, state))
                     .await;

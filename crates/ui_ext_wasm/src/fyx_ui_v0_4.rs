@@ -148,6 +148,8 @@ fn terminal_io_event(event: model_terminal::TerminalEvent) -> Option<wit_io::IoE
         Event::Created(info) => wit_io::IoEvent::TerminalCreated(wit_info(info)),
         Event::Closed(handle) => wit_io::IoEvent::TerminalClosed(handle.0),
         Event::StatusChanged(info) => wit_io::IoEvent::TerminalStatusChanged(wit_info(info)),
+        Event::ReadDone(id, result) => wit_io::IoEvent::TerminalReadDone((id, result)),
+        Event::WriteDone(id, result) => wit_io::IoEvent::TerminalWriteDone((id, result)),
     })
 }
 
@@ -243,24 +245,47 @@ impl wit_terminals::Host for UiState {
         if let Err(error) = self.permit_t2_now(model_terminal::CAPABILITY_CREATE) {
             return Ok(Err(error.into()));
         }
+        // §C.2: the program's own checkbox. An undeclared program is the import's error below.
+        let item = crate::permissions::ConsentItem::Program {
+            capability: model_terminal::CAPABILITY_CREATE.into(),
+            name: request.program.clone(),
+        };
+        if self.item_denied(&item) {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::Denied,
+                message: format!("{} is turned off on the extension page", request.program),
+            }
+            .into()));
+        }
         let env_granted = self.t2_granted(model_terminal::CAPABILITY_ENV);
+        let started = (
+            request.program.clone(),
+            request.args.clone(),
+            request.cwd.clone(),
+        );
         // A worktree-relative cwd in the active (first) worktree, as `process.spawn`'s `cwd`
         // with no worktree id.
         let cwd = request.cwd.map(|path| process::FileRef {
             worktree: None,
             path,
         });
-        Ok(self
-            .terminals
-            .create(
-                env_granted,
-                request.program,
-                request.args,
+        let created = self.terminals.create(
+            env_granted,
+            request.program,
+            request.args,
+            cwd,
+            request.title,
+        );
+        if created.is_ok() {
+            let (program, args, cwd) = started;
+            self.journal(crate::journal::JournalKind::ProgramStarted {
+                capability: model_terminal::CAPABILITY_CREATE.into(),
+                program,
+                args,
                 cwd,
-                request.title,
-            )
-            .map(|handle| handle.0)
-            .map_err(Into::into))
+            });
+        }
+        Ok(created.map(|handle| handle.0).map_err(Into::into))
     }
 
     fn send_input(
@@ -325,28 +350,46 @@ impl wit_terminals::Host for UiState {
             .map_err(Into::into))
     }
 
-    /// T3 comes with the broker's cards (plan 5.6); until then no manifest may declare it.
+    /// T3 (§C.3): checked and queued now; the card and the read start after the call returns.
     fn request_read(
         &mut self,
-        _handle: u64,
-        _scope: wit_terminals::ReadScope,
-        _lines: u16,
+        handle: u64,
+        scope: wit_terminals::ReadScope,
+        lines: u16,
     ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
-        Ok(Err(not_yet(model_terminal::CAPABILITY_READ)))
+        if !self.api.declares(model_terminal::CAPABILITY_READ) {
+            return Ok(Err(not_declared(model_terminal::CAPABILITY_READ)));
+        }
+        let gesture = self.api.take_activation();
+        let scope = match scope {
+            wit_terminals::ReadScope::LastCommand => model_terminal::ReadScope::LastCommand,
+            wit_terminals::ReadScope::LastLines => model_terminal::ReadScope::LastLines,
+        };
+        Ok(self
+            .terminals
+            .request_read(gesture, terminal_handle(handle), scope, lines)
+            .map_err(Into::into))
     }
 
     fn request_write(
         &mut self,
-        _handle: u64,
+        handle: u64,
         text: String,
-        _submit: bool,
+        submit: bool,
     ) -> wasmtime::Result<Result<u64, wit_host::HostError>> {
         self.count_lifted_text(text.len())?;
-        Ok(Err(not_yet(model_terminal::CAPABILITY_WRITE)))
+        if !self.api.declares(model_terminal::CAPABILITY_WRITE) {
+            return Ok(Err(not_declared(model_terminal::CAPABILITY_WRITE)));
+        }
+        let gesture = self.api.take_activation();
+        Ok(self
+            .terminals
+            .request_write(gesture, terminal_handle(handle), text, submit)
+            .map_err(Into::into))
     }
 }
 
-fn not_yet(capability: &str) -> wit_host::HostError {
+fn not_declared(capability: &str) -> wit_host::HostError {
     model::HostError {
         code: model::HostErrorCode::NotPermitted,
         message: format!("{capability:?} is not in the manifest"),

@@ -1190,6 +1190,10 @@ interface review {
 
     /// The outcome arrives as `io-event::review-decided` with the returned id.
     propose: func(request: proposal) -> result<u64, host-error>;
+    /// The tool closed its diff (the CLI's `close_tab`): an undecided proposal's review closes
+    /// and nothing is applied; its `review-decided` arrives as `err("withdrawn")`. An id that
+    /// is not the extension's or already decided is `invalid-argument`.
+    withdraw: func(id: u64) -> result<_, host-error>;
     begin-turn: func(session: string) -> result<_, host-error>;
     end-turn: func(session: string, changed: list<file-ref>) -> result<_, host-error>;
 }
@@ -1201,15 +1205,24 @@ interface context {
 
     record editor-context {
         active: option<file-ref>,
+        /// Most recently focused first, `active` included.
         open: list<file-ref>,
         /// The text is absent for a private file, and at most 64 KiB.
         selection: option<tuple<text-range, option<string>>>,
+        /// Whether `active`'s worktree is trusted; `none` without an active file.
+        trusted: option<bool>,
     }
 
     /// `context:editor`: `io-event::context-changed`, debounced 300 ms, while on.
     watch: func(on: bool) -> result<_, host-error>;
     /// `workspace:open`. `focus` needs a gesture or a recent request from a focused terminal.
     open: func(path: file-ref, range: option<text-range>, focus: bool) -> result<_, host-error>;
+    /// `context:editor`: the file at an absolute path (as a tool sends it over MCP). Outside
+    /// every open worktree is `invalid-argument`; a private file is `not-permitted`.
+    to-file-ref: func(absolute: string) -> result<file-ref, host-error>;
+    /// `context:editor`: the absolute path of a file, for a tool's reply. An unknown worktree is
+    /// `invalid-argument`; a private file is `not-permitted`.
+    absolute-path: func(path: file-ref) -> result<string, host-error>;
 }
 
 /// 0.4. Approval cards for a tool's own permission prompts (design.md B.12): `ui:approvals`. The

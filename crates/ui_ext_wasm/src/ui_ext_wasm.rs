@@ -59,6 +59,7 @@ mod bindings {
 
 use bindings::fyx::ui::{host as wit_host, types as wit};
 
+mod consent_items;
 mod conversions;
 mod dispatch;
 pub mod edit;
@@ -67,6 +68,7 @@ mod fyx_ui_v0_2;
 mod fyx_ui_v0_3;
 mod fyx_ui_v0_4;
 pub mod images;
+pub mod journal;
 pub mod network;
 pub mod observe;
 pub mod process;
@@ -372,8 +374,7 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         observe::CAPABILITY_OBSERVE,
     ];
     // Staged (plan P5): 0.3 plus the terminal and integration capabilities of
-    // docs/fyx/wit-0.4/design.md. The T3 ones (`terminal:read`, `terminal:write`) come with the
-    // broker's T3 model (plan 5.6); plan 4.2-4.4's join with their WIT.
+    // docs/fyx/wit-0.4/design.md, T3 included (§C.3); plan 4.2-4.4's join with their WIT.
     const V0_4: &[&str] = &[
         CAPABILITY_PANEL,
         CAPABILITY_STATUS_BAR,
@@ -392,6 +393,8 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         terminal::CAPABILITY_ENV,
         terminal::CAPABILITY_STATUS,
         terminal::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_READ,
+        terminal::CAPABILITY_WRITE,
         terminal::CAPABILITY_PACKAGE_FILES,
         integration::CAPABILITY_NETWORK_LISTEN,
         integration::CAPABILITY_DISCOVERY_FILE,
@@ -417,6 +420,10 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
 #[serde(deny_unknown_fields)]
 pub struct NetworkManifest {
     pub domains: Vec<String>,
+    /// 0.4 (design wit-0.4 §C.2): the author's one line under the item at install, required
+    /// there and refused below 0.4.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// One `[[fyx_ui.processes]]` entry, shared with the harness.
@@ -547,6 +554,39 @@ impl UiManifest {
                 );
             }
         }
+        self.check_t2_reasons(version)
+    }
+
+    /// `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]`: from 0.4 every T2 item has
+    /// one (design wit-0.4 §C.2); below 0.4 the key does not exist.
+    fn check_t2_reasons(&self, version: &Version) -> Result<()> {
+        let items = self
+            .processes
+            .iter()
+            .map(|spec| {
+                (
+                    format!("[[fyx_ui.processes]] {:?}", spec.name),
+                    &spec.reason,
+                )
+            })
+            .chain(
+                self.network
+                    .iter()
+                    .map(|network| ("[fyx_ui.network]".to_string(), &network.reason)),
+            );
+        for (what, reason) in items {
+            if *version < Version::new(0, 4, 0) {
+                anyhow::ensure!(
+                    reason.is_none(),
+                    "{what}: reason needs fyx:ui 0.4; this extension targets {version}"
+                );
+            } else {
+                let reason = reason
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("{what}: a reason is required (fyx:ui 0.4)"))?;
+                terminal::check_reason(&what, reason).map_err(anyhow::Error::msg)?;
+            }
+        }
         Ok(())
     }
 
@@ -615,6 +655,34 @@ impl UiManifest {
         if let Some(env) = &self.terminal_env {
             terminal::check_terminal_env(env.clone(), &|name| integration.listener(name))
                 .map_err(anyhow::Error::msg)?;
+        }
+        // `${package}` names the package's files (§B.6), so it needs `package:files`, as
+        // `fyx-ext check` and the harness require.
+        let uses_package = |text: &str, usage: terminal::TemplateUse| {
+            terminal::Template::parse(text, usage, &|_| Some(true))
+                .is_ok_and(|template| template.0.contains(&terminal::TemplatePart::Package))
+        };
+        let in_profiles = self.terminal_profiles.iter().any(|profile| {
+            profile
+                .args
+                .iter()
+                .any(|arg| uses_package(arg, terminal::TemplateUse::ProfileArg))
+        });
+        let in_env = self.terminal_env.iter().any(|env| {
+            env.vars
+                .values()
+                .any(|value| uses_package(value, terminal::TemplateUse::EnvValue))
+        });
+        if (in_profiles || in_env) && !declares(terminal::CAPABILITY_PACKAGE_FILES) {
+            bail!(
+                "${{package}} in {} needs the {} capability",
+                if in_profiles {
+                    "[[fyx_ui.terminal_profiles]] args"
+                } else {
+                    "[fyx_ui.terminal_env]"
+                },
+                terminal::CAPABILITY_PACKAGE_FILES
+            );
         }
         Ok(())
     }
@@ -844,6 +912,8 @@ pub struct UiState {
     observe: observe::ObserveState,
     /// The 0.4 `terminals` import: the extension's own terminals.
     terminals: terminals::TerminalState,
+    /// 0.4 (§C.4): where programs started and T3 use are recorded.
+    journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
     /// sees one answer (design.md §7).
     permission_mirror: std::collections::HashMap<&'static str, permissions::PermissionState>,
@@ -858,6 +928,7 @@ struct IoStates {
     edit: edit::EditState,
     observe: observe::ObserveState,
     terminals: terminals::TerminalState,
+    journal: Option<Arc<dyn journal::Journal>>,
 }
 
 impl UiState {
@@ -910,11 +981,13 @@ impl UiState {
             edit,
             observe,
             terminals,
+            journal,
         } = io;
         Self {
             edit,
             observe,
             terminals,
+            journal,
             capability_check,
             diagnostics,
             api,
@@ -1002,6 +1075,24 @@ impl UiState {
             });
         }
         self.permit(capability)
+    }
+
+    /// 0.4 (§C.2): whether the broker turned off one item of a granted capability, such as a
+    /// single program. Without a broker nothing is granted, so the capability check refuses.
+    fn item_denied(&self, item: &permissions::ConsentItem) -> bool {
+        self.capability_check.as_ref().is_some_and(|broker| {
+            matches!(
+                broker.item_state(&self.extension_id, item),
+                permissions::PermissionState::Denied | permissions::PermissionState::Unavailable
+            )
+        })
+    }
+
+    /// Records a journal entry, when the host keeps a journal.
+    fn journal(&self, kind: journal::JournalKind) {
+        if let Some(journal) = &self.journal {
+            journal.record(&self.extension_id, kind);
+        }
     }
 
     /// A T2 capability a synchronous 0.4 call needs now ([`terminals::t2_now`]).
@@ -1657,9 +1748,14 @@ pub struct LoadOptions {
     pub terminal_programs: Option<Vec<terminal::TerminalProgramSpec>>,
     /// `[fyx_ui.terminal_env]`, checked; set by [`UiExtension::load_checked`].
     pub terminal_env: Option<terminal::TerminalEnv>,
+    /// `[[fyx_ui.terminal_profiles]]`, checked; set by [`UiExtension::load_checked`]. Sent to the
+    /// terminal host (P2.4) with `terminal:profiles`.
+    pub terminal_profiles: Option<Vec<terminal::TerminalProfile>>,
     /// The extension's directory, for `${package}` in `terminal:env`; set by
     /// [`UiExtension::load_from_dir_with_options`].
     pub package_dir: Option<PathBuf>,
+    /// 0.4 (design §C.4): the usage journal. Without one nothing is recorded.
+    pub journal: Option<Arc<dyn journal::Journal>>,
 }
 
 impl UiExtension {
@@ -1722,7 +1818,9 @@ impl UiExtension {
             terminals: terminal_host,
             terminal_programs,
             terminal_env,
+            terminal_profiles,
             package_dir,
+            journal,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1829,6 +1927,7 @@ impl UiExtension {
                 process_environment,
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
+                journal.clone(),
             ));
             let is_v0_3 = has_io;
             let edit_set = Arc::new(edit::EditSet::default());
@@ -1847,13 +1946,26 @@ impl UiExtension {
             ));
             // Only a 0.4 component has the `terminals` import.
             let is_v0_4 = ui_api_version >= ApiVersion::V0_4_0;
+            let declares = |wanted: &str| capabilities.iter().any(|c| c.as_str() == wanted);
+            // P2.4: what the host gets for profiles and env, filtered by the grants when sent.
+            let integration = terminals::IntegrationSource {
+                profiles: terminal_profiles
+                    .filter(|_| declares(terminal::CAPABILITY_PROFILES))
+                    .unwrap_or_default(),
+                env: terminal_env
+                    .clone()
+                    .filter(|_| declares(terminal::CAPABILITY_ENV)),
+                package_dir: package_dir
+                    .clone()
+                    .filter(|_| declares(terminal::CAPABILITY_PACKAGE_FILES)),
+            };
             let terminals = Arc::new(terminals::TerminalsHandle::new(
                 extension_id.clone(),
                 terminal_host.filter(|_| is_v0_4),
+                integration,
+                capability_check.clone(),
             ));
-            let declares_create = capabilities
-                .iter()
-                .any(|capability| capability == terminal::CAPABILITY_CREATE);
+            let declares_create = declares(terminal::CAPABILITY_CREATE);
             let terminal_policy = Arc::new(if is_v0_4 {
                 terminals::TerminalPolicy::new(
                     &terminal_programs
@@ -1924,6 +2036,7 @@ impl UiExtension {
                                     workspace_for_terminals,
                                     terminal_environment,
                                 ),
+                                journal,
                             },
                         ),
                     );
@@ -2075,6 +2188,7 @@ impl UiExtension {
             process_env: manifest.process.as_ref().map(|table| table.env.clone()),
             terminal_programs: Some(manifest.terminal_programs.clone()),
             terminal_env: manifest.checked_terminal_env(),
+            terminal_profiles: terminal::check_profiles(manifest.terminal_profiles.clone()).ok(),
             ..options
         };
         let (mut extension, pushed) =
@@ -2093,6 +2207,14 @@ impl UiExtension {
 
     pub fn extension_id(&self) -> &Arc<str> {
         &self.extension_id
+    }
+
+    /// P2.4: the registry started this instance, after consent, at a load or reload. It becomes
+    /// the one that speaks to the terminal host for the extension, and sends the host its
+    /// profiles and env as granted (again whenever a grant changes; emptied when the instance
+    /// goes). An instance it replaced no longer closes terminals when it is dropped.
+    pub fn activate_terminals(&self) {
+        self.terminals.activate();
     }
 
     /// Whether the 0.4 `terminals` import has a terminal host (a 0.4 component loaded with
@@ -2155,6 +2277,7 @@ impl UiExtension {
         let processes = self.processes.clone();
         let edits = self.edits.clone();
         let observer = self.observer.clone();
+        let terminals = self.terminals.clone();
         let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
@@ -2190,6 +2313,10 @@ impl UiExtension {
                         processes.start(store.data_mut().process.finish_call(result.is_ok()));
                         edits.start(store.data_mut().edit.finish_call(result.is_ok()));
                         observer.apply(store.data_mut().observe.finish_call(result.is_ok()));
+                        terminals.start_t3(
+                            store.data_mut().terminals.finish_call(result.is_ok()),
+                            store.data().journal.clone(),
+                        );
                         // A trap kills the extension's processes with it (design.md §9) and ends
                         // its agent feed.
                         if result.is_err() {

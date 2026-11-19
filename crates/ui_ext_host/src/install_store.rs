@@ -864,8 +864,9 @@ mod tests {
             .expect("inspects");
         assert!(info.zed_extension);
         assert!(
-            crate::store_actions::file_install_detail(&info, package, "")
-                .contains(ZED_EXTENSION_WARNING)
+            crate::store_actions::file_install_notes(&info, package, None)
+                .iter()
+                .any(|note| note == ZED_EXTENSION_WARNING)
         );
         let info = setup
             .store
@@ -874,8 +875,9 @@ mod tests {
             .expect("inspects");
         assert!(!info.zed_extension);
         assert!(
-            !crate::store_actions::file_install_detail(&info, package, "")
-                .contains(ZED_EXTENSION_WARNING)
+            !crate::store_actions::file_install_notes(&info, package, None)
+                .iter()
+                .any(|note| note == ZED_EXTENSION_WARNING)
         );
 
         // Any depth or case in a package counts (owner's Q1, `fyx_registry::runs_zed_extension`).

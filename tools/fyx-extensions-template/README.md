@@ -15,7 +15,7 @@ and `scripts/dry-run.sh` runs the pipeline locally.
 | `blocklist/blocklist.toml` | the block list source (empty) |
 | `keys/` | where the owner's public keyset goes; see `keys/README.md` |
 | `policy/registry.toml` | the registry owner and the download base URL |
-| `policy/capability-tiers.json` | capability → tier, checked against Fyx's client by a test in `crates/fyx_registry` |
+| `policy/capability-tiers.json` | capability → tier, checked against Fyx's client by a test in `crates/fyx_registry`. Includes the `fyx:ui` 0.4 capabilities; `t3` (`terminal:read`, `terminal:write`) counts as T2 for a release's tier |
 | `policy/reserved-ids.txt` | ids only the registry owner may register (`fyx-*`, …) |
 | `policy/builder.toml` | the pinned builder image (digest still a placeholder) |
 | `builder/Dockerfile` | the builder image: Rust, `wasm32-wasip2`, `fyx-ext`, `fyx-registry`, `cargo-deny` |

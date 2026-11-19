@@ -62,6 +62,8 @@ use std::ops::Range;
 mod canvas;
 mod host;
 mod host_model;
+#[cfg(feature = "fyx-ui-0-4")]
+pub mod terminals;
 mod v0_1;
 #[cfg(feature = "fyx-ui-0-3")]
 mod v0_2;
@@ -84,7 +86,7 @@ pub mod bindings {
     });
 }
 
-#[cfg(feature = "fyx-ui-0-3")]
+#[cfg(all(feature = "fyx-ui-0-3", not(feature = "fyx-ui-0-4")))]
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../ui_ext/wit/since_v0.3.0",
@@ -97,6 +99,20 @@ pub mod bindings {
         // section, so a 0.1 or 0.2 export links it whenever that module shares a codegen unit
         // with SDK code it uses, and imports 0.3's type-only interfaces. The world's own
         // `export!` describes it for a 0.3 export.
+        disable_custom_section_link_helpers: true,
+    });
+}
+
+/// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`].
+#[cfg(feature = "fyx-ui-0-4")]
+pub mod bindings {
+    wit_bindgen::generate!({
+        path: "../ui_ext/wit/since_v0.4.0",
+        world: "ui-extension",
+        pub_export_macro: true,
+        default_bindings_module: "ui_ext_sdk::bindings",
+        additional_derives: [PartialEq],
+        // As for 0.3: a 0.2 or 0.1 export must not link the 0.4 world description.
         disable_custom_section_link_helpers: true,
     });
 }
@@ -124,6 +140,9 @@ pub use bindings::fyx::ui::notifications::{
     Notification, NotificationAction, NotificationLevel, ProgressLocation, ProgressOptions,
     ProgressValue,
 };
+/// The T3 capabilities (`fyx:ui` 0.4): asked at the moment of action, on one terminal.
+#[cfg(feature = "fyx-ui-0-4")]
+pub use bindings::fyx::ui::permissions::T3Capability;
 /// The T2 capabilities and their states, as `IoEvent::PermissionChanged` reports them.
 #[cfg(feature = "fyx-ui-0-3")]
 pub use bindings::fyx::ui::permissions::{PermissionState, T2Capability};
@@ -139,7 +158,9 @@ pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
 /// patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature.
-#[cfg(feature = "fyx-ui-0-3")]
+#[cfg(feature = "fyx-ui-0-4")]
+pub const API_VERSION: (u16, u16, u16) = (0, 4, 0);
+#[cfg(all(feature = "fyx-ui-0-3", not(feature = "fyx-ui-0-4")))]
 pub const API_VERSION: (u16, u16, u16) = (0, 3, 0);
 #[cfg(not(feature = "fyx-ui-0-3"))]
 pub const API_VERSION: (u16, u16, u16) = (0, 2, 0);
@@ -492,6 +513,7 @@ macro_rules! __fyx_host_shims {
             }
 
             $crate::__fyx_image_shims!($world);
+            $crate::__fyx_terminal_shims!($world);
         };
     };
 }
@@ -709,11 +731,105 @@ macro_rules! __fyx_image_shims {
     ($world:ident) => {};
 }
 
+/// The shims of the 0.4 [`terminals`] functions; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_terminal_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_open_pseudo(
+            request: &$crate::terminals::PseudoRequest,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::terminals::$world::open_pseudo(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_write_output(
+            handle: u64,
+            bytes: &[u8],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::terminals::$world::write_output(handle, bytes)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_create(
+            request: &$crate::terminals::CreateRequest,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::terminals::$world::create(request)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_send_input(
+            handle: u64,
+            bytes: &[u8],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::terminals::$world::send_input(handle, bytes)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_close(handle: u64) {
+            $crate::__private::terminals::$world::close(handle)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_set_status(
+            handle: u64,
+            status: ::std::option::Option<&$crate::terminals::TerminalStatus>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::terminals::$world::set_status(handle, status)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_list() -> ::std::result::Result<
+            ::std::vec::Vec<$crate::terminals::TerminalInfo>,
+            $crate::HostError,
+        > {
+            $crate::__private::terminals::$world::list()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_paste(
+            handle: u64,
+            text: &str,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::terminals::$world::paste(handle, text)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_request_read(
+            handle: u64,
+            scope: $crate::terminals::ReadScope,
+            lines: u16,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::terminals::$world::request_read(handle, scope, lines)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_terminal_request_write(
+            handle: u64,
+            text: &str,
+            submit: bool,
+        ) -> ::std::result::Result<u64, $crate::HostError> {
+            $crate::__private::terminals::$world::request_write(handle, text, submit)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_terminal_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
 
     pub use crate::host::newest;
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::terminals::glue as terminals;
     pub use crate::v0_1::glue as v0_1;
     #[cfg(feature = "fyx-ui-0-3")]
     pub use crate::v0_2::glue as v0_2;
@@ -868,6 +984,14 @@ impl<'a> TreeBuilder<'a> {
     #[cfg(feature = "fyx-ui-0-3")]
     pub fn canvas(&mut self, props: CanvasProps) -> NodeId {
         self.node(props)
+    }
+
+    /// `fyx:ui` 0.4: the native view of one of the extension's own terminals (see
+    /// [`terminals`]), inside its panel. One node per handle; a pseudo-terminal shown here is
+    /// opened with [`PseudoRequest::in_panel`](terminals::PseudoRequest::in_panel).
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub fn terminal(&mut self, handle: terminals::TerminalHandle) -> NodeId {
+        self.node(Props::Terminal(TerminalProps { handle }))
     }
 
     pub fn nodes(&self) -> &[Node] {
@@ -2876,13 +3000,17 @@ mod tests {
 
     #[test]
     fn api_versions_match_the_wit_packages() {
-        #[cfg(feature = "fyx-ui-0-3")]
+        #[cfg(feature = "fyx-ui-0-4")]
+        assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 4, 0, 0]);
+        #[cfg(all(feature = "fyx-ui-0-3", not(feature = "fyx-ui-0-4")))]
         assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 3, 0, 0]);
         #[cfg(not(feature = "fyx-ui-0-3"))]
         assert_eq!(API_VERSION_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
         assert_eq!(API_VERSION_V0_2_SECTION_BYTES, [0, 0, 0, 2, 0, 0]);
         assert_eq!(API_VERSION_V0_1_SECTION_BYTES, [0, 0, 0, 1, 0, 0]);
-        #[cfg(feature = "fyx-ui-0-3")]
+        #[cfg(feature = "fyx-ui-0-4")]
+        let newest = include_str!("../../ui_ext/wit/since_v0.4.0/fyx-ui.wit");
+        #[cfg(all(feature = "fyx-ui-0-3", not(feature = "fyx-ui-0-4")))]
         let newest = include_str!("../../ui_ext/wit/since_v0.3.0/fyx-ui.wit");
         #[cfg(not(feature = "fyx-ui-0-3"))]
         let newest = include_str!("../../ui_ext/wit/since_v0.2.0/fyx-ui.wit");

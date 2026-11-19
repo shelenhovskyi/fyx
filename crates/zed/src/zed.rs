@@ -6286,7 +6286,7 @@ mod tests {
                 "feedback",
                 "file_finder",
                 "fyx_terminal", // fyx: terminal_host actions
-                "fyx_ui", // fyx: ui_ext_host actions
+                "fyx_ui",       // fyx: ui_ext_host actions
                 "git",
                 "git_graph",
                 "git_onboarding",

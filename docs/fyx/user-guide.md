@@ -5,11 +5,13 @@ This guide is for people who install and use Fyx. If you want to write a UI exte
 
 It describes `origin/integration` (64d6c67f63) as of 2026-11-18. Features that are built on a stream's branch
 but not merged into `integration` yet are marked **(coming)**.
+Features that are designed and approved but not built anywhere yet are marked **(planned)**.
 
 - [What Fyx is](#what-fyx-is)
 - [Privacy defaults](#privacy-defaults)
 - [Reviewing agent changes](#reviewing-agent-changes)
 - [UI extensions](#ui-extensions)
+- [Terminals and command-line tools (planned)](#terminals-and-command-line-tools-planned-fyxui-04)
 - [Security modes for agents](#security-modes-for-agents)
 - [Where Fyx keeps its files](#where-fyx-keeps-its-files)
 - [Troubleshooting](#troubleshooting)
@@ -336,6 +338,10 @@ counts as enabled. Answers are kept in `fyx-ui-consent.json` in the data folder.
 - After that, only an update that adds a T1 capability (reading your files or buffers) waits for
   **Approve**. `fyx_ui: revoke UI extension permission` takes a T1 grant back.
 
+**(planned, 0.4)** Fyx 0.4 changes this for the powerful items: they are accepted at install, one
+checkbox each, instead of at first use. See
+[Terminals and command-line tools](#terminals-and-command-line-tools-planned-fyxui-04).
+
 <!-- crates/ui_ext_host/src/consent.rs; registry.rs: offer_consent; (coming) cade516b32 on claude/fyx-w3-renderer-e20d2b -->
 
 ### Capability chips
@@ -443,6 +449,148 @@ optional assets.
 
 <!-- (coming) d74c8bb2ac on claude/fyx-w3-renderer-e20d2b: install_store.rs, store_actions.rs -->
 
+## Terminals and command-line tools (planned, `fyx:ui` 0.4)
+
+**Everything in this section is planned, not built.** It describes what Fyx 0.4 will do, from
+[the design](wit-0.4/design.md) that the owner approved on 2026-11-19. Nothing here is on
+`integration` yet, and the details may change before it ships.
+
+Fyx will make your terminal a good home for tools like Claude Code, Gemini CLI and Codex. Fyx has
+no code of its own for any one tool: each tool gets an extension, and the extension asks you for
+what it needs.
+
+### What you will see without installing anything
+
+- **State on the terminal tab.** A tool that reports its state (Claude Code 2.1.295 and later, and
+  Codex when it ships it) will show **working**, **needs you** or **done** on its tab, with no
+  extension and no setting. Fyx always writes who reported it ("from Claude Code via OSC 7501").
+- **An agent sessions panel.** It lists every terminal that has a state, with the ones that need
+  you first. A click takes you to the terminal, and Fyx notifies you when a tool is blocked or
+  done while the window is in the background.
+
+### Installing an extension: one checkbox for each power
+
+When you install an extension (from a file or, later, from the registry), the dialog has four
+groups:
+
+1. **Shows in Fyx.** Panels and status items. Nothing to decide.
+2. **Reads.** What it can see: your files, buffers, diagnostics, your editor's selection. Listed,
+   with no checkbox: installing is the consent, and you can take each back later.
+3. **Can run code or reach outside Fyx.** One **checkbox per item, all unticked**. Each item says
+   what it is, and shows the author's own reason as "The author says: …". For example:
+   - **Run a program**: `codex` with these arguments. A shell or interpreter is marked "runs any
+     command you type".
+   - **Start terminals** for those programs.
+   - **Add these environment variables** to the terminals it starts, with every name and value
+     listed. A second, stronger checkbox, **Also add these to every new terminal you open**, is
+     separate and also unticked.
+   - **Listen on this computer** so a tool can connect (127.0.0.1 only, with a secret token that
+     the extension never sees).
+   - **Write a file** so a tool finds this window (the path is shown). "Lets Claude Code, and
+     anything that reads this folder, connect to this extension. Claude Code will run what this
+     extension tells it to."
+   - **Receive a tool's command hooks**, with the channel names, and what happens when Fyx is
+     closed (the tool normally carries on).
+   - **Watch your terminals**, **change files**, **watch agent reviews**, **reach these web
+     domains**.
+4. **Asks you each time.** The powers it may ask for at the moment it needs them (below). No
+   checkbox: nothing is granted in advance.
+
+Click **Install** to install with what you ticked. An item you leave unticked is simply denied;
+the extension loads and should tell you what it cannot do. Every checkbox ignores clicks for one
+second after the dialog opens, so a double click cannot tick one by accident.
+
+Later, the extension's page lists every item with a switch. Turning one on asks once more, with the
+same text.
+
+When an extension updates, see [Updates show what changed](#updates-show-what-changed)
+below. **When you turn an item off or
+remove the extension, everything stops at once:** terminals it started are killed with their
+processes, its listeners close, its files are removed, its hooks answer as if Fyx were closed, and
+its environment variables leave new terminals (terminals already open show **Restart to apply**).
+
+Extensions you install without a dialog (the `FYX_UI_DEV_EXTENSIONS` variable, dev builds only)
+keep today's behaviour: the first use of a power asks.
+
+### Reading and typing in your terminals: asked each time
+
+Your terminals are yours. By default no extension can read what is in them or type into them.
+
+- **Share for reading.** From a terminal tab's menu, **Share with <extension>…**, or from a card
+  the extension shows when you click something in its own panel. You choose what is shared: the
+  last command and its output, or the last lines (at most 500), as plain text. Then **Once**, or
+  **This terminal until it closes**.
+- **Typing.** An extension can type into a terminal only after you shared it for writing, and
+  **every command is confirmed** on a card that shows the exact text. Only printable text and
+  tabs: no control keys. The tab then shows "typed by <extension>" for 5 seconds.
+- The cards are drawn by Fyx, show the extension's name, ignore clicks for the first second and
+  cannot be answered from the keyboard.
+- Never in a folder you have not trusted, and never for a terminal of another Fyx profile.
+
+**"Always allow".** You can turn it on from one of these cards or from the extension's page, for
+reading and for writing separately, never at install. First Fyx says in plain words: "*<extension>*
+will see everything that appears in your terminals, including passwords and tokens, and run any
+command as you." The confirm button works after one second. While it is on, every terminal tab
+shows "<extension> has access", the status bar shows an indicator with one click to switch it off,
+every read and write is in the journal, and a write highlights the tab. It resets when the
+extension's code changes.
+
+### The journal
+
+The extension's page shows what it did: programs it started (with arguments and the folder),
+terminals it read (which, how much, never the content) and wrote to (the exact text you
+confirmed), listeners it opened, files it wrote and removed, hook requests, proposed edits and your
+consent changes. It keeps the last 2000 entries or 30 days. A full disk can drop entries, and the
+page then says "Journal incomplete".
+
+### Updates show what changed
+
+An update that **adds or widens** what an extension can do is held. The old version keeps running,
+and the page says **Update needs approval**, with a diff:
+
+> **New in 1.3:** runs `codex` with `-c notify=*`; adds `CODEX_TUI_NOTIFY` to your profile
+> terminals. **Removed:** `network:fetch` to api.example.com.
+
+New items that need a checkbox are unticked, and approving installs the update with what you
+ticked. Things the update removes, and anything that is only a panel or a status item, install
+without asking.
+
+### Several accounts
+
+If you have a personal and a work account for the same tool (two Claude logins, for example), Fyx
+keeps them apart without ever touching them:
+
+- **Account profiles** (settings: `fyx.accounts`) are a name, a tool, the folder that tool uses
+  for that account (the one the tool's own setting points at, such as `CLAUDE_CONFIG_DIR`) and a
+  colour. Fyx only sets that one variable for a terminal or agent you start with that account.
+- **You sign in with the tool's own command**, inside that folder. Fyx never reads, copies or
+  moves a token.
+- **Per project:** "In this project, use Work". The choice is stored in your settings by project
+  path, never in the repository, so a repository cannot pick an account for you. The "+" menu
+  (for example "Claude Code — Work") and the agent panel offer the choice too.
+- **Always visible:** the account's name and colour on the terminal tab, in the sessions list and
+  in the agent panel.
+- **No switching behind your back.** When a tool says "limit until 15:00", Fyx shows it as it is.
+  It never changes account because of a limit, never carries a session to another account, and
+  has no "continue with another account" button or queue that spreads work over accounts. If you
+  switch accounts yourself, a new session starts.
+- Extensions cannot choose, read or change an account, and the registry does not accept extensions
+  that rotate accounts, get around limits or share access.
+
+**Fyx profiles.** A Fyx profile is a separate copy of Fyx's data: settings, keymap, themes,
+extensions, history and accounts, run as its own process (the same as `fyx --user-data-dir`, with
+a manager). You create an empty profile, a copy, or one from a template, with a name, a colour and
+an icon. Fyx asks which to open at start when you have more than one, shows the profile's name and
+colour in the title bar, and can open a project in the profile it belongs to (`fyx --profile
+<name>`). In a "Work" profile, account profiles default to the work folders. Switching profile is
+always your action: nothing switches for you, and extensions cannot see other profiles or start
+them.
+
+The agent panel talks to Claude through Zed's own adapter, the same as upstream Zed. Anthropic's
+terms say products built on the Agent SDK should use API keys; Fyx follows upstream here.
+
+<!-- docs/fyx/wit-0.4/design.md §A (foundation), §B.4-B.9, §C.1-§C.6; plan P5 tasks 5.1-5.20; none of it is built yet -->
+
 ## Security modes for agents
 
 Agents run with your user's rights. A prompt injection in a README, an issue or a web page could
@@ -535,6 +683,7 @@ Inside the data folder:
 | `extensions/installed/` | Installed extensions, including linked UI extension folders |
 | `fyx-ui-consent.json` | Your **Enable** answers for UI extensions |
 | `extensions/fyx/` | **(coming)** The UI extension install store: one folder per version, plus `state.json` with the active, previous and pinned version of each extension |
+| `extensions/fyx/journal/<id>.jsonl` | **(planned, 0.4)** What an extension did: the last 2000 entries or 30 days; removed with the extension |
 
 In each project, at the root of a worktree:
 

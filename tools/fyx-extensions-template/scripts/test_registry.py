@@ -141,6 +141,151 @@ class Entries(unittest.TestCase):
                 self.assertIs(zed["zed_extension"], True)
 
 
+class ZeroPointFour(unittest.TestCase):
+    """fyx:ui 0.4 (docs/fyx/wit-0.4/design.md): T3, and the update diff of section C.5."""
+
+    CAPABILITIES = {
+        "t0": ["package:files", "ui:approvals"],
+        "t1": ["context:editor", "workspace:open", "terminal:profiles", "terminal:pseudo",
+               "terminal:status", "review:propose"],
+        "t2": ["network:listen", "terminal:create", "terminal:env", "terminal:observe",
+               "fs:discovery-file", "relay:hooks"],
+        "t3": ["terminal:read", "terminal:write"],
+    }
+
+    def test_the_0_4_capabilities_have_the_tiers_of_the_design(self):
+        for tier, capabilities in self.CAPABILITIES.items():
+            for capability in capabilities:
+                with self.subTest(capability):
+                    self.assertEqual(registry.tier_of(capability, POLICY["tiers"]), tier)
+
+    def test_a_t3_capability_makes_a_t2_release(self):
+        self.assertEqual(registry.release_tier("t3"), "t2")
+        self.assertEqual([registry.release_tier(t) for t in ("t0", "t1", "t2")], ["t0", "t1", "t2"])
+        # T3 outranks T1; the release counts it as T2, which is not accepted yet, like any T2.
+        for capabilities in (["terminal:read"], ["ui:panel", "terminal:profiles", "terminal:write"]):
+            with self.subTest(capabilities), self.assertRaises(registry.Refused):
+                registry.derive_release(
+                    entry(),
+                    'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\n'
+                    f"capabilities = {json.dumps(capabilities)}\n",
+                    b"",
+                    POLICY,
+                )
+        # A T1-only 0.4 release is still T1.
+        derived = registry.derive_release(
+            entry(),
+            'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\ncapabilities = ["ui:panel", "terminal:pseudo"]\n',
+            b"",
+            POLICY,
+        )
+        self.assertEqual(derived["tier"], "t1")
+
+    def test_no_signed_tier_is_t3(self):
+        self.assertTrue(any(tier == "t3" for tier in POLICY["tiers"].values()))
+        self.assertEqual({registry.release_tier(t) for t in registry.TIERS},
+                         {"t0", "t1", "t2"})
+
+    OLD = (
+        'id = "cc"\nversion = "1.2.0"\n[fyx_ui]\n'
+        'capabilities = ["ui:panel", "terminal:create", "terminal:env", "network:fetch"]\n'
+        '[fyx_ui.network]\ndomains = ["api.example.com"]\n'
+        '[[fyx_ui.terminal_programs]]\nname = "codex"\nargs = ["--quiet"]\nreason = "x"\n'
+        '[fyx_ui.terminal_env]\nvars = { A = "1" }\nreason = "x"\n'
+    )
+    NEW = (
+        'id = "cc"\nversion = "1.3.0"\n[fyx_ui]\n'
+        'capabilities = ["ui:panel", "ui:approvals", "terminal:create", "terminal:env", '
+        '"network:listen", "fs:discovery-file", "relay:hooks"]\n'
+        '[[fyx_ui.terminal_programs]]\nname = "codex"\nargs = ["-c", "notify=*"]\nreason = "x"\n'
+        '[fyx_ui.terminal_env]\nvars = { A = "1", CODEX_TUI_NOTIFY = "1" }\nscope = "all-new"\n'
+        'reason = "x"\n'
+        '[[fyx_ui.listeners]]\nname = "mcp"\nprotocol = "mcp-websocket"\nreason = "x"\n'
+        '[fyx_ui.listeners.auth]\nbearer = true\n'
+        '[[fyx_ui.discovery_files]]\nlistener = "mcp"\ndir = "${account.claude}/ide"\n'
+        'name = "${port}.lock"\nreason = "x"\n[fyx_ui.discovery_files.content]\nport = "${port}"\n'
+        '[[fyx_ui.relay_channels]]\nname = "hook"\non_failure = { exit = 2 }\nreason = "x"\n'
+    )
+
+    def test_the_update_diff_lists_what_is_added_widened_and_removed(self):
+        diff = registry.update_diff(self.OLD, self.NEW, POLICY["tiers"])
+        self.assertEqual(diff["version"], "1.3.0")
+        added = {a["item"]: a["tier"] for a in diff["added"]}
+        # Widened: the program's argument pattern, a new env name, scope all-new.
+        self.assertEqual(added["creates a terminal running codex -c notify=*"], "t2")
+        self.assertEqual(added["sets CODEX_TUI_NOTIFY=1 in its terminals"], "t2")
+        self.assertIn("sets its env in every new terminal (scope all-new)", added)
+        for item in ("capability network:listen", "capability fs:discovery-file",
+                     "capability relay:hooks",
+                     "listens on loopback: mcp (mcp-websocket)",
+                     "writes a discovery file ${account.claude}/ide/${port}.lock",
+                     "relay channel hook (timeout 30000 ms, on failure exit 2)"):
+            self.assertEqual(added[item], "t2", item)
+        # A T0 addition installs silently, so it is not listed.
+        self.assertNotIn("capability ui:approvals", added)
+        # Removals: the old pattern, the domain and network:fetch.
+        self.assertEqual(
+            diff["removed"],
+            ["capability network:fetch", "creates a terminal running codex --quiet",
+             "fetches from api.example.com"],
+        )
+
+    def test_the_update_diff_is_empty_when_nothing_changes_and_absent_when_unreadable(self):
+        same = registry.update_diff(self.OLD, self.OLD, POLICY["tiers"])
+        self.assertEqual((same["added"], same["removed"]), ([], []))
+        self.assertIsNone(registry.update_diff(None, self.NEW, POLICY["tiers"]))
+        self.assertIsNone(registry.update_diff("id = [", self.NEW, POLICY["tiers"]))
+
+    def test_the_comment_shows_the_diff_escaped(self):
+        diff = registry.update_diff(self.OLD, self.NEW, POLICY["tiers"])
+        diff["added"].append({"item": "runs @mallory [click](https://x.example) <b>", "tier": "t2"})
+        result = decision(
+            entry_before=entry(), last_published=release("1.2.0"), release=release("1.3.0"),
+            update_diff=diff,
+        )
+        body = registry.comment(result)
+        self.assertIn("**New in 1.3.0**", body)
+        self.assertIn("**Removed:**", body)
+        self.assertIn("codex -c notify=\\*", body)
+        self.assertNotIn("<b>", body)
+        self.assertNotIn("](https://", body)
+        self.assertNotIn("@mallory", body)
+        # A new extension has no diff; a new version whose manifests were unreadable says so.
+        self.assertNotIn("Update diff", registry.comment(decision()))
+        unreadable = decision(
+            entry_before=entry(), last_published=release("1.2.0"), release=release("1.3.0")
+        )
+        self.assertIn("Update diff: not available", registry.comment(unreadable))
+
+    def test_decision_input_carries_the_diff(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            before, after = Path(tmp, "before"), Path(tmp, "after")
+            for directory in (before, after):
+                (directory / "extensions").mkdir(parents=True)
+                (directory / "extensions" / "cc.toml").write_text(
+                    entry_text(id='"cc"'), encoding="utf-8"
+                )
+            pr = {"author": {"login": "alice"}, "files": [{"path": "extensions/cc.toml"}],
+                  "labels": [], "reviews": []}
+            index = {"releases": [{"signed": dict(release("1.2.0"), id="cc")}]}
+            new = ('id = "cc"\nversion = "1.3.0"\n[fyx_ui]\n'
+                   'capabilities = ["ui:panel", "terminal:pseudo"]\n')
+            old = 'id = "cc"\nversion = "1.2.0"\n[fyx_ui]\ncapabilities = ["ui:panel"]\n'
+            data = registry.decision_input(pr, None, before, after, new, b"pkg", index, None, None,
+                                           POLICY, last_manifest_text=old)
+            self.assertEqual(
+                data["update_diff"],
+                {"version": "1.3.0",
+                 "added": [{"item": "capability terminal:pseudo", "tier": "t1"}],
+                 "removed": []},
+            )
+            none = registry.decision_input(pr, None, before, after, new, b"pkg", index, None, None,
+                                           POLICY)
+            self.assertIsNone(none["update_diff"])
+
+
 class Decisions(unittest.TestCase):
     def test_a_new_t0_extension_auto_merges(self):
         result = decision()

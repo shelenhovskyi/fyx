@@ -9,15 +9,18 @@ use std::{
 use gpui::TestAppContext;
 use ui_ext::{
     terminal::{
-        self, CreateCommand, PseudoRequest, TerminalError, TerminalEvent, TerminalHandle,
-        TerminalHost, TerminalInfo, TerminalOrigin, TerminalSink, TerminalStatus,
+        self, CreateCommand, PseudoRequest, ReadScope, T3Target, TerminalError, TerminalEvent,
+        TerminalHandle, TerminalHost, TerminalInfo, TerminalIntegration, TerminalOrigin,
+        TerminalSink, TerminalStatus,
     },
     v0_2::{Props, UiEvent, Update},
 };
 
 use super::*;
 use crate::{
-    permissions::{CapabilityCheck, CapabilityDenied, PermissionState},
+    permissions::{
+        CapabilityCheck, CapabilityDenied, PermissionState, T3Answer, T3Capability, T3Prompt,
+    },
     process::{Workspace, WorktreeRoot},
 };
 
@@ -30,6 +33,9 @@ struct FakeHost {
     calls: Mutex<Vec<String>>,
     sinks: Mutex<HashMap<u64, TerminalSink>>,
     created: Mutex<Vec<CreateCommand>>,
+    /// The working directory of user terminal 50, for the T3 cards.
+    t3_cwd: Mutex<Option<PathBuf>>,
+    integrations: Mutex<Vec<(String, TerminalIntegration)>>,
 }
 
 impl FakeHost {
@@ -152,10 +158,60 @@ impl TerminalHost for FakeHost {
     fn close_all(&self, ext: &str) {
         self.record(format!("close-all {ext}"));
     }
+
+    fn t3_target(&self, _: &str, handle: TerminalHandle) -> Result<T3Target, TerminalError> {
+        if handle != TerminalHandle(50) {
+            return Err(TerminalError::NotFound);
+        }
+        Ok(T3Target {
+            terminal: 500,
+            origin: TerminalOrigin::User,
+            title: "zsh".into(),
+            cwd: self.t3_cwd.lock().unwrap().clone(),
+        })
+    }
+
+    fn read(
+        &self,
+        _: &str,
+        handle: TerminalHandle,
+        scope: ReadScope,
+        lines: u16,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        self.record(format!("read {} {scope:?} {lines} {id}", handle.0));
+        sink(TerminalEvent::ReadDone(id, Ok("$ ls\nsrc".into())));
+    }
+
+    fn write(
+        &self,
+        _: &str,
+        handle: TerminalHandle,
+        text: String,
+        submit: bool,
+        id: u64,
+        sink: TerminalSink,
+    ) {
+        self.record(format!("write {} {text} {submit} {id}", handle.0));
+        sink(TerminalEvent::WriteDone(id, Ok(())));
+    }
+
+    fn set_integration(&self, ext: &str, integration: TerminalIntegration) {
+        self.integrations
+            .lock()
+            .unwrap()
+            .push((ext.into(), integration));
+    }
 }
 
-/// A broker that grants T1 and answers T2 from a map (`granted` when absent).
-struct Broker(HashMap<&'static str, PermissionState>);
+/// A broker that grants T1, answers T2 from a map (`granted` when absent), and answers every
+/// T3 card with the second field, keeping the cards in the third.
+struct Broker(
+    HashMap<&'static str, PermissionState>,
+    T3Answer,
+    Arc<Mutex<Vec<T3Prompt>>>,
+);
 
 impl CapabilityCheck for Broker {
     fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
@@ -167,6 +223,35 @@ impl CapabilityCheck for Broker {
             .get(capability)
             .copied()
             .unwrap_or(PermissionState::Granted)
+    }
+
+    fn item_state(
+        &self,
+        extension_id: &str,
+        item: &crate::permissions::ConsentItem,
+    ) -> PermissionState {
+        match self.0.get(item.key().as_str()) {
+            Some(state) => *state,
+            None => self.state(extension_id, item.capability()),
+        }
+    }
+
+    fn t3_request(
+        &self,
+        _: &str,
+        prompt: T3Prompt,
+    ) -> futures::future::BoxFuture<'static, T3Answer> {
+        self.2.lock().unwrap().push(prompt);
+        futures::future::ready(self.1).boxed()
+    }
+}
+
+#[derive(Default)]
+struct Recorder(Mutex<Vec<(String, crate::journal::JournalKind)>>);
+
+impl crate::journal::Journal for Recorder {
+    fn record(&self, extension_id: &str, kind: crate::journal::JournalKind) {
+        self.0.lock().unwrap().push((extension_id.into(), kind));
     }
 }
 
@@ -188,6 +273,11 @@ struct Setup {
     states: Vec<(&'static str, PermissionState)>,
     workspace: Option<Vec<WorktreeRoot>>,
     capabilities: Vec<&'static str>,
+    journal: Arc<Recorder>,
+    t3: T3Answer,
+    cards: Arc<Mutex<Vec<T3Prompt>>>,
+    /// In place of a [`Broker`] over `states`.
+    broker: Option<Arc<dyn CapabilityCheck>>,
 }
 
 impl Default for Setup {
@@ -195,6 +285,10 @@ impl Default for Setup {
         Self {
             host: Arc::default(),
             states: Vec::new(),
+            journal: Arc::default(),
+            t3: T3Answer::Once,
+            cards: Arc::default(),
+            broker: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -227,7 +321,13 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
     let options = LoadOptions {
         allow_staged: Some(true),
         capabilities: Some(setup.capabilities.iter().map(|c| c.to_string()).collect()),
-        capability_check: Some(Arc::new(Broker(setup.states.iter().copied().collect()))),
+        capability_check: Some(setup.broker.clone().unwrap_or_else(|| {
+            Arc::new(Broker(
+                setup.states.iter().copied().collect(),
+                setup.t3,
+                setup.cards.clone(),
+            )) as Arc<dyn CapabilityCheck>
+        })),
         terminals: Some(setup.host.clone()),
         terminal_programs: Some(vec![terminal::TerminalProgramSpec {
             name: shell().into(),
@@ -236,7 +336,21 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
             reason: "runs the probe's shell".into(),
         }]),
         terminal_env: Some(env),
+        terminal_profiles: Some(
+            terminal::check_profiles(vec![terminal::TerminalProfileSpec {
+                id: "probe".into(),
+                name: "Probe".into(),
+                icon: None,
+                program: shell().into(),
+                path: None,
+                args: Vec::new(),
+                cwd: Default::default(),
+                account_tool: None,
+            }])
+            .unwrap(),
+        ),
         package_dir: Some(PathBuf::from("pkg")),
+        journal: Some(setup.journal.clone()),
         workspace: setup
             .workspace
             .clone()
@@ -368,6 +482,37 @@ async fn test_v0_4_created_terminals(cx: &mut TestAppContext) {
     assert_eq!(command(&extension, "input 1 ls").await, "done");
     // A pseudo-terminal's call on a created one is refused.
     assert_eq!(command(&extension, "out 1 x").await, "invalid-argument");
+    // The start is in the journal, with its arguments.
+    let journal = setup.journal.0.lock().unwrap().clone();
+    assert_eq!(
+        journal,
+        [(
+            "probe-v0-4".to_string(),
+            crate::journal::JournalKind::ProgramStarted {
+                capability: terminal::CAPABILITY_CREATE.into(),
+                program: shell().into(),
+                args: vec!["hi".into()],
+                cwd: None,
+            }
+        )]
+    );
+}
+
+/// §C.2: a program turned off on the extension page is denied, though the capability is on.
+#[gpui::test]
+async fn test_v0_4_a_program_turned_off(cx: &mut TestAppContext) {
+    let key: &'static str = Box::leak(format!("terminal:create#{}", shell()).into_boxed_str());
+    let setup = Setup {
+        states: vec![(key, PermissionState::Denied)],
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "denied"
+    );
+    assert!(setup.host.created.lock().unwrap().is_empty());
+    assert!(setup.journal.0.lock().unwrap().is_empty());
 }
 
 #[gpui::test]
@@ -455,7 +600,11 @@ async fn test_v0_4_without_a_host_terminals_are_unavailable(cx: &mut TestAppCont
                 LoadOptions {
                     allow_staged: Some(true),
                     capabilities: Some(vec!["ui:panel".into(), "terminal:pseudo".into()]),
-                    capability_check: Some(Arc::new(Broker(HashMap::new()))),
+                    capability_check: Some(Arc::new(Broker(
+                        HashMap::new(),
+                        T3Answer::Deny,
+                        Arc::default(),
+                    ))),
                     ..LoadOptions::default()
                 },
                 &cx.to_async(),
@@ -494,6 +643,180 @@ async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext
         format!("{error:#}").contains("not implemented by this build"),
         "{error:#}"
     );
+}
+
+/// Runs `command` from a click, a gesture.
+async fn click(extension: &UiExtension, command: &str) -> String {
+    let armed = extension
+        .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, format!("arm {command}")))
+        .await
+        .unwrap();
+    assert_eq!(report(&armed.value), "armed");
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::Click(1))
+        .await
+        .unwrap_or_else(|error| panic!("{command}: {error:#}"));
+    report(&reply.value)
+}
+
+/// The next `count` reports `handle-io` pushes.
+async fn pushed(
+    extension: &UiExtension,
+    events: &mut (impl futures::Stream<Item = crate::network::IoEvent> + Unpin),
+    count: usize,
+) -> Vec<String> {
+    let mut seen = Vec::new();
+    while seen.len() < count {
+        let event = events.next().await.unwrap();
+        let reply = extension.handle_io(event).await.unwrap();
+        seen.extend(reply.effects.iter().filter_map(|effect| match effect {
+            HostEffect::Push { update, .. } => Some(report(update)),
+            _ => None,
+        }));
+    }
+    seen
+}
+
+fn t3_setup(t3: T3Answer) -> Setup {
+    let mut setup = Setup {
+        t3,
+        ..Setup::default()
+    };
+    setup
+        .capabilities
+        .extend([terminal::CAPABILITY_READ, terminal::CAPABILITY_WRITE]);
+    setup
+}
+
+fn t3_calls(host: &FakeHost) -> Vec<String> {
+    host.calls()
+        .into_iter()
+        .filter(|call| call.starts_with("read ") || call.starts_with("write "))
+        .collect()
+}
+
+#[gpui::test]
+async fn test_v0_4_t3_requests(cx: &mut TestAppContext) {
+    let setup = t3_setup(T3Answer::Once);
+    let extension = load(&setup, cx).await.unwrap();
+    let mut events = extension.take_io_events().unwrap();
+
+    // Without a gesture, past 500 lines, or with control characters: refused at the call.
+    assert_eq!(command(&extension, "read 50").await, "not-permitted");
+    assert_eq!(command(&extension, "write 50 ls").await, "not-permitted");
+    assert_eq!(click(&extension, "read 50 501").await, "invalid-argument");
+    assert_eq!(click(&extension, "read 50 0").await, "invalid-argument");
+    assert_eq!(
+        click(&extension, "write 50 \u{1b}[A").await,
+        "invalid-argument"
+    );
+    // A terminal the host does not share (another profile's, or none).
+    assert_eq!(click(&extension, "read 7").await, "invalid-argument");
+
+    // A card on the user's terminal, then the host's read; the journal has the size only.
+    assert_eq!(click(&extension, "read 50 20").await, "1");
+    assert_eq!(
+        pushed(&extension, &mut events, 1).await,
+        ["read-done 1 $ ls\nsrc"]
+    );
+    assert_eq!(click(&extension, "write-enter 50 git status").await, "2");
+    assert_eq!(
+        pushed(&extension, &mut events, 1).await,
+        ["write-done 2 done"]
+    );
+    assert_eq!(
+        *setup.cards.lock().unwrap(),
+        [
+            T3Prompt {
+                capability: T3Capability::Read,
+                terminal: 500,
+                terminal_title: "zsh".into(),
+                scope: Some((ReadScope::LastLines, 20)),
+                text: None,
+                submit: false,
+            },
+            T3Prompt {
+                capability: T3Capability::Write,
+                terminal: 500,
+                terminal_title: "zsh".into(),
+                scope: None,
+                text: Some("git status".into()),
+                submit: true,
+            },
+        ]
+    );
+    assert_eq!(
+        t3_calls(&setup.host),
+        ["read 50 LastLines 20 1", "write 50 git status true 2"]
+    );
+    let journal: Vec<_> = setup
+        .journal
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, kind)| kind.clone())
+        .collect();
+    assert_eq!(
+        journal,
+        [
+            crate::journal::JournalKind::TerminalRead {
+                terminal: "zsh".into(),
+                scope: "last 20 lines".into(),
+                bytes: 8,
+            },
+            crate::journal::JournalKind::TerminalWrite {
+                terminal: "zsh".into(),
+                text: "git status".into(),
+                submit: true,
+            },
+        ]
+    );
+
+    // Its own terminal needs no card.
+    assert_eq!(command(&extension, "pseudo own").await, "1");
+    assert_eq!(click(&extension, "read-command 1").await, "3");
+    assert_eq!(
+        pushed(&extension, &mut events, 1).await,
+        ["read-done 3 $ ls\nsrc"]
+    );
+    assert_eq!(setup.cards.lock().unwrap().len(), 2);
+}
+
+#[gpui::test]
+async fn test_v0_4_t3_denied_and_untrusted(cx: &mut TestAppContext) {
+    let setup = t3_setup(T3Answer::Deny);
+    let extension = load(&setup, cx).await.unwrap();
+    let mut events = extension.take_io_events().unwrap();
+    assert_eq!(click(&extension, "read 50").await, "1");
+    assert_eq!(click(&extension, "write 50 ls").await, "2");
+    let mut seen = pushed(&extension, &mut events, 2).await;
+    seen.sort();
+    assert_eq!(
+        seen,
+        ["read-done 1 error: denied", "write-done 2 error: denied"]
+    );
+    assert!(t3_calls(&setup.host).is_empty());
+    assert!(setup.journal.0.lock().unwrap().is_empty());
+
+    // Never in a restricted worktree, and no card for it.
+    let root = tempfile::tempdir().unwrap();
+    let setup = Setup {
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: root.path().into(),
+            trusted: false,
+        }]),
+        ..t3_setup(T3Answer::Once)
+    };
+    *setup.host.t3_cwd.lock().unwrap() = Some(root.path().join("src"));
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(click(&extension, "read 50").await, "untrusted-worktree");
+    assert!(setup.cards.lock().unwrap().is_empty());
+
+    // Not declared.
+    let extension = load(&Setup::default(), cx).await.unwrap();
+    assert_eq!(click(&extension, "read 50").await, "not-permitted");
 }
 
 #[gpui::test]
@@ -576,4 +899,166 @@ fn test_v0_4_icons_match_the_wit() {
         .map(|&icon| icon.into())
         .collect();
     assert_eq!(mapped, ui_ext::v0_2::Icon::ALL);
+}
+
+/// Waits, up to `millis`, for something the tokio side does (an instance's store is dropped there).
+fn wait_for(cx: &mut TestAppContext, millis: u64, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+    while !done() && std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// P2.4: when the registry starts an instance, the host gets the profiles and env as granted.
+/// The instance it replaced leaves the new one's integration and terminals alone when dropped;
+/// the last instance's drop empties the integration and closes the terminals.
+#[gpui::test]
+async fn test_v0_4_terminal_integration(cx: &mut TestAppContext) {
+    let mut capabilities = Setup::default().capabilities;
+    capabilities.extend([terminal::CAPABILITY_PROFILES, "package:files"]);
+    let setup = Setup {
+        capabilities,
+        ..Setup::default()
+    };
+    let integrations = || setup.host.integrations.lock().unwrap().clone();
+    let old = load(&setup, cx).await.unwrap();
+    assert!(
+        integrations().is_empty(),
+        "nothing before the registry starts it"
+    );
+    old.activate_terminals();
+    let [(ext, sent)] = integrations().try_into().unwrap();
+    assert_eq!(ext, "probe-v0-4");
+    assert_eq!(sent.profiles.len(), 1);
+    assert_eq!(sent.profiles[0].id, "probe");
+    assert_eq!(sent.env.unwrap().vars[0].0, "PROBE_HOME");
+    assert!(sent.env_all_new, "the broker grants the item");
+    assert_eq!(sent.package_dir, Some(PathBuf::from("pkg")));
+
+    let new = load(&setup, cx).await.unwrap();
+    new.activate_terminals();
+    assert_eq!(integrations().len(), 2);
+    drop(old);
+    // Give the old instance's store time to go; nothing reaches the host for it.
+    wait_for(cx, 500, || false);
+    assert_eq!(integrations().len(), 2, "{:?}", setup.host.calls());
+    assert!(
+        !setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    );
+
+    drop(new);
+    wait_for(cx, 10_000, || {
+        setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    });
+    assert!(
+        setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    );
+    assert_eq!(
+        integrations().last().unwrap().1,
+        TerminalIntegration::default()
+    );
+}
+
+/// P2.4: only what is granted goes; undeclared tables never do.
+#[gpui::test]
+async fn test_v0_4_terminal_integration_follows_the_grants(cx: &mut TestAppContext) {
+    let setup = Setup {
+        states: vec![("terminal:env#all-new", PermissionState::Denied)],
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    extension.activate_terminals();
+    let sent = setup.host.integrations.lock().unwrap()[0].1.clone();
+    assert!(
+        sent.profiles.is_empty(),
+        "terminal:profiles is not declared"
+    );
+    assert!(sent.package_dir.is_none(), "package:files is not declared");
+    assert!(sent.env.is_some());
+    assert!(!sent.env_all_new);
+
+    let denied = Setup {
+        states: vec![(terminal::CAPABILITY_ENV, PermissionState::Denied)],
+        ..Setup::default()
+    };
+    let extension = load(&denied, cx).await.unwrap();
+    extension.activate_terminals();
+    let sent = denied.host.integrations.lock().unwrap()[0].1.clone();
+    assert_eq!(sent, TerminalIntegration::default());
+}
+
+/// A broker whose states change while the instance runs, and which tells it.
+#[derive(Default)]
+struct ChangingBroker {
+    denied: Mutex<Vec<String>>,
+    listeners: Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, PermissionState)>>>,
+}
+
+impl ChangingBroker {
+    fn deny(&self, capability: &str) {
+        self.denied.lock().unwrap().push(capability.into());
+        for listener in self.listeners.lock().unwrap().iter() {
+            listener
+                .unbounded_send((capability.into(), PermissionState::Denied))
+                .ok();
+        }
+    }
+}
+
+impl CapabilityCheck for ChangingBroker {
+    fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+        Ok(())
+    }
+
+    fn state(&self, _: &str, capability: &str) -> PermissionState {
+        if self.denied.lock().unwrap().iter().any(|c| c == capability) {
+            PermissionState::Denied
+        } else {
+            PermissionState::Granted
+        }
+    }
+
+    fn changes(
+        &self,
+        _: &str,
+    ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        self.listeners.lock().unwrap().push(sender);
+        receiver
+    }
+}
+
+/// P2.4: revoking `terminal:env` closes the terminals and sends the integration again, without
+/// the env.
+#[gpui::test]
+async fn test_v0_4_terminal_integration_after_a_revocation(cx: &mut TestAppContext) {
+    let broker = Arc::new(ChangingBroker::default());
+    let setup = Setup {
+        broker: Some(broker.clone()),
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    extension.activate_terminals();
+    let integrations = || setup.host.integrations.lock().unwrap().clone();
+    assert!(integrations()[0].1.env.is_some());
+    broker.deny(terminal::CAPABILITY_ENV);
+    wait_for(cx, 10_000, || integrations().len() == 2);
+    assert!(integrations()[1].1.env.is_none(), "{:?}", integrations());
+    assert!(
+        setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    );
+    drop(extension);
 }

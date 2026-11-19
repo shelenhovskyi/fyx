@@ -16,6 +16,10 @@
     `fyx:` hook in `editor`, `workspace` or `terminal`.
   - Push `integration` after a green FAST gate. Fast-forward and push `fyx/main` only after a
     green FULL gate.
+- Disk (coordinator, 2026-11-19; the user wants SSD-frugal builds): `script/fyx-disk-guard` runs
+  after every FULL gate and every push (`cargo sweep --time 2` and `fyx-prune-target` on each idle
+  target). Its WARN line (D: under 150 GB, E: under 40 GB) goes to the coordinator. When a worker
+  is archived, its target folder is deleted the same day.
 - Apply dependency and WIT change requests from other streams; announce WIT changes to W2, W3, W4, W8.
 - Weekly job: rebase the Fyx stack onto the newest stable tag, open an issue on conflict.
 

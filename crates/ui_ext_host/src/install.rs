@@ -431,6 +431,7 @@ pub fn programs_running_any_code(items: &[String]) -> Vec<String> {
                     name,
                     args: Vec::new(),
                     path,
+                    reason: None,
                 },
             )
         })
