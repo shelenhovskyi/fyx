@@ -18,14 +18,12 @@ agent-client-protocol.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 fs.workspace = true
+fyx_guard_core.workspace = true
 gpui.workspace = true
 log.workspace = true
 paths.workspace = true
 project.workspace = true
-serde.workspace = true
 settings.workspace = true
-toml = { workspace = true, features = ["display"] }
-ui_ext.workspace = true
 util.workspace = true
 
 [dev-dependencies]

@@ -17,6 +17,10 @@ Older history: `archive/W2c.md`.
   `diagnostics-changed(list<file-ref>)`. Until it is on origin/integration, the WIT edit in
   `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` is **local only, never commit** (discard it,
   then merge integration and re-run the tests).
+- **fyx_guard_core (compile speed):** the pure rules (paths, policy, modes, enforce, scrub,
+  reasons, user-config and account-dir rules) moved out of fyx_guard, which keeps the glue and
+  re-exports. Root `Cargo.toml` member + workspace dep and `Cargo.lock` are local only until W0
+  merges the integrator diff. Rule tests: ~20 s → ~7 s after a touch; 27 s from empty.
 - **Local-only, never commit:** fyx_ext_harness v0_3.rs/v0_4.rs arms `IoEvent::Listener`,
   `Context`, `DiagnosticsChanged`, `ReviewDecided` => None (drop once W0's arms are merged).
 - **Told W3:** ReviewHost, ContextHost, close(ids), DiagnosticsSource contracts.
