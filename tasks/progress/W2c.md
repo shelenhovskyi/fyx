@@ -14,7 +14,7 @@ Older history: `archive/W2c.md`.
     McpCall, ToolDef, McpError, OpenListener, ListenerObserver; IoEvent::Listener.
   - WIT fix for W0: side-session-notes `W2c-wit-0.4-withdraw.diff`: `review.withdraw ->
     result<string, host-error>` (current text, no review-decided; staged dc04464ee8 was
-    `result<_>` + err("withdrawn")). Asked W4 (local_8c72db38) to confirm; no answer yet.
+    `result<_>` + err("withdrawn")). W4 confirmed the shape; sent to W0 to stage.
 - **Next:**
   1. Wire 5.11: LoadOptions `listener_observer: Option<Arc<dyn ListenerObserver>>`; a
      ListenerSet per instance in ui_ext_wasm.rs (next to TerminalsHandle ~:1962), sink to
