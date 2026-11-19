@@ -31,7 +31,7 @@ Who has to approve:
 |---|---|
 | New extension, tier T0 or T1 | nobody: it merges when CI is green and the review passes |
 | New version, T0 or T1 | one of the entry's owners (as the PR's author, or by approving) |
-| Anything T2 (network, processes, editing files, observing agents) | the registry owner, every version |
+| Anything T2 (network, processes, editing files, observing agents, and for `fyx:ui` 0.4 creating terminals, environment, listeners, discovery files, relay hooks; reading or writing terminals is T3, which counts as T2 here) | the registry owner, every version |
 | `urgent = true` (skips the 24 h wait before installs) | the registry owner |
 | Owners added or removed | an existing owner of the entry |
 | A review concern (`needs-owner`) | the registry owner |
@@ -39,4 +39,13 @@ Who has to approve:
 An entry is never deleted. To withdraw a version, report it; the owner blocks it.
 
 Every PR gets a comment with its tier, what changed since the last release, and who has to
-approve. Text in your PR that addresses a reviewer or an AI is itself a review concern.
+approve. For a new version the comment also lists what the update adds or widens (each item with
+its tier) and what it removes: the same diff Fyx shows users before the update installs. Text in
+your PR that addresses a reviewer or an AI is itself a review concern.
+
+**Not accepted:** an extension that rotates accounts of a tool, switches them when a limit is
+reached, spreads load over accounts, carries a session from one account to another, gets around a
+limit, shares or resells access, or reads, copies, stores or moves tokens or an account's config
+folder. It is blocked if found later. Fyx itself never does these things, and refuses the
+environment names that would allow them (`CLAUDE_CONFIG_DIR`, `*_API_KEY`, `*_TOKEN`, …).
+Choosing which account a terminal uses is the user's, through Fyx's account profiles.

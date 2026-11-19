@@ -24,8 +24,9 @@ pub use sanitize::OutputSanitizer;
 pub use status::{ExtensionStatus, StatusSource, TerminalStatus};
 pub use tee_pty::{OscObserver, OscReplies, TeePty, tee, tee_with};
 pub use terminal_id::{
-    BLANKED_INHERITED_ENV, ExtensionOrigin, PseudoBackend, StatusHandle, TERMINAL_ID_ENV,
-    TERMINAL_TOKEN_ENV, TerminalExt, TerminalId, TerminalToken, terminal_for_token,
+    BLANKED_INHERITED_ENV, ExtensionOrigin, PARKED_TERMINAL_ENV, ParkedTerminal, PseudoBackend,
+    RawTap, StatusHandle, TERMINAL_ID_ENV, TERMINAL_TOKEN_ENV, TerminalExt, TerminalId,
+    TerminalToken, terminal_for_token,
 };
 
 /// OSC 7501 "Program Status" (rev 0.4, superlogical.com/rex/docs/build/program-status).

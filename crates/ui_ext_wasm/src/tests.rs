@@ -839,12 +839,17 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
-        // The harness runs every frozen version the host runs; the staged 0.4 joins once the
-        // harness runs it (P5 5.5).
+        // The harness runs every version the host knows; it runs the staged 0.4 on fake
+        // terminals ahead of the host (plan 5.10).
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(
             harness_versions,
-            [MIN_VERSION, Version::new(0, 2, 0), MAX_FROZEN_VERSION]
+            [
+                MIN_VERSION,
+                Version::new(0, 2, 0),
+                MAX_FROZEN_VERSION,
+                MAX_VERSION
+            ]
         );
         assert!(harness_versions.iter().all(is_supported_api_version));
         assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 3, 0));

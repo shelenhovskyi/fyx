@@ -907,11 +907,13 @@ mod tests {
         std::fs::write(folder.join("EXTENSION.wasm"), b"zed").expect("zed extension");
         assert!(crate::install::has_zed_extension(&folder, fs).await);
         assert!(
-            crate::install::dev_install_detail(&info.manifest, &folder, true)
+            crate::install::dev_install_notes(&info.manifest, &folder, true)
+                .join(" ")
                 .contains(ZED_EXTENSION_WARNING)
         );
         assert!(
-            !crate::install::dev_install_detail(&info.manifest, &folder, false)
+            !crate::install::dev_install_notes(&info.manifest, &folder, false)
+                .join(" ")
                 .contains(ZED_EXTENSION_WARNING)
         );
         let pending = |zed_extension| crate::registry::PendingConsent {
@@ -928,6 +930,8 @@ mod tests {
                     path: folder.clone(),
                 },
             },
+            lines: Vec::new(),
+            diff: Default::default(),
         };
         assert!(crate::registry::consent_card_text(&pending(true)).contains(ZED_EXTENSION_WARNING));
         assert!(

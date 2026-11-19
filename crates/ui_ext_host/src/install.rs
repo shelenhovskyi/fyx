@@ -273,20 +273,19 @@ pub(crate) fn prompt_and_install(
             let source = fs.canonicalize(&source).await.unwrap_or(source);
             let (extension_id, manifest) = check_dev_folder(&source, fs.as_ref()).await?;
             let zed_extension = has_zed_extension(&source, fs.as_ref()).await;
-            let detail = dev_install_detail(&manifest, &source, zed_extension);
+            // The grouped dialog of §C.2: T2 items are ticked one by one.
+            let lines = crate::consent_model::consent_items(&manifest);
+            let text = crate::consent_dialog::ConsentDialogText {
+                title: format!("Install the dev UI extension {extension_id}?"),
+                notes: dev_install_notes(&manifest, &source, zed_extension),
+                confirm: "Install".into(),
+            };
             let answer = workspace.update_in(cx, |workspace, window, cx| {
-                crate::choice::confirm(
-                    workspace,
-                    &format!("Install the dev UI extension {extension_id}?"),
-                    Some(&detail),
-                    &["Install", "Cancel"],
-                    window,
-                    cx,
-                )
+                crate::consent_dialog::ask_consent(workspace, text, lines.clone(), window, cx)
             })?;
-            if answer.await != Ok(0) {
+            let Ok(ticked) = answer.await else {
                 return Ok(None);
-            }
+            };
             // The user just confirmed these capabilities for this folder.
             let record = ConsentRecord::current(
                 &source,
@@ -301,7 +300,14 @@ pub(crate) fn prompt_and_install(
             cx.update(|_, cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
                     registry.update(cx, |registry, cx| {
-                        registry.grant_consent(&extension_id, record, fs.clone(), cx)
+                        registry.install_consent(
+                            &extension_id,
+                            record,
+                            &lines,
+                            &ticked,
+                            fs.clone(),
+                            cx,
+                        )
                     });
                 }
                 // The registry follows the setting.
@@ -458,25 +464,24 @@ pub fn runs_line(program: &str, runs_any_code: bool) -> String {
     }
 }
 
-/// The dev-folder install dialog's text.
-pub(crate) fn dev_install_detail(
+/// The notes under the dev install dialog's groups: the Zed-extension warning, the component and
+/// the folder.
+pub(crate) fn dev_install_notes(
     manifest: &UiManifest,
     source: &Path,
     zed_extension: bool,
-) -> String {
-    format!(
-        "It asks for:\n{}\n{}\nComponent: {}\nFolder: {}\n\nFyx loads it on every start and \
-         reloads it when the component is rebuilt.",
-        // Every item it is granted, hosts and programs included, as the file install shows them.
-        describe_capability_ids(&manifest.consent_items()).join("\n"),
-        if zed_extension {
-            format!("{ZED_EXTENSION_WARNING}\n")
-        } else {
-            String::new()
-        },
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if zed_extension {
+        notes.push(ZED_EXTENSION_WARNING.to_string());
+    }
+    notes.push(format!(
+        "Component: {}. Folder: {}. Fyx loads it on every start and reloads it when the \
+         component is rebuilt.",
         manifest.component,
         source.display()
-    )
+    ));
+    notes
 }
 
 /// The action: pick one of the dev paths and take it off the list.

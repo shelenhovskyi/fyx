@@ -49,7 +49,8 @@ use crate::{
         compiled_keyset, now,
     },
     store_actions::{
-        Outcome, expect_load, grant_and_rescan, installed_outcome, load_outcome, show_outcome,
+        Outcome, expect_load, grant_and_rescan, install_consent_and_rescan, installed_manifest,
+        installed_outcome, load_outcome, show_outcome,
     },
 };
 
@@ -668,9 +669,55 @@ fn format_wait(seconds: u64) -> String {
     }
 }
 
+/// The grouped dialog's notes for a registry install: where it comes from, and the Zed-extension
+/// warning when the package has one (owner's Q1; `verify_package` refuses a download that has
+/// one the release does not declare).
+pub(crate) fn registry_install_notes(release: &Release, zed_extension: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    if zed_extension || release.zed_extension {
+        notes.push(crate::install::ZED_EXTENSION_WARNING.to_string());
+    }
+    notes.push(format!(
+        "From the Fyx registry, published by {}. Source: {} at {}.",
+        release
+            .owners
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        release.source.repository,
+        &release.source.commit[..release.source.commit.len().min(12)],
+    ));
+    notes
+}
+
+/// An update's dialog (§C.2, §C.5): the lines it adds or widens, which show unticked (an item
+/// left unticked is denied, the others keep their state), and a note on what it no longer asks
+/// for.
+pub(crate) fn update_lines(
+    before: &[crate::consent_model::ItemLine],
+    after: Vec<crate::consent_model::ItemLine>,
+) -> (Vec<crate::consent_model::ItemLine>, Option<String>) {
+    let diff = crate::consent_model::consent_diff(before, &[], &after);
+    let removed = (!diff.removed.is_empty()).then(|| {
+        let titles: Vec<&str> = diff
+            .removed
+            .iter()
+            .map(|line| line.title.as_str())
+            .collect();
+        format!("No longer asks for: {}.", titles.join("; "))
+    });
+    (
+        diff.added.into_iter().chain(diff.widened).collect(),
+        removed,
+    )
+}
+
 /// Installs `release` (a fresh install, an update, or an approved held update), after the user
-/// confirmed what it asks for when it asks for anything new. The download plans again: a fresh
-/// install must get the same release (`download_for_install`), an update must still be planned.
+/// confirmed it in the grouped dialog (§C.2): always for a fresh install, for an update when it
+/// asks for anything new. The package is downloaded first, since the dialog lists what its
+/// manifest declares. The download plans again: a fresh install must get the same release
+/// (`download_for_install`), an update must still be planned.
 fn install_release(
     workspace: WeakEntity<Workspace>,
     release: Release,
@@ -699,42 +746,12 @@ fn install_release(
             let result: Result<Option<Outcome>> = async {
                 let base = approved_before.clone().unwrap_or_default();
                 let additions = base.additions(&release);
-                let asks = describe_additions(&additions);
-                // An update that starts running a Zed extension is an addition (W2c 226eea0e96),
-                // so it asks with the owner's Q1 warning among the asks.
-                if !asks.is_empty() {
-                    let detail = format!(
-                        "{}{}From the Fyx registry, published by {}.\nSource: {} at {}",
-                        if asks.is_empty() {
-                            String::new()
-                        } else {
-                            format!("It asks for:\n{}\n", asks.join("\n"))
-                        },
-                        // The signed release says it also runs a Zed extension (owner's Q1);
-                        // `verify_package` refuses a download that has one it does not declare.
-                        if release.zed_extension && !additions.zed_extension {
-                            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
-                        } else {
-                            String::new()
-                        },
-                        release.owners.iter().cloned().collect::<Vec<_>>().join(", "),
-                        release.source.repository,
-                        &release.source.commit[..release.source.commit.len().min(12)],
-                    );
-                    let answer = workspace.update_in(cx, |workspace, window, cx| {
-                        crate::choice::confirm(
-                            workspace,
-                            &format!("Install {} {}?", release.name, release.version),
-                            Some(&detail),
-                            &["Install", "Cancel"],
-                            window,
-                            cx,
-                        )
-                    })?;
-                    if answer.await != Ok(0) {
-                        return Ok(None);
-                    }
-                }
+                // A fresh install always shows the grouped dialog (§C.2). An update shows it when
+                // it asks for anything new; an update that starts running a Zed extension is an
+                // addition (W2c 226eea0e96).
+                let ask = matches!(mode, InstallMode::Fresh)
+                    || !describe_additions(&additions).is_empty();
+                // Download first: the dialog lists what the package's manifest declares.
                 let bytes = match &mode {
                     InstallMode::Fresh => {
                         let (planned, bytes) =
@@ -754,13 +771,77 @@ fn install_release(
                             .await?
                     }
                 };
+                let consent = if ask {
+                    let label = format!("{} {}", release.id, release.version);
+                    let info = store
+                        .inspect_package_bytes(bytes.clone(), &label, fs.as_ref())
+                        .await?;
+                    let mut lines = crate::consent_model::consent_items(&info.manifest);
+                    let mut notes = registry_install_notes(&release, info.zed_extension);
+                    if let InstallMode::Update(_) = &mode {
+                        let before =
+                            installed_manifest(&store, release.id.as_str(), fs.as_ref()).await?;
+                        let before = before
+                            .as_ref()
+                            .map(crate::consent_model::consent_items)
+                            .unwrap_or_default();
+                        let (shown, removed) = update_lines(&before, lines);
+                        lines = shown;
+                        notes.extend(removed);
+                    }
+                    let text = crate::consent_dialog::ConsentDialogText {
+                        title: match &mode {
+                            InstallMode::Fresh => {
+                                format!("Install {} {}?", release.name, release.version)
+                            }
+                            InstallMode::Update(_) => {
+                                format!("Update {} to {}?", release.name, release.version)
+                            }
+                        },
+                        notes,
+                        confirm: match &mode {
+                            InstallMode::Fresh => "Install".into(),
+                            InstallMode::Update(_) => "Approve and Update".into(),
+                        },
+                    };
+                    let answer = workspace.update_in(cx, |workspace, window, cx| {
+                        crate::consent_dialog::ask_consent(
+                            workspace,
+                            text,
+                            lines.clone(),
+                            window,
+                            cx,
+                        )
+                    })?;
+                    let Ok(ticked) = answer.await else {
+                        return Ok(None);
+                    };
+                    Some((lines, ticked))
+                } else {
+                    None
+                };
                 let mut approved = base;
                 approved.approve(&release);
                 let installed = store
                     .install_registry_package(bytes, &release, Some(approved), fs.as_ref())
                     .await?;
                 let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
-                grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
+                match &consent {
+                    Some((lines, ticked)) => {
+                        install_consent_and_rescan(
+                            &store,
+                            &installed.extension_id,
+                            lines,
+                            ticked,
+                            fs.clone(),
+                            cx,
+                        )
+                        .await?
+                    }
+                    None => {
+                        grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?
+                    }
+                }
                 let loaded = load_outcome(waiter, cx).await;
                 Ok(Some(installed_outcome(
                     format!("Installed {} {}", release.name, release.version),
@@ -1307,7 +1388,7 @@ impl FyxExtensionsPage {
                     .into_iter()
                     .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
-            .children(permission_rows(&id, cx))
+            .children(consent_rows(&id, self.workspace.clone(), cx))
     }
 
     /// A dev extension or an installed folder (not the install store): where it is, "Enable"
@@ -1320,6 +1401,7 @@ impl FyxExtensionsPage {
             "Installed folder, not from the registry"
         };
         let pending = local.pending.clone();
+        let workspace = self.workspace.clone();
         v_flex()
             .p_3()
             .gap_1()
@@ -1345,12 +1427,18 @@ impl FyxExtensionsPage {
                             )
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
-                            .on_click(move |_, _, cx| {
-                                let fs = <dyn Fs>::global(cx);
-                                if let Some(registry) = UiExtensionRegistry::global(cx) {
-                                    registry
-                                        .update(cx, |registry, cx| registry.enable(&id, fs, cx));
-                                }
+                            // The grouped dialog (§C.2), ticked item by item.
+                            .on_click(move |_, window, cx| {
+                                let (Some(registry), Some(workspace)) =
+                                    (UiExtensionRegistry::global(cx), workspace.upgrade())
+                                else {
+                                    return;
+                                };
+                                workspace.update(cx, |workspace, cx| {
+                                    crate::registry::ask_pending_consent(
+                                        workspace, &registry, &id, window, cx,
+                                    )
+                                });
                             }),
                         )
                     }),
@@ -1375,7 +1463,181 @@ impl FyxExtensionsPage {
                         .color(Color::Warning),
                 )
             })
-            .children(permission_rows(&id, cx))
+            .children(consent_rows(&id, self.workspace.clone(), cx))
+    }
+}
+
+/// How many journal entries the page shows, newest first.
+const JOURNAL_ROWS: usize = 20;
+
+/// The 0.4 page rows (§C.2 "Later", §C.4): every consent item with its state and a switch, then
+/// the usage journal. Turning a T2 item on asks once more with the same text and the 1 s guard;
+/// turning one off applies at once. A T1 item turned off comes back with "Enable" on the next
+/// load. Without consent lines (a bare component) it falls back to the capability rows.
+fn consent_rows(
+    extension_id: &str,
+    workspace: WeakEntity<Workspace>,
+    cx: &App,
+) -> Vec<gpui::AnyElement> {
+    use crate::consent_model::{ConsentTier, journal_line};
+    use ui_ext_wasm::permissions::PermissionState;
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return Vec::new();
+    };
+    let registry_read = registry.read(cx);
+    let lines = registry_read.consent_lines(extension_id);
+    if lines.is_empty() {
+        return permission_rows(extension_id, cx);
+    }
+    let name = registry_read.provenance_name(extension_id);
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let state = registry_read.consent_item_state(extension_id, &line.item);
+        let (note, switch) = match (line.tier, state) {
+            (ConsentTier::T0, _) => continue,
+            (ConsentTier::T3, _) => ("asks you each time", None),
+            (ConsentTier::T1, PermissionState::Granted) => ("on", Some(true)),
+            (ConsentTier::T1, _) => ("off until Enable", None),
+            (ConsentTier::T2, PermissionState::Granted) => ("on", Some(true)),
+            (ConsentTier::T2, PermissionState::Unavailable) => ("not available here", None),
+            (ConsentTier::T2, _) => ("off", Some(false)),
+        };
+        let detail = (!line.details.is_empty()).then(|| line.details.join("  ·  "));
+        let row = h_flex()
+            .gap_2()
+            .justify_between()
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        Label::new(format!("{}: {note}", line.title))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .when_some(detail, |this, detail| {
+                        this.child(
+                            Label::new(detail)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    }),
+            )
+            .when_some(switch, |this, on| {
+                let (id, registry, line, workspace, name) = (
+                    extension_id.to_string(),
+                    registry.clone(),
+                    line.clone(),
+                    workspace.clone(),
+                    name.clone(),
+                );
+                let lines = lines.clone();
+                this.child(
+                    ui::Switch::new(
+                        SharedString::from(format!("fyx-consent-{extension_id}-{index}")),
+                        if on {
+                            ui::ToggleState::Selected
+                        } else {
+                            ui::ToggleState::Unselected
+                        },
+                    )
+                    .on_click(move |_, window, cx| {
+                        let fs = <dyn Fs>::global(cx);
+                        if on {
+                            registry.update(cx, |registry, cx| {
+                                if line.tier == ConsentTier::T1 {
+                                    if let Err(error) =
+                                        registry.revoke(&id, line.item.capability(), fs, cx)
+                                    {
+                                        log::error!("fyx:ui: {error:#}");
+                                    }
+                                } else {
+                                    registry
+                                        .set_consent_item(&id, &lines, &line.item, false, fs, cx)
+                                }
+                            });
+                            return;
+                        }
+                        let Some(workspace) = workspace.upgrade() else {
+                            return;
+                        };
+                        let answer = workspace.update(cx, |workspace, cx| {
+                            crate::consent_dialog::confirm_item(
+                                workspace,
+                                &name,
+                                line.clone(),
+                                window,
+                                cx,
+                            )
+                        });
+                        let (id, registry, line, lines) =
+                            (id.clone(), registry.clone(), line.clone(), lines.clone());
+                        cx.spawn(async move |cx| {
+                            if answer.await.is_ok_and(|ticked| ticked.contains(&line.item)) {
+                                cx.update(|cx| {
+                                    registry.update(cx, |registry, cx| {
+                                        registry
+                                            .set_consent_item(&id, &lines, &line.item, true, fs, cx)
+                                    })
+                                });
+                            }
+                        })
+                        .detach();
+                    }),
+                )
+            });
+        rows.push(row.into_any_element());
+    }
+    let journal = registry_read.journal(extension_id);
+    rows.push(
+        Label::new("Usage")
+            .size(LabelSize::Small)
+            .into_any_element(),
+    );
+    if journal.incomplete {
+        rows.push(
+            Label::new("Journal incomplete: some entries could not be written.")
+                .size(LabelSize::XSmall)
+                .color(Color::Warning)
+                .into_any_element(),
+        );
+    }
+    if journal.entries.is_empty() {
+        rows.push(
+            Label::new("Nothing recorded yet.")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+        );
+    }
+    let now = std::time::SystemTime::now();
+    rows.extend(
+        journal
+            .entries
+            .iter()
+            .rev()
+            .take(JOURNAL_ROWS)
+            .map(|entry| {
+                Label::new(format!(
+                    "{}  {}",
+                    ago(now, entry.at),
+                    journal_line(&entry.kind)
+                ))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element()
+            }),
+    );
+    rows
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 d ago".
+fn ago(now: std::time::SystemTime, at: std::time::SystemTime) -> String {
+    let seconds = now.duration_since(at).unwrap_or_default().as_secs();
+    match seconds {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86400 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86400),
     }
 }
 

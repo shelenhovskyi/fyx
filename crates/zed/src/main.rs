@@ -750,8 +750,11 @@ fn main() {
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
+        terminal_host::init(cx); // fyx: terminal status on tabs, the fyx:ui terminal host
+        if let Some(host) = terminal_host::host(cx) {
+            ui_ext_host::set_terminal_host(host, cx); // fyx: before ui_ext_host loads any extension
+        }
         ui_ext_host::init(cx); // fyx: extension panels and status items
-        terminal_host::init(cx); // fyx: terminal status on tabs
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);

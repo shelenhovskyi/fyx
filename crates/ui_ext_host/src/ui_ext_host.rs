@@ -20,6 +20,10 @@ mod canvas_texture;
 mod choice;
 // fyx: public for the 0.4 consent page and the terminal menu (W2c, design wit-0.4 §C).
 pub mod consent;
+pub mod consent_dialog;
+pub mod consent_model;
+#[cfg(test)]
+mod consent_ui_tests;
 mod decorations;
 pub mod fyx_extensions_page;
 mod icons;
@@ -55,7 +59,7 @@ mod tests;
 #[cfg(test)]
 mod wasm_tests;
 
-use gpui::{Action, App};
+use gpui::{Action, App, Window};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -144,4 +148,54 @@ pub fn init(cx: &mut App) {
     cx.set_global(workspace::FyxPackageDrop(
         store_actions::install_dropped_package,
     ));
+}
+
+/// Draws a 0.4 `terminal` node (§B.2, plan 5.9): the view of the pseudo-terminal that
+/// extension `ext` opened in its panel under `handle`, or `None` when that handle is not one of
+/// its in-panel terminals. W1's `terminal_host::extension_terminal` resolves the handle; the
+/// caller wraps it in a terminal view.
+pub type TerminalNodeViews = std::rc::Rc<
+    dyn Fn(&str, ui_ext::terminal::TerminalHandle, &mut Window, &mut App) -> Option<gpui::AnyView>,
+>;
+
+struct GlobalTerminalNodeViews(TerminalNodeViews);
+
+impl gpui::Global for GlobalTerminalNodeViews {}
+
+/// Sets how panels draw their `terminal` nodes (plan 5.9). Set from `crates/zed/src/main.rs`
+/// next to [`set_terminal_host`]; without it a terminal node draws a placeholder.
+pub fn set_terminal_node_views(views: TerminalNodeViews, cx: &mut App) {
+    cx.set_global(GlobalTerminalNodeViews(views));
+}
+
+/// The view for a `terminal` node, if [`set_terminal_node_views`] was called and the handle
+/// is one of `extension_id`'s in-panel terminals.
+pub(crate) fn terminal_node_view(
+    extension_id: &str,
+    handle: ui_ext::terminal::TerminalHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<gpui::AnyView> {
+    let views = cx.try_global::<GlobalTerminalNodeViews>()?.0.clone();
+    views(extension_id, handle, window, cx)
+}
+
+/// The terminal host the runtime gets for 0.4's `terminals` imports (W1's `terminal_host`).
+struct GlobalTerminalHost(std::sync::Arc<dyn ui_ext::terminal::TerminalHost>);
+
+impl gpui::Global for GlobalTerminalHost {}
+
+/// Sets the terminal host passed to every extension loaded from now on, as
+/// `LoadOptions::terminals`. Call it before the first registry scan (W1 does, from
+/// `crates/zed/src/main.rs`); a later call applies to later loads only.
+pub fn set_terminal_host(host: std::sync::Arc<dyn ui_ext::terminal::TerminalHost>, cx: &mut App) {
+    cx.set_global(GlobalTerminalHost(host));
+}
+
+/// The terminal host set by [`set_terminal_host`], if any.
+pub(crate) fn terminal_host(
+    cx: &App,
+) -> Option<std::sync::Arc<dyn ui_ext::terminal::TerminalHost>> {
+    cx.try_global::<GlobalTerminalHost>()
+        .map(|host| host.0.clone())
 }

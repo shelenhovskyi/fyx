@@ -19,6 +19,7 @@ doctest = false
 # instead of 0.1 (see the end of the crate root). 0.3 wins when both are on.
 fyx-ui-0-2 = []
 fyx-ui-0-3 = ["ui_ext_sdk/fyx-ui-0-3"]
+fyx-ui-0-4 = ["fyx-ui-0-3", "ui_ext_sdk/fyx-ui-0-4"]
 
 [dependencies]
 ui_ext_sdk.workspace = true

@@ -243,6 +243,22 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "process:spawn",
     "workspace:edit",
     "agent:observe",
+    // 0.4: checked per call, or used by a manifest table (profiles, env, listeners, discovery
+    // files, relay channels, `${package}`) that the manifest check pairs with its capability.
+    "terminal:profiles",
+    "terminal:pseudo",
+    "terminal:create",
+    "terminal:env",
+    "terminal:status",
+    "terminal:observe",
+    "package:files",
+    "network:listen",
+    "fs:discovery-file",
+    "relay:hooks",
+    "review:propose",
+    "context:editor",
+    "workspace:open",
+    "ui:approvals",
 ];
 
 /// Declared capabilities against the imports that need them: an import whose capability is not
@@ -337,6 +353,7 @@ pub mod tests {
             api_version: Some(Version::new(0, 1, 0)),
             component: "fyx_ui.wasm".into(),
             capabilities: capabilities.iter().map(ToString::to_string).collect(),
+            package_files: Vec::new(),
         }
     }
 

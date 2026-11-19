@@ -34,6 +34,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::Spawn` | variant | `spawn`; ids are the shared 1, 2, …. |
 | `HostEffect::StartObserving` | variant |  |
 | `HostEffect::StopObserving` | variant |  |
+| `HostEffect::Terminal` | variant | A `crate::terminals` function (`fyx:ui` 0.4). |
 | `HostEffect::WriteStdin` | variant | `write_stdin`; the bytes are kept. |
 | `add_image` | fn | `fyx:ui` 0.3: registers a PNG or SVG made at run time, for `ImageProps::generated`. Needs `ui:images`; at most 1 MiB, at most 32 live images per extension. The host checks the bytes at once (the PNG header, or that an SVG is plain text) and decodes them after the call; until then, and if decoding fails, image nodes show their alt text. Off WASM it hands out handles 1, 2, … and records `HostEffect::AddImage`. |
 | `add_surface` | fn | Adds a surface at runtime. The manifest must declare the capability of its kind; at most 32 live surfaces per extension. Panels and status items are mounted at once; a modal waits for `show_surface`. |

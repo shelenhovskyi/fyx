@@ -79,6 +79,9 @@ pub struct SurfaceView {
     /// (`TreeNode::props_arc`), so an unchanged node is the same pointer and is skipped without
     /// copying or comparing its text (triage-3, PERF 12).
     synced_props: HashMap<NodeId, Arc<Props>>,
+    /// The views of the tree's `terminal` nodes by handle (0.4, plan 5.9); `None` for a handle
+    /// that is not one of the extension's in-panel terminals, drawn as a placeholder.
+    pub(crate) terminals: HashMap<u64, Option<gpui::AnyView>>,
     /// The state's `mount_count` at the last sync.
     synced_mount: u64,
     _observe_state: Subscription,
@@ -125,6 +128,7 @@ impl SurfaceView {
             synced_revision: None,
             synced_mount: 0,
             synced_props: HashMap::default(),
+            terminals: HashMap::default(),
             _observe_state: observe_state,
             _observe_images: crate::images::ImageCache::global(cx)
                 .map(|images| cx.observe(&images, |_, _, cx| cx.notify())),
@@ -235,6 +239,7 @@ impl SurfaceView {
         let mut selections: Vec<(NodeId, u32)> = Vec::new();
         let mut markdown = Vec::new();
         let mut diffs = Vec::new();
+        let mut terminal_handles: Vec<u64> = Vec::new();
         let mut lists = Vec::new();
         let mut buttons = Vec::new();
         let mut focus_order = Vec::new();
@@ -273,6 +278,8 @@ impl SurfaceView {
                         }
                     }
                     Props::DiffView(_) => diffs.push((id, node.props_arc().clone())),
+                    // The terminal view takes focus itself, by a click.
+                    Props::Terminal(props) => terminal_handles.push(props.handle),
                     // A canvas takes focus with plan 4.14, when it is clickable.
                     Props::Flex(_)
                     | Props::Text(_)
@@ -311,6 +318,26 @@ impl SurfaceView {
                 .or_insert_with(|| cx.focus_handle());
         }
         let lists: Vec<NodeId> = lists.into_iter().map(|(id, _)| id).collect();
+
+        // A terminal keeps its view while a node shows its handle; a handle that did not resolve
+        // is tried again at the next change.
+        self.terminals
+            .retain(|handle, view| view.is_some() && terminal_handles.contains(handle));
+        if !terminal_handles.is_empty() {
+            let extension_id = self.state.read(cx).extension_id().to_string();
+            for handle in terminal_handles {
+                if self.terminals.contains_key(&handle) {
+                    continue;
+                }
+                let view = crate::terminal_node_view(
+                    &extension_id,
+                    ui_ext::terminal::TerminalHandle(handle),
+                    window,
+                    cx,
+                );
+                self.terminals.insert(handle, view);
+            }
+        }
 
         // An SDK remount gives every node a new id, so an input with typing the extension has not
         // seen (or with focus) would lose it with its old editor. Carry it to the input at the
@@ -909,6 +936,9 @@ impl Scope {
     }
 }
 
+/// The height of a `terminal` node: about 15 lines of the default terminal font.
+const TERMINAL_NODE_HEIGHT: f32 = 280.;
+
 struct Renderer<'a, 'b> {
     view: &'a SurfaceView,
     state: &'a SurfaceState,
@@ -933,6 +963,7 @@ impl Renderer<'_, '_> {
             Props::DiffView(props) => self.diff_view(id, props, scope),
             Props::Image(props) => self.image(props),
             Props::Canvas(props) => self.canvas(id, node.props_arc(), props, scope),
+            Props::Terminal(props) => self.terminal(props.handle),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -1324,6 +1355,51 @@ impl Renderer<'_, '_> {
             crate::images::ImageState::Pending => self.image_placeholder(props, false),
             crate::images::ImageState::Failed => self.image_placeholder(props, true),
         }
+    }
+
+    /// A 0.4 `terminal` node: the extension's in-panel terminal, at a fixed height in the
+    /// panel's width (plan 5.9).
+    fn terminal(&self, handle: u64) -> AnyElement {
+        match self.view.terminals.get(&handle).cloned().flatten() {
+            Some(view) => div()
+                .w_full()
+                .h(px(TERMINAL_NODE_HEIGHT))
+                .overflow_hidden()
+                .rounded_sm()
+                .border_1()
+                .border_color(self.cx.theme().colors().border_variant)
+                .child(view)
+                .into_any_element(),
+            None => self.terminal_placeholder(),
+        }
+    }
+
+    /// A `terminal` node whose handle is not one of the extension's in-panel terminals, or with
+    /// no terminal support in this build.
+    fn terminal_placeholder(&self) -> AnyElement {
+        div()
+            .w_full()
+            .min_h(px(20.))
+            .p_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.cx.theme().colors().border_variant)
+            .bg(self.cx.theme().colors().element_background)
+            .child(
+                Icon::new(IconName::Terminal)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new("Terminal not available")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element()
     }
 
     fn image_placeholder(&self, props: &ui_ext::image::ImageProps, failed: bool) -> AnyElement {

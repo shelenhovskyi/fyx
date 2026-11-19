@@ -44,7 +44,10 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 ENTRY_KEYS = {"id", "owners", "source", "urgent"}
 SOURCE_KEYS = {"repository", "commit", "path"}
-TIERS = ["t0", "t1", "t2"]
+# t3 is fyx:ui 0.4's "asked at the moment of action" tier (docs/fyx/wit-0.4/design.md §C.3). It is
+# only a per-capability rating: for a release it counts as t2 (`release_tier`), so the signed
+# `tier` never takes the value t3.
+TIERS = ["t0", "t1", "t2", "t3"]
 VERDICT_CATEGORIES = {
     "capability-mismatch",
     "obfuscation",
@@ -186,7 +189,92 @@ def parse_entry(text: str, file_stem: str | None, policy: dict, existing: list[s
 
 def tier_of(capability: str, tiers: dict) -> str:
     # A capability this registry does not know is never granted silently: it counts as T2.
-    return tiers.get(capability, "t2")
+    tier = tiers.get(capability, "t2")
+    return tier if tier in TIERS else "t2"
+
+
+def release_tier(tier: str) -> str:
+    """A release's tier: t3 counts as t2 (the owner approves every version, no auto-merge)."""
+    return "t2" if tier == "t3" else tier
+
+
+# What a manifest grants, for the update diff of the PR comment (design §C.5). Each item is one
+# line the reviewer reads, with the tier the client would consent it at; a new T1 or T2 item is
+# held by the client, and the registry shows the same diff.
+MAX_DIFF_ITEMS = 40
+MAX_ITEM_CHARS = 200
+
+
+def _call(name: object, args: object) -> str:
+    parts = [str(name)] + [str(a) for a in args] if isinstance(args, list) else [str(name)]
+    return " ".join(parts)
+
+
+def manifest_grants(manifest_text: str | None, tiers: dict) -> dict[str, str] | None:
+    """`{item: tier}` for the capabilities and the T1/T2 tables of an extension.toml (the 0.4
+    tables of `crates/ui_ext`: terminal_profiles, terminal_programs, terminal_env, listeners,
+    discovery_files, relay_channels; and 0.3's network domains and processes). None if the text
+    cannot be read, so no diff is claimed."""
+    if manifest_text is None:
+        return None
+    try:
+        fyx_ui = tomllib.loads(manifest_text).get("fyx_ui") or {}
+    except tomllib.TOMLDecodeError:
+        return None
+    items: dict[str, str] = {}
+
+    def add(text: str, tier: str) -> None:
+        items[text[:MAX_ITEM_CHARS]] = tier
+
+    for capability in fyx_ui.get("capabilities", []):
+        add(f"capability {capability}", tier_of(str(capability), tiers))
+    for domain in (fyx_ui.get("network") or {}).get("domains", []):
+        add(f"fetches from {domain}", "t2")
+    for spec in fyx_ui.get("processes", []):
+        add(f"runs {_call(spec.get('name', '?'), spec.get('args'))}", "t2")
+    for spec in fyx_ui.get("terminal_programs", []):
+        add(f"creates a terminal running {_call(spec.get('name', '?'), spec.get('args'))}", "t2")
+    for spec in fyx_ui.get("terminal_profiles", []):
+        add(
+            f"terminal profile {spec.get('id', '?')} runs "
+            f"{_call(spec.get('program', '?'), spec.get('args'))}",
+            "t1",
+        )
+    env = fyx_ui.get("terminal_env") or {}
+    for name, value in sorted((env.get("vars") or {}).items()):
+        add(f"sets {name}={value} in its terminals", "t2")
+    if env.get("scope") == "all-new":
+        add("sets its env in every new terminal (scope all-new)", "t2")
+    for spec in fyx_ui.get("listeners", []):
+        token = ", token in env" if spec.get("token_in_env") else ""
+        add(f"listens on loopback: {spec.get('name', '?')} ({spec.get('protocol', '?')}{token})", "t2")
+    for spec in fyx_ui.get("discovery_files", []):
+        add(f"writes a discovery file {spec.get('dir', '?')}/{spec.get('name', '?')}", "t2")
+    for spec in fyx_ui.get("relay_channels", []):
+        exit_code = (spec.get("on_failure") or {}).get("exit", 0)
+        add(
+            f"relay channel {spec.get('name', '?')} (timeout {spec.get('timeout_ms', 30000)} ms, "
+            f"on failure exit {exit_code})",
+            "t2",
+        )
+    return items
+
+
+def update_diff(old_text: str | None, new_text: str | None, tiers: dict) -> dict | None:
+    """What a new version adds or widens (T1 and T2 items) and what it removes, as design §C.5
+    shows it on the extension page. T0 additions are not listed: they install silently. None if
+    either manifest cannot be read."""
+    old, new = manifest_grants(old_text, tiers), manifest_grants(new_text, tiers)
+    if old is None or new is None:
+        return None
+    added = sorted(item for item, tier in new.items() if item not in old and tier != "t0")
+    removed = sorted(item for item in old if item not in new)
+    version = tomllib.loads(new_text or "").get("version")
+    return {
+        "version": version if isinstance(version, str) else "",
+        "added": [{"item": item, "tier": new[item]} for item in added],
+        "removed": removed,
+    }
 
 
 # A Zed extension inside a Fyx package gets upstream's `fetch` and `process:exec` with none of
@@ -256,10 +344,12 @@ def derive_release(
         raise Refused("extension.toml's version must be major.minor.patch")
     fyx_ui = manifest.get("fyx_ui") or {}
     capabilities = sorted(set(fyx_ui.get("capabilities", [])))
-    tier = max((tier_of(c, policy["tiers"]) for c in capabilities), default="t0")
+    tier = max((tier_of(c, policy["tiers"]) for c in capabilities), key=TIERS.index, default="t0")
+    tier = release_tier(tier)
     if tier == "t2":
         # network_domains and processes come with T2 (decisions 23, 24); until fyx-ext reads
         # them, a T2 entry cannot be described completely.
+        # T3 capabilities (terminal:read, terminal:write) count as T2 here.
         raise Refused("T2 capabilities are not accepted yet: " + ", ".join(capabilities))
     name = entry["id"] + "-" + version
     # A package that also runs a Zed extension is T2 whatever it declares, so it always needs
@@ -502,6 +592,8 @@ def decide(data: dict) -> dict:
         "verdict": verdict,
         "add_labels": add_labels,
         "zed_extension": data.get("zed_extension", []),
+        # Design §C.5: what this version adds, widens or removes; None if it could not be read.
+        "update_diff": data.get("update_diff"),
         # Recorded as the `policy-tier` status, which publish.yml checks (integration-6 N3).
         "owner_approved": approved_by_owner(),
     }
@@ -596,10 +688,12 @@ def decision_input(
     verdict: dict | None,
     policy: dict,
     source_files: list[str] | tuple = (),
+    last_manifest_text: str | None = None,
 ) -> dict:
     """`decide`'s input, from what the trusted report job fetched itself: the PR from the API,
-    the entry before (base) and after (head) as files, extension.toml at the source commit, and
-    the published index and block list. Nothing here comes from running PR code."""
+    the entry before (base) and after (head) as files, extension.toml at the source commit (and,
+    for the update diff, at the last published release's commit), and the published index and
+    block list. Nothing here comes from running PR code."""
     changed = [file["path"] for file in pr.get("files", [])]
     entry_files = [f for f in changed if re.match(r"^extensions/[^/]+\.toml$", f)]
     releases = [r["signed"] for r in (index or {}).get("releases", [])]
@@ -619,6 +713,7 @@ def decision_input(
         "entry_after": None,
         "release": None,
         "last_published": None,
+        "update_diff": None,
         "entry_errors": [],
         "ci": ci_results(jobs),
         "agent_verdict": verdict,
@@ -657,6 +752,9 @@ def decision_input(
         )
     except Refused as error:
         data["entry_errors"].append(str(error))
+    if data["last_published"] and manifest_text is not None:
+        # Design §C.5: the same diff the client shows. None when the old manifest is unreadable.
+        data["update_diff"] = update_diff(last_manifest_text, manifest_text, policy["tiers"])
     return data
 
 
@@ -701,6 +799,36 @@ def escape(text: str) -> str:
     return text
 
 
+def diff_lines(decision: dict) -> list[str]:
+    """The update diff of design §C.5, as the client shows it on the extension page: what the new
+    version adds or widens (T1 and T2 items; the client holds the update for these) and what it
+    removes. Every item is the author's text, so it is escaped."""
+    if decision.get("kind") != "new-version" or decision.get("tier") is None:
+        return []
+    diff = decision.get("update_diff")
+    if diff is None:
+        return ["- Update diff: not available (a manifest could not be read); read the source diff"]
+    if not diff["added"] and not diff["removed"]:
+        return ["- Update diff: nothing added or widened, nothing removed"]
+
+    def listed(items: list[str]) -> str:
+        shown = [escape(item) for item in items[:MAX_DIFF_ITEMS]]
+        if len(items) > MAX_DIFF_ITEMS:
+            shown.append(f"and {len(items) - MAX_DIFF_ITEMS} more")
+        return "; ".join(shown)
+
+    lines = []
+    if diff["added"]:
+        marked = [f"{a['item']} [{a['tier']}]" for a in diff["added"]]
+        lines.append(
+            f"- **New in {escape(diff['version'])}** (clients hold the update until the user "
+            f"approves): {listed(marked)}"
+        )
+    if diff["removed"]:
+        lines.append(f"- **Removed:** {listed(diff['removed'])}")
+    return lines
+
+
 def comment(decision: dict) -> str:
     lines = ["<!-- fyx-registry-policy -->", "### Registry policy", ""]
     if decision["kind"] == "other":
@@ -711,6 +839,7 @@ def comment(decision: dict) -> str:
         files = ", ".join(escape(name) for name in decision["zed_extension"])
         lines.append(f"- **Warning:** this extension {ZED_EXTENSION_NOTICE}. Files: {files}")
     lines.append(f"- Status: **{decision['status']}**")
+    lines.extend(diff_lines(decision))
     for failure in decision["failures"]:
         lines.append(f"- Refused: {escape(failure)}")
     for key, value in decision["changes"].items():
@@ -819,6 +948,11 @@ def main(argv: list[str]) -> int:
     )
     assemble.add_argument("--after", type=Path, required=True)
     assemble.add_argument("--manifest", type=Path)
+    assemble.add_argument(
+        "--last-manifest",
+        type=Path,
+        help="extension.toml at the last published release's source commit, for the update diff",
+    )
     assemble.add_argument("--package", type=Path)
     assemble.add_argument("--index", type=Path)
     assemble.add_argument("--blocklist", type=Path)
@@ -927,6 +1061,9 @@ def main(argv: list[str]) -> int:
                     args.source_files.read_text(encoding="utf-8").splitlines()
                     if args.source_files and args.source_files.exists()
                     else (),
+                    args.last_manifest.read_text(encoding="utf-8")
+                    if args.last_manifest and args.last_manifest.exists()
+                    else None,
                 ),
                 out,
                 indent=2,

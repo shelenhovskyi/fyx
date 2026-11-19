@@ -105,10 +105,16 @@ impl TerminalDecorations for TabStatus {
             meta.push_str(" · ");
             meta.push_str(&origin.describe());
         }
+        // "started by <extension>" stays visible beside the program's status (§B.3).
+        let started_by = origin
+            .as_ref()
+            .filter(|origin| matches!(origin, ExtensionOrigin::Created { .. }))
+            .map(|origin| origin_marker(terminal, origin));
         Some(
             h_flex()
                 .id(("fyx-terminal-status", terminal.id().as_u64()))
                 .gap_0p5()
+                .children(started_by)
                 .child(icon)
                 .when(status.attention, |this| {
                     this.child(Indicator::dot().color(Color::Accent))
@@ -121,17 +127,25 @@ impl TerminalDecorations for TabStatus {
     }
 }
 
-/// A terminal of an extension with no status to show: the extension's mark and whose it is.
+/// The extension's mark on its terminal and whose it is. A created terminal also names the
+/// extension that started it on the tab itself (§B.3).
 fn origin_marker(terminal: &TerminalExt, origin: &ExtensionOrigin) -> AnyElement {
     let title = origin.extension().to_owned();
     let meta = origin.describe();
-    div()
+    let started_by = matches!(origin, ExtensionOrigin::Created { .. }).then(|| {
+        Label::new(title.clone())
+            .size(LabelSize::XSmall)
+            .color(Color::Muted)
+    });
+    h_flex()
         .id(("fyx-terminal-origin", terminal.id().as_u64()))
+        .gap_0p5()
         .child(
             Icon::new(IconName::Blocks)
                 .size(IconSize::Small)
                 .color(Color::Muted),
         )
+        .children(started_by)
         .tooltip(move |_window, cx| Tooltip::with_meta(title.clone(), None, meta.clone(), cx))
         .into_any_element()
 }

@@ -75,8 +75,9 @@ impl std::fmt::Debug for PseudoOpen {
     }
 }
 
-/// Pseudo-terminals with no tab (shown by an extension panel's `terminal` node). The host keeps
-/// them alive until the extension closes them.
+/// Extension terminals with no tab: pseudo-terminals shown by an extension panel's `terminal`
+/// node, and created terminals when there was no window. The host keeps them alive until the
+/// extension closes them.
 #[derive(Default)]
 struct HeldTerminals(HashMap<TerminalId, Entity<Terminal>>);
 
@@ -133,14 +134,14 @@ pub(crate) fn open(open: PseudoOpen, cx: &mut App) {
         .detach();
 
     if in_panel {
-        cx.default_global::<HeldTerminals>().0.insert(id, terminal);
+        hold(id, terminal, cx);
         return;
     }
     let shown = target.is_some_and(|(window, workspace)| {
         window
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| {
-                    add_tab(workspace, terminal.clone(), title, window, cx)
+                    add_tab(workspace, terminal.clone(), Some(title), window, cx)
                 })
             })
             .is_ok()
@@ -154,7 +155,12 @@ pub(crate) fn open(open: PseudoOpen, cx: &mut App) {
     }
 }
 
-fn target_workspace(cx: &App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
+/// Keeps an extension's terminal that has no tab until the extension closes it.
+pub(crate) fn hold(id: TerminalId, terminal: Entity<Terminal>, cx: &mut App) {
+    cx.default_global::<HeldTerminals>().0.insert(id, terminal);
+}
+
+pub(crate) fn target_workspace(cx: &App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
     let windows = cx.active_window().into_iter().chain(cx.windows());
     windows.into_iter().find_map(|window| {
         let multi_workspace = window.downcast::<MultiWorkspace>()?;
@@ -166,10 +172,10 @@ fn target_workspace(cx: &App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
 }
 
 /// Opens the tab without focus: the extension, not the user, asked for it.
-fn add_tab(
+pub(crate) fn add_tab(
     workspace: &mut Workspace,
     terminal: Entity<Terminal>,
-    title: String,
+    title: Option<String>,
     window: &mut gpui::Window,
     cx: &mut gpui::Context<Workspace>,
 ) {
@@ -182,7 +188,9 @@ fn add_tab(
             window,
             cx,
         );
-        view.set_custom_title(Some(title), cx);
+        if title.is_some() {
+            view.set_custom_title(title, cx);
+        }
         view
     });
     let pane = workspace

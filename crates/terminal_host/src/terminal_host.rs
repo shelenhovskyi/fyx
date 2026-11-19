@@ -1,6 +1,7 @@
 //! Fyx's terminal UI on top of `terminal_ext`: the status on a terminal's tab, the Agent Sessions
-//! panel and pop-up notifications; later the `ui_ext::terminal` host for extensions.
+//! panel and pop-up notifications, and the `ui_ext::terminal` host for extensions.
 
+mod created;
 mod host;
 mod notification;
 mod pseudo;
@@ -81,12 +82,20 @@ fn run(command: host::Command, cx: &mut App) {
                 terminal.update(cx, |terminal, cx| terminal.write_raw_output(&bytes, cx));
             }
         }
-        host::Command::Close(id) => pseudo::close(id, cx),
+        host::Command::OpenCreated(open) => created::open(open, cx),
+        host::Command::Input(id, bytes) => created::input(id, bytes, cx),
+        host::Command::Paste(id, bytes) => created::paste(id, bytes, cx),
+        host::Command::Close(id) => {
+            if !created::cancel(id, cx) {
+                pseudo::close(id, cx);
+            }
+        }
     }
 }
 
-/// For an extension panel's `terminal` node (`fyx:ui` §B.2): the pseudo-terminal `ext` opened
-/// with `in_panel` under `handle`. `None` for anyone else's handle.
+/// For an extension panel's `terminal` node (`fyx:ui` §B.2): the terminal `ext` holds without a
+/// tab under `handle` (a pseudo-terminal opened `in_panel`, or a created one started with no
+/// window). `None` for anyone else's handle.
 pub fn extension_terminal(
     ext: &str,
     handle: ui_ext::terminal::TerminalHandle,
