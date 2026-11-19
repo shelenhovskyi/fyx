@@ -10,11 +10,17 @@
 //! active file, the selection capped. `open` is recorded ([`crate::Harness::opened_files`]);
 //! unlike the host, the harness does not check that the file exists, and it records the focus
 //! the extension asked for.
+//!
+//! Diagnostics: a test sets what the language servers report
+//! ([`crate::Harness::set_diagnostics`]); `diagnostics` answers through
+//! `ui_ext::context::diagnostics_snapshot` (errors first, 500 cap), private and non-worktree
+//! files left out, and while the extension watches, each change queues `diagnostics-changed` with
+//! the files whose entries changed (empty above 200), without the host's 300 ms debounce.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 
-use ui_ext::context::{self as model, EditorContext};
+use ui_ext::context::{self as model, DiagnosticsSnapshot, EditorContext, FileDiagnostics};
 use ui_ext::edit::TextRange;
 use ui_ext::process::FileRef;
 use ui_ext::v0_2::{HostError, HostErrorCode};
@@ -45,6 +51,9 @@ pub(crate) struct FakeContext {
     current: EditorContext,
     pub(crate) events: VecDeque<EditorContext>,
     pub(crate) opened: Vec<OpenedFile>,
+    diagnostics: Vec<FileDiagnostics>,
+    watching_diagnostics: bool,
+    pub(crate) diagnostics_events: VecDeque<Vec<FileRef>>,
 }
 
 impl FakeContext {
@@ -112,6 +121,67 @@ impl FakeContext {
             self.events.push_back(self.current.clone());
         }
         self.watching = on;
+    }
+
+    pub(crate) fn is_watching_diagnostics(&self) -> bool {
+        self.watching_diagnostics
+    }
+
+    pub(crate) fn watch_diagnostics(&mut self, on: bool) {
+        self.watching_diagnostics = on;
+    }
+
+    /// What the language servers report now; while watching, the files whose entries changed
+    /// are queued as one `diagnostics-changed`.
+    pub(crate) fn set_diagnostics(&mut self, files: Vec<FileDiagnostics>) {
+        let entries = |files: &[FileDiagnostics], path: &FileRef| {
+            files
+                .iter()
+                .filter(|file| file.path == *path)
+                .flat_map(|file| file.diagnostics.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut changed: Vec<FileRef> = Vec::new();
+        for file in self.diagnostics.iter().chain(&files) {
+            if !changed.contains(&file.path)
+                && self.in_worktree(&file.path)
+                && !self.is_private(&file.path)
+                && entries(&self.diagnostics, &file.path) != entries(&files, &file.path)
+            {
+                changed.push(file.path.clone());
+            }
+        }
+        self.diagnostics = files;
+        if self.watching_diagnostics && !changed.is_empty() {
+            if changed.len() > model::MAX_CHANGED_DIAGNOSTIC_FILES {
+                changed.clear();
+            }
+            self.diagnostics_events.push_back(changed);
+        }
+    }
+
+    /// `context.diagnostics`: one file (private `not-permitted`, no worktree
+    /// `invalid-argument`), or every worktree file that is not private.
+    pub(crate) fn diagnostics(
+        &self,
+        path: Option<&FileRef>,
+    ) -> Result<DiagnosticsSnapshot, HostError> {
+        if let Some(path) = path {
+            self.root(path)?;
+            if self.is_private(path) {
+                return Err(error(HostErrorCode::NotPermitted, "a private file"));
+            }
+        }
+        let files = self
+            .diagnostics
+            .iter()
+            .filter(|file| match path {
+                Some(path) => file.path == *path,
+                None => self.in_worktree(&file.path) && !self.is_private(&file.path),
+            })
+            .cloned()
+            .collect();
+        Ok(model::diagnostics_snapshot(files))
     }
 
     /// The worktree of `file`: its own, or the only one when it names none.
@@ -244,6 +314,74 @@ mod tests {
         assert!(context.open(file(1, "../a"), None, false).is_err());
         context.open(file(1, "src/a.rs"), None, true).unwrap();
         assert_eq!(context.opened.len(), 1);
+    }
+
+    #[test]
+    fn diagnostics_are_read_and_watched() {
+        use ui_ext::context::{Diagnostic, DiagnosticSeverity};
+        let mut context = fake();
+        context.set_private(1, ".env");
+        let entry = |message: &str| Diagnostic {
+            range: TextRange {
+                start: Position { line: 0, column: 0 },
+                end: Position { line: 0, column: 1 },
+            },
+            severity: DiagnosticSeverity::Warning,
+            message: message.into(),
+            source: None,
+            code: None,
+        };
+        let files = |message: &str| {
+            vec![
+                FileDiagnostics {
+                    path: file(1, "a.rs"),
+                    diagnostics: vec![entry(message)],
+                },
+                FileDiagnostics {
+                    path: file(1, ".env"),
+                    diagnostics: vec![entry("secret")],
+                },
+                FileDiagnostics {
+                    path: file(9, "gone.rs"),
+                    diagnostics: vec![entry("gone")],
+                },
+            ]
+        };
+        context.set_diagnostics(files("one"));
+        assert!(context.diagnostics_events.is_empty(), "not watching");
+        let all = context.diagnostics(None).unwrap();
+        assert_eq!(all.files.len(), 1, "{all:?}");
+        assert_eq!(all.files[0].path, file(1, "a.rs"));
+        assert_eq!(
+            context
+                .diagnostics(Some(&file(1, ".env")))
+                .unwrap_err()
+                .code,
+            HostErrorCode::NotPermitted
+        );
+        assert_eq!(
+            context
+                .diagnostics(Some(&file(9, "gone.rs")))
+                .unwrap_err()
+                .code,
+            HostErrorCode::InvalidArgument
+        );
+        assert!(
+            context
+                .diagnostics(Some(&file(1, "b.rs")))
+                .unwrap()
+                .files
+                .is_empty()
+        );
+
+        context.watch_diagnostics(true);
+        context.set_diagnostics(files("one"));
+        assert!(context.diagnostics_events.is_empty(), "nothing changed");
+        context.set_diagnostics(files("two"));
+        assert_eq!(
+            context.diagnostics_events.pop_front().unwrap(),
+            [file(1, "a.rs")]
+        );
     }
 
     #[test]

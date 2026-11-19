@@ -302,6 +302,12 @@ token_in_env = false
   `mcp.notify(listener, method, params)`, to every connection or to one. A call may stay open
   until the extension answers (needed for a blocking `openDiff`). It is cancelled when its
   connection closes (`io-event::mcp-cancelled`).
+- **Handshake.** The host answers `initialize` itself, so nothing else marks a session ready. After
+  the client's `initialize` and `notifications/initialized` it delivers
+  `io-event::mcp-initialized(mcp-session)` once per connection: the listener, the connection id and
+  the client's `clientInfo` name and version (each cut to 256 bytes, empty when the client sent
+  none). The extension pushes its first context then, with
+  `listeners.notify(listener, some(connection), …)`.
 - **`mcp-streamable-http`** serves the path `/mcp` (Gemini CLI posts there).
 - **Known limitation:** a tool inside a Docker sandbox reaches the host as
   `host.docker.internal`, which the `Host` check refuses. That stays refused: the check is the
@@ -771,6 +777,8 @@ interface listeners {
     record tool-def { name: string, description: string, input-schema: string }
     record mcp-call { call-id: u64, listener: string, connection: u64, tool: string, arguments: string }
     record mcp-error { code: s32, message: string }
+    /// Delivered once per connection after `initialize` and `notifications/initialized`.
+    record mcp-session { listener: string, connection: u64, client-name: string, client-version: string }
     register-tools: func(listener: string, tools: list<tool-def>) -> result<_, host-error>;
     respond: func(call-id: u64, outcome: result<string, mcp-error>) -> result<_, host-error>;
     notify: func(listener: string, connection: option<u64>, method: string, params: string) -> result<_, host-error>;
@@ -845,7 +853,7 @@ interface approvals {
 //   terminal-output(tuple<u64, list<u8>, u64 /* dropped bytes */>), terminal-exited(tuple<u64, option<s32>>),
 //   terminal-created(terminal-info), terminal-closed(u64), terminal-status-changed(terminal-info),
 //   terminal-read-done(tuple<u64, result<string, string>>), terminal-write-done(tuple<u64, result<_, string>>),
-//   mcp-call(mcp-call), mcp-cancelled(u64), listener-message(tuple<string, u64, string>),
+//   mcp-call(mcp-call), mcp-initialized(mcp-session), mcp-cancelled(u64), listener-message(tuple<string, u64, string>),
 //   listener-request(tuple<u64, string, string, string> /* id, listener, path, body */),
 //   relay-request(tuple<u64, string, option<u64>, list<string>, string>),
 //   review-decided(tuple<u64, result<review-outcome, string>>), context-changed(editor-context),

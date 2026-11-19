@@ -837,6 +837,23 @@ impl UiExtensionRegistry {
         }
     }
 
+    /// Records what an extension declares before its load runs its init, unless the id belongs
+    /// to another source (that load fails its claim and must not change the owner's grants).
+    fn declare_before_load(
+        &mut self,
+        extension_id: &str,
+        source: &ExtensionSource,
+        capabilities: Vec<String>,
+    ) {
+        if self
+            .sources
+            .get(extension_id)
+            .is_none_or(|owner| owner == source)
+        {
+            self.consent.declare(extension_id, capabilities);
+        }
+    }
+
     fn release_extension_id(&mut self, extension_id: &str) {
         self.sources.remove(extension_id);
     }
@@ -2082,7 +2099,18 @@ Environment it may pass: {}",
                             continue;
                         }
                     }
-                    let checker = this.update(cx, |this, _| this.consent.checker()).ok();
+                    let checker = this
+                        .update(cx, |this, _| {
+                            // Before the load: the component's init already asks the checker
+                            // (listener tools, the editor context).
+                            this.declare_before_load(
+                                &found.extension_id,
+                                &found.source,
+                                found.capabilities.clone(),
+                            );
+                            this.consent.checker()
+                        })
+                        .ok();
                     let options = LoadOptions {
                         cache: found.cache.clone(),
                         capability_check: checker,
@@ -3309,8 +3337,15 @@ fn attach_to_workspace(
         cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
             .detach();
         if let Some(trust) = project::trusted_worktrees::TrustedWorktrees::try_get_global(cx) {
-            cx.observe(&trust, move |workspace, _, cx| report(workspace, cx))
-                .detach();
+            // The trust store only emits events; it never notifies, so observing it would miss
+            // a project trusted after it opened.
+            cx.subscribe(
+                &trust,
+                move |workspace, _, _: &project::trusted_worktrees::TrustedWorktreesEvent, cx| {
+                    report(workspace, cx)
+                },
+            )
+            .detach();
         }
         cx.on_release(move |_, cx| {
             crate::worktrees::OpenWorktrees::global(cx).remove(workspace_id);
@@ -3903,9 +3938,18 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
     let mut lines = Vec::new();
     let (extension, pushed) = if path.is_dir() {
         // An extension directory: `extension.toml` with a `[fyx_ui]` table names the component.
-        if let Some((_, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
+        if let Some((extension_id, manifest)) = UiManifest::read(fs.as_ref(), &path).await? {
             declared = manifest.consent_items();
             lines = crate::consent_model::consent_items(&manifest);
+            // Before the load: the component's init already asks the checker.
+            let source = ExtensionSource::Directory(reload_path.clone());
+            cx.update(|cx| {
+                if let Some(registry) = UiExtensionRegistry::global(cx) {
+                    registry.update(cx, |registry, _| {
+                        registry.declare_before_load(&extension_id, &source, declared.clone())
+                    });
+                }
+            });
         }
         UiExtension::load_from_dir_with_options(&path, options, fs.clone(), cx)
             .await?

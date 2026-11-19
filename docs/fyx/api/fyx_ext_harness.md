@@ -101,6 +101,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::set_agent_reviews` | method | The host's open agent reviews, which `agent-observe.start` sends first as a snapshot (with this extension's opaque ids, cut as the host cuts them). `None`: there are no agent reviews here, so `start` is `unavailable`. |
 | `Harness::set_bracketed_paste` | method | Whether a profile terminal's program has bracketed paste on (it starts on); `paste` is `unavailable` while it is off (design.md B.11). |
 | `Harness::set_broker` | method | Installs the permission broker and network for `network:fetch`; see `TestBroker`. |
+| `Harness::set_diagnostics` | method | What the language servers report (0.4 `context.diagnostics`); while the extension watches, `Harness::deliver_io` delivers `diagnostics-changed` with the files whose entries changed. |
 | `Harness::set_edit_answer` | method | How the editor answers `workspace:edit` edits the user allowed; without one they apply. |
 | `Harness::set_editor_context` | method | What the editor shows now; while the extension watches, `Harness::deliver_io` delivers it, filtered as the host filters it, as `context-changed`. |
 | `Harness::set_listener_granted` | method | Grants or revokes `network:listen#<name>`. Revoking closes the listener: its connections end, and `Harness::deliver_io` delivers `mcp-cancelled` for their open calls. |
@@ -119,6 +120,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::type_into_terminal` | method | Keys or text the user types into a pseudo-terminal; `Harness::deliver_io` hands them to the extension as `terminal-input`. |
 | `Harness::ui_api_version` | method |  |
 | `Harness::watching_context` | method | Whether the extension watches the editor context. |
+| `Harness::watching_diagnostics` | method | Whether the extension watches diagnostics. |
 | `Harness::with_network_domains` | method | The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them; `Harness::load_package` reads them from the manifest. |
 | `Harness::with_package_root` | method | Checks asset images against the extension folder `dir`, as `Harness::load_package` does, for a harness loaded from bytes. |
 | `Harness::with_processes` | method | The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env` declare them; `Harness::load_package` reads them from the manifest. |

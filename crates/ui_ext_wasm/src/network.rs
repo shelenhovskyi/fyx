@@ -923,6 +923,7 @@ pub(crate) struct Revocable {
     pub(crate) listeners: std::sync::Weak<crate::listeners::ListenersHandle>,
     pub(crate) context: std::sync::Weak<crate::editor_context::ContextHandle>,
     pub(crate) review: std::sync::Weak<crate::proposals::ReviewHandle>,
+    pub(crate) relay: std::sync::Weak<crate::relay::RelayHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
@@ -1063,6 +1064,12 @@ impl NetworkHandle {
                         ui_ext::review::CAPABILITY_REVIEW_PROPOSE => {
                             if let Some(review) = revocable.review.upgrade() {
                                 review.close_all();
+                            }
+                        }
+                        // §B.9: unanswered requests fail open (their replies are dropped).
+                        ui_ext::integration::CAPABILITY_RELAY_HOOKS => {
+                            if let Some(relay) = revocable.relay.upgrade() {
+                                relay.revoke_all();
                             }
                         }
                         ui_ext::terminal::CAPABILITY_OBSERVE => {

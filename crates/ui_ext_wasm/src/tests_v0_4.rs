@@ -290,6 +290,8 @@ struct Setup {
     context: Option<Arc<dyn ui_ext::context::ContextHost>>,
     review: Option<Arc<dyn ui_ext::review::ReviewHost>>,
     diagnostics: Option<Arc<dyn ui_ext::context::DiagnosticsSource>>,
+    relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
+    relay_binary: Option<PathBuf>,
 }
 
 impl Default for Setup {
@@ -308,6 +310,8 @@ impl Default for Setup {
             context: None,
             review: None,
             diagnostics: None,
+            relay_channels: Vec::new(),
+            relay_binary: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -386,6 +390,8 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         context: setup.context.clone(),
         review: setup.review.clone(),
         diagnostics_source: setup.diagnostics.clone(),
+        relay_channels: Some(setup.relay_channels.clone()),
+        relay_binary: setup.relay_binary.clone(),
         workspace: setup
             .workspace
             .clone()
@@ -655,7 +661,7 @@ async fn test_v0_4_without_a_host_terminals_are_unavailable(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext) {
+async fn test_v0_4_terminal_nodes(cx: &mut TestAppContext) {
     let extension = load(&Setup::default(), cx).await.unwrap();
     let reply = extension
         .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, "node".into()))
@@ -670,14 +676,6 @@ async fn test_v0_4_terminal_nodes_and_unbuilt_interfaces(cx: &mut TestAppContext
     }
     // T3 is not grantable yet.
     assert_eq!(command(&extension, "read 1").await, "not-permitted");
-    let error = extension
-        .handle_event_v0_2(SURFACE, UiEvent::InputChanged(1, "relay".into()))
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("not implemented by this build"),
-        "{error:#}"
-    );
 }
 
 /// Runs `command` from a click, a gesture.
@@ -2294,4 +2292,218 @@ async fn test_v0_4_diagnostics_rules_and_reloads(cx: &mut TestAppContext) {
     assert_eq!(source.calls()[2], "watch probe-v0-4 false");
     assert!(source.sink.lock().unwrap().is_none());
     std::fs::remove_dir_all(&root).ok();
+}
+
+fn relay_setup(broker: &Arc<GrantingBroker>) -> Setup {
+    let mut setup = Setup {
+        broker: Some(broker.clone()),
+        relay_channels: vec![ui_ext::integration::RelayChannelSpec {
+            name: "pre-tool".into(),
+            timeout_ms: 30_000,
+            on_failure: ui_ext::integration::OnFailure { exit: 2 },
+            reason: "checks tool calls".into(),
+        }],
+        relay_binary: Some(PathBuf::from("bin/fyx-relay")),
+        env: vec![("PROBE_HOOK", "${relay} --channel probe-v0-4/pre-tool")],
+        ..Setup::default()
+    };
+    setup
+        .capabilities
+        .push(ui_ext::integration::CAPABILITY_RELAY_HOOKS);
+    setup
+}
+
+/// The answers a [`ui_ext::integration::RelayReply`] got, and how many replies were dropped
+/// (called or not).
+#[derive(Clone, Default)]
+struct Replies {
+    answers: Arc<Mutex<Vec<ui_ext::integration::RelayAnswer>>>,
+    dropped: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct CountDrop(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for CountDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Replies {
+    fn reply(&self) -> ui_ext::integration::RelayReply {
+        let answers = self.answers.clone();
+        let guard = CountDrop(self.dropped.clone());
+        Box::new(move |answer| {
+            let _guard = guard;
+            answers.lock().unwrap().push(answer);
+        })
+    }
+
+    fn dropped(&self) -> usize {
+        self.dropped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn answers(&self) -> Vec<(u8, String, String)> {
+        self.answers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|answer| (answer.exit, answer.stdout.clone(), answer.stderr.clone()))
+            .collect()
+    }
+}
+
+/// §B.9: a hook's request on a declared, granted channel reaches `handle-io` as
+/// `relay-request` and `relay.respond` answers it once; an answer over 1 MiB leaves it open;
+/// revoking `relay:hooks` drops the unanswered replies (the endpoint answers `on_failure`) and
+/// refuses new requests and answers; `${relay}` fills a created terminal's env.
+#[gpui::test]
+async fn test_v0_4_relay(cx: &mut TestAppContext) {
+    let broker = Arc::new(GrantingBroker::default());
+    let setup = relay_setup(&broker);
+    let extension = load(&setup, cx).await.unwrap();
+    assert!(extension.relay_granted());
+    assert_eq!(extension.relay_channels()[0].on_failure.exit, 2);
+    let mut events = extension.take_io_events().unwrap();
+    let replies = Replies::default();
+
+    let first = extension
+        .relay_request(
+            "pre-tool",
+            Some(terminal::TerminalHandle(4)),
+            vec!["--event".into(), "pre".into()],
+            r#"{"tool":"edit"}"#.into(),
+            replies.reply(),
+        )
+        .unwrap();
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        format!(r#"relay {first} pre-tool 4 --event,pre {{"tool":"edit"}}"#)
+    );
+    assert_eq!(
+        command(&extension, &format!("relay-respond {first} 2 deny why")).await,
+        "done"
+    );
+    assert_eq!(replies.answers(), [(2, "deny".into(), "why".into())]);
+    assert_eq!(replies.dropped(), 1);
+    assert_eq!(
+        command(&extension, &format!("relay-respond {first} 0 - -")).await,
+        "invalid-argument",
+        "answered once"
+    );
+
+    let second = extension
+        .relay_request("pre-tool", None, Vec::new(), String::new(), replies.reply())
+        .unwrap();
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        format!("relay {second} pre-tool - - ")
+    );
+    assert_eq!(
+        command(&extension, &format!("relay-long {second}")).await,
+        "limit-exceeded"
+    );
+    let unknown = extension
+        .relay_request(
+            "post-tool",
+            None,
+            Vec::new(),
+            String::new(),
+            replies.reply(),
+        )
+        .unwrap_err();
+    assert!(unknown.contains("no relay channel"), "{unknown}");
+    assert_eq!(replies.dropped(), 2);
+
+    broker.set(
+        ui_ext::integration::CAPABILITY_RELAY_HOOKS,
+        PermissionState::Denied,
+    );
+    wait_for(cx, 10_000, || replies.dropped() == 3);
+    assert_eq!(replies.answers().len(), 1);
+    assert!(!extension.relay_granted());
+    assert_eq!(
+        command(&extension, &format!("relay-respond {second} 0 - -")).await,
+        "denied"
+    );
+    let refused = extension
+        .relay_request("pre-tool", None, Vec::new(), String::new(), replies.reply())
+        .unwrap_err();
+    assert!(refused.contains("not granted"), "{refused}");
+    assert_eq!(replies.dropped(), 4);
+
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "1"
+    );
+    let created = setup.host.created.lock().unwrap().clone();
+    assert_eq!(
+        created[0].env,
+        [(
+            "PROBE_HOOK".to_string(),
+            "bin/fyx-relay --channel probe-v0-4/pre-tool".to_string()
+        )]
+    );
+}
+
+/// §B.9: without `relay:hooks` there are no channels and `respond` is `not-permitted`; without
+/// the binary a `${relay}` value is left out; the 9th unanswered request is refused; an
+/// instance that goes (reload, unload) drops its unanswered replies.
+#[gpui::test]
+async fn test_v0_4_relay_rules_and_reloads(cx: &mut TestAppContext) {
+    let broker = Arc::new(GrantingBroker::default());
+    let replies = Replies::default();
+    let undeclared = Setup {
+        capabilities: vec![
+            "ui:panel",
+            terminal::CAPABILITY_CREATE,
+            terminal::CAPABILITY_ENV,
+        ],
+        relay_binary: None,
+        ..relay_setup(&broker)
+    };
+    let extension = load(&undeclared, cx).await.unwrap();
+    assert!(extension.relay_channels().is_empty());
+    assert!(!extension.relay_granted());
+    assert_eq!(
+        command(&extension, "relay-respond 1 0 - -").await,
+        "not-permitted"
+    );
+    assert!(
+        extension
+            .relay_request("pre-tool", None, Vec::new(), String::new(), replies.reply())
+            .is_err()
+    );
+    assert_eq!(
+        command(&extension, &format!("create {} hi", shell())).await,
+        "1"
+    );
+    assert!(undeclared.host.created.lock().unwrap()[0].env.is_empty());
+    drop(extension);
+
+    let setup = relay_setup(&broker);
+    let old = load(&setup, cx).await.unwrap();
+    for _ in 0..ui_ext::integration::MAX_RELAY_IN_FLIGHT {
+        old.relay_request("pre-tool", None, Vec::new(), String::new(), replies.reply())
+            .unwrap();
+    }
+    let ninth = old
+        .relay_request("pre-tool", None, Vec::new(), String::new(), replies.reply())
+        .unwrap_err();
+    assert!(ninth.contains("already unanswered"), "{ninth}");
+    assert_eq!(replies.dropped(), 2);
+    let new = load(&setup, cx).await.unwrap();
+    let kept = new
+        .relay_request("pre-tool", None, Vec::new(), String::new(), replies.reply())
+        .unwrap();
+    drop(old);
+    wait_for(cx, 10_000, || {
+        replies.dropped() == 2 + ui_ext::integration::MAX_RELAY_IN_FLIGHT
+    });
+    assert_eq!(
+        command(&new, &format!("relay-respond {kept} 0 ok -")).await,
+        "done"
+    );
+    assert_eq!(replies.answers(), [(0, "ok".into(), String::new())]);
+    assert!(replies.answers.lock().unwrap().len() == 1);
 }
