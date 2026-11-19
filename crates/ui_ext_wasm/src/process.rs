@@ -201,6 +201,12 @@ pub fn resolve_cwd(
             "{relative} is not a directory inside the worktree"
         )));
     }
+    // §C.6: account dirs are protected; nothing an extension starts runs in one.
+    if crate::accounts::in_account_dir(&dir) {
+        return Err(SpawnError::Io(format!(
+            "{relative} is in an account profile's dir"
+        )));
+    }
     Ok((dir, worktree))
 }
 

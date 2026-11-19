@@ -233,7 +233,7 @@ impl ContextHandle {
             Some(path) => {
                 path.check()?;
                 let (worktree, full) = resolve(&roots, &path)?;
-                if source.is_private(&full) {
+                if hidden(&**source, &full) {
                     return Err(error(HostErrorCode::NotPermitted, "a private file"));
                 }
                 let path = FileRef {
@@ -251,7 +251,7 @@ impl ContextHandle {
                         return false;
                     };
                     file.path.worktree = Some(worktree);
-                    !source.is_private(&full)
+                    !hidden(&**source, &full)
                 });
                 files
             }
@@ -350,7 +350,7 @@ impl ContextHandle {
             )
         })?;
         let full = self.absolute(&file_ref)?;
-        if host.is_private(&full) {
+        if private(&**host, &full) {
             return Err(error(HostErrorCode::NotPermitted, "a private file"));
         }
         Ok(file_ref)
@@ -361,7 +361,7 @@ impl ContextHandle {
         let host = self.host()?;
         path.check()?;
         let absolute = self.absolute(path)?;
-        if host.is_private(&absolute) {
+        if private(&**host, &absolute) {
             return Err(error(HostErrorCode::NotPermitted, "a private file"));
         }
         Ok(absolute.to_string_lossy().into_owned())
@@ -420,6 +420,17 @@ fn worktree_file(roots: &[(u64, PathBuf)], path: &FileRef) -> Option<(u64, PathB
 }
 
 /// [`absolute`], with the worktree that holds the file.
+/// A file the extension may not see through the editor context: private, or in an account
+/// profile's dir (§C.6).
+fn private(host: &dyn ContextHost, full: &std::path::Path) -> bool {
+    host.is_private(full) || crate::accounts::in_account_dir(full)
+}
+
+/// [`private`] for diagnostics.
+fn hidden(source: &dyn DiagnosticsSource, full: &std::path::Path) -> bool {
+    source.is_private(full) || crate::accounts::in_account_dir(full)
+}
+
 fn resolve(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<(u64, PathBuf), HostError> {
     let join = |root: &PathBuf| {
         path.path
@@ -475,7 +486,7 @@ impl PrivacyFilter {
             context.trusted = None;
         }
         let private = context.active.as_ref().is_none_or(|file| {
-            absolute(&roots, file).map_or(true, |full| self.host.is_private(&full))
+            absolute(&roots, file).map_or(true, |full| private(&*self.host, &full))
         });
         if let Some((_, text)) = &mut context.selection {
             if private {
@@ -559,7 +570,7 @@ impl ChangedFilter {
                 worktree: Some(worktree),
                 path,
             };
-            if !self.source.is_private(&full) && !files.contains(&file) {
+            if !hidden(&*self.source, &full) && !files.contains(&file) {
                 files.push(file);
             }
         }
