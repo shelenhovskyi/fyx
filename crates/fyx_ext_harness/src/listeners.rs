@@ -23,15 +23,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Value, json};
-use ui_ext::integration::{ListenerProtocol, ListenerSpec};
+pub use ui_ext::integration::{ListenerEvent, MAX_TOOLS, McpCall, McpError, ToolDef};
+use ui_ext::integration::{ListenerProtocol, ListenerSpec, is_tool_name};
 use ui_ext::v0_2::{HostError, HostErrorCode};
 
 /// Open connections per listener.
 pub const MAX_CONNECTIONS: usize = 16;
 /// A message, a body, an answer or a tool's schema.
 pub const MAX_MESSAGE_BYTES: usize = 4 << 20;
-/// Tools per listener.
-pub const MAX_TOOLS: usize = 64;
 /// Supported MCP revisions, newest first; `initialize` echoes the client's when it is one.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_NOTIFICATION_METHOD_BYTES: usize = 128;
@@ -43,51 +42,6 @@ const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const PARSE_ERROR: i32 = -32700;
-
-/// `listeners.tool-def`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    /// A JSON schema object, as text.
-    pub input_schema: String,
-}
-
-/// `io-event::mcp-call`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpCall {
-    pub call_id: u64,
-    pub listener: String,
-    pub connection: u64,
-    pub tool: String,
-    /// The call's `arguments` as JSON text, `{}` when absent.
-    pub arguments: String,
-}
-
-/// `listeners.mcp-error`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpError {
-    pub code: i32,
-    pub message: String,
-}
-
-/// What a listener's clients send that the extension handles, as `io-event`s.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ListenerEvent {
-    McpCall(McpCall),
-    McpCancelled(u64),
-    Message {
-        listener: String,
-        connection: u64,
-        text: String,
-    },
-    Request {
-        id: u64,
-        listener: String,
-        path: String,
-        body: String,
-    },
-}
 
 fn error(code: HostErrorCode, message: impl Into<String>) -> HostError {
     HostError {
@@ -105,14 +59,6 @@ fn is_mcp(protocol: ListenerProtocol) -> bool {
         protocol,
         ListenerProtocol::McpWebsocket | ListenerProtocol::McpStreamableHttp
     )
-}
-
-/// A tool name: `[A-Za-z0-9_-]{1,64}`.
-fn is_tool_name(name: &str) -> bool {
-    (1..=64).contains(&name.len())
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn rpc_result(id: &Value, result: Value) -> String {

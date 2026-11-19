@@ -1,8 +1,8 @@
 //! The staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
 //! `v0_3` runs them (this file started as a copy of it), plus `terminals` on the fakes of
-//! [`crate::terminals`] (plan 5.10) and `listeners` on those of [`crate::listeners`] (plan
-//! 5.14). The other 0.4 interfaces (`relay`, `review`, `context`, `approvals`) trap when called
-//! ([`define_unlinked_as_traps`]) until the rest of plan 5.14.
+//! [`crate::terminals`] (plan 5.10), `listeners` on those of [`crate::listeners`] and
+//! `context` on [`crate::context`] (plan 5.14). The other 0.4 interfaces (`relay`, `review`,
+//! `approvals`) trap when called ([`define_unlinked_as_traps`]) until the rest of plan 5.14.
 //!
 //! A `terminal` node becomes `ui_ext::v0_2::Props::Terminal`; [`terminal_node_handle`] reads its
 //! handle.
@@ -24,10 +24,10 @@ pub(crate) mod bindings {
 
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
-    agent_observe as wit_observe, decorations as wit_decorations, host as wit_host,
-    images as wit_images, io as wit_io, listeners as wit_listeners, network as wit_network,
-    notifications as wit_notifications, permissions as wit_permissions, process as wit_process,
-    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
+    agent_observe as wit_observe, context as wit_context, decorations as wit_decorations,
+    host as wit_host, images as wit_images, io as wit_io, listeners as wit_listeners,
+    network as wit_network, notifications as wit_notifications, permissions as wit_permissions,
+    process as wit_process, terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 fn result(
@@ -59,6 +59,7 @@ pub(crate) fn add_to_linker(
     wit_decorations::add_to_linker::<_, State>(linker, |state| state)?;
     wit_terminals::add_to_linker::<_, State>(linker, |state| state)?;
     wit_listeners::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_context::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
@@ -402,9 +403,12 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                 wit_permission_state(state),
             )))
         }
-        // W2c's `IoEvent::Listener` (plan 5.11; not on every branch yet). The harness delivers listener events itself (`HostIo::Listener`).
-        #[allow(unreachable_patterns)]
-        _ => None,
+        net::IoEvent::Listener(event) => Some(listener_io_event(event)),
+        net::IoEvent::Context(context) => {
+            Some(wit_io::IoEvent::ContextChanged(wit_editor_context(context)))
+        }
+        // `review` traps here until its part of plan 5.14.
+        net::IoEvent::ReviewDecided(..) => None,
     }
 }
 
@@ -508,9 +512,10 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.4 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 12] = [
+const LINKED_INTERFACES: [&str; 13] = [
     "terminals",
     "listeners",
+    "context",
     "decorations",
     "permissions",
     "types",
@@ -1280,7 +1285,7 @@ fn t3_unavailable(what: &str) -> wit_host::HostError {
 }
 
 /// A listener event for the `handle-io` export.
-pub(crate) fn listener_io_event(event: crate::listeners::ListenerEvent) -> wit_io::IoEvent {
+fn listener_io_event(event: crate::listeners::ListenerEvent) -> wit_io::IoEvent {
     use crate::listeners::ListenerEvent;
     match event {
         ListenerEvent::McpCall(call) => wit_io::IoEvent::McpCall(wit_listeners::McpCall {
@@ -1378,5 +1383,125 @@ impl wit_listeners::Host for State {
     ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
         self.count_lifted_text(body.len())?;
         result(self.listeners.reply(request_id, status, body))
+    }
+}
+
+fn wit_position(position: ui_ext::edit::Position) -> wit::Position {
+    wit::Position {
+        line: position.line,
+        column: position.column,
+    }
+}
+
+fn wit_text_range(range: ui_ext::edit::TextRange) -> wit::TextRange {
+    wit::TextRange {
+        start: wit_position(range.start),
+        end: wit_position(range.end),
+    }
+}
+
+fn wit_editor_context(context: ui_ext::context::EditorContext) -> wit_context::EditorContext {
+    wit_context::EditorContext {
+        active: context.active.map(wit_file_ref),
+        open: context.open.into_iter().map(wit_file_ref).collect(),
+        selection: context
+            .selection
+            .map(|(range, text)| (wit_text_range(range), text)),
+        trusted: context.trusted,
+    }
+}
+
+fn model_file_ref(file: wit::FileRef) -> ui_ext::process::FileRef {
+    ui_ext::process::FileRef {
+        worktree: file.worktree,
+        path: file.path,
+    }
+}
+
+impl State {
+    /// A T1 capability the manifest must declare.
+    fn permit(&self, capability: &str) -> Result<(), wit_host::HostError> {
+        if self
+            .api
+            .capabilities()
+            .iter()
+            .any(|name| name == capability)
+        {
+            return Ok(());
+        }
+        Err(model::HostError {
+            code: model::HostErrorCode::NotPermitted,
+            message: format!("{capability:?} is not in the manifest"),
+        }
+        .into())
+    }
+}
+
+/// `context`, on [`crate::context::FakeContext`]: `watch`, `to-file-ref` and `absolute-path`
+/// need `context:editor`, `open` needs `workspace:open`.
+impl wit_context::Host for State {
+    fn watch(&mut self, on: bool) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        if on && let Err(error) = self.permit(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
+            return Ok(Err(error));
+        }
+        self.context.watch(on);
+        Ok(Ok(()))
+    }
+
+    fn open(
+        &mut self,
+        path: wit::FileRef,
+        range: Option<wit::TextRange>,
+        focus: bool,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(path.path.len())?;
+        if let Err(error) = self.permit(ui_ext::context::CAPABILITY_WORKSPACE_OPEN) {
+            return Ok(Err(error));
+        }
+        let position = |position: wit::Position| ui_ext::edit::Position {
+            line: position.line,
+            column: position.column,
+        };
+        let range = range.map(|range| ui_ext::edit::TextRange {
+            start: position(range.start),
+            end: position(range.end),
+        });
+        result(self.context.open(model_file_ref(path), range, focus))
+    }
+
+    fn to_file_ref(
+        &mut self,
+        absolute: String,
+    ) -> wasmtime::Result<Result<wit::FileRef, wit_host::HostError>> {
+        self.count_lifted_text(absolute.len())?;
+        if let Err(error) = self.permit(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
+            return Ok(Err(error));
+        }
+        if absolute.len() > ui_ext::context::MAX_TOOL_PATH_BYTES {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::InvalidArgument,
+                message: "the path is too long".into(),
+            }
+            .into()));
+        }
+        Ok(self
+            .context
+            .to_file_ref(&absolute)
+            .map(wit_file_ref)
+            .map_err(Into::into))
+    }
+
+    fn absolute_path(
+        &mut self,
+        path: wit::FileRef,
+    ) -> wasmtime::Result<Result<String, wit_host::HostError>> {
+        self.count_lifted_text(path.path.len())?;
+        if let Err(error) = self.permit(ui_ext::context::CAPABILITY_CONTEXT_EDITOR) {
+            return Ok(Err(error));
+        }
+        Ok(self
+            .context
+            .absolute_path(&model_file_ref(path))
+            .map_err(Into::into))
     }
 }
