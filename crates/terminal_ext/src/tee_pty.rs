@@ -13,7 +13,7 @@ use crate::inbox::{NOTIFY_RATE, QUERY_REPLY_RATE, RateLimiter, SHELL_RATE, STATE
 use crate::osc::{self, OscEvent};
 use crate::osc_scan::OscScanner;
 use crate::program_status;
-use crate::terminal_id::{Shared, TerminalExt, lock};
+use crate::terminal_id::{Shared, Tap, TerminalExt, lock};
 
 /// Called on the IO thread with every OSC payload the pty writes. Keep it cheap.
 pub type OscObserver = Box<dyn FnMut(&[u8]) + Send>;
@@ -47,6 +47,7 @@ pub fn tee_with<P: EventedPty>(pty: P, observer: OscObserver) -> (TeePty<P>, Osc
             replies: replies.clone(),
             shared: None,
             limits: Limits::default(),
+            exit_code: None,
         },
         OscReplies { replies },
     )
@@ -77,6 +78,8 @@ pub struct TeePty<P> {
     replies: Arc<OnceLock<ReplyFn>>,
     shared: Option<Arc<Shared>>,
     limits: Limits,
+    /// The program's exit code, for a created terminal's tap when the pty closes.
+    exit_code: Option<i32>,
 }
 
 /// Rate limits, owned by the IO thread.
@@ -121,6 +124,14 @@ impl<P> TeePty<P> {
 impl<P: EventedPty> Read for TeePty<P> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.reader().read(buf)?;
+        // A created terminal's extension reads the raw output, from the first byte (§B.3).
+        if let Some(Tap(tap)) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.raw_tap.as_ref())
+        {
+            tap.output(&buf[..read]);
+        }
         let Self {
             scanner,
             observer,
@@ -192,10 +203,24 @@ impl<P: EventedPty> EventedReadWrite for TeePty<P> {
 impl<P: EventedPty> EventedPty for TeePty<P> {
     fn next_child_event(&mut self) -> Option<ChildEvent> {
         let event = self.inner.next_child_event();
-        if let (Some(ChildEvent::Exited(_)), Some(shared)) = (&event, &self.shared) {
+        if let (Some(ChildEvent::Exited(status)), Some(shared)) = (&event, &self.shared) {
+            self.exit_code = status.and_then(|status| status.code());
             lock(&shared.status).drop_live_records();
         }
         event
+    }
+}
+
+impl<P> Drop for TeePty<P> {
+    fn drop(&mut self) {
+        // The event loop drains the output after the exit, then drops the pty: nothing follows.
+        if let Some(Tap(tap)) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.raw_tap.as_ref())
+        {
+            tap.finished(self.exit_code);
+        }
     }
 }
 
@@ -248,6 +273,86 @@ mod tests {
         fn next_child_event(&mut self) -> Option<ChildEvent> {
             None
         }
+    }
+
+    /// A [`FakePty`] whose program has exited with code 3.
+    struct ExitedPty(FakePty);
+
+    impl EventedReadWrite for ExitedPty {
+        type Reader = Cursor<Vec<u8>>;
+        type Writer = Vec<u8>;
+
+        unsafe fn register(&mut self, _: &Arc<Poller>, _: Event, _: PollMode) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn reregister(&mut self, _: &Arc<Poller>, _: Event, _: PollMode) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&mut self, _: &Arc<Poller>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn reader(&mut self) -> &mut Self::Reader {
+            self.0.reader()
+        }
+
+        fn writer(&mut self) -> &mut Self::Writer {
+            self.0.writer()
+        }
+    }
+
+    impl EventedPty for ExitedPty {
+        fn next_child_event(&mut self) -> Option<ChildEvent> {
+            #[cfg(unix)]
+            let status = std::os::unix::process::ExitStatusExt::from_raw(3 << 8);
+            #[cfg(windows)]
+            let status = std::os::windows::process::ExitStatusExt::from_raw(3);
+            Some(ChildEvent::Exited(Some(status)))
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        output: Mutex<Vec<u8>>,
+        finished: Mutex<Vec<Option<i32>>>,
+    }
+
+    impl crate::RawTap for Recorder {
+        fn output(&self, bytes: &[u8]) {
+            self.output.lock().unwrap().extend_from_slice(bytes);
+        }
+
+        fn finished(&self, code: Option<i32>) {
+            self.finished.lock().unwrap().push(code);
+        }
+    }
+
+    /// §B.3: the extension sees every byte, OSC included, and the exit code when the pty closes.
+    #[test]
+    fn a_created_terminals_tap_sees_raw_output_and_the_exit_code() {
+        let output = b"\x1b]52;c;aGk=\x07hi\x1b]9;4;1;30\x07";
+        let tap = Arc::new(Recorder::default());
+        let ext = TerminalExt::created("acme", tap.clone());
+        let (mut pty, _replies) = tee(
+            ExitedPty(FakePty {
+                output: Cursor::new(output.to_vec()),
+                input: Vec::new(),
+            }),
+            &ext,
+        );
+        let mut read = Vec::new();
+        pty.read_to_end(&mut read).unwrap();
+        assert_eq!(read, output);
+        assert_eq!(*tap.output.lock().unwrap(), output);
+        assert!(matches!(
+            pty.next_child_event(),
+            Some(ChildEvent::Exited(Some(_)))
+        ));
+        assert!(tap.finished.lock().unwrap().is_empty());
+        drop(pty);
+        assert_eq!(*tap.finished.lock().unwrap(), [Some(3)]);
     }
 
     #[test]
