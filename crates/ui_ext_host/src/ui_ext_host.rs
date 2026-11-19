@@ -49,7 +49,6 @@ pub mod review_bridge;
 mod store_actions;
 mod surface;
 pub mod t3_cards;
-mod unified_diff;
 mod view;
 mod workspace_edit;
 mod worktrees;

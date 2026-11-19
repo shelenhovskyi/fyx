@@ -179,6 +179,11 @@ async fn test_open_buffer_and_watch(cx: &mut TestAppContext) {
     };
     host.watch("ext", Some(sink));
     cx.run_until_parked();
+    assert_eq!(
+        heard.lock().unwrap().drain(..).collect::<Vec<_>>(),
+        [Vec::<FileRef>::new()],
+        "the end of the first fill: anything may have changed"
+    );
     let (cache, open) = source(cx);
     let buffer = project
         .update(cx, |project, cx| {

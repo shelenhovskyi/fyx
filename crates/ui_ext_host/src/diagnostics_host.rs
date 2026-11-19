@@ -3,11 +3,13 @@
 //!
 //! What the projects' language servers report is kept in a cache that extension threads read
 //! without the main thread. The cache starts filling the first time an extension asks (or
-//! watches) and then follows every registered project: each `DiagnosticsUpdated` re-reads the
-//! named files, and the end of a server's check re-reads every file (Zed sends no update for a
-//! file whose errors and warnings stay at zero, so information and hints catch up then). An open buffer is read as it is now (its entries follow edits); a closed file's
-//! entries come from the language-server store (a `fyx:` accessor in `LspStore`) with their
-//! UTF-16 columns converted to UTF-8 bytes against the file on disk.
+//! watches); that first answer does not wait (it may be empty), and the end of the fill sends the
+//! watchers an empty change list. It then follows every registered project: each
+//! `DiagnosticsUpdated` re-reads the named files, and the end of a server's check re-reads every
+//! file (Zed sends no update for a file whose errors and warnings stay at zero, so information
+//! and hints catch up then). An open buffer is read as it is now (its entries follow edits); a
+//! closed file's entries come from the language-server store (`fyx:` accessors in `LspStore`)
+//! with their UTF-16 columns converted to UTF-8 bytes against the file on disk.
 //!
 //! Only primary entries are reported: Zed adds a server's related information as secondary
 //! entries of the same group, which are not diagnostics of their own. `source` is the
@@ -43,8 +45,6 @@ use ui_ext::{
 
 use crate::{main_thread::MainThread, worktrees::OpenWorktrees};
 
-/// How long an extension thread waits for the first fill of the cache.
-const FILL_TIMEOUT: Duration = Duration::from_secs(10);
 const PRIVATE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One file's entries, and which project reported them.
@@ -131,40 +131,34 @@ struct ExtensionDiagnostics {
 }
 
 impl ExtensionDiagnostics {
-    /// Starts following the projects and waits for the first fill (off the main thread only).
-    fn ensure_active(&self) {
-        if self.active.load(Ordering::Acquire) {
-            return;
+    /// Starts following the projects, without waiting: the first fill ends with an empty
+    /// change list to the watchers.
+    fn start(&self) {
+        if !self.active.load(Ordering::Acquire) {
+            // The feed keeps the fill running.
+            self.main.post(|cx| {
+                let _fill = activate(cx);
+            });
         }
-        self.main.call(FILL_TIMEOUT, |cx, reply| {
-            let fill = activate(cx);
-            cx.spawn(async move |_| {
-                fill.await;
-                reply.send(());
-            })
-            .detach();
-        });
     }
 }
 
 impl DiagnosticsSource for ExtensionDiagnostics {
     fn diagnostics(&self, _extension_id: &str, path: Option<&FileRef>) -> Vec<FileDiagnostics> {
-        self.ensure_active();
+        // What is there now; until the first fill that is nothing.
+        self.start();
         read_cache(&self.cache, &self.open, &self.watcher.key, path)
     }
 
     fn watch(&self, _extension_id: &str, sink: Option<DiagnosticsSink>) {
-        let start = sink.is_some();
+        let watching = sink.is_some();
         *self
             .watcher
             .sink
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = sink;
-        if start && !self.active.load(Ordering::Acquire) {
-            // The feed keeps the fill running.
-            self.main.post(|cx| {
-                let _fill = activate(cx);
-            });
+        if watching {
+            self.start();
         }
     }
 
@@ -257,7 +251,8 @@ pub(crate) fn watch_project(project: &Entity<Project>, cx: &mut App) {
     }
 }
 
-/// Starts following every project; the returned task ends with the first fill.
+/// Starts following every project; the returned task ends with the first fill, which tells the
+/// watchers that anything may have changed.
 fn activate(cx: &mut App) -> Shared<Task<()>> {
     let feed = cx.default_global::<Feed>();
     if let Some(fill) = &feed.fill {
@@ -277,8 +272,10 @@ fn activate(cx: &mut App) -> Shared<Task<()>> {
         })
         .collect::<Vec<_>>();
     let fill = cx
-        .foreground_executor()
-        .spawn(futures::future::join_all(reads).map(|_| ()))
+        .spawn(async move |cx| {
+            futures::future::join_all(reads).await;
+            cx.update(|cx| notify(None, cx));
+        })
         .shared();
     cx.default_global::<Feed>().fill = Some(fill.clone());
     fill

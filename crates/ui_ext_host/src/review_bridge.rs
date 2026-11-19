@@ -7,7 +7,8 @@
 //! auto-accepted (`auto_accept` patterns and "accept all in turn" do not apply), and a Deny rule
 //! rejects it at once. The target is checked as a `workspace:edit` target is (trust, links,
 //! exclusions, `private_files` with the user's own patterns, `fyx_guard`, size); a diff is applied
-//! strictly to the file's current text ([`crate::unified_diff`]).
+//! to the file's current text, unsaved edits included, by W5's `agent_review::apply_unified_diff`
+//! (hunks may move, no fuzz).
 //!
 //! With `apply`, the accepted text replaces the buffer's as one undo step, never saved, and is
 //! refused when the buffer changed during the review; without it nothing is touched. `withdraw`
@@ -185,7 +186,7 @@ async fn open_review(
     let old_text = buffer.read_with(cx, |buffer, _| buffer.text());
     let new_text = match proposal.change {
         Proposed::NewContent(text) => text,
-        Proposed::UnifiedDiff(diff) => crate::unified_diff::apply(&old_text, &diff)
+        Proposed::UnifiedDiff(diff) => agent_review::apply_unified_diff(&old_text, &diff)
             .map_err(|why| format!("the diff does not apply: {why}"))?,
     };
     let write = AgentWrite {
