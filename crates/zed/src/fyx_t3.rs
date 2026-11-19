@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use futures::StreamExt as _;
 use gpui::{App, Entity};
-use terminal_host::{RelayDelivery, Share, ShareBridge, ShareTarget};
+use terminal_host::{AlwaysAllowed, RelayDelivery, Share, ShareBridge, ShareTarget};
 use ui_ext_host::UiExtensionRegistry;
 use ui_ext_wasm::permissions::{T3Answer, T3Capability};
 
@@ -65,15 +65,33 @@ impl ShareBridge for Bridge {
         });
     }
 
-    fn always_allowed(&self, cx: &App) -> Vec<String> {
+    fn always_allowed(&self, cx: &App) -> Vec<AlwaysAllowed> {
         let registry = self.0.read(cx);
-        let mut names: Vec<String> = registry
-            .always_allowed()
-            .into_iter()
-            .map(|(id, _)| registry.provenance_name(&id).to_string())
-            .collect();
-        names.dedup();
-        names
+        let mut grants: Vec<(String, AlwaysAllowed)> = Vec::new();
+        for (id, capability) in registry.always_allowed() {
+            let index = match grants.iter().position(|(known, _)| *known == id) {
+                Some(index) => index,
+                None => {
+                    let extension_name = registry.provenance_name(&id).to_string();
+                    grants.push((
+                        id,
+                        AlwaysAllowed {
+                            extension_name,
+                            read: false,
+                            write: false,
+                        },
+                    ));
+                    grants.len() - 1
+                }
+            };
+            if let Some((_, grant)) = grants.get_mut(index) {
+                match capability {
+                    T3Capability::Read => grant.read = true,
+                    T3Capability::Write => grant.write = true,
+                }
+            }
+        }
+        grants.into_iter().map(|(_, grant)| grant).collect()
     }
 }
 
