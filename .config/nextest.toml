@@ -63,3 +63,10 @@ path = "junit.xml"
 [[profile.default.overrides]]
 filter = 'package(util) and test(/terminates_grandchildren/)'
 retries = 2
+
+# fyx: upstream's spawn-failure test starts the system shell (PowerShell on Windows) and waits for
+# it to exit: 16-25 s alone, past 60 s under the gate's load. The gate tests `terminal` since W1's
+# terminal_ext hook; W1 checks whether the hook made it slower.
+[[profile.default.overrides]]
+filter = 'package(terminal) and test(test_terminal_no_exit_on_spawn_failure)'
+slow-timeout = { period = "180s", terminate-after = 1 }
