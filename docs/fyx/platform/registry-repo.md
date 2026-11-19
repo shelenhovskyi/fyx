@@ -71,6 +71,7 @@ fyx-extensions/
 │       ├── publish.yml        # trusted: rebuild, sign, publish (push to main)
 │       ├── blocklist.yml      # trusted: sign and publish the block list
 │       └── refresh.yml        # trusted: re-sign the snapshot and the block list every 12 h
+├── .claude/                   # Claude Code sessions: allowed test commands, git push guard
 ├── CONTRIBUTING.md            # how to add or update an entry
 └── README.md
 ```

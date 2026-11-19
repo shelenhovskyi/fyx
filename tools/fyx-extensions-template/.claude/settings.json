@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -I -m unittest:*)",
+      "Bash(python3 -I -m unittest:*)",
+      "Bash(py -I -m unittest:*)",
+      "Bash(scripts/dry-run.sh:*)",
+      "Bash(./scripts/dry-run.sh:*)",
+      "Bash(bash scripts/dry-run.sh:*)",
+      "PowerShell(python -I -m unittest:*)",
+      "PowerShell(py -I -m unittest:*)",
+      "PowerShell(bash scripts/dry-run.sh:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push origin HEAD:main:*)",
+      "Bash(git push --tags:*)",
+      "Bash(git push origin --delete:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-commands.sh\"" }
+        ]
+      }
+    ]
+  }
+}
