@@ -12,6 +12,10 @@ verifying are `fyx-registry`'s; this script prepares its inputs and makes the po
   verdict [FILE] --inputs-sha256 HEX          a schema-checked agent verdict, else a concern
   decision-input --pr PR --before DIR --after DIR ...   assemble `decide`'s input from data
   decide INPUT                                the policy decision for one PR
+  tier-status DECISION                        the `policy-tier` status description
+  zed-check --package P --manifest M --source-files F   exit 1 on a build-only extension.wasm
+  publish-check RELEASE --commit SHA --pr PR --statuses S   refuse a T2 release the decision
+                                              did not rate T2 with the owner's approval
   comment DECISION                            the PR comment for a decision, escaped
   blocklist TOML --sequence N --now T         the unsigned block list
   reblock PUBLISHED --now T                   the published list re-dated, sequence + 1
@@ -203,9 +207,25 @@ def is_zed_extension_name(name: str) -> bool:
     return re.split(r"[/\\]", name)[-1].rstrip(". ").lower() == ZED_EXTENSION_COMPONENT
 
 
-def zed_extension_files(package: bytes = b"", source_files: list[str] | tuple = ()) -> list[str]:
-    """The `extension.wasm` files in the package and in the entry's source file list."""
-    names = list(source_files)
+def manifest_component(manifest_text: str | None) -> list[str]:
+    """`[fyx_ui].component` of an extension.toml, as a one-item list (empty if unreadable). The
+    trusted decision reads it because the component may exist only as build output, so it is in
+    no source file list (integration-6 N3)."""
+    try:
+        component = (tomllib.loads(manifest_text or "").get("fyx_ui") or {}).get("component")
+    except tomllib.TOMLDecodeError:
+        return []
+    return [component] if isinstance(component, str) else []
+
+
+def zed_extension_files(
+    package: bytes = b"",
+    source_files: list[str] | tuple = (),
+    components: list[str] | tuple = (),
+) -> list[str]:
+    """The `extension.wasm` files in the package, in the entry's source file list, and named by
+    `[fyx_ui].component`."""
+    names = list(source_files) + list(components)
     if package and zipfile.is_zipfile(io.BytesIO(package)):
         # Only `fyx-ext package` output reaches here in CI; the client checks the format.
         names += zipfile.ZipFile(io.BytesIO(package)).namelist()
@@ -244,7 +264,7 @@ def derive_release(
     name = entry["id"] + "-" + version
     # A package that also runs a Zed extension is T2 whatever it declares, so it always needs
     # the owner's approval and never auto-merges (owner's Q1, 2026-11-19).
-    zed = bool(zed_extension_files(package, source_files))
+    zed = bool(zed_extension_files(package, source_files, manifest_component(manifest_text)))
     if zed:
         tier = "t2"
     release = {
@@ -365,6 +385,8 @@ def decide(data: dict) -> dict:
             "auto_merge": False,
             "agent_review": "success",
             "add_labels": [],
+            "zed_extension": [],
+            "owner_approved": approved_by_owner(),
         }
 
     kind = "new-version" if before else "new-extension"
@@ -480,6 +502,85 @@ def decide(data: dict) -> dict:
         "verdict": verdict,
         "add_labels": add_labels,
         "zed_extension": data.get("zed_extension", []),
+        # Recorded as the `policy-tier` status, which publish.yml checks (integration-6 N3).
+        "owner_approved": approved_by_owner(),
+    }
+
+
+def tier_status(decision: dict) -> str:
+    """The `policy-tier` commit status description: what publish-check compares the rebuilt
+    release with."""
+    return (
+        f"tier={decision.get('tier') or 'none'} "
+        f"zed_extension={'true' if decision.get('zed_extension') else 'false'} "
+        f"owner_approved={'true' if decision.get('owner_approved') else 'false'}"
+    )
+
+
+# The login GitHub records as the creator of a status set with GITHUB_TOKEN. Only the trusted
+# review.yml sets `policy-tier`; a status from anyone else is ignored.
+STATUS_BOT = "github-actions[bot]"
+
+
+def publish_check(
+    release: dict, commit: str, pr: dict | None, statuses: list[dict] | None, owner: str
+) -> list[str]:
+    """Why publish.yml must not sign this rebuilt release, if it must not (integration-6 N3).
+
+    A release that is T2 or runs a Zed extension is signed only when the merged PR's latest
+    decision rated it T2, saw the Zed extension if there is one, and had the owner's approval,
+    and the owner's approval is still on the PR. Publish rebuilds from source, so a build-only
+    `extension.wasm` that the decision never saw is caught here."""
+    zed = bool(release.get("zed_extension"))
+    if release.get("tier") != "t2" and not zed:
+        return []
+    what = "runs a Zed extension (extension.wasm)" if zed else "is tier T2"
+    if not pr:
+        return [f"the release {what}, and no merged PR is recorded for commit {commit}"]
+    number = pr.get("number")
+    errors = []
+    if (pr.get("mergeCommit") or {}).get("oid") != commit:
+        errors.append(f"PR {number} was not merged as {commit}")
+    recorded = [
+        status for status in statuses or []
+        if status.get("context") == "policy-tier"
+        and (status.get("creator") or {}).get("login") == STATUS_BOT
+    ]
+    if not recorded:
+        errors.append(
+            f"the release {what}, and the policy decision recorded no tier for PR {number}'s head"
+        )
+        return errors
+    # The statuses API lists the newest first.
+    fields = dict(
+        part.split("=", 1)
+        for part in (recorded[0].get("description") or "").split()
+        if "=" in part
+    )
+    if fields.get("tier") != "t2":
+        errors.append(f"the release {what}, but the decision rated it {fields.get('tier', 'none')}")
+    if zed and fields.get("zed_extension") != "true":
+        errors.append(
+            "the rebuilt package runs a Zed extension (extension.wasm) that the decision did not see"
+        )
+    if fields.get("owner_approved") != "true":
+        errors.append("the decision did not have the owner's approval")
+    author = (pr.get("author") or {}).get("login")
+    if author != owner and owner not in approvals(pr.get("reviews", [])):
+        errors.append(f"{owner} has not approved PR {number}")
+    return errors
+
+
+def zed_check(package: bytes, manifest_text: str | None, source_files: list[str]) -> dict:
+    """pr.yml's build check: the Zed extension files in the package, and the ones the trusted
+    decision sees (the source file list and `[fyx_ui].component`). `build_only` is true when the
+    package has one and the decision would see none, so the PR would pass as T0 or T1."""
+    in_package = zed_extension_files(package)
+    trusted = zed_extension_files(b"", source_files, manifest_component(manifest_text))
+    return {
+        "package": in_package,
+        "trusted": trusted,
+        "build_only": bool(in_package) and not trusted,
     }
 
 
@@ -521,7 +622,9 @@ def decision_input(
         "entry_errors": [],
         "ci": ci_results(jobs),
         "agent_verdict": verdict,
-        "zed_extension": zed_extension_files(package or b"", source_files),
+        "zed_extension": zed_extension_files(
+            package or b"", source_files, manifest_component(manifest_text)
+        ),
     }
     if len(entry_files) != 1:
         return data
@@ -725,6 +828,21 @@ def main(argv: list[str]) -> int:
     decide_parser = commands.add_parser("decide")
     decide_parser.add_argument("input", type=Path)
 
+    tier_parser = commands.add_parser("tier-status")
+    tier_parser.add_argument("decision", type=Path)
+
+    zed = commands.add_parser("zed-check")
+    zed.add_argument("--package", type=Path, required=True)
+    zed.add_argument("--manifest", type=Path, required=True, help="extension.toml, from git")
+    zed.add_argument("--source-files", type=Path, required=True)
+
+    publish = commands.add_parser("publish-check")
+    publish.add_argument("release", type=Path)
+    publish.add_argument("--commit", required=True)
+    publish.add_argument("--pr", type=Path, help="gh pr view --json number,author,reviews,mergeCommit")
+    publish.add_argument("--statuses", type=Path, help="the PR head's statuses, newest first")
+    publish.add_argument("--policy", type=Path, default=POLICY_DIR)
+
     comment_parser = commands.add_parser("comment")
     comment_parser.add_argument("decision", type=Path)
 
@@ -815,6 +933,35 @@ def main(argv: list[str]) -> int:
             )
         elif args.command == "decide":
             json.dump(decide(json.loads(args.input.read_text(encoding="utf-8"))), out, indent=2)
+        elif args.command == "tier-status":
+            out.write(tier_status(json.loads(args.decision.read_text(encoding="utf-8"))))
+        elif args.command == "zed-check":
+            result = zed_check(
+                args.package.read_bytes(),
+                args.manifest.read_text(encoding="utf-8") if args.manifest.exists() else None,
+                args.source_files.read_text(encoding="utf-8").splitlines(),
+            )
+            json.dump(result, out, indent=2)
+            out.write("\n")
+            return 1 if result["build_only"] else 0
+        elif args.command == "publish-check":
+
+            def optional(path: Path | None):
+                if path is None or not path.exists():
+                    return None
+                text = path.read_text(encoding="utf-8")
+                return json.loads(text) if text.strip() else None
+
+            errors = publish_check(
+                json.loads(args.release.read_text(encoding="utf-8")),
+                args.commit,
+                optional(args.pr),
+                optional(args.statuses),
+                load_policy(args.policy)["owner"],
+            )
+            if errors:
+                raise Refused("; ".join(errors))
+            out.write("ok")
         elif args.command == "comment":
             out.write(comment(json.loads(args.decision.read_text(encoding="utf-8"))))
         elif args.command == "blocklist":
@@ -841,7 +988,9 @@ def main(argv: list[str]) -> int:
     except Refused as error:
         print(f"refused: {error}", file=sys.stderr)
         return 2
-    if args.command not in ("comment", "package", "revocations", "expires-within"):
+    if args.command not in (
+        "comment", "package", "revocations", "expires-within", "tier-status", "zed-check"
+    ):
         out.write("\n")
     return 0
 

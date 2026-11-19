@@ -22,7 +22,7 @@ pub const SUPPORTED_API_VERSIONS: &[Version] = &[
 /// The newest frozen version, the host's `MAX_FROZEN_VERSION`. Newer ones are staged: dev builds
 /// of Fyx load them (debug builds, or a process started with `FYX_UI_DEV_EXTENSIONS`), releases
 /// refuse them until they are frozen.
-pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 2, 0);
+pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 3, 0);
 
 /// `[fyx_ui.network] domains` entries per manifest, the host's `network::MAX_DOMAINS`.
 pub const MAX_NETWORK_DOMAINS: usize = 64;
@@ -667,14 +667,14 @@ capabilities = ["ui:panel"]
     }
 
     #[test]
-    fn staged_versions_and_their_capabilities() {
+    fn v0_3_and_its_capabilities() {
         let staged = VALID
             .replace("api_version = \"0.1.0\"", "api_version = \"0.3.0\"")
             .replace("[\"ui:panel\"]", "[\"ui:panel\", \"ui:images\"]");
         let (manifest, report) = check(&staged);
         assert!(report.errors.is_empty(), "{report:?}");
-        assert_eq!(report.warnings.len(), 1, "{report:?}");
-        assert!(report.warnings[0].contains("staged"), "{report:?}");
+        // 0.3 is frozen (integration-6): no staged warning.
+        assert!(report.warnings.is_empty(), "{report:?}");
         assert_eq!(
             manifest.expect("parses").api_version,
             Some(Version::new(0, 3, 0))

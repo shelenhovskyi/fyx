@@ -110,6 +110,7 @@ jobs:
         env:
           REPOSITORY: ${{ steps.entry.outputs.repository }}
           COMMIT: ${{ steps.entry.outputs.commit }}
+          EXTENSION_PATH: ${{ steps.entry.outputs.path }}
         run: |
           git init -q source && cd source
           git remote add origin "$REPOSITORY"
@@ -121,6 +122,11 @@ jobs:
             echo "::error::$COMMIT is on no branch of $REPOSITORY"; exit 1
           fi
           test -f Cargo.lock || { echo "::error::the source has no Cargo.lock"; exit 1; }
+          # What the trusted decision sees (review.yml), taken before any PR code runs: the
+          # source file list and extension.toml from git, not from the build's working tree.
+          mkdir -p ../trusted
+          git ls-tree -r --name-only HEAD -- "$EXTENSION_PATH" > ../trusted/source-files.txt
+          git show "HEAD:$EXTENSION_PATH/extension.toml" > ../trusted/extension.toml || true
       - name: Fetch dependencies (the only step with network)
         env:
           IMAGE: ${{ steps.entry.outputs.image }}
@@ -152,14 +158,21 @@ jobs:
         run: |
           package=$(ls out/*.fyxext)
           # A package with a Zed extension (`extension.wasm`) is accepted as tier T2 (0.3 design
-          # Q1, decided 2026-11-19): the owner approves it, it never auto-merges.
-          if unzip -Z1 "$package" | grep -qiE '(^|[/\])extension\.wasm[. ]*$'; then
+          # Q1, decided 2026-11-19): the owner approves it, it never auto-merges. The decision
+          # sees one only through the source file list and `[fyx_ui].component`, so one that
+          # only the build makes fails the build (integration-6 N3); publish.yml refuses it too.
+          mkdir -p out/review
+          if ! python3 scripts/registry.py zed-check --package "$package" \
+              --manifest trusted/extension.toml --source-files trusted/source-files.txt > out/review/zed.json; then
+            echo "::error title=Build-only Zed extension::The package has $(jq -r '.package | join(", ")' out/review/zed.json), which is in neither the source at source.commit nor [fyx_ui].component. A Zed extension must be committed or named as the component, so the release is rated tier T2 and the registry owner approves it."
+            exit 1
+          fi
+          if [ "$(jq '.package | length' out/review/zed.json)" != 0 ]; then
             echo "::warning title=Unrestricted Zed extension::This package runs an unrestricted Zed extension (extension.wasm): its network and process access bypasses Fyx's permission checks. The release is tier T2 and needs the registry owner."
           fi
           python3 scripts/registry.py release --entry entry.json \
             --manifest "source/$EXTENSION_PATH/extension.toml" --package "$package" > out/release.json
           sha256sum "$package" > out/package.sha256
-          mkdir -p out/review
           cp "source/$EXTENSION_PATH/extension.toml" out/review/
           unzip -l "$package" > out/review/package-files.txt
       - uses: actions/upload-artifact@v4

@@ -15,6 +15,7 @@
 mod agent_observe;
 mod backend;
 mod canvas;
+mod choice;
 mod consent;
 mod decorations;
 pub mod fyx_extensions_page;
@@ -24,7 +25,6 @@ mod inspector;
 mod install;
 pub mod install_store;
 mod keyboard;
-mod choice;
 mod modal;
 pub mod notifications;
 mod panel;

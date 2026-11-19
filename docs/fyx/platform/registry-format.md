@@ -152,7 +152,7 @@ Release fields, in canonical order:
 | `source.repository`, `.commit`, `.path` | `https://` URL; full 40-digit lowercase SHA; relative path without `..` (`.` for the root) |
 | `package.url`, `.sha256`, `.size` | `https://` URL; hash and size of the `.fyxext`; size 1 byte to 50 MiB (decision 12) |
 | `published_at` | when CI published it; the age gate counts from here |
-| `urgent` | security fix: skips the age gate |
+| `urgent` | security fix: skips the age gate only to replace an installed version the block list blocks |
 | `tier` | `t0`, `t1` or `t2`; at least the highest tier among the known capabilities |
 | `capabilities` | names like `ui:panel`; ones this client does not know are allowed but never granted silently |
 | `network_domains` | optional; `example.com` or `*.example.com`; at least two labels, no IP literals, no `localhost`, and neither a public suffix nor a wildcard over one (`*.com`, `*.co.uk`, `*.github.io`; a PSL snapshot in `text.rs`); needs `network:fetch` |
@@ -187,7 +187,7 @@ time of the index. Rules:
 
 - `sequence` increases with every snapshot, re-signing included. The client keeps the highest
   one it accepted and refuses a lower one, or the same one with other contents (`Rollback`).
-- `expires_at` is after `generated_at` and at most 7 days later. The CI re-signs at least daily
+- `expires_at` is after `generated_at` and at most 7 days later. The CI re-signs at least every 12 h
   (48 h validity by default); an expired snapshot is refused (`Expired`), so a frozen mirror
   shows up.
 - `revoked_keys` (optional, at most 256) are removed from the keyset for releases and block
@@ -199,7 +199,7 @@ time of the index. Rules:
   block-list keys and unblock everything. The block-list revocations of a rotation-key snapshot
   carry over to every later snapshot until another rotation-key snapshot lists different ones; a
   client stores them with the last snapshot it accepted (`VerifiedSnapshot::to_state_json`,
-  `from_state_json`), so the daily snapshot need not repeat them.
+  `from_state_json`), so the 12-hourly snapshot need not repeat them.
 
 A client verifies the snapshot first (`VerifiedSnapshot::verify`), then the index with
 `Index::verify_with_snapshot(bytes, &snapshot, &keyset)`. Canonical order: schema, sequence,
@@ -227,7 +227,7 @@ unpacked (`Release::verify_package`).
 ```
 
 - Signed by a `blocklist` key. At most 4 MiB and 10 000 entries.
-- `sequence` increases with every published list; the CI publishes a new one at least daily.
+- `sequence` increases with every published list; the CI publishes a new one at least every 12 h.
 - `expires_at` is after `generated_at` and at most 7 days later (security-2 S5).
 - `versions` is `*` (every version) or comparators joined by `,` that must all hold. A comparator
   is `=`, `>`, `>=`, `<` or `<=` followed by `major.minor.patch`. There is no `^` or `~`.
@@ -235,9 +235,11 @@ unpacked (`Release::verify_package`).
   `1.2.0+local` (bugs-1 #21); pre-release versions compare by plain semver order, so `>=1.2.0`
   also covers `1.3.0-beta`. A local file must have a plain `major.minor.patch` version
   (`check_local_version`).
-- `package_sha256` (optional): the entry blocks only the package with that hash, so a file from
+- `package_sha256` (optional): the entry blocks the package with that hash, so a file from
   disk cannot escape a block by claiming another version; the install store records each
-  installed package's hash (`InstalledVersion::package_sha256`).
+  installed package's hash (`InstalledVersion::package_sha256`). Within the entry's versions it
+  also blocks an install whose hash was never recorded: an unknown hash cannot prove it is not
+  the blocked package (integration-5 R9).
 - `reason`: 1–300 characters, the same character rules as `description`, shown to the user.
 
 Canonical order: schema, sequence, generated_at, expires_at, then for each entry: id, the
@@ -261,24 +263,37 @@ It is verified again when loaded. `BlocklistCache::apply_fetch` decides what eac
 | same `sequence`, same content | `fetched_at` updated (`Refresh`), never moved backwards; the list's age does not change |
 | same `sequence`, different content | kept, reported as a conflict |
 | higher `sequence`, or no cache yet | replaced (`Replace`) and applied |
+| no cache, `sequence` below the highest one ever accepted | kept out (`BelowFloor`): a replay after the cache was dropped |
+| no cache, past its `expires_at` | kept out (`Expired`): with nothing to compare, it may be any old list a mirror kept |
+
+**The floor.** The client keeps the highest sequence it ever accepted with its saved snapshot
+state, which outlives the cache, so dropping the cache (a revoked block-list key, a failed
+restore) does not forget it, across restarts too (`BlocklistCache::apply_fetch_above`,
+`RegistryClient::blocklist_floor`; integration-6 N4).
 
 Fetches run at start and every 6 h (`fetch_due`); a last attempt stamped in the future (a fast
 clock) does not postpone the next one (bugs-1 #22). `freshness` reports `Missing` (never
-fetched: nothing is blocked yet), `Fresh`, or `Stale` once the list's signed `generated_at` is 7
+fetched: no block is known yet), `Fresh`, or `Stale` once the list's signed `generated_at` is 7
 days old or its `expires_at` has passed, however recently it was fetched, for the "Block list is
 N days old" warning (spec §4 failure 5). Being offline never disables an extension.
 
 ## Age gate
 
-`age_gate(release, now)`: a release installs or updates only when `now >= published_at + 24 h`,
-unless `urgent`. A `published_at` in the future counts as just published, so clock skew never
-shortens the wait. Rollback to the kept previous version is not gated: it is already installed.
+`age_gate(release, now)`: a release installs or updates only when `now >= published_at + 24 h`.
+`urgent` skips the wait only when the release replaces an installed version that the block list
+blocks (integration-6 R8). The release key signs `urgent`, so a leaked release key alone cannot
+skip the wait: the separately held block-list key has to block the installed version first. A
+fresh install of an `urgent` release waits too. A `published_at` in the future counts as just
+published, so clock skew never shortens the wait. Rollback to the kept previous version is not gated: it is already installed.
 
 ## Update planning
 
 `plan_updates(installed, index, blocklist, now)` returns actions per installed extension. It is
 level-triggered: it states what each extension should be now, so the host can run it on every
-index or block list change; a lifted block simply stops producing `Disable`.
+index or block list change; a lifted block simply stops producing `Disable`. With no list, or
+one past its `expires_at`, the plan shows no blocks, and that means "not known", not "nothing is
+blocked": the host re-enables an extension it disabled only while
+`RegistryClient::blocks_can_lift` holds (integration-6 N4).
 
 The installed state per extension (kept in `state.json` by the install store, task 1.1): active
 version and its origin (`registry` or `local_file`), the kept previous version, whether the user

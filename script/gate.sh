@@ -106,6 +106,18 @@ CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
     XDG_DATA_HOME="$test_home/xdg-data" XDG_CONFIG_HOME="$test_home/xdg-config" \
     cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast "${nextest_filter[@]}" 2>&1 | tail -60
 rm -rf "$test_home"
+# Per-test timing (.config/nextest.toml writes junit.xml): keep one copy per commit outside the
+# target dir, which gets pruned. FYX_GATE_JUNIT_DIR overrides; on the Windows dev box the default
+# is D:\fyx-builds\gate-junit.
+junit_dir="${FYX_GATE_JUNIT_DIR:-}"
+if [[ -z "$junit_dir" && -d /d/fyx-builds ]]; then junit_dir=/d/fyx-builds/gate-junit; fi
+junit_src="${CARGO_TARGET_DIR:-target}/nextest/default/junit.xml"
+if [[ -n "$junit_dir" && -f "$junit_src" ]]; then
+    mkdir -p "$junit_dir"
+    junit_copy="$junit_dir/$(git rev-parse --short=10 HEAD).xml"
+    cp "$junit_src" "$junit_copy"
+    echo "gate: per-test timing: $(win_path "$junit_copy")"
+fi
 profile_after=$(profile_snapshot)
 if [[ "$profile_before" != "$profile_after" ]]; then
     touched=$(comm -13 <(printf '%s\n' "$profile_before") <(printf '%s\n' "$profile_after") | sed 's/^[0-9a-f]* [ *]//')

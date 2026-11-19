@@ -142,6 +142,9 @@ pub struct ImageCache {
     wanted: RefCell<Vec<(Arc<str>, ImageKey)>>,
     /// Fyx's bundled fonts for SVG text, loaded on the first SVG decode.
     fonts: Option<Arc<usvg::fontdb::Database>>,
+    /// Tests: every decode waits for this before it starts, to stand for one that hangs.
+    #[cfg(test)]
+    hold: Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>,
 }
 
 /// A font database with only the fonts bundled in Fyx's assets (`fonts/**/*.ttf`).
@@ -360,7 +363,15 @@ impl ImageCache {
             if let Some(images) = self.extensions.get_mut(&extension_id) {
                 images.running += 1;
             }
-            let decode = cx.background_spawn(async move { decode_job(job) });
+            #[cfg(test)]
+            let hold = self.hold.clone();
+            let decode = cx.background_spawn(async move {
+                #[cfg(test)]
+                if let Some(hold) = hold {
+                    hold.await.ok();
+                }
+                decode_job(job)
+            });
             let timer = cx.background_executor().timer(DECODE_TIMEOUT);
             cx.spawn(async move |this, cx| {
                 let mut decode = decode.fuse();
@@ -606,7 +617,6 @@ pub fn decode_svg(
     let frame = image::Frame::new(buffer);
     Ok((RenderImage::new(vec![frame]), bytes))
 }
-
 
 /// §12: at most [`MAX_SVG_NODES`] nodes (nested `<use>` and patterns count where they are drawn),
 /// and blurs of at most [`MAX_SVG_BLUR_STD_DEVIATION`].
@@ -968,6 +978,52 @@ mod tests {
         // A reload clears the rest.
         cache.update(cx, |cache, cx| cache.clear("ext", cx));
         assert_eq!(cache.read_with(cx, |cache, _| cache.used_bytes("ext")), 0);
+    }
+
+    /// integration-5 S3: a decode past `DECODE_TIMEOUT` fails its image at once, but its slot
+    /// stays taken until the decode returns, so hanging decodes cannot pile up past 2 per
+    /// extension.
+    #[gpui::test]
+    async fn test_a_timed_out_decode_keeps_its_slot(cx: &mut TestAppContext) {
+        use futures::FutureExt as _;
+        let cache = cx.new(|_| ImageCache::default());
+        let (release, held) = futures::channel::oneshot::channel();
+        cache.update(cx, |cache, _| cache.hold = Some(held.shared()));
+        let png_bytes: Arc<[u8]> = png(4, 4).into();
+        let keys: Vec<ImageKey> = cache.update(cx, |cache, cx| {
+            (0..3u32)
+                .map(|handle| {
+                    cache.add_generated("ext", handle, ImageFormat::Png, png_bytes.clone());
+                    let key = cache
+                        .key_for("ext", &ImageSource::Generated(handle), None, (4, 4), None)
+                        .expect("live handle");
+                    cache.request("ext", key.clone(), cx);
+                    key
+                })
+                .collect()
+        });
+        let state = |key: &ImageKey, cx: &mut TestAppContext| match cache
+            .read_with(cx, |cache, _| cache.get("ext", key))
+        {
+            ImageState::Ready(_) => "ready",
+            ImageState::Pending => "pending",
+            ImageState::Failed => "failed",
+        };
+        cx.executor().advance_clock(DECODE_TIMEOUT * 2);
+        cx.run_until_parked();
+        assert_eq!(
+            keys.iter().map(|key| state(key, cx)).collect::<Vec<_>>(),
+            ["failed", "failed", "pending"],
+            "the third waits: both slots are still taken"
+        );
+        assert_eq!(cache.read_with(cx, |cache, _| cache.running), 2);
+
+        // The hung decodes return: their slots free, and the third decodes.
+        cache.update(cx, |cache, _| cache.hold = None);
+        release.send(()).ok();
+        cx.run_until_parked();
+        assert_eq!(state(&keys[2], cx), "ready");
+        assert_eq!(cache.read_with(cx, |cache, _| cache.running), 0);
     }
 
     /// integration-5 H2: images drawn in the latest pass are never evicted. With four on screen

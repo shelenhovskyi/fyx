@@ -1155,7 +1155,7 @@ impl ApiState {
             return Err(host_error(
                 model::HostErrorCode::NotPermitted,
                 "permissions.request needs a click or Enter: during handle-event for click, \
-                 row-click or input-submitted, a command or an accepted picker item, or shortly \
+                 row-click, input-submitted, canvas-click or notification-action, or shortly \
                  after it, once",
             ));
         }

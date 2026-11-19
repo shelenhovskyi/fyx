@@ -1,7 +1,6 @@
-// STAGED DRAFT, not frozen and not fully decided: from docs/fyx/wit-0.3/fyx-ui-0.3.wit on
-// claude/fyx-w10-docs-a5772b (6d5f9e5462), staged here for the host work of platform plan 4.x
-// (integrator-approved, as 0.2 was). Design and open questions: docs/fyx/wit-0.3/design.md. Only the
-// integrator (W0) edits this file; parts may change until the owner has answered the open questions.
+// FROZEN: fyx:ui 0.3.0, frozen after review integration-6 (platform plan 4.9). Only the integrator
+// (W0) edits this file, and only comments; any other change goes into the next version. Design and
+// decisions: docs/fyx/wit-0.3/design.md and docs/fyx/wit-0.3/open-questions.md.
 //
 // Everything in `types`, `host` and the 0.2 half of `decorations` is copied forward from
 // ../since_v0.2.0/fyx-ui.wit, byte for byte except where a comment says "0.3", and so is 0.2
@@ -732,8 +731,9 @@ interface permissions {
         denied,
         /// Not asked yet: the first use shows the prompt.
         ask,
-        /// Not available here: the active worktree is not trusted (`process-spawn`,
-        /// `workspace-edit`), or the manifest does not declare it.
+        /// Not available here: the manifest does not declare it. (An untrusted or missing worktree
+        /// is not a permission state: the call fails with `host-error-code::untrusted-worktree` or
+        /// `no-worktree`.)
         unavailable,
     }
 
