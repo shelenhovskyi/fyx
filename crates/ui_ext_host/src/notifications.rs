@@ -43,13 +43,13 @@ pub(crate) const CLICK_GUARD: Duration = Duration::from_secs(1);
 const _: () = assert!(CLICK_GUARD.as_millis() >= BUTTON_CLICK_GUARD.as_millis());
 
 /// When a card appeared, and a repaint once its buttons take clicks.
-struct ClickGuard {
+pub(crate) struct ClickGuard {
     shown_at: Instant,
     _arm: Task<()>,
 }
 
 impl ClickGuard {
-    fn new<T: 'static>(cx: &mut Context<T>) -> Self {
+    pub(crate) fn new<T: 'static>(cx: &mut Context<T>) -> Self {
         Self {
             shown_at: cx.background_executor().now(),
             _arm: cx.spawn(async move |this, cx| {
@@ -59,7 +59,7 @@ impl ClickGuard {
         }
     }
 
-    fn armed(&self, cx: &App) -> bool {
+    pub(crate) fn armed(&self, cx: &App) -> bool {
         cx.background_executor()
             .now()
             .saturating_duration_since(self.shown_at)
@@ -69,7 +69,7 @@ impl ClickGuard {
 
 /// The first line of every extension card: drawn by the host only, from the manifest; nothing the
 /// extension sends reaches it (M.4).
-fn provenance_line(name: SharedString, extension_id: &str) -> impl IntoElement {
+pub(crate) fn provenance_line(name: SharedString, extension_id: &str) -> impl IntoElement {
     h_flex()
         .id("fyx-ui-notification-provenance")
         .gap_1()
