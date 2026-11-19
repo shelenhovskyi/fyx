@@ -243,24 +243,47 @@ impl wit_terminals::Host for UiState {
         if let Err(error) = self.permit_t2_now(model_terminal::CAPABILITY_CREATE) {
             return Ok(Err(error.into()));
         }
+        // §C.2: the program's own checkbox. An undeclared program is the import's error below.
+        let item = crate::permissions::ConsentItem::Program {
+            capability: model_terminal::CAPABILITY_CREATE.into(),
+            name: request.program.clone(),
+        };
+        if self.item_denied(&item) {
+            return Ok(Err(model::HostError {
+                code: model::HostErrorCode::Denied,
+                message: format!("{} is turned off on the extension page", request.program),
+            }
+            .into()));
+        }
         let env_granted = self.t2_granted(model_terminal::CAPABILITY_ENV);
+        let started = (
+            request.program.clone(),
+            request.args.clone(),
+            request.cwd.clone(),
+        );
         // A worktree-relative cwd in the active (first) worktree, as `process.spawn`'s `cwd`
         // with no worktree id.
         let cwd = request.cwd.map(|path| process::FileRef {
             worktree: None,
             path,
         });
-        Ok(self
-            .terminals
-            .create(
-                env_granted,
-                request.program,
-                request.args,
+        let created = self.terminals.create(
+            env_granted,
+            request.program,
+            request.args,
+            cwd,
+            request.title,
+        );
+        if created.is_ok() {
+            let (program, args, cwd) = started;
+            self.journal(crate::journal::JournalKind::ProgramStarted {
+                capability: model_terminal::CAPABILITY_CREATE.into(),
+                program,
+                args,
                 cwd,
-                request.title,
-            )
-            .map(|handle| handle.0)
-            .map_err(Into::into))
+            });
+        }
+        Ok(created.map(|handle| handle.0).map_err(Into::into))
     }
 
     fn send_input(

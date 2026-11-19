@@ -4,7 +4,9 @@ use gpui::{AnyElement, App, Entity, Focusable as _, IntoElement as _};
 use terminal::{Event as TerminalEvent, Terminal};
 use terminal_ext::osc::{BlockedKind, StatusState};
 use terminal_ext::status::app_display_name;
-use terminal_ext::{StatusSource, TerminalDecorations, TerminalExt, TerminalStatus};
+use terminal_ext::{
+    ExtensionOrigin, StatusSource, TerminalDecorations, TerminalExt, TerminalStatus,
+};
 use terminal_view::TerminalView;
 use ui::{CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
 
@@ -32,8 +34,13 @@ pub(crate) fn init(cx: &mut App) {
             let status = terminal_entity.read(cx).fyx.status_handle();
             front.terminal_opened(status, None, title, cwd);
             let front = front.clone();
-            cx.on_release(move |_, _| front.terminal_closed(id))
-                .detach();
+            // A pseudo-terminal the host holds for an extension panel outlives its views.
+            cx.on_release(move |_, cx| {
+                if !crate::pseudo::is_held(id, cx) {
+                    front.terminal_closed(id)
+                }
+            })
+            .detach();
         }
         let focus_handle = view.focus_handle(cx);
         cx.on_focus_in(&focus_handle, window, |view, _, cx| {
@@ -86,9 +93,18 @@ struct TabStatus;
 
 impl TerminalDecorations for TabStatus {
     fn tab_indicator(&self, terminal: &TerminalExt, _cx: &App) -> Option<AnyElement> {
-        let status = terminal.status()?;
-        let icon = status_icon(&status)?;
-        let (title, meta) = tooltip_text(&status);
+        let origin = terminal.origin();
+        let Some((status, icon)) = terminal
+            .status()
+            .and_then(|status| Some((status.clone(), status_icon(&status)?)))
+        else {
+            return origin.map(|origin| origin_marker(terminal, &origin));
+        };
+        let (title, mut meta) = tooltip_text(&status);
+        if let Some(origin) = &origin {
+            meta.push_str(" · ");
+            meta.push_str(&origin.describe());
+        }
         Some(
             h_flex()
                 .id(("fyx-terminal-status", terminal.id().as_u64()))
@@ -103,6 +119,21 @@ impl TerminalDecorations for TabStatus {
                 .into_any_element(),
         )
     }
+}
+
+/// A terminal of an extension with no status to show: the extension's mark and whose it is.
+fn origin_marker(terminal: &TerminalExt, origin: &ExtensionOrigin) -> AnyElement {
+    let title = origin.extension().to_owned();
+    let meta = origin.describe();
+    div()
+        .id(("fyx-terminal-origin", terminal.id().as_u64()))
+        .child(
+            Icon::new(IconName::Blocks)
+                .size(IconSize::Small)
+                .color(Color::Muted),
+        )
+        .tooltip(move |_window, cx| Tooltip::with_meta(title.clone(), None, meta.clone(), cx))
+        .into_any_element()
 }
 
 /// The state icon (working spins); `None` for idle.

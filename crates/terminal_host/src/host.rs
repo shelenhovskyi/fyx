@@ -5,16 +5,19 @@
 //! terminal_opened`] and friends), so `observe` answers without a round trip.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use futures::channel::mpsc::UnboundedSender;
 use terminal_ext::inbox::{Rate, RateLimiter};
-use terminal_ext::{ExtensionStatus, StatusHandle, StatusSource, TerminalId, osc};
+use terminal_ext::{ExtensionStatus, OutputSanitizer, StatusHandle, StatusSource, TerminalId, osc};
 use ui_ext::terminal::{
-    CreateCommand, MAX_STATUS_UPDATES_PER_SECOND, PseudoRequest, StatusState, TerminalError,
-    TerminalEvent, TerminalHandle, TerminalHost, TerminalInfo, TerminalOrigin, TerminalSink,
-    TerminalStatus,
+    CreateCommand, MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND, MAX_STATUS_UPDATES_PER_SECOND,
+    MAX_WRITE_OUTPUT_BYTES, PseudoRequest, StatusState, TerminalError, TerminalEvent,
+    TerminalHandle, TerminalHost, TerminalInfo, TerminalOrigin, TerminalSink, TerminalStatus,
 };
+
+use crate::pseudo::{self, PseudoOpen};
 
 /// The title another extension sees for a terminal that is not its own (W2c, 282e99d69a).
 pub const REDACTED: &str = "•••";
@@ -24,6 +27,26 @@ pub const REDACTED: &str = "•••";
 pub(crate) enum Command {
     /// A status changed off the main thread: send the terminal a `Wakeup` so its tab repaints.
     Repaint(TerminalId),
+    /// Build a pseudo-terminal and its tab.
+    OpenPseudo(PseudoOpen),
+    /// Sanitised output for a pseudo-terminal, at most [`MAX_WRITE_OUTPUT_BYTES`].
+    Output(TerminalId, Vec<u8>),
+    /// Close an extension's terminal (its tab, or the one the host holds for a panel).
+    Close(TerminalId),
+}
+
+/// The output side of a pseudo-terminal, owned by its extension.
+struct PseudoOutput {
+    extension: String,
+    handle: TerminalHandle,
+    sink: TerminalSink,
+    /// Held while sanitising and queueing, so concurrent writes keep their order.
+    writer: Mutex<(OutputSanitizer, RateLimiter)>,
+}
+
+fn output_rate() -> Rate {
+    let per_second = MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND as f64;
+    Rate::new(per_second, per_second)
 }
 
 /// Which extension a terminal belongs to, if any (pseudo, created and profile terminals).
@@ -42,6 +65,7 @@ struct Known {
     cwd: Option<String>,
     /// The status last reported to observers.
     reported: Option<TerminalStatus>,
+    pseudo: Option<Arc<PseudoOutput>>,
 }
 
 #[derive(Default)]
@@ -181,6 +205,11 @@ impl HostFront {
         let id = status.id();
         let events = {
             let mut state = self.lock();
+            // The host registered its own terminals (pseudo, created) when it made them.
+            if let Some(known) = state.terminals.get_mut(&id) {
+                known.cwd = cwd;
+                return;
+            }
             let reported = status.status().as_ref().map(to_wit_status);
             let known = Known {
                 status,
@@ -188,6 +217,7 @@ impl HostFront {
                 title,
                 cwd,
                 reported,
+                pseudo: None,
             };
             let State {
                 terminals,
@@ -218,7 +248,10 @@ impl HostFront {
             let Some(known) = terminals.get_mut(&id) else {
                 return;
             };
-            known.title = title;
+            // A pseudo-terminal keeps the title its extension gave it.
+            if known.pseudo.is_none() {
+                known.title = title;
+            }
             known.cwd = cwd;
             let status = known.status.status().as_ref().map(to_wit_status);
             if status == known.reported {
@@ -237,27 +270,65 @@ impl HostFront {
         deliver(events);
     }
 
-    /// Main thread: a terminal view went away.
+    /// Main thread: a terminal view went away, or the host closed a terminal it holds. Its
+    /// handles are forgotten (and never reused); the owner of a pseudo-terminal hears through the
+    /// terminal's own sink, everyone else through `observe`.
     pub(crate) fn terminal_closed(&self, id: TerminalId) {
         let events = {
             let mut state = self.lock();
-            if state.terminals.remove(&id).is_none() {
+            let Some(known) = state.terminals.remove(&id) else {
                 return;
-            }
-            state
-                .extensions
-                .values_mut()
-                .filter_map(|extension| {
-                    let handle = extension.ids.get(&id).copied();
-                    let sink = extension.observer.clone();
-                    if let Some(handle) = handle {
-                        extension.status_limits.remove(&handle);
-                    }
-                    Some((sink?, TerminalEvent::Closed(handle?)))
-                })
-                .collect::<Vec<_>>()
+            };
+            let owner = known.pseudo.as_ref().map(|pseudo| pseudo.extension.clone());
+            let mut events: Vec<_> = known
+                .pseudo
+                .iter()
+                .map(|pseudo| (pseudo.sink.clone(), TerminalEvent::Closed(pseudo.handle)))
+                .collect();
+            events.extend(state.extensions.iter_mut().filter_map(|(name, extension)| {
+                let handle = extension.ids.remove(&id)?;
+                extension.handles.remove(&handle);
+                extension.status_limits.remove(&handle);
+                if owner.as_deref() == Some(name.as_str()) {
+                    return None;
+                }
+                Some((extension.observer.clone()?, TerminalEvent::Closed(handle)))
+            }));
+            events
         };
         deliver(events);
+    }
+
+    /// The pseudo-terminal behind `ext`'s `handle`, if `ext` owns it.
+    fn own_pseudo(
+        &self,
+        ext: &str,
+        handle: TerminalHandle,
+    ) -> Result<(TerminalId, Arc<PseudoOutput>), TerminalError> {
+        let state = self.lock();
+        let id = *state
+            .extensions
+            .get(ext)
+            .and_then(|extension| extension.handles.get(&handle))
+            .ok_or(TerminalError::NotFound)?;
+        let pseudo = state
+            .terminals
+            .get(&id)
+            .and_then(|known| known.pseudo.clone())
+            .filter(|pseudo| pseudo.extension == ext)
+            .ok_or(TerminalError::NotFound)?;
+        Ok((id, pseudo))
+    }
+
+    /// For `ui_ext_host`'s `terminal` node: the terminal behind `ext`'s own `handle`.
+    pub(crate) fn owned_terminal(&self, ext: &str, handle: TerminalHandle) -> Option<TerminalId> {
+        self.own_pseudo(ext, handle).ok().map(|(id, _)| id)
+    }
+
+    fn send(&self, command: Command) -> Result<(), TerminalError> {
+        self.commands
+            .unbounded_send(command)
+            .map_err(|_| TerminalError::Unavailable("the terminal host stopped".into()))
     }
 }
 
@@ -271,13 +342,60 @@ fn deliver(events: Vec<(TerminalSink, TerminalEvent)>) {
 impl TerminalHost for HostFront {
     fn open_pseudo(
         &self,
-        _ext: &str,
-        _request: PseudoRequest,
-        _sink: TerminalSink,
+        ext: &str,
+        request: PseudoRequest,
+        sink: TerminalSink,
     ) -> Result<TerminalHandle, TerminalError> {
-        Err(TerminalError::Unavailable(
-            "pseudo-terminals are not implemented yet".into(),
-        ))
+        let (terminal, io) = pseudo::new_terminal_ext(ext);
+        let id = terminal.id();
+        let (handle, events) = {
+            let mut state = self.lock();
+            let State {
+                terminals,
+                extensions,
+            } = &mut *state;
+            let handle = extensions.entry(ext.to_owned()).or_default().handle_for(id);
+            let known = Known {
+                status: terminal.status_handle(),
+                owner: Some(Owner {
+                    extension: ext.to_owned(),
+                    origin: TerminalOrigin::Pseudo,
+                    profile_name: None,
+                }),
+                title: request.title.clone(),
+                cwd: None,
+                reported: None,
+                pseudo: Some(Arc::new(PseudoOutput {
+                    extension: ext.to_owned(),
+                    handle,
+                    sink: sink.clone(),
+                    writer: Mutex::new((OutputSanitizer::new(), RateLimiter::new(output_rate()))),
+                })),
+            };
+            let events: Vec<_> = extensions
+                .iter_mut()
+                .filter_map(|(name, extension)| {
+                    let sink = extension.observer.clone()?;
+                    let handle = extension.handle_for(id);
+                    Some((sink, TerminalEvent::Created(known.info(name, handle))))
+                })
+                .collect();
+            terminals.insert(id, known);
+            (handle, events)
+        };
+        if let Err(error) = self.send(Command::OpenPseudo(PseudoOpen {
+            ext: terminal,
+            io,
+            sink,
+            handle,
+            title: request.title,
+            in_panel: request.in_panel,
+        })) {
+            self.terminal_closed(id);
+            return Err(error);
+        }
+        deliver(events);
+        Ok(handle)
     }
 
     fn create(
@@ -293,11 +411,29 @@ impl TerminalHost for HostFront {
 
     fn write_output(
         &self,
-        _ext: &str,
-        _handle: TerminalHandle,
-        _bytes: Vec<u8>,
+        ext: &str,
+        handle: TerminalHandle,
+        bytes: Vec<u8>,
     ) -> Result<(), TerminalError> {
-        Err(TerminalError::NotFound)
+        if bytes.len() > MAX_WRITE_OUTPUT_BYTES {
+            return Err(TerminalError::TooLarge(format!(
+                "write-output takes at most {MAX_WRITE_OUTPUT_BYTES} bytes"
+            )));
+        }
+        let (id, pseudo) = self.own_pseudo(ext, handle)?;
+        let mut writer = pseudo
+            .writer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (sanitizer, limit) = &mut *writer;
+        if !limit.allow_cost_at(bytes.len() as f64, Instant::now()) {
+            return Err(TerminalError::RateLimited);
+        }
+        let clean = sanitizer.sanitize(&bytes);
+        if !clean.is_empty() {
+            self.send(Command::Output(id, clean))?;
+        }
+        Ok(())
     }
 
     fn send_input(
@@ -365,8 +501,15 @@ impl TerminalHost for HostFront {
     }
 
     fn close(&self, ext: &str, handle: TerminalHandle) {
-        // A user terminal stays open: the extension only drops its status on it.
-        self.set_status(ext, handle, None).ok();
+        match self.own_pseudo(ext, handle) {
+            Ok((id, _)) => {
+                self.send(Command::Close(id)).ok();
+            }
+            // A user terminal stays open: the extension only drops its status on it.
+            Err(_) => {
+                self.set_status(ext, handle, None).ok();
+            }
+        }
     }
 
     fn observe(&self, ext: &str, sink: Option<TerminalSink>) -> Vec<TerminalInfo> {
@@ -381,8 +524,11 @@ impl TerminalHost for HostFront {
         if !observing {
             return Vec::new();
         }
-        let mut infos: Vec<_> = terminals
-            .iter()
+        // New handles go to older terminals first.
+        let mut known: Vec<_> = terminals.iter().collect();
+        known.sort_by_key(|(id, _)| **id);
+        let mut infos: Vec<_> = known
+            .into_iter()
             .map(|(id, known)| known.info(ext, extension.handle_for(*id)))
             .collect();
         infos.sort_by_key(|info| info.handle);
@@ -390,7 +536,7 @@ impl TerminalHost for HostFront {
     }
 
     fn close_all(&self, ext: &str) {
-        let (statuses, extension) = {
+        let (statuses, owned, extension) = {
             let mut state = self.lock();
             let extension = state.extensions.remove(ext);
             let statuses: Vec<_> = state
@@ -398,9 +544,23 @@ impl TerminalHost for HostFront {
                 .values()
                 .map(|known| known.status.clone())
                 .collect();
-            (statuses, extension)
+            let owned: Vec<_> = state
+                .terminals
+                .iter()
+                .filter(|(_, known)| {
+                    known
+                        .pseudo
+                        .as_ref()
+                        .is_some_and(|pseudo| pseudo.extension == ext)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            (statuses, owned, extension)
         };
         drop(extension);
+        for id in owned {
+            self.send(Command::Close(id)).ok();
+        }
         for status in statuses {
             status.set_extension_status(ext, None);
             self.commands
@@ -560,5 +720,138 @@ mod tests {
                 (TerminalOrigin::User, "Claude Code".to_owned())
             ]
         );
+    }
+
+    fn pseudo_request(title: &str) -> PseudoRequest {
+        PseudoRequest {
+            title: title.into(),
+            cols: None,
+            rows: None,
+            in_panel: false,
+        }
+    }
+
+    #[test]
+    fn pseudo_terminals_are_their_owners_and_get_sanitised_output() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let (observer, observed) = recorder();
+        host.observe("other", Some(observer));
+
+        let (sink, owner_events) = recorder();
+        let handle = host
+            .open_pseudo("acme", pseudo_request("ssh box"), sink)
+            .unwrap();
+        let Ok(Command::OpenPseudo(open)) = queued.try_recv() else {
+            panic!("no open command");
+        };
+        assert_eq!(open.handle, handle);
+        assert_eq!(open.title, "ssh box");
+        let id = open.ext.id();
+        assert!(open.ext.is_pseudo());
+        assert_eq!(
+            open.ext.origin(),
+            Some(terminal_ext::ExtensionOrigin::Pseudo {
+                extension: "acme".into()
+            })
+        );
+        // Others see a redacted user terminal.
+        assert!(matches!(
+            observed.lock().unwrap().as_slice(),
+            [TerminalEvent::Created(info)] if info.title == REDACTED && info.origin == TerminalOrigin::User
+        ));
+        // The owner sees its own title and origin.
+        let (own_observer, _) = recorder();
+        let mine = host.observe("acme", Some(own_observer));
+        assert_eq!(
+            (mine[0].handle, mine[0].origin, mine[0].title.as_str()),
+            (handle, TerminalOrigin::Pseudo, "ssh box")
+        );
+
+        // The view registering later keeps the owner and title.
+        host.terminal_opened(open.ext.status_handle(), None, "Terminal".into(), None);
+        host.terminal_changed(id, "Terminal".into(), None);
+        assert_eq!(host.observe("acme", None).len(), 0);
+        let (own_observer, _) = recorder();
+        assert_eq!(host.observe("acme", Some(own_observer))[0].title, "ssh box");
+
+        // Output is sanitised; a query alone queues nothing.
+        host.write_output("acme", handle, b"hi\x1b[6n\x1b]52;c;aGk=\x07!".to_vec())
+            .unwrap();
+        assert!(
+            matches!(queued.try_recv(), Ok(Command::Output(out_id, bytes)) if out_id == id && bytes == b"hi!")
+        );
+        host.write_output("acme", handle, b"\x1b[c".to_vec())
+            .unwrap();
+        assert!(queued.try_recv().is_err());
+
+        // Only the owner may write; nobody may write more than one call's worth.
+        assert_eq!(
+            host.write_output("other", TerminalHandle(1), b"x".to_vec()),
+            Err(TerminalError::NotFound)
+        );
+        assert!(matches!(
+            host.write_output("acme", handle, vec![b'x'; MAX_WRITE_OUTPUT_BYTES + 1]),
+            Err(TerminalError::TooLarge(_))
+        ));
+        // About 4 MiB in a burst (the bucket refills while the loop runs), then rate limited.
+        let chunk = vec![b'x'; MAX_WRITE_OUTPUT_BYTES];
+        let accepted = (0..200)
+            .take_while(|_| host.write_output("acme", handle, chunk.clone()).is_ok())
+            .count();
+        let burst = MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND / MAX_WRITE_OUTPUT_BYTES;
+        assert!(
+            (burst - 1..200).contains(&accepted),
+            "{accepted} writes before the limit"
+        );
+        while queued.try_recv().is_ok() {}
+
+        // Closing asks the main thread to close the tab; the owner hears once the view is gone.
+        host.close("acme", handle);
+        assert!(matches!(queued.try_recv(), Ok(Command::Close(close_id)) if close_id == id));
+        host.terminal_closed(id);
+        assert_eq!(
+            owner_events.lock().unwrap().as_slice(),
+            [TerminalEvent::Closed(handle)]
+        );
+        assert!(matches!(
+            observed.lock().unwrap().last(),
+            Some(TerminalEvent::Closed(TerminalHandle(1)))
+        ));
+        assert_eq!(
+            host.write_output("acme", handle, b"x".to_vec()),
+            Err(TerminalError::NotFound)
+        );
+        // Handles are not reused.
+        let (sink, _) = recorder();
+        let next = host
+            .open_pseudo("acme", pseudo_request("again"), sink)
+            .unwrap();
+        assert_ne!(next, handle);
+    }
+
+    #[test]
+    fn close_all_closes_an_extensions_pseudo_terminals() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let (sink, _) = recorder();
+        host.open_pseudo("acme", pseudo_request("a"), sink.clone())
+            .unwrap();
+        host.open_pseudo("other", pseudo_request("b"), sink)
+            .unwrap();
+        let mut ids = HashMap::new();
+        while let Ok(Command::OpenPseudo(open)) = queued.try_recv() {
+            ids.insert(open.title.clone(), open.ext.id());
+            // Keep the terminal alive as the main thread would.
+            std::mem::forget(open.ext);
+        }
+        host.close_all("acme");
+        let closed: Vec<_> = std::iter::from_fn(|| queued.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::Close(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closed, [ids["a"]]);
     }
 }

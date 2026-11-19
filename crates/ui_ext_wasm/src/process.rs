@@ -430,6 +430,8 @@ mod job {
 // The processes of one instance
 
 struct Entry {
+    /// The `[[fyx_ui.processes]]` name, for a revocation of that program alone (§C.2).
+    program: Option<String>,
     stdin: Option<mpsc::UnboundedSender<Vec<u8>>>,
     queued: Arc<AtomicUsize>,
     killer: Option<Arc<Killer>>,
@@ -463,6 +465,18 @@ impl ProcessSet {
             entry.killed.store(true, Ordering::SeqCst);
             if let Some(killer) = &entry.killer {
                 killer.kill();
+            }
+        }
+    }
+
+    /// One program's checkbox was turned off: its processes are killed.
+    pub(crate) fn kill_program(&self, program: &str) {
+        for entry in self.lock().values() {
+            if entry.program.as_deref() == Some(program) {
+                entry.killed.store(true, Ordering::SeqCst);
+                if let Some(killer) = &entry.killer {
+                    killer.kill();
+                }
             }
         }
     }
@@ -591,6 +605,7 @@ impl ProcessState {
         self.set.lock().insert(
             id,
             Entry {
+                program: spec.as_ref().map(|spec| spec.name.clone()),
                 stdin: sender,
                 queued: Arc::new(AtomicUsize::new(0)),
                 killer: None,
@@ -656,6 +671,7 @@ pub(crate) struct ProcessHandle {
     environment: Environment,
     declared_env: Arc<BTreeSet<String>>,
     running: Arc<Running>,
+    journal: Option<Arc<dyn crate::journal::Journal>>,
 }
 
 impl ProcessHandle {
@@ -667,8 +683,10 @@ impl ProcessHandle {
         environment: Option<Environment>,
         declared_env: Arc<BTreeSet<String>>,
         running: Arc<Running>,
+        journal: Option<Arc<dyn crate::journal::Journal>>,
     ) -> Self {
         Self {
+            journal,
             extension_id,
             set,
             broker,
@@ -703,6 +721,7 @@ impl ProcessHandle {
                 environment: self.environment.clone(),
                 declared_env: self.declared_env.clone(),
                 running: self.running.clone(),
+                journal: self.journal.clone(),
             };
             tokio::spawn(run(spawn, context));
         }
@@ -723,6 +742,7 @@ struct SpawnContext {
     environment: Environment,
     declared_env: Arc<BTreeSet<String>>,
     running: Arc<Running>,
+    journal: Option<Arc<dyn crate::journal::Journal>>,
 }
 
 /// The broker when the spawn is applied: granted runs, `ask` waits for the prompt.
@@ -781,6 +801,19 @@ async fn start(
         )));
     };
     if !consent(context.broker.as_ref(), &context.extension_id).await {
+        return Err(SpawnError::Denied);
+    }
+    // 0.4 (§C.2): the program's own checkbox.
+    let item = crate::permissions::ConsentItem::Program {
+        capability: CAPABILITY_PROCESS.into(),
+        name: spec.name.clone(),
+    };
+    if context.broker.as_ref().is_some_and(|broker| {
+        matches!(
+            broker.item_state(&context.extension_id, &item),
+            PermissionState::Denied | PermissionState::Unavailable
+        )
+    }) {
         return Err(SpawnError::Denied);
     }
     let worktrees = context
@@ -852,6 +885,17 @@ async fn start(
     let mut child = command
         .spawn()
         .map_err(|error| SpawnError::Io(format!("{}: {error}", program.display())))?;
+    if let Some(journal) = &context.journal {
+        journal.record(
+            &context.extension_id,
+            crate::journal::JournalKind::ProgramStarted {
+                capability: CAPABILITY_PROCESS.into(),
+                program: spec.name.clone(),
+                args: spawn.request.args.clone(),
+                cwd: Some(cwd.display().to_string()),
+            },
+        );
+    }
     let killer = Arc::new(make_killer(&child)?);
     {
         let mut entries = context.set.lock();
@@ -959,6 +1003,35 @@ fn make_killer(child: &tokio::process::Child) -> Result<Killer, SpawnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0.4 (§C.2): turning one program's checkbox off kills that program's processes only.
+    #[test]
+    fn test_kill_program() {
+        let set = ProcessSet::default();
+        for (id, program) in [(1, Some("git")), (2, Some("codex")), (3, None)] {
+            set.lock().insert(
+                id,
+                Entry {
+                    program: program.map(str::to_string),
+                    stdin: None,
+                    queued: Arc::new(AtomicUsize::new(0)),
+                    killer: None,
+                    killed: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+        set.kill_program("git");
+        let killed: Vec<(u64, bool)> = {
+            let entries = set.lock();
+            let mut killed: Vec<_> = entries
+                .iter()
+                .map(|(id, entry)| (*id, entry.killed.load(Ordering::SeqCst)))
+                .collect();
+            killed.sort();
+            killed
+        };
+        assert_eq!(killed, [(1, true), (2, false), (3, false)]);
+    }
 
     #[cfg(windows)]
     #[test]
