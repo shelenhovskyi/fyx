@@ -143,14 +143,24 @@ fn resolve_env(
     relay: Option<&Path>,
     settings: &FyxAccountsSettingsContent,
 ) -> Vec<(String, String)> {
-    let Some(env) = &integration.env else {
-        return Vec::new();
-    };
     let values = Values {
         package: integration.package_dir.as_deref(),
         accounts,
         listeners,
         relay,
+    };
+    resolve_with(integration, &values, settings)
+}
+
+/// `integration`'s env with `values`; a variable without a value or with a refused name is left
+/// out.
+fn resolve_with(
+    integration: &TerminalIntegration,
+    values: &dyn TemplateContext,
+    settings: &FyxAccountsSettingsContent,
+) -> Vec<(String, String)> {
+    let Some(env) = &integration.env else {
+        return Vec::new();
     };
     env.vars
         .iter()
@@ -163,7 +173,63 @@ fn resolve_env(
             }
             !refused
         })
-        .filter_map(|(name, template)| Some((name.clone(), template.resolve(&values)?)))
+        .filter_map(|(name, template)| Some((name.clone(), template.resolve(values)?)))
+        .collect()
+}
+
+/// What a remote shell's command line may hold (plan 5.17): ports the host's SSH tunnel forwards,
+/// nothing else. No token, package path, account dir, relay or local pid.
+struct RemoteValues<'a> {
+    forwarded: &'a dyn Fn(&str) -> Option<u16>,
+}
+
+impl TemplateContext for RemoteValues<'_> {
+    fn package(&self) -> Option<String> {
+        None
+    }
+
+    fn listen_port(&self, listener: &str) -> Option<u16> {
+        (self.forwarded)(listener)
+    }
+
+    fn listen_token(&self, _: &str) -> Option<String> {
+        None
+    }
+
+    fn relay(&self) -> Option<String> {
+        None
+    }
+
+    fn account_dir(&self, _: &str) -> Option<String> {
+        None
+    }
+
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+}
+
+/// For a shell on an SSH host (`remote`, the `RemoteClient` entity): the env of every extension
+/// allowed into every new terminal, with only what [`RemoteValues`] gives a value.
+pub(crate) fn remote_all_new_env(
+    remote: gpui::EntityId,
+    settings: &FyxAccountsSettingsContent,
+    cx: &App,
+) -> Vec<(String, String)> {
+    integrations(cx)
+        .iter()
+        .filter(|(_, integration)| integration.env_all_new)
+        .flat_map(|(ext, integration)| {
+            let forwarded =
+                |listener: &str| crate::discovery::forwarded_port(remote, ext, listener, cx);
+            resolve_with(
+                integration,
+                &RemoteValues {
+                    forwarded: &forwarded,
+                },
+                settings,
+            )
+        })
         .collect()
 }
 
@@ -642,6 +708,36 @@ mod tests {
             &settings,
         );
         assert!(none.is_empty(), "no account, no variable");
+    }
+
+    #[test]
+    fn a_remote_shell_gets_forwarded_ports_and_no_secrets() {
+        let settings = accounts_settings();
+        let vars = integration(&[
+            ("CLAUDE_CODE_SSE_PORT", "${listen.ide.port}"),
+            ("HOOKS_URL", "http://127.0.0.1:${listen.hooks.port}/h"),
+            ("TOOL_IDE_TOKEN", "${listen.ide.token}"),
+            ("PLUGIN_DIRS", "${package}/claude-plugin"),
+            ("CLAUDE_CONFIG_HOME", "${account.claude}"),
+            ("TOOL_PID", "${pid}"),
+            ("ENABLE_IDE_INTEGRATION", "true"),
+        ]);
+        let forwarded = |listener: &str| (listener == "ide").then_some(4100);
+        let env = resolve_with(
+            &vars,
+            &RemoteValues {
+                forwarded: &forwarded,
+            },
+            &settings,
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("CLAUDE_CODE_SSE_PORT".to_owned(), "4100".to_owned()),
+                ("ENABLE_IDE_INTEGRATION".to_owned(), "true".to_owned()),
+            ],
+            "the hooks port is not forwarded; tokens, paths and the pid stay local"
+        );
     }
 
     #[test]

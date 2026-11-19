@@ -649,6 +649,7 @@ fn create_remote_shell(
     cx: &mut App,
 ) -> Result<(Shell, HashMap<String, String>)> {
     insert_zed_terminal_env(&mut env, &release_channel::AppVersion::global(cx));
+    terminal::terminal_ext::apply_remote_env_hook(&mut env, remote_client.entity_id(), cx); // fyx: plan 5.17
 
     let (program, args) = match spawn_command {
         Some((program, args)) => (Some(program.clone()), args),

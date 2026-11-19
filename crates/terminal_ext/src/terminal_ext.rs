@@ -27,7 +27,7 @@ pub use decorations::{
 };
 pub use env_hook::{
     ACCOUNT_CHOICE_ENV, AccountBadge, EnvAdditions, EnvRequest, TerminalEnvHook, apply_env_hook,
-    set_env_hook,
+    apply_remote_env_hook, set_env_hook,
 };
 pub use osc::OscEvent;
 pub use osc_scan::{MAX_OSC_PAYLOAD, OscScanner};

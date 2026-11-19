@@ -129,6 +129,11 @@ impl TerminalEnvHook for AccountsEnv {
             accounts: accounts.iter().map(badge_of).collect(),
         }
     }
+
+    /// Plan 5.17: no accounts on another host; extensions' all-new env without secrets.
+    fn remote_env(&self, remote: gpui::EntityId, cx: &App) -> Vec<(String, String)> {
+        crate::profiles::remote_all_new_env(remote, &settings(cx), cx)
+    }
 }
 
 fn color_name(color: FyxAccountColor) -> &'static str {

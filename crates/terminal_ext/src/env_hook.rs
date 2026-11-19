@@ -8,7 +8,7 @@ use std::hash::BuildHasher;
 use std::path::Path;
 use std::rc::Rc;
 
-use gpui::{App, Global};
+use gpui::{App, EntityId, Global};
 
 /// Env entry with the account the terminal was opened for: `<tool>=<profile name>`, or `none` for
 /// no account even where the project has one. [`apply_env_hook`] removes it.
@@ -48,6 +48,14 @@ pub struct EnvAdditions {
 
 pub trait TerminalEnvHook: 'static {
     fn env_for(&self, request: &EnvRequest<'_>, cx: &App) -> EnvAdditions;
+
+    /// Variables for the command line of a shell on the SSH host `remote` (the `RemoteClient`
+    /// entity), plan 5.17. They are visible to other users of that host, so the provider gives no
+    /// secrets here: no tokens, account dirs or local paths.
+    fn remote_env(&self, remote: EntityId, cx: &App) -> Vec<(String, String)> {
+        let _ = (remote, cx);
+        Vec::new()
+    }
 }
 
 struct GlobalEnvHook(Rc<dyn TerminalEnvHook>);
@@ -80,6 +88,26 @@ pub fn apply_env_hook<S: BuildHasher>(
         cx,
     );
     add(env, additions);
+}
+
+/// Called by `project::terminals::create_remote_shell` before it builds the `ssh` command: adds
+/// the hook's [`TerminalEnvHook::remote_env`] to the remote program's environment. Names of Fyx's
+/// or Zed's own are never added.
+pub fn apply_remote_env_hook<S: BuildHasher>(
+    env: &mut HashMap<String, String, S>,
+    remote: EntityId,
+    cx: &App,
+) {
+    let Some(hook) = cx.try_global::<GlobalEnvHook>().map(|hook| hook.0.clone()) else {
+        return;
+    };
+    add(
+        env,
+        EnvAdditions {
+            vars: hook.remote_env(remote, cx),
+            accounts: Vec::new(),
+        },
+    );
 }
 
 /// Removes [`ACCOUNT_CHOICE_ENV`] (returned) and any [`PARKED_ACCOUNTS_ENV`] not set by [`add`].
