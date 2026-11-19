@@ -2036,7 +2036,9 @@ Environment it may pass: {}",
                 );
                 Vec::new()
             }
-            ConsentState::NeedsApproval { new_capabilities } => {
+            ConsentState::NeedsApproval {
+                new_capabilities, ..
+            } => {
                 log::info!(
                     "fyx:ui: {} now asks for {new_capabilities:?}; the update waits for approval",
                     found.extension_id

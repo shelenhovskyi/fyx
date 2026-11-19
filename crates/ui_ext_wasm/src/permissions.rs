@@ -151,7 +151,7 @@ pub use ui_ext::network::PermissionState;
 
 pub use crate::consent_items::{
     ConsentDiff, ConsentItem, ItemLine, PLUGIN_ENV_NAMES, WARNING_RUNS_ANY_CODE, Widened,
-    consent_diff, consent_items, consent_warnings,
+    consent_diff, consent_diff_lines, consent_items, consent_warnings,
 };
 
 /// The two T3 capabilities.
@@ -241,7 +241,9 @@ pub trait CapabilityCheck: Send + Sync + 'static {
 
     /// Every state change of this extension's T2 capabilities, as `(capability, state)`: the
     /// host sends `io-event::permission-changed` for each and cancels in-flight work of a
-    /// revoked one (decision 26).
+    /// revoked one (decision 26). 0.4 (§C.2): a change of one item comes as its
+    /// [`ConsentItem::key`] (`process:spawn#codex`), which only stops that item's work; the
+    /// capability's own line follows when its state changed too.
     fn changes(
         &self,
         _extension_id: &str,
