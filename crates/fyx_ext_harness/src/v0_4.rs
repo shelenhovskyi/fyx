@@ -1307,6 +1307,14 @@ fn listener_io_event(event: crate::listeners::ListenerEvent) -> wit_io::IoEvent 
             arguments: call.arguments,
         }),
         ListenerEvent::McpCancelled(id) => wit_io::IoEvent::McpCancelled(id),
+        ListenerEvent::McpInitialized(session) => {
+            wit_io::IoEvent::McpInitialized(wit_listeners::McpSession {
+                listener: session.listener,
+                connection: session.connection,
+                client_name: session.client_name,
+                client_version: session.client_version,
+            })
+        }
         ListenerEvent::Message {
             listener,
             connection,
