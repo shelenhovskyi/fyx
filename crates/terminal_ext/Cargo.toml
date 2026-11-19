@@ -17,3 +17,4 @@ doctest = false
 alacritty_terminal.workspace = true
 log.workspace = true
 polling.workspace = true
+rand.workspace = true

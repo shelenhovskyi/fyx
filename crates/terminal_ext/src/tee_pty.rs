@@ -11,20 +11,27 @@ use polling::{Event, PollMode, Poller};
 
 use crate::osc_scan::OscScanner;
 use crate::program_status;
+use crate::terminal_id::{Shared, TerminalExt};
 
 /// Called on the IO thread with every OSC payload the pty writes. Keep it cheap.
 pub type OscObserver = Box<dyn FnMut(&[u8]) + Send>;
 
 type ReplyFn = Box<dyn Fn(Cow<'static, [u8]>) + Send + Sync>;
 
-/// Wraps `pty` so its output is scanned for OSC sequences; OSC payloads are logged at debug level.
-pub fn tee<P: EventedPty>(pty: P) -> (TeePty<P>, OscReplies) {
-    tee_with(
+/// Wraps the pty of terminal `ext` so its output is scanned for OSC sequences.
+pub fn tee<P: EventedPty>(pty: P, ext: &TerminalExt) -> (TeePty<P>, OscReplies) {
+    let id = ext.id();
+    let (mut pty, replies) = tee_with(
         pty,
-        Box::new(|payload| {
-            log::debug!("fyx terminal OSC: {:?}", String::from_utf8_lossy(payload));
+        Box::new(move |payload| {
+            log::debug!(
+                "fyx terminal {id} OSC: {:?}",
+                String::from_utf8_lossy(payload)
+            );
         }),
-    )
+    );
+    pty.shared = Some(ext.shared.clone());
+    (pty, replies)
 }
 
 /// Like [`tee`], with a custom observer for OSC payloads.
@@ -36,6 +43,7 @@ pub fn tee_with<P: EventedPty>(pty: P, observer: OscObserver) -> (TeePty<P>, Osc
             scanner: OscScanner::default(),
             observer,
             replies: replies.clone(),
+            shared: None,
         },
         OscReplies { replies },
     )
@@ -64,6 +72,8 @@ pub struct TeePty<P> {
     scanner: OscScanner,
     observer: OscObserver,
     replies: Arc<OnceLock<ReplyFn>>,
+    #[allow(dead_code, reason = "the OSC parser (phase 1, step 3) reports into it")]
+    shared: Option<Arc<Shared>>,
 }
 
 impl<P> TeePty<P> {

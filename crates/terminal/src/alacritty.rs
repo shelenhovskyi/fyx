@@ -216,8 +216,9 @@ pub(super) fn spawn_event_loop(
     events_tx: UnboundedSender<PtyEvent>,
     pty: AlacrittyPty,
     drain_on_exit: bool,
+    fyx: &terminal_ext::TerminalExt, // fyx
 ) -> Result<PtySender> {
-    let (pty, osc_replies) = terminal_ext::tee(pty); // fyx: OSC tap on the pty output
+    let (pty, osc_replies) = terminal_ext::tee(pty, fyx); // fyx: OSC tap on the pty output
     let event_loop = EventLoop::new(
         term,
         ZedListener {
