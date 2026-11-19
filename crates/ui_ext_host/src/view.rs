@@ -273,12 +273,14 @@ impl SurfaceView {
                         }
                     }
                     Props::DiffView(_) => diffs.push((id, node.props_arc().clone())),
-                    // A canvas takes focus with plan 4.14, when it is clickable.
+                    // A canvas takes focus with plan 4.14, when it is clickable. A terminal node
+                    // takes it with plan 5.9.
                     Props::Flex(_)
                     | Props::Text(_)
                     | Props::Icon(_)
                     | Props::Image(_)
-                    | Props::Canvas(_) => {}
+                    | Props::Canvas(_)
+                    | Props::Terminal(_) => {}
                 }
                 stack.extend(node.children().iter().rev());
             }
@@ -933,6 +935,7 @@ impl Renderer<'_, '_> {
             Props::DiffView(props) => self.diff_view(id, props, scope),
             Props::Image(props) => self.image(props),
             Props::Canvas(props) => self.canvas(id, node.props_arc(), props, scope),
+            Props::Terminal(_) => self.terminal_placeholder(),
         };
         // Only leaves: a wrapper around a flex or list node would change the layout in tests.
         let leaf = !matches!(
@@ -1324,6 +1327,33 @@ impl Renderer<'_, '_> {
             crate::images::ImageState::Pending => self.image_placeholder(props, false),
             crate::images::ImageState::Failed => self.image_placeholder(props, true),
         }
+    }
+
+    /// A 0.4 `terminal` node, until plan 5.9 draws the extension's terminal in it.
+    fn terminal_placeholder(&self) -> AnyElement {
+        div()
+            .w_full()
+            .min_h(px(20.))
+            .p_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(self.cx.theme().colors().border_variant)
+            .bg(self.cx.theme().colors().element_background)
+            .child(
+                Icon::new(IconName::Terminal)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new("Terminal")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element()
     }
 
     fn image_placeholder(&self, props: &ui_ext::image::ImageProps, failed: bool) -> AnyElement {

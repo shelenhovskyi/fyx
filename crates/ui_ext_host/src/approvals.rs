@@ -35,50 +35,38 @@ use crate::{
     notifications::{CLICK_GUARD, ClickGuard, provenance_line},
 };
 
-/// Open approval cards per extension (§B.12).
-pub const MAX_OPEN_APPROVALS: usize = 4;
+pub use ui_ext::approvals::{ApprovalOption, ApprovalRequest, MAX_OPEN_APPROVALS};
+
 /// What the card draws of the tool's name and the title (one line each) and of the detail.
 pub const MAX_TOOL_CHARS: usize = 40;
 pub const MAX_TITLE_CHARS: usize = 120;
 pub const MAX_DETAIL_CHARS: usize = 2000;
 pub const MAX_DETAIL_LINES: usize = 12;
 
-/// The WIT `approval-option`. The card draws them in this order, whatever order the extension
-/// asked in, so "Always allow" never sits where "Allow once" usually is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ApprovalChoice {
-    Deny,
-    AlwaysAllow,
-    AllowOnce,
-}
-
-impl ApprovalChoice {
-    pub fn label(self) -> &'static str {
-        match self {
-            ApprovalChoice::AllowOnce => "Allow once",
-            ApprovalChoice::AlwaysAllow => "Always allow",
-            ApprovalChoice::Deny => "Deny",
-        }
-    }
-
-    fn element_id(self) -> &'static str {
-        match self {
-            ApprovalChoice::AllowOnce => "fyx-ui-approval-allow-once",
-            ApprovalChoice::AlwaysAllow => "fyx-ui-approval-always-allow",
-            ApprovalChoice::Deny => "fyx-ui-approval-deny",
-        }
+/// The card draws the options in this order, whatever order the extension asked in, so
+/// "Always allow" never sits where "Allow once" usually is.
+fn draw_rank(option: ApprovalOption) -> u8 {
+    match option {
+        ApprovalOption::Deny => 0,
+        ApprovalOption::AlwaysAllow => 1,
+        ApprovalOption::AllowOnce => 2,
     }
 }
 
-/// One `approvals.ask` the runtime accepted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApprovalRequest {
-    /// The tool's name as the extension states it ("Codex"); `None` when it does not say.
-    pub tool: Option<String>,
-    pub title: String,
-    pub detail: String,
-    /// At least one.
-    pub options: Vec<ApprovalChoice>,
+pub fn option_label(option: ApprovalOption) -> &'static str {
+    match option {
+        ApprovalOption::AllowOnce => "Allow once",
+        ApprovalOption::AlwaysAllow => "Always allow",
+        ApprovalOption::Deny => "Deny",
+    }
+}
+
+fn option_element_id(option: ApprovalOption) -> &'static str {
+    match option {
+        ApprovalOption::AllowOnce => "fyx-ui-approval-allow-once",
+        ApprovalOption::AlwaysAllow => "fyx-ui-approval-always-allow",
+        ApprovalOption::Deny => "fyx-ui-approval-deny",
+    }
 }
 
 /// Whether a character would hide or reorder text: controls (newlines too unless `newlines`),
@@ -148,7 +136,7 @@ pub struct ApprovalCard {
     title: SharedString,
     detail: SharedString,
     /// In drawing order, without duplicates.
-    options: Vec<ApprovalChoice>,
+    options: Vec<ApprovalOption>,
     registry: WeakEntity<UiExtensionRegistry>,
     guard: ClickGuard,
     answered: bool,
@@ -171,7 +159,7 @@ impl ApprovalCard {
         })
         .detach();
         let mut options = request.options;
-        options.sort_unstable();
+        options.sort_unstable_by_key(|&option| draw_rank(option));
         options.dedup();
         Self {
             extension_id,
@@ -197,22 +185,22 @@ impl ApprovalCard {
     }
 
     #[cfg(test)]
-    pub(crate) fn options(&self) -> &[ApprovalChoice] {
+    pub(crate) fn options(&self) -> &[ApprovalOption] {
         &self.options
     }
 
-    fn tell_registry(&mut self, answer: Option<ApprovalChoice>, cx: &mut App) {
+    fn tell_registry(&mut self, answer: Option<ApprovalOption>, cx: &mut App) {
         self.answered = true;
         let (extension_id, id) = (self.extension_id.clone(), self.id);
         self.registry
-            .update(cx, |registry, _| {
-                registry.approval_answered(&extension_id, id, answer)
+            .update(cx, |registry, cx| {
+                registry.approval_answered(&extension_id, id, answer, cx)
             })
             .ok();
     }
 
     /// A button; ignored inside the click guard and for an option the extension did not offer.
-    pub(crate) fn answer(&mut self, choice: ApprovalChoice, cx: &mut Context<Self>) {
+    pub(crate) fn answer(&mut self, choice: ApprovalOption, cx: &mut Context<Self>) {
         if self.answered || !self.buttons_armed(cx) || !self.options.contains(&choice) {
             return;
         }
@@ -251,8 +239,8 @@ impl Render for ApprovalCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let armed = self.buttons_armed(cx);
         let buttons = self.options.iter().map(|&choice| {
-            Button::new(choice.element_id(), choice.label())
-                .style(if choice == ApprovalChoice::AllowOnce {
+            Button::new(option_element_id(choice), option_label(choice))
+                .style(if choice == ApprovalOption::AllowOnce {
                     ButtonStyle::Filled
                 } else {
                     ButtonStyle::Subtle

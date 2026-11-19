@@ -55,7 +55,7 @@ enum Call {
     },
     Tick,
     /// `UiBackend::answer_approval` (0.4, §B.12).
-    Approval(u64, Option<crate::approvals::ApprovalChoice>),
+    Approval(u64, Option<crate::approvals::ApprovalOption>),
 }
 
 /// A counter-like extension: a label, an increment button, a list with one row per count and a
@@ -330,8 +330,13 @@ impl UiBackend for FakeBackend {
         self.modals_closed.borrow_mut().push(surface_id.to_string());
     }
 
-    fn answer_approval(&self, id: u64, answer: Option<crate::approvals::ApprovalChoice>) {
+    fn answer_approval(
+        &self,
+        id: u64,
+        answer: Option<crate::approvals::ApprovalOption>,
+    ) -> LocalBoxFuture<'static, ()> {
         self.calls.borrow_mut().push(Call::Approval(id, answer));
+        async {}.boxed_local()
     }
 
     fn tick(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
@@ -3370,12 +3375,12 @@ async fn test_tick_share_counts_guest_execution(cx: &mut TestAppContext) {
 mod approval_tests {
     use super::*;
     use crate::approvals::{
-        ApprovalCard, ApprovalChoice, ApprovalRequest, MAX_DETAIL_LINES, MAX_OPEN_APPROVALS,
+        ApprovalCard, ApprovalOption, ApprovalRequest, MAX_DETAIL_LINES, MAX_OPEN_APPROVALS,
         MAX_TITLE_CHARS, display_detail, display_line,
     };
     use crate::notifications::CLICK_GUARD;
 
-    fn request(options: &[ApprovalChoice]) -> ApprovalRequest {
+    fn request(options: &[ApprovalOption]) -> ApprovalRequest {
         ApprovalRequest {
             tool: Some("Codex".into()),
             title: "Run `cargo test`?".into(),
@@ -3457,15 +3462,15 @@ mod approval_tests {
             &registry,
             1,
             request(&[
-                ApprovalChoice::AllowOnce,
-                ApprovalChoice::Deny,
-                ApprovalChoice::AllowOnce,
+                ApprovalOption::AllowOnce,
+                ApprovalOption::Deny,
+                ApprovalOption::AllowOnce,
             ]),
             cx,
         );
         assert_eq!(
             card.read_with(vcx, |card, _| card.options().to_vec()),
-            [ApprovalChoice::Deny, ApprovalChoice::AllowOnce],
+            [ApprovalOption::Deny, ApprovalOption::AllowOnce],
             "host order, no duplicates"
         );
         assert_eq!(
@@ -3475,23 +3480,23 @@ mod approval_tests {
 
         vcx.executor()
             .advance_clock(CLICK_GUARD - Duration::from_millis(1));
-        card.update(vcx, |card, cx| card.answer(ApprovalChoice::AllowOnce, cx));
+        card.update(vcx, |card, cx| card.answer(ApprovalOption::AllowOnce, cx));
         vcx.run_until_parked();
         assert_eq!(backend.calls(), [], "inside the click guard");
 
         vcx.executor().advance_clock(Duration::from_millis(1));
         vcx.update(|window, cx| gpui::Focusable::focus_handle(card.read(cx), cx).focus(window, cx));
         vcx.simulate_keystrokes("enter space escape");
-        card.update(vcx, |card, cx| card.answer(ApprovalChoice::AlwaysAllow, cx));
+        card.update(vcx, |card, cx| card.answer(ApprovalOption::AlwaysAllow, cx));
         vcx.run_until_parked();
         assert_eq!(backend.calls(), [], "keys and an option not offered");
 
-        card.update(vcx, |card, cx| card.answer(ApprovalChoice::AllowOnce, cx));
-        card.update(vcx, |card, cx| card.answer(ApprovalChoice::Deny, cx));
+        card.update(vcx, |card, cx| card.answer(ApprovalOption::AllowOnce, cx));
+        card.update(vcx, |card, cx| card.answer(ApprovalOption::Deny, cx));
         vcx.run_until_parked();
         assert_eq!(
             backend.take_calls(),
-            [Call::Approval(1, Some(ApprovalChoice::AllowOnce))]
+            [Call::Approval(1, Some(ApprovalOption::AllowOnce))]
         );
         assert_eq!(
             registry.read_with(vcx, |registry, _| registry.open_approvals("fake")),
@@ -3509,14 +3514,14 @@ mod approval_tests {
     #[gpui::test]
     async fn test_approval_closed_unanswered(cx: &mut TestAppContext) {
         let (backend, registry) = setup(cx, true);
-        let (card, vcx) = show(&registry, 1, request(&[ApprovalChoice::Deny]), cx);
+        let (card, vcx) = show(&registry, 1, request(&[ApprovalOption::Deny]), cx);
         card.update(vcx, |card, cx| card.close(cx));
         vcx.run_until_parked();
         assert_eq!(backend.take_calls(), [Call::Approval(1, None)]);
         drop(card);
         vcx.update(|window, _| window.remove_window());
 
-        let (card, vcx) = show(&registry, 2, request(&[ApprovalChoice::Deny]), cx);
+        let (card, vcx) = show(&registry, 2, request(&[ApprovalOption::Deny]), cx);
         drop(card);
         vcx.update(|window, _| window.remove_window());
         vcx.run_until_parked();
@@ -3530,9 +3535,9 @@ mod approval_tests {
         let (backend, registry) = setup(cx, true);
         registry.update(cx, |registry, cx| {
             for id in 1..=MAX_OPEN_APPROVALS as u64 + 1 {
-                registry.ask_approval("fake", id, request(&[ApprovalChoice::Deny]), cx);
+                registry.ask_approval("fake", id, request(&[ApprovalOption::Deny]), cx);
             }
-            registry.ask_approval("fake", 1, request(&[ApprovalChoice::Deny]), cx);
+            registry.ask_approval("fake", 1, request(&[ApprovalOption::Deny]), cx);
             registry.ask_approval("fake", 9, request(&[]), cx);
         });
         assert_eq!(
@@ -3550,16 +3555,46 @@ mod approval_tests {
 
         let (backend, registry) = setup(cx, false);
         registry.update(cx, |registry, cx| {
-            registry.ask_approval("fake", 1, request(&[ApprovalChoice::Deny]), cx)
+            registry.ask_approval("fake", 1, request(&[ApprovalOption::Deny]), cx)
         });
         assert_eq!(backend.take_calls(), [Call::Approval(1, None)], "no window");
+    }
+
+    /// The runtime's `HostEffect::AskApproval` opens a card; an invalid one is answered `none`.
+    #[gpui::test]
+    async fn test_approval_from_host_effect(cx: &mut TestAppContext) {
+        let (backend, registry) = setup(cx, true);
+        registry.update(cx, |registry, cx| {
+            registry.apply_effect(
+                "fake",
+                HostEffect::AskApproval {
+                    id: 7,
+                    request: request(&[ApprovalOption::AllowOnce, ApprovalOption::Deny]),
+                },
+                cx,
+            );
+            registry.apply_effect(
+                "fake",
+                HostEffect::AskApproval {
+                    id: 8,
+                    request: request(&[]),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            registry.read_with(cx, |registry, _| registry.open_approvals("fake")),
+            [7]
+        );
+        assert_eq!(backend.take_calls(), [Call::Approval(8, None)]);
     }
 
     /// A new instance (a reload) or a dead one closes the old instance's cards with no answer.
     #[gpui::test]
     async fn test_approval_cards_close_with_the_instance(cx: &mut TestAppContext) {
         let (backend, registry) = setup(cx, true);
-        let (card, vcx) = show(&registry, 1, request(&[ApprovalChoice::AllowOnce]), cx);
+        let (card, vcx) = show(&registry, 1, request(&[ApprovalOption::AllowOnce]), cx);
         let dismissed = Rc::new(Cell::new(false));
         vcx.update(|_, cx| {
             let dismissed = dismissed.clone();
