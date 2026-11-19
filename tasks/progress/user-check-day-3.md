@@ -5,7 +5,7 @@
 Назви меню, кнопок і повідомлень наведено англійською, так, як їх малює Fyx. Паролі, ключі й входи в
 акаунти вводите лише ви, ніколи не агент. **Сьогодні входити в жоден акаунт не треба.**
 
-**Час:** близько 42 хвилин, найважливіше йде першим. Якщо часу мало, робіть блоки 0–4 (це
+**Час:** близько 43 хвилин, найважливіше йде першим. Якщо часу мало, робіть блоки 0–4 (це
 ~22 хв) і пропустіть решту.
 
 **Стан аркуша:** чернетка від 2026-11-19. Рядки меню й діалогів звірено з кодом
@@ -24,7 +24,7 @@
 | 7 | Файли виявлення (discovery files) з'являються й зникають | 3 |
 | 8 | Shell integration: PowerShell і Git Bash | 4 |
 | 9 | Оновлення показує лише зміни | 4 |
-| 10 | «Share with …», око на вкладці, «typed by», картки T3 (тільки з Check Probe) | 3 |
+| 10 | «Share with …», око на вкладці, «typed by», картки T3 (тільки з Check Probe) | 4 |
 
 ## Чого в цій збірці ще НЕМАЄ (не перевіряйте)
 
@@ -197,7 +197,7 @@ osc "state=blocked:kind=permission:app=claude-code:title=$t"
 - Якщо ні: скрін вкладки й підказки.
 
 **2.3** Відкрийте панель **Agent Sessions**: кнопка із дзвіночком у правому доку (підказка
-`Agent Sessions`; на ній число очікуваних) або палітра команд → `toggle agent sessions`.
+`Agent Sessions`; на ній число очікуваних) або палітра команд → `fyx terminal: toggle agent sessions`.
 - Очікувано: у списку цей термінал: назва, рядок `Claude Code: needs permission — Run tests?`
   і рядок дрібніше з `via OSC 7501`. Термінали, що потребують вас, зверху. Клік по рядку переводить
   у цей термінал. Якщо жоден термінал не має статусу, панель каже `No terminal reports a status.`
@@ -364,9 +364,11 @@ Get-ChildItem "$day3\accounts\*\ide"
   випадковий). У файлі (`Get-Content`, не показуйте нікому) JSON з `pid`, `workspaceFolders` (ваш
   проєкт), `ideName` `Fyx`, `transport` `ws` і `authToken`.
 - Якщо ні: порожні теки; що в журналі (`$prof\logs\Fyx.log`) про `discovery` чи `listener`.
+  (Відомо: у журналі може бути `the IDE tools were not registered: listener "ide" is not granted` і
+  `the editor context is off`. Це помилка порядку завантаження, на файли виявлення не впливає.)
 
 **7.2** Вимкніть `Writes the discovery file ${port}.lock` на сторінці розширення.
-- Очікувано: файли зникають одразу. Увімкніть: з'являються знову (інший порт, можливо).
+- Очікувано: файли зникають одразу (цей крок W3 ще дозвіряє). Увімкніть: з'являються знову (інший порт, можливо).
 - Якщо ні: які файли лишилися.
 
 **7.3** Закрийте Fyx повністю і ще раз `Get-ChildItem "$day3\accounts\*\ide"`.
@@ -442,11 +444,11 @@ capabilities = ["ui:panel", "terminal:pseudo", "terminal:status", "terminal:obse
 (Get-Item "$day3\pseudo-edit\fyx_ui.wasm").LastWriteTime = Get-Date
 ```
 
-- Очікувано (за ~1 с): розширення `fyx-demo-pseudo-terminal` на сторінці **Fyx Extensions** вимкнене
+- Очікувано (за ~1 с, без перезапуску; зміна файлу `fyx_ui.wasm` перезавантажує розширення сама):
+  розширення `fyx-demo-pseudo-terminal` на сторінці **Fyx Extensions** вимкнене
   з кнопкою **Enable** і рядком на кшталт `Its update waits for Enable: …`; стара версія не
   завантажується з новими правами.
-- Якщо ні: нічого не сталося. Перезапустіть Fyx (dev-папки читаються на старті) і запишіть, що
-  стало після перезапуску.
+- Якщо ні: нічого не сталося. Перезапустіть Fyx і запишіть, що стало після перезапуску.
 
 **9.2** Натисніть **Enable**.
 - Очікувано: діалог `Approve the update of fyx-demo-pseudo-terminal?`. У ньому лише групи зі
@@ -467,42 +469,66 @@ capabilities = ["ui:panel", "terminal:pseudo", "terminal:status", "terminal:obse
 | 9.2 діалог лише зі змінами | | |
 | 9.3 непоставлений прапорець лишається off | | |
 
-## 10. «Share with …», око на вкладці, «typed by», картки T3 (3 хв, потрібен Check Probe)
+## 10. «Share with …», око на вкладці, «typed by», картки T3 (4 хв, потрібен Check Probe)
 
 Перевіряємо читання й друк у **ваші** термінали. Жодне розширення зі збірки цього не просить, тож
 потрібне тестове розширення **Check Probe** (W3, `$probe`). Якщо `$probe` порожній, **цей блок
 пропустіть** і напишіть «блок 10 пропущено».
 
 **10.1** **Install Dev Extension…** → `$probe`. Подивіться на діалог.
-- Очікувано: група **Asks you each time** з рядками `Reads a terminal you share with it` і
+- Очікувано: усі чотири групи. **Shows in Fyx**: `A panel`, `Approval cards for its tools`.
+  **Allowed without asking**: `Opens terminals of its own`. **Off unless you tick it**:
+  `Sees every terminal's title, status and exit` (прапорець порожній; **не ставте**).
+  **Asks you each time**: `Reads a terminal you share with it` і
   `Types into a terminal you share with it`, без прапорців. **Install**.
 - Якщо ні: які групи показало.
 
-**10.2** Відкрийте звичайний термінал і клацніть у ньому **правою кнопкою**.
-- Очікувано: у меню роздільник і заголовок `Share with Check Probe`, а під ним перемикачі
-  `Read once`, `Read until this terminal closes`, `Allow typing (each command confirmed)`.
+Керування Check Probe: у його панелі **одне поле команд**. Наберіть команду й натисніть **Enter**.
+Кнопок немає. Спершу відкрийте звичайний термінал (вкладка PowerShell).
+
+**10.2** Картка читання. У полі Check Probe наберіть `list`, потім `read 1` (число з `list`, де
+рядок виглядає як `1:user:•••`; якщо термінал інший, візьміть його номер).
+- Очікувано: `list` перелічує термінали. `read 1` відкриває **картку** в стосі сповіщень, а не
+  діалог: ім'я розширення, текст `Plain text, without colours. It goes to the extension.`, кнопки
+  `Deny`, `This terminal until it closes`, `Once`. Перша секунда кліки не діють, Enter і Escape
+  нічого не відповідають. Натисніть **Once**.
+- Якщо ні: скрін картки; що показало замість неї.
+
+**10.3** Меню «Share». Клацніть **правою кнопкою** у цьому терміналі.
+- Очікувано: у меню нижче `Inline Assist` і `Add to Agent Thread` роздільник і заголовок
+  `Share with Check Probe`, під ним перемикачі `Read once`, `Read until this terminal closes`,
+  `Allow typing (each command confirmed)`, ще нижче `Close Terminal Tab`. Увімкнений пункт має
+  галочку.
 - Якщо ні: скрін меню (чи є пункти взагалі).
 
-**10.3** Поставте `Read until this terminal closes`.
+**10.4** Око. Поставте `Read until this terminal closes`.
 - Очікувано: на вкладці з'являється **око** (жовте). Підказка: `Check Probe may read this terminal
-  until it closes`. Зніміть відмітку: око зникає.
-- Якщо ні: скрін вкладки.
+  until it closes`. Тепер `read 1` у Check Probe відповідає **без картки** (ви вже дали дозвіл).
+  Зніміть відмітку: око зникає, `read 1` знову показує картку.
+- Якщо ні: скрін вкладки; чи питала картка попри відмітку.
 
-**10.4** Картки T3 і «typed by»: кнопки в панелі Check Probe, які вони запускають читання й друк,
-описав W3: «ЗАПОВНИТИ». Очікувано від них:
-- Читання без «Share» відкриває **картку** в стосі сповіщень (не діалог): ім'я розширення, текст
-  `Plain text, without colours. It goes to the extension.`, кнопки `Deny`, `This terminal until
-  it closes`, `Once`; перша секунда кліки не діють, Enter і Escape нічого не відповідають.
-- Друк показує картку з **точним** текстом (під ним `Fyx types exactly this; the tab shows who
-  typed it.`), кнопки `Deny` і `Type it` (або `Type and press Enter`). Після підтвердження на вкладці на 5 секунд `typed by Check Probe`.
-- Якщо ні: скрін картки, текст на ній.
+**10.5** Друк. **Без** відмітки на `Allow typing` наберіть у Check Probe `write 1 echo hi`.
+- Очікувано: **відмова без картки** (друкувати можна лише в термінал, який ви дозволили).
+  Тепер поставте `Allow typing (each command confirmed)` (правою кнопкою) і повторіть
+  `write 1 echo hi`.
+- Очікувано: картка з **точним** текстом `echo hi`, під ним `Fyx types exactly this; the tab shows
+  who typed it.`, кнопки `Deny` і `Type it`. **Type it**: текст з'являється в терміналі **без
+  Enter**, на вкладці на 5 секунд напис `typed by fyx-check-probe` (зараз показується id розширення,
+  а не назва `Check Probe`; це відомо, виправляють). `write-enter 1 echo hi` дає картку з кнопкою
+  `Type and press Enter`, і команда виконується.
+- Якщо ні: скрін картки; чи надрукувався текст; що написано на вкладці.
+
+**10.6** Закрийте цей термінал.
+- Очікувано: відмітки Share зникають разом з ним, око теж.
 
 | Крок | Так / ні | Примітка |
 |---|---|---|
-| 10.1 група «Asks you each time» | | |
-| 10.2 меню Share with | | |
-| 10.3 око і підказка | | |
-| 10.4 картки T3 і «typed by» | | |
+| 10.1 усі чотири групи в діалозі | | |
+| 10.2 картка читання | | |
+| 10.3 меню Share with | | |
+| 10.4 око, підказка, читання без картки | | |
+| 10.5 друк: відмова, картка, «typed by» | | |
+| 10.6 закриття терміналу знімає відмітки | | |
 
 ## Після перевірки
 
