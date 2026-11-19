@@ -1,0 +1,224 @@
+# The agent review and the policy decision (registry-repo.md, "review.yml"). Runs in the base
+# repository's context and never checks out or runs PR code: it reads the PR through the API and
+# the entry, extension.toml and source with `git show`, as data. pr.yml's artifacts are untrusted
+# (the PR controls pr.yml's run); only the PR number is taken from them, and it is checked
+# against the triggering run's head commit.
+name: review
+
+on:
+  workflow_run:
+    workflows: [pr, review-trigger]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  pr:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      head: ${{ steps.pr.outputs.head }}
+    steps:
+      - id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          gh run download "$RUN_ID" --repo "$REPO" --name pr --dir pr
+          number=$(jq -r '.number | tonumber' pr/pr.json)
+          actual=$(gh pr view "$number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          if [ "$actual" != "$HEAD" ]; then
+            echo "::error::PR $number's head is $actual, not the triggering run's $HEAD"; exit 1
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+
+  agent-review:
+    needs: pr
+    runs-on: ubuntu-24.04
+    environment: agent-review
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Collect the review inputs (text only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.pr.outputs.number }}
+        run: |
+          mkdir -p inputs
+          gh pr diff "$NUMBER" --repo "$REPO" > inputs/entry.diff
+          # The source diff since the last published commit, the package file list and the
+          # assets are added here with the builder (task 3.2); they are fetched as text, never
+          # run.
+          cat inputs/* | sha256sum | cut -d' ' -f1 > inputs.sha256
+          cat inputs/* | wc -c > inputs.size
+      - name: Review
+        env:
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+          # Off until the owner decides about the model key (registry-repo.md, "review.yml"):
+          # the repository variable AGENT_REVIEW must be `on` as well.
+          AGENT_REVIEW: ${{ vars.AGENT_REVIEW }}
+        run: |
+          # Fails closed: without a configured reviewer (the model key is the owner's decision,
+          # or a local model on a self-hosted runner), the verdict is `concern`, "no reviewer
+          # configured", and every entry PR needs the owner.
+          if [ "$AGENT_REVIEW" = "on" ] && [ -n "$MODEL_API_KEY" ] && [ -x scripts/agent-review ]; then
+            scripts/agent-review inputs > raw-verdict.json || true
+            python3 scripts/registry.py verdict raw-verdict.json \
+              --inputs-sha256 "$(cat inputs.sha256)" --inputs-size "$(cat inputs.size)" > verdict.json
+          else
+            python3 scripts/registry.py verdict \
+              --inputs-sha256 "$(cat inputs.sha256)" --inputs-size "$(cat inputs.size)" > verdict.json
+          fi
+          cat verdict.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verdict
+          path: verdict.json
+
+  report:
+    needs: [pr, agent-review]
+    if: always() && needs.pr.result == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      auto_merge: ${{ steps.report.outputs.auto_merge }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: verdict
+        continue-on-error: true
+      - name: Gather the data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.pr.outputs.number }}
+          HEAD: ${{ needs.pr.outputs.head }}
+        run: |
+          mkdir -p data/before data/after
+          gh pr view "$NUMBER" --repo "$REPO" --json author,files,labels,reviews > data/pr.json
+          # The base and head versions of the changed entry, as files.
+          git fetch -q origin "pull/$NUMBER/head"
+          for file in $(jq -r '.files[].path | select(test("^extensions/[^/]+\\.toml$"))' data/pr.json); do
+            mkdir -p "data/before/extensions" "data/after/extensions"
+            git show "origin/main:$file" > "data/before/$file" 2>/dev/null || rm -f "data/before/$file"
+            git show "$HEAD:$file" > "data/after/$file" 2>/dev/null || rm -f "data/after/$file"
+          done
+          # extension.toml at the entry's source commit, as text.
+          entry=$(ls data/after/extensions/*.toml 2>/dev/null | head -n 1 || true)
+          if [ -n "$entry" ]; then
+            repository=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["source"]["repository"])' "$entry")
+            commit=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["source"]["commit"])' "$entry")
+            path=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["source"].get("path", "."))' "$entry")
+            git init -q source
+            if git -C source fetch -q --depth 1 "$repository" "$commit"; then
+              git -C source show "FETCH_HEAD:$path/extension.toml" > data/extension.toml || true
+              # The file list, as text, so the decision sees a Zed extension (0.3 design Q1).
+              git -C source ls-tree -r --name-only FETCH_HEAD -- "$path" > data/source-files.txt || true
+            fi
+          fi
+          # pr.yml's job results for this head commit.
+          run=$(gh run list --repo "$REPO" --workflow pr.yml --commit "$HEAD" --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -n "$run" ]; then gh api "repos/$REPO/actions/runs/$run/jobs" > data/jobs.json; fi
+          gh release download index --repo "$REPO" --pattern index.json --pattern blocklist.json --dir data || true
+          # extension.toml at the last published release's source commit, for the update diff of
+          # the comment (0.4 design C.5): text only, fetched with git and never run.
+          if [ -n "$entry" ] && [ -f data/index.json ]; then
+            id=$(basename "$entry" .toml)
+            last=$(jq -r --arg id "$id" '[.releases[].signed | select(.id == $id)] | sort_by(.version | split(".") | map(tonumber)) | last | select(. != null) | "\(.source.repository) \(.source.commit) \(.source.path // ".")"' data/index.json || true)
+            if [ -n "$last" ]; then
+              set -- $last
+              git init -q last-source
+              if git -C last-source fetch -q --depth 1 "$1" "$2"; then
+                git -C last-source show "FETCH_HEAD:$3/extension.toml" > data/last-extension.toml || true
+              fi
+            fi
+          fi
+      - name: Decide
+        run: |
+          python3 scripts/registry.py decision-input --pr data/pr.json --jobs data/jobs.json \
+            --before data/before --after data/after --manifest data/extension.toml \
+            --index data/index.json --blocklist data/blocklist.json --verdict verdict.json \
+            --source-files data/source-files.txt --last-manifest data/last-extension.toml \
+            > data/input.json
+          python3 scripts/registry.py decide data/input.json > data/decision.json
+          python3 scripts/registry.py comment data/decision.json > data/comment.md
+          cat data/decision.json
+      - name: Statuses, comment, labels, auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.pr.outputs.number }}
+          HEAD: ${{ needs.pr.outputs.head }}
+        run: |
+          status() {
+            gh api "repos/$REPO/statuses/$HEAD" -f state="$2" -f context="$1" -f description="$3" > /dev/null
+          }
+          policy=$(jq -r .status data/decision.json)
+          status policy "$policy" "$(jq -r '[.failures[], (.required[] | select(.satisfied | not) | "needs " + .who)] | join("; ") | .[0:139]' data/decision.json)"
+          agent=$(jq -r .agent_review data/decision.json)
+          status agent-review "$agent" "$(jq -r '.verdict.verdict' data/decision.json)"
+          # The tier, the Zed extension and the owner's approval as decided, for publish.yml to
+          # check against the rebuilt release (integration-6 N3). Informational, never required.
+          status policy-tier success "$(python3 scripts/registry.py tier-status data/decision.json)"
+          # One comment, updated in place.
+          comment=$(gh api "repos/$REPO/issues/$NUMBER/comments" --paginate \
+            --jq '[.[] | select(.body | startswith("<!-- fyx-registry-policy -->"))][0].id // empty')
+          if [ -n "$comment" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$comment" -F body=@data/comment.md > /dev/null
+          else
+            gh api "repos/$REPO/issues/$NUMBER/comments" -F body=@data/comment.md > /dev/null
+          fi
+          # The review can only escalate: needs-owner is added here and removed only by the owner.
+          for label in $(jq -r '.add_labels[]' data/decision.json); do
+            gh pr edit "$NUMBER" --repo "$REPO" --add-label "$label"
+          done
+          echo "auto_merge=$(jq -r .auto_merge data/decision.json)" >> "$GITHUB_OUTPUT"
+        id: report
+
+  # A merge made with GITHUB_TOKEN would not start publish.yml (GitHub runs no workflows for
+  # GITHUB_TOKEN events), so auto-merge is enabled with a GitHub App token that can only merge,
+  # held in its own Environment. Without it, the owner merges green PRs by hand.
+  merge:
+    needs: [pr, report]
+    if: needs.report.outputs.auto_merge == 'true'
+    runs-on: ubuntu-24.04
+    environment: auto-merge
+    permissions: {}
+    steps:
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.pr.outputs.number }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::no AUTO_MERGE_TOKEN: the owner merges green PRs by hand"; exit 0
+          fi
+          gh pr merge "$NUMBER" --repo "$REPO" --auto --squash

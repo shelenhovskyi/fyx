@@ -111,7 +111,7 @@ pub use element::{
     CursorLayout, EditorElement, HighlightedRange, HighlightedRangeLine, PointForPosition,
     file_status_label_color, render_breadcrumb_text,
 };
-pub use git::blame::{BlameRenderer, GitBlame};
+pub use git::blame::{BlameRenderer, GitBlame, MAX_RELATIVE_TIMESTAMP};
 pub use git::{
     DefaultDiffHunkRenderer, DiffHunkRenderer, HiddenDiffHunkRenderer,
     HiddenUnstagedDiffHunkRenderer, render_diff_hunk_controls, set_blame_renderer,
@@ -9993,6 +9993,14 @@ impl Editor {
             && self.focus_handle.is_focused(window)
     }
 
+    // fyx: a steady caret for inputs in extension surfaces, whose every repaint re-renders the
+    // surface (Fyx triage-3 #5).
+    pub fn disable_cursor_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink_manager = cx.new(|cx| BlinkManager::new(CURSOR_BLINK_INTERVAL, |_| false, cx));
+        self._subscriptions
+            .push(cx.observe(&self.blink_manager, |_, _, cx| cx.notify()));
+    }
+
     pub fn set_show_cursor_when_unfocused(&mut self, is_enabled: bool, cx: &mut Context<Self>) {
         self.show_cursor_when_unfocused = is_enabled;
         cx.notify();
@@ -12547,11 +12555,10 @@ impl EditorSnapshot {
                 self.git_blame_gutter_max_author_length
                     .map(|max_author_length| {
                         let renderer = cx.global::<GlobalBlameRenderer>().0.clone();
-                        const MAX_RELATIVE_TIMESTAMP: &str = "2 years, 11 months ago";
 
                         let max_char_count = max_author_length.min(renderer.max_author_length())
                             + ::git::SHORT_SHA_LENGTH
-                            + MAX_RELATIVE_TIMESTAMP.len();
+                            + renderer.max_timestamp_width(cx);
 
                         ch_advance * max_char_count
                             + renderer.blame_entry_non_text_width(window, cx)

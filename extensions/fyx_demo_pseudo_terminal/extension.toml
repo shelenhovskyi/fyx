@@ -1,0 +1,15 @@
+id = "fyx-demo-pseudo-terminal"
+name = "WASM shell demo"
+description = "Fyx UI demo: a pseudo-terminal whose backend is the extension, a small shell drawn by Fyx's terminal in a panel (fyx:ui 0.4 only)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Read by Fyx's extension host (`fyx_ui::UiManifest`); upstream ignores the table.
+# This demo exists only for the staged fyx:ui 0.4: build it with
+# `cargo build --target wasm32-wasip2 -p fyx_demo_pseudo_terminal --features fyx_demo_pseudo_terminal/fyx-ui-0-4`
+# on its own, so the SDK's 0.4 feature does not reach the other demos.
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+capabilities = ["ui:panel", "terminal:pseudo"]

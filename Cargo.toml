@@ -88,7 +88,9 @@ members = [
     "crates/fs_benchmarks",
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
+    "crates/fyx_api_docs", # fyx
     "crates/fyx_ext", # fyx
+    "crates/fyx_ext_harness", # fyx
     "crates/fyx_guard", # fyx
     "crates/fyx_registry", # fyx
     "crates/git",
@@ -176,6 +178,7 @@ members = [
     "crates/project_benchmarks",
     "crates/project_panel",
     "crates/project_symbols",
+    "crates/project_bookmarks",
     "crates/prompt_store",
     "crates/proto",
     "crates/proxy_handshake",
@@ -220,6 +223,8 @@ members = [
     "crates/telemetry",
     "crates/telemetry_events",
     "crates/terminal",
+    "crates/terminal_ext", # fyx
+    "crates/terminal_host", # fyx
     "crates/terminal_view",
     "crates/text",
     "crates/theme",
@@ -234,6 +239,8 @@ members = [
     "crates/ui_ext", # fyx
     "crates/ui_ext_host", # fyx
     "crates/ui_ext_sdk", # fyx
+    "crates/ui_ext_sdk_v0_1", # fyx
+    "crates/ui_ext_sdk_v0_2", # fyx
     "crates/ui_ext_wasm", # fyx
     "crates/ui_input",
     "crates/ui_macros",
@@ -272,6 +279,14 @@ members = [
     "extensions/fyx_demo_markdown", # fyx
     "extensions/fyx_demo_gitstatus", # fyx
     "extensions/fyx_demo_form", # fyx
+    "extensions/fyx_demo_decorations", # fyx
+    "extensions/fyx_demo_images", # fyx
+    "extensions/fyx_demo_charts", # fyx
+    "extensions/fyx_demo_t2", # fyx
+    "extensions/fyx_demo_pseudo_terminal", # fyx
+    "extensions/fyx_demo_terminal_profiles", # fyx
+    "extensions/fyx_claude_code", # fyx
+    "extensions/fyx_gemini_cli", # fyx
     "extensions/glsl",
     "extensions/html",
     "extensions/proto",
@@ -377,6 +392,7 @@ file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
+fyx_ext_harness = { path = "crates/fyx_ext_harness" } # fyx
 fyx_guard = { path = "crates/fyx_guard" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 git = { path = "crates/git" }
@@ -464,6 +480,7 @@ prettier = { path = "crates/prettier" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
 project_symbols = { path = "crates/project_symbols" }
+project_bookmarks = { path = "crates/project_bookmarks" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 proxy_handshake = { path = "crates/proxy_handshake" }
@@ -507,6 +524,8 @@ tasks_ui = { path = "crates/tasks_ui" }
 telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }
 terminal = { path = "crates/terminal" }
+terminal_ext = { path = "crates/terminal_ext" } # fyx
+terminal_host = { path = "crates/terminal_host" } # fyx
 terminal_view = { path = "crates/terminal_view" }
 text = { path = "crates/text" }
 theme = { path = "crates/theme" }
@@ -520,6 +539,8 @@ ui = { path = "crates/ui" }
 ui_ext = { path = "crates/ui_ext" } # fyx
 ui_ext_host = { path = "crates/ui_ext_host" } # fyx
 ui_ext_sdk = { path = "crates/ui_ext_sdk" } # fyx
+ui_ext_sdk_v0_1 = { path = "crates/ui_ext_sdk_v0_1" } # fyx
+ui_ext_sdk_v0_2 = { path = "crates/ui_ext_sdk_v0_2" } # fyx
 ui_ext_wasm = { path = "crates/ui_ext_wasm" } # fyx
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
@@ -554,7 +575,7 @@ accesskit = { version = "0.24.0", features = ["enumn"] }
 accesskit_macos = "0.26.0"
 accesskit_unix = "0.22"
 accesskit_windows = "0.34"
-agent-client-protocol = { version = "=5.0.0", features = ["schemars", "unstable", "unstable_protocol_v2"] }
+agent-client-protocol = { version = "=5.1.0", features = ["schemars", "unstable", "unstable_protocol_v2"] }
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 any_vec = "0.14"
@@ -703,8 +724,8 @@ itertools = "0.14.0"
 js-sys = "0.3"
 jsonschema = { version = "0.51", default-features = false }
 jsonwebtoken = { version = "10.0", default-features = false }
-jupyter-protocol = "1.4.0"
-jupyter-websocket-client = "1.1.0"
+jupyter-protocol = "2.0.3"
+jupyter-websocket-client = "3.0.0"
 libc = "0.2"
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 libwebrtc = "0.3.26"
@@ -721,7 +742,7 @@ mime = "0.3.17"
 minidumper = "0.11"
 moka = { version = "0.12.10", features = ["sync"] }
 nanoid = "0.4"
-nbformat = "1.2.0"
+nbformat = "3.0.0"
 nix = "0.30"
 notify-rust = "4"
 nucleo = { package = "nucleo-matcher", version = "0.3" }
@@ -872,6 +893,7 @@ proc-macro2 = "1.0.93"
 profiling = "1"
 # replace this with main when #635 is merged
 pollster = "0.4.0"
+polling = "3.8.0" # fyx: terminal_ext implements alacritty's EventedReadWrite
 proptest = { version = "1.12.0", features = ["attr-macro"] }
 proptest-derive = "0.8.0"
 prost = "0.14"
@@ -902,7 +924,7 @@ resvg = { version = "0.46.0", default-features = false, features = [
 ] }
 ring = "0.17.14" # fyx
 rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit"] }
-runtimelib = { version = "1.4.0", default-features = false, features = [
+jupyter-zmq-client = { version = "3.0.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
 ] }
 rust-embed = { version = "8.11", features = ["include-exclude", "compression"] }
@@ -1157,6 +1179,7 @@ outline = { codegen-units = 1 }
 paths = { codegen-units = 1 }
 prettier = { codegen-units = 1 }
 project_symbols = { codegen-units = 1 }
+project_bookmarks = { codegen-units = 1 }
 refineable = { codegen-units = 1 }
 release_channel = { codegen-units = 1 }
 reqwest_client = { codegen-units = 1 }

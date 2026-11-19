@@ -1,4 +1,6 @@
 pub mod fs_watcher;
+#[cfg(windows)]
+mod fyx_junction; // fyx: junctions without cmd /C mklink
 mod git_clone_progress;
 
 use parking_lot::Mutex;
@@ -748,19 +750,15 @@ impl Fs for RealFs {
 
         #[cfg(windows)]
         if smol::fs::metadata(&target).await?.is_dir() {
-            let status = new_command("cmd")
-                .args(["/C", "mklink", "/J"])
-                .args([path, target.as_path()])
-                .status()
-                .await?;
-
-            if !status.success() {
-                return Err(anyhow::anyhow!(
-                    "Failed to create junction from {:?} to {:?}",
-                    path,
-                    target
-                ));
-            }
+            // fyx: a direct reparse point instead of `cmd /C mklink /J`, which a path with
+            // `&`, `|` or `%` could turn into a command.
+            let link = path.to_path_buf();
+            let junction_target = target.clone();
+            smol::unblock(move || fyx_junction::create_junction(&link, &junction_target))
+                .await
+                .with_context(|| {
+                    format!("Failed to create junction from {path:?} to {target:?}")
+                })?;
         } else {
             smol::fs::windows::symlink_file(target, path).await?
         }

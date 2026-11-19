@@ -1,0 +1,16 @@
+# Guest fixture for the fyx:ui 0.2 host tests: a scriptable component that calls every 0.2 host
+# import. Built from the 0.2 WIT with wit-bindgen directly, since `ui_ext_sdk` is 0.1 until plan
+# 2.4. A member of the fixture workspace in `crates/ui_ext_wasm/fixtures`.
+[package]
+name = "fyx_ui_test_probe_v0_2"
+version = "0.2.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/probe_v0_2.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"

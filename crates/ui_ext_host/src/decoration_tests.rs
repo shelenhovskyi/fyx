@@ -1,26 +1,37 @@
 //! Decorations in real editors: the block follows its line through edits above it, and every
 //! editor on the buffer places it at the same logical line.
 
-use std::path::Path;
+use std::{
+    cell::{Cell, RefCell},
+    path::Path,
+    rc::Rc,
+};
 
+use anyhow::{Result, anyhow};
 use editor::{Editor, display_map::CustomBlockId};
 use fs::{FakeFs, Fs as _};
-use gpui::{Entity, Pixels, TestAppContext, VisualTestContext};
+use futures::{FutureExt as _, future::LocalBoxFuture};
+use gpui::{AppContext as _, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
 use language::{Buffer, Point};
 use project::Project;
-use ui_ext::{FlexDirection, FlexProps, Node, Patch, Props, TextProps, Tree, TreeLimits, Update};
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
+    self, ButtonProps, DecorationLocation, FlexDirection, FlexProps, Node, NodeId, Patch, Props,
+    TextProps, UiEvent, Update, tree::Tree,
+};
 use util::path;
 
 use crate::{
-    DecorationId, DecorationPlacement, DecorationTarget, Decorations,
-    decorations::{estimate_lines, parse_dev_decorations, path_matches},
+    DecorationId, DecorationPlacement, DecorationTarget, Decorations, UiExtensionRegistry,
+    backend::{HostEffect, Reply, Row, UiBackend},
+    decorations::{estimate_lines, parse_dev_decorations, path_matches, worktree_path_matches},
     text_tree,
 };
 
 /// The text node of [`text_tree`].
 const TEXT_SELECTOR: &str = "fyx-node-2";
 
-fn init(cx: &mut TestAppContext) -> Entity<Decorations> {
+pub(crate) fn init(cx: &mut TestAppContext) -> Entity<Decorations> {
     crate::tests::init_test(cx);
     cx.update(|cx| {
         crate::decorations::init(cx);
@@ -47,7 +58,7 @@ async fn scratch_buffer(text: &str, cx: &mut TestAppContext) -> (Entity<Project>
     (project, buffer)
 }
 
-fn open_editor(
+pub(crate) fn open_editor(
     project: &Entity<Project>,
     buffer: &Entity<Buffer>,
     cx: &mut TestAppContext,
@@ -61,13 +72,13 @@ fn open_editor(
     (editor, vcx)
 }
 
-fn redraw(cx: &mut VisualTestContext) {
+pub(crate) fn redraw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
 
-fn only_block(
+pub(crate) fn only_block(
     decorations: &Entity<Decorations>,
     editor: &Entity<Editor>,
     id: DecorationId,
@@ -80,7 +91,11 @@ fn only_block(
     blocks[0]
 }
 
-fn block_row(editor: &Entity<Editor>, block: CustomBlockId, cx: &mut VisualTestContext) -> u32 {
+pub(crate) fn block_row(
+    editor: &Entity<Editor>,
+    block: CustomBlockId,
+    cx: &mut VisualTestContext,
+) -> u32 {
     editor
         .update(cx, |editor, cx| editor.row_for_block(block, cx))
         .expect("block is in the display map")
@@ -94,7 +109,7 @@ fn text_top(cx: &mut VisualTestContext) -> Pixels {
         .y
 }
 
-fn insert(buffer: &Entity<Buffer>, at: Point, text: &str, cx: &mut VisualTestContext) {
+pub(crate) fn insert(buffer: &Entity<Buffer>, at: Point, text: &str, cx: &mut VisualTestContext) {
     buffer.update(cx, |buffer, cx| buffer.edit([(at..at, text)], None, cx));
     redraw(cx);
 }
@@ -242,6 +257,58 @@ async fn test_updates_repaint_and_resize_the_block(cx: &mut TestAppContext) {
     assert_eq!(text.as_deref(), Some("first\nsecond"));
 }
 
+/// design.md 0.3 §11: nothing of an extension is drawn in the review pane's editors.
+#[gpui::test]
+async fn test_review_pane_editors_get_no_block(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let (project, buffer) = scratch_buffer(
+        "a
+b
+", cx,
+    )
+    .await;
+    let id = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("scratch/notes.txt", 0), text_tree("note"), cx)
+        })
+        .expect("valid tree");
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    only_block(&decorations, &editor, id, &mut vcx);
+
+    let window = cx.add_window(|window, cx| {
+        let mut editor = Editor::for_buffer(buffer.clone(), Some(project.clone()), window, cx);
+        editor.register_addon(agent_review::AgentReviewEditor);
+        editor
+    });
+    let review = window.root(cx).expect("editor window");
+    let mut review_cx = VisualTestContext::from_window(*window, cx);
+    redraw(&mut review_cx);
+    let blocks_in = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+        decorations.read_with(cx, |decorations, _| {
+            decorations.blocks_in(editor.entity_id(), id)
+        })
+    };
+    assert!(blocks_in(&review, &mut review_cx).is_empty());
+
+    // Marked after a block was placed: it goes at the next sync (here, a decorations change).
+    editor.update(&mut vcx, |editor, _| {
+        editor.register_addon(agent_review::AgentReviewEditor)
+    });
+    let second = decorations
+        .update(&mut vcx, |decorations, cx| {
+            decorations.add_tree(below("scratch/notes.txt", 1), text_tree("another"), cx)
+        })
+        .expect("valid tree");
+    redraw(&mut vcx);
+    assert!(blocks_in(&editor, &mut vcx).is_empty());
+    assert!(
+        decorations
+            .read_with(&mut vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), second))
+            .is_empty()
+    );
+}
+
 #[gpui::test]
 async fn test_other_files_get_no_block(cx: &mut TestAppContext) {
     let decorations = init(cx);
@@ -273,6 +340,515 @@ fn test_path_matching() {
     let abs = std::env::temp_dir().join("scratch").join("notes.txt");
     assert!(path_matches(&abs, full, Some(&abs)));
     assert!(!path_matches(&abs, full, None));
+
+    // Extension paths: exactly the worktree-relative path, never a suffix or a single-file
+    // worktree's empty path.
+    assert!(worktree_path_matches("src/notes.txt", "src/notes.txt"));
+    assert!(!worktree_path_matches("notes.txt", "src/notes.txt"));
+    assert!(!worktree_path_matches(
+        "scratch/src/notes.txt",
+        "src/notes.txt"
+    ));
+    assert!(!worktree_path_matches("", ""));
+}
+
+// Extension decorations (design.md §L).
+
+const FIX_BUTTON: NodeId = 3;
+
+#[derive(Clone, Debug, PartialEq)]
+enum ExtCall {
+    Mount(String),
+    Event(String, UiEvent),
+}
+
+/// An extension whose decorations have a label (node 2) and a button (node 3); a click relabels
+/// it. `mount` answers with `mount_label`, or fails when it is `None`.
+struct FakeExtension {
+    id: &'static str,
+    calls: RefCell<Vec<ExtCall>>,
+    mount_label: RefCell<Option<String>>,
+    /// Effects the next event reply carries.
+    event_effects: RefCell<Vec<HostEffect>>,
+    /// The next event fails like a trapped instance (an error without a `ReplyError`).
+    trap_next_event: Cell<bool>,
+    /// Decorations the renderer reported as closed.
+    closed: RefCell<Vec<String>>,
+}
+
+impl FakeExtension {
+    fn new(id: &'static str) -> Rc<Self> {
+        Rc::new(Self {
+            id,
+            calls: RefCell::default(),
+            mount_label: RefCell::new(Some("mounted".into())),
+            event_effects: RefCell::default(),
+            trap_next_event: Cell::new(false),
+            closed: RefCell::default(),
+        })
+    }
+
+    fn take_calls(&self) -> Vec<ExtCall> {
+        std::mem::take(&mut self.calls.borrow_mut())
+    }
+}
+
+fn label(content: &str) -> Props {
+    Props::Text(TextProps {
+        content: content.into(),
+        ..TextProps::default()
+    })
+}
+
+fn todo_tree(text: &str) -> Vec<Node> {
+    vec![
+        Node {
+            id: 1,
+            parent: None,
+            props: Props::Flex(FlexProps {
+                direction: FlexDirection::Row,
+                gap: 4,
+                ..FlexProps::default()
+            }),
+        },
+        Node {
+            id: 2,
+            parent: Some(1),
+            props: label(text),
+        },
+        Node {
+            id: FIX_BUTTON,
+            parent: Some(1),
+            props: Props::Button(ButtonProps {
+                label: "Fix".into(),
+                ..ButtonProps::default()
+            }),
+        },
+    ]
+}
+
+impl UiBackend for FakeExtension {
+    fn extension_id(&self) -> &str {
+        self.id
+    }
+
+    fn decoration_closed(&self, id: &str) {
+        self.closed.borrow_mut().push(id.to_string());
+    }
+
+    fn mount(&self, surface_id: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        self.calls
+            .borrow_mut()
+            .push(ExtCall::Mount(surface_id.into()));
+        let tree = match self.mount_label.borrow().as_deref() {
+            Some(text) => Tree::from_nodes(todo_tree(text), TreeLimits::default())
+                .map_err(anyhow::Error::from),
+            None => Err(anyhow!("mount failed")),
+        };
+        async move {
+            tree.map(|value| Reply {
+                effects: Vec::new(),
+                value,
+            })
+        }
+        .boxed_local()
+    }
+
+    fn handle_event(
+        &self,
+        surface_id: &str,
+        event: UiEvent,
+    ) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        self.calls
+            .borrow_mut()
+            .push(ExtCall::Event(surface_id.into(), event));
+        let trapped = self.trap_next_event.replace(false);
+        let effects = std::mem::take(&mut *self.event_effects.borrow_mut());
+        async move {
+            if trapped {
+                return Err(anyhow!("wasm trap"));
+            }
+            Ok(Reply {
+                effects,
+                value: Update::Patches(vec![Patch::SetProps(2, label("clicked"))]),
+            })
+        }
+        .boxed_local()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<Row>>>> {
+        async move {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Vec::new(),
+            })
+        }
+        .boxed_local()
+    }
+}
+
+fn location(path: &str, line: u32) -> DecorationLocation {
+    DecorationLocation {
+        path: path.into(),
+        line,
+        placement: v0_2::DecorationPlacement::Below,
+        height_lines: None,
+    }
+}
+
+fn place(
+    decorations: &Entity<Decorations>,
+    extension: &Rc<FakeExtension>,
+    id: &str,
+    location: DecorationLocation,
+    nodes: Vec<Node>,
+    cx: &mut impl gpui::AppContext,
+) -> Result<DecorationId> {
+    let backend: Rc<dyn UiBackend> = extension.clone();
+    decorations.update(cx, |decorations, cx| {
+        decorations.place_extension(extension.id, id, &location, nodes, backend, None, cx)
+    })
+}
+
+fn label_of(
+    decorations: &Entity<Decorations>,
+    id: DecorationId,
+    cx: &mut VisualTestContext,
+) -> String {
+    decorations.read_with(cx, |decorations, cx| {
+        let state = decorations.state(id).expect("live decoration").read(cx);
+        match state
+            .tree()
+            .and_then(|tree| tree.get(2))
+            .map(|node| node.props())
+        {
+            Some(Props::Text(props)) => props.content.clone(),
+            other => panic!("node 2 is {other:?}"),
+        }
+    })
+}
+
+#[gpui::test]
+async fn test_extension_decoration_follows_edits_and_routes_clicks(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let extension = FakeExtension::new("fyx-demo-todo");
+    let (project, buffer) = scratch_buffer("fn main() {\n    // TODO: x\n}\n", cx).await;
+    let id = place(
+        &decorations,
+        &extension,
+        "todo-1",
+        location("notes.txt", 1),
+        todo_tree("TODO: x"),
+        cx,
+    )
+    .expect("placed");
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    let vcx = &mut vcx;
+    let block = only_block(&decorations, &editor, id, vcx);
+    assert_eq!(block_row(&editor, block, vcx), 2);
+    // The placed tree is shown as is: no `mount` call.
+    assert_eq!(extension.take_calls(), []);
+    assert_eq!(label_of(&decorations, id, vcx), "TODO: x");
+
+    insert(&buffer, Point::new(0, 0), "use std::io;\n\n", vcx);
+    assert_eq!(block_row(&editor, block, vcx), 4);
+
+    // A click in the block reaches `handle-event(id, ..)` and its reply repaints the block.
+    let button = vcx
+        .debug_bounds("fyx-node-3")
+        .expect("the decoration's button is drawn");
+    vcx.simulate_click(button.center(), Modifiers::none());
+    redraw(vcx);
+    assert_eq!(
+        extension.take_calls(),
+        [ExtCall::Event("todo-1".into(), UiEvent::Click(FIX_BUTTON))]
+    );
+    assert_eq!(label_of(&decorations, id, vcx), "clicked");
+
+    // `push-update(id, ..)` reaches the decoration; an unknown id is refused.
+    let pushed = decorations.update(vcx, |decorations, cx| {
+        decorations.push(
+            "fyx-demo-todo",
+            "todo-1",
+            Update::Patches(vec![Patch::SetProps(2, label("pushed"))]),
+            cx,
+        )
+    });
+    assert!(pushed);
+    assert_eq!(label_of(&decorations, id, vcx), "pushed");
+    let unknown = decorations.update(vcx, |decorations, cx| {
+        decorations.push("fyx-demo-todo", "todo-2", Update::Unchanged, cx)
+    });
+    assert!(!unknown);
+}
+
+#[gpui::test]
+async fn test_extension_paths_are_worktree_relative(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let extension = FakeExtension::new("ext");
+    let (project, buffer) = scratch_buffer("a\nb\n", cx).await;
+    // The worktree is `scratch`, so its file is `notes.txt`; the worktree-qualified path and
+    // suffixes do not match for extensions.
+    let relative = place(
+        &decorations,
+        &extension,
+        "rel",
+        location("notes.txt", 0),
+        todo_tree("x"),
+        cx,
+    )
+    .expect("placed");
+    let qualified = place(
+        &decorations,
+        &extension,
+        "qualified",
+        location("scratch/notes.txt", 0),
+        todo_tree("x"),
+        cx,
+    )
+    .expect("placed");
+    for bad in [
+        "../notes.txt",
+        "/root/scratch/notes.txt",
+        "a//b",
+        "C:\\notes.txt",
+        "",
+    ] {
+        assert!(
+            place(
+                &decorations,
+                &extension,
+                "bad",
+                location(bad, 0),
+                todo_tree("x"),
+                cx
+            )
+            .is_err(),
+            "{bad:?} is refused"
+        );
+    }
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    only_block(&decorations, &editor, relative, &mut vcx);
+    assert!(
+        decorations
+            .read_with(&mut vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), qualified))
+            .is_empty()
+    );
+}
+
+#[gpui::test]
+async fn test_extension_namespaces_cap_and_unload(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let first = FakeExtension::new("first");
+    let second = FakeExtension::new("second");
+    let (project, buffer) = scratch_buffer("a\nb\n", cx).await;
+
+    // The same id in two extensions is two decorations.
+    let first_shared = place(
+        &decorations,
+        &first,
+        "shared",
+        location("notes.txt", 0),
+        todo_tree("1"),
+        cx,
+    )
+    .expect("placed");
+    let second_shared = place(
+        &decorations,
+        &second,
+        "shared",
+        location("notes.txt", 1),
+        todo_tree("2"),
+        cx,
+    )
+    .expect("placed");
+    assert_ne!(first_shared, second_shared);
+
+    // 512 per extension; placing a live id again is not a new one.
+    for index in 1..ui_ext::MAX_DECORATIONS {
+        place(
+            &decorations,
+            &first,
+            &format!("d{index}"),
+            location("elsewhere.txt", 0),
+            todo_tree("x"),
+            cx,
+        )
+        .expect("under the cap");
+    }
+    assert!(
+        place(
+            &decorations,
+            &first,
+            "one-more",
+            location("notes.txt", 0),
+            todo_tree("x"),
+            cx
+        )
+        .is_err()
+    );
+    place(
+        &decorations,
+        &first,
+        "d1",
+        location("elsewhere.txt", 1),
+        todo_tree("x"),
+        cx,
+    )
+    .expect("placing a live id again moves it");
+    place(
+        &decorations,
+        &second,
+        "other",
+        location("notes.txt", 0),
+        todo_tree("x"),
+        cx,
+    )
+    .expect("the other extension has its own cap");
+
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    let vcx = &mut vcx;
+    only_block(&decorations, &editor, first_shared, vcx);
+    only_block(&decorations, &editor, second_shared, vcx);
+
+    // `remove-decoration` in one namespace leaves the other alone.
+    let removed = decorations.update(vcx, |decorations, cx| {
+        decorations.remove_extension_decoration("second", "shared", cx)
+    });
+    assert!(removed);
+    redraw(vcx);
+    let counts = decorations.read_with(vcx, |decorations, _| {
+        (
+            decorations.count_of("first"),
+            decorations.count_of("second"),
+            decorations.extension_decoration("first", "shared"),
+        )
+    });
+    assert_eq!(counts, (ui_ext::MAX_DECORATIONS, 1, Some(first_shared)));
+
+    // Unloading an extension removes every decoration and block it has.
+    let removed = decorations.update(vcx, |decorations, cx| {
+        decorations.remove_extension("first", cx)
+    });
+    assert_eq!(removed, ui_ext::MAX_DECORATIONS);
+    redraw(vcx);
+    assert!(
+        decorations
+            .read_with(vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), first_shared))
+            .is_empty()
+    );
+    assert_eq!(
+        decorations.read_with(vcx, |decorations, _| decorations.count_of("second")),
+        1
+    );
+}
+
+#[gpui::test]
+async fn test_extension_decoration_moves_resyncs_and_is_removed_on_failed_mount(
+    cx: &mut TestAppContext,
+) {
+    let decorations = init(cx);
+    let extension = FakeExtension::new("ext");
+    // The registry hears of a failed decoration's removal (integration-5 M2).
+    let registry = cx.new(|_| UiExtensionRegistry::trusting());
+    cx.update(|cx| {
+        crate::registry::set_global_for_tests(registry.clone(), cx);
+        let backend: Rc<dyn UiBackend> = extension.clone();
+        registry.update(cx, |registry, cx| {
+            registry.register_backend(backend, &[], cx)
+        });
+    });
+    let (project, buffer) = scratch_buffer("a\nb\nc\n", cx).await;
+    let first = place(
+        &decorations,
+        &extension,
+        "todo",
+        location("notes.txt", 0),
+        todo_tree("old"),
+        cx,
+    )
+    .expect("placed");
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    let vcx = &mut vcx;
+    let block = only_block(&decorations, &editor, first, vcx);
+    assert_eq!(block_row(&editor, block, vcx), 1);
+
+    // Placing the live id again moves it and replaces the tree.
+    let moved = place(
+        &decorations,
+        &extension,
+        "todo",
+        location("notes.txt", 2),
+        todo_tree("new"),
+        vcx,
+    )
+    .expect("placed");
+    redraw(vcx);
+    let block = only_block(&decorations, &editor, moved, vcx);
+    assert_eq!(block_row(&editor, block, vcx), 3);
+    assert_eq!(label_of(&decorations, moved, vcx), "new");
+    assert!(decorations.read_with(vcx, |decorations, _| decorations.state(first).is_none()));
+    assert_eq!(
+        decorations.read_with(vcx, |decorations, _| decorations.count_of("ext")),
+        1
+    );
+
+    // A tree that does not fit is not shown; the extension is asked for `mount(id)`.
+    let mut misfit = todo_tree("misfit");
+    misfit[1].parent = Some(99);
+    let resynced = place(
+        &decorations,
+        &extension,
+        "todo",
+        location("notes.txt", 2),
+        misfit,
+        vcx,
+    )
+    .expect("placed");
+    redraw(vcx);
+    assert_eq!(extension.take_calls(), [ExtCall::Mount("todo".into())]);
+    assert_eq!(label_of(&decorations, resynced, vcx), "mounted");
+
+    // When that mount fails too, the decoration is removed.
+    *extension.mount_label.borrow_mut() = None;
+    let mut misfit = todo_tree("misfit");
+    misfit[1].parent = Some(99);
+    place(
+        &decorations,
+        &extension,
+        "todo",
+        location("notes.txt", 2),
+        misfit,
+        vcx,
+    )
+    .expect("placed");
+    redraw(vcx);
+    assert_eq!(
+        decorations.read_with(vcx, |decorations, _| (
+            decorations.count_of("ext"),
+            decorations.extension_decoration("ext", "todo")
+        )),
+        (0, None)
+    );
+    assert!(
+        decorations
+            .read_with(vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), resynced))
+            .is_empty()
+    );
+    assert_eq!(
+        *extension.closed.borrow(),
+        ["todo"],
+        "the host side is told"
+    );
 }
 
 #[test]
@@ -351,4 +927,156 @@ fn test_dev_file_format() {
         parse_dev_decorations(r#"[{ "path": "a", "line": 1, "text": "x", "colour": 1 }]"#).is_err(),
         "unknown field"
     );
+}
+
+fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is drawn"));
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    redraw(cx);
+}
+
+/// The registry side of design.md §L: `place-decoration` / `remove-decoration` effects, pushes
+/// to a decoration id, effects made by a click in a decoration, and removal on reload and when
+/// the instance dies.
+#[gpui::test]
+async fn test_registry_applies_decoration_effects(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let registry = cx.new(|_| UiExtensionRegistry::trusting());
+    let extension = FakeExtension::new("fyx-demo-todo");
+    let backend: Rc<dyn UiBackend> = extension.clone();
+    registry.update(cx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[], cx)
+    });
+    let (project, buffer) = scratch_buffer(
+        "a
+// TODO one
+b
+// TODO two
+",
+        cx,
+    )
+    .await;
+    let (editor, mut vcx) = open_editor(&project, &buffer, cx);
+    let vcx = &mut vcx;
+    let live = |id: &str, vcx: &mut VisualTestContext| {
+        decorations.read_with(vcx, |decorations, _| {
+            decorations.extension_decoration("fyx-demo-todo", id)
+        })
+    };
+
+    registry.update(vcx, |registry, cx| {
+        registry.apply_effect(
+            "fyx-demo-todo",
+            HostEffect::PlaceDecoration {
+                id: "todo-1".into(),
+                location: location("notes.txt", 1),
+                nodes: todo_tree("TODO one"),
+            },
+            cx,
+        )
+    });
+    redraw(vcx);
+    let first = live("todo-1", vcx).expect("placed through the registry");
+    let block = only_block(&decorations, &editor, first, vcx);
+    assert_eq!(block_row(&editor, block, vcx), 2);
+
+    // A click in the decoration whose reply places a second decoration and pushes to it: the
+    // effects come back through the registry's link.
+    *extension.event_effects.borrow_mut() = vec![
+        HostEffect::PlaceDecoration {
+            id: "todo-2".into(),
+            location: location("notes.txt", 3),
+            nodes: todo_tree("TODO two"),
+        },
+        HostEffect::Push {
+            surface_id: "todo-2".into(),
+            update: Update::Patches(vec![Patch::SetProps(2, label("pushed"))]),
+        },
+    ];
+    click("fyx-node-3", vcx);
+    assert_eq!(
+        extension.take_calls(),
+        [ExtCall::Event("todo-1".into(), UiEvent::Click(FIX_BUTTON))]
+    );
+    assert_eq!(label_of(&decorations, first, vcx), "clicked");
+    let second = live("todo-2", vcx).expect("placed by the click's reply");
+    assert_eq!(label_of(&decorations, second, vcx), "pushed");
+
+    // `remove-decoration`.
+    registry.update(vcx, |registry, cx| {
+        registry.apply_effect(
+            "fyx-demo-todo",
+            HostEffect::RemoveDecoration {
+                id: "todo-1".into(),
+            },
+            cx,
+        )
+    });
+    redraw(vcx);
+    assert_eq!(live("todo-1", vcx), None);
+    assert!(
+        decorations
+            .read_with(vcx, |decorations, _| decorations
+                .blocks_in(editor.entity_id(), first))
+            .is_empty()
+    );
+
+    // A reload (the extension registered again) starts without decorations.
+    registry.update(vcx, |registry, cx| {
+        registry.register_backend(backend.clone(), &[], cx)
+    });
+    redraw(vcx);
+    assert_eq!(live("todo-2", vcx), None);
+
+    // A trapped instance takes its decorations with it.
+    registry.update(vcx, |registry, cx| {
+        registry.apply_effect(
+            "fyx-demo-todo",
+            HostEffect::PlaceDecoration {
+                id: "todo-3".into(),
+                location: location("notes.txt", 1),
+                nodes: todo_tree("TODO three"),
+            },
+            cx,
+        )
+    });
+    redraw(vcx);
+    assert!(live("todo-3", vcx).is_some());
+    extension.trap_next_event.set(true);
+    click("fyx-node-3", vcx);
+    assert_eq!(
+        decorations.read_with(vcx, |decorations, _| decorations.count_of("fyx-demo-todo")),
+        0
+    );
+}
+
+/// Triage 3, PERF 10: a tree update that keeps the block's height repaints the block only;
+/// editors are not resynced. One that changes the height is.
+#[gpui::test]
+async fn test_same_height_updates_do_not_resync_editors(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let id = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("notes.txt", 0), text_tree("one"), cx)
+        })
+        .expect("valid tree");
+    cx.run_until_parked();
+    let notified = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let notified = notified.clone();
+        cx.observe(&decorations, move |_, _| notified.set(notified.get() + 1))
+            .detach();
+    });
+    let set_text = |text: &str, cx: &mut TestAppContext| {
+        let update = Update::Patches(vec![Patch::SetProps(2, label(text))]);
+        decorations.update(cx, |decorations, cx| decorations.update(id, update, cx));
+        cx.run_until_parked();
+    };
+
+    set_text("still one line", cx);
+    assert_eq!(notified.get(), 0, "same height: no resync");
+    set_text("two\nlines", cx);
+    assert_eq!(notified.get(), 1, "taller: one resync");
 }

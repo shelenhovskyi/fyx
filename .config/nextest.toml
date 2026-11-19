@@ -3,6 +3,7 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 
 [test-groups]
 sequential-db-tests = { max-threads = 1 }
+terminal-view-conpty = { max-threads = 1 } # fyx: see the terminal_view override
 
 [[profile.default.overrides]]
 filter = 'package(db)'
@@ -46,3 +47,38 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter =  'package(editor) and test(test_random_blocks)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# fyx: tests that build wasm guests with cargo wait on one shared target-dir lock while the gate
+# runs everything in parallel (3-5 s alone, past 60 s under load).
+[[profile.default.overrides]]
+filter = 'package(fyx_ext_harness) or package(ui_ext_wasm) or (package(ui_ext_host) and (test(/^wasm_tests::/) or test(/^decoration_wasm_tests::/)))'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# fyx: per-test timing for every gate run (<target>/nextest/default/junit.xml); script/gate.sh
+# keeps a copy per integration commit.
+[profile.default.junit]
+path = "junit.xml"
+
+# fyx: upstream's grandchild-kill tests (util, v1.29.2) wait at most 2-5 s for the process tree;
+# under the gate's full parallel load on Windows the tree takes longer. They pass alone in ~1 s.
+[[profile.default.overrides]]
+filter = 'package(util) and test(/terminates_grandchildren/)'
+retries = 2
+
+# fyx: upstream's spawn-failure test starts the system shell (PowerShell on Windows) and waits for
+# it to exit: 16-25 s alone, past 60 s under the gate's load. The gate tests `terminal` since W1's
+# terminal_ext hook; W1 checks whether the hook made it slower.
+[[profile.default.overrides]]
+filter = 'package(terminal) and test(test_terminal_no_exit_on_spawn_failure)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+# fyx: another randomized upstream editor test, like the two above; past 60 s under the gate's load.
+[[profile.default.overrides]]
+filter = 'package(editor) and test(test_random_columnar_selections)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# fyx: terminal_view's parallel tests leave orphaned OpenConsole.exe (conpty) processes on Windows
+# (W1, 2026-11-19); one at a time they leave none. The group is in `[test-groups]` above.
+[[profile.default.overrides]]
+filter = 'package(terminal_view)'
+test-group = 'terminal-view-conpty'

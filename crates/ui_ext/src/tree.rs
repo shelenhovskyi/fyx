@@ -48,8 +48,24 @@ pub enum TreeError {
     UnknownSibling { node: NodeId, before: NodeId },
     #[error("node {node} would be nested deeper than {max} levels")]
     TooDeep { node: NodeId, max: usize },
+    /// 0.2 only: `invalidate-rows` names a node that is not a list or table.
+    #[error("node {node} is a {kind} node, not a list or table")]
+    NotAList { node: NodeId, kind: &'static str },
     #[error("a list row must have exactly one root node, found {0}")]
     RowRootCount(usize),
+    /// 0.3: more canvases than [`crate::canvas::MAX_CANVASES_PER_SURFACE`] in one tree.
+    #[error("a surface has at most {max} canvas nodes")]
+    TooManyCanvases { max: usize },
+    /// 0.2 and 0.3: the tree would retain more than
+    /// [`crate::v0_2::tree::MAX_TREE_TEXT_BYTES`] of text.
+    #[error("a surface's tree would hold more than {max} bytes of text")]
+    TreeTextTooLarge { max: usize },
+    /// 0.3: canvases are not allowed in list rows.
+    #[error("node {0} is a canvas, which a list row cannot hold")]
+    CanvasInRow(NodeId),
+    /// 0.4: a terminal view belongs in a panel, not in a virtualized row.
+    #[error("node {0} is a terminal, which a list row cannot hold")]
+    TerminalInRow(NodeId),
     #[error("patch {index}: {error}")]
     Patch { index: usize, error: Box<TreeError> },
 }

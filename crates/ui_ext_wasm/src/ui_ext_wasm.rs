@@ -1,4 +1,7 @@
-//! Host side of the `fyx:ui@0.1.0` world (`crates/ui_ext/wit/fyx-ui.wit`).
+//! Host side of the `fyx:ui` worlds: `fyx:ui@0.1.0` (`crates/ui_ext/wit/fyx-ui.wit`, here) and
+//! `fyx:ui@0.2.0` (`crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit`, `fyx_ui_v0_2.rs`). One runtime
+//! loads both side by side; the version a component targets, read from its `fyx:ui-api-version`
+//! section before instantiation, picks its bindings (`dispatch.rs`).
 //!
 //! A UI extension is its own component in its own [`Store`] with its own call queue, so a slow call
 //! of the same extension's `zed:extension` component (a download, a language server install) never
@@ -13,24 +16,28 @@
 use std::{
     future::Future,
     ops::RangeInclusive,
-    path::{Component as PathComponent, Path},
-    pin::{Pin, pin},
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    path::{Component as PathComponent, Path, PathBuf},
+    pin::pin,
+    sync::{
+        Arc, Condvar, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use fs::Fs;
 use futures::{
     FutureExt as _, StreamExt as _,
     channel::{mpsc, oneshot},
-    future::{BoxFuture, Either},
+    future::BoxFuture,
 };
 use gpui::{AsyncApp, Task};
 use semver::Version;
 use serde::Deserialize;
-use ui_ext::{Tree, TreeLimits};
+use sha2::{Digest as _, Sha256};
+use ui_ext::{ApiVersion, TreeLimits, integration, terminal};
 use wasmtime::{
     Engine, Store, UpdateDeadline,
     component::{Component, HasData, Linker, ResourceTable},
@@ -51,6 +58,31 @@ mod bindings {
 }
 
 use bindings::fyx::ui::{host as wit_host, types as wit};
+
+mod consent_items;
+mod conversions;
+mod dispatch;
+pub mod edit;
+mod effects;
+mod fyx_ui_v0_2;
+mod fyx_ui_v0_3;
+mod fyx_ui_v0_4;
+pub mod images;
+pub mod journal;
+pub mod network;
+pub mod observe;
+pub mod process;
+mod stderr;
+mod terminals;
+pub mod ticks;
+
+pub use effects::{
+    ACTIVATION_WINDOW, EffectReply, EffectReplyError, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2,
+    MAX_TICK_DELAY, MIN_TICK_DELAY,
+};
+pub use ui_ext::v0_2::{CAPABILITY_EDITOR_DECORATIONS, CAPABILITY_MODAL};
+
+use dispatch::UiBindings;
 
 /// Compiled code of UI components, kept for the process so a reload of an unchanged component
 /// skips most of the compilation. The same scheme as `extension_host`'s cache, sized for UI
@@ -100,7 +132,13 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 }
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
-pub const MAX_VERSION: Version = Version::new(0, 1, 0);
+/// The newest version this build knows: the staged 0.4 (plan P5).
+pub const MAX_VERSION: Version = Version::new(0, 4, 0);
+/// The newest frozen version: 0.3 (integration-6, plan 4.9). Newer ones are staged: they load only
+/// where [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2).
+/// Freezing a version names it here explicitly; never set this to [`MAX_VERSION`], which may be a
+/// staged world (0.4 now).
+pub const MAX_FROZEN_VERSION: Version = Version::new(0, 3, 0);
 
 /// Custom section with the `fyx:ui` version a component targets: three big-endian `u16`s, the same
 /// encoding as `zed:api-version`.
@@ -135,10 +173,14 @@ pub const MAX_LIFTED_TEXT_PER_CALL: usize = 16 << 20;
 /// Longest `log` message written out; the rest is cut off (it still counts toward
 /// [`MAX_LIFTED_TEXT_PER_CALL`]).
 pub const MAX_LOG_MESSAGE_LEN: usize = 16 << 10;
-/// Linear memory one UI component may grow to: room for a JS engine (a componentize-js guest
+/// Linear memory one UI component may grow to, all its memories together (a component and its
+/// adapters have a few; triage-3, host memory): room for a JS engine (a componentize-js guest
 /// embeds one) as well as a tree mirror and state. It also bounds each string and list one host
 /// call copies out of the guest; [`MAX_LIFTED_TEXT_PER_CALL`] bounds their sum per call.
 pub const UI_MEMORY_LIMIT: usize = 256 << 20;
+/// Entries in an instance's WASI resource table (streams, pollables, handles). wasmtime's default
+/// is a million; a UI component needs a few dozen.
+pub const UI_RESOURCE_TABLE_LIMIT: usize = 4096;
 /// Table elements per table (function references; a Rust component uses a few thousand).
 pub const UI_TABLE_ELEMENTS_LIMIT: usize = 64 * 1024;
 /// Core instances, tables and memories per component (a component and its adapters use a handful).
@@ -146,17 +188,59 @@ pub const UI_INSTANCES_LIMIT: usize = 32;
 pub const UI_TABLES_LIMIT: usize = 32;
 pub const UI_MEMORIES_LIMIT: usize = 8;
 
-/// The `fyx:ui` versions this host can load, on every release channel.
-///
-/// Unlike `extension_host`'s `wasm_api_version_range`, which caps stable and preview at Zed's v0.6.0
-/// while it stages its own extension API, `fyx:ui` is versioned by its WIT package alone.
-pub fn api_version_range() -> RangeInclusive<Version> {
-    MIN_VERSION..=MAX_VERSION
+/// The `fyx:ui` versions a load accepts. Like `extension_host`'s `wasm_api_version_range`, which
+/// caps stable and preview while Zed stages its extension API, staged versions are accepted only
+/// when `allow_staged` ([`staged_api_allowed`]). Within the range only the versions
+/// [`ApiVersion`] knows exist: for 0.x every minor version is its own world.
+pub fn api_version_range(allow_staged: bool) -> RangeInclusive<Version> {
+    MIN_VERSION..=if allow_staged {
+        MAX_VERSION
+    } else {
+        MAX_FROZEN_VERSION
+    }
 }
 
-pub fn is_supported_api_version(version: &Version) -> bool {
-    api_version_range().contains(version)
+/// The world of a version this build knows, on any release channel.
+pub fn known_api_version(version: &Version) -> Option<ApiVersion> {
+    if !version.pre.is_empty() || !version.build.is_empty() {
+        return None;
+    }
+    ApiVersion::from_parts(
+        u16::try_from(version.major).ok()?,
+        u16::try_from(version.minor).ok()?,
+        u16::try_from(version.patch).ok()?,
+    )
 }
+
+/// Whether some build may load `version`, staged versions included.
+pub fn is_supported_api_version(version: &Version) -> bool {
+    known_api_version(version).is_some()
+}
+
+/// Whether staged versions may load: in Dev and Nightly builds, and for dev extensions
+/// (`FYX_UI_DEV_EXTENSIONS`, `fyx.extensions.dev_paths`); never for installed extensions on Stable
+/// or Preview.
+pub fn staged_api_allowed(dev_or_nightly_build: bool, dev_extension: bool) -> bool {
+    dev_or_nightly_build || dev_extension
+}
+
+/// What [`LoadOptions::allow_staged`] means when it is `None`: debug builds, or a process started
+/// with `FYX_UI_DEV_EXTENSIONS`. Callers that know the release channel pass
+/// [`staged_api_allowed`] instead.
+pub fn staged_api_allowed_by_default() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("FYX_UI_DEV_EXTENSIONS").is_some()
+}
+
+/// Every capability a surface or decoration can need, for a load without a manifest.
+const ALL_UI_CAPABILITIES: [&str; 7] = [
+    CAPABILITY_PANEL,
+    CAPABILITY_STATUS_BAR,
+    CAPABILITY_MODAL,
+    CAPABILITY_EDITOR_DECORATIONS,
+    ui_ext::image::CAPABILITY_IMAGES,
+    ui_ext::canvas::CAPABILITY_CANVAS,
+    ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+];
 
 /// Reads the [`API_VERSION_SECTION`], if the component has one.
 pub fn parse_api_version(extension_id: &str, wasm_bytes: &[u8]) -> Result<Option<Version>> {
@@ -216,15 +300,495 @@ pub struct UiManifest {
     pub api_version: Version,
     /// Path of the component inside the extension directory, separate from `extension.wasm`.
     pub component: String,
-    /// Capabilities the surfaces need: [`CAPABILITY_PANEL`], [`CAPABILITY_STATUS_BAR`].
+    /// Capabilities the surfaces need: [`CAPABILITY_PANEL`], [`CAPABILITY_STATUS_BAR`], and for
+    /// 0.2 [`CAPABILITY_MODAL`] and [`CAPABILITY_EDITOR_DECORATIONS`].
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// `process:spawn`: the programs it may run (spec decision 24, design.md 0.3 §0.6).
+    #[serde(default)]
+    pub processes: Vec<ProcessSpec>,
+    /// `[fyx_ui.process]`: what every program gets.
+    #[serde(default)]
+    pub process: Option<ProcessManifest>,
+    /// `name` from the top of `extension.toml`, as its author wrote it: check it before showing
+    /// it (the provenance line of notifications, design.md M.4).
+    #[serde(skip)]
+    pub name: Option<String>,
+    /// `version` from the top of `extension.toml`, unchecked; for the `user-agent` of
+    /// `network:fetch`.
+    #[serde(skip)]
+    pub version: Option<String>,
+    /// 0.3, with `network:fetch`: the hosts the extension may fetch from (design.md §8).
+    #[serde(default)]
+    pub network: Option<NetworkManifest>,
+    /// 0.4: `[[fyx_ui.terminal_profiles]]` (design §B.1).
+    #[serde(default)]
+    pub terminal_profiles: Vec<ui_ext::terminal::TerminalProfileSpec>,
+    /// 0.4: `[[fyx_ui.terminal_programs]]`, for `terminal:create` (§B.3).
+    #[serde(default)]
+    pub terminal_programs: Vec<ui_ext::terminal::TerminalProgramSpec>,
+    /// 0.4: `[fyx_ui.terminal_env]`, for `terminal:env` (§B.4).
+    #[serde(default)]
+    pub terminal_env: Option<ui_ext::terminal::TerminalEnvSpec>,
+    /// 0.4: `[[fyx_ui.listeners]]`, for `network:listen` (§B.7).
+    #[serde(default)]
+    pub listeners: Vec<ui_ext::integration::ListenerSpec>,
+    /// 0.4: `[[fyx_ui.discovery_files]]`, for `fs:discovery-file` (§B.8).
+    #[serde(default)]
+    pub discovery_files: Vec<ui_ext::integration::DiscoveryFileSpec>,
+    /// 0.4: `[[fyx_ui.relay_channels]]`, for `relay:hooks` (§B.9).
+    #[serde(default)]
+    pub relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
+}
+
+/// What each world's manifest may declare (wit-0.3/migration.md §2): a capability a world cannot
+/// use is an error, not a warning, so the install dialog never asks consent for it.
+fn world_capabilities(version: &Version) -> &'static [&'static str] {
+    const V0_1: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        // Accepted, unused: the 0.2 migration declares them before the component moves.
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+    ];
+    const V0_2: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+    ];
+    // The smaller 0.3 (owner, 2026-11-19): pickers, hover, code lenses, virtual documents,
+    // commands and document context are 0.4's, so their capabilities are refused here.
+    const V0_3: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+        ui_ext::image::CAPABILITY_IMAGES,
+        ui_ext::canvas::CAPABILITY_CANVAS,
+        network::CAPABILITY_NETWORK,
+        process::CAPABILITY_PROCESS,
+        edit::CAPABILITY_EDIT,
+        observe::CAPABILITY_OBSERVE,
+    ];
+    // Staged (plan P5): 0.3 plus the terminal and integration capabilities of
+    // docs/fyx/wit-0.4/design.md, T3 included (§C.3); plan 4.2-4.4's join with their WIT.
+    const V0_4: &[&str] = &[
+        CAPABILITY_PANEL,
+        CAPABILITY_STATUS_BAR,
+        CAPABILITY_MODAL,
+        CAPABILITY_EDITOR_DECORATIONS,
+        ui_ext::v0_2::CAPABILITY_NOTIFICATIONS,
+        ui_ext::image::CAPABILITY_IMAGES,
+        ui_ext::canvas::CAPABILITY_CANVAS,
+        network::CAPABILITY_NETWORK,
+        process::CAPABILITY_PROCESS,
+        edit::CAPABILITY_EDIT,
+        observe::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_PROFILES,
+        terminal::CAPABILITY_PSEUDO,
+        terminal::CAPABILITY_CREATE,
+        terminal::CAPABILITY_ENV,
+        terminal::CAPABILITY_STATUS,
+        terminal::CAPABILITY_OBSERVE,
+        terminal::CAPABILITY_READ,
+        terminal::CAPABILITY_WRITE,
+        terminal::CAPABILITY_PACKAGE_FILES,
+        integration::CAPABILITY_NETWORK_LISTEN,
+        integration::CAPABILITY_DISCOVERY_FILE,
+        integration::CAPABILITY_RELAY_HOOKS,
+        integration::CAPABILITY_REVIEW_PROPOSE,
+        integration::CAPABILITY_CONTEXT_EDITOR,
+        integration::CAPABILITY_WORKSPACE_OPEN,
+        integration::CAPABILITY_APPROVALS,
+    ];
+    if *version >= Version::new(0, 4, 0) {
+        V0_4
+    } else if *version >= Version::new(0, 3, 0) {
+        V0_3
+    } else if *version >= Version::new(0, 2, 0) {
+        V0_2
+    } else {
+        V0_1
+    }
+}
+
+/// `[fyx_ui.network]`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkManifest {
+    pub domains: Vec<String>,
+    /// 0.4 (design wit-0.4 §C.2): the author's one line under the item at install, required
+    /// there and refused below 0.4.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One `[[fyx_ui.processes]]` entry, shared with the harness.
+pub use ui_ext::process::ProcessSpec;
+
+/// `[fyx_ui.process]`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessManifest {
+    /// Environment variables passed through besides `PATH`, `HOME`/`USERPROFILE` and `LANG`.
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// The consent item of a network domain: an update that adds one is held (decision 21).
+pub fn domain_consent_item(domain: &str) -> String {
+    format!("network:fetch@{domain}")
+}
+
+/// The consent item of a program.
+pub fn process_consent_item(program: &str) -> String {
+    format!("process:spawn@{program}")
+}
+
+impl UiManifest {
+    /// What the user consents to: the capabilities, and each domain, program, argument pattern
+    /// and environment name, so an update that adds any of them is held until it is approved
+    /// (design.md 0.3 §0.6).
+    pub fn consent_items(&self) -> Vec<String> {
+        let domains = self
+            .network
+            .iter()
+            .flat_map(|network| network.domains.iter())
+            .map(|domain| domain_consent_item(domain));
+        let programs = self.processes.iter().flat_map(|process| {
+            let program = match &process.path {
+                Some(path) => format!("{} ({path})", process.name),
+                None => process.name.clone(),
+            };
+            std::iter::once(process_consent_item(&program)).chain(
+                process
+                    .args
+                    .iter()
+                    // Its own prefix, so a pattern is not shown as one more program.
+                    .map(move |pattern| format!("process:args@{} {pattern}", process.name)),
+            )
+        });
+        let env = self
+            .process
+            .iter()
+            .flat_map(|process| process.env.iter())
+            .map(|name| format!("process:env@{name}"));
+        self.capabilities
+            .iter()
+            .cloned()
+            .chain(domains)
+            .chain(programs)
+            .chain(env)
+            .collect()
+    }
+
+    /// What the manifest's world may declare (wit-0.3/migration.md §2): its capabilities, and the
+    /// 0.3 tables (`network`, `processes`, `process`) only from 0.3 on.
+    pub fn check_world(&self) -> Result<()> {
+        let version = &self.api_version;
+        let world = world_capabilities(version);
+        for capability in &self.capabilities {
+            if world.contains(&capability.as_str()) {
+                continue;
+            }
+            anyhow::ensure!(
+                permissions::tier_of(capability).is_some(),
+                "unknown capability {capability:?}"
+            );
+            // The first world that has it.
+            let needs = [
+                ("0.2", Version::new(0, 2, 0)),
+                ("0.3", Version::new(0, 3, 0)),
+                ("0.4", Version::new(0, 4, 0)),
+            ]
+            .into_iter()
+            .find(|(_, world)| world_capabilities(world).contains(&capability.as_str()))
+            .map(|(needs, _)| needs);
+            match needs {
+                Some(needs) => bail!(
+                    "capability {capability:?} needs fyx:ui {needs}; this extension targets \
+                     {version}"
+                ),
+                None => bail!(
+                    "capability {capability:?} is not in fyx:ui {version}; it is planned for a \
+                     later version"
+                ),
+            }
+        }
+        if *version < Version::new(0, 3, 0) {
+            for (present, table) in [
+                (self.network.is_some(), "[fyx_ui.network]"),
+                (!self.processes.is_empty(), "[[fyx_ui.processes]]"),
+                (self.process.is_some(), "[fyx_ui.process]"),
+            ] {
+                anyhow::ensure!(
+                    !present,
+                    "{table} needs fyx:ui 0.3; this extension targets {version}"
+                );
+            }
+        }
+        if *version < Version::new(0, 4, 0) {
+            for (present, table) in [
+                (
+                    !self.terminal_profiles.is_empty(),
+                    "[[fyx_ui.terminal_profiles]]",
+                ),
+                (
+                    !self.terminal_programs.is_empty(),
+                    "[[fyx_ui.terminal_programs]]",
+                ),
+                (self.terminal_env.is_some(), "[fyx_ui.terminal_env]"),
+                (!self.listeners.is_empty(), "[[fyx_ui.listeners]]"),
+                (
+                    !self.discovery_files.is_empty(),
+                    "[[fyx_ui.discovery_files]]",
+                ),
+                (!self.relay_channels.is_empty(), "[[fyx_ui.relay_channels]]"),
+            ] {
+                anyhow::ensure!(
+                    !present,
+                    "{table} needs fyx:ui 0.4; this extension targets {version}"
+                );
+            }
+        }
+        self.check_t2_reasons(version)
+    }
+
+    /// `reason` on `[[fyx_ui.processes]]` and `[fyx_ui.network]`: from 0.4 every T2 item has
+    /// one (design wit-0.4 §C.2); below 0.4 the key does not exist.
+    fn check_t2_reasons(&self, version: &Version) -> Result<()> {
+        let items = self
+            .processes
+            .iter()
+            .map(|spec| {
+                (
+                    format!("[[fyx_ui.processes]] {:?}", spec.name),
+                    &spec.reason,
+                )
+            })
+            .chain(
+                self.network
+                    .iter()
+                    .map(|network| ("[fyx_ui.network]".to_string(), &network.reason)),
+            );
+        for (what, reason) in items {
+            if *version < Version::new(0, 4, 0) {
+                anyhow::ensure!(
+                    reason.is_none(),
+                    "{what}: reason needs fyx:ui 0.4; this extension targets {version}"
+                );
+            } else {
+                let reason = reason
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("{what}: a reason is required (fyx:ui 0.4)"))?;
+                terminal::check_reason(&what, reason).map_err(anyhow::Error::msg)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `[fyx_ui.terminal_env]`, checked as [`UiManifest::check_terminals`] does; `None` without
+    /// one or when it does not pass.
+    pub fn checked_terminal_env(&self) -> Option<terminal::TerminalEnv> {
+        let integration = integration::IntegrationTables {
+            listeners: &self.listeners,
+            discovery_files: &self.discovery_files,
+            relay_channels: &self.relay_channels,
+        };
+        let env = self.terminal_env.clone()?;
+        terminal::check_terminal_env(env, &|name| integration.listener(name)).ok()
+    }
+
+    /// The 0.4 terminal and integration tables (design §B, plan 5.5): each goes with its
+    /// capability, and their entries pass `ui_ext::terminal` and `ui_ext::integration`'s checks.
+    pub fn check_terminals(&self) -> Result<()> {
+        let declares = |capability: &str| self.capabilities.iter().any(|c| c == capability);
+        let integration = integration::IntegrationTables {
+            listeners: &self.listeners,
+            discovery_files: &self.discovery_files,
+            relay_channels: &self.relay_channels,
+        };
+        for (present, table, capability) in [
+            (
+                !self.terminal_profiles.is_empty(),
+                "[[fyx_ui.terminal_profiles]]",
+                terminal::CAPABILITY_PROFILES,
+            ),
+            (
+                !self.terminal_programs.is_empty(),
+                "[[fyx_ui.terminal_programs]]",
+                terminal::CAPABILITY_CREATE,
+            ),
+            (
+                self.terminal_env.is_some(),
+                "[fyx_ui.terminal_env]",
+                terminal::CAPABILITY_ENV,
+            ),
+            (
+                !self.listeners.is_empty(),
+                "[[fyx_ui.listeners]]",
+                integration::CAPABILITY_NETWORK_LISTEN,
+            ),
+            (
+                !self.discovery_files.is_empty(),
+                "[[fyx_ui.discovery_files]]",
+                integration::CAPABILITY_DISCOVERY_FILE,
+            ),
+            (
+                !self.relay_channels.is_empty(),
+                "[[fyx_ui.relay_channels]]",
+                integration::CAPABILITY_RELAY_HOOKS,
+            ),
+        ] {
+            match (present, declares(capability)) {
+                (true, false) => bail!("{table} needs the {capability} capability"),
+                (false, true) => bail!("{capability} needs {table}"),
+                _ => {}
+            }
+        }
+        terminal::check_profiles(self.terminal_profiles.clone()).map_err(anyhow::Error::msg)?;
+        terminal::check_programs(&self.terminal_programs).map_err(anyhow::Error::msg)?;
+        integration.check().map_err(anyhow::Error::msg)?;
+        if let Some(env) = &self.terminal_env {
+            terminal::check_terminal_env(env.clone(), &|name| integration.listener(name))
+                .map_err(anyhow::Error::msg)?;
+        }
+        // `${package}` names the package's files (§B.6), so it needs `package:files`, as
+        // `fyx-ext check` and the harness require.
+        let uses_package = |text: &str, usage: terminal::TemplateUse| {
+            terminal::Template::parse(text, usage, &|_| Some(true))
+                .is_ok_and(|template| template.0.contains(&terminal::TemplatePart::Package))
+        };
+        let in_profiles = self.terminal_profiles.iter().any(|profile| {
+            profile
+                .args
+                .iter()
+                .any(|arg| uses_package(arg, terminal::TemplateUse::ProfileArg))
+        });
+        let in_env = self.terminal_env.iter().any(|env| {
+            env.vars
+                .values()
+                .any(|value| uses_package(value, terminal::TemplateUse::EnvValue))
+        });
+        if (in_profiles || in_env) && !declares(terminal::CAPABILITY_PACKAGE_FILES) {
+            bail!(
+                "${{package}} in {} needs the {} capability",
+                if in_profiles {
+                    "[[fyx_ui.terminal_profiles]] args"
+                } else {
+                    "[fyx_ui.terminal_env]"
+                },
+                terminal::CAPABILITY_PACKAGE_FILES
+            );
+        }
+        Ok(())
+    }
+
+    /// `[fyx_ui.network]` and `network:fetch` go together; the domains follow
+    /// `network::DomainList::parse` (IDNA, no public-suffix wildcards, localhost only with a
+    /// port).
+    pub fn check_network(&self) -> Result<()> {
+        let declares = self
+            .capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        match &self.network {
+            Some(table) => {
+                anyhow::ensure!(
+                    declares,
+                    "[fyx_ui.network] needs {:?} in capabilities",
+                    network::CAPABILITY_NETWORK
+                );
+                network::DomainList::parse(&table.domains).map_err(anyhow::Error::msg)?;
+            }
+            None => anyhow::ensure!(
+                !declares,
+                "{:?} needs [fyx_ui.network] domains",
+                network::CAPABILITY_NETWORK
+            ),
+        }
+        Ok(())
+    }
+
+    /// The process rules (spec decision 24), checked when the manifest is read. W2c enforces
+    /// them when a program runs (plan 4.7).
+    pub fn check_processes(&self) -> Result<()> {
+        let declares = self.capabilities.iter().any(|c| c == "process:spawn");
+        let mut seen = std::collections::BTreeSet::new();
+        for process in &self.processes {
+            let name = &process.name;
+            let plain = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && !name.starts_with('.');
+            if !plain {
+                bail!("[[fyx_ui.processes]] name {name:?} must be a program name, not a path");
+            }
+            if !seen.insert(name.clone()) {
+                bail!("[[fyx_ui.processes]] names {name:?} twice");
+            }
+            if let Some(path) = &process.path {
+                let relative = Path::new(path);
+                let inside = !path.is_empty()
+                    && relative
+                        .components()
+                        .all(|component| matches!(component, PathComponent::Normal(_)));
+                if !inside {
+                    bail!(
+                        "[[fyx_ui.processes]] {name}: path {path:?} must be relative, inside the worktree"
+                    );
+                }
+            }
+            for pattern in &process.args {
+                if pattern.is_empty() || pattern.chars().any(char::is_control) {
+                    bail!("[[fyx_ui.processes]] {name}: argument pattern {pattern:?} is not valid");
+                }
+            }
+        }
+        for variable in self.process.iter().flat_map(|process| process.env.iter()) {
+            let valid = !variable.is_empty()
+                && variable
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                bail!("[fyx_ui.process] env {variable:?} is not a variable name");
+            }
+            // Names that load code into a program (`LD_PRELOAD`, `NODE_OPTIONS`, …) are refused
+            // even when declared (design.md §9).
+            ui_ext::process::check_env_name(variable)
+                .map_err(|error| anyhow::anyhow!("[fyx_ui.process] env: {error}"))?;
+        }
+        let has_table = !self.processes.is_empty() || self.process.is_some();
+        if has_table && !declares {
+            bail!("[[fyx_ui.processes]] needs the process:spawn capability");
+        }
+        if declares && self.processes.is_empty() {
+            bail!("process:spawn needs [[fyx_ui.processes]]");
+        }
+        Ok(())
+    }
+}
+
+/// Only `[fyx_ui].api_version`, read before anything else so that a manifest for a newer world
+/// fails with its version rather than with an unknown field (wit-0.3/migration.md §2).
+#[derive(Deserialize)]
+struct ApiVersionOnly {
+    api_version: Version,
 }
 
 #[derive(Deserialize)]
 struct ExtensionToml {
     id: Arc<str>,
-    fyx_ui: Option<UiManifest>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    fyx_ui: Option<toml::Table>,
 }
 
 impl UiManifest {
@@ -237,16 +801,35 @@ impl UiManifest {
             .with_context(|| format!("reading {path:?}"))?;
         let toml: ExtensionToml =
             toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
-        let Some(manifest) = toml.fyx_ui else {
+        let Some(table) = toml.fyx_ui else {
             return Ok(None);
         };
         let id = toml.id;
         validate_id("extension", &id).with_context(|| format!("in {path:?}"))?;
+        // The version first, then the manifest of that world (wit-0.3/migration.md §2).
+        let ApiVersionOnly { api_version } = ApiVersionOnly::deserialize(table.clone())
+            .with_context(|| format!("extension {id}: [fyx_ui].api_version, in {path:?}"))?;
         anyhow::ensure!(
-            is_supported_api_version(&manifest.api_version),
-            "extension {id} targets fyx:ui {}, this build supports {MIN_VERSION}..={MAX_VERSION}",
-            manifest.api_version,
+            is_supported_api_version(&api_version),
+            "extension {id} targets fyx:ui {api_version}, this build supports 0.1.0, 0.2.0, 0.3.0 and the staged \
+             0.4.0",
         );
+        let mut manifest = UiManifest::deserialize(table)
+            .with_context(|| format!("parsing [fyx_ui] of {path:?}"))?;
+        manifest.name = toml.name;
+        manifest.version = toml.version;
+        manifest
+            .check_world()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .check_network()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .check_processes()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .check_terminals()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             !manifest.component.is_empty()
                 && Path::new(&manifest.component)
@@ -256,24 +839,6 @@ impl UiManifest {
             manifest.component,
         );
         Ok(Some((id, manifest)))
-    }
-
-    /// Every surface needs the capability of its kind.
-    fn check_surfaces(&self, extension_id: &str, surfaces: &[ui_ext::Surface]) -> Result<()> {
-        for surface in surfaces {
-            let required = match surface.kind {
-                ui_ext::SurfaceKind::Panel(_) => CAPABILITY_PANEL,
-                ui_ext::SurfaceKind::StatusItem(_) => CAPABILITY_STATUS_BAR,
-            };
-            anyhow::ensure!(
-                self.capabilities
-                    .iter()
-                    .any(|capability| capability == required),
-                "extension {extension_id}: surface {:?} needs {required:?} in [fyx_ui].capabilities",
-                surface.id,
-            );
-        }
-        Ok(())
     }
 }
 
@@ -324,38 +889,232 @@ pub struct UiState {
     pushed_items: usize,
     /// String bytes of the running call's `push-update` and `log` arguments.
     lifted_text: usize,
-    limits: wasmtime::StoreLimits,
+    limits: UiLimits,
     call_started: Instant,
     call_budget: Duration,
+    /// Epochs the running call has executed in, as time: what its budget counts.
+    executed: Duration,
     /// Surfaces `mount` has been called for, so only the first mount gets
     /// [`UI_FIRST_MOUNT_BUDGET`].
     mounted: std::collections::HashSet<String>,
     disabled: Option<String>,
+    capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+    diagnostics: diagnostics::DiagnosticsBuffer,
+    /// Live ids, declared capabilities, shown modals and the effect list of the 0.2 imports.
+    api: effects::ApiState,
+    /// The 0.3 `network` import's ids, counters and the requests of the running call.
+    network: network::NetworkState,
+    /// The 0.3 `process` import's ids, counters and the spawns of the running call.
+    process: process::ProcessState,
+    /// The 0.3 `workspace-edit` import's ids, counters and the edits of the running call.
+    edit: edit::EditState,
+    /// What the running call asked of the 0.3 `agent-observe` feed.
+    observe: observe::ObserveState,
+    /// The 0.4 `terminals` import: the extension's own terminals.
+    terminals: terminals::TerminalState,
+    /// 0.4 (§C.4): where programs started and T3 use are recorded.
+    journal: Option<Arc<dyn journal::Journal>>,
+    /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
+    /// sees one answer (design.md §7).
+    permission_mirror: std::collections::HashMap<&'static str, permissions::PermissionState>,
+    /// 0.3 `permissions.request` in the running call: the prompts to ask for once it returns.
+    permission_requests: Vec<&'static str>,
+}
+
+/// The 0.3 T2 state of a new [`UiState`].
+struct IoStates {
+    network: network::NetworkState,
+    process: process::ProcessState,
+    edit: edit::EditState,
+    observe: observe::ObserveState,
+    terminals: terminals::TerminalState,
+    journal: Option<Arc<dyn journal::Journal>>,
 }
 
 impl UiState {
-    fn new(extension_id: Arc<str>, ctx: WasiCtx) -> Self {
+    /// For the T2 imports: the broker's state of `capability`, `Unavailable` without a broker.
+    /// Recorded for the Extension Inspector like [`UiState::check_capability`].
+    pub fn permission_state(&self, capability: &str) -> permissions::PermissionState {
+        let state = self
+            .capability_check
+            .as_ref()
+            .map_or(permissions::PermissionState::Unavailable, |broker| {
+                broker.state(&self.extension_id, capability)
+            });
+        self.diagnostics.capability_check(
+            capability,
+            match state {
+                permissions::PermissionState::Granted | permissions::PermissionState::Ask => None,
+                other => Some(format!("{other:?}")),
+            },
+        );
+        state
+    }
+
+    /// For host imports that read or act for the extension: whether it may use `capability`
+    /// now. Answers from the host's permission broker each time, so a revocation applies to the
+    /// next call. Without a broker, T1 and T2 are denied.
+    pub fn check_capability(&self, capability: &str) -> Result<(), permissions::CapabilityDenied> {
+        let result = permissions::check_without_broker(
+            self.capability_check.as_ref(),
+            &self.extension_id,
+            capability,
+        );
+        self.diagnostics.capability_check(
+            capability,
+            result.as_ref().err().map(|denied| denied.reason.clone()),
+        );
+        result
+    }
+
+    fn new(
+        extension_id: Arc<str>,
+        ctx: WasiCtx,
+        capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+        diagnostics: diagnostics::DiagnosticsBuffer,
+        api: effects::ApiState,
+        io: IoStates,
+    ) -> Self {
+        let IoStates {
+            network,
+            process,
+            edit,
+            observe,
+            terminals,
+            journal,
+        } = io;
         Self {
+            edit,
+            observe,
+            terminals,
+            journal,
+            capability_check,
+            diagnostics,
+            api,
+            network,
+            process,
             extension_id,
-            table: ResourceTable::new(),
+            table: {
+                let mut table = ResourceTable::new();
+                table.set_max_capacity(UI_RESOURCE_TABLE_LIMIT);
+                table
+            },
             ctx,
             pushes: Vec::new(),
             pushed_items: 0,
             lifted_text: 0,
-            limits: ui_store_limits(),
+            limits: UiLimits::new(),
             call_started: Instant::now(),
             call_budget: UI_INIT_BUDGET,
+            executed: Duration::ZERO,
             mounted: Default::default(),
             disabled: None,
+            permission_mirror: Default::default(),
+            permission_requests: Vec::new(),
         }
+    }
+
+    /// A fresh time budget without dropping the effects made so far: `surfaces` right after
+    /// instantiation, whose effects (and the instantiation's) apply together (triage-3, BUG 32).
+    fn restart_budget(&mut self, budget: Duration) {
+        self.call_started = Instant::now();
+        self.call_budget = budget;
     }
 
     fn begin_call(&mut self, budget: Duration) {
         self.call_started = Instant::now();
         self.call_budget = budget;
+        self.executed = Duration::ZERO;
         self.pushes.clear();
         self.pushed_items = 0;
         self.lifted_text = 0;
+        self.permission_mirror.clear();
+        self.permission_requests.clear();
+        self.api.begin_call();
+    }
+
+    /// `permissions.query`: `unavailable` unless the manifest declares it, else the broker's
+    /// state as of this call's first query of it.
+    fn query_permission(&mut self, capability: &'static str) -> permissions::PermissionState {
+        if !self.api.declares(capability) {
+            return permissions::PermissionState::Unavailable;
+        }
+        if let Some(state) = self.permission_mirror.get(capability) {
+            return *state;
+        }
+        let state = self.permission_state(capability);
+        self.permission_mirror.insert(capability, state);
+        state
+    }
+
+    /// The manifest and the broker for a T2 capability at every call: `ask` is accepted (the
+    /// prompt comes when the operation is applied), `denied` and `unavailable` refuse.
+    fn permit_t2(&self, capability: &str) -> Result<(), ui_ext::v0_2::HostError> {
+        use ui_ext::v0_2::{HostError, HostErrorCode};
+        if !self.api.declares(capability) {
+            return Err(HostError {
+                code: HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            });
+        }
+        match self.permission_state(capability) {
+            permissions::PermissionState::Granted | permissions::PermissionState::Ask => Ok(()),
+            state => Err(HostError {
+                code: HostErrorCode::Denied,
+                message: format!("{capability} is {state:?}"),
+            }),
+        }
+    }
+
+    /// A T1 capability of the 0.4 `terminals` import: declared, and granted by the broker.
+    fn permit_t1(&self, capability: &str) -> Result<(), ui_ext::v0_2::HostError> {
+        if !self.api.declares(capability) {
+            return Err(ui_ext::v0_2::HostError {
+                code: ui_ext::v0_2::HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            });
+        }
+        self.permit(capability)
+    }
+
+    /// 0.4 (§C.2): whether the broker turned off one item of a granted capability, such as a
+    /// single program. Without a broker nothing is granted, so the capability check refuses.
+    fn item_denied(&self, item: &permissions::ConsentItem) -> bool {
+        self.capability_check.as_ref().is_some_and(|broker| {
+            matches!(
+                broker.item_state(&self.extension_id, item),
+                permissions::PermissionState::Denied | permissions::PermissionState::Unavailable
+            )
+        })
+    }
+
+    /// Records a journal entry, when the host keeps a journal.
+    fn journal(&self, kind: journal::JournalKind) {
+        if let Some(journal) = &self.journal {
+            journal.record(&self.extension_id, kind);
+        }
+    }
+
+    /// A T2 capability a synchronous 0.4 call needs now ([`terminals::t2_now`]).
+    fn permit_t2_now(&self, capability: &'static str) -> Result<(), ui_ext::v0_2::HostError> {
+        if !self.api.declares(capability) {
+            return Err(ui_ext::v0_2::HostError {
+                code: ui_ext::v0_2::HostErrorCode::NotPermitted,
+                message: format!("{capability:?} is not in the manifest"),
+            });
+        }
+        terminals::t2_now(
+            self.capability_check.as_ref(),
+            &self.extension_id,
+            self.permission_state(capability),
+            capability,
+        )
+    }
+
+    /// Whether a declared T2 capability is granted now.
+    fn t2_granted(&self, capability: &str) -> bool {
+        self.api.declares(capability)
+            && self.permission_state(capability) == permissions::PermissionState::Granted
     }
 
     fn count_lifted_text(&mut self, bytes: usize) -> wasmtime::Result<()> {
@@ -459,7 +1218,22 @@ impl wit_host::Host for UiState {
         Ok(())
     }
 
-    fn log(&mut self, level: wit_host::LogLevel, mut message: String) -> wasmtime::Result<()> {
+    fn log(&mut self, level: wit_host::LogLevel, message: String) -> wasmtime::Result<()> {
+        let level = match level {
+            wit_host::LogLevel::Trace => log::Level::Trace,
+            wit_host::LogLevel::Debug => log::Level::Debug,
+            wit_host::LogLevel::Info => log::Level::Info,
+            wit_host::LogLevel::Warn => log::Level::Warn,
+            wit_host::LogLevel::Error => log::Level::Error,
+        };
+        self.write_log(level, message)
+    }
+}
+
+impl UiState {
+    /// `log` of either world: counted toward [`MAX_LIFTED_TEXT_PER_CALL`], cut at
+    /// [`MAX_LOG_MESSAGE_LEN`], written at once (not an effect).
+    fn write_log(&mut self, level: log::Level, mut message: String) -> wasmtime::Result<()> {
         self.count_lifted_text(message.len())?;
         if message.len() > MAX_LOG_MESSAGE_LEN {
             let mut end = MAX_LOG_MESSAGE_LEN;
@@ -470,21 +1244,28 @@ impl wit_host::Host for UiState {
             message.truncate(end);
             message.push_str(&format!("… ({total} bytes, cut)"));
         }
-        let level = match level {
-            wit_host::LogLevel::Trace => log::Level::Trace,
-            wit_host::LogLevel::Debug => log::Level::Debug,
-            wit_host::LogLevel::Info => log::Level::Info,
-            wit_host::LogLevel::Warn => log::Level::Warn,
-            wit_host::LogLevel::Error => log::Level::Error,
-        };
-        log::log!(target: "fyx_ui", level, "{}: {message}", self.extension_id);
+        log::log!(
+            target: "fyx_ui",
+            level,
+            "{}: {}",
+            self.extension_id,
+            ui_ext::sanitize_for_log(&message)
+        );
+        self.diagnostics.log(level, &message);
         Ok(())
     }
 }
 
 struct UiRuntime {
     engine: Engine,
+    /// One linker per world, so each version's imports are exactly what its world declares.
     linker: Linker<UiState>,
+    linker_v0_2: Linker<UiState>,
+    /// Only what this build implements of the staged 0.3 world; instantiation adds traps for the
+    /// rest.
+    linker_v0_3: Linker<UiState>,
+    /// The staged 0.4 world, likewise.
+    linker_v0_4: Linker<UiState>,
 }
 
 fn ui_runtime() -> Result<&'static UiRuntime> {
@@ -539,6 +1320,75 @@ pub fn validate_surfaces(surfaces: &[ui_ext::Surface]) -> Result<()> {
     Ok(())
 }
 
+/// The store's resource limiter: [`ui_store_limits`] per memory and table, and
+/// [`UI_MEMORY_LIMIT`] for all the instance's memories together, so eight memories cannot take
+/// eight times the budget (triage-3, host memory). Memories only grow, so the sum of the growths
+/// is what they hold.
+pub(crate) struct UiLimits {
+    inner: wasmtime::StoreLimits,
+    memory_total: usize,
+}
+
+impl UiLimits {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: ui_store_limits(),
+            memory_total: 0,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for UiLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if !self.inner.memory_growing(current, desired, maximum)? {
+            return Ok(false);
+        }
+        let total = self.memory_total + desired.saturating_sub(current);
+        if total > UI_MEMORY_LIMIT {
+            // Like `trap_on_grow_failure`: a trap, which disables the extension, with the reason.
+            wasmtime::bail!(
+                "memory of all its instances would be {total} bytes, the limit is {UI_MEMORY_LIMIT}"
+            );
+        }
+        self.memory_total = total;
+        Ok(true)
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
+}
+
 /// Resource caps of every UI component's store. Growing past one traps (rather than failing the
 /// guest's allocation quietly), which disables the extension with an explicit error.
 fn ui_store_limits() -> wasmtime::StoreLimits {
@@ -566,11 +1416,19 @@ fn build_ui_runtime() -> Result<UiRuntime> {
         .name("fyx-ui-epoch".into())
         .spawn(move || {
             loop {
+                // Nothing to interrupt or time out while no guest call runs: park instead of
+                // waking 100 times a second for the whole process (triage-3, PERF 7).
+                drop(
+                    CALLS_STARTED
+                        .wait_while(lock_active_calls(), |active| *active == 0)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
                 std::thread::sleep(UI_EPOCH_INTERVAL);
                 let Some(engine) = weak_engine.upgrade() else {
                     break;
                 };
                 engine.increment_epoch();
+                EPOCH_TICKS.fetch_add(1, Ordering::Relaxed);
                 wake_deadlines();
             }
         })
@@ -579,10 +1437,59 @@ fn build_ui_runtime() -> Result<UiRuntime> {
     let mut linker = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     bindings::UiExtension::add_to_linker::<_, UiState>(&mut linker, |state| state)?;
-    Ok(UiRuntime { engine, linker })
+    // `decorations` is linked for every 0.2 component and checked per call, so a component that
+    // imports it loads whether or not it has the capability.
+    let mut linker_v0_2 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_2)?;
+    fyx_ui_v0_2::UiExtension::add_to_linker::<_, UiState>(&mut linker_v0_2, |state| state)?;
+    let mut linker_v0_3 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_3)?;
+    fyx_ui_v0_3::add_to_linker(&mut linker_v0_3)?;
+    let mut linker_v0_4 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker_v0_4)?;
+    fyx_ui_v0_4::add_to_linker(&mut linker_v0_4)?;
+    Ok(UiRuntime {
+        engine,
+        linker,
+        linker_v0_2,
+        linker_v0_3,
+        linker_v0_4,
+    })
 }
 
-/// Wakers of pending [`Deadline`]s, woken on every epoch tick.
+/// Guest calls running now (instantiation included): the epoch thread ticks only while there
+/// are any.
+static ACTIVE_CALLS: Mutex<usize> = Mutex::new(0);
+static CALLS_STARTED: Condvar = Condvar::new();
+/// Epoch ticks so far, for tests.
+static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+
+fn lock_active_calls() -> std::sync::MutexGuard<'static, usize> {
+    ACTIVE_CALLS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One running guest call, counted in [`ACTIVE_CALLS`] while it lives.
+struct ActiveCall;
+
+impl ActiveCall {
+    fn begin() -> Self {
+        let mut active = lock_active_calls();
+        *active += 1;
+        if *active == 1 {
+            CALLS_STARTED.notify_all();
+        }
+        ActiveCall
+    }
+}
+
+impl Drop for ActiveCall {
+    fn drop(&mut self) {
+        let mut active = lock_active_calls();
+        *active = active.saturating_sub(1);
+    }
+}
+
+/// Wakers of calls waiting in [`with_budget`], woken on every epoch tick.
 static DEADLINE_WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
 
 fn wake_deadlines() {
@@ -596,52 +1503,259 @@ fn wake_deadlines() {
     }
 }
 
-/// Completes once `Instant::now()` passes the deadline, at the resolution of the epoch thread.
-/// It needs no executor timer, so it works on tokio and in GPUI tests alike.
-struct Deadline(Instant);
+/// The waker a guest call is polled with: it notes when the call was first woken, so
+/// [`with_budget`] can tell a call that waits on the host (not woken) from one that is ready but
+/// not polled because the tokio workers are busy (woken).
+struct RecordingWaker {
+    woken_at: Mutex<Option<Instant>>,
+    inner: Waker,
+}
 
-impl Future for Deadline {
-    type Output = ();
+impl std::task::Wake for RecordingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if Instant::now() >= self.0 {
-            return Poll::Ready(());
-        }
-        DEADLINE_WAKERS
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken_at
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(cx.waker().clone());
-        Poll::Pending
+            .get_or_insert_with(Instant::now);
+        self.inner.wake_by_ref();
     }
 }
 
-/// Runs a guest call with `budget`. The epoch callback interrupts a guest that keeps executing;
-/// this drops the call when the guest is blocked in a host call instead (`wasi:io/poll` behind
-/// `thread::sleep`, for example), where no epoch callback runs.
+/// Runs a guest call with `budget`. The epoch callback interrupts a guest that keeps executing
+/// longer than `budget`, counting only epochs it executed in (`UiState::executed`). This drops the
+/// call when the guest is blocked in a host call instead (`wasi:io/poll` behind `thread::sleep`,
+/// for example), where no epoch callback runs.
+///
+/// Both count the call's own time, not wall time (async-1 #5): a call that is ready but waits for
+/// a busy tokio worker spends neither, so other work on the shared runtime, or other UI
+/// extensions, cannot get a healthy extension disabled.
 async fn with_budget<T>(budget: Duration, call: impl Future<Output = Result<T>>) -> Result<T> {
-    let deadline = Deadline(Instant::now() + budget + UI_DEADLINE_SLACK);
-    match futures::future::select(pin!(call), deadline).await {
-        Either::Left((result, _)) => result,
-        Either::Right(((), _)) => Err(anyhow!(
-            "exceeded its time budget of {budget:?} while blocked in a host call"
-        )),
-    }
+    // Every guest call runs in here, so this is what keeps the epoch thread ticking (triage-3,
+    // PERF 7); a call waiting on the host counts too, since the epoch thread polls it again.
+    let _active = ActiveCall::begin();
+    let limit = budget + UI_DEADLINE_SLACK;
+    let mut call = pin!(call);
+    let mut blocked = Duration::ZERO;
+    let mut waiting: Option<(Instant, Arc<RecordingWaker>)> = None;
+    futures::future::poll_fn(move |cx| {
+        let now = Instant::now();
+        if let Some((since, waker)) = waiting.take() {
+            let woken_at = *waker
+                .woken_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let until = woken_at.map_or(now, |at| at.clamp(since, now));
+            blocked += until.saturating_duration_since(since);
+        }
+        if blocked > limit {
+            return Poll::Ready(Err(anyhow!(
+                "exceeded its time budget of {budget:?} while blocked in a host call"
+            )));
+        }
+        let waker = Arc::new(RecordingWaker {
+            woken_at: Mutex::new(None),
+            inner: cx.waker().clone(),
+        });
+        let result = call
+            .as_mut()
+            .poll(&mut Context::from_waker(&Waker::from(waker.clone())));
+        if result.is_pending() {
+            waiting = Some((Instant::now(), waker));
+            // The epoch thread polls the call again, so time blocked in the host is counted.
+            DEADLINE_WAKERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(cx.waker().clone());
+        }
+        result
+    })
+    .await
 }
 
-type UiCall = Box<
-    dyn Send
-        + for<'a> FnOnce(&'a mut bindings::UiExtension, &'a mut Store<UiState>) -> BoxFuture<'a, ()>,
->;
+type UiCall =
+    Box<dyn Send + for<'a> FnOnce(&'a mut UiBindings, &'a mut Store<UiState>) -> BoxFuture<'a, ()>>;
 
-/// A loaded `fyx:ui` component. Calls are serialized on its own queue.
+/// A loaded `fyx:ui` component of either world. Calls are serialized on its own queue.
 #[derive(Clone)]
 pub struct UiExtension {
     extension_id: Arc<str>,
     api_version: Version,
+    ui_api_version: ApiVersion,
+    capabilities: Arc<[String]>,
+    /// The static surfaces as the 0.1 renderer sees them: modals are left out.
     surfaces: Arc<[ui_ext::Surface]>,
+    surfaces_v0_2: Arc<[ui_ext::v0_2::Surface]>,
+    initial_effects: Arc<[HostEffect]>,
     limits: TreeLimits,
     tx: mpsc::UnboundedSender<UiCall>,
     _task: Arc<Task<Result<(), gpui_tokio::JoinError>>>,
+    from_precompiled: bool,
+    diagnostics: diagnostics::DiagnosticsBuffer,
+    /// `extension.toml`'s `name`, unchecked; `None` without a manifest.
+    name: Option<Arc<str>>,
+    /// Starts `network.fetch` requests after their call and hands back the outcomes.
+    network: Arc<network::NetworkHandle>,
+    /// Starts `process.spawn` programs after their call; dropping the last clone kills them.
+    processes: Arc<process::ProcessHandle>,
+    /// Starts `workspace-edit.apply-edit` edits after their call.
+    edits: Arc<edit::EditHandle>,
+    /// The `agent-observe` feed; dropping the last clone stops it.
+    observer: Arc<observe::ObserveHandle>,
+    /// The 0.4 terminals; dropping the last clone closes them all.
+    terminals: Arc<terminals::TerminalsHandle>,
+}
+
+/// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
+/// hashes the engine's compatibility hash (wasmtime version and configuration) and the
+/// component's SHA-256, so a different engine or component never matches a stale file.
+///
+/// Loading one is loading trusted machine code, so the caller must only ever name a place that
+/// Fyx alone writes (the install store), never a path inside an extension package.
+#[derive(Clone, Debug)]
+pub struct PrecompiledCache {
+    pub dir: PathBuf,
+    pub stem: String,
+}
+
+impl PrecompiledCache {
+    /// The file for this component under the current engine.
+    pub fn file_for(&self, wasm_bytes: &[u8]) -> Result<PathBuf> {
+        let engine = &ui_runtime()?.engine;
+        struct Sha256Hasher(Sha256);
+        impl std::hash::Hasher for Sha256Hasher {
+            fn finish(&self) -> u64 {
+                0
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.update(bytes);
+            }
+        }
+        let mut hasher = Sha256Hasher(Sha256::new());
+        std::hash::Hash::hash(&engine.precompile_compatibility_hash(), &mut hasher);
+        hasher.0.update(Sha256::digest(wasm_bytes));
+        let key = format!("{:x}", hasher.0.finalize());
+        Ok(self.dir.join(format!("{}-{}.cwasm", self.stem, &key[..32])))
+    }
+}
+
+/// Compiles `wasm_bytes`, or loads the precompiled copy in `cache` when it is there and fits this
+/// engine. A missing, stale or unreadable copy is (re)written after compiling. Returns whether the
+/// copy was used.
+fn compile_component(
+    engine: &Engine,
+    wasm_bytes: &[u8],
+    cache: Option<&PrecompiledCache>,
+) -> Result<(Component, bool)> {
+    let file = match cache.map(|cache| cache.file_for(wasm_bytes)).transpose() {
+        Ok(file) => file,
+        Err(error) => {
+            log::warn!("fyx:ui: no precompiled cache: {error:#}");
+            None
+        }
+    };
+    // Read into memory rather than `deserialize_file`, which maps the file: on Windows a mapped
+    // file can be neither replaced nor deleted, which would pin old versions in the install store.
+    if let Some(file) = &file
+        && let Ok(bytes) = std::fs::read(file)
+    {
+        // SAFETY: `file` is only ever written by `compile_component` below, from a component
+        // this engine compiled, at a path the caller guarantees only Fyx writes (see
+        // `PrecompiledCache`). wasmtime still checks the header against this engine.
+        match unsafe { Component::deserialize(engine, &bytes) } {
+            Ok(component) => return Ok((component, true)),
+            Err(error) => log::warn!(
+                "fyx:ui: precompiled {} is unusable, compiling again: {error:#}",
+                file.display()
+            ),
+        }
+    }
+    let component = Component::from_binary(engine, wasm_bytes)
+        .map_err(anyhow::Error::from)
+        .context("failed to compile fyx:ui component")?;
+    if let Some(file) = &file {
+        if let Err(error) = write_precompiled(&component, file) {
+            log::warn!(
+                "fyx:ui: could not save precompiled {}: {error:#}",
+                file.display()
+            );
+        }
+    }
+    Ok((component, false))
+}
+
+/// Writes through a temporary file and a rename, so a crash never leaves a torn `.cwasm`.
+fn write_precompiled(component: &Component, file: &Path) -> Result<()> {
+    let bytes = component.serialize().map_err(anyhow::Error::from)?;
+    let dir = file.parent().context("no parent directory")?;
+    std::fs::create_dir_all(dir)?;
+    let temp = file.with_extension("cwasm.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, file)?;
+    Ok(())
+}
+
+/// How [`UiExtension::load_with_options`] loads a component.
+#[derive(Clone, Default)]
+pub struct LoadOptions {
+    pub cache: Option<PrecompiledCache>,
+    /// The host's permission broker, for [`UiState::check_capability`].
+    pub capability_check: Option<Arc<dyn permissions::CapabilityCheck>>,
+    /// `[fyx_ui].capabilities`: what the extension declared. The static surfaces are checked
+    /// against it at load, and `add-surface`, `show-surface` and the decorations at each call,
+    /// together with the broker. `None` (no manifest: tests and bare components) declares every
+    /// UI capability. [`UiExtension::load_from_dir_with_options`] sets it from the manifest.
+    pub capabilities: Option<Vec<String>>,
+    /// Whether a staged version (none since 0.3 is frozen) may load; `None` means
+    /// [`staged_api_allowed_by_default`].
+    pub allow_staged: Option<bool>,
+    /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
+    /// Applies only to a 0.3 component that declares `network:fetch`.
+    pub network_domains: Option<Vec<String>>,
+    /// `extension.toml`'s `version`, for the `user-agent` of `network:fetch`; set by
+    /// [`UiExtension::load_checked`].
+    pub extension_version: Option<String>,
+    /// Fyx's `proxy` setting for `network:fetch`, kept current by the host; `None` goes direct.
+    /// Environment proxies are never used.
+    pub proxy: Option<network::ProxySetting>,
+    /// `fyx.extensions.network.private_hosts` for `network:fetch`, kept current by the host;
+    /// `None` lists no name.
+    pub private_hosts: Option<network::PrivateHosts>,
+    /// Name resolution for `network:fetch`; `None` is the system resolver. For tests.
+    pub resolver: Option<Arc<dyn network::Resolve>>,
+    /// `[[fyx_ui.processes]]`; [`UiExtension::load_checked`] sets it from the manifest. Applies
+    /// only to a 0.3 component that declares `process:spawn`.
+    pub processes: Option<Vec<process::ProcessSpec>>,
+    /// `[fyx_ui.process] env`; set by [`UiExtension::load_checked`].
+    pub process_env: Option<Vec<String>>,
+    /// The host's open worktrees, for `process:spawn` (`cwd`, `path` programs, the `PATH`
+    /// filter). Without it, `spawn` is `unavailable`.
+    pub workspace: Option<Arc<dyn process::Workspace>>,
+    /// Fyx's environment as `process:spawn` sees it; `None` is the real one. For tests.
+    pub process_environment: Option<process::Environment>,
+    /// The editor side of `workspace:edit`. Without it, `apply-edit` is `unavailable`.
+    pub workspace_edits: Option<Arc<dyn edit::WorkspaceEdits>>,
+    /// The agent reviews for `agent:observe`. Without them, `start` is `unavailable`.
+    pub agent_reviews: Option<Arc<dyn observe::AgentReviews>>,
+    /// The terminal host for the 0.4 `terminals` import (`terminal_host`, W1). Without it, the
+    /// import is `unavailable`.
+    pub terminals: Option<Arc<dyn terminal::TerminalHost>>,
+    /// `[[fyx_ui.terminal_programs]]`; set by [`UiExtension::load_checked`]. Applies only to a
+    /// 0.4 component that declares `terminal:create`.
+    pub terminal_programs: Option<Vec<terminal::TerminalProgramSpec>>,
+    /// `[fyx_ui.terminal_env]`, checked; set by [`UiExtension::load_checked`].
+    pub terminal_env: Option<terminal::TerminalEnv>,
+    /// `[[fyx_ui.terminal_profiles]]`, checked; set by [`UiExtension::load_checked`]. Sent to the
+    /// terminal host (P2.4) with `terminal:profiles`.
+    pub terminal_profiles: Option<Vec<terminal::TerminalProfile>>,
+    /// The extension's directory, for `${package}` in `terminal:env`; set by
+    /// [`UiExtension::load_from_dir_with_options`].
+    pub package_dir: Option<PathBuf>,
+    /// 0.4 (design §C.4): the usage journal. Without one nothing is recorded.
+    pub journal: Option<Arc<dyn journal::Journal>>,
 }
 
 impl UiExtension {
@@ -655,17 +1769,99 @@ impl UiExtension {
         wasm_bytes: Vec<u8>,
         cx: &AsyncApp,
     ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_with_cache(extension_id, wasm_bytes, None, cx)
+    }
+
+    /// [`UiExtension::load`], using and filling a precompiled cache. Compiling runs on the
+    /// background executor and instantiation on tokio, so no window waits on either.
+    pub fn load_with_cache(
+        extension_id: Arc<str>,
+        wasm_bytes: Vec<u8>,
+        cache: Option<PrecompiledCache>,
+        cx: &AsyncApp,
+    ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_with_options(
+            extension_id,
+            wasm_bytes,
+            LoadOptions {
+                cache,
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+    }
+
+    /// [`UiExtension::load`] with a precompiled cache, a permission broker, the declared
+    /// capabilities and staging.
+    pub fn load_with_options(
+        extension_id: Arc<str>,
+        wasm_bytes: Vec<u8>,
+        options: LoadOptions,
+        cx: &AsyncApp,
+    ) -> Task<Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        let LoadOptions {
+            cache,
+            capability_check,
+            capabilities,
+            allow_staged,
+            network_domains,
+            extension_version,
+            proxy,
+            private_hosts,
+            resolver,
+            processes,
+            process_env,
+            workspace,
+            process_environment,
+            workspace_edits,
+            agent_reviews,
+            terminals: terminal_host,
+            terminal_programs,
+            terminal_env,
+            terminal_profiles,
+            package_dir,
+            journal,
+        } = options;
+        let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
+        let capabilities: Arc<[String]> = match capabilities {
+            Some(capabilities) => capabilities.into(),
+            None => ALL_UI_CAPABILITIES
+                .iter()
+                .map(|&capability| capability.into())
+                .collect(),
+        };
+        let diagnostics = diagnostics::DiagnosticsBuffer::default();
         if let Err(error) = validate_id("extension", &extension_id) {
             return Task::ready(Err(error));
         }
+        let declares_network = capabilities
+            .iter()
+            .any(|capability| capability == network::CAPABILITY_NETWORK);
+        let domains = match network_domains {
+            Some(domains) if declares_network => match network::DomainList::parse(&domains) {
+                Ok(domains) => domains,
+                Err(error) => return Task::ready(Err(anyhow::Error::msg(error))),
+            },
+            _ => network::DomainList::default(),
+        };
+        let declares_process = capabilities
+            .iter()
+            .any(|capability| capability == process::CAPABILITY_PROCESS);
+        let process_policy = if declares_process {
+            process::ProcessPolicy {
+                programs: processes.unwrap_or_default(),
+                env: process_env.unwrap_or_default().into_iter().collect(),
+            }
+        } else {
+            process::ProcessPolicy::default()
+        };
         let compile_task = cx.background_executor().spawn({
             let extension_id = extension_id.clone();
             async move {
                 let runtime = ui_runtime()?;
                 let section_version = parse_api_version(&extension_id, &wasm_bytes)?;
-                let component = Component::from_binary(&runtime.engine, &wasm_bytes)
-                    .map_err(anyhow::Error::from)
-                    .context("failed to compile fyx:ui component")?;
+                let (component, from_precompiled) =
+                    compile_component(&runtime.engine, &wasm_bytes, cache.as_ref())?;
                 let api_version = section_version
                     .or_else(|| api_version_from_imports(&component, &runtime.engine))
                     .with_context(|| {
@@ -674,35 +1870,184 @@ impl UiExtension {
                              {API_VERSION_SECTION} section and imports no fyx:ui interface"
                         )
                     })?;
+                let ui_api_version = known_api_version(&api_version).with_context(|| {
+                    format!(
+                        "extension {extension_id} targets fyx:ui {api_version}, this build \
+                         supports 0.1.0, 0.2.0, 0.3.0 and the staged 0.4.0"
+                    )
+                })?;
                 anyhow::ensure!(
-                    is_supported_api_version(&api_version),
-                    "extension {extension_id} targets fyx:ui {api_version}, this build supports {}..={}",
-                    MIN_VERSION,
-                    MAX_VERSION,
+                    api_version_range(allow_staged).contains(&api_version),
+                    "extension {extension_id} targets fyx:ui {api_version}, which is staged: this \
+                     build loads it only in Dev and Nightly builds or as a dev extension, and \
+                     otherwise supports {MIN_VERSION}..={MAX_FROZEN_VERSION}",
                 );
-                anyhow::Ok((api_version, component))
+                anyhow::Ok((api_version, ui_api_version, component, from_precompiled))
             }
         });
 
         cx.spawn(async move |cx| {
-            let (api_version, component) = compile_task.await?;
+            // Read here: `load_with_options` may be called while the app is borrowed.
+            let app_version = cx.update(|cx| release_channel::AppVersion::global(cx));
+            let fetcher = network::Fetcher::new(
+                network::user_agent(&app_version, &extension_id, extension_version.as_deref()),
+                resolver,
+            )
+            .with_proxy(proxy.unwrap_or_default())
+            .with_private_hosts(private_hosts.unwrap_or_default());
+            let (api_version, ui_api_version, component, from_precompiled) = compile_task.await?;
             let (pushed_tx, pushed_rx) = mpsc::unbounded();
+            // Only a 0.3 or 0.4 component has the T2 imports.
+            let has_io = ui_api_version >= ApiVersion::V0_3_0;
+            let domains = Arc::new(if has_io {
+                domains
+            } else {
+                network::DomainList::default()
+            });
+            let running = Arc::new(network::Running::new(diagnostics.clone()));
+            let network = Arc::new(network::NetworkHandle::new(
+                extension_id.clone(),
+                domains.clone(),
+                fetcher,
+                capability_check.clone(),
+                running.clone(),
+            ));
+            let process_policy = Arc::new(if has_io {
+                process_policy
+            } else {
+                process::ProcessPolicy::default()
+            });
+            let process_set = Arc::new(process::ProcessSet::default());
+            let terminal_environment = process_environment.clone();
+            let processes = Arc::new(process::ProcessHandle::new(
+                extension_id.clone(),
+                process_set.clone(),
+                capability_check.clone(),
+                workspace.clone(),
+                process_environment,
+                Arc::new(process_policy.env.clone()),
+                running.clone(),
+                journal.clone(),
+            ));
+            let is_v0_3 = has_io;
+            let edit_set = Arc::new(edit::EditSet::default());
+            let edits = Arc::new(edit::EditHandle::new(
+                extension_id.clone(),
+                capability_check.clone(),
+                workspace_edits.filter(|_| is_v0_3),
+                edit_set.clone(),
+                running.clone(),
+            ));
+            let observer = Arc::new(observe::ObserveHandle::new(
+                extension_id.clone(),
+                capability_check.clone(),
+                agent_reviews.filter(|_| is_v0_3),
+                running.clone(),
+            ));
+            // Only a 0.4 component has the `terminals` import.
+            let is_v0_4 = ui_api_version >= ApiVersion::V0_4_0;
+            let declares = |wanted: &str| capabilities.iter().any(|c| c.as_str() == wanted);
+            // P2.4: what the host gets for profiles and env, filtered by the grants when sent.
+            let integration = terminals::IntegrationSource {
+                profiles: terminal_profiles
+                    .filter(|_| declares(terminal::CAPABILITY_PROFILES))
+                    .unwrap_or_default(),
+                env: terminal_env
+                    .clone()
+                    .filter(|_| declares(terminal::CAPABILITY_ENV)),
+                package_dir: package_dir
+                    .clone()
+                    .filter(|_| declares(terminal::CAPABILITY_PACKAGE_FILES)),
+            };
+            let terminals = Arc::new(terminals::TerminalsHandle::new(
+                extension_id.clone(),
+                terminal_host.filter(|_| is_v0_4),
+                integration,
+                capability_check.clone(),
+            ));
+            let declares_create = declares(terminal::CAPABILITY_CREATE);
+            let terminal_policy = Arc::new(if is_v0_4 {
+                terminals::TerminalPolicy::new(
+                    &terminal_programs
+                        .filter(|_| declares_create)
+                        .unwrap_or_default(),
+                    terminal_env,
+                    package_dir,
+                )
+            } else {
+                terminals::TerminalPolicy::default()
+            });
+            let edits_available = edits.available();
+            let reviews_available = observer.available();
 
             let instantiate = {
                 let extension_id = extension_id.clone();
+                let diagnostics = diagnostics.clone();
+                let capabilities = capabilities.clone();
+                let network = network.clone();
+                let process_set = process_set.clone();
+                let terminals = terminals.clone();
+                let workspace_for_terminals = workspace.clone();
+                let revocable = network::Revocable {
+                    processes: Arc::downgrade(&process_set),
+                    edits: Arc::downgrade(&edit_set),
+                    observer: Arc::downgrade(&observer),
+                    terminals: Arc::downgrade(&terminals),
+                };
                 async move {
+                    // On tokio: revocations reach in-flight requests, processes and `handle-io`.
+                    if has_io {
+                        network.watch_permissions(revocable);
+                    }
+                    if is_v0_4 {
+                        terminals.forward(&running);
+                    }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
-                    wasi.inherit_stderr();
+                    // Line by line through `log`, capped (triage-3, SEC T5).
+                    wasi.stderr(stderr::GuestStderr::new(
+                        extension_id.clone(),
+                        diagnostics.clone(),
+                    ));
                     deny_network(&mut wasi);
                     // No preopened directories, no environment variables, no arguments: the
-                    // builder starts empty and only stderr is inherited.
-                    let mut store =
-                        Store::new(&runtime.engine, UiState::new(extension_id, wasi.build()));
+                    // builder starts empty and only stderr goes anywhere.
+                    let mut store = Store::new(
+                        &runtime.engine,
+                        UiState::new(
+                            extension_id.clone(),
+                            wasi.build(),
+                            capability_check,
+                            diagnostics.clone(),
+                            effects::ApiState::new(ui_api_version, capabilities),
+                            IoStates {
+                                network: network::NetworkState::new(domains, running),
+                                process: process::ProcessState::new(
+                                    process_policy,
+                                    process_set,
+                                    workspace,
+                                ),
+                                edit: edit::EditState::new(edits_available),
+                                observe: observe::ObserveState::new(reviews_available),
+                                terminals: terminals::TerminalState::new(
+                                    extension_id.clone(),
+                                    terminals.clone(),
+                                    terminal_policy,
+                                    workspace_for_terminals,
+                                    terminal_environment,
+                                ),
+                                journal,
+                            },
+                        ),
+                    );
                     store.limiter(|state| &mut state.limits);
-                    store.epoch_deadline_callback(|context| {
-                        let state = context.data();
-                        if state.call_started.elapsed() > state.call_budget {
+                    // The callback runs only while the guest executes: once per epoch it runs
+                    // through, and once on resuming after it yielded, however long it waited
+                    // (async-1 #5).
+                    store.epoch_deadline_callback(|mut context| {
+                        let state = context.data_mut();
+                        state.executed += UI_EPOCH_INTERVAL;
+                        if state.executed > state.call_budget {
                             Ok(UpdateDeadline::Interrupt)
                         } else {
                             Ok(UpdateDeadline::Yield(1))
@@ -711,17 +2056,13 @@ impl UiExtension {
                     store.set_epoch_deadline(1);
 
                     let extension = with_budget(UI_INIT_BUDGET, async {
-                        bindings::UiExtension::instantiate_async(
-                            &mut store,
-                            &component,
-                            &runtime.linker,
-                        )
-                        .await
-                        .map_err(anyhow::Error::from)
+                        UiBindings::instantiate(ui_api_version, &mut store, &component, runtime)
+                            .await
+                            .map_err(anyhow::Error::from)
                     })
                     .await
                     .context("failed to instantiate fyx:ui component")?;
-                    store.data_mut().begin_call(UI_INIT_BUDGET);
+                    store.data_mut().restart_budget(UI_INIT_BUDGET);
                     let surfaces = with_budget(UI_INIT_BUDGET, async {
                         extension
                             .call_surfaces(&mut store)
@@ -730,18 +2071,28 @@ impl UiExtension {
                     })
                     .await
                     .context("fyx:ui surfaces() failed")?;
-                    let surfaces: Arc<[ui_ext::Surface]> =
-                        surfaces.into_iter().map(Into::into).collect();
-                    validate_surfaces(&surfaces).context("invalid surfaces()")?;
+                    if ui_api_version == ApiVersion::V0_1_0 {
+                        let surfaces: Vec<ui_ext::Surface> = surfaces
+                            .iter()
+                            .filter_map(dispatch::shim::surface)
+                            .collect();
+                        validate_surfaces(&surfaces).context("invalid surfaces()")?;
+                    }
+                    store
+                        .data_mut()
+                        .api
+                        .register_static(&surfaces)
+                        .context("invalid surfaces()")?;
+                    let initial_effects: Arc<[HostEffect]> = store.data_mut().finish_call().into();
                     // Nothing replies to instantiation, so its pushes go to the channel; the
                     // receiver is still in hand here, so sending cannot fail.
-                    for pushed in store.data_mut().pushes.drain(..) {
+                    for pushed in dispatch::shim::pushes(initial_effects.to_vec()) {
                         pushed_tx.unbounded_send(pushed).ok();
                     }
-                    anyhow::Ok((extension, store, surfaces))
+                    anyhow::Ok((extension, store, surfaces, initial_effects))
                 }
             };
-            let (mut extension, mut store, surfaces) =
+            let (mut extension, mut store, surfaces, initial_effects) =
                 gpui_tokio::Tokio::spawn(cx, instantiate).await??;
 
             let (tx, mut rx) = mpsc::unbounded::<UiCall>();
@@ -757,10 +2108,25 @@ impl UiExtension {
                 Self {
                     extension_id,
                     api_version,
-                    surfaces,
-                    limits: TreeLimits::default(),
+                    ui_api_version,
+                    capabilities,
+                    surfaces: surfaces
+                        .iter()
+                        .filter_map(dispatch::shim::surface)
+                        .collect(),
+                    surfaces_v0_2: surfaces.into(),
+                    initial_effects,
+                    limits: ui_api_version.tree_limits(),
                     tx,
                     _task: Arc::new(task),
+                    from_precompiled,
+                    diagnostics,
+                    name: None,
+                    network,
+                    processes,
+                    edits,
+                    observer,
+                    terminals,
                 },
                 pushed_rx,
             ))
@@ -774,6 +2140,17 @@ impl UiExtension {
         fs: Arc<dyn Fs>,
         cx: &AsyncApp,
     ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
+        Self::load_from_dir_with_options(extension_dir, LoadOptions::default(), fs, cx).await
+    }
+
+    /// [`UiExtension::load_from_dir`] with a precompiled cache, a permission broker and staging.
+    /// The declared capabilities come from the manifest; `options.capabilities` is ignored.
+    pub async fn load_from_dir_with_options(
+        extension_dir: &Path,
+        options: LoadOptions,
+        fs: Arc<dyn Fs>,
+        cx: &AsyncApp,
+    ) -> Result<Option<(Self, mpsc::UnboundedReceiver<PushedUpdate>)>> {
         let Some((extension_id, manifest)) = UiManifest::read(fs.as_ref(), extension_dir).await?
         else {
             return Ok(None);
@@ -783,28 +2160,90 @@ impl UiExtension {
             .load_bytes(&component_path)
             .await
             .with_context(|| format!("reading {component_path:?}"))?;
-        let (extension, pushed) = Self::load(extension_id.clone(), wasm_bytes, cx)
+        let options = LoadOptions {
+            package_dir: Some(extension_dir.to_path_buf()),
+            ..options
+        };
+        Self::load_checked(extension_id, manifest, wasm_bytes, options, cx)
             .await
-            .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
+            .map(Some)
+    }
+
+    /// Loads `wasm_bytes` as the component `manifest` describes, with the manifest's checks: its
+    /// capabilities apply and its API version must be the component's. For a caller that read
+    /// the manifest and the bytes itself, once, so what it checked (consent) is what loads
+    /// (triage-3, SEC T1).
+    pub async fn load_checked(
+        extension_id: Arc<str>,
+        manifest: UiManifest,
+        wasm_bytes: Vec<u8>,
+        options: LoadOptions,
+        cx: &AsyncApp,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<PushedUpdate>)> {
+        let options = LoadOptions {
+            capabilities: Some(manifest.capabilities.clone()),
+            network_domains: manifest.network.as_ref().map(|table| table.domains.clone()),
+            extension_version: manifest.version.clone(),
+            processes: Some(manifest.processes.clone()),
+            process_env: manifest.process.as_ref().map(|table| table.env.clone()),
+            terminal_programs: Some(manifest.terminal_programs.clone()),
+            terminal_env: manifest.checked_terminal_env(),
+            terminal_profiles: terminal::check_profiles(manifest.terminal_profiles.clone()).ok(),
+            ..options
+        };
+        let (mut extension, pushed) =
+            Self::load_with_options(extension_id.clone(), wasm_bytes, options, cx)
+                .await
+                .with_context(|| format!("loading fyx:ui extension {extension_id}"))?;
         anyhow::ensure!(
             extension.api_version == manifest.api_version,
             "extension {extension_id}: extension.toml says fyx:ui {}, the component targets {}",
             manifest.api_version,
             extension.api_version,
         );
-        manifest.check_surfaces(&extension_id, extension.surfaces())?;
-        Ok(Some((extension, pushed)))
+        extension.name = manifest.name.map(Arc::from);
+        Ok((extension, pushed))
     }
 
     pub fn extension_id(&self) -> &Arc<str> {
         &self.extension_id
     }
 
+    /// P2.4: the registry started this instance, after consent, at a load or reload. It becomes
+    /// the one that speaks to the terminal host for the extension, and sends the host its
+    /// profiles and env as granted (again whenever a grant changes; emptied when the instance
+    /// goes). An instance it replaced no longer closes terminals when it is dropped.
+    pub fn activate_terminals(&self) {
+        self.terminals.activate();
+    }
+
+    /// Whether the 0.4 `terminals` import has a terminal host (a 0.4 component loaded with
+    /// [`LoadOptions::terminals`]).
+    pub fn terminals_available(&self) -> bool {
+        self.terminals.available()
+    }
+
+    /// `extension.toml`'s `name` as its author wrote it (check it before showing it).
+    pub fn display_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     pub fn api_version(&self) -> &Version {
         &self.api_version
     }
 
-    /// What `surfaces` returned right after instantiation.
+    /// What the Extension Inspector shows: recent calls, `log` output and capability checks.
+    pub fn diagnostics(&self) -> diagnostics::Diagnostics {
+        self.diagnostics.snapshot()
+    }
+
+    /// Whether the component came from a precompiled cache rather than a fresh compile.
+    pub fn from_precompiled(&self) -> bool {
+        self.from_precompiled
+    }
+
+    /// What `surfaces` returned right after instantiation, in the 0.1 model: a 0.2 component's
+    /// modals are left out ([`UiExtension::surfaces_v0_2`] has them).
     pub fn surfaces(&self) -> &[ui_ext::Surface] {
         &self.surfaces
     }
@@ -813,132 +2252,33 @@ impl UiExtension {
         self.limits
     }
 
-    /// The initial tree of a surface, validated.
-    pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
-        let (result, pushed) = self
-            .call(CallBudget::Mount(surface_id.to_string()), {
-                let surface_id = surface_id.to_string();
-                move |extension, store| {
-                    async move { extension.call_mount(store, &surface_id).await }.boxed()
-                }
-            })
-            .await?;
-        let nodes = self.guest_result(result, &pushed)?;
-        let tree = Tree::from_nodes(nodes.into_iter().map(Into::into).collect(), self.limits)
-            .with_context(|| format!("invalid tree from mount({surface_id:?})"));
-        self.reply(tree, pushed)
-    }
-
-    /// The extension's reply to one input event. The caller applies it to its tree, which
-    /// validates it.
-    pub async fn handle_event(
+    /// Runs one guest call on the extension's queue and returns its result with the effects the
+    /// guest made during it, in order. A failed call (trap, budget) disables the extension and
+    /// drops them.
+    async fn call<T, F>(
         &self,
+        kind: &'static str,
         surface_id: &str,
-        event: ui_ext::UiEvent,
-    ) -> Result<Reply<ui_ext::Update>> {
-        let (result, pushed) = self
-            .call(CallBudget::Regular, {
-                let surface_id = surface_id.to_string();
-                let event = wit::UiEvent::from(event);
-                move |extension, store| {
-                    async move {
-                        extension
-                            .call_handle_event(store, &surface_id, &event)
-                            .await
-                    }
-                    .boxed()
-                }
-            })
-            .await?;
-        let update = self.guest_result(result, &pushed)?;
-        self.reply(Ok(update.into()), pushed)
-    }
-
-    /// Rows `start..start + count` of a virtualized list, each validated as a single-root tree.
-    pub async fn list_rows(
-        &self,
-        surface_id: &str,
-        list_node: ui_ext::NodeId,
-        start: u32,
-        count: u32,
-    ) -> Result<Reply<Vec<(u32, Tree)>>> {
-        let (rows, pushed) = self
-            .call(CallBudget::Regular, {
-                let surface_id = surface_id.to_string();
-                move |extension, store| {
-                    async move {
-                        extension
-                            .call_list_rows(store, &surface_id, list_node, start, count)
-                            .await
-                    }
-                    .boxed()
-                }
-            })
-            .await?;
-        let requested = start..start.saturating_add(count);
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                anyhow::ensure!(
-                    requested.contains(&row.index),
-                    "list-rows({surface_id:?}, {list_node}) returned row {} outside {requested:?}",
-                    row.index,
-                );
-                let nodes = row.nodes.into_iter().map(Into::into).collect();
-                let tree = Tree::from_row(nodes, self.limits).with_context(|| {
-                    format!(
-                        "invalid row {} from list-rows({surface_id:?}, {list_node})",
-                        row.index
-                    )
-                })?;
-                Ok((row.index, tree))
-            })
-            .collect();
-        self.reply(rows, pushed)
-    }
-
-    /// Turns an error the guest reported into a [`ReplyError`] carrying the call's pushes.
-    fn guest_result<T>(
-        &self,
-        result: std::result::Result<T, String>,
-        pushed: &[PushedUpdate],
-    ) -> Result<T> {
-        result.map_err(|message| {
-            ReplyError {
-                pushed: pushed.to_vec(),
-                message: format!("from fyx:ui extension {}: {message}", self.extension_id),
-            }
-            .into()
-        })
-    }
-
-    /// Pairs a validated value with the call's pushes; a validation error becomes a
-    /// [`ReplyError`] carrying them.
-    fn reply<T>(&self, value: Result<T>, pushed: Vec<PushedUpdate>) -> Result<Reply<T>> {
-        match value {
-            Ok(value) => Ok(Reply { pushed, value }),
-            Err(error) if error.is::<ReplyError>() => Err(error),
-            Err(error) => Err(ReplyError {
-                pushed,
-                message: format!("fyx:ui extension {}: {error:#}", self.extension_id),
-            }
-            .into()),
-        }
-    }
-
-    /// Runs one guest call on the extension's queue and returns its result with the updates the
-    /// guest pushed during it. A failed call (trap, budget) disables the extension and drops them.
-    async fn call<T, F>(&self, budget: CallBudget, f: F) -> Result<(T, Vec<PushedUpdate>)>
+        budget: CallBudget,
+        f: F,
+    ) -> Result<(T, Vec<HostEffect>)>
     where
         T: 'static + Send,
         F: 'static
             + Send
             + for<'a> FnOnce(
-                &'a mut bindings::UiExtension,
+                &'a mut UiBindings,
                 &'a mut Store<UiState>,
             ) -> BoxFuture<'a, wasmtime::Result<T>>,
     {
         let (return_tx, return_rx) = oneshot::channel();
+        let diagnostics = self.diagnostics.clone();
+        let network = self.network.clone();
+        let processes = self.processes.clone();
+        let edits = self.edits.clone();
+        let observer = self.observer.clone();
+        let terminals = self.terminals.clone();
+        let surface_id = surface_id.to_string();
         self.tx
             .unbounded_send(Box::new(move |extension, store| {
                 async move {
@@ -952,13 +2292,56 @@ impl UiExtension {
                             f(extension, store).await.map_err(anyhow::Error::from)
                         })
                         .await;
-                        let pushes = std::mem::take(&mut store.data_mut().pushes);
+                        let effects = store.data_mut().finish_call();
+                        // `permissions.request` prompts, after the call and only if it returned;
+                        // the answer reaches the guest as `permission-changed`.
+                        let prompts = std::mem::take(&mut store.data_mut().permission_requests);
+                        if result.is_ok()
+                            && let Some(broker) = store.data().capability_check.clone()
+                        {
+                            for capability in prompts {
+                                let extension_id = store.data().extension_id.clone();
+                                let broker = broker.clone();
+                                tokio::spawn(async move {
+                                    broker.request(&extension_id, capability).await;
+                                });
+                            }
+                        }
+                        // The call's requests start now, after it returned, or are dropped with
+                        // its effects if it failed (design.md §0.3).
+                        network.start(store.data_mut().network.finish_call(result.is_ok()));
+                        processes.start(store.data_mut().process.finish_call(result.is_ok()));
+                        edits.start(store.data_mut().edit.finish_call(result.is_ok()));
+                        observer.apply(store.data_mut().observe.finish_call(result.is_ok()));
+                        terminals.start_t3(
+                            store.data_mut().terminals.finish_call(result.is_ok()),
+                            store.data().journal.clone(),
+                        );
+                        // A trap kills the extension's processes with it (design.md §9) and ends
+                        // its agent feed.
+                        if result.is_err() {
+                            processes.kill_all();
+                            observer.stop();
+                        }
+                        diagnostics.call(diagnostics::CallRecord {
+                            kind,
+                            surface_id,
+                            at: std::time::SystemTime::now(),
+                            duration: store.data().call_started.elapsed(),
+                            executed: store.data().executed,
+                            budget,
+                            pushes: effects
+                                .iter()
+                                .filter(|effect| matches!(effect, HostEffect::Push { .. }))
+                                .count(),
+                            error: result.as_ref().err().map(|error| format!("{error:#}")),
+                        });
                         // A trap or a dropped call, the time budget included, leaves the instance
                         // unusable.
                         if let Err(error) = &result {
                             store.data_mut().disabled = Some(format!("{error:#}"));
                         }
-                        result.map(|value| (value, pushes))
+                        result.map(|value| (value, effects))
                     };
                     // The caller may have stopped waiting; then nobody needs the result.
                     return_tx.send(result).ok();
@@ -1130,8 +2513,17 @@ impl From<ui_ext::UiEvent> for wit::UiEvent {
     }
 }
 
+pub mod diagnostics;
+pub mod permissions;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_v0_2;
+#[cfg(test)]
+mod tests_v0_3;
+
+#[cfg(test)]
+mod tests_v0_4;

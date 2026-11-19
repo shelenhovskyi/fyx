@@ -18,20 +18,46 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
+# fyx: the decoders network:fetch offers in `accept-encoding`.
+async-compression = { workspace = true, features = ["brotli", "zlib", "zstd"] }
+bytes.workspace = true
 fs.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
+http_client_tls.workspace = true
+http_proxy.workspace = true
 log.workspace = true
+release_channel.workspace = true
 moka.workspace = true
+reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "process", "time"] }
 toml = { workspace = true, features = ["display"] }
-ui_ext.workspace = true
+ui_ext = { workspace = true, features = ["network", "process"] }
+url.workspace = true
 wasmparser.workspace = true
 wasmtime-wasi.workspace = true
 wasmtime.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
+fyx_ext_harness.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+rustls.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+tokio-rustls.workspace = true

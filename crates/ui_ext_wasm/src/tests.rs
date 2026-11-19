@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use gpui::TestAppContext;
-use ui_ext::{Patch, Props, TreeNode, UiEvent, Update};
+use ui_ext::{Patch, Props, Tree, TreeNode, UiEvent, Update};
 
 use super::*;
 
@@ -245,6 +245,11 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     .await;
     let future = write(
         "/extensions/future",
+        &table("\"ui:panel\"", "fyx_ui.wasm", "0.5.0"),
+    )
+    .await;
+    let mismatch = write(
+        "/extensions/mismatch",
         &table("\"ui:panel\"", "fyx_ui.wasm", "0.2.0"),
     )
     .await;
@@ -268,7 +273,11 @@ async fn test_load_from_dir(cx: &mut TestAppContext) {
     assert!(load(plain).await.expect("reads").is_none());
     for (dir, message) in [
         (escaping, "must be a relative path inside the extension"),
-        (future, "targets fyx:ui 0.2.0"),
+        (future, "targets fyx:ui 0.5.0"),
+        (
+            mismatch,
+            "extension.toml says fyx:ui 0.2.0, the component targets 0.1.0",
+        ),
         (no_panel, "needs \"ui:panel\""),
     ] {
         let error = load(dir).await.err().expect("rejected");
@@ -555,11 +564,84 @@ async fn test_call_blocked_in_host_is_cut_off_and_disables_extension(cx: &mut Te
     assert!(format!("{error:#}").contains("disabled"), "{error:#}");
 }
 
+/// Plan 1.1: the first load compiles and writes a `.cwasm`; the next uses it; a broken copy is
+/// compiled again and replaced; another component gets a file of its own.
+#[gpui::test]
+async fn test_precompiled_cache(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(gpui_tokio::init);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cache = PrecompiledCache {
+        dir: dir.path().join("probe"),
+        stem: "0.1.0".into(),
+    };
+    let wasm = probe_wasm();
+    let file = cache.file_for(&wasm).expect("cache file");
+    assert!(file.starts_with(dir.path().join("probe")));
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("0.1.0-")
+    );
+
+    let load = |cx: &mut TestAppContext| {
+        let wasm = wasm.clone();
+        let cache = cache.clone();
+        cx.update(|cx| {
+            UiExtension::load_with_cache("probe".into(), wasm, Some(cache), &cx.to_async())
+        })
+    };
+    let (first, _) = load(cx).await.expect("compiles");
+    assert!(!first.from_precompiled());
+    assert!(file.is_file(), "written after compiling");
+
+    let (second, _) = load(cx).await.expect("loads the copy");
+    assert!(second.from_precompiled());
+    second
+        .handle_event(probe::SURFACE, UiEvent::Click(probe::PUSH))
+        .await
+        .expect("the precompiled component works");
+
+    std::fs::write(&file, b"not a cwasm").expect("break the copy");
+    let (third, _) = load(cx).await.expect("compiles again");
+    assert!(!third.from_precompiled());
+    let (fourth, _) = load(cx).await.expect("uses the rewritten copy");
+    assert!(fourth.from_precompiled());
+
+    let other = cache
+        .file_for(&demo_counter_wasm())
+        .expect("other cache file");
+    assert_ne!(other, file, "keyed by the component");
+}
+
 #[test]
 fn test_api_version_gating() {
     assert!(is_supported_api_version(&Version::new(0, 1, 0)));
-    assert!(!is_supported_api_version(&Version::new(0, 2, 0)));
-    assert!(!is_supported_api_version(&Version::new(0, 0, 9)));
+    assert!(is_supported_api_version(&Version::new(0, 2, 0)));
+    for unknown in [(0, 0, 9), (0, 1, 1), (0, 5, 0), (1, 0, 0)] {
+        let version = Version::new(unknown.0, unknown.1, unknown.2);
+        assert!(!is_supported_api_version(&version), "{version}");
+    }
+    assert_eq!(
+        known_api_version(&Version::new(0, 2, 0)),
+        Some(ApiVersion::V0_2_0)
+    );
+    assert_eq!(known_api_version(&"0.2.0-rc.1".parse().unwrap()), None);
+    // 0.2 (integration-5 A2) and 0.3 (integration-6) are frozen: they load everywhere.
+    assert!(api_version_range(false).contains(&Version::new(0, 2, 0)));
+    assert!(api_version_range(false).contains(&Version::new(0, 1, 0)));
+    assert!(api_version_range(false).contains(&Version::new(0, 3, 0)));
+    // 0.4 is staged (plan P5): known, and loaded only where staged versions may.
+    assert_eq!(
+        known_api_version(&Version::new(0, 4, 0)),
+        Some(ApiVersion::V0_4_0)
+    );
+    assert!(!api_version_range(false).contains(&Version::new(0, 4, 0)));
+    assert!(api_version_range(true).contains(&Version::new(0, 4, 0)));
+    assert!(!staged_api_allowed(false, false));
+    assert!(staged_api_allowed(true, false));
+    assert!(staged_api_allowed(false, true));
 
     assert_eq!(
         parse_api_version("probe", &probe_wasm()).expect("parses"),
@@ -672,4 +754,215 @@ async fn test_invalid_ids_are_refused_at_load(cx: &mut TestAppContext) {
     let message = format!("{error:#}");
     assert!(message.contains("extension id \"../escape\""), "{message}");
     assert!(message.contains("extension.toml"), "{message}");
+}
+
+/// Triage-3, PERF 7: the epoch thread parks while no guest call runs and ticks during one.
+#[test]
+fn test_epoch_thread_parks_without_calls() {
+    ui_runtime().expect("runtime");
+    std::thread::sleep(UI_EPOCH_INTERVAL * 5);
+    let idle = EPOCH_TICKS.load(Ordering::Relaxed);
+    std::thread::sleep(UI_EPOCH_INTERVAL * 10);
+    assert_eq!(
+        EPOCH_TICKS.load(Ordering::Relaxed),
+        idle,
+        "no ticks while idle"
+    );
+
+    // A call waiting on the epoch thread's clock finishes, so the thread woke for it.
+    futures::executor::block_on(with_budget(Duration::from_secs(5), async {
+        // Ready only after some time, and woken only by the epoch thread.
+        let ready_at = Instant::now() + UI_EPOCH_INTERVAL * 5;
+        futures::future::poll_fn(|_| {
+            if Instant::now() >= ready_at {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        anyhow::Ok(())
+    }))
+    .expect("the call finishes in its budget");
+    assert!(EPOCH_TICKS.load(Ordering::Relaxed) > idle);
+}
+
+/// `fyx_ext_harness` (Apache-2.0) runs guests for extension tests without this GPL runtime, so it
+/// mirrors the runtime's call contract instead of depending on it. These run the same guests
+/// through both and compare every call, so the two cannot drift apart unnoticed.
+mod harness_conformance {
+    use fyx_ext_harness::{Harness, Pushed};
+
+    use super::*;
+
+    fn pushes(host: &[PushedUpdate]) -> Vec<Pushed> {
+        host.iter()
+            .map(|push| Pushed {
+                surface_id: push.surface_id.clone(),
+                update: push.update.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn limits_match() {
+        assert_eq!(fyx_ext_harness::MAX_PUSHES_PER_CALL, MAX_PUSHES_PER_CALL);
+        assert_eq!(
+            fyx_ext_harness::MAX_PUSHED_ITEMS_PER_CALL,
+            MAX_PUSHED_ITEMS_PER_CALL
+        );
+        assert_eq!(
+            fyx_ext_harness::MAX_LIFTED_TEXT_PER_CALL,
+            MAX_LIFTED_TEXT_PER_CALL
+        );
+        assert_eq!(fyx_ext_harness::MAX_LOG_MESSAGE_LEN, MAX_LOG_MESSAGE_LEN);
+        assert_eq!(fyx_ext_harness::CALL_BUDGET, UI_CALL_BUDGET);
+        assert_eq!(fyx_ext_harness::INIT_BUDGET, UI_INIT_BUDGET);
+        assert_eq!(fyx_ext_harness::EPOCH_INTERVAL, UI_EPOCH_INTERVAL);
+        assert_eq!(fyx_ext_harness::API_VERSION_SECTION, API_VERSION_SECTION);
+        assert_eq!(fyx_ext_harness::MEMORY_LIMIT, UI_MEMORY_LIMIT);
+        assert_eq!(
+            fyx_ext_harness::TABLE_ELEMENTS_LIMIT,
+            UI_TABLE_ELEMENTS_LIMIT
+        );
+        assert_eq!(fyx_ext_harness::INSTANCES_LIMIT, UI_INSTANCES_LIMIT);
+        assert_eq!(fyx_ext_harness::TABLES_LIMIT, UI_TABLES_LIMIT);
+        assert_eq!(fyx_ext_harness::MEMORIES_LIMIT, UI_MEMORIES_LIMIT);
+        assert_eq!(
+            fyx_ext_harness::MAX_PUSHED_ITEMS_PER_CALL_V0_2,
+            MAX_PUSHED_ITEMS_PER_CALL_V0_2
+        );
+        assert_eq!(fyx_ext_harness::MIN_TICK_DELAY, MIN_TICK_DELAY);
+        assert_eq!(fyx_ext_harness::MAX_TICK_DELAY, MAX_TICK_DELAY);
+        assert_eq!(fyx_ext_harness::ACTIVATION_WINDOW, ACTIVATION_WINDOW);
+        assert_eq!(
+            fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
+            crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
+        );
+        // The harness runs every version the host knows; it runs the staged 0.4 on fake
+        // terminals ahead of the host (plan 5.10).
+        let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
+        assert_eq!(
+            harness_versions,
+            [
+                MIN_VERSION,
+                Version::new(0, 2, 0),
+                MAX_FROZEN_VERSION,
+                MAX_VERSION
+            ]
+        );
+        assert!(harness_versions.iter().all(is_supported_api_version));
+        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_VERSION, Version::new(0, 4, 0));
+    }
+
+    #[gpui::test]
+    async fn test_counter_matches_the_harness(cx: &mut TestAppContext) {
+        use counter::*;
+
+        let wasm = demo_counter_wasm();
+        let (host, _pushed) = load("fyx-demo-counter", wasm.clone(), cx).await;
+        let mut harness = Harness::load(&wasm).expect("the harness loads the counter");
+        assert_eq!(host.surfaces(), harness.surfaces_v0_1());
+
+        let mut tree = host.mount(SURFACE).await.expect("mount").value;
+        assert_eq!(&tree, harness.mount_v0_1(SURFACE).expect("mount"));
+
+        for id in [INCREMENT, INCREMENT, DECREMENT, RESET, ROOT, INCREMENT] {
+            let reply = host
+                .handle_event(SURFACE, UiEvent::Click(id))
+                .await
+                .expect("event");
+            let outcome = harness
+                .event_v0_1(SURFACE, UiEvent::Click(id))
+                .expect("event");
+            assert_eq!(pushes(&reply.pushed), outcome.pushed, "click {id}");
+            assert_eq!(reply.value, outcome.update, "click {id}");
+            tree.apply_update(reply.value).expect("apply");
+            assert_eq!(Some(&tree), harness.tree_v0_1(SURFACE), "click {id}");
+        }
+
+        let host_rows = host
+            .list_rows(SURFACE, LIST, 0, 10)
+            .await
+            .expect("rows")
+            .value;
+        let harness_rows = harness.rows_v0_1(SURFACE, LIST, 0, 10).expect("rows");
+        assert_eq!(host_rows, harness_rows);
+        assert!(!host_rows.is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_probe_matches_the_harness(cx: &mut TestAppContext) {
+        let wasm = probe_wasm();
+        let (host, _pushed) = load("probe", wasm.clone(), cx).await;
+        let mut harness = Harness::load(&wasm).expect("the harness loads the probe");
+        assert_eq!(host.surfaces(), harness.surfaces_v0_1());
+
+        for id in [probe::PUSH, probe::PUSH_THEN_PATCH, probe::PUSH_THEN_FAIL] {
+            let event = UiEvent::Click(id);
+            let (host_pushed, host_value) =
+                match host.handle_event(probe::SURFACE, event.clone()).await {
+                    Ok(reply) => (pushes(&reply.pushed), Ok(reply.value)),
+                    Err(error) => {
+                        let error = error
+                            .downcast_ref::<ReplyError>()
+                            .unwrap_or_else(|| panic!("click {id}: not a guest error: {error:#}"));
+                        (pushes(&error.pushed), Err(()))
+                    }
+                };
+            let reply = harness
+                .handle_event_raw_v0_1(probe::SURFACE, event)
+                .expect("no trap");
+            assert_eq!(host_pushed, reply.pushed, "click {id}");
+            assert_eq!(host_value, reply.value.map_err(|_| ()), "click {id}");
+        }
+
+        let flood = UiEvent::Click(probe::PUSH_FLOOD);
+        assert!(
+            host.handle_event(probe::SURFACE, flood.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            harness
+                .handle_event_raw_v0_1(probe::SURFACE, flood)
+                .is_err()
+        );
+        let next = UiEvent::Click(probe::PUSH);
+        assert!(
+            host.handle_event(probe::SURFACE, next.clone())
+                .await
+                .is_err(),
+            "disabled"
+        );
+        assert!(
+            harness.handle_event_raw_v0_1(probe::SURFACE, next).is_err(),
+            "disabled"
+        );
+    }
+}
+
+/// Triage-3, host memory: the 256 MiB budget covers all of an instance's memories together, and
+/// the WASI resource table is capped.
+#[test]
+fn test_memory_budget_covers_every_memory() {
+    use wasmtime::ResourceLimiter as _;
+    let mut limits = UiLimits::new();
+    let half = UI_MEMORY_LIMIT / 2;
+    assert!(
+        limits.memory_growing(0, half, None).unwrap(),
+        "first memory"
+    );
+    assert!(
+        limits.memory_growing(0, half, None).unwrap(),
+        "second memory, at the budget"
+    );
+    assert!(
+        limits.memory_growing(0, 64 * 1024, None).is_err(),
+        "a third memory past the budget traps"
+    );
+    let mut table = ResourceTable::new();
+    table.set_max_capacity(UI_RESOURCE_TABLE_LIMIT);
+    assert_eq!(table.max_capacity(), UI_RESOURCE_TABLE_LIMIT);
 }

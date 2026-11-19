@@ -35,7 +35,9 @@ Contents:
   is also raced against a deadline of budget + 50 ms, and dropped when that passes.
 - **Over budget means disabled.** A call that is interrupted or dropped, traps, or panics (a Rust
   panic on `wasm32-wasip2` is a trap) disables the extension. Every later call fails at once with
-  `disabled after an earlier failure: <reason>`. Restart Fyx to load it again.
+  `disabled after an earlier failure: <reason>`. **Restart extension** on the stopped surface (or
+  `fyx_ui: restart UI extension`) loads it again on a fresh instance; a dev extension also
+  restarts by itself on its next build.
 - Calls of one extension are serialized on its own queue. A slow call delays that extension's
   next event, but never Fyx itself or other extensions.
 - Every 10 ms tick, a running call also yields to the executor.
@@ -54,15 +56,15 @@ does.
 
 | Cap | Value | Host applies it to | `SurfaceTree` applies it to |
 |---|---|---|---|
-| `max_nodes_per_update` | **2048** | patches in one `patches` update; nodes in one list row | queued patches (an inserted subtree counts one per node), **and** the nodes of a `mount`/`replace` |
+| `max_nodes_per_update` | **2048** | patches in one `patches` update; nodes in one list row | queued patches (an inserted subtree counts one per node) |
 | `max_nodes` | **16384** | nodes in the whole tree, so also in a `mount` or `replace` | the mirror after any edit |
 | `max_depth` | **64** | levels from a root to its deepest node (a root is level 1), in the tree and in each list row; a deeper insert fails as `TooDeep` and the whole update is rejected | the same, on the mirror |
 
 <!-- crates/ui_ext/src/tree.rs:9-25, 96-104, 168-173, 190-191, 255-258; crates/ui_ext_sdk/src/ui_ext_sdk.rs:605-618, 685, 717-718, 752-753 -->
 
-Gotcha: **through `SurfaceTree`, a mount is capped at 2048 nodes**, although the host accepts
-16384. Grow a bigger tree with `insert` across several events, or keep large collections in
-virtualized lists, which is what lists are for.
+A `mount` or `replace` through `SurfaceTree` is capped at `max_nodes` (16384), as in the host,
+so a tree grown past 2048 nodes with `insert` across several events can always be mounted again.
+Large collections still belong in virtualized lists.
 
 Other caps:
 
@@ -83,7 +85,7 @@ Exceeding a host cap in an update is not fatal: the update is rejected as a whol
 | `handle-event` returns `Err` | Logged; the message shows in the panel footer (click to dismiss). The tree is unchanged. | stays enabled |
 | an update (reply or push) that does not apply to the retained tree | Logged; `Invalid update from the extension: …` in the footer; the surface is mounted again, at most one remount in flight at a time | stays enabled |
 | `list-rows` answer with an invalid row or an index outside `start..start+count` | The whole answer is rejected and the error shown. That list is not asked again until it changes. | stays enabled |
-| trap, panic, time budget, push cap | The call fails. | **disabled** until restart |
+| trap, panic, time budget, push cap | The call fails. | **stopped** until Restart extension (or, for a dev extension, its next build) |
 
 <!-- crates/ui_ext_host/src/surface.rs:130-161, 240-263, 287-343, 404-443; crates/ui_ext_host/src/view.rs:289-346; crates/ui_ext_wasm/src/ui_ext_wasm.rs:579-592, 640-660, 663-689, 716-721 -->
 
@@ -289,7 +291,9 @@ you that a surface was closed (0.2 items 5–7).
   total 16 MiB; a `log` message is cut at 16 KiB.
 - An installed extension loads only after the user enables it, for the capabilities and the
   component (or linked folder) it has then; see "Installing as a dev extension" in
-  `extension-authoring.md`.
+  `extension-authoring.md`. The consent records (`<data dir>/fyx-ui-consent.json`) are not signed:
+  anything that can write your data folder can grant consent. They guard against extensions
+  appearing on their own, not against a program already running as you.
 - No access to the worktree, buffers or settings. The todo demo serves a mocked worktree for this
   reason.
 - Fyx's own host functions: `push-update` and `log`.

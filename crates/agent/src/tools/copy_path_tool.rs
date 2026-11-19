@@ -98,6 +98,7 @@ impl AgentTool for CopyPathTool {
             if let ToolPermissionDecision::Deny(reason) = decision {
                 return Err(reason);
             }
+            fyx_guard::check_agent_copy(&project, &input.source_path, &input.destination_path, cx)?; // fyx: guard
 
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
             let canonical_roots = canonicalize_worktree_roots(&project, &fs, cx).await;

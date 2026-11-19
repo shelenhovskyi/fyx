@@ -4,6 +4,16 @@
 //! copy: a failed or invalid fetch never changes it, an older sequence never replaces a newer
 //! one (otherwise replaying an old list would unblock versions), and being offline never
 //! disables anything; it only makes the page warn once the copy is 7 days old.
+//!
+//! Its age is measured from the signed `generated_at`, and it carries a signed `expires_at`
+//! (security-2 S5): a mirror that keeps serving the newest list it has, after the registry
+//! published a newer one, cannot make it look fresh. The registry CI publishes a new list, with a
+//! new sequence, at least every 12 h (spec decision 19).
+//!
+//! "No list" never means "nothing is blocked" (integration-6 N4): the client keeps the highest
+//! sequence it ever accepted even when it drops the cache (a revoked block-list key), refuses a
+//! list below it, and refuses an expired list it has nothing to compare with. Blocks it applied
+//! lift only while it holds a current list ([`crate::RegistryClient::blocks_can_lift`]).
 
 use std::{fmt, time::Duration};
 
@@ -11,13 +21,18 @@ use semver::Version;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{
-    Canonical, Document, Error, ExtensionId, Keyset, Signed, Timestamp, canonical::CanonicalWriter,
-    check_schema, index::to_pretty_json, parse_json,
+    Canonical, Document, Error, ExtensionId, KeyRole, Keyset, Sha256Digest, Signed, Timestamp,
+    canonical::CanonicalWriter, check_schema, index::to_pretty_json, parse_json, text::check_text,
 };
 
 pub const BLOCKLIST_SCHEMA: u32 = 1;
 pub const BLOCKLIST_FETCH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const BLOCKLIST_STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// The longest a block list may be valid.
+pub const MAX_BLOCKLIST_VALIDITY: Duration = BLOCKLIST_STALE_AFTER;
+/// The most `blocklist.json` may weigh, and the most entries it may list.
+pub const MAX_BLOCKLIST_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_BLOCK_ENTRIES: usize = 10_000;
 
 const BLOCKLIST_DOMAIN: &str = "fyx-registry/blocklist/v1";
 const MAX_REASON_LENGTH: usize = 300;
@@ -29,6 +44,8 @@ pub struct Blocklist {
     /// Increases with every published list; a client never goes back to a lower one.
     pub sequence: u64,
     pub generated_at: Timestamp,
+    /// After this the list is [`Freshness::Stale`], whatever the fetch time says.
+    pub expires_at: Timestamp,
     pub entries: Vec<BlockEntry>,
 }
 
@@ -37,6 +54,10 @@ pub struct Blocklist {
 pub struct BlockEntry {
     pub id: ExtensionId,
     pub versions: VersionRange,
+    /// Blocks only the package with this hash (within `versions`), so a file from disk cannot
+    /// escape a block by claiming another version (security-2 S13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_sha256: Option<Sha256Digest>,
     /// Shown to the user in the notification and on the extension page.
     pub reason: String,
     pub urgent: bool,
@@ -70,13 +91,15 @@ pub struct Comparator {
 }
 
 impl Comparator {
+    /// Semver precedence, which ignores build metadata: `1.2.0+local` is `=1.2.0` (bugs-1 #21).
     pub fn matches(&self, version: &Version) -> bool {
+        let ordering = version.cmp_precedence(&self.version);
         match self.op {
-            ComparatorOp::Exact => version == &self.version,
-            ComparatorOp::Greater => version > &self.version,
-            ComparatorOp::GreaterOrEqual => version >= &self.version,
-            ComparatorOp::Less => version < &self.version,
-            ComparatorOp::LessOrEqual => version <= &self.version,
+            ComparatorOp::Exact => ordering.is_eq(),
+            ComparatorOp::Greater => ordering.is_gt(),
+            ComparatorOp::GreaterOrEqual => ordering.is_ge(),
+            ComparatorOp::Less => ordering.is_lt(),
+            ComparatorOp::LessOrEqual => ordering.is_le(),
         }
     }
 }
@@ -176,11 +199,14 @@ impl<'de> Deserialize<'de> for VersionRange {
 }
 
 impl Canonical for Blocklist {
+    const ROLE: KeyRole = KeyRole::Blocklist;
+
     fn canonical_bytes(&self) -> Vec<u8> {
         let mut writer = CanonicalWriter::new(BLOCKLIST_DOMAIN);
         writer.u64(u64::from(self.schema));
         writer.u64(self.sequence);
         writer.u64(self.generated_at.0);
+        writer.u64(self.expires_at.0);
         writer.length(self.entries.len());
         for entry in &self.entries {
             writer.string(entry.id.as_str());
@@ -191,6 +217,10 @@ impl Canonical for Blocklist {
             }
             writer.string(&entry.reason);
             writer.bool(entry.urgent);
+            writer.bool(entry.package_sha256.is_some());
+            if let Some(sha256) = &entry.package_sha256 {
+                writer.byte_string(&sha256.0);
+            }
         }
         writer.finish()
     }
@@ -205,24 +235,40 @@ impl Blocklist {
                 supported: BLOCKLIST_SCHEMA,
             });
         }
+        if self.expires_at <= self.generated_at
+            || self.expires_at.0 - self.generated_at.0 > MAX_BLOCKLIST_VALIDITY.as_secs()
+        {
+            return Err(Error::Invalid(format!(
+                "block list {}: expires_at must be after generated_at and at most {} days later",
+                self.sequence,
+                MAX_BLOCKLIST_VALIDITY.as_secs() / 86_400
+            )));
+        }
+        if self.entries.len() > MAX_BLOCK_ENTRIES {
+            return Err(Error::Invalid(format!(
+                "block list {}: at most {MAX_BLOCK_ENTRIES} entries",
+                self.sequence
+            )));
+        }
         for entry in &self.entries {
-            let length = entry.reason.chars().count();
-            if length == 0
-                || length > MAX_REASON_LENGTH
-                || entry.reason.chars().any(char::is_control)
-            {
-                return Err(Error::Invalid(format!(
-                    "block entry for {} {}: the reason must be 1 to {MAX_REASON_LENGTH} \
-                     characters without control characters",
+            check_text("reason", &entry.reason, 1, MAX_REASON_LENGTH).map_err(|message| {
+                Error::Invalid(format!(
+                    "block entry for {} {}: {message}",
                     entry.id, entry.versions
-                )));
-            }
+                ))
+            })?;
         }
         Ok(())
     }
 
     /// Parses a signed `blocklist.json` without verifying it.
     pub fn from_json(bytes: &[u8]) -> Result<Signed<Blocklist>, Error> {
+        if bytes.len() > MAX_BLOCKLIST_SIZE {
+            return Err(Error::Invalid(format!(
+                "blocklist.json has {} bytes, the cap is {MAX_BLOCKLIST_SIZE}",
+                bytes.len()
+            )));
+        }
         check_schema(
             bytes,
             Document::Blocklist,
@@ -262,15 +308,41 @@ impl VerifiedBlocklist {
         &self.signed.signed.entries
     }
 
-    /// The first entry that blocks `version` of `id`.
-    pub fn block_for(&self, id: &ExtensionId, version: &Version) -> Option<&BlockEntry> {
-        self.entries()
-            .iter()
-            .find(|entry| &entry.id == id && entry.versions.matches(version))
+    /// The first entry that blocks `version` of `id` whose package has `package_sha256`. An entry
+    /// with a hash blocks the package known to have it, and, within its versions, a package whose
+    /// hash was never recorded: an unknown hash cannot prove it is not the blocked one
+    /// (integration-5 R9).
+    pub fn block_for(
+        &self,
+        id: &ExtensionId,
+        version: &Version,
+        package_sha256: Option<&Sha256Digest>,
+    ) -> Option<&BlockEntry> {
+        self.entries().iter().find(|entry| {
+            &entry.id == id
+                && entry.versions.matches(version)
+                && entry
+                    .package_sha256
+                    .as_ref()
+                    .is_none_or(|blocked| package_sha256.is_none_or(|known| known == blocked))
+        })
     }
 
-    pub fn is_blocked(&self, id: &ExtensionId, version: &Version) -> bool {
-        self.block_for(id, version).is_some()
+    pub fn is_blocked(
+        &self,
+        id: &ExtensionId,
+        version: &Version,
+        package_sha256: Option<&Sha256Digest>,
+    ) -> bool {
+        self.block_for(id, version, package_sha256).is_some()
+    }
+
+    pub fn generated_at(&self) -> Timestamp {
+        self.signed.signed.generated_at
+    }
+
+    pub fn expires_at(&self) -> Timestamp {
+        self.signed.signed.expires_at
     }
 }
 
@@ -311,6 +383,16 @@ pub enum KeepReason {
     /// The registry published two different lists with one sequence number.
     ConflictingSequence {
         sequence: u64,
+    },
+    /// Lower than the highest sequence this client ever accepted, whose list it no longer holds
+    /// (integration-6 N4).
+    BelowFloor {
+        floor: u64,
+        fetched: u64,
+    },
+    /// Past its signed `expires_at`, with no list held to compare it with (integration-5 R9).
+    Expired {
+        expires_at: Timestamp,
     },
 }
 
@@ -359,6 +441,18 @@ impl BlocklistCache {
         keyset: &Keyset,
         now: Timestamp,
     ) -> CacheUpdate {
+        Self::apply_fetch_above(cache, None, fetched, keyset, now)
+    }
+
+    /// [`BlocklistCache::apply_fetch`] for a client that remembers `floor`, the highest sequence
+    /// it ever accepted, past a dropped cache: a list below it is a replay and is kept out.
+    pub fn apply_fetch_above(
+        cache: Option<&BlocklistCache>,
+        floor: Option<u64>,
+        fetched: Result<&[u8], String>,
+        keyset: &Keyset,
+        now: Timestamp,
+    ) -> CacheUpdate {
         let body = match fetched {
             Ok(body) => body,
             Err(error) => return CacheUpdate::Keep(KeepReason::FetchFailed(error)),
@@ -371,11 +465,22 @@ impl BlocklistCache {
             fetched_at: now,
             blocklist,
         };
+        let fetched = fresh.blocklist.sequence();
+        if let Some(floor) = floor
+            && fetched < floor
+        {
+            return CacheUpdate::Keep(KeepReason::BelowFloor { floor, fetched });
+        }
         let Some(cache) = cache else {
+            // Nothing to compare with: an expired list may be any old one a mirror kept.
+            if now >= fresh.blocklist.expires_at() {
+                return CacheUpdate::Keep(KeepReason::Expired {
+                    expires_at: fresh.blocklist.expires_at(),
+                });
+            }
             return CacheUpdate::Replace(fresh);
         };
         let cached = cache.blocklist.sequence();
-        let fetched = fresh.blocklist.sequence();
         if fetched > cached {
             CacheUpdate::Replace(fresh)
         } else if fetched < cached {
@@ -393,21 +498,27 @@ impl BlocklistCache {
         }
     }
 
+    /// The age counts from the list's signed `generated_at` (a list stamped in the future is
+    /// age 0), not from when it was fetched, and a list past its signed `expires_at` is stale
+    /// however recently it was fetched.
     pub fn freshness(cache: Option<&BlocklistCache>, now: Timestamp) -> Freshness {
         let Some(cache) = cache else {
             return Freshness::Missing;
         };
-        let age = now.since(cache.fetched_at);
-        if age >= BLOCKLIST_STALE_AFTER {
+        let age = now.since(cache.blocklist.generated_at());
+        if age >= BLOCKLIST_STALE_AFTER || now >= cache.blocklist.expires_at() {
             Freshness::Stale { age }
         } else {
             Freshness::Fresh
         }
     }
 
-    /// Whether to fetch now, given when the last attempt (successful or not) started.
+    /// Whether to fetch now, given when the last attempt (successful or not) started. An attempt
+    /// stamped in the future (the clock was fast) does not postpone the next one (bugs-1 #22).
     pub fn fetch_due(last_attempt: Option<Timestamp>, now: Timestamp) -> bool {
-        last_attempt.is_none_or(|last_attempt| now.since(last_attempt) >= BLOCKLIST_FETCH_INTERVAL)
+        last_attempt.is_none_or(|last_attempt| {
+            last_attempt > now || now.since(last_attempt) >= BLOCKLIST_FETCH_INTERVAL
+        })
     }
 }
 
@@ -422,6 +533,7 @@ pub(crate) mod test_support {
             versions: VersionRange::parse(versions).expect("valid range"),
             reason: "Uploads the open buffer to a third party.".into(),
             urgent: true,
+            package_sha256: None,
         }
     }
 
@@ -430,6 +542,7 @@ pub(crate) mod test_support {
             schema: BLOCKLIST_SCHEMA,
             sequence,
             generated_at: Timestamp(sequence * 10),
+            expires_at: Timestamp(sequence * 10 + 2 * 86_400),
             entries,
         }
     }
@@ -451,6 +564,7 @@ pub(crate) mod test_support {
         let schema = u32::try_from(reader.u64()?).ok()?;
         let sequence = reader.u64()?;
         let generated_at = Timestamp(reader.u64()?);
+        let expires_at = Timestamp(reader.u64()?);
         let entry_count = reader.length()?;
         let mut entries = Vec::new();
         for _ in 0..entry_count {
@@ -469,11 +583,19 @@ pub(crate) mod test_support {
                 let version = Version::parse(&reader.string()?).ok()?;
                 comparators.push(Comparator { op, version });
             }
+            let reason = reader.string()?;
+            let urgent = reader.bool()?;
+            let package_sha256 = if reader.bool()? {
+                Some(Sha256Digest(reader.byte_string()?.try_into().ok()?))
+            } else {
+                None
+            };
             entries.push(BlockEntry {
                 id,
                 versions: VersionRange { comparators },
-                reason: reader.string()?,
-                urgent: reader.bool()?,
+                reason,
+                urgent,
+                package_sha256,
             });
         }
         reader.finish()?;
@@ -481,6 +603,7 @@ pub(crate) mod test_support {
             schema,
             sequence,
             generated_at,
+            expires_at,
             entries,
         })
     }
@@ -536,9 +659,13 @@ mod tests {
         let verified = VerifiedBlocklist::from_json(&json, &keyset()).expect("verifies");
         assert_eq!(verified.signed().signed, list);
         let todo = ExtensionId::new("todo").expect("valid");
-        assert!(verified.is_blocked(&todo, &version("1.2.5")));
-        assert!(!verified.is_blocked(&todo, &version("1.3.0")));
-        assert!(verified.is_blocked(&ExtensionId::new("spy").expect("valid"), &version("0.0.1")));
+        assert!(verified.is_blocked(&todo, &version("1.2.5"), None));
+        assert!(!verified.is_blocked(&todo, &version("1.3.0"), None));
+        assert!(verified.is_blocked(
+            &ExtensionId::new("spy").expect("valid"),
+            &version("0.0.1"),
+            None
+        ));
     }
 
     #[test]
@@ -674,11 +801,14 @@ mod tests {
     }
 
     #[test]
-    fn freshness_warns_after_seven_days_and_fetch_runs_every_six_hours() {
+    fn freshness_counts_from_the_signed_time_and_fetch_runs_every_six_hours() {
         let day = 24 * 60 * 60;
+        let mut list = blocklist(1, Vec::new());
+        list.generated_at = Timestamp(10 * day);
+        list.expires_at = Timestamp(17 * day);
         let cache = BlocklistCache {
             fetched_at: Timestamp(10 * day),
-            blocklist: verified(blocklist(1, Vec::new())),
+            blocklist: verified(list.clone()),
         };
         assert_eq!(
             BlocklistCache::freshness(None, Timestamp(0)),
@@ -699,6 +829,27 @@ mod tests {
             Freshness::Fresh
         );
 
+        // security-2 S5: the same list replayed every day refreshes `fetched_at`, but it still
+        // goes stale when its signed expiry passes.
+        list.expires_at = Timestamp(12 * day);
+        let mut cache = BlocklistCache {
+            fetched_at: Timestamp(10 * day),
+            blocklist: verified(list.clone()),
+        };
+        let replayed = signed_json(list, &registry_key());
+        for now in (11..20).map(|days| Timestamp(days * day)) {
+            if let CacheUpdate::Refresh(refreshed) =
+                BlocklistCache::apply_fetch(Some(&cache), Ok(&replayed), &keyset(), now)
+            {
+                cache = refreshed;
+            }
+        }
+        assert_eq!(cache.fetched_at, Timestamp(19 * day));
+        assert!(matches!(
+            BlocklistCache::freshness(Some(&cache), Timestamp(19 * day)),
+            Freshness::Stale { .. }
+        ));
+
         let hour = 60 * 60;
         assert!(BlocklistCache::fetch_due(None, Timestamp(0)));
         assert!(!BlocklistCache::fetch_due(
@@ -709,6 +860,80 @@ mod tests {
             Some(Timestamp(0)),
             Timestamp(6 * hour)
         ));
+        // bugs-1 #22: a last attempt stamped a year ahead does not stop fetching.
+        assert!(BlocklistCache::fetch_due(
+            Some(Timestamp(365 * day)),
+            Timestamp(day)
+        ));
+    }
+
+    #[test]
+    fn validity_and_size_are_bounded() {
+        let mut list = blocklist(1, Vec::new());
+        list.expires_at = list.generated_at;
+        assert!(list.validate().is_err());
+        list.expires_at = list.generated_at.saturating_add(MAX_BLOCKLIST_VALIDITY);
+        assert!(list.validate().is_ok());
+        list.expires_at = list.expires_at.saturating_add(Duration::from_secs(1));
+        assert!(list.validate().is_err());
+
+        let mut hidden = blocklist(1, vec![entry("todo", "*")]);
+        hidden.entries[0].reason = "Spyware\u{202e}".into();
+        assert!(hidden.validate().is_err());
+        assert!(Blocklist::from_json(&vec![b' '; MAX_BLOCKLIST_SIZE + 1]).is_err());
+    }
+
+    /// bugs-1 #21, security-2 S13: build metadata does not escape a block, and hash entries
+    /// block exactly one package.
+    #[test]
+    fn build_metadata_and_hash_entries() {
+        let exact = VersionRange::parse("=1.2.0").expect("valid");
+        assert!(exact.matches(&version("1.2.0+local")));
+        assert!(
+            VersionRange::parse("<=1.2.0")
+                .expect("valid")
+                .matches(&version("1.2.0+x"))
+        );
+        assert!(
+            !VersionRange::parse(">1.2.0")
+                .expect("valid")
+                .matches(&version("1.2.0+x"))
+        );
+
+        let bad = Sha256Digest::of(b"bad package");
+        let mut hashed = entry("todo", "*");
+        hashed.package_sha256 = Some(bad);
+        let list = verified(blocklist(2, vec![hashed]));
+        let todo = ExtensionId::new("todo").expect("valid");
+        assert!(list.is_blocked(&todo, &version("9.0.0"), Some(&bad)));
+        assert!(!list.is_blocked(&todo, &version("9.0.0"), Some(&Sha256Digest::of(b"good"))));
+        // An install whose hash was never recorded is blocked within the versions (R9).
+        assert!(list.is_blocked(&todo, &version("9.0.0"), None));
+    }
+
+    /// integration-6 N4, integration-5 R9: past a dropped cache, a list below the highest
+    /// sequence ever accepted is kept out; with no cache, an expired list is too.
+    #[test]
+    fn floor_and_expiry_without_a_cache() {
+        let keyset = keyset();
+        let old = signed_json(blocklist(3, Vec::new()), &registry_key());
+        assert!(matches!(
+            BlocklistCache::apply_fetch_above(None, Some(4), Ok(&old), &keyset, Timestamp(31)),
+            CacheUpdate::Keep(KeepReason::BelowFloor {
+                floor: 4,
+                fetched: 3
+            })
+        ));
+        let same = signed_json(blocklist(4, Vec::new()), &registry_key());
+        assert!(matches!(
+            BlocklistCache::apply_fetch_above(None, Some(4), Ok(&same), &keyset, Timestamp(41)),
+            CacheUpdate::Replace(_)
+        ));
+        let expires_at = blocklist(4, Vec::new()).expires_at;
+        assert_eq!(
+            BlocklistCache::apply_fetch_above(None, Some(4), Ok(&same), &keyset, expires_at),
+            CacheUpdate::Keep(KeepReason::Expired { expires_at })
+        );
     }
 
     fn arbitrary_range() -> impl Strategy<Value = VersionRange> {
@@ -736,22 +961,26 @@ mod tests {
             arbitrary_range(),
             "[a-zA-Z0-9 .,]{1,40}",
             any::<bool>(),
+            proptest::option::of(any::<[u8; 32]>()),
         )
-            .prop_map(|(id, versions, reason, urgent)| BlockEntry {
+            .prop_map(|(id, versions, reason, urgent, sha256)| BlockEntry {
                 id: ExtensionId::new(id).expect("valid id"),
                 versions,
                 reason,
                 urgent,
+                package_sha256: sha256.map(Sha256Digest),
             });
         (
             any::<u64>(),
-            any::<u64>(),
+            0u64..1 << 40,
+            1u64..=MAX_BLOCKLIST_VALIDITY.as_secs(),
             proptest::collection::vec(entry, 0..4),
         )
-            .prop_map(|(sequence, generated_at, entries)| Blocklist {
+            .prop_map(|(sequence, generated_at, validity, entries)| Blocklist {
                 schema: BLOCKLIST_SCHEMA,
                 sequence,
                 generated_at: Timestamp(generated_at),
+                expires_at: Timestamp(generated_at + validity),
                 entries,
             })
     }
@@ -800,7 +1029,7 @@ mod tests {
             let mut bytes = signed.signed.canonical_bytes();
             let position = position.index(bytes.len());
             bytes[position] ^= mask;
-            prop_assert!(keyset().verify(&bytes, &signed.signature).is_err());
+            prop_assert!(keyset().verify(&bytes, &signed.signature, KeyRole::Blocklist).is_err());
         }
     }
 }

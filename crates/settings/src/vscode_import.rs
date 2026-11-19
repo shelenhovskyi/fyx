@@ -185,6 +185,7 @@ impl VsCodeSettings {
             agent_servers: None,
             agent_review: None, // fyx: agent_review
             fyx_security: None, // fyx: fyx_guard
+            fyx: None,          // fyx: settings of Fyx crates
             audio: None,
             auto_update: None,
             base_keymap: Some(BaseKeymapContent::VSCode),
@@ -205,6 +206,7 @@ impl VsCodeSettings {
             file_finder: None,
             git: self.git_settings_content(),
             git_panel: self.git_panel_settings_content(),
+            git_graph: None,
             global_lsp_settings: skip_default(GlobalLspSettingsContent {
                 semantic_token_rules: self.semantic_token_rules(),
                 ..GlobalLspSettingsContent::default()

@@ -1,5 +1,6 @@
 mod acp;
 mod custom;
+mod fyx; // fyx: account profiles for agents
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod e2e_tests;

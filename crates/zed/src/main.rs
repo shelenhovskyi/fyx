@@ -313,7 +313,7 @@ fn main() {
             app_version,
             app_commit_sha,
             *release_channel::RELEASE_CHANNEL,
-            client::telemetry::os_name(),
+            client::telemetry::guessed_os_name(),
             client::telemetry::os_version(),
         );
         println!("Fyx System Specs (from CLI):\n{}", system_specs); // fyx: product name
@@ -375,7 +375,7 @@ fn main() {
         }
     };
     if failed_single_instance_check {
-        println!("zed is already running");
+        println!("Fyx is already running"); // fyx: product name
         return;
     }
 
@@ -746,9 +746,15 @@ fn main() {
         tab_switcher::init(cx);
         outline::init(cx);
         call_hierarchy::init(cx);
+        project_bookmarks::init(cx);
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
+        terminal_host::init(cx); // fyx: terminal status on tabs, the fyx:ui terminal host
+        if let Some(host) = terminal_host::host(cx) {
+            ui_ext_host::set_terminal_host(host, cx); // fyx: before ui_ext_host loads any extension
+        }
+        ui_ext_host::set_terminal_node_views(std::rc::Rc::new(terminal_host::extension_terminal_view), cx); // fyx: terminal nodes in extension panels
         ui_ext_host::init(cx); // fyx: extension panels and status items
         tasks_ui::init(cx);
         snippets_ui::init(cx);
@@ -1246,8 +1252,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                         sha,
                                         repo.downgrade(),
                                         workspace.weak_handle(),
-                                        None,
-                                        None,
+                                        Default::default(),
                                         window,
                                         cx,
                                     );

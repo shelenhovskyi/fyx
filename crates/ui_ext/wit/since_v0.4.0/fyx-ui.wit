@@ -1,0 +1,1453 @@
+// STAGED: fyx:ui 0.4.0 (platform plan P5, task 5.5). Draft by W2c from docs/fyx/wit-0.4/design.md
+// "WIT diff"; W0 stages it as crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit. Not frozen: any part may
+// change until the 0.4 freeze. Plan 4.2-4.4 (decoration extras, picker, code lens, hover, virtual
+// documents, commands; wit-0.3/design.md sections 1-6) join this world in a later step.
+//
+// Everything of 0.3 is copied forward from ../since_v0.3.0/fyx-ui.wit, byte for byte except where a
+// comment says "0.4".
+package fyx:ui@0.4.0;
+
+interface types {
+    /// Chosen by the extension.
+    ///
+    /// In a surface tree (`mount`, `update`) an id is unique within the surface and must not be
+    /// reused for a different node while the surface lives. In a `list-row` subtree an id is
+    /// row-local: unique within that row only, and every row may use the same ids. The host
+    /// never routes events to row-local ids; a click anywhere in a row is `row-click`.
+    type node-id = u32;
+
+    /// Colours are semantic theme slots, never raw values, so every extension follows the
+    /// active theme.
+    enum color-token {
+        text,
+        text-muted,
+        text-accent,
+        error,
+        warning,
+        success,
+        border,
+        surface,
+        elevated-surface,
+    }
+
+    /// Icons the host promises to draw. Frozen per world version: the host maps each case to
+    /// its own icon set, so upstream renames never break an extension. New icons need a new
+    /// world version.
+    enum icon {
+        // Navigation and structure
+        arrow-up,
+        arrow-down,
+        arrow-left,
+        arrow-right,
+        chevron-up,
+        chevron-down,
+        chevron-left,
+        chevron-right,
+        expand,
+        collapse,
+        menu,
+        ellipsis,
+        list-tree,
+        list-todo,
+        table,
+        file-tree,
+        // Actions
+        plus,
+        dash,
+        check,
+        check-double,
+        close,
+        search,
+        filter,
+        refresh,
+        undo,
+        copy,
+        pencil,
+        trash,
+        replace,
+        download,
+        send,
+        share,
+        link,
+        pin,
+        unpin,
+        play,
+        pause,
+        stop,
+        maximize,
+        minimize,
+        split,
+        // Files and code
+        file,
+        file-code,
+        file-diff,
+        file-text,
+        folder,
+        folder-open,
+        code,
+        terminal,
+        diff,
+        regex,
+        case-sensitive,
+        whole-word,
+        hash,
+        at-sign,
+        // Version control
+        git-branch,
+        git-commit,
+        pull-request,
+        // Status and feedback
+        info,
+        warning,
+        error,
+        help,
+        bell,
+        bell-dot,
+        circle,
+        dot,
+        star,
+        star-filled,
+        bookmark,
+        thumbs-up,
+        thumbs-down,
+        todo-pending,
+        todo-progress,
+        todo-complete,
+        /// Drawn rotating by the host, so a busy indicator needs no ticks.
+        spinner,
+        /// Draws nothing at icon size; aligns rows that have no icon (unchecked checkboxes).
+        blank,
+        // Objects
+        settings,
+        clock,
+        debug,
+        eye,
+        eye-off,
+        lock,
+        unlock,
+        person,
+        people,
+        chat,
+        envelope,
+        book,
+        notepad,
+        image,
+        globe,
+        server,
+        database,
+        keyboard,
+        box,
+        archive,
+        sparkle,
+        bolt,
+        flame,
+        power,
+        /// The generic extension icon; also what the host shows for a 0.1 icon name it cannot map.
+        blocks,
+    }
+
+    enum flex-direction { row, column }
+
+    enum align { start, center, end, stretch }
+
+    record flex-props {
+        direction: flex-direction,
+        gap: u16,
+        padding: u16,
+        grow: bool,
+        align: align,
+        background: option<color-token>,
+    }
+
+    record text-props {
+        content: string,
+        color: option<color-token>,
+        bold: bool,
+        monospace: bool,
+    }
+
+    enum button-style { default, filled, subtle, danger }
+
+    record button-props {
+        label: string,
+        icon: option<icon>,
+        style: button-style,
+        disabled: bool,
+        /// Shown on hover. At most 1024 bytes; the host truncates longer text.
+        tooltip: option<string>,
+        /// The accessible name, read by screen readers; without it, `label` when it is not empty,
+        /// then the tooltip, then the icon's name. Set it for an icon-only button. At most 256
+        /// bytes; the host truncates longer text.
+        accessible-label: option<string>,
+    }
+
+    record input-props {
+        value: string,
+        placeholder: string,
+        /// Masks the text on screen (passwords, tokens). The value still reaches the extension in
+        /// `input-changed` and `input-submitted`; the host never logs it.
+        secret: bool,
+        /// The accessible name, read by screen readers; without it, the placeholder is used. At
+        /// most 256 bytes; the host truncates longer text.
+        label: option<string>,
+    }
+
+    /// Virtualized: the host asks for rows with `list-rows` as they scroll into view.
+    /// `row-height` is in pixels and fixed for every row.
+    ///
+    /// The host fetches rows again when `row-count` or `row-height` changes, or when an
+    /// `invalidate-rows` patch names the list. Changing only `selected` fetches nothing.
+    record list-props {
+        row-count: u32,
+        row-height: u16,
+        /// The highlighted row, scrolled into view when the extension sets it. In a modal the
+        /// arrow keys move it and the host reports each move with `row-selected`.
+        selected: option<u32>,
+    }
+
+    /// Rows come from `list-rows`, like a list; the same refetch rules apply.
+    record table-props {
+        columns: list<string>,
+        row-count: u32,
+    }
+
+    record icon-props {
+        name: icon,
+        color: option<color-token>,
+    }
+
+    /// Host component: rendered by Zed's own diff/editor machinery, the extension only supplies text.
+    record diff-view-props {
+        old-text: string,
+        new-text: string,
+        language: option<string>,
+    }
+
+    /// 0.3. Where an image comes from (design.md §12). `ui:images`.
+    variant image-source {
+        /// A PNG or SVG file in the extension package's `assets/` folder: a relative path with
+        /// `/` separators and no `..`, such as `assets/logo.svg`, at most 1024 bytes and ending in
+        /// `.png` or `.svg`. At most 2 MiB on disk.
+        asset(string),
+        /// An image the extension made at run time, from `images.add-image`.
+        generated(u32),
+    }
+
+    enum image-fit {
+        /// Scaled to fit inside the box, keeping its aspect ratio.
+        contain,
+        /// Scaled to cover the box, keeping its aspect ratio; the overflow is clipped.
+        cover,
+    }
+
+    /// 0.3. A raster or vector image, drawn inside its own box and clipped to it. Panels only:
+    /// an `image` in a status item, modal or decoration tree rejects the update. Not
+    /// interactive: a click on it is not an event.
+    record image-props {
+        source: image-source,
+        /// Required, 1 to 256 bytes. Shown while the image loads, when it fails, and to screen
+        /// readers.
+        alt: string,
+        /// The box in logical pixels, each 1 to 2048. With both `none` the image's own size is
+        /// used (PNG pixels, or the SVG's `viewBox`); with one set the other follows the aspect
+        /// ratio. The box never grows wider than its parent.
+        width: option<u32>,
+        height: option<u32>,
+        fit: image-fit,
+        /// SVG only: draw the image as a one-colour mask in this theme colour, like the host's
+        /// own icons. `none` keeps the SVG's colours.
+        tint: option<color-token>,
+    }
+
+    /// 0.3. Eight colours for charts and data, chosen by the host to stay distinct and readable
+    /// on the active theme (and for common colour-vision deficiencies). Never raw values.
+    enum data-color { series1, series2, series3, series4, series5, series6, series7, series8 }
+
+    variant canvas-color {
+        token(color-token),
+        data(data-color),
+    }
+
+    record paint {
+        color: canvas-color,
+        /// Percent, 0 to 100; 100 is opaque.
+        opacity: u8,
+    }
+
+    record stroke {
+        paint: paint,
+        /// Logical pixels, 0.5 to 16.
+        width: f32,
+    }
+
+    /// Canvas coordinates: logical pixels from the canvas's top-left corner. Every number must
+    /// be finite and within -32768 to 32768.
+    record point {
+        x: f32,
+        y: f32,
+    }
+
+    record rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    }
+
+    record line-op {
+        %from: point,
+        to: point,
+        stroke: stroke,
+    }
+
+    record rect-op {
+        bounds: rect,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    record rounded-rect-op {
+        bounds: rect,
+        /// Logical pixels, clamped to half the shorter side.
+        radius: f32,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    record circle-op {
+        center: point,
+        radius: f32,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    variant path-segment {
+        move-to(point),
+        line-to(point),
+        /// Control point, end point.
+        quad-to(tuple<point, point>),
+        /// Two control points, end point.
+        cubic-to(tuple<point, point, point>),
+        close,
+    }
+
+    /// At least one of `fill` and `stroke`. A fill uses the non-zero rule.
+    record path-op {
+        segments: list<path-segment>,
+        fill: option<paint>,
+        stroke: option<stroke>,
+    }
+
+    /// The host's UI font sizes, not points.
+    enum canvas-text-size { small, medium, large }
+
+    enum text-anchor { start, middle, end }
+
+    /// One line of text, at most 256 bytes; `at` is the baseline at the anchor.
+    record text-op {
+        at: point,
+        text: string,
+        paint: paint,
+        size: canvas-text-size,
+        anchor: text-anchor,
+        monospace: bool,
+    }
+
+    /// Drawn in list order, later ops over earlier ones.
+    variant draw-op {
+        line(line-op),
+        rect(rect-op),
+        rounded-rect(rounded-rect-op),
+        circle(circle-op),
+        path(path-op),
+        text(text-op),
+    }
+
+    enum canvas-fit {
+        /// Drawn at its size; what does not fit the parent is clipped.
+        clip,
+        /// Scaled down, keeping the aspect ratio, when the parent is narrower; never up.
+        scale-down,
+    }
+
+    /// 0.3. A static vector drawing (design.md §13). `ui:canvas`. Panels only, like `image`, and
+    /// not inside list rows. The whole draw list travels in every `set-props`: there are no
+    /// per-op patches. Caps: 16384 ops, 65536 path segments, 256 KiB of text per canvas; 16
+    /// canvases per surface.
+    record canvas-props {
+        /// The drawing's own size in logical pixels, each 1 to 4096. Nothing is drawn outside it.
+        width: u32,
+        height: u32,
+        /// Required, 1 to 1024 bytes: what the drawing shows, for screen readers and as the
+        /// tooltip.
+        description: string,
+        ops: list<draw-op>,
+        /// Sends `canvas-click` with canvas coordinates. No hover, pointer-move or drag in 0.3.
+        clickable: bool,
+        fit: canvas-fit,
+    }
+
+    /// 0.4. A native terminal inside an extension panel (design.md B.2): one of the extension's
+    /// own pseudo or created terminals, by its `terminals.terminal-handle`. One node per handle; a
+    /// handle shown in a node is not also a tab.
+    record terminal-props {
+        handle: u64,
+    }
+
+    variant props {
+        flex(flex-props),
+        text(text-props),
+        button(button-props),
+        input(input-props),
+        %list(list-props),
+        table(table-props),
+        icon(icon-props),
+        markdown(string),
+        diff-view(diff-view-props),
+        /// 0.3.
+        image(image-props),
+        /// 0.3.
+        canvas(canvas-props),
+        /// 0.4.
+        terminal(terminal-props),
+    }
+
+    /// WIT types cannot be recursive, so a tree travels as a flat `list<node>` in which every
+    /// node names its parent. Parents precede children; siblings keep list order. Only `flex`
+    /// nodes have children.
+    record node {
+        id: node-id,
+        parent: option<node-id>,
+        props: props,
+    }
+
+    record insert-op {
+        node: node,
+        /// Insert before this sibling; `none` appends.
+        before: option<node-id>,
+    }
+
+    /// `count` rows from `start`.
+    record row-range {
+        start: u32,
+        count: u32,
+    }
+
+    record invalidate-rows-op {
+        /// A `list` or `table` node of the surface tree.
+        target: node-id,
+        /// `none` invalidates every row. Rows outside the list are ignored.
+        rows: option<row-range>,
+    }
+
+    variant patch {
+        set-props(tuple<node-id, props>),
+        insert(insert-op),
+        /// Removes the node and its whole subtree.
+        remove(node-id),
+        /// The rows changed although the list's props did not. The host keeps drawing the old
+        /// rows until their replacements arrive, and asks only for the visible ones.
+        invalidate-rows(invalidate-rows-op),
+    }
+
+    /// Caps: at most 2048 patches in one `patches`; at most 16384 nodes in a surface tree, which
+    /// is also the cap for a `replace` and for `mount`, so a whole surface can always be resent;
+    /// at most 2048 nodes in one list row; at most 64 levels from a root to its deepest node; at
+    /// most 8 MiB of text in a surface tree's props. An update that breaks a cap or does not fit
+    /// the tree is rejected whole, and the host mounts the surface again.
+    variant update {
+        unchanged,
+        replace(list<node>),
+        patches(list<patch>),
+    }
+
+    record list-row {
+        index: u32,
+        /// Nesting depth, drawn by the host as indentation (tree views). The host draws at most
+        /// 32 levels and clamps deeper rows.
+        indent: u8,
+        /// A subtree whose single root has `parent: none`. Ids are row-local (see `node-id`).
+        nodes: list<node>,
+    }
+
+    /// Why the host closed a modal. Never sent when the extension closed it itself.
+    enum dismiss-reason {
+        /// The user pressed Escape.
+        escape,
+        /// A click outside the modal, or focus moved elsewhere (another window, a dock).
+        focus-lost,
+        /// Another modal opened in the same window, from this extension or any other source.
+        replaced,
+        /// The window that showed it closed.
+        window-closed,
+    }
+
+    variant ui-event {
+        click(node-id),
+        input-changed(tuple<node-id, string>),
+        input-submitted(tuple<node-id, string>),
+        /// The list node and the row index within it. A click on anything inside a row, buttons
+        /// included, is a `row-click`.
+        row-click(tuple<node-id, u32>),
+        /// The user moved a list's selection with the keyboard (modals only). The host has already
+        /// set `selected` in its tree; the extension need not echo it.
+        row-selected(tuple<node-id, u32>),
+        /// The host closed a modal surface; its tree is gone. The reply must be `unchanged`.
+        dismissed(dismiss-reason),
+        /// 0.3. A click on a `clickable` canvas, in canvas coordinates (after `scale-down`, so
+        /// they match the draw list). Grants the click-or-Enter activation like `click`.
+        canvas-click(canvas-click),
+        /// §M. The user clicked an action button of a notification this surface owns. Grants the
+        /// click-or-Enter activation, like `click`.
+        notification-action(notification-action-event),
+        /// §M. A notification this surface owns closed without the extension asking (an
+        /// extension's own `dismiss-notification` sends nothing).
+        notification-closed(tuple<u64, notification-close-reason>),
+        /// §M. The user pressed Cancel on a cancellable progress this surface owns. The progress
+        /// stays until the extension calls `progress-end`.
+        progress-cancel-requested(u64),
+    }
+
+    /// §M. Which action of which notification was clicked.
+    record notification-action-event {
+        notification: u64,
+        /// The `id` the extension gave the action.
+        action: string,
+    }
+
+    /// §M. Why a notification closed when the extension did not close it.
+    enum notification-close-reason {
+        /// The user closed it (its close button, or Escape while it had focus).
+        user,
+        /// It was `auto-dismiss` and its time ran out.
+        expired,
+        /// The window that showed it closed.
+        window-closed,
+    }
+
+    record canvas-click {
+        canvas: node-id,
+        x: f32,
+        y: f32,
+    }
+
+    enum dock-position { left, right, bottom }
+
+    record panel-descriptor {
+        position: dock-position,
+        icon: icon,
+        default-size: u32,
+    }
+
+    enum status-bar-side { left, right }
+
+    record status-item-descriptor {
+        side: status-bar-side,
+        /// Higher sorts closer to the edge.
+        priority: s32,
+    }
+
+    /// Width classes of Zed's own modals, so extension pickers line up with the built-in ones.
+    enum modal-width { small, medium, large }
+
+    /// Like Zed's own modals, an extension modal always closes on Escape, on a click outside it
+    /// and when focus leaves it; it cannot veto that.
+    record modal-descriptor {
+        width: modal-width,
+    }
+
+
+    /// Panels and status items are mounted when they are added and live until removed. A modal
+    /// is mounted each time it is shown and its tree is dropped when it closes.
+    variant surface-kind {
+        panel(panel-descriptor),
+        status-item(status-item-descriptor),
+        modal(modal-descriptor),
+    }
+
+    enum decoration-placement { above, below }
+
+    /// Where an editor decoration goes. Only checked for syntax when `place-decoration` is
+    /// called; the host anchors it in every open buffer of that file, and in buffers opened later.
+    record decoration-location {
+        /// Relative to a worktree root, `/`-separated, without `..` (`src/main.rs`). Matched
+        /// against every worktree of every open workspace.
+        path: string,
+        /// Zero-based row when the decoration is anchored. The host turns it into a CRDT anchor
+        /// per buffer, so from then on the block moves with the line; rows past the end clamp to
+        /// the last row. If the anchored line is deleted, the block stays where the anchor
+        /// collapses to.
+        line: u32,
+        placement: decoration-placement,
+        /// Block height in editor lines; `none` lets the host estimate it from the tree.
+        height-lines: option<u16>,
+    }
+
+    /// Zero-based line, and a column in UTF-8 bytes from the start of the line. A column that is
+    /// not on a character boundary is rejected with `invalid-argument`; one past the end of the
+    /// line clamps to the end.
+    record position {
+        line: u32,
+        column: u32,
+    }
+
+    /// Half-open: `start` is included, `end` is not.
+    record text-range {
+        start: position,
+        end: position,
+    }
+
+    /// A file in a worktree of an open workspace.
+    record file-ref {
+        /// Opaque id of the worktree, stable for the session. `none` in a request means "the one
+        /// worktree that has this path"; a path found in more than one is `invalid-argument`.
+        worktree: option<u64>,
+        /// Relative to the worktree root, `/`-separated, without empty, `.` or `..` components.
+        path: string,
+    }
+
+    record surface {
+        /// 1 to 64 bytes of `a-z`, `0-9`, `-`, `_`, `.`; unique among the extension's live surfaces.
+        id: string,
+        title: string,
+        kind: surface-kind,
+    }
+}
+
+/// Functions the extension may call on the host.
+///
+/// Every function with an effect (an update, a surface change, a tick) is checked when it is
+/// called and returns the check's result at once, but the effect itself happens after the
+/// current export call returns, in the order the extension called them, and before that call's
+/// own return value is applied.
+///
+/// 0.3: the same rule covers every effectful function of every interface below. Functions that
+/// start work outside the call (a fetch, a process, an edit) return an id at once; the outcome
+/// arrives later through the `handle-io` export.
+interface host {
+    use types.{update, surface};
+
+    enum host-error-code {
+        /// No live surface of this extension has that id.
+        unknown-surface,
+        /// A per-call or per-extension cap was reached; the message names it.
+        limit-exceeded,
+        /// The arguments break a rule other than a cap (a bad id, a duplicate id, the wrong kind).
+        invalid-argument,
+        /// The manifest lacks the capability, or the call needs a user gesture it does not have.
+        not-permitted,
+        /// The host cannot do it now (no workspace window to show a modal in).
+        unavailable,
+        /// 0.3. The user refused or revoked the capability. The manifest does declare it;
+        /// `permissions.query` says whether it is denied or unavailable.
+        denied,
+        /// 0.3. The worktree the call works in is not trusted (Zed's restricted mode): T2 work
+        /// there is refused without a prompt until the user trusts it. Not a permission state.
+        untrusted-worktree,
+        /// 0.3. The call needs an open worktree and the window has none.
+        no-worktree,
+    }
+
+    record host-error {
+        code: host-error-code,
+        message: string,
+    }
+
+    /// Sends an update the extension initiated (a push to another surface, a tick's side
+    /// effects). `ok` means the update passed the checks the host can make at once (the surface
+    /// exists, the caps); it can still fail to fit the tree when it is applied, which remounts
+    /// the surface. On `err` nothing was queued: the extension's mirror of that surface is now
+    /// ahead of the host and must be resent whole. At most 64 pushes per export call, carrying at
+    /// most 32768 patches plus nodes together (two whole trees); past that, `limit-exceeded`.
+    push-update: func(surface-id: string, update: update) -> result<_, host-error>;
+
+    /// Asks for one `tick(surface-id)` call at least `delay-ms` after the current call returns.
+    /// One pending tick per surface: a new request replaces the earlier one. The host clamps
+    /// the delay up to 100 ms, and to 1000 ms while Fyx is in the background. A tick that falls
+    /// due while its panel is hidden waits until the panel is shown and is then delivered once:
+    /// a panel opened hours later gets one tick, not a backlog (design.md, "Ticks"). A delay over
+    /// 24 hours is `invalid-argument`. Decorations cannot request ticks.
+    request-tick: func(surface-id: string, delay-ms: u32) -> result<_, host-error>;
+
+    /// Drops the pending tick of a surface, if any.
+    cancel-tick: func(surface-id: string);
+
+    /// Adds a surface at runtime. The manifest must declare the capability of its kind. Panels
+    /// and status items are added to every workspace window and mounted; a modal waits for
+    /// `show-surface`. At most 32 live surfaces per extension.
+    add-surface: func(surface: surface) -> result<_, host-error>;
+
+    /// Removes a live surface, static or runtime: its containers close in every window, its
+    /// tree, pending tick and queued events are dropped, and no event is sent. The id may be
+    /// added again afterwards, as a new surface.
+    remove-surface: func(surface-id: string) -> result<_, host-error>;
+
+    /// Opens a modal in the active workspace window and focuses it, or reveals a panel there
+    /// (opens its dock and activates it, without moving focus). Showing a modal needs a click or
+    /// Enter: it is allowed during `handle-event` for `click`, `row-click`, `input-submitted` or
+    /// a clicked `notification-action`, or within 5 s after one, once. Typing (`input-changed`),
+    /// `row-selected` and `dismissed` do not count. Showing a surface that is already shown does
+    /// nothing.
+    ///
+    /// 0.3: a `canvas-click` also grants the click-or-Enter activation (design.md, "Gestures in
+    /// 0.3").
+    show-surface: func(surface-id: string) -> result<_, host-error>;
+
+    /// Closes a modal (no `dismissed` event) or hides a panel's dock if that panel is active.
+    hide-surface: func(surface-id: string) -> result<_, host-error>;
+
+    enum log-level { trace, debug, info, warn, error }
+
+    log: func(level: log-level, message: string);
+}
+
+/// Editor decorations: retained `fyx:ui` trees drawn as blocks above or below a buffer line
+/// (design.md, "L"). Needs the `ui:editor-decorations` capability; without it every call returns
+/// `not-permitted`. Both functions follow the effect rule of `host`.
+///
+/// A decoration id lives in the same namespace as the extension's surface ids and follows the
+/// same id rule, so it must not equal a live surface id. Once placed, the id works like a surface
+/// id for `push-update`, `handle-event` (clicks, input), `list-rows` and `mount` (the host calls
+/// `mount(id)` to resync a decoration whose update did not fit), but not for `request-tick`,
+/// `show-surface` or `remove-surface`. At most 512 live decorations per extension, not counted
+/// against the 32 surfaces.
+interface decorations {
+    use types.{node, decoration-location};
+    use host.{host-error};
+
+    /// Places a decoration with the initial tree `nodes` (at most 16384 nodes, parents first).
+    /// Placing an id that is already a live decoration moves it and replaces its tree, like a
+    /// fresh mount. At most 512 `place-decoration` and `remove-decoration` calls per export call;
+    /// past that, `limit-exceeded`.
+    place-decoration: func(id: string, location: decoration-location, nodes: list<node>) -> result<_, host-error>;
+
+    /// Removes a live decoration in every editor; no event is sent. The id may be placed again.
+    remove-decoration: func(id: string) -> result<_, host-error>;
+}
+
+/// 0.3. The state of the T2 capabilities this extension declares, and a way to ask for one ahead
+/// of its first use (from a "Connect" button, say).
+interface permissions {
+    use host.{host-error};
+
+    /// 0.4 adds the cases after `agent-observe` (design.md C.1).
+    enum t2-capability {
+        network-fetch,
+        process-spawn,
+        workspace-edit,
+        agent-observe,
+        network-listen,
+        terminal-create,
+        terminal-env,
+        terminal-observe,
+        fs-discovery-file,
+        relay-hooks,
+    }
+
+    /// 0.4. Asked at the moment of action, on one terminal, after a gesture (design.md C.3);
+    /// never answered by `query`. Each request returns its own answer.
+    enum t3-capability { terminal-read, terminal-write }
+
+    enum permission-state {
+        /// Allowed by the user.
+        granted,
+        /// Refused or revoked by the user; only the extensions page changes it back.
+        denied,
+        /// Not asked yet: the first use shows the prompt.
+        ask,
+        /// Not available here: the manifest does not declare it. (An untrusted or missing worktree
+        /// is not a permission state: the call fails with `host-error-code::untrusted-worktree` or
+        /// `no-worktree`.)
+        unavailable,
+    }
+
+    /// The state as of the start of the current call.
+    query: func(capability: t2-capability) -> permission-state;
+
+    /// Shows the consent prompt now, if the state is `ask`. Needs the click-or-Enter activation.
+    /// The answer arrives as `io-event::permission-changed`.
+    request: func(capability: t2-capability) -> result<_, host-error>;
+}
+
+/// 0.3. `network:fetch`: HTTPS requests to the domains the manifest lists (spec decision 23).
+interface network {
+    use host.{host-error};
+
+    enum http-method { get, head, post, put, patch, delete, options }
+
+    record http-request {
+        method: http-method,
+        /// `https://` and a host the manifest allows; `http://` only for a declared `localhost`
+        /// or `127.0.0.1` with a port. No user info. At most 8 KiB.
+        url: string,
+        /// At most 64 headers, 16 KiB in total. `host`, `content-length`, `transfer-encoding`,
+        /// `connection`, `upgrade`, `te`, `trailer`, `expect`, `keep-alive` and every `proxy-*`
+        /// header, and `accept-encoding`, are set by the host and rejected here.
+        headers: list<tuple<string, string>>,
+        /// At most 4 MiB.
+        body: option<list<u8>>,
+        /// At most 30000, the default.
+        timeout-ms: option<u32>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        /// Decompressed, at most 16 MiB.
+        body: list<u8>,
+        /// The URL that answered, after the redirects the host followed.
+        url: string,
+    }
+
+    variant fetch-error {
+        /// The capability is denied or was revoked while the request waited or ran.
+        denied,
+        /// The host is not in the manifest's domain list, or resolved to an address the host does
+        /// not connect to (a private address for a public domain).
+        host-not-allowed(string),
+        /// A redirect pointed off the list, to `http://`, or past the fifth hop. Names the host.
+        redirect-not-allowed(string),
+        dns(string),
+        connect(string),
+        tls(string),
+        timeout,
+        /// The response passed 16 MiB, or the headers 64 KiB.
+        too-large,
+        cancelled,
+        other(string),
+    }
+
+    /// Starts a request after the current call returns and returns its id. The outcome arrives
+    /// as `io-event::fetch-done`. The first fetch shows the consent prompt if the state is `ask`;
+    /// the request waits for the answer. At most 8 requests in flight and 120 started per minute.
+    fetch: func(request: http-request) -> result<u64, host-error>;
+
+    /// Cancels a request; `fetch-done` follows with `cancelled` unless it already completed.
+    cancel-fetch: func(request: u64);
+}
+
+/// 0.3. `process:spawn`: runs programs the manifest names (spec decision 24).
+interface process {
+    use host.{host-error};
+    use types.{file-ref};
+
+    record spawn-request {
+        /// A name from the manifest's `[[fyx_ui.processes]]`, never a path.
+        program: string,
+        /// At most 256 arguments, 128 KiB in total.
+        args: list<string>,
+        /// A directory inside a worktree; `none` is the root of the first worktree.
+        cwd: option<file-ref>,
+        /// Only names the manifest lists in `[fyx_ui.process].env`; at most 32.
+        env: list<tuple<string, string>>,
+        /// Keep stdin open for `write-stdin`; otherwise it is closed at start.
+        stdin: bool,
+    }
+
+    enum output-stream { stdout, stderr }
+
+    record process-output {
+        process: u64,
+        %stream: output-stream,
+        /// At most 64 KiB per event.
+        data: list<u8>,
+    }
+
+    record process-exit {
+        process: u64,
+        /// `none` when it ended by a signal or was killed.
+        code: option<s32>,
+        /// The host killed it (`kill`, disable, reload, revoke, uninstall, Fyx quitting).
+        killed: bool,
+    }
+
+    variant spawn-error {
+        denied,
+        /// The program is not on `PATH` outside the worktrees, or is a script the host does not
+        /// run (`.bat`, `.cmd`).
+        not-found(string),
+        limit-exceeded,
+        io(string),
+        /// Anything else; the text says what.
+        other(string),
+    }
+
+    /// Starts the program after the current call returns and returns its id. Output arrives as
+    /// `io-event::process-output`, then exactly one `process-exited`, or one `spawn-failed`
+    /// instead of both. At most 4 processes per extension.
+    spawn: func(request: spawn-request) -> result<u64, host-error>;
+
+    /// At most 1 MiB per call and 4 MiB queued per process.
+    write-stdin: func(process: u64, data: list<u8>) -> result<_, host-error>;
+
+    close-stdin: func(process: u64) -> result<_, host-error>;
+
+    /// Kills the process and everything it started.
+    kill: func(process: u64) -> result<_, host-error>;
+}
+
+/// 0.3. `workspace:edit`: text edits to files in the worktrees, as one undoable step each.
+interface workspace-edit {
+    use host.{host-error};
+    use types.{text-range, file-ref};
+
+    record text-edit {
+        range: text-range,
+        new-text: string,
+    }
+
+    record file-edit {
+        file: file-ref,
+        /// Create the file if it does not exist (its parent directory must exist).
+        create: bool,
+        /// Non-overlapping, at most 4096 per edit in total.
+        edits: list<text-edit>,
+    }
+
+    record workspace-edit {
+        /// Names the step in the undo history and in the title of the multi-file view. At most
+        /// 128 bytes.
+        label: string,
+        /// At most 64 files.
+        files: list<file-edit>,
+    }
+
+    variant edit-error {
+        denied,
+        /// A file changed while the edit was being applied.
+        conflict(string),
+        /// The path is outside every worktree, leaves it through a symlink, or names a protected
+        /// path, at any depth and whatever the security mode: `.git/`, `.fyx/`, `.zed/`,
+        /// `.vscode/`, `.idea/`, agent configs (`.claude/`, `.codex/`, `.gemini/`, `.agents/`,
+        /// `.cursor/`, `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.rules`,
+        /// `.cursorrules`), the repository's `.fyx/security.toml` `read_only` patterns, or the
+        /// `private_files` setting.
+        not-allowed(string),
+        not-found(string),
+        invalid(string),
+        cancelled,
+        /// A file is in a worktree that is not trusted (Zed's restricted mode).
+        untrusted-worktree,
+        /// Anything else; the text says what.
+        other(string),
+    }
+
+    /// Applies the edit after the current call returns, all or nothing, and returns its id. The
+    /// outcome arrives as `io-event::edit-done`. Nothing is saved: edited buffers stay dirty.
+    /// At most 4 edits in flight and 4 MiB of new text per edit.
+    apply-edit: func(edit: workspace-edit) -> result<u64, host-error>;
+}
+
+/// 0.3. `agent:observe`: the host's review of agent edits, read-only. Nothing in this world can
+/// accept, reject, comment on or submit a review.
+interface agent-observe {
+    use host.{host-error};
+    use types.{file-ref};
+
+    enum hunk-decision { pending, accepted, rejected }
+
+    record hunk-info {
+        /// Zero-based rows of the old text the hunk replaces, and of the new text it inserts.
+        old-start: u32,
+        old-count: u32,
+        new-start: u32,
+        new-count: u32,
+        old-text: string,
+        new-text: string,
+        decision: hunk-decision,
+        /// The user's comment to the agent, if any.
+        comment: option<string>,
+    }
+
+    variant resolution {
+        unchanged,
+        pending(u32),
+        accepted-all,
+        rejected-all,
+        /// Accepted and rejected hunk counts.
+        partial(tuple<u32, u32>),
+    }
+
+    enum review-source {
+        /// A diff shown with an agent's permission request, before anything is written.
+        permission,
+        /// An agent's file write, held until the review is submitted.
+        write,
+    }
+
+    enum rule-kind { auto-accept, always-ask, deny }
+
+    record review-info {
+        /// Opaque ids, stable for the session, different for every extension.
+        review: u64,
+        session: u64,
+        turn: u64,
+        /// `none` when the file is outside every worktree; its path is never shown.
+        file: option<file-ref>,
+        source: review-source,
+        /// The project rule that applies, from `.fyx/review.toml`.
+        rule: option<rule-kind>,
+        resolution: resolution,
+        submitted: bool,
+        /// Empty when `file` is `none`. Cut after 256 KiB of hunk text, with `truncated` set.
+        hunks: list<hunk-info>,
+        /// The hunks were cut (or dropped with `file`), and only that.
+        truncated: bool,
+    }
+
+    /// Every open review. It replaces whatever the extension knew: it comes first after `start`,
+    /// and again whenever the host resyncs a feed that fell behind (more than 1024 events
+    /// queued), in which case the events in between are not sent.
+    record review-snapshot {
+        /// At most 1000, oldest first.
+        reviews: list<review-info>,
+        /// Older reviews were left out to stay within 1000.
+        older-dropped: bool,
+    }
+
+    record turn-file {
+        file: option<file-ref>,
+        resolution: resolution,
+        rule: option<rule-kind>,
+    }
+
+    variant agent-event {
+        /// First event after `start`, and after a resync.
+        snapshot(review-snapshot),
+        opened(review-info),
+        updated(review-info),
+        resolved(review-info),
+        closed(u64),
+        /// The turn stopped; the files decided in it.
+        turn-ended(tuple<u64, list<turn-file>>),
+        /// Files that changed on disk during the turn without review.
+        unreviewed-changes(tuple<u64, list<file-ref>>),
+        /// Review mode was switched on or off.
+        review-mode(bool),
+    }
+
+    /// Starts delivering `io-event::agent` events, beginning with a `snapshot`. The first call
+    /// shows the consent prompt if the state is `ask`.
+    start: func() -> result<_, host-error>;
+
+    stop: func();
+}
+
+/// 0.4. Terminals (design.md B.1-B.5, B.11, C.3). The extension's own terminals (pseudo,
+/// created) are its own; the user's need T3 to read or write.
+interface terminals {
+    use host.{host-error};
+
+    /// Per extension and opaque; never reused within one load.
+    type terminal-handle = u64;
+
+    enum terminal-origin { pseudo, created, profile, user }
+
+    enum status-state { idle, working, blocked, done, error }
+
+    record terminal-status {
+        state: status-state,
+        /// At most 64 bytes.
+        label: string,
+        /// At most 512 bytes.
+        detail: option<string>,
+        /// 0..=100.
+        progress: option<u8>,
+        attention: bool,
+    }
+
+    record terminal-info {
+        handle: terminal-handle,
+        origin: terminal-origin,
+        /// The command line is redacted without a T3 read.
+        title: string,
+        cwd: option<string>,
+        status: option<terminal-status>,
+        /// The account profile's name, never its path.
+        account: option<string>,
+    }
+
+    record pseudo-request {
+        /// At most 256 bytes.
+        title: string,
+        cols: option<u16>,
+        rows: option<u16>,
+        /// Shown by a `terminal` node in the extension's panel rather than as a tab.
+        in-panel: bool,
+    }
+
+    record create-request {
+        /// A `[[fyx_ui.terminal_programs]]` name.
+        program: string,
+        args: list<string>,
+        /// Worktree-relative; none is the active worktree's root.
+        cwd: option<string>,
+        title: option<string>,
+    }
+
+    enum read-scope { last-command, last-lines }
+
+    /// `terminal:pseudo`. The extension is the backend; input and resizes arrive as io events.
+    open-pseudo: func(request: pseudo-request) -> result<terminal-handle, host-error>;
+    /// At most 64 KiB per call; above 4 MiB/s per terminal, `limit-exceeded`. Answered sequences
+    /// (DA, DSR, OSC 52, ...) are removed before the terminal sees them.
+    write-output: func(handle: terminal-handle, bytes: list<u8>) -> result<_, host-error>;
+    /// `terminal:create`: a declared program in a pty. Not in an untrusted worktree.
+    create: func(request: create-request) -> result<terminal-handle, host-error>;
+    /// A created terminal's input, at most 64 KiB per call.
+    send-input: func(handle: terminal-handle, bytes: list<u8>) -> result<_, host-error>;
+    /// Closes one of the extension's own terminals; a created one is killed with its tree.
+    close: func(handle: terminal-handle);
+    /// No capability on the extension's own terminals; `terminal:status` on others. At most 4
+    /// updates per second per terminal. The host draws the source.
+    set-status: func(handle: terminal-handle, status: option<terminal-status>) -> result<_, host-error>;
+    /// `terminal:observe`. (`%list`: `list` is a WIT keyword.)
+    %list: func() -> result<list<terminal-info>, host-error>;
+    /// Into the extension's profile or own terminal, after a gesture, in bracketed-paste mode
+    /// only; control characters but tab and newline are removed; at most 16 KiB.
+    paste: func(handle: terminal-handle, text: string) -> result<_, host-error>;
+    /// T3 `terminal:read`, after a gesture: a card on the user's terminal. `lines` at most 500.
+    /// The answer arrives as `io-event::terminal-read-done` with the returned id.
+    request-read: func(handle: terminal-handle, scope: read-scope, lines: u16) -> result<u64, host-error>;
+    /// T3 `terminal:write`, after a gesture: the exact text is confirmed on a card. Printable
+    /// text and tab only. `submit` adds Enter after the confirmation.
+    request-write: func(handle: terminal-handle, text: string, submit: bool) -> result<u64, host-error>;
+}
+
+/// 0.4. Loopback listeners and MCP (design.md B.7): `network:listen`. The host binds
+/// `127.0.0.1:0`, checks the token, `Origin` and `Host`, and speaks MCP for the `mcp-*` kinds.
+interface listeners {
+    use host.{host-error};
+
+    record tool-def {
+        name: string,
+        description: string,
+        /// A JSON schema, as text.
+        input-schema: string,
+    }
+
+    record mcp-call {
+        call-id: u64,
+        listener: string,
+        connection: u64,
+        tool: string,
+        /// JSON, as text.
+        arguments: string,
+    }
+
+    record mcp-error {
+        code: s32,
+        message: string,
+    }
+
+    register-tools: func(listener: string, tools: list<tool-def>) -> result<_, host-error>;
+    /// The answer to `io-event::mcp-call`; the result is JSON as text. A call may stay open until
+    /// answered; it is cancelled when its connection closes.
+    respond: func(call-id: u64, outcome: result<string, mcp-error>) -> result<_, host-error>;
+    /// An MCP notification, to one connection or to all.
+    notify: func(listener: string, connection: option<u64>, method: string, params: string) -> result<_, host-error>;
+    /// A `websocket` listener's text frame.
+    send: func(listener: string, connection: u64, text: string) -> result<_, host-error>;
+    /// The answer to an `http` listener's `io-event::listener-request`.
+    reply: func(request-id: u64, status: u16, body: string) -> result<_, host-error>;
+}
+
+/// 0.4. Command-hook relay (design.md B.9): `relay:hooks`.
+interface relay {
+    use host.{host-error};
+
+    /// The answer to `io-event::relay-request`; the relay prints it and exits with the code.
+    respond: func(id: u64, exit-code: u8, stdout: string, stderr: string) -> result<_, host-error>;
+}
+
+/// 0.4. Proposed edits through agent review (design.md B.10): `review:propose`.
+interface review {
+    use host.{host-error};
+    use types.{file-ref};
+
+    variant proposed {
+        new-content(string),
+        unified-diff(string),
+    }
+
+    record proposal {
+        path: file-ref,
+        change: proposed,
+        title: string,
+        /// The extension's key for a tool session.
+        session: string,
+        /// The host applies the accepted hunks to the buffer, as one undo step, and never saves.
+        apply: bool,
+    }
+
+    enum decision { accepted, partial, rejected }
+
+    record review-outcome {
+        decision: decision,
+        /// The text after the user's choices and edits.
+        final-content: string,
+    }
+
+    /// The outcome arrives as `io-event::review-decided` with the returned id.
+    propose: func(request: proposal) -> result<u64, host-error>;
+    /// The tool closed its diff (the CLI's `close_tab`): an undecided proposal's review closes
+    /// and nothing is applied; its `review-decided` arrives as `err("withdrawn")`. An id that
+    /// is not the extension's or already decided is `invalid-argument`.
+    withdraw: func(id: u64) -> result<_, host-error>;
+    begin-turn: func(session: string) -> result<_, host-error>;
+    end-turn: func(session: string, changed: list<file-ref>) -> result<_, host-error>;
+}
+
+/// 0.4. Editor context and opening files (design.md B.11).
+interface context {
+    use host.{host-error};
+    use types.{file-ref, text-range};
+
+    record editor-context {
+        active: option<file-ref>,
+        /// Most recently focused first, `active` included.
+        open: list<file-ref>,
+        /// The text is absent for a private file, and at most 64 KiB.
+        selection: option<tuple<text-range, option<string>>>,
+        /// Whether `active`'s worktree is trusted; `none` without an active file.
+        trusted: option<bool>,
+    }
+
+    /// `context:editor`: `io-event::context-changed`, debounced 300 ms, while on.
+    watch: func(on: bool) -> result<_, host-error>;
+    /// `workspace:open`. `focus` needs a gesture or a recent request from a focused terminal.
+    open: func(path: file-ref, range: option<text-range>, focus: bool) -> result<_, host-error>;
+    /// `context:editor`: the file at an absolute path (as a tool sends it over MCP). Outside
+    /// every open worktree is `invalid-argument`; a private file is `not-permitted`.
+    to-file-ref: func(absolute: string) -> result<file-ref, host-error>;
+    /// `context:editor`: the absolute path of a file, for a tool's reply. An unknown worktree is
+    /// `invalid-argument`; a private file is `not-permitted`.
+    absolute-path: func(path: file-ref) -> result<string, host-error>;
+}
+
+/// 0.4. Approval cards for a tool's own permission prompts (design.md B.12): `ui:approvals`. The
+/// answer goes back to the tool through the extension; it grants nothing in Fyx.
+interface approvals {
+    use host.{host-error};
+
+    enum approval-option { allow-once, always-allow, deny }
+
+    /// `tool` is the asking tool's name as the extension states it (the card marks it "says"),
+    /// 0 to 40 bytes on one line, empty when there is none; `title` 1 to 120 bytes on one line;
+    /// `detail` at most 2000 bytes and 12 lines; 1 to 3 distinct options. At most 4 cards are
+    /// open per extension (`limit-exceeded`). The answer arrives as `io-event::approval-answered`,
+    /// `none` when the card closed unanswered.
+    ask: func(tool: string, title: string, detail: string, options: list<approval-option>) -> result<u64, host-error>;
+}
+
+/// 0.3. Outcomes of work that runs outside a call, delivered through `handle-io`.
+interface io {
+    use network.{http-response, fetch-error};
+    use process.{process-output, process-exit, spawn-error};
+    use workspace-edit.{edit-error};
+    use agent-observe.{agent-event};
+    use permissions.{t2-capability, permission-state};
+    use terminals.{terminal-handle, terminal-info};
+    use listeners.{mcp-call};
+    use review.{review-outcome};
+    use context.{editor-context};
+    use approvals.{approval-option};
+
+    variant io-event {
+        fetch-done(tuple<u64, result<http-response, fetch-error>>),
+        process-output(process-output),
+        process-exited(process-exit),
+        spawn-failed(tuple<u64, spawn-error>),
+        edit-done(tuple<u64, result<_, edit-error>>),
+        agent(agent-event),
+        /// The user answered a prompt or changed the extension's permissions; in-flight work of
+        /// a revoked capability has already been cancelled.
+        permission-changed(tuple<t2-capability, permission-state>),
+        /// 0.4. Keyboard input to a pseudo-terminal, coalesced to 30 per second.
+        terminal-input(tuple<terminal-handle, list<u8>>),
+        /// 0.4. The last size only: handle, columns, rows.
+        terminal-resized(tuple<terminal-handle, u16, u16>),
+        /// 0.4. A created terminal's output, and the bytes dropped before it.
+        terminal-output(tuple<terminal-handle, list<u8>, u64>),
+        /// 0.4. None for a signal or a failed start.
+        terminal-exited(tuple<terminal-handle, option<s32>>),
+        /// 0.4. `terminal:observe`.
+        terminal-created(terminal-info),
+        /// 0.4.
+        terminal-closed(terminal-handle),
+        /// 0.4.
+        terminal-status-changed(terminal-info),
+        /// 0.4. The answer to `request-read`: its id, and the text.
+        terminal-read-done(tuple<u64, result<string, string>>),
+        /// 0.4. The answer to `request-write`: its id.
+        terminal-write-done(tuple<u64, result<_, string>>),
+        /// 0.4.
+        mcp-call(mcp-call),
+        /// 0.4. A call whose connection closed.
+        mcp-cancelled(u64),
+        /// 0.4. A `websocket` listener's frame: listener, connection, text.
+        listener-message(tuple<string, u64, string>),
+        /// 0.4. An `http` listener's request: id, listener, path, body.
+        listener-request(tuple<u64, string, string, string>),
+        /// 0.4. Id, channel, terminal, argv, stdin.
+        relay-request(tuple<u64, string, option<terminal-handle>, list<string>, string>),
+        /// 0.4.
+        review-decided(tuple<u64, result<review-outcome, string>>),
+        /// 0.4.
+        context-changed(editor-context),
+        /// 0.4. None when the card closed unanswered.
+        approval-answered(tuple<u64, option<approval-option>>),
+    }
+}
+
+/// 0.3. Images the extension makes at run time, for `image-source::generated` (design.md §12).
+/// `ui:images`. Package assets need no call.
+interface images {
+    use host.{host-error};
+
+    enum image-format { png, svg }
+
+    /// Registers an image and returns its handle. The bytes are checked and decoded off the
+    /// main thread after the call returns; until then, and if decoding fails, nodes show the alt
+    /// text. At most 1 MiB of bytes, the same size limits as assets, at most 32 live generated
+    /// images, and all images of the extension count against its 64 MiB of decoded pixels.
+    add-image: func(format: image-format, bytes: list<u8>) -> result<u32, host-error>;
+
+    /// Frees a generated image. Nodes that still show it show their alt text. Unknown handles
+    /// are ignored. A reload or a disable frees all of them.
+    remove-image: func(image: u32);
+}
+
+/// Notifications and progress (design.md, "M"). Needs the `ui:notifications` capability (tier
+/// T0); without it every call returns `not-permitted`. Every function follows the effect rule of
+/// `host`: checked at the call, applied after the export returns, dropped by a trap.
+///
+/// Every notification and progress has an **owner**: a live surface or decoration id of this
+/// extension. Its events arrive as `handle-event(owner, …)`, and removing the owner closes them
+/// without an event. The host always draws the extension's name and id above a notification
+/// and next to a progress; the extension cannot style, hide or replace that line.
+interface notifications {
+    use host.{host-error};
+
+    enum notification-level { info, success, warning, error }
+
+    record notification-action {
+        /// 1 to 64 bytes of `[a-z0-9._-]`, unique within the notification. Sent back in
+        /// `notification-action-event`.
+        id: string,
+        /// The button text: 1 to 24 bytes of plain text on one line.
+        label: string,
+    }
+
+    record notification {
+        /// The surface or decoration whose `handle-event` gets this notification's events.
+        owner: string,
+        level: notification-level,
+        /// 1 to 80 bytes of plain text on one line.
+        title: string,
+        /// At most 500 bytes of plain text, at most 4 lines. No markdown, links or icons.
+        body: option<string>,
+        /// At most 2. Drawn as buttons in list order; the first is the primary one.
+        actions: list<notification-action>,
+        /// `true`: the host closes it after a time it chooses by level (6 s for `info` and
+        /// `success`, 10 s for `warning` and `error`), paused while the pointer is over it or the
+        /// window is in the background. `false`: it stays until the user or the extension closes
+        /// it.
+        auto-dismiss: bool,
+    }
+
+    /// Shows a notification in the active workspace window, without moving focus, and returns its
+    /// id. Caps: 5 accepted calls per rolling 60 s and 3 open notifications per extension, and
+    /// 4 `notify` and `dismiss-notification` calls together per export call; past any,
+    /// `limit-exceeded`, and the title is written to the log instead.
+    notify: func(notification: notification) -> result<u64, host-error>;
+
+    /// Closes a notification of this extension; no event is sent. Unknown or closed ids are
+    /// ignored.
+    dismiss-notification: func(id: u64);
+
+    enum progress-location {
+        /// One host status-bar item per extension, showing its newest running progress; its
+        /// tooltip lists all of them.
+        status-bar,
+        /// A bar under the header of the owner, which must be a panel.
+        panel,
+    }
+
+    record progress-options {
+        /// The surface or decoration whose `handle-event` gets `progress-cancel-requested`; a
+        /// panel for `location: panel`.
+        owner: string,
+        /// 1 to 80 bytes of plain text on one line.
+        title: string,
+        location: progress-location,
+        /// Draws a Cancel button that sends `progress-cancel-requested`.
+        cancellable: bool,
+    }
+
+    variant progress-value {
+        indeterminate,
+        /// 0 to 100.
+        percent(u8),
+    }
+
+    /// Starts a progress, indeterminate until the first `progress-update`, and returns its id.
+    /// At most 4 running progresses per extension and 30 starts per rolling 60 s.
+    progress-start: func(options: progress-options) -> result<u64, host-error>;
+
+    /// Sets the value and, when given, a one-line message (at most 120 bytes). The host redraws
+    /// at most 10 times a second and keeps the last value. At most 64 updates per export call.
+    progress-update: func(id: u64, value: progress-value, message: option<string>) -> result<_, host-error>;
+
+    /// Ends a progress. Unknown or ended ids are ignored. Disabling, reloading or unloading the
+    /// extension, or removing the owner, ends its progresses too.
+    progress-end: func(id: u64);
+}
+
+world ui-extension {
+    use types.{surface, node, node-id, ui-event, update, list-row};
+    use io.{io-event};
+
+    import host;
+    import decorations;
+    import notifications;
+    import images;
+    import permissions;
+    import network;
+    import process;
+    import workspace-edit;
+    import agent-observe;
+    // 0.4.
+    import terminals;
+    import listeners;
+    import relay;
+    import review;
+    import context;
+    import approvals;
+
+    // ---- 0.2, unchanged ----
+
+    /// Called once after instantiation; declares the static surfaces. More can be added with
+    /// `add-surface`.
+    export surfaces: func() -> list<surface>;
+
+    /// The whole tree of a surface (at most 16384 nodes): when a panel or status item is added,
+    /// each time a modal is shown, and again whenever the host resyncs after an update that did
+    /// not fit, which for a decoration replaces the tree it was placed with.
+    export mount: func(surface-id: string) -> result<list<node>, string>;
+
+    /// At most one call per input event; the host debounces scroll, hover and typing.
+    export handle-event: func(surface-id: string, event: ui-event) -> result<update, string>;
+
+    export list-rows: func(surface-id: string, list-node: node-id, start: u32, count: u32) -> list<list-row>;
+
+    /// The tick `request-tick` asked for. Never called while the surface is mounting or failed,
+    /// nor for a modal that is not shown. The update applies to `surface-id`, like an event's.
+    export tick: func(surface-id: string) -> result<update, string>;
+
+    // ---- 0.3 ----
+
+    /// The outcome of a fetch, a process, an edit, an agent-review event or a permission change.
+    /// Not tied to a surface: push to surfaces with `push-update`.
+    export handle-io: func(event: io-event) -> result<_, string>;
+}

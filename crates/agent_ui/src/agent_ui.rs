@@ -3,6 +3,7 @@ pub mod agent_connection_store;
 mod agent_diff;
 mod agent_model_selector;
 mod agent_panel;
+pub use agent_panel::OnboardingUpsell; // fyx: zed::fyx skips its zed.dev card
 mod agent_registry_ui;
 mod buffer_codegen;
 mod completion_provider;
@@ -1107,6 +1108,7 @@ mod tests {
             sandbox_permissions: Default::default(),
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
+            auto_generate_thread_titles: true,
             max_idle_retained_threads: 5,
             threads_sidebar: agent_settings::ThreadsSidebarSettings {
                 auto_open: true,

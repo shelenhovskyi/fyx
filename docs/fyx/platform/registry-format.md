@@ -3,8 +3,8 @@
 The files the Fyx extension registry publishes and the client reads, as implemented by
 `crates/fyx_registry` (Platform 1 [spec](spec.md), decisions 14–21; [plan](plan.md) tasks
 3.2–3.4). The crate is pure: it takes bytes and the current time and returns verified documents
-and decisions. Fetching, storing and the UI belong to the registry client (3.3, 3.4) and the
-Extensions page (3.5).
+and decisions. The client core (3.3, below) adds the order of trust and the stop rules on top,
+still without I/O: the host does the fetching (HTTP), the storing and the UI (3.5).
 
 ## Conventions
 
@@ -22,36 +22,55 @@ Extensions page (3.5).
 The registry signs with Ed25519 (`ring`, already in the workspace). A signature names its key:
 
 ```json
-{"key_id": "fyx-2026-a", "ed25519": "<base64 of 64 bytes>"}
+{"key_id": "fyx-rel-2026-a", "ed25519": "<base64 of 64 bytes>"}
 ```
 
 Key ids are 1–64 characters of `a-z`, `0-9`, `-` and `.`, starting with a letter or digit.
 
-A **keyset** lists the public keys a reader accepts. The client compiles in the registry key and
-one rotation key (decision 18); the CI tool reads a keyset file:
+A **keyset** lists the public keys a reader accepts, each with its **roles**: `release`,
+`blocklist` and `snapshot`. A key signs only documents of its roles, so a leaked block-list key
+cannot publish a release (security-2 T9). The role `blocklist-revocation` signs no document; it
+lets a snapshot revoke block-list keys, and only the offline snapshot rotation key has it. The CI tool reads a keyset file:
 
 ```json
 {"keys": [
-  {"key_id": "fyx-2026-a", "ed25519": "<base64 of 32 bytes>"},
-  {"key_id": "fyx-2026-b", "ed25519": "<base64 of 32 bytes>"}
+  {"key_id": "fyx-rel-2026-a",  "ed25519": "<base64 of 32 bytes>", "roles": ["release"]},
+  {"key_id": "fyx-rel-2026-b",  "ed25519": "<base64 of 32 bytes>", "roles": ["release"]},
+  {"key_id": "fyx-snap-2026-a", "ed25519": "<base64 of 32 bytes>", "roles": ["snapshot"]},
+  {"key_id": "fyx-snap-2026-b", "ed25519": "<base64 of 32 bytes>", "roles": ["snapshot"]},
+  {"key_id": "fyx-bl-2026-a",   "ed25519": "<base64 of 32 bytes>", "roles": ["blocklist"]},
+  {"key_id": "fyx-bl-2026-b",   "ed25519": "<base64 of 32 bytes>", "roles": ["blocklist"]}
 ]}
 ```
 
-Rotation: sign new documents with the rotation key; old releases keep verifying with the old key
-while it is in the keyset. Before a client release drops the old key, the CI re-signs every
-release with the new one. A signature by a key that is not in the keyset is refused as
-`UnknownKey`; one that does not match is `BadSignature`.
+The format allows a key with several roles. The Fyx registry gives **every key exactly one role**,
+so the roles make **three keysets** (spec decision 18, owner 2026-11-18): release keys, snapshot
+keys and block-list keys, each a current key and one rotation key, with no key in two of them.
+The client compiles in the whole keyset. Every verify call checks the role of the document it
+verifies: releases need `release`, the snapshot `snapshot` and the block list `blocklist`. A
+signature by a key without the document's role is refused as `WrongRole`. A key listed in the
+current snapshot's `revoked_keys` signs nothing any more: releases and block lists are checked
+with the keyset minus the revoked keys (`VerifiedSnapshot::effective_keyset`). How the keys are
+held and rotated: [registry-repo.md](registry-repo.md#keys).
+
+Rotation, per role: sign new documents with the rotation key; old documents keep verifying with
+the old key while it is in the keyset. Before a client release drops an old release key, CI
+re-signs every release with the new one. A signature by a key that is not in the keyset is
+refused as `UnknownKey`; one that does not match is `BadSignature`. A cached block list signed by
+a key that a newer client dropped, or that a snapshot revoked, fails verification when it is
+loaded, so it is discarded.
 
 The **signing key file** (CI secret, never committed, never created by the tool) holds the
-32-byte Ed25519 seed:
+32-byte Ed25519 seed of one key. The release, snapshot and block-list keys are separate secrets:
 
 ```json
-{"key_id": "fyx-2026-a", "seed": "<base64 of 32 bytes>"}
+{"key_id": "fyx-rel-2026-a", "seed": "<base64 of 32 bytes>"}
 ```
 
 Any 32 random bytes are a valid seed, e.g. `openssl rand -base64 32`. The tool reads it from
-`--key-file` or from the `FYX_REGISTRY_SIGNING_KEY` environment variable (the same JSON), and
-`fyx-registry public-key` prints the matching keyset entry.
+`--key-file` (on Unix the file must not be readable by group or others) or from the
+`FYX_REGISTRY_SIGNING_KEY` environment variable (the same JSON), which it removes from its
+environment at once. `fyx-registry public-key --role <role>…` prints the matching keyset entry.
 
 ## Signed documents
 
@@ -72,8 +91,9 @@ signed. The canonical form is a sequence of fields in a fixed order:
 | `bool` | 1 byte, `0` or `1` |
 | list | length as big-endian `u64`, then each item |
 
-The first field is a domain tag (`fyx-registry/release/v1`, `fyx-registry/blocklist/v1`), so a
-signature over a release can never pass as one over a block list. Sets (owners, capabilities,
+The first field is a domain tag (`fyx-registry/release/v1`, `fyx-registry/blocklist/v1`,
+`fyx-registry/snapshot/v1`), so a signature over a release can never pass as one over a block
+list. Sets (owners, capabilities,
 domains, programs) are encoded sorted and without duplicates. Tests decode the canonical bytes
 of random documents back to equal documents, which shows the encoding is unambiguous.
 
@@ -108,15 +128,17 @@ of random documents back to equal documents, which shows the encoding is unambig
         "network_domains": ["api.example.com"],
         "processes": []
       },
-      "signature": {"key_id": "fyx-2026-a", "ed25519": "<base64>"}
+      "signature": {"key_id": "fyx-rel-2026-a", "ed25519": "<base64>"}
     }
   ]
 }
 ```
 
 Each release is signed on its own, so CI adds a release without re-signing the rest, and a
-client uses every release that verifies even if another entry is damaged (the damaged ones are
-reported as rejected). The index as a whole is not signed.
+client uses every release that verifies even if another entry is damaged: each entry is parsed
+on its own, and a damaged one is reported as rejected (bugs-1 #12). The index as a whole, its
+time and its set of releases, is pinned by the signed snapshot below. `index.json` is at most
+32 MiB and 100 000 entries.
 
 Release fields, in canonical order:
 
@@ -124,20 +146,64 @@ Release fields, in canonical order:
 |---|---|
 | `id` | extension id |
 | `version` | `major.minor.patch` |
-| `name` | 1–64 characters, no control characters, no surrounding whitespace |
-| `description` | 0–300 characters, same rules |
+| `name` | 1–64 characters of letters, digits, spaces and plain punctuation (`-_.,:;!?&+'()/#`); no repeated spaces, no surrounding whitespace |
+| `description` | 0–300 characters; no control (Cc), format (Cf: bidi overrides, zero-width) or U+2028/U+2029 characters; no surrounding whitespace |
 | `owners` | at least one GitHub login (`A-Z a-z 0-9 -`, 1–39, no leading or trailing `-`); shown as the publisher |
 | `source.repository`, `.commit`, `.path` | `https://` URL; full 40-digit lowercase SHA; relative path without `..` (`.` for the root) |
 | `package.url`, `.sha256`, `.size` | `https://` URL; hash and size of the `.fyxext`; size 1 byte to 50 MiB (decision 12) |
 | `published_at` | when CI published it; the age gate counts from here |
-| `urgent` | security fix: skips the age gate |
+| `urgent` | security fix: skips the age gate only to replace an installed version the block list blocks |
 | `tier` | `t0`, `t1` or `t2`; at least the highest tier among the known capabilities |
 | `capabilities` | names like `ui:panel`; ones this client does not know are allowed but never granted silently |
-| `network_domains` | optional; `example.com` or `*.example.com`; needs `network:fetch` |
+| `network_domains` | optional; `example.com` or `*.example.com`; at least two labels, no IP literals, no `localhost`, and neither a public suffix nor a wildcard over one (`*.com`, `*.co.uk`, `*.github.io`; a PSL snapshot in `text.rs`); needs `network:fetch` |
 | `processes` | optional; program names without paths (`A-Z a-z 0-9 . _ + -`, up to 64); needs `process:spawn` |
 
-A version listed twice is rejected in every copy. `fyx-registry index add` refuses to add a
-version that is already published: a published release is never replaced, only blocked.
+Duplicates are counted among releases that verify (security-2 S11), so a forged copy cannot evict
+the genuine one: identical valid copies count once, two different valid copies of one version
+are both rejected. The CI (`verify_strict`) refuses any duplicate. `fyx-registry index add`
+refuses to add a version that is already published: a published release is never replaced, only
+blocked.
+
+## `snapshot.json`
+
+```json
+{
+  "signed": {
+    "schema": 1,
+    "sequence": 913,
+    "generated_at": 1763400000,
+    "expires_at": 1763572800,
+    "index_sha256": "<64 hex digits>",
+    "index_size": 1048576,
+    "revoked_keys": ["fyx-2025-a"]
+  },
+  "signature": {"key_id": "fyx-snap-2026-a", "ed25519": "<base64>"}
+}
+```
+
+Signed by a `snapshot` key (security-2 S6). It names the exact `index.json` by size and SHA-256,
+so a mirror cannot withhold a release or serve an older index; its `generated_at` is the signed
+time of the index. Rules:
+
+- `sequence` increases with every snapshot, re-signing included. The client keeps the highest
+  one it accepted and refuses a lower one, or the same one with other contents (`Rollback`).
+- `expires_at` is after `generated_at` and at most 7 days later. The CI re-signs at least every 12 h
+  (48 h validity by default); an expired snapshot is refused (`Expired`), so a frozen mirror
+  shows up.
+- `revoked_keys` (optional, at most 256) are removed from the keyset for releases and block
+  lists.
+  A `blocklist` key, or a key with the `blocklist-revocation` role, may be revoked only by a
+  snapshot signed by a key with the `blocklist-revocation` role: the offline snapshot rotation key
+  (registry-repo.md, open question 3). In any other snapshot such entries are ignored and reported
+  (`VerifiedSnapshot::ignored_revocations`), so a leaked CI environment cannot revoke the
+  block-list keys and unblock everything. The block-list revocations of a rotation-key snapshot
+  carry over to every later snapshot until another rotation-key snapshot lists different ones; a
+  client stores them with the last snapshot it accepted (`VerifiedSnapshot::to_state_json`,
+  `from_state_json`), so the 12-hourly snapshot need not repeat them.
+
+A client verifies the snapshot first (`VerifiedSnapshot::verify`), then the index with
+`Index::verify_with_snapshot(bytes, &snapshot, &keyset)`. Canonical order: schema, sequence,
+generated_at, expires_at, index_sha256, index_size, revoked_keys.
 
 A downloaded package is checked against `package.size` and `package.sha256` before it is
 unpacked (`Release::verify_package`).
@@ -150,23 +216,35 @@ unpacked (`Release::verify_package`).
     "schema": 1,
     "sequence": 42,
     "generated_at": 1763400000,
+    "expires_at": 1763572800,
     "entries": [
-      {"id": "todo", "versions": ">=1.2.0, <1.2.3", "reason": "Uploads open buffers.", "urgent": true}
+      {"id": "todo", "versions": ">=1.2.0, <1.2.3", "reason": "Uploads open buffers.", "urgent": true},
+      {"id": "todo", "versions": "*", "package_sha256": "<64 hex digits>", "reason": "A forged package.", "urgent": true}
     ]
   },
-  "signature": {"key_id": "fyx-2026-a", "ed25519": "<base64>"}
+  "signature": {"key_id": "fyx-bl-2026-a", "ed25519": "<base64>"}
 }
 ```
 
-- `sequence` increases with every published list.
+- Signed by a `blocklist` key. At most 4 MiB and 10 000 entries.
+- `sequence` increases with every published list; the CI publishes a new one at least every 12 h.
+- `expires_at` is after `generated_at` and at most 7 days later (security-2 S5).
 - `versions` is `*` (every version) or comparators joined by `,` that must all hold. A comparator
-  is `=`, `>`, `>=`, `<` or `<=` followed by `major.minor.patch`. There is no `^` or `~`, and
-  pre-release versions compare by plain semver order, so `>=1.2.0` also covers `1.3.0-beta`
-  (a file installed from disk may carry one).
-- `reason`: 1–300 characters without control characters, shown to the user.
+  is `=`, `>`, `>=`, `<` or `<=` followed by `major.minor.patch`. There is no `^` or `~`.
+  Versions compare by semver precedence, which ignores build metadata, so `=1.2.0` also blocks
+  `1.2.0+local` (bugs-1 #21); pre-release versions compare by plain semver order, so `>=1.2.0`
+  also covers `1.3.0-beta`. A local file must have a plain `major.minor.patch` version
+  (`check_local_version`).
+- `package_sha256` (optional): the entry blocks the package with that hash, so a file from
+  disk cannot escape a block by claiming another version; the install store records each
+  installed package's hash (`InstalledVersion::package_sha256`). Within the entry's versions it
+  also blocks an install whose hash was never recorded: an unknown hash cannot prove it is not
+  the blocked package (integration-5 R9).
+- `reason`: 1–300 characters, the same character rules as `description`, shown to the user.
 
-Canonical order: schema, sequence, generated_at, then for each entry: id, the comparators (each
-operator and version as strings), reason, urgent.
+Canonical order: schema, sequence, generated_at, expires_at, then for each entry: id, the
+comparators (each operator and version as strings), reason, urgent, whether a package hash
+follows, and the hash.
 
 ### The cached copy
 
@@ -182,26 +260,40 @@ It is verified again when loaded. `BlocklistCache::apply_fetch` decides what eac
 |---|---|
 | network error, not JSON, bad or unknown signature, newer schema | kept as is (`Keep`); nothing is disabled |
 | lower `sequence` than the cache | kept: a replayed old list must not unblock anything |
-| same `sequence`, same content | `fetched_at` updated (`Refresh`), never moved backwards |
+| same `sequence`, same content | `fetched_at` updated (`Refresh`), never moved backwards; the list's age does not change |
 | same `sequence`, different content | kept, reported as a conflict |
 | higher `sequence`, or no cache yet | replaced (`Replace`) and applied |
+| no cache, `sequence` below the highest one ever accepted | kept out (`BelowFloor`): a replay after the cache was dropped |
+| no cache, past its `expires_at` | kept out (`Expired`): with nothing to compare, it may be any old list a mirror kept |
 
-Fetches run at start and every 6 h (`fetch_due`). `freshness` reports `Missing` (never fetched:
-nothing is blocked yet), `Fresh`, or `Stale` once the last successful fetch is 7 days old, for
-the "Block list is N days old" warning (spec §4 failure 5). Being offline never disables an
-extension.
+**The floor.** The client keeps the highest sequence it ever accepted with its saved snapshot
+state, which outlives the cache, so dropping the cache (a revoked block-list key, a failed
+restore) does not forget it, across restarts too (`BlocklistCache::apply_fetch_above`,
+`RegistryClient::blocklist_floor`; integration-6 N4).
+
+Fetches run at start and every 6 h (`fetch_due`); a last attempt stamped in the future (a fast
+clock) does not postpone the next one (bugs-1 #22). `freshness` reports `Missing` (never
+fetched: no block is known yet), `Fresh`, or `Stale` once the list's signed `generated_at` is 7
+days old or its `expires_at` has passed, however recently it was fetched, for the "Block list is
+N days old" warning (spec §4 failure 5). Being offline never disables an extension.
 
 ## Age gate
 
-`age_gate(release, now)`: a release installs or updates only when `now >= published_at + 24 h`,
-unless `urgent`. A `published_at` in the future counts as just published, so clock skew never
-shortens the wait. Rollback to the kept previous version is not gated: it is already installed.
+`age_gate(release, now)`: a release installs or updates only when `now >= published_at + 24 h`.
+`urgent` skips the wait only when the release replaces an installed version that the block list
+blocks (integration-6 R8). The release key signs `urgent`, so a leaked release key alone cannot
+skip the wait: the separately held block-list key has to block the installed version first. A
+fresh install of an `urgent` release waits too. A `published_at` in the future counts as just
+published, so clock skew never shortens the wait. Rollback to the kept previous version is not gated: it is already installed.
 
 ## Update planning
 
 `plan_updates(installed, index, blocklist, now)` returns actions per installed extension. It is
 level-triggered: it states what each extension should be now, so the host can run it on every
-index or block list change; a lifted block simply stops producing `Disable`.
+index or block list change; a lifted block simply stops producing `Disable`. With no list, or
+one past its `expires_at`, the plan shows no blocks, and that means "not known", not "nothing is
+blocked": the host re-enables an extension it disabled only while
+`RegistryClient::blocks_can_lift` holds (integration-6 N4).
 
 The installed state per extension (kept in `state.json` by the install store, task 1.1): active
 version and its origin (`registry` or `local_file`), the kept previous version, whether the user
@@ -235,6 +327,51 @@ list applies to them.
 blocked and passes the age gate, or says why none can install (`NotInIndex`, `Blocked`,
 `TooNew`).
 
+## Client core
+
+`RegistryClient` (`crates/fyx_registry/src/client.rs`, plan 3.3) is what the extensions page and
+the install store call. It holds the compiled-in keyset, the last accepted snapshot and index,
+and the block-list cache. It never touches the network, the disk or the clock:
+
+- **`Fetch`**: the host's fetcher, `fetch(&FetchRequest) -> Future<anyhow::Result<Vec<u8>>> +
+  Send`. A `FetchRequest` names the file (`Snapshot`, `Index`, `Blocklist`,
+  `Package { url }`) and `max_bytes`: 64 KiB for the snapshot, exactly the snapshot's
+  `index_size` for the index, 4 MiB for the block list, `package.size` for a package. The client
+  refuses a longer body even if the fetcher does not stop.
+- **`refresh_index(fetch, now)`**: the snapshot first, against the keyset and the last accepted
+  snapshot; then the index it names (not fetched again when the held one matches). The two are
+  accepted together or not at all. Returns `Updated`, `Unchanged`, `FetchFailed` (offline: the
+  state stays) or `Refused(error)`.
+- **`refresh_blocklist(fetch, now)`**: `BlocklistCache::apply_fetch` with the keyset of the last
+  accepted snapshot (revoked keys removed). A snapshot that revokes the key of the cached list
+  drops that list. At start, then every 6 h: `blocklist_fetch_due(now)` and
+  `next_blocklist_fetch(now)` (for the host's timer) count from the last attempt, failed ones
+  included, so an offline client retries every 6 h. The attempt time is not stored: a fresh
+  start always fetches (plan 3.4).
+- **`index(now)`**: the verified index, or why installs and updates are stopped
+  (`Unavailable`): `NeverFetched`; `Expired` (the last snapshot is past `expires_at`);
+  `Refused(error)` (the last fetched snapshot or index failed: a rollback, a bad signature, an
+  index the snapshot does not name), cleared by the next good refresh. Offline stops nothing
+  while the last snapshot is valid.
+- **`plan_install(id, now)`**: `plan_install` on the current index, plus `consent`: what the
+  install confirmation asks for (T1/T2 and unknown capabilities, domains, programs, tier; empty
+  for an all-T0 release). Refused with `Unavailable` while stopped.
+- **`plan_updates(installed, now)`**: `plan_updates` on the current index. While stopped, only the
+  block list acts: blocked versions still roll back or are disabled, nothing updates or is held.
+  Held updates for new T1/T2 capabilities come from `Permissions::additions`; record the user's
+  approval with `Permissions::approve`.
+- **`PlanChanges::between(previous, current)`**: what changed between two `plan_updates` runs,
+  for the host's notifications. A new `Disable` or `Rollback` means "blocked: <reason>"; a
+  `Disable` that went away means the block was lifted. Spec §4 failures 1, 2 and 5 are client
+  tests in `client.rs`.
+- **`download(fetch, release)`**: fetches the package capped at `package.size` and checks it
+  with `Release::verify_package` before the install store unpacks it.
+- **`stored_state()` / `restore(keyset, &StoredState)`**: three opaque files (the snapshot state,
+  the index bytes, the block-list cache). Store them after `Updated` and after a block-list
+  `Replace` or `Refresh`. `restore` verifies each again and leaves out, and reports, any part
+  that fails (the index is kept only with the snapshot that names it); the next refresh fetches
+  it again. The restored snapshot keeps guarding the sequence.
+
 ## `fyx-registry` (CI tool)
 
 ```bash
@@ -254,20 +391,52 @@ fyx-registry sign blocklist blocklist-unsigned.json --out blocklist.json
 ```
 
 ```bash
+fyx-registry sign snapshot --index index.json --sequence 914 --key-file snapshot-key.json --out snapshot.json
+```
+
+```bash
+fyx-registry verify index index.json --keyset keyset.json --snapshot snapshot.json
+```
+
+```bash
 fyx-registry verify blocklist blocklist.json --keyset keyset.json
 ```
 
+```bash
+fyx-registry verify keyset keyset.json --online-snapshot-key fyx-snap-2026-a
+```
+
 - `sign release` takes the unsigned release (the `signed` part above), validates it, checks it
-  against the package file when `--package` is given, and writes the envelope.
+  against the package file (`--package`, required), and writes the envelope.
 - `sign blocklist` takes the unsigned block list and writes the envelope.
-- `verify release|index|blocklist` checks signatures and contents; `verify release --package`
-  also checks the package file. Any failure exits non-zero.
+- `sign snapshot` hashes the index, sets `generated_at` (now, or `--generated-at`) and
+  `expires_at` (`--validity-hours`, 48 by default), adds `--revoke <key>`s, and writes the
+  envelope.
+- `verify release|index|blocklist|snapshot` checks signatures and contents; `verify release
+  --package` also checks the package file, `verify index --snapshot` that the snapshot names this
+  index. Any failure exits non-zero.
+- `verify keyset` checks the registry's role separation ([registry-repo.md, "Keys"](registry-repo.md#keys)): it
+  refuses a key with two signing roles (`release`, `blocklist`, `snapshot`) and
+  `blocklist-revocation` on a key without `snapshot`. With `--online-snapshot-key <id>`, the key in
+  `SNAPSHOT_KEY`, it also refuses that key unless it has `snapshot` and not
+  `blocklist-revocation`, so a rotation cannot put that role into CI by accident. Clients do not
+  apply this check.
+- `verify client <dir> --keyset <file> [--now <seconds>]` runs the client core (below) over a
+  folder holding `snapshot.json`, `index.json`, optionally `blocklist.json`, and packages named by
+  the last segment of their `package.url`. It reports each extension as installable (with its
+  package verified when present) or held by the age gate, and fails if the client refuses
+  anything. The registry template's dry run (`tools/fyx-extensions-template`) ends with it.
 - `index add` verifies the whole existing index and the new release, refuses a version that is
   already there, keeps releases sorted by id and version, sets `generated_at` (now, or
   `--generated-at`), and replaces the file atomically. A missing index is created.
-- `public-key` prints the keyset entry for the signing key.
+- `public-key --role <role>…` prints the keyset entry for the signing key.
+- Files are replaced through a temporary file with a random name, created exclusively.
 
 Without `--key-file`, the signing commands read `FYX_REGISTRY_SIGNING_KEY`.
+
+The tool signs with whatever key it is given. Keeping the two kinds apart is CI's job: the release
+key and the block-list key live in separate GitHub Environments, and only the workflow for each kind
+of document can read its key (registry-repo.md, "CI").
 
 ## Schema changes
 

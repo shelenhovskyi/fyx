@@ -141,7 +141,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("General Settings"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Accessible Mode",
-                description: "Optimize Fyx's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.", // fyx: product name
+                description: "Optimize Zed's interface for assistive technology such as screen readers. When enabled, otherwise-collapsed controls stay expanded and keyboard-reachable.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("accessible_mode"),
@@ -327,7 +327,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Trust All Projects By Default",
-                description: "When opening Fyx, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.", // fyx: product name
+                description: "When opening Zed, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("session.trust_all_projects"),
@@ -377,7 +377,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore On Startup",
-                description: "What to restore from the previous session when opening Fyx.", // fyx: product name
+                description: "What to restore from the previous session when opening Zed.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("restore_on_startup"),
@@ -398,7 +398,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SettingItem(SettingItem {
                 files: USER,
                 title: "Preview Channel",
-                description: "Which settings should be activated only in Preview build of Fyx.", // fyx: product name
+                description: "Which settings should be activated only in Preview build of Zed.",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -455,7 +455,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Telemetry Metrics",
-                description: "Send anonymized usage data like what languages you're using Fyx with.", // fyx: product name
+                description: "Send anonymized usage data like what languages you're using Zed with.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("telemetry.metrics"),
@@ -740,7 +740,7 @@ fn appearance_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Icon Theme",
-                    description: "The custom set of icons Fyx will associate with files and directories.", // fyx: product name
+                    description: "The custom set of icons Zed will associate with files and directories.",
                     field: Box::new(SettingField {
                         organization_override: None,
                         json_path: Some("icon_theme$"),
@@ -4048,7 +4048,7 @@ fn search_and_files_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Exclusions",
-                description: "Files or globs of files that will be excluded by Fyx entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"", // fyx: product name
+                description: "Files or globs of files that will be excluded by Zed entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -4071,7 +4071,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Inclusions",
-                description: "Files or globs of files that will be included by Fyx, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zed's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions", // fyx: product name
+                description: "Files or globs of files that will be included by Zed, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zed's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
                         organization_override: None,
@@ -5332,7 +5332,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Decorations",
-                description: "(Linux only) whether Fyx or your compositor should draw window decorations.", // fyx: product name
+                description: "(Linux only) whether Zed or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("window_decorations"),
@@ -6554,9 +6554,23 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn git_panel_section() -> [SettingsPageItem; 19] {
+    fn git_panel_section() -> [SettingsPageItem; 20] {
         [
             SettingsPageItem::SectionHeader("Git Panel"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Style",
+                description: "Show relative or absolute dates in commit history.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.date_style"),
+                    pick: |content| content.git_panel.as_ref()?.date_style.as_ref(),
+                    write: |content, value, _| {
+                        content.git_panel.get_or_insert_default().date_style = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Git Panel Button",
                 description: "Show the Git panel button in the status bar.",
@@ -7244,7 +7258,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Save Breakpoints",
-                description: "Whether breakpoints should be reused across Fyx sessions.", // fyx: product name
+                description: "Whether breakpoints should be reused across Zed sessions.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("debugger.save_breakpoints"),
@@ -7281,7 +7295,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Log DAP Communications",
-                description: "Whether to log messages between active debug adapters and Fyx.", // fyx: product name
+                description: "Whether to log messages between active debug adapters and Zed.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("debugger.log_dap_communications"),
@@ -8214,14 +8228,28 @@ fn terminal_page() -> SettingsPage {
 }
 
 fn version_control_page() -> SettingsPage {
-    fn git_integration_section() -> [SettingsPageItem; 3] {
+    fn git_integration_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Git Integration"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Format",
+                description: "Format absolute dates using locale, iso (YYYY-MM-DD HH:MM), or a strftime format such as %Y-%m-%d %H:%M.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.date_format"),
+                    pick: |content| content.git.as_ref()?.date_format.as_ref(),
+                    write: |content, value, _| {
+                        content.git.get_or_insert_default().date_format = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::DynamicItem(DynamicItem {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Fyx.", // fyx: product name
+                    description: "Disable all Git integration features in Zed.",
                     field: Box::new(SettingField::<bool> {
                         organization_override: None,
                         json_path: Some("git.disable_git"),
@@ -8425,9 +8453,36 @@ fn version_control_page() -> SettingsPage {
         ]
     }
 
-    fn inline_git_blame_section() -> [SettingsPageItem; 6] {
+    fn inline_git_blame_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Inline Git Blame"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Style",
+                description: "Show relative or absolute dates inline and in the status bar.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.inline_blame.date_style"),
+                    pick: |content| {
+                        content
+                            .git
+                            .as_ref()?
+                            .inline_blame
+                            .as_ref()?
+                            .date_style
+                            .as_ref()
+                    },
+                    write: |content, value, _| {
+                        content
+                            .git
+                            .get_or_insert_default()
+                            .inline_blame
+                            .get_or_insert_default()
+                            .date_style = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::DynamicItem(DynamicItem {
                 discriminant: SettingItem {
                     title: "Enabled",
@@ -8609,9 +8664,28 @@ fn version_control_page() -> SettingsPage {
         ]
     }
 
-    fn git_blame_view_section() -> [SettingsPageItem; 2] {
+    fn git_blame_view_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Git Blame View"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Style",
+                description: "Show relative or absolute dates in the blame gutter.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.blame.date_style"),
+                    pick: |content| content.git.as_ref()?.blame.as_ref()?.date_style.as_ref(),
+                    write: |content, value, _| {
+                        content
+                            .git
+                            .get_or_insert_default()
+                            .blame
+                            .get_or_insert_default()
+                            .date_style = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Avatar",
                 description: "Show the avatar of the author of the commit.",
@@ -8642,9 +8716,36 @@ fn version_control_page() -> SettingsPage {
         ]
     }
 
-    fn branch_picker_section() -> [SettingsPageItem; 2] {
+    fn branch_picker_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Branch Picker"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Style",
+                description: "Show relative or absolute dates in the branch picker.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.branch_picker.date_style"),
+                    pick: |content| {
+                        content
+                            .git
+                            .as_ref()?
+                            .branch_picker
+                            .as_ref()?
+                            .date_style
+                            .as_ref()
+                    },
+                    write: |content, value, _| {
+                        content
+                            .git
+                            .get_or_insert_default()
+                            .branch_picker
+                            .get_or_insert_default()
+                            .date_style = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Author Name",
                 description: "Show author name as part of the commit information in branch picker.",
@@ -8667,6 +8768,59 @@ fn version_control_page() -> SettingsPage {
                             .branch_picker
                             .get_or_insert_default()
                             .show_author_name = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn stash_picker_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Stash Picker"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Style",
+                description: "Show relative or absolute dates in the stash picker.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.stash_picker.date_style"),
+                    pick: |content| {
+                        content
+                            .git
+                            .as_ref()?
+                            .stash_picker
+                            .as_ref()?
+                            .date_style
+                            .as_ref()
+                    },
+                    write: |content, value, _| {
+                        content
+                            .git
+                            .get_or_insert_default()
+                            .stash_picker
+                            .get_or_insert_default()
+                            .date_style = value
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn git_graph_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Git Graph"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Date Style",
+                description: "Show relative or absolute dates in graph rows.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_graph.date_style"),
+                    pick: |content| content.git_graph.as_ref()?.date_style.as_ref(),
+                    write: |content, value, _| {
+                        content.git_graph.get_or_insert_default().date_style = value
                     },
                 }),
                 metadata: None,
@@ -8746,9 +8900,63 @@ fn version_control_page() -> SettingsPage {
         ]
     }
 
-    fn file_diff_section() -> [SettingsPageItem; 2] {
+    fn commit_view_section() -> [SettingsPageItem; 4] {
         [
-            SettingsPageItem::SectionHeader("File Diff"),
+            SettingsPageItem::SectionHeader("Git Commit View"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Expand Description by Default",
+                description: "Whether newly opened commit views show the full commit description.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.commit_view.expand_description"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git
+                            .as_ref()?
+                            .commit_view
+                            .as_ref()?
+                            .expand_description
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git
+                            .get_or_insert_default()
+                            .commit_view
+                            .get_or_insert_default()
+                            .expand_description = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Expand Files by Default",
+                description: "Whether newly opened commit views expand every changed file.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git.commit_view.expand_files"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git
+                            .as_ref()?
+                            .commit_view
+                            .as_ref()?
+                            .expand_files
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git
+                            .get_or_insert_default()
+                            .commit_view
+                            .get_or_insert_default()
+                            .expand_files = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Full File by Default",
                 description: "Whether newly opened file diffs show the full file instead of changes only.",
@@ -8787,7 +8995,9 @@ fn version_control_page() -> SettingsPage {
             inline_git_blame_section(),
             git_blame_view_section(),
             branch_picker_section(),
-            file_diff_section(),
+            stash_picker_section(),
+            commit_view_section(),
+            git_graph_section(),
             git_hunks_section(),
         ],
     }
@@ -8904,7 +9114,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("General"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Disable AI",
-                description: "Whether to disable all AI features in Fyx.", // fyx: product name
+                description: "Whether to disable all AI features in Zed.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("disable_ai"),
@@ -9291,7 +9501,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Terminal Thread Init Command",
-                description: "Command to automatically run when Fyx creates a Terminal Thread shell in the agent panel. Runs in your configured shell.", // fyx: product name
+                description: "Command to automatically run when Zed creates a Terminal Thread shell in the agent panel. Runs in your configured shell.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.terminal_init_command"),
@@ -9444,6 +9654,29 @@ fn ai_page(cx: &App) -> SettingsPage {
                             .agent
                             .get_or_insert_default()
                             .show_merge_conflict_indicator = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Auto-Generate Thread Titles",
+                description: "Whether to automatically generate a title for Zed Agent threads using the summary model. When disabled, titles are only created when manually requested.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.auto_generate_thread_titles"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .auto_generate_thread_titles
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .auto_generate_thread_titles = value;
                     },
                 }),
                 metadata: None,
@@ -10160,7 +10393,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Autoclose"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Autoclose",
-                description: "Whether to automatically type closing characters for you. For example, when you type '(', Fyx will automatically add a closing ')' at the correct position.", // fyx: product name
+                description: "Whether to automatically type closing characters for you. For example, when you type '(', Zed will automatically add a closing ')' at the correct position.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).use_autoclose"),
@@ -10180,7 +10413,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Auto Surround",
-                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Fyx will automatically surround text with ().", // fyx: product name
+                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zed will automatically surround text with ().",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).use_auto_surround"),
@@ -10728,7 +10961,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Prefer LSP",
-                description: "Use LSP tasks over Fyx language extension tasks.", // fyx: product name
+                description: "Use LSP tasks over Zed language extension tasks.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),

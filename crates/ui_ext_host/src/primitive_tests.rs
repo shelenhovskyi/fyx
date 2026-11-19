@@ -6,9 +6,10 @@ use std::{cell::RefCell, rc::Rc};
 use anyhow::Result;
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use gpui::{AppContext as _, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
-use ui_ext::{
+use ui_ext::TreeLimits;
+use ui_ext::v0_2::{
     ButtonProps, ButtonStyle, ColorToken, DiffViewProps, FlexDirection, FlexProps, IconProps,
-    InputProps, Node, NodeId, Props, TableProps, TextProps, Tree, TreeLimits, UiEvent, Update,
+    InputProps, Node, NodeId, Props, TableProps, TextProps, UiEvent, Update, tree::Tree,
 };
 
 use crate::{
@@ -39,9 +40,11 @@ fn node(id: NodeId, parent: Option<NodeId>, props: Props) -> Node {
 fn button(label: &str, icon: Option<&str>, style: ButtonStyle, disabled: bool) -> Props {
     Props::Button(ButtonProps {
         label: label.into(),
-        icon: icon.map(Into::into),
+        icon: icon.map(|name| ui_ext::v0_2::IconRef::Upstream(name.into())),
         style,
         disabled,
+        tooltip: None,
+        accessible_label: None,
     })
 }
 
@@ -96,7 +99,7 @@ fn nodes() -> Vec<Node> {
             UNKNOWN_ICON,
             root,
             Props::Icon(IconProps {
-                name: "fyx_no_such_icon".into(),
+                name: ui_ext::v0_2::IconRef::Upstream("fyx_no_such_icon".into()),
                 color: None,
             }),
         ),
@@ -104,7 +107,7 @@ fn nodes() -> Vec<Node> {
             KNOWN_ICON,
             root,
             Props::Icon(IconProps {
-                name: "check".into(),
+                name: ui_ext::v0_2::IconRef::Upstream("check".into()),
                 color: Some(ColorToken::Success),
             }),
         ),
@@ -139,6 +142,8 @@ fn nodes() -> Vec<Node> {
             Props::Input(InputProps {
                 value: "draft".into(),
                 placeholder: "Filter".into(),
+                secret: false,
+                label: None,
             }),
         ),
         node(
@@ -195,7 +200,7 @@ impl UiBackend for StaticBackend {
         let tree = Tree::from_nodes(nodes(), TreeLimits::default()).map_err(anyhow::Error::from);
         async move {
             tree.map(|value| Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value,
             })
         }
@@ -210,7 +215,7 @@ impl UiBackend for StaticBackend {
         self.events.borrow_mut().push(event);
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: Update::Unchanged,
             })
         }
@@ -223,17 +228,21 @@ impl UiBackend for StaticBackend {
         list: NodeId,
         start: u32,
         count: u32,
-    ) -> LocalBoxFuture<'static, Result<Reply<Vec<(u32, Tree)>>>> {
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
         let rows = if list == TABLE {
             (start..(start + count).min(TABLE_ROWS))
-                .map(|index| (index, table_row(index)))
+                .map(|index| crate::backend::Row {
+                    index,
+                    indent: 0,
+                    tree: table_row(index),
+                })
                 .collect()
         } else {
             Vec::new()
         };
         async move {
             Ok(Reply {
-                pushed: Vec::new(),
+                effects: Vec::new(),
                 value: rows,
             })
         }
@@ -251,12 +260,12 @@ fn open(
 ) {
     crate::tests::init_test(cx);
     let backend = Rc::new(StaticBackend::default());
-    let surface = ui_ext::Surface {
+    let surface = ui_ext::v0_2::Surface {
         id: "static".into(),
         title: "Static".into(),
-        kind: ui_ext::SurfaceKind::Panel(ui_ext::PanelDescriptor {
-            position: ui_ext::DockPosition::Right,
-            icon: "hash".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
             default_size: 320,
         }),
     };
@@ -385,7 +394,10 @@ async fn test_input_shows_its_value_and_user_text_stands(cx: &mut TestAppContext
     vcx.simulate_input("ed");
     state.update(vcx, |state, cx| {
         state.apply_update(
-            Update::Patches(vec![ui_ext::Patch::SetProps(MONO_TEXT, text("changed"))]),
+            Update::Patches(vec![ui_ext::v0_2::Patch::SetProps(
+                MONO_TEXT,
+                text("changed"),
+            )]),
             cx,
         );
     });
@@ -445,4 +457,194 @@ async fn test_diff_view_language_from_name(cx: &mut TestAppContext) {
         "diff.txt"
     );
     assert_eq!(crate::view::diff_path(None, &languages), "diff.txt");
+}
+
+/// Triage-3 #5 (PERF 1): how long a redraw takes when nothing in the surface changed (a caret
+/// blink elsewhere), for a tree at the node cap. Prints the timing; run with `--ignored`.
+#[gpui::test]
+#[ignore]
+async fn bench_redraw_of_a_large_tree(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let flex = |direction| {
+        Props::Flex(FlexProps {
+            direction,
+            ..FlexProps::default()
+        })
+    };
+    let mut nodes = vec![node(1, None, flex(FlexDirection::Column))];
+    let mut next = 2;
+    for _ in 0..128 {
+        let group = next;
+        next += 1;
+        nodes.push(node(group, Some(1), flex(FlexDirection::Row)));
+        for i in 0..126 {
+            nodes.push(node(next, Some(group), text(format!("cell {i}"))));
+            next += 1;
+        }
+    }
+    let count = nodes.len();
+    let tree = Tree::from_nodes(nodes, TreeLimits::default()).expect("valid tree");
+    let backend: Rc<dyn UiBackend> = Rc::new(StaticBackend::default());
+    let surface = ui_ext::v0_2::Surface {
+        id: "static".into(),
+        title: "Static".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
+            default_size: 320,
+        }),
+    };
+    let state = cx.new(|cx| SurfaceState::with_tree(backend, surface, None, tree, cx));
+    // How a panel hosts it: as a cached view (`AnyView::cached`), so a redraw caused by
+    // something else (a caret blinking in another editor) reuses its last frame.
+    struct CachedHost(Entity<SurfaceView>);
+    impl gpui::Render for CachedHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            gpui::div().size_full().child(
+                gpui::AnyView::from(self.0.clone())
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
+        }
+    }
+    let (host, vcx) = cx.add_window_view(|window, cx| {
+        CachedHost(cx.new(|cx| SurfaceView::new(state, false, window, cx)))
+    });
+    vcx.run_until_parked();
+    for round in 0..3 {
+        let started = std::time::Instant::now();
+        // As a caret blink elsewhere does: one other view notifies, the window redraws.
+        host.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        eprintln!("redraw {round} of {count} nodes: {:?}", started.elapsed());
+    }
+}
+
+/// A panel with two `terminal` nodes: handle 3 is one of the extension's in-panel terminals,
+/// handle 4 is not.
+struct TerminalBackend;
+
+impl UiBackend for TerminalBackend {
+    fn extension_id(&self) -> &str {
+        "terminals"
+    }
+
+    fn mount(&self, _: &str) -> LocalBoxFuture<'static, Result<Reply<Tree>>> {
+        let terminal = |handle| Props::Terminal(ui_ext::v0_2::TerminalNodeProps { handle });
+        let nodes = vec![
+            node(
+                ROOT,
+                None,
+                Props::Flex(FlexProps {
+                    direction: FlexDirection::Column,
+                    ..FlexProps::default()
+                }),
+            ),
+            node(2, Some(ROOT), terminal(3)),
+            node(3, Some(ROOT), terminal(4)),
+        ];
+        let tree = Tree::from_nodes(nodes, TreeLimits::default()).map_err(anyhow::Error::from);
+        async move {
+            tree.map(|value| Reply {
+                effects: Vec::new(),
+                value,
+            })
+        }
+        .boxed_local()
+    }
+
+    fn handle_event(&self, _: &str, _: UiEvent) -> LocalBoxFuture<'static, Result<Reply<Update>>> {
+        async move {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Update::Unchanged,
+            })
+        }
+        .boxed_local()
+    }
+
+    fn list_rows(
+        &self,
+        _: &str,
+        _: NodeId,
+        _: u32,
+        _: u32,
+    ) -> LocalBoxFuture<'static, Result<Reply<Vec<crate::backend::Row>>>> {
+        async move {
+            Ok(Reply {
+                effects: Vec::new(),
+                value: Vec::new(),
+            })
+        }
+        .boxed_local()
+    }
+}
+
+struct FakeTerminalView;
+
+impl gpui::Render for FakeTerminalView {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::Styled as _;
+        gpui::div().size_full()
+    }
+}
+
+/// Plan 5.9: a `terminal` node draws the view `set_terminal_node_views` gives for the
+/// extension's handle, made once and kept across redraws; another handle draws a placeholder.
+#[gpui::test]
+async fn test_terminal_node_draws_the_extensions_terminal(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let asked: Rc<RefCell<Vec<(String, u64)>>> = Rc::default();
+    cx.update(|cx| {
+        let asked = asked.clone();
+        crate::set_terminal_node_views(
+            Rc::new(move |ext, handle, _, cx| {
+                asked.borrow_mut().push((ext.to_string(), handle.0));
+                (ext == "terminals" && handle.0 == 3).then(|| cx.new(|_| FakeTerminalView).into())
+            }),
+            cx,
+        );
+    });
+    let backend: Rc<dyn UiBackend> = Rc::new(TerminalBackend);
+    let surface = ui_ext::v0_2::Surface {
+        id: "terminals".into(),
+        title: "Terminals".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
+            default_size: 320,
+        }),
+    };
+    let state = cx.new(|cx| SurfaceState::new(backend, surface, None, cx));
+    cx.run_until_parked();
+    let (view, vcx) =
+        cx.add_window_view(|window, cx| SurfaceView::new(state.clone(), false, window, cx));
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+
+    let terminal = bounds("fyx-node-2".into(), vcx);
+    let placeholder = bounds("fyx-node-3".into(), vcx);
+    assert!(
+        terminal.size.height > placeholder.size.height * 4.0,
+        "terminal {terminal:?}, placeholder {placeholder:?}"
+    );
+    assert_eq!(
+        *asked.borrow(),
+        [("terminals".to_string(), 3), ("terminals".to_string(), 4)]
+    );
+    view.read_with(vcx, |view, _| {
+        assert!(view.terminals.get(&3).is_some_and(Option::is_some));
+        assert_eq!(view.terminals.get(&4), Some(&None));
+    });
 }

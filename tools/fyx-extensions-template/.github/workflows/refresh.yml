@@ -1,0 +1,141 @@
+# Trusted, on a schedule (registry-repo.md, "refresh.yml"): re-sign the snapshot of the unchanged
+# index and the unchanged block list every 12 h, so neither lapses while the registry is quiet
+# (48 h validity: three refreshes in a row can fail before a client sees an expired document).
+# A signing key is only ever in the environment of the one step that signs.
+name: refresh
+
+on:
+  # schedule:
+  #   - cron: "17 */12 * * *"
+  workflow_dispatch:
+# Paused until launch (plan 3.2, 2026-11-19): Actions minutes on this private repository cost
+# money, so nothing runs on its own. Restore the trigger above with the owner's go-ahead.
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    concurrency:
+      group: publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the keyset before any key is read
+        env:
+          SNAPSHOT_KEY_ID: ${{ vars.SNAPSHOT_KEY_ID }}
+        run: |
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          docker run --rm --network none -v "$PWD:/w:ro" -w /w "$image" \
+            fyx-registry verify keyset keys/keyset.json --online-snapshot-key "$SNAPSHOT_KEY_ID"
+      - name: Download the published index and snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p published
+          gh release download index --repo "$REPO" --pattern index.json --pattern snapshot.json --dir published
+      - name: Re-sign the snapshot of the unchanged index
+        env:
+          FYX_REGISTRY_SIGNING_KEY: ${{ secrets.SNAPSHOT_KEY }}
+        run: |
+          sequence=$(( $(jq -r .signed.sequence published/snapshot.json) + 1 ))
+          # Release and snapshot revocations carry over; block-list ones the client keeps itself.
+          mapfile -t revoke < <(python3 scripts/registry.py revocations published/snapshot.json --keyset keys/keyset.json)
+          docker run --rm --network none -e FYX_REGISTRY_SIGNING_KEY -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry sign snapshot --index published/index.json --sequence "$sequence" "${revoke[@]}" --out snapshot.json
+      - name: Verify and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          docker run --rm --network none -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry verify index published/index.json --keyset keys/keyset.json --snapshot snapshot.json
+          gh release upload index --repo "$REPO" --clobber snapshot.json
+
+  blocklist:
+    runs-on: ubuntu-24.04
+    environment: blocklist-signing
+    concurrency:
+      group: blocklist
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download the published block list
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          image=$(python3 -c 'import tomllib; p = tomllib.load(open("policy/builder.toml", "rb")); print(p["image"] + "@" + p["digest"])')
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          mkdir -p published
+          # A download error fails the job; only a block list never published is skipped (R6).
+          python3 scripts/published.py --repo "$REPO" --dir published --allow-missing blocklist.json
+          if [ -f published/blocklist.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no block list published yet"
+          fi
+      - name: Re-sign the unchanged block list
+        if: steps.published.outputs.exists == 'true'
+        env:
+          FYX_REGISTRY_SIGNING_KEY: ${{ secrets.BLOCKLIST_KEY }}
+        run: |
+          # Entries never change here; only blocklist.yml changes them.
+          python3 scripts/registry.py reblock published/blocklist.json --now "$(date +%s)" > unsigned.json
+          docker run --rm --network none -e FYX_REGISTRY_SIGNING_KEY -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry sign blocklist unsigned.json --out blocklist.json
+      - name: Verify and upload
+        if: steps.published.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          docker run --rm --network none -v "$PWD:/w" -w /w "$IMAGE" \
+            fyx-registry verify blocklist blocklist.json --keyset keys/keyset.json
+          gh release upload index --repo "$REPO" --clobber blocklist.json
+
+  # No secrets: reads the published documents. Two failed refreshes in a row leave less than
+  # 24 h; then it opens an issue for the owner.
+  watchdog:
+    needs: [snapshot, blocklist]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Expiry check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          owner=$(python3 -c 'import tomllib; print(tomllib.load(open("policy/registry.toml", "rb"))["owner"])')
+          mkdir -p published
+          python3 scripts/published.py --repo "$REPO" --dir published --allow-missing \
+            snapshot.json blocklist.json
+          now=$(date +%s)
+          late=""
+          for file in published/snapshot.json published/blocklist.json; do
+            [ -f "$file" ] || continue
+            python3 scripts/registry.py expires-within "$file" --hours 24 --now "$now" || late="$late $(basename "$file")"
+          done
+          if [ -n "$late" ]; then
+            gh issue create --repo "$REPO" --assignee "$owner" --title "Registry documents expire within 24 h:$late" \
+              --body "The 12 h refresh failed at least twice in a row. Check the refresh workflow runs: clients refuse an expired snapshot (no installs or updates), and a stale block list shows a warning."
+          fi

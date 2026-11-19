@@ -1,7 +1,16 @@
 # `fyx:ui` 0.2 → 0.3: coexistence, gating, SDK, test plan
 
-Companion to [`design.md`](design.md) and [`fyx-ui-0.3.wit`](fyx-ui-0.3.wit). Nothing here has
-been implemented. It extends [`wit-0.2/migration.md`](../wit-0.2/migration.md), which this file
+Companion to [`design.md`](design.md) and the staged WIT,
+[`crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit`](../../../crates/ui_ext/wit/since_v0.3.0/fyx-ui.wit).
+
+**Status (2026-11-19).** This file was written as the plan, before any code. For the smaller 0.3
+(images, canvas, T2, notifications) most of it has landed: the 0.3 WIT directory, the 0.3 linker
+with every declared interface linked, and the per-world capability lists in the manifest,
+`fyx-ext` and the harness (integration-6 §2). What it says about the picker, `document-context`
+and the decoration extras moved to 0.4 with plan 4.2–4.4. Not done: the `gate.sh` copy check of
+§1 (integration-6 F4). The rest of the file is the plan as written.
+
+It extends [`wit-0.2/migration.md`](../wit-0.2/migration.md), which this file
 assumes has landed: the per-version WIT directories, `UiBindings`, the `HostEffect` list, the
 channel staging and the SDK's per-version modules. Paths are relative to the repository root, at
 `integration` `1ec364b`, with `crates/ui_ext_wasm` as on `claude/fyx-w3-renderer-e20d2b`
@@ -18,7 +27,7 @@ capability exists for anything older than 0.3.
 crates/ui_ext/wit/
   since_v0.1.0/fyx-ui.wit   # frozen
   since_v0.2.0/fyx-ui.wit   # frozen when 0.2 is declared frozen
-  since_v0.3.0/fyx-ui.wit   # docs/fyx/wit-0.3/fyx-ui-0.3.wit once decided, minus its header comment
+  since_v0.3.0/fyx-ui.wit   # staged from the design draft; the one source (the docs copy is gone)
 ```
 
 The 0.3 file is self-contained (Zed's copy-forward rule, 0.2 migration §1): it repeats `types`,
@@ -72,7 +81,8 @@ pub fn api_version_range(channel: ReleaseChannel) -> RangeInclusive<Version> {
 `MIN_VERSION` stays 0.1.0 for every 0.3 build (spec decision 29; design Q9 for what happens at
 1.0).
 
-**Manifest parsing.** `UiManifest` is `deny_unknown_fields` (`ui_ext_wasm.rs:197-207`). A 0.3
+**Manifest parsing** (implemented: W2c, d65c68a2fc; design §0.6, "What the host checks
+today"). `UiManifest` is `deny_unknown_fields`. A 0.3
 manifest has new tables (`network`, `processes`, `process`, `commands`, `picker_sources`). Read it
 in two steps: first only `api_version` (a lenient struct), check the version, then the full
 manifest for that version. An older host then says "targets fyx:ui 0.3.0, this build supports
@@ -92,6 +102,10 @@ Per version, the manifest accepts:
 
 An error, not a warning, for capabilities an older world cannot use: otherwise the install dialog
 would ask consent for something the component cannot do.
+
+`[[fyx_ui.commands]]` (≤ 64, title ≤ 128 bytes) and `[[fyx_ui.picker_sources]]` (≤ 64,
+`picker = "<extension>/<surface>"`) are accepted and checked in 0.3 manifests. No host feature
+uses them yet.
 
 **Linkers.** A third `Linker<UiState>` with WASI and `since_v0_3_0::UiExtension::add_to_linker`.
 Every 0.3 interface is linked for every 0.3 component and checks its capability per call, as 0.2

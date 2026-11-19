@@ -32,10 +32,21 @@ pub const MAX_TOOLTIP_BYTES: usize = 1024;
 pub enum ApiVersion {
     V0_1_0,
     V0_2_0,
+    /// Frozen at integration-6 (docs/fyx/wit-0.3/design.md); the 0.2 rules apply to everything 0.3
+    /// copies forward.
+    V0_3_0,
+    /// Staged (plan P5): terminals and CLI integrations (docs/fyx/wit-0.4/design.md). Loads only
+    /// where staged versions may; everything 0.3 has applies unchanged.
+    V0_4_0,
 }
 
 impl ApiVersion {
-    pub const ALL: [ApiVersion; 2] = [ApiVersion::V0_1_0, ApiVersion::V0_2_0];
+    pub const ALL: [ApiVersion; 4] = [
+        ApiVersion::V0_1_0,
+        ApiVersion::V0_2_0,
+        ApiVersion::V0_3_0,
+        ApiVersion::V0_4_0,
+    ];
 
     /// The supported set is explicit, not a semver range: for 0.x every minor version is a
     /// different world, so 0.1.1 or 0.3.0 is not "close enough" to anything.
@@ -43,6 +54,8 @@ impl ApiVersion {
         match (major, minor, patch) {
             (0, 1, 0) => Some(ApiVersion::V0_1_0),
             (0, 2, 0) => Some(ApiVersion::V0_2_0),
+            (0, 3, 0) => Some(ApiVersion::V0_3_0),
+            (0, 4, 0) => Some(ApiVersion::V0_4_0),
             _ => None,
         }
     }
@@ -51,6 +64,8 @@ impl ApiVersion {
         match self {
             ApiVersion::V0_1_0 => (0, 1, 0),
             ApiVersion::V0_2_0 => (0, 2, 0),
+            ApiVersion::V0_3_0 => (0, 3, 0),
+            ApiVersion::V0_4_0 => (0, 4, 0),
         }
     }
 
@@ -59,6 +74,8 @@ impl ApiVersion {
         match self {
             ApiVersion::V0_1_0 => "fyx:ui@0.1.0",
             ApiVersion::V0_2_0 => "fyx:ui@0.2.0",
+            ApiVersion::V0_3_0 => "fyx:ui@0.3.0",
+            ApiVersion::V0_4_0 => "fyx:ui@0.4.0",
         }
     }
 
@@ -66,6 +83,8 @@ impl ApiVersion {
         match self {
             ApiVersion::V0_1_0 => crate::WIT_DIR_V0_1_0,
             ApiVersion::V0_2_0 => crate::WIT_DIR_V0_2_0,
+            ApiVersion::V0_3_0 => crate::WIT_DIR_V0_3_0,
+            ApiVersion::V0_4_0 => crate::WIT_DIR_V0_4_0,
         }
     }
 
@@ -82,7 +101,7 @@ impl ApiVersion {
     pub fn check_surface_id(self, id: &str) -> Result<(), ApiError> {
         match self {
             ApiVersion::V0_1_0 => Ok(()),
-            ApiVersion::V0_2_0 => check_id(id),
+            ApiVersion::V0_2_0 | ApiVersion::V0_3_0 | ApiVersion::V0_4_0 => check_id(id),
         }
     }
 }
@@ -288,7 +307,9 @@ impl LiveIds {
                     ids.surfaces
                         .insert(surface.id.clone(), surface.kind.clone());
                 }
-                ApiVersion::V0_2_0 => ids.insert_surface(surface, capabilities)?,
+                ApiVersion::V0_2_0 | ApiVersion::V0_3_0 | ApiVersion::V0_4_0 => {
+                    ids.insert_surface(surface, capabilities)?
+                }
             }
         }
         Ok(ids)
@@ -400,7 +421,7 @@ impl LiveIds {
                 what,
                 version: self.version,
             }),
-            ApiVersion::V0_2_0 => Ok(()),
+            ApiVersion::V0_2_0 | ApiVersion::V0_3_0 | ApiVersion::V0_4_0 => Ok(()),
         }
     }
 
@@ -531,7 +552,7 @@ mod tests {
             assert_eq!(ApiVersion::from_parts(major, minor, patch), Some(version));
             assert_eq!(version.wit_package(), format!("fyx:ui@{version}"));
         }
-        for (major, minor, patch) in [(0, 0, 1), (0, 1, 1), (0, 3, 0), (1, 0, 0), (0, 2, 1)] {
+        for (major, minor, patch) in [(0, 0, 1), (0, 1, 1), (0, 5, 0), (1, 0, 0), (0, 2, 1)] {
             assert_eq!(ApiVersion::from_parts(major, minor, patch), None);
         }
         assert!(ApiVersion::V0_1_0 < ApiVersion::V0_2_0);
@@ -545,6 +566,14 @@ mod tests {
             (
                 ApiVersion::V0_2_0,
                 include_str!("../wit/since_v0.2.0/fyx-ui.wit"),
+            ),
+            (
+                ApiVersion::V0_3_0,
+                include_str!("../wit/since_v0.3.0/fyx-ui.wit"),
+            ),
+            (
+                ApiVersion::V0_4_0,
+                include_str!("../wit/since_v0.4.0/fyx-ui.wit"),
             ),
         ];
         for (version, wit) in packages {

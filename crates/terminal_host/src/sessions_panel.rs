@@ -1,0 +1,241 @@
+//! The "Agent Sessions" dock panel: every terminal in this workspace with a status, the ones that
+//! need attention first; a click jumps to the terminal.
+
+use gpui::{
+    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Subscription,
+    WeakEntity, Window, actions, px,
+};
+use terminal_ext::TerminalStatus;
+use terminal_view::TerminalView;
+use ui::{Indicator, prelude::*};
+use workspace::Workspace;
+use workspace::dock::{DockPosition, Panel, PanelEvent};
+
+use crate::sessions::{self, Sessions};
+use crate::tab_status::{status_icon, tooltip_text};
+
+actions!(
+    fyx_terminal,
+    [
+        /// Shows or hides the Agent Sessions panel: terminals whose programs report a status.
+        ToggleAgentSessions,
+    ]
+);
+
+pub(crate) fn register(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(sessions) = sessions::global(cx) else {
+        return;
+    };
+    let workspace_handle = cx.weak_entity();
+    let panel = cx.new(|cx| AgentSessionsPanel::new(workspace_handle, sessions, cx));
+    workspace.add_panel(panel, window, cx);
+    workspace.register_action(|workspace, _: &ToggleAgentSessions, window, cx| {
+        workspace.toggle_panel_focus::<AgentSessionsPanel>(window, cx);
+    });
+}
+
+pub struct AgentSessionsPanel {
+    workspace: WeakEntity<Workspace>,
+    sessions: Entity<Sessions>,
+    focus_handle: FocusHandle,
+    position: DockPosition,
+    _observe_sessions: Subscription,
+}
+
+impl AgentSessionsPanel {
+    fn new(
+        workspace: WeakEntity<Workspace>,
+        sessions: Entity<Sessions>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _observe_sessions: cx.observe(&sessions, |_, _, cx| cx.notify()),
+            workspace,
+            sessions,
+            focus_handle: cx.focus_handle(),
+            position: DockPosition::Right,
+        }
+    }
+
+    fn rows(&self, cx: &App) -> Vec<(Entity<TerminalView>, TerminalStatus)> {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return Vec::new();
+        };
+        let workspace = workspace.read(cx);
+        self.sessions
+            .read(cx)
+            .list(cx)
+            .into_iter()
+            .filter(|(view, _)| sessions::workspace_contains(workspace, view, cx))
+            .collect()
+    }
+
+    fn jump_to(
+        &mut self,
+        view: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                sessions::reveal(workspace, view, window, cx)
+            })
+            .ok();
+    }
+}
+
+impl Render for AgentSessionsPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.rows(cx);
+        let body = if rows.is_empty() {
+            v_flex()
+                .p_2()
+                .gap_1()
+                .child(Label::new("No terminal reports a status.").size(LabelSize::Small))
+                .child(
+                    Label::new(
+                        "Programs that send OSC 7501 (Claude Code 2.1.295 and later) or \
+                         OSC 9;4 progress show up here.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+        } else {
+            v_flex()
+                .p_1()
+                .gap_0p5()
+                .children(rows.into_iter().enumerate().map(|(index, (view, status))| {
+                    let terminal_title = view.read(cx).terminal().read(cx).title(true);
+                    let accounts = view.read(cx).terminal().read(cx).fyx.accounts();
+                    let (title, meta) = tooltip_text(&status);
+                    let icon = status_icon(&status).unwrap_or_else(|| {
+                        Icon::new(IconName::Terminal)
+                            .size(IconSize::Small)
+                            .color(Color::Muted)
+                            .into_any_element()
+                    });
+                    h_flex()
+                        .id(("fyx-agent-session", index))
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_start()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(cx.theme().colors().element_hover))
+                        .child(div().pt_0p5().child(icon))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(Label::new(terminal_title).single_line().truncate())
+                                        .children(
+                                            accounts
+                                                .iter()
+                                                .map(|account| crate::accounts::badge(account, cx)),
+                                        )
+                                        .when(status.attention, |this| {
+                                            this.child(Indicator::dot().color(Color::Accent))
+                                        }),
+                                )
+                                .child(
+                                    Label::new(title)
+                                        .size(LabelSize::Small)
+                                        .single_line()
+                                        .truncate(),
+                                )
+                                .child(
+                                    Label::new(meta)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .single_line()
+                                        .truncate(),
+                                ),
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.jump_to(&view, window, cx)),
+                        )
+                }))
+        };
+        v_flex()
+            .key_context("AgentSessionsPanel")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(cx.theme().colors().panel_background)
+            .child(
+                v_flex()
+                    .id("fyx-agent-sessions-body")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+    }
+}
+
+impl EventEmitter<PanelEvent> for AgentSessionsPanel {}
+
+impl Focusable for AgentSessionsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for AgentSessionsPanel {
+    fn persistent_name() -> &'static str {
+        "Agent Sessions"
+    }
+
+    fn panel_key() -> &'static str {
+        "FyxAgentSessions"
+    }
+
+    fn position(&self, _: &Window, _: &App) -> DockPosition {
+        self.position
+    }
+
+    fn position_is_valid(&self, _: DockPosition) -> bool {
+        true
+    }
+
+    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
+        self.position = position;
+        cx.notify();
+    }
+
+    fn default_size(&self, _: &Window, _: &App) -> Pixels {
+        px(320.)
+    }
+
+    fn icon(&self, _: &Window, _: &App) -> Option<IconName> {
+        Some(IconName::Bell)
+    }
+
+    fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {
+        Some("Agent Sessions")
+    }
+
+    fn icon_label(&self, _: &Window, cx: &App) -> Option<String> {
+        let waiting = self
+            .rows(cx)
+            .iter()
+            .filter(|(_, status)| status.attention)
+            .count();
+        (waiting > 0).then(|| waiting.to_string())
+    }
+
+    fn toggle_action(&self) -> Box<dyn Action> {
+        Box::new(ToggleAgentSessions)
+    }
+
+    fn activation_priority(&self) -> u32 {
+        8
+    }
+}

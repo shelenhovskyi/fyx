@@ -3,10 +3,12 @@
 //!
 //! Apache-2.0, like the SDK, because extension authors run it on their own code.
 
+pub mod assets;
 pub mod build;
 pub mod inspect;
 pub mod manifest;
 pub mod package;
+pub mod run;
 pub mod template;
 
 use std::io::ErrorKind;
@@ -61,20 +63,50 @@ impl Report {
     }
 }
 
+/// How far `check` goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckDepth {
+    /// The manifest and what can be read from the component without running it.
+    Static,
+    /// Also load the component in [`fyx_ext_harness`] and check the capabilities its surfaces
+    /// need, as the host does when it loads the extension.
+    Load,
+}
+
 /// Checks the extension in `dir`: its manifest, and the built component it names.
-pub fn check(dir: &Path) -> Result<(Manifest, Report)> {
+pub fn check(dir: &Path, depth: CheckDepth) -> Result<(Manifest, Report)> {
+    let (manifest, report, _) = check_loaded(dir, depth)?;
+    Ok((manifest, report))
+}
+
+/// [`check`], also returning the loaded component when `depth` is [`CheckDepth::Load`] and it
+/// loaded.
+pub fn check_loaded(
+    dir: &Path,
+    depth: CheckDepth,
+) -> Result<(Manifest, Report, Option<fyx_ext_harness::Harness>)> {
     let mut report = Report::default();
     let manifest = manifest::read(dir, &mut report)?;
+    assets::check_assets(dir, &mut report);
     let component = manifest.component_path();
+    let mut harness = None;
     match std::fs::read(&component) {
-        Ok(bytes) => inspect::check_component(&manifest, &bytes, &mut report),
+        Ok(bytes) => {
+            inspect::check_component(&manifest, &bytes, &mut report);
+            if depth == CheckDepth::Load && !report.has_errors() {
+                harness = run::load(&bytes, dir, &mut report);
+                if let Some(harness) = &harness {
+                    run::check_surfaces(&manifest, harness, &mut report);
+                }
+            }
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => report.error(format!(
             "{} does not exist yet; run `fyx-ext build`",
             component.display()
         )),
         Err(error) => report.error(format!("reading {}: {error}", component.display())),
     }
-    Ok((manifest, report))
+    Ok((manifest, report, harness))
 }
 
 #[cfg(test)]
@@ -91,7 +123,7 @@ mod tests {
         )
         .expect("write the manifest");
 
-        let (_, report) = check(dir.path()).expect("check");
+        let (_, report) = check(dir.path(), CheckDepth::Static).expect("check");
         assert!(
             report.errors.iter().any(|e| e.contains("fyx-ext build")),
             "{report:?}"
@@ -104,7 +136,7 @@ mod tests {
             &[0, 0, 0, 1, 0, 0],
         );
         std::fs::write(dir.path().join("out/x.wasm"), bytes).expect("write the component");
-        let (manifest, report) = check(dir.path()).expect("check");
+        let (manifest, report) = check(dir.path(), CheckDepth::Static).expect("check");
         assert_eq!(manifest.id, "x");
         assert!(
             !report.has_errors() && report.warnings.is_empty(),

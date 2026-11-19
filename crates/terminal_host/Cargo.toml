@@ -1,0 +1,36 @@
+[package]
+name = "terminal_host"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Fyx terminal UI on top of terminal_ext: tab status, agent sessions, extension terminals"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/terminal_host.rs"
+doctest = false
+
+[dependencies]
+futures.workspace = true
+gpui.workspace = true
+ui_ext = { workspace = true, features = ["t2"] }
+log.workspace = true
+project.workspace = true
+release_channel.workspace = true
+settings.workspace = true
+sysinfo.workspace = true
+task.workspace = true
+terminal.workspace = true
+terminal_ext.workspace = true
+terminal_view.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

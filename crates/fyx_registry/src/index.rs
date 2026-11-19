@@ -1,8 +1,10 @@
 //! `index.json`: every published release, each signed on its own.
 //!
-//! Releases are signed one by one rather than the index as a whole, so the registry CI can add
-//! a release without re-signing the others, and a client can use the releases that verify even
-//! if one entry is damaged.
+//! Releases are signed one by one, so the registry CI can add a release without re-signing the
+//! others, and a client can use the releases that verify even if one entry is damaged: each
+//! entry is parsed on its own (bugs-1 #12). The index as a whole, its time and the set of
+//! releases, is covered by the signed snapshot ([`crate::Snapshot`], security-2 S6), so a mirror
+//! cannot withhold a release or replay an old index.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,14 +12,22 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Canonical, Document, Error, ExtensionId, Keyset, Sha256Digest, Signed, Tier, Timestamp,
-    canonical::CanonicalWriter, check_schema, parse_json,
+    Canonical, Document, Error, ExtensionId, KeyRole, Keyset, Sha256Digest, Signed, Tier,
+    Timestamp, VerifiedSnapshot,
+    canonical::CanonicalWriter,
+    check_schema, parse_json,
+    text::{check_name, check_text},
 };
 
 pub const INDEX_SCHEMA: u32 = 1;
 
 /// Decision 12: a `.fyxext` package is at most 50 MiB.
 pub const MAX_PACKAGE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// The most `index.json` may weigh; a client refuses a larger download before parsing it.
+pub const MAX_INDEX_SIZE: u64 = 32 * 1024 * 1024;
+/// The most entries `index.json` may list.
+pub const MAX_RELEASES: usize = 100_000;
 
 const RELEASE_DOMAIN: &str = "fyx-registry/release/v1";
 const MAX_NAME_LENGTH: usize = 64;
@@ -27,11 +37,78 @@ const MAX_PROCESS_NAME_LENGTH: usize = 64;
 const MAX_DOMAIN_LENGTH: usize = 253;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawIndex")]
 pub struct Index {
     pub schema: u32,
+    /// Unsigned here; [`Index::verify_with_snapshot`] takes the time from the signed snapshot.
     pub generated_at: Timestamp,
     pub releases: Vec<Signed<Release>>,
+    /// Entries that did not parse, kept so the rest of the index stays usable. Never written
+    /// back: the registry CI refuses an index that has any ([`Index::verify_strict`]).
+    #[serde(skip_serializing)]
+    pub malformed: Vec<MalformedRelease>,
+}
+
+/// An entry of `index.json` that is not a signed release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MalformedRelease {
+    /// Position in `releases`, from 0.
+    pub position: usize,
+    /// `signed.id` and `signed.version` as written, if they are strings, for the message.
+    pub id: Option<String>,
+    pub version: Option<String>,
+    pub error: Error,
+}
+
+/// The index as read, before each entry is parsed on its own.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIndex {
+    schema: u32,
+    generated_at: Timestamp,
+    releases: Vec<serde_json::Value>,
+}
+
+impl TryFrom<RawIndex> for Index {
+    type Error = String;
+
+    fn try_from(raw: RawIndex) -> Result<Self, String> {
+        if raw.releases.len() > MAX_RELEASES {
+            return Err(format!(
+                "the index lists {} releases, the cap is {MAX_RELEASES}",
+                raw.releases.len()
+            ));
+        }
+        let mut releases = Vec::with_capacity(raw.releases.len());
+        let mut malformed = Vec::new();
+        for (position, value) in raw.releases.into_iter().enumerate() {
+            let field = |name: &str| {
+                value
+                    .pointer(&format!("/signed/{name}"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let (id, version) = (field("id"), field("version"));
+            match serde_json::from_value::<Signed<Release>>(value) {
+                Ok(release) => releases.push(release),
+                Err(error) => malformed.push(MalformedRelease {
+                    position,
+                    id,
+                    version,
+                    error: Error::Parse {
+                        document: Document::Release,
+                        message: error.to_string(),
+                    },
+                }),
+            }
+        }
+        Ok(Self {
+            schema: raw.schema,
+            generated_at: raw.generated_at,
+            releases,
+            malformed,
+        })
+    }
 }
 
 /// One published version of one extension. Every field is covered by the release signature.
@@ -49,7 +126,8 @@ pub struct Release {
     pub package: Package,
     /// When the registry CI published the release; the 24 h age gate counts from here.
     pub published_at: Timestamp,
-    /// A security fix that skips the age gate (decision 17).
+    /// A security fix: it skips the age gate only to replace a blocked version (decision 17 as
+    /// narrowed by integration-6 R8; [`crate::AGE_GATE`]).
     pub urgent: bool,
     /// The highest tier among the capabilities, as declared in `extension.toml`.
     pub tier: Tier,
@@ -58,6 +136,13 @@ pub struct Release {
     pub network_domains: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub processes: BTreeSet<String>,
+    /// The package has a Zed `extension.wasm` ([`crate::runs_zed_extension`]): it also runs as a
+    /// Zed extension, with unrestricted network and process access. Such a release is T2
+    /// whatever it declares (owner's Q1), and the host shows
+    /// [`crate::RUNS_ZED_EXTENSION_WARNING`]. [`Release::verify_package`] checks it against the
+    /// package. A client older than this field reads such a release as malformed and skips it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zed_extension: bool,
 }
 
 /// Where the registry CI built the package from (decision 15).
@@ -83,6 +168,8 @@ pub struct Package {
 }
 
 impl Canonical for Release {
+    const ROLE: KeyRole = KeyRole::Release;
+
     fn canonical_bytes(&self) -> Vec<u8> {
         let mut writer = CanonicalWriter::new(RELEASE_DOMAIN);
         writer.string(self.id.as_str());
@@ -102,6 +189,10 @@ impl Canonical for Release {
         writer.strings(self.capabilities.iter().map(String::as_str));
         writer.strings(self.network_domains.iter().map(String::as_str));
         writer.strings(self.processes.iter().map(String::as_str));
+        // Written only when set, so every release signed before the field keeps its signature.
+        if self.zed_extension {
+            writer.bool(true);
+        }
         writer.finish()
     }
 }
@@ -117,7 +208,7 @@ impl Release {
                 "the version must be major.minor.patch without a suffix".into(),
             ));
         }
-        check_text("name", &self.name, 1, MAX_NAME_LENGTH).map_err(invalid)?;
+        check_name("name", &self.name, MAX_NAME_LENGTH).map_err(invalid)?;
         check_text("description", &self.description, 0, MAX_DESCRIPTION_LENGTH).map_err(invalid)?;
         if self.owners.is_empty() {
             return Err(invalid("at least one owner is required".into()));
@@ -172,6 +263,11 @@ impl Release {
                 )));
             }
         }
+        if self.zed_extension && self.tier != Tier::T2 {
+            return Err(invalid(
+                "a release that runs a Zed extension is T2, whatever it declares".into(),
+            ));
+        }
         if !self.network_domains.is_empty() && !self.capabilities.contains("network:fetch") {
             return Err(invalid(
                 "network_domains need the network:fetch capability".into(),
@@ -180,7 +276,8 @@ impl Release {
         for domain in &self.network_domains {
             if !is_domain_pattern(domain) {
                 return Err(invalid(format!(
-                    "{domain:?} is not a domain like \"example.com\" or \"*.example.com\""
+                    "{domain:?} is not a domain like \"example.com\" or \"*.example.com\" (no \
+                     single labels, IP addresses, localhost or public suffixes)"
                 )));
             }
         }
@@ -200,7 +297,8 @@ impl Release {
         Ok(())
     }
 
-    /// Checks downloaded package bytes against the signed size and hash.
+    /// Checks downloaded package bytes against the signed size and hash, and that a package with
+    /// a Zed `extension.wasm` has a release with `zed_extension` set.
     pub fn verify_package(&self, package: &[u8]) -> Result<(), Error> {
         let size = package.len() as u64;
         if size != self.package.size {
@@ -214,6 +312,14 @@ impl Release {
             return Err(Error::PackageMismatch(format!(
                 "{}@{} has sha256 {digest}, the index says {}",
                 self.id, self.version, self.package.sha256
+            )));
+        }
+        // The signature must not hide a Zed component: a package that has one needs a release
+        // that says so (owner's Q1). A flag without one only over-warns.
+        if crate::runs_zed_extension(package) && !self.zed_extension {
+            return Err(Error::PackageMismatch(format!(
+                "{}@{} has a Zed extension.wasm, and the release does not say zed_extension",
+                self.id, self.version
             )));
         }
         Ok(())
@@ -234,12 +340,24 @@ impl Signed<Release> {
     }
 }
 
-/// A release that was left out of a [`VerifiedIndex`], and why.
+/// An entry that was left out of a [`VerifiedIndex`], and why. `id` and `version` are `None`
+/// for an entry too damaged to name them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RejectedRelease {
-    pub id: ExtensionId,
-    pub version: Version,
+    pub id: Option<String>,
+    pub version: Option<String>,
     pub error: Error,
+}
+
+impl RejectedRelease {
+    /// `id@version`, or what is known of it.
+    pub fn label(&self) -> String {
+        format!(
+            "{}@{}",
+            self.id.as_deref().unwrap_or("<unknown>"),
+            self.version.as_deref().unwrap_or("<unknown>")
+        )
+    }
 }
 
 /// The releases of an index whose signatures and contents check out.
@@ -283,67 +401,107 @@ impl Index {
             schema: INDEX_SCHEMA,
             generated_at,
             releases: Vec::new(),
+            malformed: Vec::new(),
         }
     }
 
     pub fn from_json(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() as u64 > MAX_INDEX_SIZE {
+            return Err(Error::Invalid(format!(
+                "index.json has {} bytes, the cap is {MAX_INDEX_SIZE}",
+                bytes.len()
+            )));
+        }
         check_schema(bytes, Document::Index, "/schema", INDEX_SCHEMA)?;
         parse_json(bytes, Document::Index)
+    }
+
+    /// The client's path: `bytes` must be the index the snapshot names (size and SHA-256), the
+    /// releases are checked against the snapshot's keyset (revoked keys removed), and the time
+    /// is the snapshot's signed `generated_at`. `keyset` is the client's trusted keyset.
+    pub fn verify_with_snapshot(
+        bytes: &[u8],
+        snapshot: &VerifiedSnapshot,
+        keyset: &Keyset,
+    ) -> Result<VerifiedIndex, Error> {
+        snapshot.check_index(bytes)?;
+        let index = Self::from_json(bytes)?;
+        let keyset = snapshot.effective_keyset(keyset)?;
+        let mut verified = index.verify(&keyset);
+        verified.generated_at = snapshot.generated_at();
+        Ok(verified)
     }
 
     pub fn to_json(&self) -> Result<Vec<u8>, Error> {
         to_pretty_json(self, Document::Index)
     }
 
-    /// Keeps every release that verifies; the others are listed in
-    /// [`VerifiedIndex::rejected`]. A version listed twice is rejected in every copy, since the
-    /// client cannot know which one the registry meant.
+    /// Keeps every release that verifies; the others, and the malformed entries, are listed in
+    /// [`VerifiedIndex::rejected`]. Duplicates are counted among verified releases only, so a
+    /// forged copy cannot evict the genuine one (security-2 S11): identical copies count once,
+    /// and a version with two different valid copies is rejected in both, since the client
+    /// cannot know which one the registry meant.
     pub fn verify(&self, keyset: &Keyset) -> VerifiedIndex {
-        let mut counts = BTreeMap::<(&ExtensionId, &Version), usize>::new();
-        for release in &self.releases {
-            *counts
-                .entry((&release.signed.id, &release.signed.version))
-                .or_default() += 1;
-        }
-
         let mut verified = VerifiedIndex {
             generated_at: self.generated_at,
             ..VerifiedIndex::default()
         };
+        for malformed in &self.malformed {
+            verified.rejected.push(RejectedRelease {
+                id: malformed.id.clone(),
+                version: malformed.version.clone(),
+                error: malformed.error.clone(),
+            });
+        }
+        let mut valid = BTreeMap::<(&ExtensionId, &Version), Vec<&Release>>::new();
         for release in &self.releases {
-            let id = &release.signed.id;
-            let version = &release.signed.version;
-            let count = counts.get(&(id, version)).copied().unwrap_or_default();
-            let result = if count > 1 {
-                Err(Error::Invalid(format!(
-                    "{id}@{version} appears {count} times in the index"
-                )))
-            } else {
-                release.verify_release(keyset).map(|_| ())
-            };
-            match result {
-                Ok(()) => {
-                    verified
-                        .releases
-                        .entry(id.clone())
-                        .or_default()
-                        .insert(version.clone(), release.signed.clone());
-                }
+            match release.verify_release(keyset) {
+                Ok(release) => valid
+                    .entry((&release.id, &release.version))
+                    .or_default()
+                    .push(release),
                 Err(error) => verified.rejected.push(RejectedRelease {
-                    id: id.clone(),
-                    version: version.clone(),
+                    id: Some(release.signed.id.to_string()),
+                    version: Some(release.signed.version.to_string()),
                     error,
                 }),
+            }
+        }
+        for ((id, version), copies) in valid {
+            if copies.iter().all(|copy| *copy == copies[0]) {
+                verified
+                    .releases
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(version.clone(), copies[0].clone());
+            } else {
+                for _ in &copies {
+                    verified.rejected.push(RejectedRelease {
+                        id: Some(id.to_string()),
+                        version: Some(version.to_string()),
+                        error: Error::Invalid(format!(
+                            "{id}@{version} appears {} times in the index with different contents",
+                            copies.len()
+                        )),
+                    });
+                }
             }
         }
         verified
     }
 
-    /// For the registry CI: the whole index must verify.
+    /// For the registry CI: the whole index must verify, with no duplicate entries at all.
     pub fn verify_strict(&self, keyset: &Keyset) -> Result<VerifiedIndex, Error> {
         let verified = self.verify(keyset);
         if let Some(rejected) = verified.rejected.first() {
             return Err(rejected.error.clone());
+        }
+        let listed = self.releases.len();
+        let distinct: usize = verified.releases.values().map(BTreeMap::len).sum();
+        if distinct != listed {
+            return Err(Error::Invalid(format!(
+                "the index lists {listed} releases but only {distinct} distinct versions"
+            )));
         }
         Ok(verified)
     }
@@ -394,20 +552,6 @@ pub(crate) fn to_pretty_json<T: Serialize>(
     Ok(bytes)
 }
 
-fn check_text(field: &str, value: &str, min: usize, max: usize) -> Result<(), String> {
-    let length = value.chars().count();
-    if length < min || length > max {
-        return Err(format!("{field} must be {min} to {max} characters"));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(format!("{field} must not contain control characters"));
-    }
-    if value.trim() != value {
-        return Err(format!("{field} must not start or end with whitespace"));
-    }
-    Ok(())
-}
-
 fn check_https_url(field: &str, value: &str) -> Result<(), String> {
     let valid = value
         .strip_prefix("https://")
@@ -455,9 +599,19 @@ fn is_capability_name(capability: &str) -> bool {
         .is_some_and(|(namespace, name)| is_name_part(namespace) && is_name_part(name))
 }
 
+/// A domain or `*.domain` that names one site: at least two labels, not all-numeric (no IP
+/// literals), not `localhost`, and neither the domain nor a wildcard's base a public suffix such
+/// as `com` or `co.uk` (security-2 S14).
 fn is_domain_pattern(pattern: &str) -> bool {
     let domain = pattern.strip_prefix("*.").unwrap_or(pattern);
-    !domain.is_empty()
+    let labels: Vec<&str> = domain.split('.').collect();
+    let names_one_site = labels.len() >= 2
+        && !labels.contains(&"localhost")
+        && !labels
+            .last()
+            .is_some_and(|label| label.chars().all(|character| character.is_ascii_digit()))
+        && !crate::text::is_public_suffix(domain);
+    names_one_site
         && domain.len() <= MAX_DOMAIN_LENGTH
         && domain.split('.').all(|label| {
             !label.is_empty()
@@ -508,6 +662,7 @@ pub(crate) mod test_support {
             capabilities: ["ui:panel".to_string()].into(),
             network_domains: BTreeSet::new(),
             processes: BTreeSet::new(),
+            zed_extension: false,
         }
     }
 
@@ -541,6 +696,14 @@ pub(crate) mod test_support {
             capabilities: reader.strings()?.into_iter().collect(),
             network_domains: reader.strings()?.into_iter().collect(),
             processes: reader.strings()?.into_iter().collect(),
+            // Only ever written as `true`; a written `false` is not canonical.
+            zed_extension: if reader.is_empty() {
+                false
+            } else if reader.bool()? {
+                true
+            } else {
+                return None;
+            },
         };
         reader.finish()?;
         Some(release)
@@ -577,6 +740,22 @@ mod tests {
             (
                 "control in name",
                 Box::new(|r| r.name = "a\u{1b}[31m".into()),
+            ),
+            (
+                "bidi override in name",
+                Box::new(|r| r.name = "Todo\u{202e}gpj".into()),
+            ),
+            (
+                "zero width in description",
+                Box::new(|r| r.description = "Safe\u{200b}ly".into()),
+            ),
+            (
+                "line separator in description",
+                Box::new(|r| r.description = "One\u{2028}Two".into()),
+            ),
+            (
+                "symbol in name",
+                Box::new(|r| r.name = "Todo \u{2714}".into()),
             ),
             ("padded name", Box::new(|r| r.name = " Todo".into())),
             (
@@ -677,7 +856,7 @@ mod tests {
         release.network_domains.extend([
             "example.com".to_string(),
             "*.example.org".to_string(),
-            "localhost".to_string(),
+            "api.example.co.uk".to_string(),
         ]);
         release
             .processes
@@ -691,6 +870,11 @@ mod tests {
         index.releases.push(signed(release("todo", "1.0.0")));
         let json = index.to_json().expect("serializes");
         assert_eq!(Index::from_json(&json), Ok(index));
+        assert!(
+            !String::from_utf8(json)
+                .expect("utf-8")
+                .contains("malformed")
+        );
     }
 
     #[test]
@@ -722,6 +906,12 @@ mod tests {
             Signed::sign(release("lint", "0.1.0"), &rotation_key()),
             signed(release("dup", "1.0.0")),
             signed(release("dup", "1.0.0")),
+            signed(release("conflict", "1.0.0")),
+            signed({
+                let mut other = release("conflict", "1.0.0");
+                other.description = "Another description.".into();
+                other
+            }),
         ];
         let verified = index.verify(&keyset());
         let todo = ExtensionId::new("todo").expect("valid");
@@ -737,22 +927,95 @@ mod tests {
                 .latest(&ExtensionId::new("lint").expect("valid"))
                 .is_some()
         );
+        // Identical copies count once; different valid copies are both rejected.
         assert!(
             verified
                 .latest(&ExtensionId::new("dup").expect("valid"))
+                .is_some()
+        );
+        assert!(
+            verified
+                .latest(&ExtensionId::new("conflict").expect("valid"))
                 .is_none()
         );
 
         let rejected: Vec<_> = verified
             .rejected()
             .iter()
-            .map(|rejected| (rejected.version.to_string(), rejected.error.clone()))
+            .map(|rejected| (rejected.label(), rejected.error.clone()))
             .collect();
-        assert!(matches!(&rejected[0], (v, Error::BadSignature { .. }) if v == "1.1.0"));
-        assert!(matches!(&rejected[1], (v, Error::UnknownKey { .. }) if v == "1.2.0"));
-        assert!(matches!(&rejected[2], (v, Error::Invalid(_)) if v == "1.3.0"));
+        assert!(matches!(&rejected[0], (v, Error::BadSignature { .. }) if v == "todo@1.1.0"));
+        assert!(matches!(&rejected[1], (v, Error::UnknownKey { .. }) if v == "todo@1.2.0"));
+        assert!(matches!(&rejected[2], (v, Error::Invalid(_)) if v == "todo@1.3.0"));
         assert_eq!(rejected.len(), 5);
         assert!(index.verify_strict(&keyset()).is_err());
+
+        // The CI also refuses identical duplicates.
+        let mut duplicated = Index::new(Timestamp(0));
+        duplicated.releases = vec![
+            signed(release("dup", "1.0.0")),
+            signed(release("dup", "1.0.0")),
+        ];
+        assert!(duplicated.verify_strict(&keyset()).is_err());
+    }
+
+    /// bugs-1 #12: one damaged entry no longer discards the index.
+    #[test]
+    fn a_malformed_entry_is_rejected_alone() {
+        let mut index = Index::new(Timestamp(0));
+        index.releases.push(signed(release("todo", "1.0.0")));
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&index.to_json().expect("serializes")).expect("json");
+        let mut broken = json["releases"][0].clone();
+        broken["signed"]["version"] = "2.0.0".into();
+        broken["signed"]["package"]["sha256"] = "BC4A".into();
+        json["releases"].as_array_mut().expect("array").push(broken);
+        json["releases"]
+            .as_array_mut()
+            .expect("array")
+            .push(serde_json::json!(17));
+        let bytes = serde_json::to_vec(&json).expect("serializes");
+
+        let index = Index::from_json(&bytes).expect("the index still parses");
+        let verified = index.verify(&keyset());
+        let todo = ExtensionId::new("todo").expect("valid");
+        assert!(verified.release(&todo, &Version::new(1, 0, 0)).is_some());
+        let labels: Vec<String> = verified
+            .rejected()
+            .iter()
+            .map(RejectedRelease::label)
+            .collect();
+        assert_eq!(labels, ["todo@2.0.0", "<unknown>@<unknown>"]);
+        assert!(index.verify_strict(&keyset()).is_err());
+    }
+
+    #[test]
+    fn domains_name_one_site() {
+        for good in [
+            "example.com",
+            "*.example.org",
+            "api.example.co.uk",
+            "a1.b-c.io",
+        ] {
+            assert!(is_domain_pattern(good), "{good}");
+        }
+        for bad in [
+            "com",
+            "*.com",
+            "*.co.uk",
+            "co.uk",
+            "*.github.io",
+            "localhost",
+            "*.localhost",
+            "dev.localhost",
+            "127.0.0.1",
+            "*.0.1",
+            "example",
+            "",
+            "*.",
+        ] {
+            assert!(!is_domain_pattern(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -794,6 +1057,53 @@ mod tests {
         );
     }
 
+    /// Owner's Q1 (revised): a package with a Zed `extension.wasm` is accepted, but its release
+    /// must say so, and is T2.
+    #[test]
+    fn a_zed_extension_release_is_declared_and_t2() {
+        let mut release = release("todo", "1.0.0");
+        let plain = release.canonical_bytes();
+        release.zed_extension = true;
+        assert_ne!(release.canonical_bytes(), plain, "the flag is signed");
+        release.zed_extension = false;
+        assert_eq!(
+            release.canonical_bytes(),
+            plain,
+            "old signatures still verify"
+        );
+
+        release.zed_extension = true;
+        assert!(
+            matches!(release.validate(), Err(Error::Invalid(message)) if message.contains("T2"))
+        );
+        release.tier = Tier::T2;
+        release.validate().expect("T2 with the flag");
+        let json = serde_json::to_value(&release).expect("json");
+        assert_eq!(json["zed_extension"], true);
+        release.zed_extension = false;
+        let json = serde_json::to_value(&release).expect("json");
+        assert!(json.get("zed_extension").is_none(), "omitted when false");
+    }
+
+    /// A package with a Zed `extension.wasm` needs `zed_extension` in its signed release.
+    #[test]
+    fn a_hidden_zed_extension_is_a_mismatch() {
+        // One central directory header naming `extension.wasm`: all `entry_names` reads.
+        let mut package = b"PK".to_vec();
+        package.resize(46, 0);
+        package[28] = 14;
+        package.extend_from_slice(b"extension.wasm");
+        let mut release = release("todo", "1.0.0");
+        release.package.size = package.len() as u64;
+        release.package.sha256 = Sha256Digest::of(&package);
+        assert!(matches!(
+            release.verify_package(&package),
+            Err(Error::PackageMismatch(message)) if message.contains("zed_extension")
+        ));
+        release.zed_extension = true;
+        assert_eq!(release.verify_package(&package), Ok(()));
+    }
+
     #[test]
     fn package_bytes_are_checked() {
         let release = release("todo", "1.0.0");
@@ -831,12 +1141,22 @@ mod tests {
                 proptest::collection::btree_set("[a-z]{1,8}:[a-z]{1,8}", 0..4),
                 proptest::collection::btree_set("[a-z]{1,8}\\.[a-z]{2,4}", 0..3),
                 proptest::collection::btree_set("[a-z]{1,8}", 0..3),
+                any::<bool>(),
             ),
         )
             .prop_map(
                 |(
                     (id, (major, minor, patch), name, description, owners, sha256),
-                    (size, published_at, urgent, tier, capabilities, network_domains, processes),
+                    (
+                        size,
+                        published_at,
+                        urgent,
+                        tier,
+                        capabilities,
+                        network_domains,
+                        processes,
+                        zed_extension,
+                    ),
                 )| {
                     let mut release = release(&id, "0.0.0");
                     release.version = Version::new(major, minor, patch);
@@ -851,6 +1171,7 @@ mod tests {
                     release.capabilities = capabilities;
                     release.network_domains = network_domains;
                     release.processes = processes;
+                    release.zed_extension = zed_extension;
                     release
                 },
             )
@@ -919,7 +1240,7 @@ mod tests {
             let mut bytes = signed.signed.canonical_bytes();
             let position = position.index(bytes.len());
             bytes[position] ^= mask;
-            prop_assert!(keyset.verify(&bytes, &signed.signature).is_err());
+            prop_assert!(keyset.verify(&bytes, &signed.signature, KeyRole::Release).is_err());
         }
     }
 }

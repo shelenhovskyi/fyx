@@ -1,0 +1,11 @@
+# Ids nobody may register. A trailing * reserves a prefix.
+fyx
+fyx-*
+zed
+zed-*
+anthropic
+claude
+claude-*
+github
+official
+registry

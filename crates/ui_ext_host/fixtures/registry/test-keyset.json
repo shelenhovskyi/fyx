@@ -1,0 +1,25 @@
+{
+  "keys": [
+    {
+      "key_id": "fyx-test-release",
+      "ed25519": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "roles": [
+        "release"
+      ]
+    },
+    {
+      "key_id": "fyx-test-blocklist",
+      "ed25519": "oJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=",
+      "roles": [
+        "blocklist"
+      ]
+    },
+    {
+      "key_id": "fyx-test-snapshot",
+      "ed25519": "F8t5+ytBIPKx7GXkGY1uCLKOgT/rAeSkAIObheGAgM4=",
+      "roles": [
+        "snapshot"
+      ]
+    }
+  ]
+}

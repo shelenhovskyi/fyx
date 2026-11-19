@@ -21,6 +21,7 @@ pub enum VectorName {
     StudentStamp,
     ZedLogo,
     ZedXCopilot,
+    FyxLogo, // fyx: images/fyx_logo.svg
 }
 
 impl VectorName {

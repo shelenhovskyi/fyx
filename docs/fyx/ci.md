@@ -248,6 +248,31 @@ Things the gate works around on one machine only. CI never takes these paths.
   is in the gated set and `example.com` resolves to `127.*`, `script/gate.sh` skips exactly
   these three with a `gate: WARNING` line. Fix on the machine (find what filters its DNS) and the
   skip turns itself off.
+- **Upstream tests write `development_credentials` in the real profile** (found 2026-11-18). In
+  debug builds Zed keeps credentials in `%APPDATA%\Fyx\development_credentials` instead of the
+  keychain, and an upstream `client` test logs in through it, leaving a fake `https://zed.dev`
+  token. Zed's own tests do the same to Zed's profile. The gate's profile check skips this one
+  file; fixing it means changing upstream tests. If a dev build shows a stray zed.dev sign-in,
+  reset the file to `{}`.
+
+## Known gaps
+
+Tests that exist but no gate runs, because both the dev machine and CI are Windows:
+
+- `fyx_guard`'s `cfg(unix)` real-symlink test. The Windows box has no symlink privilege, and
+  there is no Linux job (building `gpui` and `project` there costs 20–30 minutes per push).
+  Windows junction tests (`junctions_are_followed`) cover the directory cases in every gate; the
+  unix test now compiles but still never runs. Add a Linux `fyx_guard` job when a second OS is in
+  scope.
+
+## Tests and the user's profile
+
+`script/gate.sh` runs nextest with `HOME`, `LOCALAPPDATA`, `APPDATA`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME`
+in a temp folder, and compares the real `Fyx` folders under those locations before and after the
+run (except `logs/` and `db/`). A new or changed file there turns the gate red with its path; if a
+Fyx or Zed process is running, it only warns. Windows resolves `paths::data_dir()` through Known
+Folders, which ignore the variables, so the comparison is the check that matters there: tests must
+use a temp dir or an in-memory store, never the app's data directory.
 
 ## Secrets
 

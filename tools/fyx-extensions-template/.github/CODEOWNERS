@@ -1,0 +1,10 @@
+# Everything that decides trust is the owner's.
+/.github/            @shelenhovskyi
+/policy/             @shelenhovskyi
+/builder/            @shelenhovskyi
+/keys/               @shelenhovskyi
+/blocklist/          @shelenhovskyi
+/scripts/            @shelenhovskyi
+/README.md           @shelenhovskyi
+/CONTRIBUTING.md     @shelenhovskyi
+# /extensions/ has no code owner: the policy check decides who must approve.

@@ -1,11 +1,11 @@
 [package]
-description = "The fast, collaborative code editor."
+description = "Fyx, a code editor forked from Zed." # fyx: package metadata
 edition.workspace = true
 name = "zed"
-version = "1.28.1"
+version = "1.29.2"
 publish.workspace = true
 license = "GPL-3.0-or-later"
-authors = ["Zed Team <hi@zed.dev>"]
+authors = ["Fyx contributors", "Zed Team <hi@zed.dev>"] # fyx: Zed kept as upstream author
 default-run = "fyx" # fyx: binary renamed with paths::APP_NAME
 
 [lints]
@@ -179,6 +179,7 @@ profiling.workspace = true
 project.workspace = true
 project_panel.workspace = true
 project_symbols.workspace = true
+project_bookmarks.workspace = true
 prompt_store.workspace = true
 proto.workspace = true
 recent_projects.workspace = true
@@ -207,6 +208,7 @@ tab_switcher.workspace = true
 tasks_ui.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true
+terminal_host.workspace = true # fyx
 terminal_view.workspace = true
 theme.workspace = true
 theme_extension.workspace = true
@@ -294,6 +296,7 @@ category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fyx"]
+copyright = "Copyright 2026 Hennadii Shelenhovskyi. Based on Zed, copyright 2022-2025 Zed Industries, Inc."
 
 [package.metadata.bundle-nightly] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
@@ -303,6 +306,7 @@ category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fyx"]
+copyright = "Copyright 2026 Hennadii Shelenhovskyi. Based on Zed, copyright 2022-2025 Zed Industries, Inc."
 
 [package.metadata.bundle-preview] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
@@ -312,6 +316,7 @@ category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fyx"]
+copyright = "Copyright 2026 Hennadii Shelenhovskyi. Based on Zed, copyright 2022-2025 Zed Industries, Inc."
 
 [package.metadata.bundle-stable] # fyx: bundle id, name and URL scheme
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
@@ -321,6 +326,7 @@ category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fyx"]
+copyright = "Copyright 2026 Hennadii Shelenhovskyi. Based on Zed, copyright 2022-2025 Zed Industries, Inc."
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

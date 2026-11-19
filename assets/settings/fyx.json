@@ -44,6 +44,22 @@
   "agent_review": {
     "enabled": false,
   },
+  // No avatar lookups: they send commit author emails to GitHub and repository SHAs to other
+  // forges.
+  "git": {
+    "blame": {
+      "show_avatar": false,
+    },
+  },
+  // Prettier for JSON-with-comments (settings and keymap files) would `npm install` on first
+  // open; the JSON language server formats them instead.
+  "languages": {
+    "JSONC": {
+      "prettier": {
+        "allowed": false,
+      },
+    },
+  },
   // The agent's default model is a bring-your-own-key provider, not Zed's hosted models
   // (zed.dev). Set an Anthropic API key, or pick any other configured provider.
   "agent": {
@@ -55,9 +71,55 @@
   // Security modes for agents (`crates/fyx_guard`, docs/fyx/security-modes.md).
   // "off" behaves like Zed; "audit" logs what "shield" would block; "shield"
   // keeps private files, secret environment variables and agent configs out of
-  // agents' reach. Only user settings can change it.
+  // agents' reach. Only user settings set it; while Fyx runs, a change that
+  // lowers it asks for confirmation.
   "fyx_security": {
     "mode": "off",
     "allow_env": [],
+  },
+  "fyx": {
+    "extensions": {
+      // Folders of UI extensions in development, loaded on every start and reloaded when
+      // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".
+      "dev_paths": [],
+      // Show the Extension Inspector panel in release builds too (dev builds always have it).
+      "developer_mode": false,
+      // Status bar items of UI extensions not to show, as "<extension id>/<surface id>"
+      // (right-click an item, "Hide Button").
+      "hidden_status_items": [],
+      // The Fyx extension registry (https://, http://localhost or file://). Empty: off.
+      "registry_url": "",
+      "network": {
+        // Host names UI extensions may reach on your private network (10/8, 172.16/12,
+        // 192.168/16, 100.64/10, fc00::/7) when they also declare them; "*.corp.example"
+        // matches subdomains. Loopback and link-local addresses are never allowed.
+        "private_hosts": [],
+      },
+    },
+    "terminal": {
+      // Pop up a notification when a terminal program (Claude Code through OSC 7501, for
+      // example) waits for you or finishes while the window is in the background.
+      "notifications": true,
+    },
+    // Several accounts of one tool, each in its own config dir. Fyx only sets the tool's
+    // config-dir variable in a terminal or an agent; sign in with the tool's own command.
+    "accounts": {
+      // { "name": "Work", "tool": "claude", "dir": "~/.claude-work", "color": "red" }
+      "profiles": [],
+      // The account each project uses: { "~/work/api": { "claude": "Work" } }. Set from the
+      // terminal panel's "+" menu.
+      "projects": {},
+      "tools": {
+        "claude": {
+          "env": "CLAUDE_CONFIG_DIR",
+          "label": "Claude Code",
+          "agents": ["claude-acp"],
+        },
+        "codex": { "env": "CODEX_HOME", "label": "Codex", "agents": ["codex-acp"] },
+        "gemini": { "env": "GEMINI_CLI_HOME", "label": "Gemini CLI", "agents": ["gemini"] },
+        "copilot": { "env": "COPILOT_HOME", "label": "GitHub Copilot CLI" },
+        "opencode": { "env": "OPENCODE_CONFIG_DIR", "label": "OpenCode" },
+      },
+    },
   },
 }

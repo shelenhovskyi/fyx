@@ -1026,6 +1026,7 @@ impl TerminalBuilder {
         );
 
         let terminal = Terminal {
+            fyx: terminal_ext::TerminalExt::new(), // fyx
             task: None,
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
@@ -1114,6 +1115,12 @@ impl TerminalBuilder {
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
         let no_pty = HeadlessTerminal::is_enabled(cx);
+        terminal_ext::apply_env_hook(
+            &mut env,
+            working_directory.as_deref(),
+            is_remote_terminal,
+            cx,
+        ); // fyx: accounts, terminal:env
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
@@ -1147,6 +1154,7 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+            let fyx = terminal_ext::TerminalExt::insert_env(&mut env); // fyx: FYX_TERMINAL_ID/TOKEN
 
             #[derive(Default)]
             struct ShellParams {
@@ -1302,8 +1310,13 @@ impl TerminalBuilder {
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
 
                 //And connect them together
-                let pty_tx =
-                    spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+                let pty_tx = spawn_event_loop(
+                    term.clone(),
+                    events_tx,
+                    pty,
+                    pty_options.drain_on_exit,
+                    &fyx,
+                )?; // fyx
 
                 (
                     TerminalType::Pty {
@@ -1316,6 +1329,7 @@ impl TerminalBuilder {
 
             let no_task = task.is_none();
             let terminal = Terminal {
+                fyx, // fyx
                 task,
                 terminal_type,
                 subprocess,
@@ -1520,6 +1534,7 @@ enum TerminalType {
 }
 
 pub struct Terminal {
+    pub fyx: terminal_ext::TerminalExt, // fyx: Fyx's per-terminal state (id, token, status)
     terminal_type: TerminalType,
     /// Set for non-PTY terminals (see [`HeadlessTerminal`]); owns the spawned
     /// subprocess and the task pumping its output into the grid.
@@ -1648,6 +1663,19 @@ impl Terminal {
     }
 
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
+        // fyx: a pseudo-terminal never answers its extension's output (clipboard, reports)
+        if self.fyx.is_pseudo()
+            && matches!(
+                event,
+                TerminalBackendEvent::ClipboardStore(_)
+                    | TerminalBackendEvent::ClipboardLoad(_)
+                    | TerminalBackendEvent::PtyWrite(_)
+                    | TerminalBackendEvent::TextAreaSizeRequest(_)
+                    | TerminalBackendEvent::ColorRequest(..)
+            )
+        {
+            return;
+        }
         match event {
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
@@ -1745,6 +1773,9 @@ impl Terminal {
                 let columns_changed =
                     self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
+                // fyx: a pseudo-terminal's size goes to its extension
+                let (cols, rows) = (new_bounds.num_columns(), new_bounds.num_lines());
+                self.fyx.forward_resize(cols, rows);
 
                 if let TerminalType::Pty {
                     resources: PtyResources::Active(pty_tx),
@@ -2198,6 +2229,10 @@ impl Terminal {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.pty_write_log.borrow_mut().push(input.to_vec());
+        // fyx: a pseudo-terminal's input goes to its extension
+        if self.fyx.forward_input(&input) {
+            return;
+        }
         if let TerminalType::Pty {
             resources: PtyResources::Active(pty_tx),
             ..
@@ -2485,6 +2520,17 @@ impl Terminal {
     }
 
     ///Paste text into the terminal
+    /// fyx: whether the program has bracketed paste on, read live from any thread (a hidden tab's
+    /// `last_content` is stale). For `fyx:ui` paste into a tool.
+    pub fn fyx_bracketed_paste(&self) -> impl Fn() -> bool + Send + Sync + use<> {
+        let term = self.term.clone();
+        move || {
+            term.lock()
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        }
+    }
+
     pub fn paste(&mut self, text: &str) {
         let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
             format!("{}{}{}", "\x1b[200~", text.replace('\x1b', ""), "\x1b[201~")

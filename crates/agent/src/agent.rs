@@ -1,4 +1,5 @@
 mod db;
+mod fyx_models; // fyx: model lists load on first use
 mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
@@ -419,19 +420,20 @@ pub struct LanguageModels {
     model_list: acp_thread::AgentModelList,
     refresh_models_rx: watch::Receiver<()>,
     refresh_models_tx: watch::Sender<()>,
+    models_requested: bool, // fyx: see fyx_models.rs
 }
 
 impl LanguageModels {
     fn new(cx: &mut App) -> Self {
         let (refresh_models_tx, refresh_models_rx) = watch::channel(());
-        LanguageModelRegistry::global(cx)
-            .update(cx, |registry, cx| registry.authenticate_providers(cx));
+        // fyx: no `authenticate_providers` here; `fyx_models` starts it on first use.
 
         let mut this = Self {
             models: HashMap::default(),
             model_list: acp_thread::AgentModelList::Grouped(IndexMap::default()),
             refresh_models_rx,
             refresh_models_tx,
+            models_requested: false,
         };
         this.refresh_list(cx);
         this
@@ -3045,6 +3047,7 @@ struct NativeAgentModelSelector {
 impl acp_thread::AgentModelSelector for NativeAgentModelSelector {
     fn list_models(&self, cx: &mut App) -> Task<Result<acp_thread::AgentModelList>> {
         log::debug!("NativeAgentConnection::list_models called");
+        fyx_models::on_list_models(&self.connection, cx); // fyx: first use loads the lists
         let list = self.connection.0.read(cx).models.model_list.clone();
         Task::ready(if list.is_empty() {
             Err(anyhow::anyhow!("No models available"))
@@ -3319,11 +3322,23 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         session_id: acp_v2::SessionId,
         project: Entity<Project>,
         _work_dirs: PathList,
-        _title: Option<SharedString>,
+        title: Option<SharedString>,
         cx: &mut App,
     ) -> Task<Result<Entity<acp_thread::AcpThread>>> {
-        self.0
-            .update(cx, |agent, cx| agent.open_thread(session_id, project, cx))
+        let load = self
+            .0
+            .update(cx, |agent, cx| agent.open_thread(session_id, project, cx));
+        cx.spawn(async move |cx| {
+            let thread = load.await?;
+            if let Some(title) = title {
+                thread.update(cx, |thread, cx| {
+                    if thread.title().is_none() {
+                        thread.set_provisional_title(title, cx);
+                    }
+                });
+            }
+            Ok(thread)
+        })
     }
 
     fn auth_methods(&self) -> &[acp_v2::AuthMethod] {
@@ -3463,6 +3478,15 @@ impl NativeAgentConnection {
     ) -> Task<Result<acp_v2::StopReason>> {
         let session_id = params.session_id.clone();
         log::info!("Received prompt request for session: {}", session_id);
+        // fyx: the first prompt waits for the model lists, which load on first use.
+        if let Some(wait) = self.wait_for_first_model(&session_id, cx) {
+            let this = self.clone();
+            return cx.spawn(async move |cx| {
+                wait.await;
+                cx.update(|cx| this.execute_prompt(client_user_message_id, params, cx))
+                    .await
+            });
+        }
         log::debug!("Prompt blocks count: {}", params.prompt.len());
 
         let Some(project_state) = self.0.read(cx).session_project_state(&session_id) else {
@@ -6257,6 +6281,85 @@ mod internal_tests {
                     .map(|block| block.to_markdown(cx)),
                 Some("retained context")
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_load_session_restores_caller_title_only_without_saved_title(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let database = cx
+            .update(|cx| ThreadsDatabase::connect(cx))
+            .await
+            .expect("thread database should connect");
+
+        let untitled_session_id = acp_v2::SessionId::new("untitled");
+        let mut untitled_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+        untitled_thread.title = SharedString::default();
+        database
+            .save_thread(
+                untitled_session_id.clone(),
+                untitled_thread,
+                PathList::new(&[Path::new("/a")]),
+            )
+            .await
+            .expect("untitled thread should save");
+
+        let titled_session_id = acp_v2::SessionId::new("titled");
+        let mut titled_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+        titled_thread.title = "Saved title".into();
+        database
+            .save_thread(
+                titled_session_id.clone(),
+                titled_thread,
+                PathList::new(&[Path::new("/a")]),
+            )
+            .await
+            .expect("titled thread should save");
+
+        let restored_untitled = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    untitled_session_id.clone(),
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    Some("Sidebar title".into()),
+                    cx,
+                )
+            })
+            .await
+            .expect("untitled thread should load");
+        cx.run_until_parked();
+        restored_untitled.read_with(cx, |thread, _| {
+            assert_eq!(thread.title(), Some("Sidebar title".into()));
+            assert!(thread.has_provisional_title());
+        });
+        // The restored title is display-only, so it must not be written back
+        // as the native thread's own title.
+        let native_untitled =
+            cx.update(|cx| native_thread_for_session(&agent, &untitled_session_id, cx));
+        native_untitled.read_with(cx, |thread, _| assert_eq!(thread.title(), None));
+
+        let restored_titled = cx
+            .update(|cx| {
+                connection.load_session(
+                    titled_session_id,
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    Some("Stale title".into()),
+                    cx,
+                )
+            })
+            .await
+            .expect("titled thread should load");
+        cx.run_until_parked();
+        restored_titled.read_with(cx, |thread, _| {
+            assert_eq!(thread.title(), Some("Saved title".into()));
+            assert!(!thread.has_provisional_title());
         });
     }
 

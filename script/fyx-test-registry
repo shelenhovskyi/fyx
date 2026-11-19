@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# Writes a local Fyx test registry: a directory with snapshot.json, index.json, blocklist.json and
+# the packages, signed with the TEST keys that debug builds of Fyx trust
+# (crates/ui_ext_host/fixtures/registry/test-keyset.json). Release builds trust none of them.
+#
+# Usage: script/fyx-test-registry [--from DIR] [--stage 1|2|3] [OUT_DIR] [DEMO...]
+#
+#   --from DIR  take the demos from DIR/<demo> as built, e.g. <target>/fyx-demos-v0_3 from
+#               `script/fyx-build-demos --fyx-ui-0-3` (default: extensions/, built with
+#               script/fyx-build-demos). Without DEMOs: every folder in DIR with an extension.toml.
+#   --stage N   what the registry holds, so a user check can switch from one to the next:
+#               1  every demo at its own version; the block list names only versions older than
+#                  any release (it is never empty).
+#               2  stage 1, plus for each demo the next patch version with the same declarations
+#                  (updates by itself); the last demo's also declares the network domain
+#                  example.com (and network:fetch if it had none), so it waits for "Approve and
+#                  Update"; the first demo also gets the next minor version, published now, so it
+#                  waits out the 24 h gate.
+#               3  stage 2, and the block list blocks the first demo's patch version (rolled
+#                  back to its stage-1 version).
+#   OUT_DIR     where to write it (default: target/fyx-test-registry); it is replaced.
+#   DEMO        extension folders (default: fyx_demo_counter fyx_demo_todo).
+#
+# Then set, in the settings of a debug build:
+#   "fyx": { "extensions": { "registry_url": "<the file:// URL it prints>" } }
+# and open "Fyx Extensions" (the Extensions page, or `fyx_ui: open fyx extensions`).
+#
+# The flow is the registry's publish step (the template's scripts/dry-run.sh): sign each release,
+# add it to the index, sign a snapshot of the index, sign the block list. A release's tier is the
+# highest of its capabilities' in tools/fyx-extensions-template/policy/capability-tiers.json (one
+# missing there counts as t2); its domains and programs come from [fyx_ui.network] and
+# [[fyx_ui.processes]]. Releases are dated two days back, past the 24 h age gate, unless noted.
+# A package's signed URL is https://registry.test/packages/<id>-<version>.fyxext; a directory
+# registry serves it from packages/<id>-<version>.fyxext under OUT_DIR. Snapshot and block list
+# sequences grow with the time and the stage, so a later run or stage replaces an earlier one.
+#
+# The seeds below are test keys, public on purpose; they must never sign anything real.
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+from=""
+stage=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --from) from=$2; shift 2 ;;
+        --stage) stage=$2; shift 2 ;;
+        *) break ;;
+    esac
+done
+case "$stage" in 1 | 2 | 3) ;; *) echo "fyx-test-registry: --stage is 1, 2 or 3" >&2; exit 1 ;; esac
+out=${1:-$repo/target/fyx-test-registry}
+shift || true
+demos=("$@")
+if [ ${#demos[@]} -eq 0 ]; then
+    if [ -n "$from" ]; then
+        for dir in "$from"/*/; do
+            [ -f "$dir/extension.toml" ] && demos+=("$(basename "$dir")")
+        done
+    else
+        demos=(fyx_demo_counter fyx_demo_todo)
+    fi
+fi
+[ ${#demos[@]} -gt 0 ] || { echo "fyx-test-registry: no demos in $from" >&2; exit 1; }
+root=${from:-$repo/extensions}
+
+py=python3
+command -v "$py" > /dev/null 2>&1 && "$py" -c 'import sys' 2> /dev/null || py=python
+
+cargo build -q --manifest-path "$repo/Cargo.toml" -p fyx_registry --bin fyx-registry     -p fyx_ext --bin fyx-ext
+target=$(cargo metadata -q --format-version 1 --no-deps --manifest-path "$repo/Cargo.toml" \
+    | "$py" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+registry() { "$target/debug/fyx-registry" "$@"; }
+fyx_ext() { "$target/debug/fyx-ext" "$@"; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+rm -rf "$out"
+mkdir -p "$out/packages"
+
+# The test seeds of crates/ui_ext_host/src/registry_service_tests.rs.
+key() { # key ID BYTE ROLE
+    local seed
+    seed=$("$py" -c "import base64, sys; print(base64.b64encode(bytes([int(sys.argv[1], 16)]) * 32).decode())" "$2")
+    printf '{"key_id": "%s", "seed": "%s"}\n' "$1" "$seed" > "$work/$1.json"
+    registry public-key --key-file "$work/$1.json" --role "$3" > "$work/$1.public.json"
+}
+key fyx-test-release 11 release
+key fyx-test-blocklist 22 blocklist
+key fyx-test-snapshot 33 snapshot
+"$py" - "$work" "$repo/crates/ui_ext_host/fixtures/registry/test-keyset.json" <<'EOF'
+import json, sys
+work, fixture = sys.argv[1:]
+keys = [json.load(open(f"{work}/{name}.public.json")) for name in
+        ("fyx-test-release", "fyx-test-blocklist", "fyx-test-snapshot")]
+json.dump({"keys": keys}, open(f"{work}/keyset.json", "w"), indent=2)
+if keys != json.load(open(fixture))["keys"]:
+    sys.exit("the test keys no longer match test-keyset.json")
+EOF
+
+now=$(date +%s)
+aged=$((now - 2 * 24 * 60 * 60))
+tiers="$repo/tools/fyx-extensions-template/policy/capability-tiers.json"
+
+# publish DEMO BUMP PUBLISHED EXTRA_CAPABILITY: a copy of the demo with its version bumped
+# (none, patch or minor) and maybe one more capability, packed, signed and added to the index.
+# Writes "<id> <version>" to $work/published.
+publish() {
+    local demo=$1 bump=$2 published=$3 extra=$4
+    local copy="$work/src-$demo-$bump"
+    rm -rf "$copy" "$work/pack"
+    cp -R "$root/$demo" "$copy"
+    "$py" - "$copy/extension.toml" "$bump" "$extra" <<'EOF'
+import re, sys, tomllib
+path, bump, extra = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+version = tomllib.loads(text)["version"]
+major, minor, patch = (int(part) for part in version.split("."))
+new = {"none": version, "patch": f"{major}.{minor}.{patch + 1}",
+       "minor": f"{major}.{minor + 1}.0"}[bump]
+text, count = re.subn(r'(?m)^version = "[^"]*"$', f'version = "{new}"', text, count=1)
+assert count == 1, "no version line"
+if extra:
+    # A new network domain: fyx:ui 0.3 has no T1 capability left to add, and a new domain is
+    # a change of permissions the user approves.
+    capabilities = tomllib.loads(text).get("fyx_ui", {}).get("capabilities", [])
+    if "network:fetch" not in capabilities:
+        text, count = re.subn(r'(?m)^(capabilities = \[.*)\]$', r'\1, "network:fetch"]', text,
+                              count=1)
+        assert count == 1, "no one-line capabilities list"
+    if re.search(r'(?m)^\[fyx_ui\.network\]$', text):
+        text, count = re.subn(r'(?ms)^(\[fyx_ui\.network\]\n(?:[^\[].*?\n)*?domains = \[.*?)\]$',
+                              rf'\1, "{extra}"]', text, count=1)
+        assert count == 1, "no one-line domains list in [fyx_ui.network]"
+    else:
+        text = text.rstrip("\n") + f'\n\n[fyx_ui.network]\ndomains = ["{extra}"]\n'
+    domains = tomllib.loads(text)["fyx_ui"]["network"]["domains"]
+    assert extra in domains, domains
+open(path, "w", encoding="utf-8").write(text)
+EOF
+    # The demo is built already; fyx-ext checks and packs it as it is.
+    fyx_ext package --path "$copy" --out "$work/pack" --no-build > /dev/null
+    local package
+    package=$(ls "$work/pack"/*.fyxext)
+    "$py" - "$copy" "$package" "$published" "$demo" "$tiers" > "$work/release.json" <<'EOF'
+import hashlib, json, os, sys, tomllib
+folder, package, published, demo, tiers = sys.argv[1:]
+manifest = tomllib.load(open(os.path.join(folder, "extension.toml"), "rb"))
+ui = manifest.get("fyx_ui", {})
+data = open(package, "rb").read()
+capabilities = sorted(ui.get("capabilities", []))
+known = json.load(open(tiers))["capabilities"]
+tier = max((known.get(c, "t2") for c in capabilities), default="t0")
+release = {
+    "id": manifest["id"],
+    "version": manifest["version"],
+    "name": manifest["name"],
+    "description": manifest.get("description", manifest["name"]),
+    "owners": ["fyx-tests"],
+    "source": {
+        "repository": "https://github.com/fyx-tests/fyx",
+        "commit": "0" * 40,
+        "path": f"extensions/{demo}",
+    },
+    "package": {
+        "url": f"https://registry.test/packages/{manifest['id']}-{manifest['version']}.fyxext",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+    },
+    "published_at": int(published),
+    "urgent": False,
+    "tier": tier,
+    "capabilities": capabilities,
+}
+domains = sorted(ui.get("network", {}).get("domains", []))
+programs = sorted({process["name"] for process in ui.get("processes", [])})
+if domains:
+    release["network_domains"] = domains
+if programs:
+    release["processes"] = programs
+print(json.dumps(release, indent=2))
+EOF
+    local id version
+    id=$("$py" -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$work/release.json")
+    version=$("$py" -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$work/release.json")
+    registry sign release "$work/release.json" --package "$package" \
+        --key-file "$work/fyx-test-release.json" --out "$work/signed.json" >&2
+    registry index add --index "$out/index.json" --release "$work/signed.json" \
+        --keyset "$work/keyset.json" > /dev/null
+    cp "$package" "$out/packages/$id-$version.fyxext"
+    echo "published $id $version"
+    echo "$id $version" > "$work/published"
+}
+
+blocks=()
+first=${demos[0]}
+last=${demos[${#demos[@]} - 1]}
+for demo in "${demos[@]}"; do
+    publish "$demo" none "$aged" ""
+    read -r id version < "$work/published"
+    [ "$demo" = "$first" ] && blocks+=("$id|<$version|Builds before $version are withdrawn (test entry).")
+    if [ "$stage" -ge 2 ]; then
+        extra=""
+        [ "$demo" = "$last" ] && extra=example.com
+        publish "$demo" patch "$aged" "$extra"
+        read -r id patched < "$work/published"
+        if [ "$demo" = "$first" ]; then
+            publish "$demo" minor "$now" ""
+            [ "$stage" -ge 3 ] && blocks+=("$id|=$patched|Crashes on open (test entry).")
+        fi
+    fi
+done
+
+sequence=$((now * 10 + stage))
+registry sign snapshot --index "$out/index.json" --sequence "$sequence" \
+    --key-file "$work/fyx-test-snapshot.json" --out "$out/snapshot.json"
+registry verify index "$out/index.json" --keyset "$work/keyset.json" --snapshot "$out/snapshot.json"
+
+"$py" - "$now" "$sequence" "${blocks[@]}" > "$work/blocklist-unsigned.json" <<'EOF'
+import json, sys
+now, sequence, *blocks = sys.argv[1:]
+now = int(now)
+entries = []
+for block in blocks:
+    id, versions, reason = block.split("|", 2)
+    entries.append({"id": id, "versions": versions, "reason": reason, "urgent": False})
+print(json.dumps({"schema": 1, "sequence": int(sequence), "generated_at": now,
+                  "expires_at": now + 6 * 24 * 60 * 60, "entries": entries}))
+EOF
+registry sign blocklist "$work/blocklist-unsigned.json" \
+    --key-file "$work/fyx-test-blocklist.json" --out "$out/blocklist.json"
+registry verify blocklist "$out/blocklist.json" --keyset "$work/keyset.json"
+
+absolute=$(cd "$out" && pwd -W 2> /dev/null || pwd)
+echo
+echo "test registry (stage $stage) written to $out"
+echo "registry_url: file:///${absolute#/}"

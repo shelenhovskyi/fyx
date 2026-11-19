@@ -12,7 +12,7 @@ still build and run against 0.1 exactly as before.
 
 | What | Where | Notes |
 |---|---|---|
-| The 0.2 world, next to 0.1 | `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` | The design's WIT with a "STAGED" header and a `TODO` for section M. Parses with `wasm-tools component wit` 1.263.0; a dummy component embeds, builds and validates. The docs copy is gone, so there is one source. |
+| The 0.2 world, next to 0.1 | `crates/ui_ext/wit/since_v0.2.0/fyx-ui.wit` | The design's WIT with a "STAGED" header and a `TODO` for section M. (Since 2026-11-18 section M is in it, W2c `700077009f`, and the host treats 0.2 as frozen: `MAX_FROZEN_VERSION = 0.2.0`, W2c `8abde04072`.) Parses with `wasm-tools component wit` 1.263.0; a dummy component embeds, builds and validates. The docs copy is gone, so there is one source. |
 | 0.1 world | `crates/ui_ext/wit/fyx-ui.wit` | Not moved and not edited (section 1). |
 | WIT paths | `ui_ext::WIT_DIR` (still 0.1), `WIT_DIR_V0_1_0`, `WIT_DIR_V0_2_0`, `ApiVersion::wit_dir` | |
 | 0.2 data model | `ui_ext::v0_2` (`crates/ui_ext/src/v0_2.rs`) | Every type of the 0.2 `types` interface plus `host-error`; the frozen `Icon` enum (101 cases, checked against the WIT by a test) and `IconRef { Frozen, Upstream }`; `From` every 0.1 type, `TryFrom<v0_2::UiEvent>` back to 0.1 (section 2, "Conversions"); `SurfaceKind::capability`; `Update::check_caps` (F's checks at the call); `ButtonProps::tooltip_text` (1024 bytes, cut at a character boundary); `ListRow::indent_levels` (clamped to 32). |
@@ -40,8 +40,9 @@ Design points this step had to settle (flag them in review):
 - **0.1 static surfaces** in `LiveIds::new(V0_1_0, …)` are checked only for the capability of
   their kind, as `check_surfaces` does today: any id, duplicates and any count are accepted. A
   modal is refused, since 0.1 cannot declare one.
-- **Section M** is not in the WIT: design.md has only a placeholder row, with no types for actions
-  or progress, no capability and no error codes. The WIT has a `TODO` where the interface goes.
+- **Section M** was not in the WIT at this point: design.md had only a placeholder row. It was
+  drafted on 2026-11-18 (design.md §M) and added to the WIT, in place of the `TODO`, with the host
+  side the same day (W2c `700077009f`).
 - **Not done here, because they change `Tree` under the renderer:** design G (`Patch::InvalidateRows`
   applied by `Tree`, `TreeError::NotAList`, the `Touched` result). They move to plan 2.3. The
   `replace` / `mount` cap of 16384 needed no change: `Tree` already checks `max_nodes` for both
@@ -207,76 +208,66 @@ extension changes behaviour by being loaded in a 0.2 host.
 
 ## 4. SDK (W4)
 
-`ui_ext_sdk` generates the bindings of **both** worlds in every build, and an extension picks its
-world where it registers:
+Implemented in plan task 2.4 (2026-11-18). It differs from the earlier draft of this section,
+because two things the draft assumed did not hold:
+- wit-bindgen names a world's exported macro after the world, and both versions call their world
+  `ui-extension`, so two `generate!` calls cannot share a crate;
+- an SDK build that can call both worlds' host imports makes a 0.1 component import
+  `fyx:ui/host@0.2.0`, which a 0.1 host refuses.
+
+**One API, the 0.2 one.** `ui_ext_sdk` generates the 0.2 bindings and re-exports their types:
+`Icon`, tooltips, secret inputs, list selection, row indent, modal surfaces, `row-selected` and
+`dismissed`, `invalidate-rows`, decorations, `HostError`. Authors write against them only.
+
+**The world is chosen in `register_extension!`:**
 
 ```rust
-pub mod bindings {
-    pub mod v0_2 {
-        wit_bindgen::generate!({ path: "../ui_ext/wit/since_v0.2.0", world: "ui-extension", /* as today */ });
-    }
-    pub mod v0_1 {
-        wit_bindgen::generate!({ path: "../ui_ext/wit/since_v0.1.0", world: "ui-extension", /* as today */ });
-    }
-}
+register_extension!(MyExtension);        // exports fyx:ui@0.2.0, with `tick`
+register_extension!(MyExtension, v0_1);  // exports fyx:ui@0.1.0 from the same code
 ```
 
-```rust
-register_extension!(MyExtension);        // fyx:ui 0.2, the default
-register_extension!(MyExtension, v0_1);  // for Fyx builds that only know 0.1
-```
+- The 0.1 bindings live in a separate Apache crate, `crates/ui_ext_sdk_v0_1`, so their export
+  macro does not collide with the 0.2 one.
+- `v0_1` converts at the boundary (`crates/ui_ext_sdk/src/v0_1.rs`):
+  - icons become upstream `IconName`s: the kebab name in snake case, or one of 17 listed
+    exceptions, all checked against `crates/icons/src/icons.rs` by a test;
+  - tooltips, list selection and row indents are dropped;
+  - what 0.1 cannot express is an error that names 0.2: modal surfaces are left out of
+    `surfaces` (logged); secret inputs, the `blank` icon node and `invalidate-rows` make the call
+    return `Err`; `request_tick`, `add_surface`, `remove_surface`, `show_surface`, `hide_surface`,
+    `place_decoration` and `remove_decoration` return `unavailable`.
+- So a 0.2-only feature used in a 0.1 build fails at run time with a clear message, not at
+  compile time.
 
-**Why not Cargo features** (an earlier draft had exclusive `fyx-ui-0-1` / `fyx-ui-0-2` features
-with a `compile_error!`). Cargo unifies features. An extension that selects 0.1 and depends on a
-helper crate built on the SDK's default would get both features and fail to compile, with no way
-out for the author (judge wit-0.2-design #3). With both modules always present, the SDK has no
-features to unify. The probe fixture picks its world with a feature of its own (`probe-0-1`
-switches its `register_extension!` arm), and a leaf crate's feature unifies with nothing.
-`gate.sh` needs no feature check.
+**Host imports chosen at link time.** The SDK's host functions (`host.rs`) call `extern "Rust"`
+shims that the macro defines in the extension's crate for the chosen world. Checked with
+`wasm-tools component wit` on all six demos:
+- a 0.1 build imports only `fyx:ui/types@0.1.0` and `fyx:ui/host@0.1.0`, exports no `tick`, and
+  carries one `0.1.0` version section;
+- a 0.2 build imports only `@0.2.0` interfaces, exports `tick`, and carries one `0.2.0` section.
 
-**Why it does not leak 0.2 into a 0.1 component.** The SDK uses `pub_export_macro: true`. With
-it, wit-bindgen 0.41 emits two `component-type` sections. The `generate!` itself emits one with
-the world's imports only. The `export!` macro, invoked by `register_extension!` in the
-extension's own crate, emits one with the exports and the imports
-(`wit-bindgen-rust` 0.41, `lib.rs` around line 1322). `wit-component` drops imports that the core
-module never calls. So a 0.1 extension carries the 0.1 exports, plus only the imports it actually
-calls. **This has to be verified before the SDK adopts it.** Build one demo with
-`register_extension!(T, v0_1)` and check that `wasm-tools component wit` shows only `@0.1.0`
-`fyx:ui` interfaces and no `tick` export. If a 0.2 import appears, the fallback is the feature
-design above, with the unification trap documented in `docs/fyx/sdk-reference.md`.
+A 0.2 build always imports `fyx:ui/decorations`, because the shims are `#[no_mangle]` and so kept
+by the linker. That matches design.md section L, where the host links `decorations` for every 0.2
+component and checks `ui:editor-decorations` per call, and `fyx-ext check` treats the import
+accordingly.
 
-**How the API splits.**
+**What stays shared:**
+- `ui_ext::TreeLimits`;
+- the tree rules, through `host_model.rs` (SDK types into the `ui_ext` 0.1 model, which
+  `ui_ext::Tree` validates; the structure carries over exactly);
+- `SurfaceTree`, `PatchSet`, `TreeBuilder` and the row helpers, written once.
 
-- The crate root re-exports the 0.2 types and API, as today. `ui_ext_sdk::v0_1` has the 0.1 API
-  for 0.1 guests.
-- The version-independent code (`TreeBuilder`, `IdAllocator`, `SurfaceTree`, `PatchSet`, the
-  row helpers) is written once. It is instantiated per version by an internal macro over that
-  version's bindings types, so it is neither copied by hand nor made generic in the public API.
-- Each version module brings its own `Extension` trait (0.2 adds `tick`), host-function wrappers,
-  props builders and `host_model.rs` conversions into the shared `ui_ext` model. `ui_ext::TreeLimits`
-  stays shared, which keeps integration-2 #8 fixed.
-- `register_extension!(T, v0_1)` writes the `0.1.0` version section and exports the 0.1 world.
-  The default arm writes `0.2.0` and also exports `tick` (`ui_ext_sdk.rs:211-214`).
-- 0.2-only APIs exist only in the 0.2 module, so using them in a 0.1 guest fails to compile
-  rather than silently doing nothing:
-  - `Extension::tick`;
-  - `request_tick`, `cancel_tick`, `add_surface`, `remove_surface`, `show_surface` and
-    `hide_surface`;
-  - `place_decoration` and `remove_decoration`;
-  - `SurfaceTree::invalidate_rows`, `SurfaceTree::push` and `SurfaceTree::place`;
-  - `Surface::modal`;
-  - the builders for `tooltip`, `secret`, `selected` and `indent`.
-- `push_update` returns `Result<(), HostError>` in 0.2 and `()` in 0.1.
-- `list_row` takes an `indent` argument only in 0.2.
-- Icons: 0.2 builders take the generated `Icon`; 0.1 builders keep `&str`.
-- `SurfaceTree::mount` checks `max_nodes` (16384) in both versions, since the host accepts that
-  for `mount` and `replace` (design.md, Summary).
-- Crate version `0.1.0` → `0.2.0`.
+**Who exports what today:**
+- The six demos export 0.1 by default, since that is what Fyx runs, and 0.2 with their
+  `fyx-ui-0-2` feature, a feature of the leaf crate that unifies with nothing.
+- The template and the `ui_ext_wasm` fixtures use `register_extension!(T, v0_1)`.
+- Moving to `register_extension!(T)` and `api_version = "0.2.0"` is a one-line change once the
+  host runs 0.2 (plan 2.2, 2.3).
 
 **Porting a 0.1 extension to 0.2 can require new surface ids.** 0.2 rejects static surfaces whose
 ids break `[a-z0-9._-]{1,64}` (design.md, E). Surface ids are part of panel keys and persisted
 dock state, so a renamed id loses the saved size and position. Every Fyx demo already complies
-(`counter`, `todos`, `gallery`, `gallery-status`).
+(`counter`, `todos`, `gallery`, `gallery-status`, `markdown`, `git-status`, `form`).
 
 ## 5. VS Code sidecar (W8)
 

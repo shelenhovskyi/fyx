@@ -112,6 +112,10 @@ impl<'a> CanonicalReader<'a> {
         (0..count).map(|_| self.string()).collect()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     pub(crate) fn finish(self) -> Option<()> {
         self.bytes.is_empty().then_some(())
     }

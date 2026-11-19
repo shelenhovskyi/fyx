@@ -194,7 +194,7 @@ impl FormPanel {
 
     fn submit_button(&self) -> ButtonProps {
         ButtonProps::new("Submit")
-            .icon("check")
+            .icon(Icon::Check)
             .style(ButtonStyle::Filled)
             .disabled(!self.is_valid())
     }
@@ -330,7 +330,7 @@ impl Extension for FormPanel {
             SURFACE_ID,
             "Sign-up form",
             DockPosition::Right,
-            "user_check",
+            Icon::Person,
             320,
         )]
     }
@@ -409,11 +409,24 @@ impl Extension for FormPanel {
             }
             UiEvent::Click(id) if id == submit => self.submit(),
             UiEvent::Click(id) if id == reset => self.reset(),
-            UiEvent::Click(_) | UiEvent::RowClick(_) => Ok(Update::Unchanged),
+            UiEvent::Click(_)
+            | UiEvent::RowClick(_)
+            | UiEvent::RowSelected(_)
+            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
+            // The SDK's fyx-ui-0-3 feature adds events this demo never gets.
+            #[allow(unreachable_patterns)]
+            _ => Ok(Update::Unchanged),
         }
     }
 }
 
+// fyx:ui 0.1 by default, which is what every Fyx runs; `--features fyx-ui-0-2` builds the 0.2
+// world and `--features fyx-ui-0-3` the staged 0.3 world from the same code.
+#[cfg(not(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3")))]
+register_extension!(FormPanel, v0_1);
+#[cfg(all(feature = "fyx-ui-0-2", not(feature = "fyx-ui-0-3")))]
+register_extension!(FormPanel, v0_2);
+#[cfg(feature = "fyx-ui-0-3")]
 register_extension!(FormPanel);
 
 #[cfg(test)]
@@ -520,7 +533,7 @@ mod tests {
         assert_eq!(
             nodes[12].props,
             ButtonProps::new("Submit")
-                .icon("check")
+                .icon(Icon::Check)
                 .style(ButtonStyle::Filled)
                 .disabled(true)
                 .into()
@@ -609,7 +622,7 @@ mod tests {
             set_props_of(&patches, SUBMIT),
             Some(
                 &ButtonProps::new("Submit")
-                    .icon("check")
+                    .icon(Icon::Check)
                     .style(ButtonStyle::Filled)
                     .into()
             )

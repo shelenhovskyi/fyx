@@ -1,0 +1,23 @@
+[package]
+name = "fyx_ext_harness"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+description = "Runs a Fyx UI extension component in wasmtime without the editor, for tests"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_ext_harness.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+semver.workspace = true
+toml.workspace = true
+ui_ext = { workspace = true, features = ["network"] }
+wasmparser.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true

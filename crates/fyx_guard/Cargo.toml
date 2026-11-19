@@ -20,13 +20,20 @@ collections.workspace = true
 fs.workspace = true
 gpui.workspace = true
 log.workspace = true
+paths.workspace = true
 project.workspace = true
 serde.workspace = true
 settings.workspace = true
-toml.workspace = true
+toml = { workspace = true, features = ["display"] }
+ui_ext.workspace = true
 util.workspace = true
 
 [dev-dependencies]
+action_log.workspace = true
+acp_thread = { workspace = true, features = ["test-support"] }
+agent = { workspace = true, features = ["test-support"] }
+agent_settings.workspace = true
+feature_flags.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true

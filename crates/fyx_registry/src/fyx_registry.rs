@@ -1,13 +1,18 @@
 //! Client-side core of the Fyx extension registry (Platform 1, decisions 14–21).
 //!
-//! Pure functions only: no network, no file system, no clock. Callers pass in the bytes they
-//! fetched and the current time, and get back verified documents and decisions. The formats are
-//! documented in `docs/fyx/platform/registry-format.md`.
+//! No network, no file system, no clock. Callers pass in the bytes they (or a [`Fetch`] they
+//! supply) fetched and the current time, and get back verified documents and decisions; the
+//! [`RegistryClient`] ties them together in the order of trust. The formats are documented in
+//! `docs/fyx/platform/registry-format.md`.
 
 mod blocklist;
 mod canonical;
+mod client;
 mod index;
+mod package;
 mod signing;
+mod snapshot;
+mod text;
 mod update;
 
 use std::{fmt, time::Duration};
@@ -18,16 +23,27 @@ use sha2::{Digest as _, Sha256};
 pub use blocklist::{
     BLOCKLIST_FETCH_INTERVAL, BLOCKLIST_SCHEMA, BLOCKLIST_STALE_AFTER, BlockEntry, Blocklist,
     BlocklistCache, CacheUpdate, Comparator, ComparatorOp, Freshness, KeepReason,
-    VerifiedBlocklist, VersionRange,
+    MAX_BLOCK_ENTRIES, MAX_BLOCKLIST_SIZE, MAX_BLOCKLIST_VALIDITY, VerifiedBlocklist, VersionRange,
+};
+pub use client::{
+    DownloadError, Fetch, FetchRequest, IndexRefresh, InstallError, InstallPlan, RegistryClient,
+    RegistryFile, StoredState, Unavailable,
 };
 pub use index::{
-    INDEX_SCHEMA, Index, MAX_PACKAGE_SIZE, Package, RejectedRelease, Release, Source, VerifiedIndex,
+    INDEX_SCHEMA, Index, MAX_INDEX_SIZE, MAX_PACKAGE_SIZE, MAX_RELEASES, MalformedRelease, Package,
+    RejectedRelease, Release, Source, VerifiedIndex,
 };
-pub use signing::{KeyId, Keyset, PublicKey, Signature, SigningKey};
+pub use package::{
+    RUNS_ZED_EXTENSION_WARNING, ZED_EXTENSION_WASM, entry_names, is_zed_extension_wasm,
+    runs_zed_extension,
+};
+pub use signing::{KeyId, KeyRole, Keyset, PublicKey, Signature, SigningKey};
+pub use snapshot::{MAX_SNAPSHOT_VALIDITY, SNAPSHOT_SCHEMA, Snapshot, VerifiedSnapshot};
+pub use text::is_public_suffix;
 pub use update::{
-    AGE_GATE, Action, Additions, AgeGate, HoldReason, InstallRefusal, InstalledExtension,
-    InstalledVersion, Origin, Permissions, PlannedAction, UpdateReason, age_gate, plan_install,
-    plan_updates,
+    AGE_GATE, Action, Additions, AgeGate, FirstSeen, HoldReason, InstallRefusal,
+    InstalledExtension, InstalledVersion, Origin, Permissions, PlanChanges, PlannedAction,
+    UpdateReason, age_gate, age_gate_seen, check_local_version, plan_install, plan_updates,
 };
 
 /// The documents this crate reads, for error messages.
@@ -39,6 +55,7 @@ pub enum Document {
     BlocklistCache,
     Keyset,
     SigningKey,
+    Snapshot,
 }
 
 impl fmt::Display for Document {
@@ -50,6 +67,7 @@ impl fmt::Display for Document {
             Document::BlocklistCache => "cached block list",
             Document::Keyset => "keyset",
             Document::SigningKey => "signing key",
+            Document::Snapshot => "snapshot.json",
         })
     }
 }
@@ -68,10 +86,25 @@ pub enum Error {
     Invalid(String),
     #[error("signed by unknown key {key_id:?}")]
     UnknownKey { key_id: String },
+    #[error("key {key_id:?} may not sign a {role} document")]
+    WrongRole { key_id: String, role: KeyRole },
     #[error("the signature by key {key_id:?} does not match the content")]
     BadSignature { key_id: String },
     #[error("package does not match the index: {0}")]
     PackageMismatch(String),
+    /// A signed document past its `expires_at`: a mirror may be replaying an old copy.
+    #[error("{document} expired at {expires_at:?}")]
+    Expired {
+        document: Document,
+        expires_at: Timestamp,
+    },
+    /// A signed document older than one already seen: a mirror is replaying an old copy.
+    #[error("{document} has sequence {found}, older than the {highest_seen} already seen")]
+    Rollback {
+        document: Document,
+        found: u64,
+        highest_seen: u64,
+    },
 }
 
 /// Seconds since the Unix epoch, UTC. The crate never reads the clock; callers pass `now`.
@@ -161,23 +194,61 @@ impl Tier {
         }
     }
 
+    /// Every capability this version of Fyx knows, with its tier. The registry template's
+    /// `policy/capability-tiers.json` must list exactly these (a test checks it). The T3
+    /// capabilities of fyx:ui 0.4 ([`Tier::T3_CAPABILITIES`]) count as T2 here: a release's tier
+    /// has no T3 value (design wit-0.4 §C.1).
+    pub const KNOWN_CAPABILITIES: [(&'static str, Tier); 35] = [
+        ("ui:panel", Tier::T0),
+        ("ui:status-bar", Tier::T0),
+        ("ui:modal", Tier::T0),
+        ("ui:notifications", Tier::T0),
+        ("ui:editor-decorations", Tier::T0),
+        ("ui:picker", Tier::T0),
+        ("ui:code-lens", Tier::T0),
+        ("ui:hover", Tier::T0),
+        ("ui:virtual-documents", Tier::T0),
+        ("ui:commands", Tier::T0),
+        ("ui:images", Tier::T0),
+        ("ui:canvas", Tier::T0),
+        // fyx:ui 0.4.
+        ("package:files", Tier::T0),
+        ("ui:approvals", Tier::T0),
+        ("workspace:read-buffers", Tier::T1),
+        ("workspace:read-files", Tier::T1),
+        ("workspace:diagnostics", Tier::T1),
+        // fyx:ui 0.4.
+        ("context:editor", Tier::T1),
+        ("workspace:open", Tier::T1),
+        ("terminal:profiles", Tier::T1),
+        ("terminal:pseudo", Tier::T1),
+        ("terminal:status", Tier::T1),
+        ("review:propose", Tier::T1),
+        ("network:fetch", Tier::T2),
+        ("process:spawn", Tier::T2),
+        ("workspace:edit", Tier::T2),
+        ("agent:observe", Tier::T2),
+        // fyx:ui 0.4.
+        ("network:listen", Tier::T2),
+        ("terminal:create", Tier::T2),
+        ("terminal:env", Tier::T2),
+        ("terminal:observe", Tier::T2),
+        ("fs:discovery-file", Tier::T2),
+        ("relay:hooks", Tier::T2),
+        ("terminal:read", Tier::T2),
+        ("terminal:write", Tier::T2),
+    ];
+
+    /// Asked at the moment of action, never in advance (fyx:ui 0.4, design §C.3): `t3` in the
+    /// template's file, T2 for a release's tier.
+    pub const T3_CAPABILITIES: [&'static str; 2] = ["terminal:read", "terminal:write"];
+
     /// The tier of a capability this version of Fyx knows, `None` for any other.
     pub fn of_capability(capability: &str) -> Option<Tier> {
-        Some(match capability {
-            "ui:panel"
-            | "ui:status-bar"
-            | "ui:modal"
-            | "ui:notifications"
-            | "ui:editor-decorations"
-            | "ui:picker"
-            | "ui:code-lens"
-            | "ui:hover"
-            | "ui:virtual-documents"
-            | "ui:commands" => Tier::T0,
-            "workspace:read-buffers" | "workspace:read-files" | "workspace:diagnostics" => Tier::T1,
-            "network:fetch" | "process:spawn" | "workspace:edit" | "agent:observe" => Tier::T2,
-            _ => return None,
-        })
+        Self::KNOWN_CAPABILITIES
+            .iter()
+            .find(|(known, _)| *known == capability)
+            .map(|(_, tier)| *tier)
     }
 
     /// Like [`Tier::of_capability`], but a capability this version does not know counts as T2:
@@ -252,6 +323,9 @@ pub struct Signed<T> {
 
 /// Documents with a canonical byte form that signatures cover.
 pub trait Canonical {
+    /// The key role allowed to sign this document.
+    const ROLE: KeyRole;
+
     fn canonical_bytes(&self) -> Vec<u8>;
 }
 
@@ -262,7 +336,7 @@ impl<T: Canonical> Signed<T> {
     }
 
     pub fn verify(&self, keyset: &Keyset) -> Result<(), Error> {
-        keyset.verify(&self.signed.canonical_bytes(), &self.signature)
+        keyset.verify(&self.signed.canonical_bytes(), &self.signature, T::ROLE)
     }
 }
 
@@ -347,6 +421,32 @@ mod tests {
         assert_eq!(Tier::of_capability("ui:web"), None);
         assert_eq!(Tier::of_capability_or_highest("ui:web"), Tier::T2);
         assert!(Tier::T0 < Tier::T1 && Tier::T1 < Tier::T2);
+    }
+
+    /// The registry template's policy script reads its tiers from this file; it must agree with
+    /// the client, entry for entry.
+    #[test]
+    fn the_registry_template_knows_the_same_tiers() {
+        let file: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tools/fyx-extensions-template/policy/capability-tiers.json"
+        ))
+        .expect("JSON");
+        let listed: std::collections::BTreeMap<String, String> =
+            serde_json::from_value(file["capabilities"].clone()).expect("capability -> tier");
+        // The file writes T3 as `t3`; a release counts it as T2.
+        let known: std::collections::BTreeMap<String, String> = Tier::KNOWN_CAPABILITIES
+            .iter()
+            .map(|(capability, tier)| {
+                let tier = if Tier::T3_CAPABILITIES.contains(capability) {
+                    assert_eq!(*tier, Tier::T2, "{capability}");
+                    "t3"
+                } else {
+                    tier.as_str()
+                };
+                (capability.to_string(), tier.to_string())
+            })
+            .collect();
+        assert_eq!(listed, known);
     }
 
     #[test]

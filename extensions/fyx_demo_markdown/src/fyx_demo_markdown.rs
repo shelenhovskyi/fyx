@@ -91,14 +91,14 @@ impl MarkdownPanel {
 
     fn undo(&self) -> ButtonProps {
         ButtonProps::new("Undo line")
-            .icon("undo")
+            .icon(Icon::Undo)
             .style(ButtonStyle::Subtle)
             .disabled(self.lines.is_empty())
     }
 
     fn clear(&self) -> ButtonProps {
         ButtonProps::new("Clear")
-            .icon("trash")
+            .icon(Icon::Trash)
             .style(ButtonStyle::Subtle)
             .disabled(self.lines.is_empty() && self.draft.is_empty())
     }
@@ -165,7 +165,7 @@ impl Extension for MarkdownPanel {
             SURFACE_ID,
             "Markdown preview",
             DockPosition::Right,
-            "file_markdown",
+            Icon::FileText,
             360,
         )]
     }
@@ -248,11 +248,23 @@ impl Extension for MarkdownPanel {
             UiEvent::Click(_)
             | UiEvent::InputChanged(_)
             | UiEvent::InputSubmitted(_)
-            | UiEvent::RowClick(_) => Ok(Update::Unchanged),
+            | UiEvent::RowClick(_)
+            | UiEvent::RowSelected(_)
+            | UiEvent::Dismissed(_) => Ok(Update::Unchanged),
+            // The SDK's fyx-ui-0-3 feature adds events this demo never gets.
+            #[allow(unreachable_patterns)]
+            _ => Ok(Update::Unchanged),
         }
     }
 }
 
+// fyx:ui 0.1 by default, which is what every Fyx runs; `--features fyx-ui-0-2` builds the 0.2
+// world and `--features fyx-ui-0-3` the staged 0.3 world from the same code.
+#[cfg(not(any(feature = "fyx-ui-0-2", feature = "fyx-ui-0-3")))]
+register_extension!(MarkdownPanel, v0_1);
+#[cfg(all(feature = "fyx-ui-0-2", not(feature = "fyx-ui-0-3")))]
+register_extension!(MarkdownPanel, v0_2);
+#[cfg(feature = "fyx-ui-0-3")]
 register_extension!(MarkdownPanel);
 
 #[cfg(test)]

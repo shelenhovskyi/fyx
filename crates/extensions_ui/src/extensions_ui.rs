@@ -36,7 +36,7 @@ use ui::{
 use util::ResultExt;
 use vim_mode_setting::VimModeSetting;
 use workspace::{
-    Workspace,
+    OpenPathPromptMode, Workspace,
     item::{Item, ItemEvent},
     workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError},
 };
@@ -181,6 +181,7 @@ pub fn init(cx: &mut App) {
                         workspace.project().clone(),
                         workspace.app_state().fs.clone(),
                     ),
+                    OpenPathPromptMode::SelectPath,
                     window,
                     cx,
                 );
@@ -189,7 +190,7 @@ pub fn init(cx: &mut App) {
                 window
                     .spawn(cx, async move |cx| {
                         let extension_path = match prompt.await.map_err(anyhow::Error::from) {
-                            Ok(Some(mut paths)) => paths.pop()?,
+                            Ok(Some(mut result)) => result.paths.pop()?,
                             Ok(None) => return None,
                             Err(err) => {
                                 workspace_handle
@@ -1142,14 +1143,7 @@ impl ExtensionsPage {
             .child(
                 Banner::new()
                     .severity(Severity::Success)
-                    // fyx: product name in every upsell banner
-                    .child(
-                        Label::new(label.replace(
-                            "Zed",
-                            release_channel::ReleaseChannel::Stable.display_name(),
-                        ))
-                        .mt_0p5(),
-                    )
+                    .child(Label::new(SharedString::new_static(label)).mt_0p5())
                     .map(|this| {
                         if vim {
                             this.action_slot(
@@ -1493,6 +1487,7 @@ impl Render for ExtensionsPage {
                             .gap_1p5()
                             .justify_between()
                             .child(Headline::new("Extensions").size(HeadlineSize::Large))
+                            .child(ui_ext_host::fyx_extensions_button()) // fyx: Fyx registry page
                             .child(
                                 Button::new("install-dev-extension", "Install Dev Extension")
                                     .style(ButtonStyle::Outlined)

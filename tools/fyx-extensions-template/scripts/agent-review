@@ -1,0 +1,14 @@
+#!/bin/sh
+# Placeholder for the escalate-only agent review (registry-repo.md, "review.yml", agent-review).
+#
+# Contract for the real reviewer:
+# - input: the directory given as $1, holding the review inputs as text (never run);
+# - output: one verdict JSON on stdout, {"verdict": "pass" | "concern", "reasons": [...],
+#   "inputs_sha256": "..."}, checked by `registry.py verdict` against its schema;
+# - no tools, no shell, no network beyond the model call; the key is in MODEL_API_KEY only.
+#
+# Not configured: the model key is the owner's decision (paid), and the alternative is a local
+# model on a self-hosted runner. Until then this prints nothing and fails, so review.yml records
+# `concern`, "no reviewer configured", and every entry PR needs the owner.
+echo "agent-review: no reviewer configured" >&2
+exit 1
