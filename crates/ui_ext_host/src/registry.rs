@@ -142,6 +142,8 @@ pub struct UiExtensionRegistry {
     /// The last reload of each dev path. A new one replaces (drops) the one in flight, so two
     /// loads of one extension never race and the newest component wins (triage-3, ASYNC 9).
     dev_reloads: HashMap<PathBuf, Task<()>>,
+    /// The last revoke's write to the install store's approvals (each waits for the one before).
+    approval_writes: Option<futures::future::Shared<Task<()>>>,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -282,6 +284,16 @@ impl UiExtensionRegistry {
         self
     }
 
+    /// Resolves once every revoke made so far is written to the install store's approvals.
+    pub fn approval_writes_done(&self) -> impl std::future::Future<Output = ()> + use<> {
+        let writes = self.approval_writes.clone();
+        async move {
+            if let Some(writes) = writes {
+                writes.await;
+            }
+        }
+    }
+
     pub fn install_store(&self) -> Option<&InstallStore> {
         self.store.as_ref()
     }
@@ -418,20 +430,16 @@ impl UiExtensionRegistry {
         // instead of it coming back silently (integration-5 R4).
         if let Some(store) = self.install_store().cloned() {
             let (extension_id, capability) = (extension_id.to_string(), capability.to_string());
-            cx.background_spawn(async move {
-                let Ok(installed) = store.installed_extensions(fs.as_ref()).await else {
-                    return;
-                };
-                let Some(mut approved) = installed
-                    .into_iter()
-                    .find(|installed| installed.id.as_str() == extension_id)
-                    .map(|installed| installed.approved)
-                else {
-                    return;
-                };
-                if approved.capabilities.remove(&capability) {
+            // Chained after the previous one, so revokes are written in the order they were made;
+            // kept (not detached) so a test can wait for it.
+            let previous = self.approval_writes.take();
+            self.approval_writes = Some(
+                cx.background_spawn(async move {
+                    if let Some(previous) = previous {
+                        previous.await;
+                    }
                     if let Err(error) = store
-                        .set_approved(&extension_id, approved, fs.as_ref())
+                        .take_back_approval(&extension_id, &capability, fs.as_ref())
                         .await
                     {
                         log::error!(
@@ -439,9 +447,9 @@ impl UiExtensionRegistry {
                             ui_ext::sanitize_for_log(&format!("{error:#}"))
                         );
                     }
-                }
-            })
-            .detach();
+                })
+                .shared(),
+            );
         }
         log::info!("fyx:ui: revoked {capability} from {extension_id}");
         cx.notify();
