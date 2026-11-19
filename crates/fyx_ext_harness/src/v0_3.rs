@@ -387,9 +387,9 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                 wit_permission_state(state),
             )))
         }
-        // W2c's `IoEvent::Listener` (plan 5.11; not on every branch yet). 0.4 only.
-        #[allow(unreachable_patterns)]
-        _ => None,
+        // 0.4 only.
+        net::IoEvent::Context(..) => None,
+        net::IoEvent::ReviewDecided(..) => None,
     }
 }
 

@@ -310,7 +310,7 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         net::IoEvent::Terminal(event) => Some(terminal_io_event(event)),
         // `approvals` traps here until plan 5.14, so no answer arrives.
         net::IoEvent::ApprovalAnswered(..) => None,
-        // `network:listen` is not wired to the WIT imports yet (plan 5.11), so no listener runs.
+        // The harness delivers listener events itself (`HostIo::Listener`).
         net::IoEvent::Listener(..) => None,
         net::IoEvent::FetchDone(id, result) => Some(wit_io::IoEvent::FetchDone((
             id,
@@ -404,9 +404,9 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
                 wit_permission_state(state),
             )))
         }
-        // W2c's `IoEvent::Listener` (plan 5.11; not on every branch yet). The harness delivers listener events itself (`HostIo::Listener`).
-        #[allow(unreachable_patterns)]
-        _ => None,
+        // The harness does not bind `context` or `review` yet (plan 5.13), so neither event arrives.
+        net::IoEvent::Context(..) => None,
+        net::IoEvent::ReviewDecided(..) => None,
     }
 }
 
