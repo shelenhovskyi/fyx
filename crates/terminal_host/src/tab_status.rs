@@ -98,6 +98,12 @@ impl TerminalDecorations for TabStatus {
             Some(extension) => Some(typed_by_marker(terminal, extension, status)),
             None => status,
         };
+        let access = crate::t3::access(terminal, cx);
+        let status = if access.is_empty() {
+            status
+        } else {
+            Some(access_marker(terminal, access, status))
+        };
         let accounts = terminal.accounts();
         if accounts.is_empty() {
             return status;
@@ -164,6 +170,27 @@ fn typed_by_marker(
         .into_any_element()
 }
 
+/// §C.3: an eye on a user terminal that an extension may read or type into now.
+fn access_marker(
+    terminal: &TerminalExt,
+    access: Vec<String>,
+    rest: Option<AnyElement>,
+) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .child(
+            div()
+                .id(("fyx-terminal-access", terminal.id().as_u64()))
+                .child(
+                    Icon::new(IconName::Eye)
+                        .size(IconSize::Small)
+                        .color(Color::Warning),
+                )
+                .tooltip(Tooltip::text(access.join("\n"))),
+        )
+        .children(rest)
+        .into_any_element()
+}
 /// The program's status, else the extension's mark.
 fn status_indicator(terminal: &TerminalExt) -> Option<AnyElement> {
     let origin = terminal.origin();

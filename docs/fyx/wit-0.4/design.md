@@ -54,7 +54,7 @@ content does not change.
 | B.8 | Discovery files | 5.11 | `fs:discovery-file` T2 |
 | B.9 | `fyx-relay` for command hooks | 5.11 | `relay:hooks` T2 |
 | B.10 | Proposed edits through agent review | 5.12 | `review:propose` T1 |
-| B.11 | Editor context, opening files, pasting into a tool | 5.13 | `context:editor` T1, `workspace:open` T1 |
+| B.11 | Editor context, opening files, pasting into a tool | 5.13 | `context:editor` T1, `workspace:open` T1, `workspace:diagnostics` T1 |
 | B.12 | Approval cards for a tool's own permission prompts | 5.13 | `ui:approvals` T0 |
 | C.1–C.5 | Consent: T2 accepted at install with checkboxes, T3 at the moment of action, journal, update diff | 5.5–5.7 | `terminal:read` T3, `terminal:write` T3 |
 | C.6 | Multiple accounts: forbidden auth and config-dir names, account profiles, Fyx profiles (variant A) | 5.5, 5.20 | none |
@@ -475,7 +475,30 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   `context.absolute-path(file-ref)` goes the other way. The host does the conversion, so the
   extension still never learns a path outside the worktrees: a path that is in no worktree, or is
   private (`is_private_path`), is an error, not a `file-ref`.
-- **`workspace:diagnostics`** stays T1 (0.3).
+- **Diagnostics read (`workspace:diagnostics`, T1).** Claude Code calls `getDiagnostics` about
+  four times a turn (around each edit, for one file and for all files), and diffs the answers
+  ("Found 1 new diagnostic issue"). The 0.3 WIT only passes diagnostics inside provider requests,
+  so a tool extension had nothing to answer with. 0.4 adds a pull read and a change event to the
+  `context` interface:
+  - `context.diagnostics(path: option<file-ref>)` returns a snapshot. With a `file-ref` it is that
+    one file; with `none` it is every worktree file of the window that has diagnostics (what the
+    editor's language servers report, open or not).
+  - Each entry has `range` (a `text-range`, **0-based**, columns in UTF-8 bytes as everywhere in
+    the WIT), `severity` (`error`, `warning`, `information`, `hint`), `message`, `source` (the
+    server, such as `rust-analyzer`) and `code`, both optional. A message is cut at 2 KiB.
+  - **Worktree files only.** A private file (`is_private_path`) is `not-permitted` when asked for
+    by name and is left out of the all-files answer without a trace (no entry, no count). A
+    `file-ref` that is in no worktree is `invalid-argument`; the extension never gets a path
+    outside the worktrees. A file with no diagnostics returns an empty list.
+  - **Capped at 500 entries** in one answer, errors first, then warnings, information and hints,
+    then by path and line. `truncated` is true when entries were left out.
+  - **`diagnostics-changed` (optional).** `context.watch-diagnostics(on)` subscribes to
+    `io-event::diagnostics-changed(list<file-ref>)`: the files whose diagnostics changed,
+    debounced 300 ms, at most 200 files per event (a larger change sends an empty list: "everything
+    may have changed"). It carries no entries, so a caller caches the last snapshot and re-reads
+    only when told. Without a subscription `diagnostics` still works; it is a fresh read.
+  - The install dialog's combination warning (above) applies: diagnostics can carry source text
+    in messages.
 - **Paste into a tool:** `terminals.paste(handle, text)` into the extension's profile terminal
   (§B.1) or own terminal. Only after a gesture in the extension's UI or a command the user ran
   ("Send selection to Claude"). Only while the terminal's foreground program has bracketed-paste
@@ -786,6 +809,25 @@ interface context {
         selection: option<tuple<text-range, option<string>>>,   // text absent for private files
     }
     watch: func(on: bool) -> result<_, host-error>;                                      // context:editor
+
+    /// 0.4. Diagnostics (§B.11, `workspace:diagnostics`, T1).
+    enum severity { error, warning, information, hint }
+    record diagnostic {
+        range: text-range,                                      // zero-based, UTF-8 byte columns
+        severity: severity,
+        message: string,                                        // cut at 2 KiB
+        source: option<string>,                                 // the language server, e.g. "rust-analyzer"
+        code: option<string>,                                   // numeric codes as text
+    }
+    record file-diagnostics { path: file-ref, diagnostics: list<diagnostic> }
+    record diagnostics-snapshot {
+        files: list<file-diagnostics>,                          // only files with at least one entry
+        truncated: bool,                                        // more than 500 entries; errors kept first
+    }
+    /// `some` = that file (private: not-permitted; in no worktree: invalid-argument);
+    /// `none` = every worktree file with diagnostics (private files left out).
+    diagnostics: func(path: option<file-ref>) -> result<diagnostics-snapshot, host-error>;
+    watch-diagnostics: func(on: bool) -> result<_, host-error>;                          // workspace:diagnostics
     open: func(path: file-ref, range: option<text-range>, focus: bool) -> result<_, host-error>;  // workspace:open
     to-file-ref: func(abs-path: string) -> result<file-ref, host-error>;                 // context:editor
     absolute-path: func(path: file-ref) -> result<string, host-error>;                   // context:editor
@@ -807,6 +849,7 @@ interface approvals {
 //   listener-request(tuple<u64, string, string, string> /* id, listener, path, body */),
 //   relay-request(tuple<u64, string, option<u64>, list<string>, string>),
 //   review-decided(tuple<u64, result<review-outcome, string>>), context-changed(editor-context),
+//   diagnostics-changed(list<file-ref> /* empty = anything may have changed */),
 //   approval-answered(tuple<u64, option<approval-option>>)
 //
 // permissions: t2-capability gains network-listen, terminal-create, terminal-env, terminal-observe,
@@ -842,7 +885,9 @@ lists.
    Edge behaviour of 2.1.326: `closeAllDiffTabs` and a duplicate `close_tab` after a decision
    answer without withdrawing (§B.10); `getDiagnostics` gets a file URI in two Windows forms,
    `file:///C:/work/app.py` and `file://C:\work\app.py`, and the extension accepts both (through
-   `context.to-file-ref`, §B.11); paths in `openDiff` and `at_mentioned` carry backslashes.
+   `context.to-file-ref`, §B.11); paths in `openDiff` and `at_mentioned` carry backslashes. `getDiagnostics` answers from
+   `context.diagnostics` (§B.11); the extension keeps the last snapshot and refreshes it on
+   `diagnostics-changed`, so the four calls a turn are cheap and stable.
 4. Turns: `UserPromptSubmit` → `begin-turn`, `Stop` → `end-turn`. **After the user rejects a
    diff (`DIFF_REJECTED`) Claude ends the turn with no `Stop` hook,** so the extension also ends
    the turn when it answers a rejection. **Review is post-hoc first:** `PreToolUse` and

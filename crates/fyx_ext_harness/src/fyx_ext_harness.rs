@@ -57,8 +57,10 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
 mod compile_cache;
+mod context;
 mod listeners;
 mod notifications;
+mod review;
 mod terminals;
 mod v0_2;
 mod v0_3;
@@ -68,7 +70,9 @@ pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
 };
 pub use compile_cache::cache_compiled_components;
+pub use context::OpenedFile;
 pub use listeners::{ListenerEvent, McpCall, McpError, ToolDef};
+pub use review::ReviewTurn;
 pub use terminals::{FakeTerminal, plain_text};
 
 use api_state::ApiState;
@@ -317,6 +321,10 @@ pub(crate) struct State {
     terminals: terminals::FakeTerminals,
     /// 0.4 `network:listen`.
     listeners: listeners::FakeListeners,
+    /// 0.4 `context`.
+    context: context::FakeContext,
+    /// 0.4 `review`.
+    review: review::FakeReview,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -554,7 +562,6 @@ enum Bindings {
 enum HostIo {
     Model(ui_ext::network::IoEvent),
     Terminal(ui_ext::terminal::TerminalEvent),
-    Listener(listeners::ListenerEvent),
 }
 
 /// An event for `handle-io` in the component's world.
@@ -856,11 +863,8 @@ impl Bindings {
             (Self::V0_4(_), HostIo::Terminal(event)) => {
                 Some(WorldIo::V0_4(v0_4::terminal_io_event(event)))
             }
-            (Self::V0_4(_), HostIo::Listener(event)) => {
-                Some(WorldIo::V0_4(v0_4::listener_io_event(event)))
-            }
             (_, HostIo::Model(event)) => v0_3::io_event(event).map(WorldIo::V0_3),
-            (_, HostIo::Terminal(_) | HostIo::Listener(_)) => None,
+            (_, HostIo::Terminal(_)) => None,
         }
     }
 
@@ -1180,6 +1184,8 @@ impl Harness {
                     Vec::new(),
                 ),
                 listeners: fake_listeners,
+                context: context::FakeContext::default(),
+                review: review::FakeReview::default(),
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1794,6 +1800,80 @@ impl Harness {
         self.store.data_mut().listeners.take_reply(id)
     }
 
+    /// The open worktrees for `context` (0.4): (id, root as the host spells it, `\` or `/`).
+    /// The roots need not exist.
+    pub fn set_worktrees(&mut self, roots: &[(u64, &str)]) {
+        self.store.data_mut().context.set_roots(
+            roots
+                .iter()
+                .map(|(id, root)| (*id, (*root).to_owned()))
+                .collect(),
+        );
+    }
+
+    /// A file the user keeps private: `to-file-ref` and `absolute-path` refuse it, and the
+    /// context carries no selection text of it.
+    pub fn set_private_file(&mut self, worktree: u64, path: &str) {
+        self.store.data_mut().context.set_private(worktree, path);
+    }
+
+    /// What the editor shows now; while the extension watches, [`Harness::deliver_io`]
+    /// delivers it, filtered as the host filters it, as `context-changed`.
+    pub fn set_editor_context(&mut self, context: ui_ext::context::EditorContext) {
+        self.store.data_mut().context.set_context(context);
+    }
+
+    /// Whether the extension watches the editor context.
+    pub fn watching_context(&self) -> bool {
+        self.store.data().context.is_watching()
+    }
+
+    /// Every `context.open` the extension made, in order.
+    pub fn opened_files(&self) -> Vec<OpenedFile> {
+        self.store.data().context.opened.clone()
+    }
+
+    /// The undecided `review` proposals (0.4), by id. Their paths need
+    /// [`Harness::set_worktrees`].
+    pub fn proposals(&self) -> Vec<(u64, ui_ext::review::Proposal)> {
+        self.store.data().review.proposals()
+    }
+
+    /// The user decides proposal `id` in agent review; [`Harness::deliver_io`] delivers
+    /// `review-decided`. False when `id` is not open (withdrawn, or decided already).
+    pub fn decide_review(
+        &mut self,
+        id: u64,
+        decision: ui_ext::review::Decision,
+        final_content: &str,
+    ) -> bool {
+        let outcome = ui_ext::review::ReviewOutcome {
+            decision,
+            final_content: final_content.to_owned(),
+        };
+        self.store.data_mut().review.end(id, Ok(outcome))
+    }
+
+    /// Proposal `id`'s review ends undecided (its file went away): `review-decided` with `Err`.
+    pub fn fail_review(&mut self, id: u64, reason: &str) -> bool {
+        self.store.data_mut().review.end(id, Err(reason.to_owned()))
+    }
+
+    /// The user edits proposal `id`'s text; `withdraw` returns it.
+    pub fn edit_review(&mut self, id: u64, text: &str) -> bool {
+        self.store.data_mut().review.edit(id, text)
+    }
+
+    /// The proposals the extension withdrew, in order.
+    pub fn withdrawn_reviews(&self) -> Vec<u64> {
+        self.store.data().review.withdrawn.clone()
+    }
+
+    /// The extension's `begin-turn` and `end-turn` calls, in order.
+    pub fn review_turns(&self) -> Vec<ReviewTurn> {
+        self.store.data().review.turns.clone()
+    }
+
     /// The MCP calls the extension has not answered, by call id.
     pub fn open_mcp_calls(&self) -> Vec<u64> {
         self.store.data().listeners.open_calls()
@@ -1986,7 +2066,30 @@ impl Harness {
             delivered.push(RawEffects { effects, value });
         }
         while let Some(event) = self.store.data_mut().listeners.events.pop_front() {
-            let Some(event) = self.extension.world_io(HostIo::Listener(event)) else {
+            let event = ui_ext::network::IoEvent::Listener(event);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(event) = self.store.data_mut().context.events.pop_front() {
+            let event = ui_ext::network::IoEvent::Context(event);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some((id, outcome)) = self.store.data_mut().review.events.pop_front() {
+            let event = ui_ext::network::IoEvent::ReviewDecided(id, outcome);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
             let (value, effects) =

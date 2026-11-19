@@ -165,6 +165,12 @@ pub enum HostEffect {
     /// A [`crate::listeners`] function (`fyx:ui` 0.4).
     #[cfg(feature = "fyx-ui-0-4")]
     Listener(crate::listeners::ListenerEffect),
+    /// A [`crate::context`] function (`fyx:ui` 0.4).
+    #[cfg(feature = "fyx-ui-0-4")]
+    Context(crate::context::ContextEffect),
+    /// A [`crate::review`] function (`fyx:ui` 0.4).
+    #[cfg(feature = "fyx-ui-0-4")]
+    Review(crate::review::ReviewEffect),
 }
 
 #[cfg(all(feature = "fyx-ui-0-3", not(target_arch = "wasm32")))]

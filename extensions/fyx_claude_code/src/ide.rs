@@ -24,6 +24,8 @@ pub const LISTENER: &str = "ide";
 /// JSON-RPC's "invalid params" and "method not found", as MCP uses them.
 pub const INVALID_PARAMS: i32 = -32602;
 pub const UNKNOWN_TOOL: i32 = -32601;
+/// JSON-RPC's "internal error": the host refused what the call needs.
+pub const INTERNAL_ERROR: i32 = -32603;
 
 /// `listeners.tool-def`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,8 +75,8 @@ pub struct TextRange {
 
 /// Absolute paths, as Claude names files, against Fyx's worktree-relative [`FileRef`]s.
 ///
-/// The 0.4 WIT gives an extension no absolute paths, so this needs a host primitive (reported
-/// to the coordinator, 5.15); until then it is a trait the tests fill.
+/// Built for 0.4 it is `context.to-file-ref` and `context.absolute-path` (`wired`); the compat
+/// replay and the tests fill it with a fixed root.
 ///
 /// `to_ref` gets paths in [`normalize_path`]'s form; `to_absolute` gives the OS's own form, as
 /// Claude sends paths (with `\` on Windows).
@@ -498,6 +500,14 @@ pub trait IdeHost {
     /// What the host's diagnostics hold, by absolute path: of the file `only`, or of every file.
     /// A file with nothing is left out.
     fn diagnostics(&self, only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)>;
+    /// Opens `file` in the editor (`context.open`); the error is the host's message.
+    fn open(&mut self, file: &FileRef, focus: bool) -> Result<(), String>;
+    /// Proposes `new_contents` for `file` in agent review (`review.propose`, `apply = false`):
+    /// the proposal's id, `None` when the host has no ids to give (the compat replay), or the
+    /// host's refusal.
+    fn propose(&mut self, file: &FileRef, new_contents: &str) -> Result<Option<u64>, String>;
+    /// Closes an undecided proposal (`review.withdraw`).
+    fn withdraw(&mut self, proposal: u64);
 }
 
 /// The extension's side of the `ide` listener: Claude's `tools/call`s by the host's call id,
@@ -506,26 +516,48 @@ pub trait IdeHost {
 #[derive(Debug, Default)]
 pub struct Server {
     diffs: Diffs<u64>,
+    /// The review proposal of each open `openDiff` call.
+    proposals: BTreeMap<u64, u64>,
     cache: DiagnosticsCache,
 }
 
 impl Server {
     /// `io-event::mcp-call` on [`LISTENER`]. Every call is answered now except `openDiff`, which
-    /// stays open until [`Server::decided`] or a close.
+    /// becomes a proposal in agent review and stays open until [`Server::review_decided`] (or
+    /// [`Server::decided`]) or a close.
     pub fn call(&mut self, host: &mut dyn IdeHost, call: u64, tool: &str, arguments: &str) {
         match IdeCall::parse(tool, arguments, host.roots()) {
-            Ok(IdeCall::OpenDiff { tab, .. }) => self.diffs.opened(tab, call),
+            Ok(IdeCall::OpenDiff {
+                file,
+                new_contents,
+                tab,
+            }) => {
+                // A second diff in the same tab replaces the first.
+                if let Some(open) = self.diffs.close(&tab) {
+                    self.close(host, open);
+                }
+                match host.propose(&file, &new_contents) {
+                    Ok(proposal) => {
+                        self.diffs.opened(tab, call);
+                        if let Some(proposal) = proposal {
+                            self.proposals.insert(call, proposal);
+                        }
+                    }
+                    // Without a review Claude keeps its edit and asks in the terminal.
+                    Err(_) => host.respond(call, Ok(DiffAnswer::TabClosed.result())),
+                }
+            }
             // A close withdraws only a proposal that is still open, whose call then ends with
             // `TAB_CLOSED`; after a decision it is a no-op.
             Ok(IdeCall::CloseTab { tab }) => {
                 if let Some(open) = self.diffs.close(&tab) {
-                    host.respond(open, Ok(DiffAnswer::TabClosed.result()));
+                    self.close(host, open);
                 }
                 host.respond(call, Ok(text_result("TAB_CLOSED")));
             }
             Ok(IdeCall::CloseAllDiffTabs) => {
                 for open in self.diffs.close_all() {
-                    host.respond(open, Ok(DiffAnswer::TabClosed.result()));
+                    self.close(host, open);
                 }
                 host.respond(call, Ok(text_result("CLOSED_ALL_DIFF_TABS")));
             }
@@ -538,9 +570,28 @@ impl Server {
                 });
                 host.respond(call, Ok(answer));
             }
-            Ok(IdeCall::OpenFile { .. }) => host.respond(call, Ok(text_result("OK"))),
+            // The selection Claude asks for (`startText`, `endText`) needs the file's text,
+            // which the extension cannot read; the file opens without one.
+            Ok(IdeCall::OpenFile { file, focus, .. }) => {
+                let outcome =
+                    host.open(&file, focus)
+                        .map(|()| text_result("OK"))
+                        .map_err(|message| McpError {
+                            code: INTERNAL_ERROR,
+                            message: format!("openFile: {message}"),
+                        });
+                host.respond(call, outcome);
+            }
             Err(error) => host.respond(call, Err(error)),
         }
+    }
+
+    /// Withdraws the open `openDiff` call `call`'s proposal and answers it `TAB_CLOSED`.
+    fn close(&mut self, host: &mut dyn IdeHost, call: u64) {
+        if let Some(proposal) = self.proposals.remove(&call) {
+            host.withdraw(proposal);
+        }
+        host.respond(call, Ok(DiffAnswer::TabClosed.result()));
     }
 
     /// The user decided the `openDiff` call `call` in Fyx; false when it is not open.
@@ -548,13 +599,37 @@ impl Server {
         if !self.diffs.decided(&call) {
             return false;
         }
+        self.proposals.remove(&call);
         host.respond(call, Ok(answer.result()));
         true
     }
 
-    /// `io-event::mcp-cancelled`: the call's connection closed.
-    pub fn cancelled(&mut self, call: u64) {
-        self.diffs.decided(&call);
+    /// `io-event::review-decided` for `proposal`: answers its `openDiff` call. False when no
+    /// open call has it (an outcome that arrives after a close).
+    pub fn review_decided(
+        &mut self,
+        host: &mut dyn IdeHost,
+        proposal: u64,
+        answer: &DiffAnswer,
+    ) -> bool {
+        let Some(call) = self
+            .proposals
+            .iter()
+            .find_map(|(call, open)| (*open == proposal).then_some(*call))
+        else {
+            return false;
+        };
+        self.decided(host, call, answer)
+    }
+
+    /// `io-event::mcp-cancelled`: the call's connection closed or Claude gave up; its proposal
+    /// is withdrawn.
+    pub fn cancelled(&mut self, host: &mut dyn IdeHost, call: u64) {
+        if self.diffs.decided(&call)
+            && let Some(proposal) = self.proposals.remove(&call)
+        {
+            host.withdraw(proposal);
+        }
     }
 
     /// A turn began, or the host's diagnostics changed.
