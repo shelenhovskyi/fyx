@@ -222,6 +222,11 @@ fn context_io_event(context: ui_ext::context::EditorContext) -> Option<wit_io::I
     ))
 }
 
+/// The `diagnostics-changed` case (design wit-0.4 §B.11). Not staged yet.
+fn diagnostics_io_event(_: Vec<ui_ext::process::FileRef>) -> Option<wit_io::IoEvent> {
+    None
+}
+
 /// The `review-decided` case (design wit-0.4 §B.10).
 fn review_io_event(
     id: u64,

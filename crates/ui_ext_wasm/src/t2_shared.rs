@@ -398,6 +398,7 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
         network::IoEvent::Terminal(event) => return terminal_io_event(event),
         network::IoEvent::Listener(event) => return listener_io_event(event),
         network::IoEvent::Context(context) => return context_io_event(context),
+        network::IoEvent::DiagnosticsChanged(files) => return diagnostics_io_event(files),
         network::IoEvent::ReviewDecided(id, result) => return review_io_event(id, result),
         network::IoEvent::ApprovalAnswered(id, answer) => {
             return approval_io_event(id, answer);

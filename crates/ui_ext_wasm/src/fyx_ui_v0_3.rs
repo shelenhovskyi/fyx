@@ -83,6 +83,11 @@ fn context_io_event(_: ui_ext::context::EditorContext) -> Option<wit_io::IoEvent
     None
 }
 
+/// 0.3 has no diagnostics feed.
+fn diagnostics_io_event(_: Vec<ui_ext::process::FileRef>) -> Option<wit_io::IoEvent> {
+    None
+}
+
 /// 0.3 has no proposed edits.
 fn review_io_event(
     _: u64,

@@ -1797,6 +1797,9 @@ pub struct LoadOptions {
     /// The review bridge of the 0.4 `review` import (§B.10). Without it, the import is
     /// `unavailable`.
     pub review: Option<Arc<dyn ui_ext::review::ReviewHost>>,
+    /// The language-server side of the 0.4 `context.diagnostics` and `watch-diagnostics`
+    /// (§B.11). Without it, they are `unavailable`.
+    pub diagnostics_source: Option<Arc<dyn ui_ext::context::DiagnosticsSource>>,
 }
 
 impl UiExtension {
@@ -1867,6 +1870,7 @@ impl UiExtension {
             listener_observer,
             context: context_host,
             review: review_host,
+            diagnostics_source,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -2040,6 +2044,7 @@ impl UiExtension {
                 context_host.filter(|_| is_v0_4),
                 workspace.clone(),
                 listeners.clone(),
+                diagnostics_source.filter(|_| is_v0_4),
             ));
             let review = Arc::new(proposals::ReviewHandle::new(
                 extension_id.clone(),
@@ -2311,6 +2316,12 @@ impl UiExtension {
     /// Whether the 0.4 `context` import has an editor host ([`LoadOptions::context`]).
     pub fn context_available(&self) -> bool {
         self.context.available()
+    }
+
+    /// Whether the 0.4 `context.diagnostics` has a language-server source
+    /// ([`LoadOptions::diagnostics_source`]).
+    pub fn diagnostics_available(&self) -> bool {
+        self.context.diagnostics_available()
     }
 
     /// Whether the 0.4 `review` import has a review bridge.
