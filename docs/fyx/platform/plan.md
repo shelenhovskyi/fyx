@@ -115,6 +115,55 @@ All six are done (2026-11-18, W2c `6b36bc4e7d`, `9fad627507`, `1cec81f03f`, `d11
 `b3822c6fce`). The proxy turned out unsafe as built and now refuses proxied domain fetches
 (integration-5 S4); routing through the proxy is D.2.
 
+## P5 terminals and CLI integrations
+
+Decided by the owner on 2026-11-19, from the research in
+[`terminal-api/research.md`](../terminal-api/research.md) (Ukrainian). Design:
+[wit-0.4/design.md](../wit-0.4/design.md). The coordinator's answers to the open questions are
+in its "Decisions": documented protocols and OSC 7501 first, Claude Code's IDE protocol in
+phase 4 with a compat test; env in profile terminals by default with an "all new terminals"
+checkbox; SSH and PowerShell shell integration in phase 6; loopback TCP on every OS.
+
+Owners: **W1** terminal host, **W2c** WIT, model and permissions, **W3** renderer and consent UI,
+**W4** SDK, harness and demos. W0 stages the WIT (integrator-only), W7 reviews.
+
+| # | Owner | Task | Depends on | Done when |
+|---|---|---|---|---|
+| | | **Phase 1, terminal foundation (layer A), about 2 weeks** | | |
+| 5.1 | W1 | `crates/terminal_ext`: `TerminalId`, the terminal registry (`observe_new`, `on_release`), `FYX_TERMINAL_ID` and `FYX_TERMINAL_TOKEN` through one `fyx:` hook in `insert_zed_terminal_env` ([design §A](../wit-0.4/design.md#a-the-terminal-foundation-layer-a-host-only) 1) | — | every local terminal has both vars; ids survive a tab move; the hook is ≤ 3 lines |
+| 5.2 | W1 | OSC tap: `TeePty` prototype first, then OSC 7, 9/777/99, `9;4`, 1337 and **7501** with the support-query reply from the spec, size and rate caps on the IO thread (§A 2) | 5.1 | a recorded Claude Code 2.1.295+ session sets the tab state; bytes reach alacritty unchanged; the swap is one line |
+| 5.3 | W1 | `TerminalStatus` and the `TerminalDecorations` provider; status icon and host-drawn source on the tab (§A 3) | 5.2 | OSC 7501 `blocked` shows on the tab with "from <app> via OSC 7501"; `tab_content` diff ≤ 15 lines |
+| 5.4 | W3 | Agent sessions panel ("needs attention" first, click to focus) and window-unfocused notifications on `blocked` and `done` (§A 4) | 5.3 | two Claude sessions sort by attention; a notification fires only while the window is unfocused |
+| | | **Phase 2, consent model and the 0.4 terminal world, about 3 weeks** | | |
+| 5.5 | W2c | 0.4 model and manifest: the `terminals`, `listeners`, `relay`, `review`, `context` and `approvals` interfaces, the `terminal` node, the new manifest tables with `reason`, T2 additions and `t3-capability`; the `terminal:env` forbidden names, including the auth and config-dir names (design §B.4, §C.6); `world_capabilities`, `fyx-ext` and harness lists. WIT diff to W0 for `since_v0.4.0` | P4 | `wasm-tools component wit` parses the staged world; a 0.3 manifest with a 0.4 table is refused; `PATH`, `HOME`, `CLAUDE_CONFIG_DIR` and `FOO_API_KEY` in `terminal:env` are refused |
+| 5.6 | W2c | Permissions broker: T2 states set at install per item, T3 requests, "Always allow" bound to the component hash, the journal store, revocation that kills, closes and cleans up (§C.2–§C.4) | 5.5 | unticked items are `denied`; revocation closes listeners and removes discovery files; journal entries never hold terminal content |
+| 5.7 | W3 | Consent UI: the grouped install dialog with checkboxes and the 1 s guard, extension-page switches and journal view, held-update diff, T3 cards and the "Always allow" warning, badge and status-bar indicator (§C.2–§C.5) | 5.6 | spec §4 failure 1 still passes; a new program in an update shows in the diff; T3 cards ignore keys and early clicks |
+| 5.8 | W1 | Terminal host for extensions: profiles in "+" (§B.1), pseudo-terminals with the sanitiser and rate caps (§B.2), created terminals in a pty (§B.3), env injection with the profile and all-new scopes (§B.4), `${package}` (§B.6), status and `terminal:observe` with redaction (§B.5), bracketed paste (§B.11) | 5.1, 5.5 | an echo pseudo-terminal works in a tab and in a panel; OSC 52 and DSR from it never reach the grid; reload kills a created terminal's tree |
+| 5.9 | W3 | `terminal` node in the extension panel container (§B.2) and the approval cards (§B.12) | 5.8 | a panel shows a native terminal with selection, search and IME; one handle never shows twice |
+| 5.10 | W4 | SDK 0.4 module for terminals and harness fakes; demo `fyx_demo_pseudo_terminal` (a TUI written in WASM in a panel) and a profile demo | 5.8, 5.9 | the demo runs headless in the harness and in Fyx |
+| | | **Phase 3, integration kit (layer B), about 2–3 weeks** | | |
+| 5.11 | W2c | Loopback listeners and the MCP wrapper: `127.0.0.1:0`, host token, `Origin` and `Host` checks, `mcp-websocket`, `mcp-streamable-http`, `websocket`, `http`; blocking calls cancelled with their connection (§B.7) | 5.6 | wrong token, `Origin` and foreign `Host` never reach the extension; an MCP `tools/call` round-trips |
+| 5.12 | W1 | Discovery files (templates, `0600` in `0700`, atomic, no symlinks, stale cleanup, account dirs; `fyx_guard` allows host-written ones) and `crates/fyx_relay` (binary, endpoint, terminal-token routing, `on_failure`) (§B.8, §B.9) | 5.1, 5.11 | a template naming `settings.json` is refused; a relay hook with Fyx closed exits 0 at once |
+| 5.13 | W2c | `review:propose` bridge to `agent_review` (public API only; hooks asked of W5), turns, `apply` (§B.10); `context:editor` and `workspace:open` (§B.11) | 5.6 | a blocking proposal returns the final content after a partial accept; private files show no text |
+| 5.14 | W4 | SDK and harness for listeners, relay, review and context; a generic MCP echo demo | 5.11–5.13 | the demo answers a `tools/call` from a test client |
+| | | **Phase 4, `fyx_claude_code`, about 1–2 weeks** | | |
+| 5.15 | W4 | `extensions/fyx_claude_code` (design, "The first extensions"): profile with `account_tool`, the Claude plugin in package files, `http` hooks and relay, the IDE protocol over `mcp-websocket` with the lock file, `openDiff` → `review:propose`, turns. **Compat test** pinned to a Claude Code version. Check first whether `CLAUDE_CODE_PLUGIN_DIRS` hooks wait for Claude's trust dialog (research question 1) | 5.10, 5.14 | the compat test passes; an `openDiff` shows hunk by hunk and returns the final content; the tab shows the account |
+| | | **Phase 5, `fyx_gemini_cli`, about 1 week** | | |
+| 5.16 | W4 | `extensions/fyx_gemini_cli` on the documented IDE companion spec: `mcp-streamable-http`, Bearer token, the `${tmp}` discovery file, `ide/contextUpdate`, non-blocking diffs. Any primitive it needs that Claude did not is added before 0.4 freezes | 5.14 | Gemini CLI connects and a diff round-trips with no change to the host |
+| | | **Phase 6, shell integration and the user's terminals, about 2 weeks** | | |
+| 5.17 | W1 | Shell integration with a nonce for zsh, bash, fish **and PowerShell** (`CommandBlock`), loaded through the env hook (`ZDOTDIR`, `--rcfile`, `XDG_DATA_DIRS`); SSH terminals and remote listeners through a tunnel | 5.8 | a forged OSC 133 without the nonce is untrusted; blocks work in all four shells; a remote Claude reaches the listener over SSH |
+| 5.18 | W3 | T3 read and write on the user's terminals: "Share with…", per-command write confirmation, "typed by" marker, "Always allow" (§C.3) | 5.7, 5.17 | a write without confirmation is impossible; reads give plain text only |
+| 5.19 | W7 | Security review of P5 (threats table of the design), before 0.4 freezes | 5.18 | review file in `tasks/reviews/` |
+| | | **Multiple accounts and Fyx profiles** | | |
+| 5.20 | W1 | Account profiles (`fyx.accounts`, per-project choice in user settings, the ACP hook in `agent_servers/src/acp.rs`, badges) and **Fyx profiles, variant A** over `--user-data-dir`: manager, start-up choice, title-bar chip, `fyx --profile`, project → profile memory (§C.6). Check the macOS Dock and CLI behaviour with several instances | 5.1 | two accounts in two terminals with the right badges; no code path reads an account dir's content; a limit message offers no other account |
+| 5.21 | W10 | Registry template and docs: T3 in `capability-tiers.json` (counts as T2 for the release tier), the update diff in the PR comment, the account-rotation rule in the review rules; user guide and authoring guide for 0.4 | 5.5 | template tests pass; `registry-repo.md` has the rule |
+
+**Order and parallelism.** Phase 1 is W1 alone, with 5.4 (W3) once 5.3 lands. In phase 2, W2c
+(5.5, 5.6) and W1 (5.8) compile at the same time; W3 follows on 5.6. Phase 3 is W2c (5.11, 5.13)
+and W1 (5.12). Phases 4–5 are W4 with fixes from the owners. Phase 6 is W1 and W3. 5.20 runs
+beside phases 2–3 when a compiling slot is free. The owner's limit of 2 compiling streams plus the
+gatekeeper holds throughout.
+
 ## Deferred after 1.0
 
 TypeScript extensions are deferred until after 1.0, and whether to do them at all is re-evaluated

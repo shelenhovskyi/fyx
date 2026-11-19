@@ -33,6 +33,8 @@ branch are listed under [Coming](#coming).
 - [wit-0.3/open-questions.md](wit-0.3/open-questions.md): Q1–Q14 with options, recommended answers
   and kind, for the full and the smaller 0.3; all answered (2026-11-19).
 - [wit-0.3/migration.md](wit-0.3/migration.md): 0.2 → 0.3 coexistence, version gating, SDK and test plan.
+- [wit-0.4/design.md](wit-0.4/design.md): `fyx:ui@0.4.0` terminals and CLI integrations (plan P5):
+  the integration kit, the 0.4 consent model with T3, multiple accounts and Fyx profiles.
 - [terminal-api/research.md](terminal-api/research.md): research (in Ukrainian) on terminal access for extensions and tool-agnostic CLI integrations (Claude Code, Gemini CLI, Codex and others): the code today, terminal-as-extension shapes, prior art, a consent model with install-time grants, a three-layer proposal and phases.
 
 ## Development

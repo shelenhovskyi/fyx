@@ -448,32 +448,6 @@ The 24 h gate counts from the later of `published_at` and when this client first
 - Q2 (eac5325c40): ui_ext::process::RUNS_ANY_CODE, runs_any_code and RUNS_ANY_CODE_PROMPT. Not done: registry review needs args patterns or a written reason. The template refuses T2 today, and a release lists process names only, without args, so this waits until T2 opens in the registry.
 - Q5: apply-edit needs no gesture (only permissions.request takes the activation); showing edits is W3's. Q8: cut_review keeps whole hunks up to 256 KiB for worktree files and nothing outside them. Q10: the prompt is W3's UI; the host side needs no change.
 
-## Handoff (2026-11-19, before a context clear)
-
-- **Branch:** claude/fyx-w2c-host-0-2-cbde2c, pushed. fyx/main is merged in (b1c9047ebf), and so is the R8 WIP branch.
-- **Ready, not merged yet:** the gatekeeper must merge after W3's and W4's break-list fixes. These commits break their crates until then:
-  - 550990dfe8: button accessible-label.
-  - 8abde04072: A2, 0.2 frozen at an explicit 0.2.0.
-  - 7c4ee5b5d8: ui:notifications at 0.1 says it needs 0.2.
-  - da05f68c1b: R8.
-  - 6c8af501ac: R6.
-  - 107cae0d51 and 1a0941361f: prescan_svg.
-  - a8c2fee176: A3.
-  - 8b1c611f44: A5.
-  - eac5325c40: Q2.
-  - 047e0ac8da: Q1, revised.
-- **Pending on others:**
-  - W4: SDK, harness and gallery for accessible-label, A3 and A5; the harness must link 0.3 decorations, and api_state's no-worktree must use HostErrorCode::NoWorktree; sdk-reference.md names handle-command and picker-source-event.
-  - W3: primitive_tests.rs:41 accessible_label; the renderer's accessible name; agent_observe Snapshot is a struct variant; workspace_edit untrusted becomes EditError::UntrustedWorktree; registry_service_tests.rs:139 needs zed_extension; the Q1 warning and the Q2 prompt text.
-- **Open items:**
-  - Q2's registry review rule (args patterns or a written reason): wait until T2 opens in the registry template (the coordinator agreed). Releases list process names only, so the args must be added to the release first.
-  - Q9: 0.1 and 0.2 loading is removed at the 1.0 cut, after the 0.3 freeze. Nothing is removed yet.
-- **Gotchas:**
-  - fyx-build-demos and the ui_ext_wasm suite need W4's crates. To test before W4 lands, patch them locally with the scratchpad scripts tmp_w4.py, tmp_w4_a3.py and tmp_w4_a5.py, then `git checkout -- crates/fyx_ext_harness crates/ui_ext_sdk` before committing.
-  - ui_ext's t2 modules (process, network, edit, observe) are tested only with `--all-features`.
-  - Working copies are CRLF, so edit scripts must read in text mode.
-  - Run `bash script/fyx-prune-target <target>` after tests.
-
 ## integration-6 (2026-11-19)
 
 - **Plan 4.13 lift bench** (`test_canvas_lift_bench` in `ui_ext_wasm/src/tests_v0_3.rs`, probe
@@ -528,3 +502,71 @@ The 24 h gate counts from the later of `published_at` and when this client first
   has not accepted it) and `Additions.zed_extension`: an approved T2 install whose update newly
   runs as a Zed extension is held for approval. `BUTTON_CLICK_GUARD`'s doc says the host applies
   at least 1 s to every card (the value stays 750 ms, the renderer's floor).
+
+## Handoff (2026-11-19, second context clear)
+
+- **Branch:** claude/fyx-w2c-host-0-2-cbde2c, pushed. Its base is fyx/main ebafa3f573, merged in
+  as a fast-forward.
+- **Tip, ready at the gatekeeper (not merged):** 226eea0e96, which includes f53acdcfd4,
+  4458b3abd9 and 099d5cf888 (integration-6) and the zed_extension additions. It also carries the
+  earlier ready batch (A2, A3, A5, R6, R8, Q1, Q2, prescan_svg, accessible-label) if W0 has not
+  merged that yet.
+- **Breaks in others' crates** (lists sent; merge with or after their fixes):
+  - W4: `tests_v0_3::harness_conformance_process` declares env `FYX_TEST` at lines 1941, 1959
+    and 2005. Two tests fail; the fix is `NO_COLOR`. The harness's `permissions.request` text
+    must match F3's (`api_state.rs:1157`).
+  - W3: done in ba5de3f4a4 (on claude/fyx-w3-renderer-e20d2b and `integration`, checked
+    2026-11-19): the consent test env is `NO_COLOR`; `apply_plan` re-enables only when
+    `blocks_can_lift(now)` holds and the list is fresh; `release_keyset()` goes through
+    `parse_release_keyset`, which refuses a keyset failing `check_role_separation(None)` (tested);
+    `describe_additions` shows `RUNS_ZED_EXTENSION_WARNING` for `Additions.zed_extension` and the
+    host-side hold is gone. Merge W2c with or after it.
+- **Docs:** W10 did the R8, R9/N4 and N1 texts (a768772afb on claude/fyx-w10-docs-a5772b).
+- **Canvas cap:** 16384 stays on my recommendation (bench ~1.1–1.3 ms per 10 000 round trip;
+  the excess is the ABI lift). The coordinator records the decision.
+- **Open items for the 1.0 cut** (after the 0.3 freeze; nothing done yet):
+  - drop 0.1 and 0.2 loading (Q9): `MIN_VERSION`, the 0.1 shim and the 0.2 world, their probes
+    and tests, and the 0.1/0.2 manifest paths;
+  - rename the 0.3 world to 1.0.0: the WIT package version, `since_v0.3.0`,
+    `MAX_FROZEN_VERSION`, `ApiVersion::V0_3_0`, manifest `api_version` gating and the capability
+    tables, coordinated with W0 (the WIT is integrator-only) and W4 (SDK and harness).
+- **Waiting for T2 in the registry:** Q2's registry part (registry review needs args patterns or
+  a written reason for a "runs any code" program) and R7 (process args and env in the signed
+  release). Releases list process names only, so the args go into the release first.
+- **Q4 `private_hosts` (2026-11-19):** `ui_ext_wasm::network::PrivateHosts` (shared handle, like
+  `ProxySetting`; `LoadOptions::private_hosts`). Entries are names of two or more labels or `*.`
+  plus one (subdomains only); IP literals, ports, `localhost`, `*` and `*.<tld>` are ignored and
+  returned by `set` for logging. A listed name that the extension also declares may resolve to
+  RFC 1918, `100.64/10` and `fc00::/7` (`is_private_network`), never loopback or link-local;
+  `https` is still required. The refusal names the setting. **For W3:** add
+  `fyx.extensions.network.private_hosts: Option<Vec<String>>` (`settings_content/src/fyx.rs`,
+  as a `network` sub-table) and call `PrivateHosts::set` on every settings change.
+- **P5 5.5, step 1 (2026-11-19): `ui_ext::terminal`** (behind `t2`; W0 may add a
+  `terminal = ["t2"]` alias). Contents: the types of the 0.4 `terminals` interface, the
+  `TerminalHost` trait and `TerminalSink`, the limits, the
+  profile/program/env tables with `reason`, `Template` and `TemplateContext`,
+  `is_forbidden_terminal_env`/`is_account_env`, and `ACCOUNT_DIR_ENV_NAMES` and
+  `CREDENTIAL_ENV_NAMES`. Agreed with W1:
+  - W1 implements `TerminalHost` in a new `terminal_host` crate; terminal_ext stays a leaf.
+  - A sink may be called from any thread and only queues.
+  - W1 allocates handles and never reuses them in one load.
+  - **Decision (mine):** a name with a credential suffix (`_TOKEN`, …) may carry exactly one
+    `${listen.<n>.token}` of a `token_in_env` listener: that is Fyx's own per-run secret. The
+    explicit credential names, the account-dir names and `FYX_*` stay refused.
+  - Profile icons are frozen `Icon` names and optional.
+- **P5 5.5, step 2: the WIT draft** `tasks/wit/fyx-ui-0.4.wit` (145f748bbf), generated from
+  0.3 plus the design's diff. `wasm-tools component wit` parses it. Keyword renames: `%list`, and
+  `respond(…, outcome)`. It went to W0 to stage as `since_v0.4.0`; the corrections went to W10.
+  Plan 4.2–4.4's parts are not in it yet.
+- **Next (after W0 stages it):**
+  - `ApiVersion::V0_4_0` (staged);
+  - the 0.4 manifest tables in `UiManifest`, refused below 0.4, and `world_capabilities` with
+    the 0.4 capabilities;
+  - the mirror list for W4 (`fyx_ext/src/manifest.rs`, harness);
+  - then the import side and 5.6.
+- **Gotchas:**
+  - Targets: `E:/fyx-targets/w2c` (release-fast build of ui_ext_wasm, for the bench and the
+    suite) and `E:/fyx-targets/w2c-light` (fyx_registry and ui_ext only).
+  - ui_ext's t2 modules are tested only with `--all-features`.
+  - Heredoc Python edits lose backslashes: build them with `chr(92)`.
+  - Run `bash script/fyx-prune-target <target>` after tests.

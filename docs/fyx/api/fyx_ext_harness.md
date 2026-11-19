@@ -131,4 +131,5 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TestBroker::prompts` | method | How many times the prompt was shown. |
 | `TestBroker::state` | field | The state at the import. `Ask` accepts the request and asks when it is delivered. |
 | `api_version_section` | fn | The version in the component's `fyx:ui-api-version` section, if it has one. |
+| `cache_compiled_components` | re-export | `compile_cache::cache_compiled_components` |
 | `variables_set` | fn | Whether `PACKAGE_VARIABLE` or `COMPONENT_VARIABLE` is set, as under `fyx-ext test`. A headless test skips when neither is, and fails when `Harness::from_env` fails although one is. |

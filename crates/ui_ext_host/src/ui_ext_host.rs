@@ -15,6 +15,7 @@
 mod agent_observe;
 mod backend;
 mod canvas;
+mod canvas_texture;
 mod choice;
 mod consent;
 mod decorations;

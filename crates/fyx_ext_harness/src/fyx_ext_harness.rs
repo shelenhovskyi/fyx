@@ -56,6 +56,7 @@ use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod api_state;
+mod compile_cache;
 mod notifications;
 mod v0_2;
 mod v0_3;
@@ -63,6 +64,7 @@ mod v0_3;
 pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
 };
+pub use compile_cache::cache_compiled_components;
 
 use api_state::ApiState;
 
@@ -939,9 +941,7 @@ impl Harness {
     pub fn load_with_capabilities(wasm: &[u8], capabilities: &[&str]) -> Result<Self> {
         let runtime = runtime()?;
         let section_version = api_version_section(wasm)?;
-        let component = Component::from_binary(&runtime.engine, wasm)
-            .map_err(anyhow::Error::from)
-            .context("compiling the component")?;
+        let component = compile_cache::compile(&runtime.engine, wasm)?;
         let api_version = section_version
             .or_else(|| api_version_from_imports(&component, &runtime.engine))
             .with_context(|| {

@@ -164,6 +164,20 @@ fn bundled_fonts(cx: &App) -> Arc<usvg::fontdb::Database> {
     Arc::new(fonts)
 }
 
+struct BundledFonts(Arc<usvg::fontdb::Database>);
+
+impl Global for BundledFonts {}
+
+/// [`bundled_fonts`], loaded once and shared by SVG images and canvas textures.
+pub(crate) fn shared_fonts(cx: &mut App) -> Arc<usvg::fontdb::Database> {
+    if let Some(fonts) = cx.try_global::<BundledFonts>() {
+        return fonts.0.clone();
+    }
+    let fonts = bundled_fonts(cx);
+    cx.set_global(BundledFonts(fonts.clone()));
+    fonts
+}
+
 struct GlobalImageCache(Entity<ImageCache>);
 
 impl Global for GlobalImageCache {}
@@ -353,7 +367,7 @@ impl ImageCache {
                 return;
             };
             if self.fonts.is_none() {
-                self.fonts = Some(bundled_fonts(cx));
+                self.fonts = Some(shared_fonts(cx));
             }
             let Some(job) = self.job(&extension_id, &key) else {
                 self.finish(&extension_id, key, Err(anyhow!("its source is gone")), cx);

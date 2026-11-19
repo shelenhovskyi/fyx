@@ -1,5 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
 # Fyx
 
 *Fyx is an independent fork of Zed and is not affiliated with or endorsed by Zed Industries.*
