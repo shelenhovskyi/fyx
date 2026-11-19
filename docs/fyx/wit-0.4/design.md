@@ -513,13 +513,14 @@ can run any program on your computer" (0.3 Q2).
 
 ### C.2 T2 at install, with checkboxes
 
-The install dialog (file, dev UI, registry) has four groups:
+The install dialog (file, dev UI, registry) has four groups, named by how consent works:
 
 1. **Shows in Fyx** (T0): one line.
-2. **Reads and uses inside Fyx** (T1): one line per capability, no checkbox. T1 includes
-   `terminal:pseudo` and `terminal:status` (and the other T1 capabilities of §C.1), so this group
-   is not only reading.
-3. **Can run code or reach outside Fyx** (T2): a checkbox per item, unticked:
+2. **Allowed without asking** (T1): one line per capability, no checkbox. T1 includes
+   `terminal:pseudo`, `terminal:status`, `workspace:open` and `review:propose` (and the other T1
+   capabilities of §C.1), so this group is not only reading. `terminal:observe` is not here: it
+   is a read-only T2 item, in the next group, with a checkbox.
+3. **Off unless you tick it** (T2): a checkbox per item, unticked:
    - one per program for `process:spawn` and `terminal:create`, with its argument patterns;
    - one per listener for `network:listen`, and one per discovery file, with its path;
    - one for `network:fetch` with its domain list, one for `terminal:env` with every name and
