@@ -1135,6 +1135,15 @@ interface listeners {
         arguments: string,
     }
 
+    /// An `mcp-*` client's handshake (`initialize`, then `notifications/initialized`): its
+    /// `clientInfo`, name and version each cut to 256 bytes, empty when the client sent none.
+    record mcp-session {
+        listener: string,
+        connection: u64,
+        client-name: string,
+        client-version: string,
+    }
+
     record mcp-error {
         code: s32,
         message: string,
@@ -1285,7 +1294,7 @@ interface io {
     use agent-observe.{agent-event};
     use permissions.{t2-capability, permission-state};
     use terminals.{terminal-handle, terminal-info};
-    use listeners.{mcp-call};
+    use listeners.{mcp-call, mcp-session};
     use review.{review-outcome};
     use context.{editor-context};
     use approvals.{approval-option};
@@ -1323,6 +1332,9 @@ interface io {
         mcp-call(mcp-call),
         /// 0.4. A call whose connection closed.
         mcp-cancelled(u64),
+        /// 0.4. A client finished the handshake: push its first context now. Once per
+        /// connection.
+        mcp-initialized(mcp-session),
         /// 0.4. A `websocket` listener's frame: listener, connection, text.
         listener-message(tuple<string, u64, string>),
         /// 0.4. An `http` listener's request: id, listener, path, body.

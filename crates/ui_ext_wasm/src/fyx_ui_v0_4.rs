@@ -186,9 +186,14 @@ fn listener_io_event(event: ui_ext::integration::ListenerEvent) -> Option<wit_io
             arguments: call.arguments,
         }),
         Event::McpCancelled(id) => wit_io::IoEvent::McpCancelled(id),
-        // Gap 8: `io-event::mcp-initialized` is proposed to W0 (integrator-only WIT); until it is
-        // staged the handshake is not delivered.
-        Event::McpInitialized(_) => return None,
+        Event::McpInitialized(session) => {
+            wit_io::IoEvent::McpInitialized(wit_listeners::McpSession {
+                listener: session.listener,
+                connection: session.connection,
+                client_name: session.client_name,
+                client_version: session.client_version,
+            })
+        }
         Event::Message {
             listener,
             connection,
