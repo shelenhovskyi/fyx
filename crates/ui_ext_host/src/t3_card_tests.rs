@@ -141,3 +141,47 @@ async fn test_t3_card_closes_when_the_request_goes(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert!(dismissed.get());
 }
+
+/// The terminal host's bridge (§C.3): menu shares, what a terminal has shared, and the closed
+/// hook, which works from any thread and takes every share of that terminal back.
+#[gpui::test]
+async fn test_t3_share_bridge(cx: &mut TestAppContext) {
+    let registry = cx.new(|_| UiExtensionRegistry::default());
+    registry.update(cx, |registry, cx| {
+        registry.t3_share_terminal("a", 7, T3Capability::Read, T3Answer::Once, cx);
+        registry.t3_share_terminal("a", 7, T3Capability::Write, T3Answer::Once, cx);
+        registry.t3_share_terminal("b", 7, T3Capability::Read, T3Answer::UntilClosed, cx);
+        registry.t3_share_terminal("b", 8, T3Capability::Read, T3Answer::UntilClosed, cx);
+    });
+    let shared = |terminal, cx: &mut TestAppContext| {
+        let mut shared = registry.read_with(cx, |registry, _| registry.t3_shared(terminal));
+        shared.sort_by_key(|(id, capability, _)| (id.clone(), *capability));
+        shared
+    };
+    assert_eq!(
+        shared(7, cx),
+        [
+            ("a".to_string(), T3Capability::Read, T3Answer::Once),
+            ("a".to_string(), T3Capability::Write, T3Answer::Once),
+            ("b".to_string(), T3Capability::Read, T3Answer::UntilClosed),
+        ]
+    );
+    registry.update(cx, |registry, cx| {
+        registry.t3_share_terminal("a", 7, T3Capability::Write, T3Answer::Deny, cx)
+    });
+    assert_eq!(shared(7, cx).len(), 2);
+
+    let closed = registry.update(cx, |registry, cx| registry.t3_terminal_closed_hook(cx));
+    std::thread::spawn(move || closed(7)).join().unwrap();
+    cx.run_until_parked();
+    assert_eq!(shared(7, cx), []);
+    assert_eq!(
+        shared(8, cx),
+        [("b".to_string(), T3Capability::Read, T3Answer::UntilClosed)]
+    );
+    // Nothing loaded: nobody to share with.
+    assert_eq!(
+        registry.read_with(cx, |registry, _| registry.t3_share_targets()),
+        []
+    );
+}

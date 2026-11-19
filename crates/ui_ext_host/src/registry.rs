@@ -44,7 +44,7 @@ use ui_ext::v0_2::{
 use ui_ext_wasm::{
     CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, LoadOptions, PrecompiledCache, UiExtension,
     UiManifest,
-    permissions::{Tier, tier_of},
+    permissions::{T3Answer, T3Capability, Tier, tier_of},
 };
 use workspace::{
     Workspace, WorkspaceSettings,
@@ -157,6 +157,20 @@ pub struct UiExtensionRegistry {
     /// T3 cards (§C.3) until the workspace takes them to draw, by the registry's id.
     t3_requests: HashMap<u64, crate::consent::T3PromptRequest>,
     next_t3_request: u64,
+    /// Which read share each (extension, terminal) got from the terminal's menu, Once or until
+    /// it closes; the consent store says whether it still holds.
+    t3_share_kinds: HashMap<(String, u64), T3Answer>,
+    /// Where the terminal host reports closed terminals ([`Self::t3_terminal_closed_hook`]).
+    t3_closed: Option<futures::channel::mpsc::UnboundedSender<u64>>,
+}
+
+/// A loaded extension a terminal can be shared with (§C.3), for the terminal's menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct T3ShareTarget {
+    pub extension_id: String,
+    pub extension_name: SharedString,
+    pub can_read: bool,
+    pub can_write: bool,
 }
 
 /// Requests for the workspaces that show a surface (design.md, C and E).
@@ -1229,6 +1243,109 @@ impl UiExtensionRegistry {
             }
         })
         .detach();
+    }
+
+    /// The loaded extensions that declare `terminal:read` or `terminal:write`, by id.
+    pub fn t3_share_targets(&self) -> Vec<T3ShareTarget> {
+        let mut targets: Vec<T3ShareTarget> = self
+            .backends
+            .keys()
+            .filter_map(|id| {
+                let declared = self.consent.declared(id);
+                let declares =
+                    |capability: T3Capability| declared.iter().any(|c| c == capability.name());
+                let (can_read, can_write) =
+                    (declares(T3Capability::Read), declares(T3Capability::Write));
+                (can_read || can_write).then(|| T3ShareTarget {
+                    extension_id: id.to_string(),
+                    extension_name: self.provenance_name(id),
+                    can_read,
+                    can_write,
+                })
+            })
+            .collect();
+        targets.sort_by(|a, b| a.extension_id.cmp(&b.extension_id));
+        targets
+    }
+
+    /// What is shared from a terminal now, per extension: a read `Once` or `UntilClosed`, a write
+    /// `Once` (each write still has its card).
+    pub fn t3_shared(&self, terminal: u64) -> Vec<(String, T3Capability, T3Answer)> {
+        self.consent
+            .shared(terminal)
+            .into_iter()
+            .map(|(id, capability)| {
+                let answer = match capability {
+                    // A card's "until it closes" is shared too, and never Once.
+                    T3Capability::Read => self
+                        .t3_share_kinds
+                        .get(&(id.clone(), terminal))
+                        .copied()
+                        .unwrap_or(T3Answer::UntilClosed),
+                    T3Capability::Write => T3Answer::Once,
+                };
+                (id, capability, answer)
+            })
+            .collect()
+    }
+
+    /// The terminal menu's "Share with <extension>" (§C.3); `Deny` takes it back.
+    pub fn t3_share_terminal(
+        &mut self,
+        extension_id: &str,
+        terminal: u64,
+        capability: T3Capability,
+        answer: T3Answer,
+        cx: &mut Context<Self>,
+    ) {
+        if capability == T3Capability::Read {
+            let key = (extension_id.to_string(), terminal);
+            if answer == T3Answer::Deny {
+                self.t3_share_kinds.remove(&key);
+            } else {
+                self.t3_share_kinds.insert(key, answer);
+            }
+        }
+        self.consent
+            .share_terminal(extension_id, terminal, capability, answer);
+        cx.notify();
+    }
+
+    /// For the terminal host: call it with a terminal's id when it closes. Its shares go and its
+    /// open T3 cards end with `Deny`. Callable from any thread.
+    pub fn t3_terminal_closed_hook(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> std::sync::Arc<dyn Fn(u64) + Send + Sync> {
+        let sender = match &self.t3_closed {
+            Some(sender) => sender.clone(),
+            None => {
+                let (sender, mut closed) = futures::channel::mpsc::unbounded::<u64>();
+                cx.spawn(async move |this, cx| {
+                    while let Some(terminal) = closed.next().await {
+                        if this
+                            .update(cx, |this, cx| this.t3_terminal_closed(terminal, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                self.t3_closed = Some(sender.clone());
+                sender
+            }
+        };
+        std::sync::Arc::new(move |terminal| {
+            sender.unbounded_send(terminal).ok();
+        })
+    }
+
+    fn t3_terminal_closed(&mut self, terminal: u64, cx: &mut Context<Self>) {
+        self.t3_share_kinds
+            .retain(|(_, shared_terminal), _| *shared_terminal != terminal);
+        self.consent.terminal_closed(terminal);
+        cx.notify();
     }
 
     /// With no window the request is dropped: `Deny`.
