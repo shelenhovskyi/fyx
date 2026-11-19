@@ -7035,13 +7035,24 @@ dependencies = [
  "collections",
  "feature_flags",
  "fs",
+ "fyx_guard_core",
  "gpui",
  "log",
  "paths",
  "project",
- "serde",
  "serde_json",
  "settings",
+ "util",
+]
+
+[[package]]
+name = "fyx_guard_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "log",
+ "serde",
  "toml 0.9.8",
  "ui_ext",
  "util",
