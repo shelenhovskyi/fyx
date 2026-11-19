@@ -98,6 +98,8 @@ profile_snapshot() {
 }
 profile_before=$(profile_snapshot)
 test_home=$(mktemp -d)
+# A Fyx app another session starts during the run writes the real profile too, and its log says so.
+touch "$test_home/.started"
 mkdir -p "$test_home/LocalAppData" "$test_home/AppData" "$test_home/xdg-data" "$test_home/xdg-config"
 cargo_home="${CARGO_HOME:-$(to_unix "${USERPROFILE:-${HOME:-}}")/.cargo}"
 rustup_home="${RUSTUP_HOME:-$(to_unix "${USERPROFILE:-${HOME:-}}")/.rustup}"
@@ -106,6 +108,10 @@ CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" HOME="$test_home" \
     LOCALAPPDATA="$(win_path "$test_home/LocalAppData")" APPDATA="$(win_path "$test_home/AppData")" \
     XDG_DATA_HOME="$test_home/xdg-data" XDG_CONFIG_HOME="$test_home/xdg-config" \
     cargo nextest run "${pkgs[@]}" --no-tests=pass --no-fail-fast "${nextest_filter[@]}" 2>&1 | tail -60
+app_started=""
+for dir in "${profile_candidates[@]}"; do
+    [[ -n "$(find "$dir/logs" -maxdepth 1 -name '*.log' -newer "$test_home/.started" 2>/dev/null)" ]] && app_started=1
+done
 rm -rf "$test_home"
 # Per-test timing (.config/nextest.toml writes junit.xml): keep one copy per commit outside the
 # target dir, which gets pruned. FYX_GATE_JUNIT_DIR overrides; on the Windows dev box the default
@@ -122,8 +128,8 @@ fi
 profile_after=$(profile_snapshot)
 if [[ "$profile_before" != "$profile_after" ]]; then
     touched=$(comm -13 <(printf '%s\n' "$profile_before") <(printf '%s\n' "$profile_after") | sed 's/^[0-9a-f]* [ *]//')
-    if tasklist 2>/dev/null | grep -qiE '^(fyx|zed)(-dev)?\.exe'; then
-        echo "gate: WARNING: files changed in the real Fyx profile during the tests, but a Fyx/Zed process is running, so they may be its own:"
+    if [[ -n "$app_started" ]] || tasklist 2>/dev/null | grep -qiE '^(fyx|zed)(-dev)?\.exe'; then
+        echo "gate: WARNING: files changed in the real Fyx profile during the tests, but a Fyx/Zed app ran meanwhile (its log changed, or it is still running), so they may be its own:"
         printf '  %s\n' $touched
     else
         echo "gate: RED: the tests wrote into the user's real Fyx profile (use a temp dir or an in-memory store):"
