@@ -626,7 +626,7 @@ mod tests {
             let fixture = Self {
                 directory: tempfile::tempdir().expect("temporary directory"),
             };
-            fixture.write("key.json", test_key_json("test-registry", 1).as_bytes());
+            fixture.write_key("key.json", &test_key_json("test-registry", 1));
             let public_key = SigningKey::from_json(test_key_json("test-registry", 1).as_bytes())
                 .expect("test key")
                 .public_key(KeyRole::ALL);
@@ -642,6 +642,18 @@ mod tests {
 
         fn write(&self, name: &str, bytes: &[u8]) {
             fs::write(self.path(name), bytes).expect("writes");
+        }
+
+        /// The CLI refuses a key file that group or others can read, and the usual umask leaves
+        /// a new file readable by them on Unix.
+        fn write_key(&self, name: &str, json: &str) {
+            self.write(name, json.as_bytes());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(self.path(name), fs::Permissions::from_mode(0o600))
+                    .expect("restricts the key file");
+            }
         }
 
         fn read(&self, name: &str) -> String {
@@ -1097,10 +1109,7 @@ mod tests {
             ),
             ("bl", 14, vec![KeyRole::Blocklist]),
         ] {
-            fixture.write(
-                &format!("{key_id}.json"),
-                test_key_json(key_id, seed).as_bytes(),
-            );
+            fixture.write_key(&format!("{key_id}.json"), &test_key_json(key_id, seed));
             keys.push(
                 SigningKey::from_json(test_key_json(key_id, seed).as_bytes())
                     .expect("test key")
