@@ -2114,6 +2114,10 @@ Environment it may pass: {}",
                         context: Some(cx.update(|cx| {
                             crate::context_host::for_extension(&found.extension_id, cx)
                         })),
+                        // review:propose (plan 5.13).
+                        review: Some(cx.update(|cx| {
+                            crate::review_bridge::for_extension(&found.extension_id, cx)
+                        })),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -3880,6 +3884,9 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         }),
         context: Some(
             cx.update(|cx| crate::context_host::for_extension(&path.to_string_lossy(), cx)),
+        ),
+        review: Some(
+            cx.update(|cx| crate::review_bridge::for_extension(&path.to_string_lossy(), cx)),
         ),
         ..LoadOptions::default()
     };

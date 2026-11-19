@@ -14,8 +14,8 @@
 //! one undo step, never saved; without it nothing is touched. Withdrawing, a revocation and the
 //! instance's end drop the review's task, which closes the review without applying anything.
 //!
-//! Each load has its own host object, so the old instance's `close_all` after a reload never
-//! closes the new instance's reviews (ids are unique per instance only).
+//! Each load has its own host object; ids are unique in the process, and `close` names the
+//! reviews to close, so an old instance's close after a reload never touches the new one's.
 
 use std::{
     collections::HashMap,
@@ -143,9 +143,14 @@ impl ReviewHost for ExtensionReviews {
         });
     }
 
-    fn close_all(&self, _extension_id: &str) {
-        let closed = lock(&self.open).drain().collect::<Vec<_>>();
-        for (_, review) in closed {
+    fn close(&self, _extension_id: &str, ids: &[u64]) {
+        let closed = {
+            let mut open = lock(&self.open);
+            ids.iter()
+                .filter_map(|id| open.remove(id))
+                .collect::<Vec<_>>()
+        };
+        for review in closed {
             review.close.send(()).ok();
         }
     }

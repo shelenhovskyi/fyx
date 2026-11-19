@@ -193,7 +193,7 @@ async fn test_rejected_and_unapplied(cx: &mut TestAppContext) {
 
 /// Withdrawing and closing close the review without an outcome; withdraw returns the proposal.
 #[gpui::test]
-async fn test_withdraw_and_close_all(cx: &mut TestAppContext) {
+async fn test_withdraw_and_close(cx: &mut TestAppContext) {
     let (_, _project) = setup(true, cx).await;
     let host = ExtensionReviews {
         key: "ext".into(),
@@ -225,7 +225,7 @@ async fn test_withdraw_and_close_all(cx: &mut TestAppContext) {
         review(cx).read_with(cx, |review, _| review.reviews().len()),
         1
     );
-    host.close_all("ext");
+    host.close("ext", &[2, 99]);
     cx.run_until_parked();
     assert_eq!(
         review(cx).read_with(cx, |review, _| review.reviews().len()),
