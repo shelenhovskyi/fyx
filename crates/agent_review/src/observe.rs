@@ -177,7 +177,8 @@ fn observed(review: &Review, sessions: &mut SessionNumbers) -> ObservedReview {
         abs_path: edit.abs_path().to_path_buf(),
         source: match review.source() {
             ReviewSource::Permission(_) => ObservedSource::Permission,
-            ReviewSource::Write => ObservedSource::Write,
+            // A proposal holds a write the same way; the snapshot has no own kind for it yet.
+            ReviewSource::Write | ReviewSource::Extension { .. } => ObservedSource::Write,
         },
         rule: review.rule().map(|rule| rule.kind),
         resolution: edit.resolution(),
