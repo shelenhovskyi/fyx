@@ -34,6 +34,8 @@ capabilities = [
     "context:editor",
     # `openFile`.
     "workspace:open",
+    # `getDiagnostics` (T1).
+    "workspace:diagnostics",
 ]
 
 # Claude Code reads CLAUDE_CODE_SSE_PORT and finds the lock file in the account's config dir.
