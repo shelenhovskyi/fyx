@@ -1,0 +1,16 @@
+# Guest fixture for the fyx:ui 0.4 host tests: the `terminals` import and the `terminal` node.
+# Built from the staged 0.4 WIT with wit-bindgen directly.
+# A member of the fixture workspace in `crates/ui_ext_wasm/fixtures`.
+[package]
+name = "fyx_ui_test_probe_v0_4"
+version = "0.4.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/probe_v0_4.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"

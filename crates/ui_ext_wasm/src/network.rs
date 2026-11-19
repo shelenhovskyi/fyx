@@ -902,6 +902,7 @@ pub(crate) struct Revocable {
     pub(crate) processes: std::sync::Weak<crate::process::ProcessSet>,
     pub(crate) edits: std::sync::Weak<crate::edit::EditSet>,
     pub(crate) observer: std::sync::Weak<crate::observe::ObserveHandle>,
+    pub(crate) terminals: std::sync::Weak<crate::terminals::TerminalsHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
@@ -950,6 +951,12 @@ impl NetworkHandle {
             .take()
     }
 
+    /// Queues an outcome the host produced itself (an approval card's answer) behind the
+    /// others; nothing once the instance is gone.
+    pub(crate) async fn deliver(&self, event: IoEvent) {
+        self.running.deliver(event).await;
+    }
+
     /// Whether the capability is granted now, for the delivery: a revocation while a request
     /// ran turns its outcome into `denied`.
     pub(crate) fn granted(&self) -> bool {
@@ -989,6 +996,17 @@ impl NetworkHandle {
                         crate::observe::CAPABILITY_OBSERVE => {
                             if let Some(observer) = revocable.observer.upgrade() {
                                 observer.stop();
+                            }
+                        }
+                        // §C.2: created terminals die with their trees; the env leaves them.
+                        ui_ext::terminal::CAPABILITY_CREATE | ui_ext::terminal::CAPABILITY_ENV => {
+                            if let Some(terminals) = revocable.terminals.upgrade() {
+                                terminals.close_all();
+                            }
+                        }
+                        ui_ext::terminal::CAPABILITY_OBSERVE => {
+                            if let Some(terminals) = revocable.terminals.upgrade() {
+                                terminals.stop_observing();
                             }
                         }
                         _ => {}

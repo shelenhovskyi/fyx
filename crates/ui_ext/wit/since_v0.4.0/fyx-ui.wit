@@ -1219,8 +1219,12 @@ interface approvals {
 
     enum approval-option { allow-once, always-allow, deny }
 
-    /// At least one option. The answer arrives as `io-event::approval-answered`.
-    ask: func(title: string, detail: string, options: list<approval-option>) -> result<u64, host-error>;
+    /// `tool` is the asking tool's name as the extension states it (the card marks it "says"),
+    /// 0 to 40 bytes on one line, empty when there is none; `title` 1 to 120 bytes on one line;
+    /// `detail` at most 2000 bytes and 12 lines; 1 to 3 distinct options. At most 4 cards are
+    /// open per extension (`limit-exceeded`). The answer arrives as `io-event::approval-answered`,
+    /// `none` when the card closed unanswered.
+    ask: func(tool: string, title: string, detail: string, options: list<approval-option>) -> result<u64, host-error>;
 }
 
 /// 0.3. Outcomes of work that runs outside a call, delivered through `handle-io`.
