@@ -13,11 +13,11 @@ use std::path::PathBuf;
 use collections::HashMap;
 use gpui::{App, Entity, EntityId, Global, WeakEntity};
 use project::{AgentId, AgentServerStore, Project};
-use settings::{FyxAccountsSettingsContent, SettingsStore};
+use settings::{FyxAccount, FyxAccountsSettingsContent, SettingsStore};
 
 /// The account each connected agent got, by agent server store (one per project) and agent.
 #[derive(Default)]
-struct ConnectedAccounts(HashMap<(EntityId, AgentId), (String, String)>);
+struct ConnectedAccounts(HashMap<(EntityId, AgentId), FyxAccount>);
 
 impl Global for ConnectedAccounts {}
 
@@ -30,12 +30,8 @@ fn accounts(cx: &App) -> Option<FyxAccountsSettingsContent> {
         .clone()
 }
 
-/// The `(variable, dir)` of the project's account for the agent's tool.
-fn account_env(
-    agent_id: &AgentId,
-    project: &Entity<Project>,
-    cx: &App,
-) -> Option<(String, String)> {
+/// The project's account for the agent's tool.
+fn project_account(agent_id: &AgentId, project: &Entity<Project>, cx: &App) -> Option<FyxAccount> {
     let project = project.read(cx);
     if !project.is_local() {
         return None;
@@ -46,8 +42,43 @@ fn account_env(
         .collect::<Vec<PathBuf>>();
     let accounts = accounts(cx)?;
     let tool = accounts.tool_for_agent(agent_id.0.as_ref())?;
-    let account = accounts.project_account(tool, roots.iter().map(PathBuf::as_path))?;
-    Some(account.env_entry())
+    accounts.project_account(tool, roots.iter().map(PathBuf::as_path))
+}
+
+/// The account an agent shows in the agent panel (design §C.6: always visible).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentAccount {
+    pub account: FyxAccount,
+    /// The tool's menu name, e.g. "Claude Code".
+    pub tool_label: String,
+    /// The agent connected with it; otherwise it is the one it will get.
+    pub connected: bool,
+}
+
+/// For the agent panel: the account `agent_id` connected with in `project`, or else the one it
+/// gets when it connects. `None` for a tool without accounts and for remote projects.
+pub fn agent_account(
+    agent_id: &AgentId,
+    project: &Entity<Project>,
+    cx: &App,
+) -> Option<AgentAccount> {
+    let store = project.read(cx).agent_server_store().entity_id();
+    let connected = cx
+        .try_global::<ConnectedAccounts>()
+        .and_then(|connected| connected.0.get(&(store, agent_id.clone())))
+        .cloned();
+    let (account, connected) = match connected {
+        Some(account) => (account, true),
+        None => (project_account(agent_id, project, cx)?, false),
+    };
+    let tool_label = accounts(cx)
+        .map(|accounts| accounts.tool_label(&account.tool))
+        .unwrap_or_else(|| account.tool.clone());
+    Some(AgentAccount {
+        account,
+        tool_label,
+        connected,
+    })
 }
 
 /// At connect: puts the project's account into the agent's environment and remembers it for the
@@ -60,14 +91,14 @@ pub(crate) fn add_account_env(
     cx: &mut App,
 ) {
     let key = (store.entity_id(), agent_id.clone());
-    match account_env(agent_id, project, cx) {
-        Some(entry) => {
-            log::info!("agent {} uses the account dir in {}", agent_id.0, entry.0);
-            env.get_or_insert_default()
-                .insert(entry.0.clone(), entry.1.clone());
+    match project_account(agent_id, project, cx) {
+        Some(account) => {
+            let (name, value) = account.env_entry();
+            log::info!("agent {} uses the account dir in {name}", agent_id.0);
+            env.get_or_insert_default().insert(name, value);
             cx.default_global::<ConnectedAccounts>()
                 .0
-                .insert(key, entry);
+                .insert(key, account);
         }
         None => {
             cx.default_global::<ConnectedAccounts>().0.remove(&key);
@@ -85,8 +116,8 @@ pub(crate) fn add_login_env(
     let entry = cx
         .try_global::<ConnectedAccounts>()
         .and_then(|connected| connected.0.get(&(store.entity_id(), agent_id.clone())));
-    if let Some(entry) = entry {
-        env.extend([entry.clone()]);
+    if let Some(account) = entry {
+        env.extend([account.env_entry()]);
     }
 }
 
@@ -152,7 +183,18 @@ mod tests {
                     (env.unwrap_or_default(), login)
                 })
             };
+        let shown = |project: &Entity<Project>, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| agent_account(&claude, project, cx))
+                .map(|account| (account.account.name, account.connected))
+        };
+        assert_eq!(
+            shown(&work, cx),
+            Some(("Work".to_owned(), false)),
+            "before connecting"
+        );
         let (env, login) = connect(&work, &claude, cx);
+        assert_eq!(shown(&work, cx), Some(("Work".to_owned(), true)));
+        assert_eq!(shown(&home, cx), None);
         let dir = Path::new("/w").to_string_lossy().into_owned();
         assert_eq!(env.get("CLAUDE_CONFIG_DIR"), Some(&dir));
         assert_eq!(
