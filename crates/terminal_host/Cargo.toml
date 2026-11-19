@@ -18,8 +18,11 @@ futures.workspace = true
 gpui.workspace = true
 ui_ext = { workspace = true, features = ["t2"] }
 log.workspace = true
+project.workspace = true
 release_channel.workspace = true
 settings.workspace = true
+sysinfo.workspace = true
+task.workspace = true
 terminal.workspace = true
 terminal_ext.workspace = true
 terminal_view.workspace = true
