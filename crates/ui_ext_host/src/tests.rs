@@ -3697,4 +3697,32 @@ mod terminal_host_tests {
             assert!(Arc::ptr_eq(&crate::terminal_host(cx).unwrap(), &second));
         });
     }
+
+    struct FakeListenerObserver;
+
+    impl ui_ext::integration::ListenerObserver for FakeListenerObserver {
+        fn opened(&self, _: &str, _: &ui_ext::integration::OpenListener) {}
+        fn closed(&self, _: &str, _: &str) {}
+    }
+
+    /// `set_listener_observer` is the one observer every later load passes as
+    /// `LoadOptions::listener_observer` (§B.8); a later call replaces it.
+    #[gpui::test]
+    fn test_set_listener_observer(cx: &mut TestAppContext) {
+        let registry = cx.new(|_| crate::UiExtensionRegistry::default());
+        registry.update(cx, |registry, _| {
+            assert!(
+                registry.listener_observer().is_none(),
+                "none until W1 sets it"
+            );
+            let first: Arc<dyn ui_ext::integration::ListenerObserver> =
+                Arc::new(FakeListenerObserver);
+            registry.set_listener_observer(first.clone());
+            assert!(Arc::ptr_eq(&registry.listener_observer().unwrap(), &first));
+            let second: Arc<dyn ui_ext::integration::ListenerObserver> =
+                Arc::new(FakeListenerObserver);
+            registry.set_listener_observer(second.clone());
+            assert!(Arc::ptr_eq(&registry.listener_observer().unwrap(), &second));
+        });
+    }
 }
