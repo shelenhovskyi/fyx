@@ -1504,4 +1504,26 @@ impl wit_context::Host for State {
             .absolute_path(&model_file_ref(path))
             .map_err(Into::into))
     }
+
+    // Staged in the 0.4 WIT ahead of the host side (design.md §B.11), as in the host.
+    fn diagnostics(
+        &mut self,
+        _path: Option<wit::FileRef>,
+    ) -> wasmtime::Result<Result<wit_context::DiagnosticsSnapshot, wit_host::HostError>> {
+        Ok(Err(diagnostics_unavailable()))
+    }
+
+    fn watch_diagnostics(
+        &mut self,
+        _on: bool,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        Ok(Err(diagnostics_unavailable()))
+    }
+}
+
+fn diagnostics_unavailable() -> wit_host::HostError {
+    wit_host::HostError {
+        code: wit_host::HostErrorCode::Unavailable,
+        message: "diagnostics are not available yet".into(),
+    }
 }

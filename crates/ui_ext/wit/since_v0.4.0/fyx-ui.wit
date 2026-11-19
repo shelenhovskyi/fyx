@@ -1224,6 +1224,42 @@ interface context {
     /// `context:editor`: the absolute path of a file, for a tool's reply. An unknown worktree is
     /// `invalid-argument`; a private file is `not-permitted`.
     absolute-path: func(path: file-ref) -> result<string, host-error>;
+
+    /// 0.4. Diagnostics (design.md §B.11): `workspace:diagnostics`.
+    enum severity { error, warning, information, hint }
+
+    record diagnostic {
+        /// Zero-based, columns in UTF-8 bytes.
+        range: text-range,
+        severity: severity,
+        /// Cut at 2 KiB.
+        message: string,
+        /// The language server, such as `rust-analyzer`.
+        source: option<string>,
+        /// Numeric codes as text.
+        code: option<string>,
+    }
+
+    record file-diagnostics {
+        path: file-ref,
+        diagnostics: list<diagnostic>,
+    }
+
+    record diagnostics-snapshot {
+        /// Only files with at least one entry.
+        files: list<file-diagnostics>,
+        /// More than 500 entries: errors are kept first, then warnings, information and hints,
+        /// then by path and line.
+        truncated: bool,
+    }
+
+    /// `workspace:diagnostics`: `some` is that one file (a private file is `not-permitted`, one in
+    /// no worktree `invalid-argument`, one without diagnostics an empty list); `none` is every
+    /// worktree file of the window with diagnostics, private files left out without a trace.
+    diagnostics: func(path: option<file-ref>) -> result<diagnostics-snapshot, host-error>;
+    /// `workspace:diagnostics`: `io-event::diagnostics-changed`, debounced 300 ms, while on.
+    /// `diagnostics` works without it; it is a fresh read.
+    watch-diagnostics: func(on: bool) -> result<_, host-error>;
 }
 
 /// 0.4. Approval cards for a tool's own permission prompts (design.md B.12): `ui:approvals`. The
@@ -1253,6 +1289,7 @@ interface io {
     use review.{review-outcome};
     use context.{editor-context};
     use approvals.{approval-option};
+    use types.{file-ref};
 
     variant io-event {
         fetch-done(tuple<u64, result<http-response, fetch-error>>),
@@ -1296,6 +1333,9 @@ interface io {
         review-decided(tuple<u64, result<review-outcome, string>>),
         /// 0.4.
         context-changed(editor-context),
+        /// 0.4. The files whose diagnostics changed, at most 200; empty when more changed (anything
+        /// may have changed). It carries no entries: read them with `context.diagnostics`.
+        diagnostics-changed(list<file-ref>),
         /// 0.4. None when the card closed unanswered.
         approval-answered(tuple<u64, option<approval-option>>),
     }
