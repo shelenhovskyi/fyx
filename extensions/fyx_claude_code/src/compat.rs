@@ -3,13 +3,12 @@
 //! `compat/README.md`. When the SDK and harness gain listeners and the relay (plan 5.14), the
 //! same transcripts are replayed through `fyx_ext_harness` against the built component.
 
-use std::collections::BTreeMap;
-
 use serde_json::{Value, json};
 
 use crate::hooks::{Channel, Effect, HookInput, Sessions, StatusState};
 use crate::ide::{
-    self, Diagnostic, DiffAnswer, IdeCall, Position, ReviewDecision, Roots, Severity, TextRange,
+    self, Diagnostic, DiagnosticsCache, DiffAnswer, Diffs, IdeCall, Position, ReviewDecision,
+    Roots, Severity, TextRange,
 };
 
 pub const FORMAT: &str = "fyx-claude-transcript";
@@ -28,6 +27,10 @@ pub const TRANSCRIPTS: &[(&str, &str)] = &[
     (
         "live-interactive.jsonl",
         include_str!("compat/live-interactive.jsonl"),
+    ),
+    (
+        "live-interactive-windows.jsonl",
+        include_str!("compat/live-interactive-windows.jsonl"),
     ),
     (
         "live-print-hooks.jsonl",
@@ -89,7 +92,7 @@ pub fn fill(draft: &str) -> Result<String, String> {
             }
         }
         replay.step(&event).map_err(at)?;
-        if event["t"] == "hook" {
+        if event["t"] == "hook" || (event["t"] == "review" && !replay.last_effects.is_empty()) {
             event["expect"] = Value::Array(std::mem::take(&mut replay.last_effects));
         }
         out.push(event.to_string());
@@ -125,21 +128,24 @@ fn start(first: &str, filling: bool) -> Result<(Header, Replay), String> {
     let replay = Replay {
         roots: PrefixRoot(header.root.clone()),
         sessions: Sessions::default(),
-        pending_diffs: BTreeMap::new(),
+        diffs: Diffs::default(),
         expected_out: Vec::new(),
         diagnostics: Vec::new(),
+        cache: DiagnosticsCache::default(),
         filling,
         last_effects: Vec::new(),
     };
     Ok((header, replay))
 }
 
-/// The transcript's one workspace root, as worktree 1.
+/// The transcript's one workspace root, as worktree 1: `/work/app`, or `C:\\work\\app` for a
+/// transcript recorded on Windows, whose paths keep Claude's own forms.
 struct PrefixRoot(String);
 
 impl Roots for PrefixRoot {
     fn to_ref(&self, absolute: &str) -> Option<ide::FileRef> {
-        let relative = absolute.strip_prefix(&self.0)?.strip_prefix('/')?;
+        let root = ide::normalize_path(&self.0);
+        let relative = absolute.strip_prefix(&root)?.strip_prefix('/')?;
         (!relative.is_empty()
             && relative
                 .split('/')
@@ -151,19 +157,27 @@ impl Roots for PrefixRoot {
     }
 
     fn to_absolute(&self, file: &ide::FileRef) -> Option<String> {
-        (file.worktree == Some(1)).then(|| format!("{}/{}", self.0, file.path))
+        (file.worktree == Some(1)).then(|| {
+            if self.0.contains('\\') {
+                format!("{}\\{}", self.0, file.path.replace('/', "\\"))
+            } else {
+                format!("{}/{}", self.0, file.path)
+            }
+        })
     }
 }
 
 struct Replay {
     roots: PrefixRoot,
     sessions: Sessions,
-    /// JSON-RPC id of an open `openDiff` → its tab.
-    pending_diffs: BTreeMap<String, String>,
+    /// The open `openDiff` calls, by JSON-RPC id.
+    diffs: Diffs<String>,
     /// Messages the extension produced that the transcript has not shown yet, in order.
     expected_out: Vec<Value>,
     /// What the host reports for `getDiagnostics`, by absolute path; set by `diagnostics`.
     diagnostics: Vec<(String, Vec<Diagnostic>)>,
+    /// Cleared by a `diagnostics` event and at each prompt.
+    cache: DiagnosticsCache,
     /// [`fill`]: hooks are not checked, and their effects go to `last_effects`.
     filling: bool,
     last_effects: Vec<Value>,
@@ -174,10 +188,10 @@ impl Replay {
         if let Some(left) = self.expected_out.first() {
             return Err(format!("the extension never sent {left}"));
         }
-        if !self.pending_diffs.is_empty() {
+        if !self.diffs.is_empty() {
             return Err(format!(
                 "openDiff calls left open: {:?}",
-                self.pending_diffs.keys()
+                self.diffs.keys().collect::<Vec<_>>()
             ));
         }
         Ok(())
@@ -214,25 +228,35 @@ impl Replay {
         let arguments = params["arguments"].to_string();
         match IdeCall::parse(tool, &arguments, &self.roots) {
             Ok(IdeCall::OpenDiff { tab, .. }) => {
-                self.pending_diffs.insert(id, tab);
+                self.diffs.opened(tab, id);
             }
+            // A close withdraws only a proposal that is still open, whose call then ends with
+            // `TAB_CLOSED`; after a decision it is a no-op.
             Ok(IdeCall::CloseTab { tab }) => {
-                self.pending_diffs.retain(|_, open| *open != tab);
+                if let Some(call) = self.diffs.close(&tab) {
+                    self.respond(&call, Ok(DiffAnswer::TabClosed.result()));
+                }
                 self.respond(&id, Ok(ide::text_result("TAB_CLOSED")));
             }
             Ok(IdeCall::CloseAllDiffTabs) => {
+                for call in self.diffs.close_all() {
+                    self.respond(&call, Ok(DiffAnswer::TabClosed.result()));
+                }
                 self.respond(&id, Ok(ide::text_result("CLOSED_ALL_DIFF_TABS")));
             }
             Ok(IdeCall::GetDiagnostics { file }) => {
                 // One file, or every file; a file the host has nothing for is left out.
-                let only = file.and_then(|file| self.roots.to_absolute(&file));
-                let files: Vec<_> = self
-                    .diagnostics
-                    .iter()
-                    .filter(|(path, _)| only.as_ref().is_none_or(|only| only == path))
-                    .cloned()
-                    .collect();
-                self.respond(&id, Ok(ide::diagnostics_result(&files)));
+                let only = file.as_ref().and_then(|file| self.roots.to_absolute(file));
+                let diagnostics = &self.diagnostics;
+                let answer = self.cache.answer(file, || {
+                    let files: Vec<_> = diagnostics
+                        .iter()
+                        .filter(|(path, _)| only.as_ref().is_none_or(|only| only == path))
+                        .cloned()
+                        .collect();
+                    ide::diagnostics_result(&files)
+                });
+                self.respond(&id, Ok(answer));
             }
             Ok(IdeCall::OpenFile { .. }) => {
                 self.respond(&id, Ok(ide::text_result("OK")));
@@ -289,9 +313,9 @@ impl Replay {
     /// The user's decision on the open `openDiff` (in Fyx's agent review).
     fn review(&mut self, event: &Value) -> Result<(), String> {
         let id = event["call"].to_string();
-        self.pending_diffs
-            .remove(&id)
-            .ok_or_else(|| format!("no open openDiff with id {id}"))?;
+        if !self.diffs.decided(&id) {
+            return Err(format!("no open openDiff with id {id}"));
+        }
         let answer = match event["decision"].as_str() {
             Some("accepted") => DiffAnswer::from_review(
                 ReviewDecision::Accepted,
@@ -312,7 +336,20 @@ impl Replay {
             other => return Err(format!("review decision {other:?}")),
         };
         self.respond(&id, Ok(answer.result()));
-        Ok(())
+        // Claude ends the turn after a rejection without `Stop`; the extension ends it.
+        let effects: Vec<Value> = if answer == DiffAnswer::Rejected {
+            self.sessions.diff_rejected().iter().map(describe).collect()
+        } else {
+            Vec::new()
+        };
+        if self.filling {
+            self.last_effects = effects;
+            return Ok(());
+        }
+        let expected = event["expect"].as_array().cloned().unwrap_or_default();
+        (effects == expected)
+            .then_some(())
+            .ok_or_else(|| format!("effects {effects:?}, expected {expected:?}"))
     }
 
     /// The editor's selection changed (`io-event::context-changed`).
@@ -391,6 +428,7 @@ impl Replay {
                 Ok((absolute, diagnostics))
             })
             .collect::<Result<_, String>>()?;
+        self.cache.invalidate();
         Ok(())
     }
 
@@ -400,6 +438,9 @@ impl Replay {
         let channel =
             Channel::from_relay(channel).ok_or_else(|| format!("unknown channel {channel:?}"))?;
         let input = HookInput::parse(channel, &event["stdin"].to_string())?;
+        if channel == Channel::UserPrompt {
+            self.cache.invalidate();
+        }
         let roots = &self.roots;
         let effects = self.sessions.apply(&input, |path| roots.to_ref(path));
         let effects: Vec<Value> = effects.iter().map(describe).collect();

@@ -1,12 +1,15 @@
 """Turns a recorder.py log into (1) a sanitized recording and (2) a draft transcript.
 
   python convert.py <log.jsonl> --project <dir> --config <dir> --mode interactive|print
-      --date YYYY-MM-DD --raw <out.raw.jsonl> --draft <out.draft.jsonl>
+      --date YYYY-MM-DD --raw <out.raw.jsonl> --draft <out.draft.jsonl> [--windows]
+  python convert.py recorded/<x>.raw.jsonl --draft <out.draft.jsonl> [--windows]
 
 The recording keeps every event, with times relative to the first, and Windows paths under
-C:\\work\\app. The draft is in `fyx-claude-transcript` form under /work/app, without the
-extension's answers or the hooks' `expect`: `compat::fill` (the ignored `fill_draft` test) adds
-them. Sanitized: the project and config dirs, transcript and scratchpad paths, session, prompt
+C:\\work\\app. The draft is in `fyx-claude-transcript` form under /work/app, or with
+`--windows` under C:\\work\\app with Claude's own path and URI forms (`C:\\a\\b`,
+`file:///C:/a/b`, `file://C:\\a\\b`). It has no extension's answers or hooks' `expect`:
+`compat::fill` (the ignored `fill_draft` test) adds them. Given a recording already sanitized
+(`recorded/`), only the draft is written. Sanitized: the project and config dirs, transcript and scratchpad paths, session, prompt
 and tool-use ids, other UUIDs, and pids. The auth token is never logged by the recorder.
 """
 
@@ -85,15 +88,23 @@ class Sanitizer:
             return text
         return value
 
+    def name_in(self, path):
+        """The session a transcript or scratchpad path is named after (its last UUID, or a
+        `live-N` of a sanitized recording)."""
+        if UUID.search(path):
+            return self.session(UUID.findall(path)[-1])
+        named = re.findall(r"live-\d+", path)
+        return named[-1] if named else "live"
+
     def field(self, key, value):
         if key == "session_id" and isinstance(value, str):
             return self.session(value)
         if key == "transcript_path" and isinstance(value, str):
-            name = self.session(UUID.findall(value)[-1]) if UUID.search(value) else "live"
+            name = self.name_in(value)
             return (f"/tmp/claude-config/projects/-work-app/{name}.jsonl" if self.posix
                     else f"C:\\claude-config\\projects\\C--work-app\\{name}.jsonl")
         if key == "scratchpad_dir" and isinstance(value, str):
-            name = self.session(UUID.findall(value)[-1]) if UUID.search(value) else "live"
+            name = self.name_in(value)
             return (f"/tmp/claude/{name}/scratchpad" if self.posix
                     else f"C:\\Users\\user\\AppData\\Local\\Temp\\claude\\{name}\\scratchpad")
         if key == "prompt_id" and isinstance(value, str):
@@ -101,6 +112,17 @@ class Sanitizer:
         if key == "pid" and isinstance(value, int):
             return 4242
         return self.value(value, key)
+
+
+def relative(path):
+    """`C:\\work\\app\\a\\b`, `file:///C:/work/app/a/b` or `/work/app/a/b` -> `a/b`."""
+    path = path.removeprefix("file://").replace("\\", "/")
+    if path[:1] == "/" and path[2:3] == ":":
+        path = path[1:]
+    for root in ("C:/work/app/", "/work/app/"):
+        if path.startswith(root):
+            return path[len(root):]
+    raise SystemExit(f"not under the root: {path!r}")
 
 
 def check_clean(text, project, config):
@@ -117,15 +139,26 @@ def check_clean(text, project, config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("log")
-    parser.add_argument("--project", required=True)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--mode", required=True, choices=["interactive", "print"])
-    parser.add_argument("--date", required=True)
-    parser.add_argument("--raw", required=True)
+    parser.add_argument("--project")
+    parser.add_argument("--config")
+    parser.add_argument("--mode", choices=["interactive", "print"])
+    parser.add_argument("--date")
+    parser.add_argument("--raw")
     parser.add_argument("--draft", required=True)
+    parser.add_argument("--windows", action="store_true")
     args = parser.parse_args()
 
     events = [json.loads(line) for line in open(args.log, encoding="utf-8") if line.strip()]
+    if events[0].get("format") == "fyx-claude-recording":
+        # Already sanitized: its paths are the project's, its config dir is the placeholder.
+        recording = events.pop(0)
+        args.project, args.config = "C:\\work\\app", "C:\\claude-config"
+        args.mode, args.date = recording["mode"], recording["recorded"]
+        args.raw = None
+        for event in events:
+            event["ts"] = event.pop("ms")
+    elif not (args.project and args.config and args.mode and args.date and args.raw):
+        parser.error("a recorder log needs --project, --config, --mode, --date and --raw")
     # Sessions that never got a prompt (a run that failed on its arguments) are left out.
     prompted = {e["stdin"].get("session_id") for e in events
                 if e["t"] == "hook" and e["channel"].endswith("/user-prompt")}
@@ -134,6 +167,7 @@ def main():
     start = events[0]["ts"]
 
     raw = Sanitizer(args.project, args.config, posix=False)
+    raw_name = (args.raw or args.log).replace("\\", "/").rsplit("/", 1)[-1]
     note = ("Recorded live from Claude Code 2.1.326 (Windows) by src/compat/recorder/recorder.py, "
             "which played the IDE; sanitized by convert.py. Every frame both ways and every hook.")
     lines = [json.dumps({"format": "fyx-claude-recording", "version": 1,
@@ -145,19 +179,23 @@ def main():
         event = {"ms": event.pop("ms"), **raw.value(event)}
         lines.append(json.dumps(event, ensure_ascii=False))
     text = "\n".join(lines) + "\n"
-    check_clean(text, args.project, args.config)
-    open(args.raw, "w", encoding="utf-8", newline="\n").write(text)
+    if args.raw:
+        check_clean(text, args.project, args.config)
+        open(args.raw, "w", encoding="utf-8", newline="\n").write(text)
 
-    draft = Sanitizer(args.project, args.config, posix=True)
+    draft = Sanitizer(args.project, args.config, posix=not args.windows)
+    root = "C:\\work\\app" if args.windows else "/work/app"
+    mapped = ("on Windows, with Claude's own path and URI forms" if args.windows
+              else "on Windows (paths mapped to /work/app)")
     answers = {}
     for event in events:
         msg = event.get("msg") or {}
         if event["t"] == "mcp" and event["dir"] == "out" and "id" in msg:
             answers[msg["id"]] = msg.get("result")
     header = {"format": "fyx-claude-transcript", "version": 1, "claude_code": "2.1.326",
-              "mode": args.mode, "recorded": args.date, "root": "/work/app",
-              "note": "Recorded live from Claude Code 2.1.326 on Windows (paths mapped to /work/app); "
-                      "the raw recording is recorded/" + args.raw.replace("\\", "/").rsplit("/", 1)[-1]
+              "mode": args.mode, "recorded": args.date, "root": root,
+              "note": f"Recorded live from Claude Code 2.1.326 {mapped}; "
+                      "the raw recording is recorded/" + raw_name
                       + ". The extension's answers and the hooks' effects were filled by compat::fill "
                       "and checked against the recording."}
     out = [json.dumps(header, ensure_ascii=False)]
@@ -176,7 +214,7 @@ def main():
                 if result and (original is None or original.startswith("file:///")):
                     files = []
                     for entry in json.loads(result["content"][0]["text"]):
-                        path = draft.value(entry["uri"]).removeprefix("file:///work/app/")
+                        path = relative(draft.value(entry["uri"]))
                         files.append({"path": path, "diagnostics": [
                             {"range": {"start": [d["range"]["start"]["line"], d["range"]["start"]["character"]],
                                        "end": [d["range"]["end"]["line"], d["range"]["end"]["character"]]},
@@ -202,13 +240,13 @@ def main():
             elif msg.get("method") == "selection_changed":
                 p = msg["params"]
                 out.append(json.dumps({"t": "editor",
-                                       "path": p["filePath"].removeprefix("/work/app/"),
+                                       "path": relative(p["filePath"]),
                                        "selection": {"start": [p["selection"]["start"]["line"], p["selection"]["start"]["character"]],
                                                      "end": [p["selection"]["end"]["line"], p["selection"]["end"]["character"]],
                                                      "text": p["text"]}}, ensure_ascii=False))
             elif msg.get("method") == "at_mentioned":
                 p = msg["params"]
-                out.append(json.dumps({"t": "mention", "path": p["filePath"].removeprefix("/work/app/"),
+                out.append(json.dumps({"t": "mention", "path": relative(p["filePath"]),
                                        "lines": [p["lineStart"], p["lineEnd"]]}))
             elif result.get("content") and result["content"][0].get("text") in ("FILE_SAVED", "DIFF_REJECTED"):
                 if result["content"][0]["text"] == "FILE_SAVED":
@@ -219,9 +257,10 @@ def main():
                     out.append(json.dumps({"t": "review", "call": msg["id"], "decision": "rejected"}))
             # Other answers are the extension's to give: compat::fill writes them.
     text = "\n".join(out) + "\n"
-    check_clean(text, args.project, args.config)
+    if args.raw:  # A sanitized recording was checked when it was written.
+        check_clean(text, args.project, args.config)
     open(args.draft, "w", encoding="utf-8", newline="\n").write(text)
-    print(f"{args.raw}: {len(lines)} lines; {args.draft}: {len(out)} lines")
+    print(f"{args.raw or args.log}: {len(lines)} lines; {args.draft}: {len(out)} lines")
 
 
 if __name__ == "__main__":
