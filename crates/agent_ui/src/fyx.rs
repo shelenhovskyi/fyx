@@ -1,14 +1,100 @@
 //! fyx: the account an agent uses, beside the agent's icon in the panel's toolbar (`fyx.accounts`,
-//! design §C.6: the account is always visible). Fyx's code in this crate lives in files named
-//! `fyx*`, so rebases never conflict on it; `agent_panel.rs` calls it from one `fyx:` line.
+//! design §C.6: the account is always visible), and the "+" menu's "Claude Code — Work" entries.
+//! Fyx's code in this crate lives in files named `fyx*`, so rebases never conflict on it;
+//! `agent_panel.rs` calls it from `fyx:` lines.
+
+use std::rc::Rc;
 
 use agent_servers::AgentAccount;
-use gpui::{AnyElement, App, Entity, Hsla};
-use project::Project;
+use gpui::{AnyElement, App, Entity, Global, Hsla, WeakEntity};
+use project::{AgentId, Project};
 use settings::FyxAccountColor;
-use ui::{Indicator, Tooltip, prelude::*};
+use ui::{ContextMenu, ContextMenuEntry, IconPosition, Indicator, Tooltip, prelude::*};
+use workspace::Workspace;
 
-use crate::Agent;
+use crate::{Agent, NewExternalAgentThread, agent_panel::AgentPanel};
+
+/// Set by a "+" account entry for the new thread it opens right after: an empty draft of the
+/// agent belongs to the old account's connection, so a new draft replaces it.
+#[derive(Default)]
+struct NewAccountThread(bool);
+
+impl Global for NewAccountThread {}
+
+/// For `AgentPanel::activate_new_thread`: whether this new thread is for a newly chosen account
+/// (§C.6 rule 3: a new account is a new thread, never the old one carried over). Read once.
+pub(crate) fn take_new_account_thread(cx: &mut App) -> bool {
+    let new_account = cx
+        .try_global::<NewAccountThread>()
+        .is_some_and(|flag| flag.0);
+    if new_account {
+        cx.set_global(NewAccountThread(false));
+    }
+    new_account
+}
+
+/// After an agent's own "+" entry: "<agent> — <account>" for each account of the agent's tool,
+/// the project's current one ticked. Choosing one makes it the project's account for the tool
+/// (user settings) and opens a new thread with it. An agent connected with another account gets
+/// a new connection; threads already open keep theirs.
+pub(crate) fn account_entries(
+    mut menu: ContextMenu,
+    agent_id: &AgentId,
+    display_name: &SharedString,
+    workspace: &WeakEntity<Workspace>,
+    disabled: bool,
+    cx: &App,
+) -> ContextMenu {
+    let Some(project) = workspace
+        .upgrade()
+        .map(|workspace| workspace.read(cx).project().clone())
+    else {
+        return menu;
+    };
+    for (account, chosen) in agent_servers::account_choices(agent_id, &project, cx) {
+        let label = format!("{display_name} — {}", account.name);
+        let entry = ContextMenuEntry::new(label)
+            .toggleable(IconPosition::End, chosen)
+            .disabled(disabled)
+            .handler({
+                let (workspace, agent_id) = (workspace.clone(), agent_id.clone());
+                move |window, cx| {
+                    let Some(workspace) = workspace.upgrade() else {
+                        return;
+                    };
+                    workspace.update(cx, |workspace, cx| {
+                        let project = workspace.project().clone();
+                        let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                            return;
+                        };
+                        panel.update(cx, |panel, cx| {
+                            if agent_servers::choose_account(&agent_id, &project, &account, cx) {
+                                let id = agent_id.clone();
+                                panel.connection_store().update(cx, |store, cx| {
+                                    store.restart_connection(
+                                        Agent::Custom { id: id.clone() },
+                                        Rc::new(agent_servers::CustomAgentServer::new(id)),
+                                        cx,
+                                    );
+                                });
+                                cx.set_global(NewAccountThread(true));
+                            }
+                            panel.new_external_agent_thread(
+                                &NewExternalAgentThread {
+                                    agent: agent_id.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                            cx.set_global(NewAccountThread(false));
+                        });
+                    });
+                }
+            });
+        menu = menu.item(entry);
+    }
+    menu
+}
 
 fn color(color: FyxAccountColor, cx: &App) -> Hsla {
     let colors = cx.theme().colors();
