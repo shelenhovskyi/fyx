@@ -217,6 +217,7 @@ pub(super) fn spawn_event_loop(
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
+    let (pty, osc_replies) = terminal_ext::tee(pty); // fyx: OSC tap on the pty output
     let event_loop = EventLoop::new(
         term,
         ZedListener {
@@ -229,6 +230,7 @@ pub(super) fn spawn_event_loop(
     )
     .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
+    osc_replies.connect(pty_tx.clone()); // fyx
     let _io_thread = event_loop.spawn();
 
     Ok(PtySender {
