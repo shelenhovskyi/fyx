@@ -191,7 +191,7 @@ async fn test_open_buffer_and_watch(cx: &mut TestAppContext) {
         worktree: Some(opaque_id("ext", (WORKSPACE, worktree_id(&project, cx)))),
         path: "b.rs".into(),
     };
-    assert_eq!(heard.lock().unwrap().pop(), Some(vec![file.clone()]));
+    assert_eq!(heard.lock().unwrap().pop(), Some(vec![file]));
     let all = read_cache(&cache, &open, "ext", None);
     assert_eq!(all[0].diagnostics[0].range, range(3, 4));
     assert_eq!(all[0].diagnostics[0].severity, DiagnosticSeverity::Warning);
