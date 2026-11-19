@@ -1744,6 +1744,11 @@ Environment it may pass: {}",
         .detach();
     }
 
+    /// The workspace whose window was active last (`context:editor` follows it).
+    pub(crate) fn active_workspace(&self) -> Option<gpui::EntityId> {
+        self.active_workspace
+    }
+
     /// The workspace whose window became active; modals open there.
     pub fn set_active_workspace(&mut self, workspace: gpui::EntityId) {
         self.active_workspace = Some(workspace);
@@ -2105,6 +2110,10 @@ Environment it may pass: {}",
                             .read_with(cx, |this, _| this.listener_observer())
                             .ok()
                             .flatten(),
+                        // context:editor and workspace:open (plan 5.13).
+                        context: Some(cx.update(|cx| {
+                            crate::context_host::for_extension(&found.extension_id, cx)
+                        })),
                         ..LoadOptions::default()
                     };
                     ready.push((found, bytes, options));
@@ -3284,6 +3293,8 @@ fn attach_to_workspace(
             workspace.project().downgrade(),
             cx,
         );
+        // context:editor and workspace:open (plan 5.13).
+        crate::context_host::watch_workspace(workspace, window, cx);
         let project = workspace.project().clone();
         cx.observe(&project, move |workspace, _, cx| report(workspace, cx))
             .detach();
@@ -3867,6 +3878,9 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
             UiExtensionRegistry::global(cx)
                 .and_then(|registry| registry.read(cx).listener_observer())
         }),
+        context: Some(
+            cx.update(|cx| crate::context_host::for_extension(&path.to_string_lossy(), cx)),
+        ),
         ..LoadOptions::default()
     };
     let mut declared = Vec::new();

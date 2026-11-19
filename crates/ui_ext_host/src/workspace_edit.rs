@@ -52,6 +52,8 @@ struct Registered {
     /// `None` in tests, which have no workspace: no card then.
     workspace: Option<WeakEntity<Workspace>>,
     project: WeakEntity<Project>,
+    /// The workspace's window, to open files in it (`workspace:open`); `None` in tests.
+    window: Option<gpui::AnyWindowHandle>,
 }
 
 impl Global for EditWorkspaces {}
@@ -62,9 +64,33 @@ pub(crate) fn register_workspace(
     project: WeakEntity<Project>,
     cx: &mut App,
 ) {
-    cx.default_global::<EditWorkspaces>()
-        .0
-        .insert(id, Registered { workspace, project });
+    cx.default_global::<EditWorkspaces>().0.insert(
+        id,
+        Registered {
+            workspace,
+            project,
+            window: None,
+        },
+    );
+}
+
+/// The window of a registered workspace (`workspace:open`).
+pub(crate) fn set_workspace_window(id: EntityId, window: gpui::AnyWindowHandle, cx: &mut App) {
+    if let Some(registered) = cx.default_global::<EditWorkspaces>().0.get_mut(&id) {
+        registered.window = Some(window);
+    }
+}
+
+/// A registered workspace and its window, by the workspace's entity id.
+pub(crate) fn workspace_and_window(
+    id: EntityId,
+    cx: &App,
+) -> Option<(gpui::Entity<Workspace>, gpui::AnyWindowHandle)> {
+    let registered = cx.try_global::<EditWorkspaces>()?.0.get(&id)?;
+    Some((
+        registered.workspace.as_ref()?.upgrade()?,
+        registered.window?,
+    ))
 }
 
 pub(crate) fn unregister_workspace(id: EntityId, cx: &mut App) {
@@ -293,6 +319,57 @@ pub(crate) async fn apply_edit(
             }
             Err(error)
         }
+    }
+}
+
+/// One file of a worktree, resolved and checked as an edit target is (`review:propose`, §B.10).
+pub(crate) struct ResolvedFile {
+    pub project: Entity<Project>,
+    pub project_path: ProjectPath,
+    pub abs_path: PathBuf,
+}
+
+/// Resolves `file` for the extension whose worktree ids are keyed by `key`, with every check of
+/// an edit target (trust, collaboration, links, exclusions, `private_files`, `fyx_guard`, size).
+/// A missing file is `not-found` unless `create`; nothing is created here.
+pub(crate) async fn resolve_file(
+    key: &str,
+    file: ui_ext::process::FileRef,
+    create: bool,
+    cx: &mut AsyncApp,
+) -> Result<ResolvedFile, EditError> {
+    let edit = WorkspaceEdit {
+        label: String::new(),
+        files: vec![ui_ext_wasm::edit::FileEdit {
+            target: EditTarget::File(file),
+            expected_version: None,
+            create,
+            edits: Vec::new(),
+        }],
+    };
+    let (mut targets, _) = cx.update(|cx| resolve(key, edit, cx))?;
+    let target = targets
+        .pop()
+        .ok_or_else(|| EditError::NotFound("no file".into()))?;
+    stays_inside(&target).await?;
+    Ok(ResolvedFile {
+        project: target.project,
+        project_path: target.project_path,
+        abs_path: target.abs_path,
+    })
+}
+
+/// What an [`EditError`] says, for a host whose errors are strings.
+pub(crate) fn describe_error(error: &EditError) -> String {
+    match error {
+        EditError::Denied => "denied".into(),
+        EditError::Cancelled => "cancelled".into(),
+        EditError::UntrustedWorktree => "the worktree is not trusted (restricted mode)".into(),
+        EditError::Conflict(why)
+        | EditError::NotAllowed(why)
+        | EditError::NotFound(why)
+        | EditError::Invalid(why)
+        | EditError::Other(why) => why.clone(),
     }
 }
 
@@ -615,30 +692,35 @@ impl Global for KeptBuffers {}
 
 fn keep_until_clean(transaction: &ProjectTransaction, cx: &mut App) {
     for buffer in transaction.0.keys() {
-        if !buffer.read(cx).is_dirty()
-            || cx
-                .default_global::<KeptBuffers>()
-                .0
-                .contains_key(&buffer.entity_id())
-        {
-            continue;
-        }
-        let subscription = cx.subscribe(buffer, |buffer, event: &language::BufferEvent, cx| {
-            let clean = matches!(
-                event,
-                language::BufferEvent::Saved | language::BufferEvent::DirtyChanged
-            ) && !buffer.read(cx).is_dirty();
-            if clean {
-                let id = buffer.entity_id();
-                cx.defer(move |cx| {
-                    cx.default_global::<KeptBuffers>().0.remove(&id);
-                });
-            }
-        });
-        cx.default_global::<KeptBuffers>()
-            .0
-            .insert(buffer.entity_id(), (buffer.clone(), subscription));
+        keep_buffer_until_clean(buffer, cx);
     }
+}
+
+/// Holds an edited buffer until it is clean again (see [`KeptBuffers`]).
+pub(crate) fn keep_buffer_until_clean(buffer: &Entity<Buffer>, cx: &mut App) {
+    if !buffer.read(cx).is_dirty()
+        || cx
+            .default_global::<KeptBuffers>()
+            .0
+            .contains_key(&buffer.entity_id())
+    {
+        return;
+    }
+    let subscription = cx.subscribe(buffer, |buffer, event: &language::BufferEvent, cx| {
+        let clean = matches!(
+            event,
+            language::BufferEvent::Saved | language::BufferEvent::DirtyChanged
+        ) && !buffer.read(cx).is_dirty();
+        if clean {
+            let id = buffer.entity_id();
+            cx.defer(move |cx| {
+                cx.default_global::<KeptBuffers>().0.remove(&id);
+            });
+        }
+    });
+    cx.default_global::<KeptBuffers>()
+        .0
+        .insert(buffer.entity_id(), (buffer.clone(), subscription));
 }
 
 struct EditNotification;
