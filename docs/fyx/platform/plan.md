@@ -164,11 +164,39 @@ and W1 (5.12). Phases 4–5 are W4 with fixes from the owners. Phase 6 is W1 and
 beside phases 2–3 when a compiling slot is free. The owner's limit of 2 compiling streams plus the
 gatekeeper holds throughout.
 
+## P6 product basics
+
+Added by the owner on 2026-11-20 from [roadmap-and-vscode-port.md](../research/roadmap-and-vscode-port.md)
+section 1 (G-numbers there). Gaps users notice on day one, mostly because Fyx is cloud-off. Owners
+are suggestions for the coordinator. Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
+
+| # | Owner | Task | Size | Depends on | Done when |
+|---|---|---|---|---|---|
+| | | **P0, before the 1.0 cut** | | | |
+| 6.1 | W2c (WIT, model) + W3 (UI) + W4 (SDK) | Extension settings (G4): a `[settings]` table in the manifest (type, default, description, enum, min/max), a `settings` import that reads the current values and an event when they change, and a settings page per extension in the extensions UI generated from the schema. **In the 0.4 WIT, before it freezes** | M | 5.5 | a demo declares three settings; changing one in the UI reaches the guest without a reload; a wrong type is refused at install |
+| 6.2 | W1 | Self-updater with signed releases (G1): a release channel manifest signed with Ed25519 (the registry's signing scheme, its own key), download, signature and hash check, install on restart, keep the previous version and roll back; Zed's updater endpoint stays off | M | — | a test channel offers 1.0.1; a tampered package is refused; rollback restores the previous version |
+| 6.3 | W5 successor (`agent_review`) | Local history and agent timeline (G3): a snapshot per save and per agent turn, a timeline per file and per turn, restore a file or a whole agent turn even after it was accepted; size cap and pruning | M | 1(b) of the Phase 5 backlog (review per turn) | accept an agent turn, then undo the whole turn from the timeline in one step |
+| 6.4 | W1 | Local crash reports (G5): panics and minidumps written under the Fyx data dir, a "Crash reports" view, and "Report" that opens a prefilled GitHub issue in the browser; nothing is uploaded | S | — | a forced panic shows in the view after restart with a working "Report" |
+| 6.5 | W1 (settings) + owner of AI settings | Local or bring-your-own edit predictions (G2): check which non-Zed providers upstream still ships (Copilot, Codestral, Ollama and others), enable them in the cloud-off build, add an OpenAI-compatible local endpoint (llama.cpp, Ollama) | M | — | inline predictions work with a local `llama-server` and no network |
+| | | **P1, after 1.0** | | | |
+| 6.6 | W2c + W3 | Diagnostics from extensions (G7): a diagnostics collection per extension shown in the editor and the diagnostics panel like LSP ones, with source and severity | S–M | 0.4 or the first post-1.0 WIT | a linter demo marks lines and lists them in the panel |
+| 6.7 | W2c + W3 | Tree views and file decorations (G8): nested tree rows with expand and collapse on top of `list`, and badges or colours on project-panel entries contributed by an extension (one `fyx:` hook in `project_panel`) | M | 6.6 | a bookmarks demo shows a tree and marks bookmarked files in the project panel |
+
+**Order.** 6.1 goes with phase 2 of P5 (5.5, 5.6) so it is in the 0.4 freeze. 6.2 and 6.4 are
+W1's, after 5.8 or whenever a compiling slot is free, and must land before the 1.0 cut. 6.3
+follows backlog item 1(b). 6.5 can start at once; it is mostly configuration and one provider.
+6.6 and 6.7 wait for the post-1.0 WIT. VS Code compatibility is not part of P6 (owner, 2026-11-20).
+
 ## Deferred after 1.0
 
 TypeScript extensions are deferred until after 1.0, and whether to do them at all is re-evaluated
 then (owner, 2026-11-18; spec decision 3). P3 builds and signs Rust extensions only. `sdks/ts`
 stays in the repository as an unsupported prototype.
+
+**VS Code extensions: not supported (owner, 2026-11-20).** No Node sidecar and no `.vsix`
+conversion as a feature; PLAN.md backlog item 12 is dropped. `sidecars/vscode-host` and
+`tools/vsix-convert` stay as unsupported code until a separate removal step
+([research](../research/roadmap-and-vscode-port.md)).
 
 | # | Was | Task | Revisit |
 |---|---|---|---|
