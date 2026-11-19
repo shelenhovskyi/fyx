@@ -762,7 +762,7 @@ fn main() {
             cx,
         ); // fyx: terminal nodes in extension panels
         ui_ext_host::init(cx); // fyx: extension panels and status items
-        fyx_t3::init(cx); // fyx: terminal shares and closed terminals for the consent broker
+        fyx_t3::init(cx); // fyx: T3 shares, closed terminals, discovery-file writer
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);

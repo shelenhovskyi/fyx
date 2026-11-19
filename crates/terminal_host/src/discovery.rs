@@ -129,6 +129,58 @@ impl DiscoveryWriter {
     }
 }
 
+/// The manifest's content tree as the JSON it is written as.
+fn json_of(value: &ui_ext::integration::DiscoveryValue) -> Value {
+    use ui_ext::integration::DiscoveryValue;
+    match value {
+        DiscoveryValue::Bool(value) => Value::from(*value),
+        DiscoveryValue::Integer(value) => Value::from(*value),
+        DiscoveryValue::Text(text) => Value::from(text.clone()),
+        DiscoveryValue::Array(items) => Value::Array(items.iter().map(json_of).collect()),
+        DiscoveryValue::Table(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), json_of(value)))
+                .collect(),
+        ),
+    }
+}
+
+impl From<&ui_ext::integration::OpenListener> for OpenListener {
+    fn from(listener: &ui_ext::integration::OpenListener) -> Self {
+        Self {
+            name: listener.name.clone(),
+            port: listener.port,
+            token: listener.token.clone(),
+            files: listener
+                .discovery_files
+                .iter()
+                .map(|spec| DiscoveryFile {
+                    dir: spec.dir.clone(),
+                    default_dir: spec.default_dir.clone(),
+                    name: spec.name.clone(),
+                    content: Value::Object(
+                        spec.content
+                            .iter()
+                            .map(|(key, value)| (key.clone(), json_of(value)))
+                            .collect(),
+                    ),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// W2c's listeners (plan 5.11) tell the writer; `main.rs` hands it to the extension registry.
+impl ui_ext::integration::ListenerObserver for DiscoveryWriter {
+    fn opened(&self, extension_id: &str, listener: &ui_ext::integration::OpenListener) {
+        DiscoveryWriter::opened(self, extension_id, listener.into());
+    }
+
+    fn closed(&self, extension_id: &str, listener: &str) {
+        DiscoveryWriter::closed(self, extension_id, listener);
+    }
+}
 type Key = (String, String);
 
 #[derive(Default, Serialize, Deserialize)]
@@ -583,6 +635,42 @@ mod tests {
         assert!(recorded.files.is_empty());
     }
 
+    #[test]
+    fn the_manifest_tree_becomes_the_json_template() {
+        use ui_ext::integration::DiscoveryValue as V;
+        let spec = ui_ext::integration::DiscoveryFileSpec {
+            listener: "ide".into(),
+            dir: "${tmp}/gemini/ide".into(),
+            default_dir: None,
+            name: "gemini-ide-server-${pid}-${port}.json".into(),
+            content: BTreeMap::from([
+                ("port".into(), V::from("${port}")),
+                ("n".into(), V::Integer(3)),
+                ("on".into(), V::Bool(true)),
+                ("list".into(), V::Array(vec![V::from("${worktrees}")])),
+                (
+                    "ideInfo".into(),
+                    V::Table(BTreeMap::from([
+                        ("name".into(), V::from("fyx")),
+                        ("displayName".into(), V::from("Fyx")),
+                    ])),
+                ),
+            ]),
+            reason: "Gemini CLI finds Fyx".into(),
+        };
+        let listener = OpenListener::from(&ui_ext::integration::OpenListener {
+            name: "ide".into(),
+            protocol: ui_ext::integration::ListenerProtocol::McpStreamableHttp,
+            port: 1,
+            token: "t".into(),
+            discovery_files: vec![spec],
+        });
+        assert_eq!(
+            listener.files[0].content,
+            json!({ "port": "${port}", "n": 3, "on": true, "list": ["${worktrees}"],
+                "ideInfo": { "name": "fyx", "displayName": "Fyx" } })
+        );
+    }
     #[test]
     fn at_start_the_files_of_runs_that_are_gone_are_removed() {
         let root = tempfile::tempdir().unwrap();

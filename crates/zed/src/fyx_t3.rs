@@ -1,6 +1,7 @@
 //! fyx: T3 (design wit-0.4 §C.3) between the terminal host and the consent broker, which do not
 //! depend on each other: the terminal menu's "Share with <extension>" and the tabs' access marks
 //! read and change `ui_ext_host`'s registry, and a closed terminal ends its shares and cards.
+//! Also hands the registry the terminal host's discovery-file writer (plan 5.12) for listeners.
 
 use std::rc::Rc;
 
@@ -80,6 +81,10 @@ pub fn init(cx: &mut App) {
     let closed = registry.update(cx, |registry, cx| registry.t3_terminal_closed_hook(cx));
     terminal_host::set_terminal_closed_hook(closed, cx);
     terminal_host::set_share_bridge(Rc::new(Bridge(registry.clone())), cx);
+    if let Some(writer) = terminal_host::discovery_writer(cx) {
+        // Read by each load, so this is before any extension's listeners open.
+        registry.update(cx, |registry, _| registry.set_listener_observer(writer));
+    }
     cx.observe(&registry, |_, cx| terminal_host::shares_changed(cx))
         .detach();
 }
