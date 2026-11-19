@@ -58,13 +58,16 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 mod api_state;
 mod compile_cache;
 mod notifications;
+mod terminals;
 mod v0_2;
 mod v0_3;
+mod v0_4;
 
 pub use api_state::{
     ACTIVATION_WINDOW, HostEffect, MAX_PUSHED_ITEMS_PER_CALL_V0_2, MAX_TICK_DELAY, MIN_TICK_DELAY,
 };
 pub use compile_cache::cache_compiled_components;
+pub use terminals::{FakeTerminal, plain_text};
 
 use api_state::ApiState;
 
@@ -85,6 +88,7 @@ pub const SUPPORTED_API_VERSIONS: &[Version] = &[
     Version::new(0, 1, 0),
     Version::new(0, 2, 0),
     Version::new(0, 3, 0),
+    Version::new(0, 4, 0),
 ];
 /// The section `register_extension!` writes: three big-endian `u16`s.
 pub const API_VERSION_SECTION: &str = "fyx:ui-api-version";
@@ -307,6 +311,8 @@ pub(crate) struct State {
     lifted_text: usize,
     /// 0.2 checks and effects.
     api: ApiState,
+    /// 0.4 terminals.
+    terminals: terminals::FakeTerminals,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -482,6 +488,7 @@ struct Runtime {
     linker_v0_2: Linker<State>,
     /// What the host implements of the staged 0.3 world; instantiation adds traps for the rest.
     linker_v0_3: Linker<State>,
+    linker_v0_4: Linker<State>,
 }
 
 fn runtime() -> Result<&'static Runtime> {
@@ -519,11 +526,15 @@ fn build_runtime() -> Result<Runtime> {
     let mut linker_v0_3 = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker_v0_3)?;
     v0_3::add_to_linker(&mut linker_v0_3)?;
+    let mut linker_v0_4 = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker_v0_4)?;
+    v0_4::add_to_linker(&mut linker_v0_4)?;
     Ok(Runtime {
         engine,
         linker_v0_1,
         linker_v0_2,
         linker_v0_3,
+        linker_v0_4,
     })
 }
 
@@ -532,6 +543,31 @@ enum Bindings {
     V0_1(bindings::UiExtension),
     V0_2(v0_2::UiExtension),
     V0_3(v0_3::UiExtension),
+    V0_4(v0_4::UiExtension),
+}
+
+/// An event for `handle-io`, before it is put in the component's world.
+enum HostIo {
+    Model(ui_ext::network::IoEvent),
+    Terminal(ui_ext::terminal::TerminalEvent),
+}
+
+/// An event for `handle-io` in the component's world.
+enum WorldIo {
+    V0_3(v0_3::bindings::fyx::ui::io::IoEvent),
+    V0_4(v0_4::bindings::fyx::ui::io::IoEvent),
+}
+
+/// A 0.4 tree's `terminal` nodes: the extension's own terminals, one node each.
+fn checked_terminals<'a>(
+    store: &Store<State>,
+    props: impl IntoIterator<Item = &'a model::Props>,
+) -> std::result::Result<(), String> {
+    let handles = props
+        .into_iter()
+        .filter_map(v0_4::terminal_node_handle)
+        .collect::<Vec<_>>();
+    store.data().terminals.check_nodes(&handles)
 }
 
 /// A 0.3 value the model cannot hold, or an `image` node the host refuses, as the guest's own
@@ -573,6 +609,8 @@ impl Bindings {
                 .collect(),
             Self::V0_3(extension) => v0_3::try_collect(extension.call_surfaces(store)?)
                 .map_err(|error| wasmtime::Error::msg(error.message))?,
+            Self::V0_4(extension) => v0_4::try_collect(extension.call_surfaces(store)?)
+                .map_err(|error| wasmtime::Error::msg(error.message))?,
         })
     }
 
@@ -603,6 +641,19 @@ impl Bindings {
                     )
                     .map(|()| nodes)
                 }),
+            Self::V0_4(extension) => extension
+                .call_mount(&mut *store, surface_id)?
+                .and_then(|nodes| guest_value(v0_4::try_collect::<_, model::Node>(nodes)))
+                .and_then(|nodes| {
+                    guest_value(
+                        store
+                            .data()
+                            .api
+                            .check_images(surface_id, nodes.iter().map(|node| &node.props)),
+                    )?;
+                    checked_terminals(store, nodes.iter().map(|node| &node.props))?;
+                    Ok(nodes)
+                }),
         })
     }
 
@@ -629,6 +680,14 @@ impl Bindings {
                 .call_handle_event(&mut *store, surface_id, &event.into())?
                 .and_then(|update| guest_value(model::Update::try_from(update)))
                 .and_then(|update| checked_images(store, surface_id, update)),
+            Self::V0_4(extension) => extension
+                .call_handle_event(&mut *store, surface_id, &event.into())?
+                .and_then(|update| guest_value(model::Update::try_from(update)))
+                .and_then(|update| checked_images(store, surface_id, update))
+                .and_then(|update| {
+                    checked_terminals(store, api_state::update_props(&update))?;
+                    Ok(update)
+                }),
         })
     }
 
@@ -680,7 +739,49 @@ impl Bindings {
                     None => Ok(rows),
                 }
             }),
+            Self::V0_4(extension) => {
+                return Self::list_rows_v0_4(extension, store, surface_id, list, start, count);
+            }
         })
+    }
+
+    /// 0.4 rows: 0.3's rules, and no `terminal` node in a row.
+    fn list_rows_v0_4(
+        extension: &v0_4::UiExtension,
+        store: &mut Store<State>,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> wasmtime::Result<std::result::Result<Vec<model::ListRow>, String>> {
+        Ok(guest_value(v0_4::try_collect::<_, model::ListRow>(
+            extension.call_list_rows(&mut *store, surface_id, list, start, count)?,
+        ))
+        .and_then(|rows| {
+            guest_value(
+                store.data().api.check_images(
+                    surface_id,
+                    rows.iter()
+                        .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                ),
+            )
+            .map(|()| rows)
+        })
+        .and_then(|rows| {
+            match rows.iter().flat_map(|row| &row.nodes).find(|node| {
+                matches!(node.props, model::Props::Canvas(_))
+                    || v0_4::terminal_node_handle(&node.props).is_some()
+            }) {
+                Some(node) if matches!(node.props, model::Props::Canvas(_)) => {
+                    Err(ui_ext::TreeError::CanvasInRow(node.id).to_string())
+                }
+                Some(node) => Err(format!(
+                    "node {}: a terminal cannot be in a list row",
+                    node.id
+                )),
+                None => Ok(rows),
+            }
+        }))
     }
 
     /// A 0.1 component has no `tick`; it can never request one either.
@@ -696,20 +797,43 @@ impl Bindings {
                 .call_tick(&mut *store, surface_id)?
                 .and_then(|update| guest_value(model::Update::try_from(update)))
                 .and_then(|update| checked_images(store, surface_id, update)),
+            Self::V0_4(extension) => extension
+                .call_tick(&mut *store, surface_id)?
+                .and_then(|update| guest_value(model::Update::try_from(update)))
+                .and_then(|update| checked_images(store, surface_id, update))
+                .and_then(|update| {
+                    checked_terminals(store, api_state::update_props(&update))?;
+                    Ok(update)
+                }),
         })
     }
 }
 
 impl Bindings {
-    /// `handle-io` (0.3 only).
+    /// `event` in this component's world, or `None` when the world has no such event. A 0.1 or
+    /// 0.2 component gets 0.3's, which [`Self::handle_io`] answers with an error.
+    fn world_io(&self, event: HostIo) -> Option<WorldIo> {
+        match (self, event) {
+            (Self::V0_4(_), HostIo::Model(event)) => v0_4::io_event(event).map(WorldIo::V0_4),
+            (Self::V0_4(_), HostIo::Terminal(event)) => {
+                Some(WorldIo::V0_4(v0_4::terminal_io_event(event)))
+            }
+            (_, HostIo::Model(event)) => v0_3::io_event(event).map(WorldIo::V0_3),
+            (_, HostIo::Terminal(_)) => None,
+        }
+    }
+
+    /// `handle-io` (0.3 and 0.4).
     fn handle_io(
         &self,
         store: &mut Store<State>,
-        event: &v0_3::bindings::fyx::ui::io::IoEvent,
+        event: &WorldIo,
     ) -> wasmtime::Result<std::result::Result<(), String>> {
-        match self {
-            Self::V0_3(extension) => extension.call_handle_io(store, event),
-            Self::V0_1(_) | Self::V0_2(_) => Ok(Err("handle-io needs fyx:ui 0.3".into())),
+        match (self, event) {
+            (Self::V0_3(extension), WorldIo::V0_3(event)) => extension.call_handle_io(store, event),
+            (Self::V0_4(extension), WorldIo::V0_4(event)) => extension.call_handle_io(store, event),
+            (Self::V0_1(_) | Self::V0_2(_), _) => Ok(Err("handle-io needs fyx:ui 0.3".into())),
+            _ => Ok(Err("an io event of another world".into())),
         }
     }
 }
@@ -978,6 +1102,13 @@ impl Harness {
                     ui_api_version,
                     capabilities.iter().map(ToString::to_string).collect(),
                 ),
+                terminals: terminals::FakeTerminals::new(
+                    &capabilities
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    Vec::new(),
+                ),
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1012,10 +1143,14 @@ impl Harness {
                     .and_then(|()| v0_3::UiExtension::instantiate(&mut store, &component, &linker))
                     .map(Bindings::V0_3)
             }
-            // The host loads 0.4 only to refuse it at instantiation, until P5 5.5 links the world.
-            ApiVersion::V0_4_0 => Err(wasmtime::Error::msg(
-                "fyx:ui 0.4 is staged; the harness does not run 0.4 components yet",
-            )),
+            // The host does not run 0.4 yet (W2c refuses it at instantiation); the harness runs it
+            // on fake terminals (plan 5.10), so extensions can be written ahead of the host.
+            ApiVersion::V0_4_0 => {
+                let mut linker = runtime.linker_v0_4.clone();
+                v0_4::define_unlinked_as_traps(&mut linker, &runtime.engine, &component)
+                    .and_then(|()| v0_4::UiExtension::instantiate(&mut store, &component, &linker))
+                    .map(Bindings::V0_4)
+            }
         }
         .map_err(anyhow::Error::from)
         .context("instantiating the component")?;
@@ -1140,6 +1275,13 @@ impl Harness {
             harness = harness
                 .with_processes(programs, &env)
                 .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(programs) = table.get("terminal_programs") {
+            let programs: Vec<ui_ext::terminal::TerminalProgramSpec> = programs
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.terminal_programs]] in {manifest_path:?}"))?;
+            harness = harness.with_terminal_programs(programs);
         }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
@@ -1320,6 +1462,71 @@ impl Harness {
         Ok(self)
     }
 
+    /// The programs `terminal:create` may run, as `[[fyx_ui.terminal_programs]]` declares them;
+    /// [`Harness::load_package`] reads them from the manifest.
+    pub fn with_terminal_programs(
+        mut self,
+        programs: Vec<ui_ext::terminal::TerminalProgramSpec>,
+    ) -> Self {
+        let state = self.store.data_mut();
+        let capabilities = state.api.capabilities().to_vec();
+        state.terminals = terminals::FakeTerminals::new(&capabilities, programs);
+        self
+    }
+
+    /// One of the extension's 0.4 terminals (pseudo or created), while it is open.
+    pub fn terminal(&self, handle: u64) -> Option<&FakeTerminal> {
+        self.store.data().terminals.get(handle)
+    }
+
+    /// The extension's open 0.4 terminals, by handle.
+    pub fn terminals(&self) -> Vec<(u64, FakeTerminal)> {
+        self.store
+            .data()
+            .terminals
+            .all()
+            .map(|(handle, terminal)| (handle, terminal.clone()))
+            .collect()
+    }
+
+    /// The handles the `terminal` nodes of a mounted surface show, in tree order.
+    pub fn terminal_nodes(&self, surface_id: &str) -> Vec<u64> {
+        self.nodes(surface_id)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|node| v0_4::terminal_node_handle(&node.props))
+            .collect()
+    }
+
+    /// Keys or text the user types into a pseudo-terminal; [`Harness::deliver_io`] hands them to
+    /// the extension as `terminal-input`.
+    pub fn type_into_terminal(&mut self, handle: u64, bytes: &[u8]) -> Result<()> {
+        self.store
+            .data_mut()
+            .terminals
+            .type_into(handle, bytes)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// A new size for a terminal; [`Harness::deliver_io`] delivers the last one as
+    /// `terminal-resized`.
+    pub fn resize_terminal(&mut self, handle: u64, cols: u16, rows: u16) -> Result<()> {
+        self.store
+            .data_mut()
+            .terminals
+            .resize(handle, cols, rows)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// Ends a created terminal's program; [`Harness::deliver_io`] delivers `terminal-exited`.
+    pub fn exit_terminal(&mut self, handle: u64, code: Option<i32>) -> Result<()> {
+        self.store
+            .data_mut()
+            .terminals
+            .exit(handle, code)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
     /// Runs `program` for spawns of `name` instead of a real program. A declared program with
     /// no fake ends `spawn-failed(not-found)`.
     pub fn fake_program(
@@ -1428,7 +1635,10 @@ impl Harness {
                     None => Err(FetchError::Denied),
                 }
             };
-            let Some(event) = v0_3::io_event(IoEvent::FetchDone(id, result)) else {
+            let Some(event) = self
+                .extension
+                .world_io(HostIo::Model(IoEvent::FetchDone(id, result)))
+            else {
                 continue;
             };
             let (value, effects) =
@@ -1438,7 +1648,7 @@ impl Harness {
             delivered.push(RawEffects { effects, value });
         }
         for event in std::mem::take(&mut self.permission_events) {
-            let Some(event) = v0_3::io_event(event) else {
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
             let (value, effects) =
@@ -1448,7 +1658,7 @@ impl Harness {
             delivered.push(RawEffects { effects, value });
         }
         for event in self.run_edits() {
-            let Some(event) = v0_3::io_event(event) else {
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
             let (value, effects) =
@@ -1462,7 +1672,20 @@ impl Harness {
                 break;
             }
             let event = self.opaque_ids.event(event);
-            let Some(event) = v0_3::io_event(ui_ext::network::IoEvent::Agent(event)) else {
+            let Some(event) = self
+                .extension
+                .world_io(HostIo::Model(ui_ext::network::IoEvent::Agent(event)))
+            else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(event) = self.store.data_mut().terminals.events.pop_front() {
+            let Some(event) = self.extension.world_io(HostIo::Terminal(event)) else {
                 continue;
             };
             let (value, effects) =
@@ -1472,7 +1695,7 @@ impl Harness {
             delivered.push(RawEffects { effects, value });
         }
         for event in self.run_processes() {
-            let Some(event) = v0_3::io_event(event) else {
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
             let (value, effects) =

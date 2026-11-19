@@ -135,6 +135,12 @@ fn props(props: &Props) -> Result<v1::Props, String> {
         Props::Image(_) => return Err(needs_0_3("an image node")),
         #[cfg(feature = "fyx-ui-0-3")]
         Props::Canvas(_) => return Err(needs_0_3("a canvas node")),
+        #[cfg(feature = "fyx-ui-0-4")]
+        Props::Terminal(_) => {
+            return Err(
+                "a terminal node needs fyx:ui 0.4; this extension is exported as 0.1".into(),
+            );
+        }
     })
 }
 

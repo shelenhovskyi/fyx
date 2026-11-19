@@ -186,6 +186,10 @@ pub(crate) struct QueuedFetch {
 }
 
 impl ApiState {
+    pub(crate) fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
     pub(crate) fn new(version: ApiVersion, capabilities: Vec<String>) -> Self {
         let live = LiveIds::new(version, &[], &capabilities)
             .expect("an empty surface set passes every check");
