@@ -26,7 +26,7 @@ This is the host-free skeleton:
 - the companion core (`src/companion.rs`), tested natively;
 - the compat test ([`src/compat/README.md`](src/compat/README.md)), pinned to Gemini CLI 0.69.0.
 
-The same README lists the primitives Gemini needs that the kit lacks. One of them, typed
+The same README lists the primitives Gemini needs that the kit lacks. It also gives the decided plan for hooks and turns, which come after the skeleton: a settings file in the package through `GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, in profile terminals only. One of them, typed
 discovery content, blocks IDE mode until the host can write it. The wiring to the host's events
 comes with plan 5.14.
 
