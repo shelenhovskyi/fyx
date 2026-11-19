@@ -10,6 +10,7 @@ mod pseudo;
 mod sessions;
 mod sessions_panel;
 mod settings;
+mod t3;
 mod tab_status;
 
 use gpui::App;
@@ -19,6 +20,7 @@ pub use accounts::{FyxAccountsSettings, account_choice};
 pub use profiles::TerminalIntegration;
 pub use sessions_panel::{AgentSessionsPanel, ToggleAgentSessions};
 pub use settings::FyxTerminalSettings;
+pub use t3::{Share, ShareBridge, ShareTarget, set_share_bridge};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use gpui::{Entity, Global, WeakEntity};
 use terminal::Terminal;
 use terminal_ext::TerminalId;
 
-pub use host::HostFront;
+pub use host::{HostFront, TerminalClosedHook};
 
 struct GlobalHost(Arc<HostFront>);
 
@@ -67,6 +69,14 @@ fn init_host(cx: &mut App) {
     .detach();
 }
 
+/// §C.3: told every terminal that closes (by [`TerminalId::as_u64`]), so the consent broker
+/// drops its shares and ends its open cards. Set once by `main.rs`.
+pub fn set_terminal_closed_hook(hook: TerminalClosedHook, cx: &App) {
+    if let Some(front) = front(cx) {
+        front.set_closed_hook(hook);
+    }
+}
+
 fn terminal_by_id(id: TerminalId, cx: &App) -> Option<Entity<Terminal>> {
     cx.try_global::<TerminalsById>()
         .and_then(|terminals| terminals.0.get(&id))
@@ -90,6 +100,19 @@ fn run(command: host::Command, cx: &mut App) {
         host::Command::Integration(ext, integration) => profiles::set(ext, integration, cx),
         host::Command::Input(id, bytes) => created::input(id, bytes, cx),
         host::Command::Paste(id, bytes) => created::paste(id, bytes, cx),
+        host::Command::Read {
+            id,
+            scope,
+            lines,
+            reply,
+        } => t3::read(id, scope, lines, reply, cx),
+        host::Command::Write {
+            id,
+            extension,
+            text,
+            submit,
+            reply,
+        } => t3::write(id, extension, text, submit, reply, cx),
         host::Command::Close(id) => {
             if !created::cancel(id, cx) {
                 pseudo::close(id, cx);
