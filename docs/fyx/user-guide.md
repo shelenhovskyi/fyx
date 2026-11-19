@@ -474,8 +474,10 @@ When you install an extension (from a file or, later, from the registry), the di
 groups:
 
 1. **Shows in Fyx.** Panels and status items. Nothing to decide.
-2. **Reads.** What it can see: your files, buffers, diagnostics, your editor's selection. Listed,
-   with no checkbox: installing is the consent, and you can take each back later.
+2. **Reads and uses inside Fyx.** What it can see (your files, buffers, diagnostics, your editor's
+   selection) and what it can do inside Fyx without leaving it (add terminal profiles, open
+   terminals of its own, show a status on a tab). Listed, with no checkbox: installing is the
+   consent, and you can take each back later.
 3. **Can run code or reach outside Fyx.** One **checkbox per item, all unticked**. Each item says
    what it is, and shows the author's own reason as "The author says: …". For example:
    - **Run a program**: `codex` with these arguments. A shell or interpreter is marked "runs any
@@ -551,8 +553,8 @@ and the page says **Update needs approval**, with a diff:
 > **New in 1.3:** runs `codex` with `-c notify=*`; adds `CODEX_TUI_NOTIFY` to your profile
 > terminals. **Removed:** `network:fetch` to api.example.com.
 
-New items that need a checkbox are unticked, and approving installs the update with what you
-ticked. Things the update removes, and anything that is only a panel or a status item, install
+The update dialog shows only the groups that have changes, with no empty groups. New items that
+need a checkbox are unticked, and approving installs the update with what you ticked. Things the update removes, and anything that is only a panel or a status item, install
 without asking.
 
 ### Several accounts

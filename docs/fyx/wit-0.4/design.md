@@ -492,7 +492,9 @@ can run any program on your computer" (0.3 Q2).
 The install dialog (file, dev UI, registry) has four groups:
 
 1. **Shows in Fyx** (T0): one line.
-2. **Reads** (T1): one line per capability, no checkbox.
+2. **Reads and uses inside Fyx** (T1): one line per capability, no checkbox. T1 includes
+   `terminal:pseudo` and `terminal:status` (and the other T1 capabilities of §C.1), so this group
+   is not only reading.
 3. **Can run code or reach outside Fyx** (T2): a checkbox per item, unticked:
    - one per program for `process:spawn` and `terminal:create`, with its argument patterns;
    - one per listener for `network:listen`, and one per discovery file, with its path;
@@ -508,6 +510,8 @@ The install dialog (file, dev UI, registry) has four groups:
 - **Buttons:** "Install" installs with what is ticked. A T2 item left unticked is `denied`; the
   extension sees `denied` and should say what it cannot do. Every checkbox ignores clicks for 1 s
   after the dialog appears.
+- **Updates:** the update dialog (§C.5) shows only the groups that have changes, with no empty
+  groups.
 - **Later:** the extension page lists every item with its state and a switch; turning a T2 item
   on asks once more, with the same text and the 1 s guard.
 - **Dev installs without a dialog** (`FYX_UI_DEV_EXTENSIONS`, dev builds only) keep 0.3's
