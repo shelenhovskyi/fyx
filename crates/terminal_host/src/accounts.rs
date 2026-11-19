@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
 use gpui::{AnyElement, App, Hsla, SharedString, Window};
 use settings::settings_content::{FyxAccount, FyxAccountColor, FyxAccountsSettingsContent};
@@ -325,6 +326,62 @@ fn set_project_account(
     }
 }
 
+/// `ui_ext::terminal::AccountDirs` (plan 5.20, §C.6) for the extension runtime: a snapshot of
+/// `fyx.accounts`, replaced on every settings change. The runtime calls it off the main thread,
+/// so it never reads `cx`.
+struct HostAccountDirs(Arc<RwLock<FyxAccountsSettingsContent>>);
+
+impl HostAccountDirs {
+    fn snapshot(&self) -> std::sync::RwLockReadGuard<'_, FyxAccountsSettingsContent> {
+        self.0.read().unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+impl ui_ext::terminal::AccountDirs for HostAccountDirs {
+    fn dirs(&self) -> Vec<PathBuf> {
+        self.snapshot()
+            .accounts()
+            .into_iter()
+            .map(|account| account.dir)
+            .collect()
+    }
+
+    fn env_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .snapshot()
+            .tools
+            .iter()
+            .flatten()
+            .filter_map(|(_, tool)| Some(tool.env.as_deref()?.trim().to_owned()))
+            .filter(|name| !name.is_empty())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    fn account_dir(&self, tool: &str, cwd: &Path) -> Option<PathBuf> {
+        // The project's choice only: no choice means no dir, never another account of the tool.
+        self.snapshot()
+            .project_account(tool, [cwd])
+            .map(|account| account.dir)
+    }
+}
+
+/// The account profiles for `ui_ext_wasm::set_account_dirs`, kept current with user settings.
+/// Called once by `main.rs`, before any extension loads.
+pub fn account_dirs(cx: &mut App) -> Arc<dyn ui_ext::terminal::AccountDirs> {
+    let snapshot = Arc::new(RwLock::new(settings(cx)));
+    if cx.has_global::<SettingsStore>() {
+        let watched = snapshot.clone();
+        cx.observe_global::<SettingsStore>(move |cx| {
+            *watched.write().unwrap_or_else(|poison| poison.into_inner()) = settings(cx);
+        })
+        .detach();
+    }
+    Arc::new(HostAccountDirs(snapshot))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +657,33 @@ mod tests {
         }
         drop(terminals);
         std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn account_dirs_follow_the_snapshot() {
+        use ui_ext::terminal::AccountDirs as _;
+        let snapshot = Arc::new(RwLock::new(two()));
+        let dirs = HostAccountDirs(snapshot.clone());
+        assert_eq!(
+            dirs.dirs(),
+            [
+                PathBuf::from("/a/.claude"),
+                PathBuf::from("/a/.claude-work"),
+                PathBuf::from("/a/.codex")
+            ]
+        );
+        assert_eq!(dirs.env_names(), ["CLAUDE_CONFIG_DIR", "CODEX_HOME"]);
+        let project = Path::new("/src/work/api");
+        assert_eq!(
+            dirs.account_dir("claude", project),
+            Some(PathBuf::from("/a/.claude-work"))
+        );
+        // No choice for the tool, or no project: no dir, never another account.
+        assert_eq!(dirs.account_dir("codex", project), None);
+        assert_eq!(dirs.account_dir("claude", Path::new("/src/other")), None);
+
+        *snapshot.write().unwrap() = FyxAccountsSettingsContent::default();
+        assert!(dirs.dirs().is_empty());
+        assert_eq!(dirs.account_dir("claude", project), None);
     }
 }

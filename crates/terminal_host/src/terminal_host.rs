@@ -18,7 +18,7 @@ mod tab_status;
 use gpui::App;
 use workspace::Workspace;
 
-pub use accounts::{FyxAccountsSettings, account_choice};
+pub use accounts::{FyxAccountsSettings, account_choice, account_dirs};
 pub use discovery::{
     Context as DiscoveryContext, DiscoveryFile, DiscoveryWriter, OpenListener, discovery_writer,
     init_discovery,
