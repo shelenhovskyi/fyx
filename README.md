@@ -83,7 +83,8 @@ bash script/fyx-build-demos
 
 The script copies each component next to its `extension.toml` and prints a
 `FYX_UI_DEV_EXTENSIONS=...` line. Set that variable and start Fyx; each demo adds a panel with a
-button in its dock:
+button in its dock. The variable works on Dev and Nightly builds only; for an older Stable-channel
+build, also set `ZED_RELEASE_CHANNEL=dev`:
 
 ```bat
 set FYX_UI_DEV_EXTENSIONS=C:\src\fyx\extensions\fyx_demo_counter;C:\src\fyx\extensions\fyx_demo_todo;C:\src\fyx\extensions\fyx_demo_gallery
