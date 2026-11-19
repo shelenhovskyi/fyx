@@ -18215,6 +18215,7 @@ dependencies = [
  "settings",
  "sysinfo 0.39.6",
  "task",
+ "terminal_ext",
  "theme",
  "theme_settings",
  "thiserror 2.0.17",
@@ -18224,6 +18225,15 @@ dependencies = [
  "util_macros",
  "vte",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "terminal_ext"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "log",
+ "polling",
 ]
 
 [[package]]

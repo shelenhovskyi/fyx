@@ -222,6 +222,7 @@ members = [
     "crates/telemetry",
     "crates/telemetry_events",
     "crates/terminal",
+    "crates/terminal_ext", # fyx
     "crates/terminal_view",
     "crates/text",
     "crates/theme",
@@ -516,6 +517,7 @@ tasks_ui = { path = "crates/tasks_ui" }
 telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }
 terminal = { path = "crates/terminal" }
+terminal_ext = { path = "crates/terminal_ext" } # fyx
 terminal_view = { path = "crates/terminal_view" }
 text = { path = "crates/text" }
 theme = { path = "crates/theme" }
@@ -883,6 +885,7 @@ proc-macro2 = "1.0.93"
 profiling = "1"
 # replace this with main when #635 is merged
 pollster = "0.4.0"
+polling = "3.8.0" # fyx: terminal_ext implements alacritty's EventedReadWrite
 proptest = { version = "1.12.0", features = ["attr-macro"] }
 proptest-derive = "0.8.0"
 prost = "0.14"
