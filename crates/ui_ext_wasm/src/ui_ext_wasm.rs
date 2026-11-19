@@ -69,6 +69,9 @@ mod fyx_ui_v0_3;
 mod fyx_ui_v0_4;
 pub mod images;
 pub mod journal;
+// The WIT imports, the load options and revocation wire it next (plan 5.11).
+#[cfg_attr(not(test), allow(dead_code))]
+mod listeners;
 pub mod network;
 pub mod observe;
 pub mod process;

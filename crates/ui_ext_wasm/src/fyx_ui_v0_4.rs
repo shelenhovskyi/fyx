@@ -30,9 +30,9 @@ pub(crate) mod bindings {
 pub(crate) use bindings::UiExtension;
 use bindings::fyx::ui::{
     agent_observe as wit_observe, approvals as wit_approvals, decorations as wit_decorations,
-    host as wit_host, images as wit_images, io as wit_io, network as wit_network,
-    notifications as wit_notifications, permissions as wit_permissions, process as wit_process,
-    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
+    host as wit_host, images as wit_images, io as wit_io, listeners as wit_listeners,
+    network as wit_network, notifications as wit_notifications, permissions as wit_permissions,
+    process as wit_process, terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(
@@ -160,6 +160,32 @@ fn approval_option(option: wit_approvals::ApprovalOption) -> ui_ext::approvals::
         wit_approvals::ApprovalOption::AlwaysAllow => Option::AlwaysAllow,
         wit_approvals::ApprovalOption::Deny => Option::Deny,
     }
+}
+
+/// The 0.4 `io-event` cases of a listener's event (design wit-0.4 §B.7).
+fn listener_io_event(event: ui_ext::integration::ListenerEvent) -> Option<wit_io::IoEvent> {
+    use ui_ext::integration::ListenerEvent as Event;
+    Some(match event {
+        Event::McpCall(call) => wit_io::IoEvent::McpCall(wit_listeners::McpCall {
+            call_id: call.call_id,
+            listener: call.listener,
+            connection: call.connection,
+            tool: call.tool,
+            arguments: call.arguments,
+        }),
+        Event::McpCancelled(id) => wit_io::IoEvent::McpCancelled(id),
+        Event::Message {
+            listener,
+            connection,
+            text,
+        } => wit_io::IoEvent::ListenerMessage((listener, connection, text)),
+        Event::Request {
+            id,
+            listener,
+            path,
+            body,
+        } => wit_io::IoEvent::ListenerRequest((id, listener, path, body)),
+    })
 }
 
 /// The `approval-answered` case; `None` when the card closed unanswered.
