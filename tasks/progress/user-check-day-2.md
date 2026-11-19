@@ -9,8 +9,8 @@
 прохід на одній збірці `fyx.exe`, приблизно **24 хвилини**. Назви команд, кнопок і повідомлень
 наведено англійською, як у Fyx. Ключі, паролі та входи в акаунти вводите лише ви, ніколи не агент.
 
-**Стан аркуша:** 2026-11-19. Місця, які ще треба заповнити, позначені **«ЗАПОВНИТИ: …»**. Шлях і
-коміт збірки надсилає гейткіпер. Шукайте `ЗАПОВНИТИ` у файлі: перед перевіркою їх не має лишитися.
+**Стан аркуша:** 2026-11-19, готовий. Збірку надіслав гейткіпер, демо й пакет зібрав W4 з того
+самого коміту.
 
 | Блок | Що | Хв |
 |---|---|---|
@@ -20,20 +20,20 @@
 | 3 | Огляд змін агента з Claude Agent (свій акаунт) | 9 |
 | 4 | Режим shield (свій ключ Anthropic) | 4 |
 
-Рядки й кнопки звірено з кодом 2026-11-19 на `origin/integration` `0f3bdb411d`.
+Рядки й кнопки звірено з кодом 2026-11-19 на `0f3bdb411d` і ще раз на коміті збірки `12f77bb234`.
 
 ## 0. Підготовка (3 хв)
 
 ### Збірка
 
-- **Коміт:** «ЗАПОВНИТИ: коміт збірки (надсилає гейткіпер)».
-- **Файл:** «ЗАПОВНИТИ: шлях до `fyx.exe` (надсилає гейткіпер)».
-- `fyx:ui` 0.3 тепер заморожений, тож підходить і release-збірка.
+- **Коміт:** `12f77bb234` (debug-збірка з вбудованими ресурсами).
+- **Файл:** `D:\fyx-builds\12f77bb234\fyx.exe`. Поруч лежать `conpty.dll` і `OpenConsole.exe`, їх не
+  переносьте окремо.
 - Перевірка з кореня репозиторію (Git Bash). Кожен рядок має закінчуватися на `yes`. Рядок
-  `f868421052` (клавіша Tab в огляді, W5) може бути `NO`: тоді пропустіть крок K1 у блоці 3.
+  `f868421052` (клавіша Tab в огляді, W5) теж є в цій збірці.
 
 ```bash
-for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-base --is-ancestor $c «ЗАПОВНИТИ: коміт» && echo "$c yes" || echo "$c NO"; done
+for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-base --is-ancestor $c 12f77bb234 && echo "$c yes" || echo "$c NO"; done
 ```
 
 | Коміт | Що | Блок |
@@ -48,12 +48,13 @@ for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-ba
 
 Нічого не збирайте самі: усе готує координатор.
 
-- **Демо:** «ЗАПОВНИТИ: теки демо, зібрані з коміту збірки». Теки `demos-0.2\`, `demos-0.2-next\` і
-  `demos-0.3\` від 2026-11-18 **не підходять**: ABI 0.2 і 0.3 змінився після `6bc8a1c12b`
-  (`accessible-label`, менший 0.3, заморожування). Потрібні `fyx_demo_gallery`, `fyx_demo_images`,
-  `fyx_demo_charts` і `fyx_demo_t2`.
-- **Пакет:** `D:\fyx-user-check\w3\packages\fyx-demo-counter-0.1.0.fyxext`. «ЗАПОВНИТИ:
-  перепакований з коміту збірки, або підтвердити, що старий вантажиться».
+- **Демо** в `D:\fyx-user-check\day2\demos\`, зібрані W4 з `12f77bb234`: `fyx_demo_gallery`
+  (`fyx:ui` 0.2, панель **Gallery 0.2**), `fyx_demo_images`, `fyx_demo_charts` і `fyx_demo_t2`
+  (0.3). Кожне проходить `fyx-ext check` на цьому коміті; що з чого зібрано, записано в
+  `D:\fyx-user-check\day2\BUILT-FROM.txt`. Старі теки `demos-0.2\`, `demos-0.2-next\` і
+  `demos-0.3\` **не беріть**: ABI 0.2 і 0.3 змінився після них.
+- **Пакет:** `D:\fyx-user-check\day2\packages\fyx-demo-counter-0.1.0.fyxext` (перепакований з
+  `12f77bb234`). Старий файл у `w3\packages\` не потрібен.
 - **Проєкт для огляду.** Створіть його заново (той самий скрипт, що в першому дні):
 
   ```powershell
@@ -76,7 +77,7 @@ for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-ba
 
    ```powershell
    Remove-Item -Recurse -Force D:\fyx-user-check\profile-2 -ErrorAction SilentlyContinue
-   $fyx = '«ЗАПОВНИТИ: шлях до fyx.exe»'
+   $fyx = 'D:\fyx-builds\12f77bb234\fyx.exe'
    $prof = 'D:\fyx-user-check\profile-2'
    & $fyx --user-data-dir $prof --foreground D:\fyx-user-check\review-project
    ```
@@ -109,11 +110,11 @@ for c in 37c4a84fe4 a440a97284 dfdb6b0023 3851a95912 f868421052; do git merge-ba
 
 | # | Що зробити | Очікується |
 |---|---|---|
-| W1 | На сторінці **Fyx Extensions** натисніть **Install Dev Extension…**. У вікні вибору теки (заголовок `Install Dev UI Extension`) оберіть теку `fyx_demo_t2` з матеріалів | Підтвердження у вікні Fyx: `Install the dev UI extension fyx-demo-t2?`, під ним `It asks for:` і перелік можливостей простими словами, потім `Component:` і `Folder:`. Кнопки **Install** і **Cancel**. Натисніть **Escape**: нічого не встановлено. Повторіть і натисніть **Install**: toast `Installed the dev UI extension fyx-demo-t2`. |
-| W2 | **Install Dev Extension…** ще для `fyx_demo_gallery`, `fyx_demo_images` і `fyx_demo_charts` | Те саме підтвердження для кожної. |
-| W3 | **Install from File…**. Вікно вибору файлу (`Install UI Extension Package`) → `fyx-demo-counter-0.1.0.fyxext` | Підтвердження `Install fyx-demo-counter 0.1.0?` з можливостями і шляхом до файлу. **Install** → toast `Installed fyx-demo-counter 0.1.0`, панель Counter у доку. |
+| W1 | На сторінці **Fyx Extensions** натисніть **Install Dev Extension…**. У вікні вибору теки (заголовок `Install Dev UI Extension`) оберіть `D:\fyx-user-check\day2\demos\fyx_demo_t2` | Підтвердження у вікні Fyx: `Install the dev UI extension fyx-demo-t2?`, під ним `It asks for:` і перелік можливостей простими словами, потім `Component:` і `Folder:`. Кнопки **Install** і **Cancel**. Натисніть **Escape**: нічого не встановлено. Повторіть і натисніть **Install**: toast `Installed the dev UI extension fyx-demo-t2`. |
+| W2 | **Install Dev Extension…** ще для `fyx_demo_gallery`, `fyx_demo_images` і `fyx_demo_charts` з тієї самої теки `day2\demos\` | Те саме підтвердження для кожної. |
+| W3 | **Install from File…**. Вікно вибору файлу (`Install UI Extension Package`) → `D:\fyx-user-check\day2\packages\fyx-demo-counter-0.1.0.fyxext` | Підтвердження `Install fyx-demo-counter 0.1.0?` з можливостями і шляхом до файлу. **Install** → toast `Installed fyx-demo-counter 0.1.0`, панель Counter у доку. |
 | W4 | Палітра команд → `fyx_ui: open extension panel` | Список `Open which extension panel?` з полем `Type to filter…`. Наберіть `cha`: лишається **Charts**. **Enter** відкриває панель. Наберіть щось без збігів: `No match`. |
-| W5 | Відкрийте панелі **Gallery 0.2** (або **Gallery**, залежно від збірки демо), **Images** і **Charts**. Лише подивіться | Чи виглядають картинки, діаграма й sparkline охайно, у кольорах теми, без миготіння? |
+| W5 | Відкрийте панелі **Gallery 0.2**, **Images** і **Charts**. Лише подивіться | Чи виглядають картинки, діаграма й sparkline охайно, у кольорах теми, без миготіння? |
 | W6 | Поставте курсор у `a.txt`. Панель **T2 capabilities** → **Request fetch**. Одразу, менш ніж за секунду, натисніть **Allow**. Потім спробуйте **Enter** і **Escape** | Картка в стосі сповіщень, а не діалог посеред екрана: `Allow T2 capabilities demo to connect to the internet?`. Курсор лишається в `a.txt`. Перша секунда кліки по **Allow** не діють. Enter і Escape картку не закривають і нічого не відповідають. Після секунди **Allow** спрацьовує, на панелі `Permission: allowed`. |
 
 | Крок | Що | Так / ні, враження |
@@ -151,7 +152,7 @@ Claude Agent на вашому акаунті.
 | R1 | *In a.txt change bravo to BRAVO, and in b.txt change delta to DELTA. Make no other change.* | 5 с нічого не натискайте. Подивіться на картку в треді. **Review** у toast. Потім **ctrl-k shift-y** і в запиті **Accept All in Turn** | Фокус і вкладка не змінились самі, є toast з **Review**. Картка в треді: `Fyx is reviewing this edit to … hunk by hunk; decide it in the review pane.` з **Open review**. **Review** відкриває одну панель на хід з обома файлами. Після підтвердження `git -C D:\fyx-user-check\review-project diff` показує обидві зміни. |
 | R2 | *In a.txt change charlie to CHARLIE, and in b.txt change echo to ECHO.* | Відкрийте огляд і закрийте вкладку (**ctrl-w**). Потім **ctrl-k y**. Потім **ctrl-k shift-n** → **Reject All in Turn** | Після ctrl-w нічого не записано, знову є toast. ctrl-k y повертає ту саму панель. Після відхилення обидва файли без змін. |
 | R3 | *Add the line "Run tests before committing." to AGENTS.md, and in b.txt change foxtrot to FOXTROT.* | **ctrl-k shift-y**, підтвердьте | `b.txt` прийнято, а `AGENTS.md` **лишається** на огляді з підписом `Fyx's defaults (agent instruction files)`. **Reject file** → `git diff AGENTS.md` порожній. |
-| K1 | будь-яка правка на огляді | **Tab** кілька разів, **Shift+Tab**, **Escape**. Пропустіть, якщо `f868421052` дав `NO` | Фокус іде кнопками по порядку (**Accept all in turn**, **Reject all in turn**, **Reject and close**, файли, **Accept**, **Reject** …), Shift+Tab назад, Escape повертає в diff. |
+| K1 | будь-яка правка на огляді | **Tab** кілька разів, **Shift+Tab**, **Escape** | Фокус іде кнопками по порядку (**Accept all in turn**, **Reject all in turn**, **Reject and close**, файли, **Accept**, **Reject** …), Shift+Tab назад, Escape повертає в diff. |
 | K2 | та сама | **alt-j** / **alt-k**, потім **ctrl-k j** / **ctrl-k k**, потім **alt-c** | Наступний / попередній фрагмент, наступний / попередній файл ходу. alt-c відкриває поле коментаря. |
 
 Наостанок два-три речення про відчуття. Чи не заважає toast? Чи зрозуміло, що робити далі? Чи не
