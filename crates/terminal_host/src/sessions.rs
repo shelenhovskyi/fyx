@@ -8,8 +8,8 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, Global, WeakEntity, Window,
     WindowHandle,
 };
-use terminal_ext::TerminalStatus;
 use terminal_ext::osc::StatusState;
+use terminal_ext::{TerminalId, TerminalStatus};
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::TerminalPanel;
 use workspace::{MultiWorkspace, Pane, Workspace};
@@ -163,6 +163,18 @@ impl Sessions {
             .ok();
     }
 
+    /// The live view of a terminal and its window.
+    pub(crate) fn find_terminal(
+        &self,
+        id: TerminalId,
+        cx: &App,
+    ) -> Option<(Entity<TerminalView>, AnyWindowHandle)> {
+        self.entries.iter().find_map(|entry| {
+            let view = entry.view.upgrade()?;
+            (view.read(cx).terminal().read(cx).fyx.id() == id).then_some((view, entry.window))
+        })
+    }
+
     /// Live terminal views with a status, sorted for the list.
     pub(crate) fn list(&self, cx: &App) -> Vec<(Entity<TerminalView>, TerminalStatus)> {
         let mut list: Vec<_> = self
@@ -197,6 +209,22 @@ fn locate(workspace: &Workspace, view: &Entity<TerminalView>, cx: &App) -> Optio
         let index = pane.read(cx).index_for_item(view)?;
         Some(Location::TerminalPanel(pane.clone(), index))
     })
+}
+
+/// The pane in `workspace` (center or terminal panel) that holds `view`.
+pub(crate) fn pane_of(
+    workspace: &Workspace,
+    view: &Entity<TerminalView>,
+    cx: &App,
+) -> Option<Entity<Pane>> {
+    match locate(workspace, view, cx)? {
+        Location::Center => workspace
+            .panes()
+            .iter()
+            .find(|pane| pane.read(cx).index_for_item(view).is_some())
+            .cloned(),
+        Location::TerminalPanel(pane, _) => Some(pane),
+    }
 }
 
 pub(crate) fn workspace_contains(

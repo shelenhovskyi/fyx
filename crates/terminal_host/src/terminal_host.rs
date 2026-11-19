@@ -3,6 +3,7 @@
 
 mod host;
 mod notification;
+mod pseudo;
 mod sessions;
 mod sessions_panel;
 mod settings;
@@ -18,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt as _;
-use gpui::{Global, WeakEntity};
+use gpui::{Entity, Global, WeakEntity};
 use terminal::Terminal;
 use terminal_ext::TerminalId;
 
@@ -61,18 +62,38 @@ fn init_host(cx: &mut App) {
     .detach();
 }
 
+fn terminal_by_id(id: TerminalId, cx: &App) -> Option<Entity<Terminal>> {
+    cx.try_global::<TerminalsById>()
+        .and_then(|terminals| terminals.0.get(&id))
+        .and_then(WeakEntity::upgrade)
+}
+
 fn run(command: host::Command, cx: &mut App) {
     match command {
         host::Command::Repaint(id) => {
-            let terminal = cx
-                .try_global::<TerminalsById>()
-                .and_then(|terminals| terminals.0.get(&id))
-                .and_then(WeakEntity::upgrade);
-            if let Some(terminal) = terminal {
+            if let Some(terminal) = terminal_by_id(id, cx) {
                 terminal.update(cx, |_, cx| cx.emit(terminal::Event::Wakeup));
             }
         }
+        host::Command::OpenPseudo(open) => pseudo::open(open, cx),
+        host::Command::Output(id, bytes) => {
+            if let Some(terminal) = terminal_by_id(id, cx) {
+                terminal.update(cx, |terminal, cx| terminal.write_raw_output(&bytes, cx));
+            }
+        }
+        host::Command::Close(id) => pseudo::close(id, cx),
     }
+}
+
+/// For an extension panel's `terminal` node (`fyx:ui` §B.2): the pseudo-terminal `ext` opened
+/// with `in_panel` under `handle`. `None` for anyone else's handle.
+pub fn extension_terminal(
+    ext: &str,
+    handle: ui_ext::terminal::TerminalHandle,
+    cx: &App,
+) -> Option<Entity<Terminal>> {
+    let id = front(cx)?.owned_terminal(ext, handle)?;
+    pseudo::held_terminal(id, cx)
 }
 
 pub fn init(cx: &mut App) {
