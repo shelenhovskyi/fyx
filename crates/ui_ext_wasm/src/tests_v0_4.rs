@@ -288,6 +288,7 @@ struct Setup {
     discovery_files: Vec<DiscoveryFileSpec>,
     observer: Option<Arc<dyn ListenerObserver>>,
     context: Option<Arc<dyn ui_ext::context::ContextHost>>,
+    review: Option<Arc<dyn ui_ext::review::ReviewHost>>,
 }
 
 impl Default for Setup {
@@ -304,6 +305,7 @@ impl Default for Setup {
             discovery_files: Vec::new(),
             observer: None,
             context: None,
+            review: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -380,6 +382,7 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         discovery_files: Some(setup.discovery_files.clone()),
         listener_observer: setup.observer.clone(),
         context: setup.context.clone(),
+        review: setup.review.clone(),
         workspace: setup
             .workspace
             .clone()
@@ -1717,5 +1720,333 @@ async fn test_v0_4_editor_context_rules_and_reloads(cx: &mut TestAppContext) {
     drop(new);
     wait_for(cx, 10_000, || editor.calls().len() == 3);
     assert_eq!(editor.calls()[2], "watch probe-v0-4 false");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The review bridge's side: keeps each proposal's sink, records the calls.
+#[derive(Default)]
+struct FakeReviewer {
+    sinks: Mutex<HashMap<u64, ui_ext::review::ReviewSink>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FakeReviewer {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn call(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+
+    /// What the user decided, or why the review ended; the sink of `id` hears it.
+    fn decide(&self, id: u64, result: Result<(ui_ext::review::Decision, &str), &str>) {
+        let sink = self.sinks.lock().unwrap().get(&id).cloned().unwrap();
+        sink(
+            id,
+            result
+                .map(|(decision, text)| ui_ext::review::ReviewOutcome {
+                    decision,
+                    final_content: text.into(),
+                })
+                .map_err(String::from),
+        );
+    }
+}
+
+impl ui_ext::review::ReviewHost for FakeReviewer {
+    fn propose(
+        &self,
+        _: &str,
+        id: u64,
+        proposal: ui_ext::review::Proposal,
+        sink: ui_ext::review::ReviewSink,
+    ) -> Result<(), String> {
+        if proposal.path.path == "refused.rs" {
+            return Err("the diff does not apply".into());
+        }
+        let kind = match proposal.change {
+            ui_ext::review::Proposed::NewContent(_) => "new",
+            ui_ext::review::Proposed::UnifiedDiff(_) => "diff",
+        };
+        self.call(format!(
+            "propose {} {kind} {} {}",
+            proposal.path.path, proposal.apply, proposal.session
+        ));
+        self.sinks.lock().unwrap().insert(id, sink);
+        Ok(())
+    }
+
+    fn withdraw(&self, _: &str, id: u64) -> Result<String, String> {
+        self.call("withdraw".into());
+        Ok(format!("current {id}"))
+    }
+
+    fn begin_turn(&self, ext: &str, session: &str) {
+        self.call(format!("begin {ext} {session}"));
+    }
+
+    fn end_turn(&self, _: &str, session: &str, changed: Vec<ui_ext::process::FileRef>) {
+        let paths: Vec<String> = changed.into_iter().map(|file| file.path).collect();
+        self.call(format!("end {session} {}", paths.join(",")));
+    }
+
+    fn close(&self, ext: &str, ids: &[u64]) {
+        self.call(format!("close {ext} {}", ids.len()));
+    }
+}
+
+fn review_setup(reviewer: &Arc<FakeReviewer>, root: &Path) -> Setup {
+    let mut capabilities = Setup::default().capabilities;
+    capabilities.push(ui_ext::review::CAPABILITY_REVIEW_PROPOSE);
+    Setup {
+        capabilities,
+        review: Some(reviewer.clone()),
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: root.to_path_buf(),
+            trusted: true,
+        }]),
+        ..Setup::default()
+    }
+}
+
+/// The next `review-decided`, as the probe reports it; other io-events (permission changes) are
+/// skipped.
+async fn next_decided(
+    extension: &UiExtension,
+    events: &mut futures::channel::mpsc::Receiver<crate::network::IoEvent>,
+) -> String {
+    loop {
+        let event = events.next().await.unwrap();
+        if !matches!(event, crate::network::IoEvent::ReviewDecided(..)) {
+            continue;
+        }
+        let reply = extension.handle_io(event).await.unwrap();
+        let effects = format!("{:?}", reply.effects);
+        let start = effects.find("content: \"").unwrap() + "content: \"".len();
+        let end = start + effects[start..].find("\",").unwrap();
+        return effects[start..end].replace("\\\"", "\"");
+    }
+}
+
+async fn propose(extension: &UiExtension, words: &str) -> u64 {
+    let reply = command(extension, &format!("propose {words}")).await;
+    reply
+        .parse()
+        .unwrap_or_else(|_| panic!("propose {words}: {reply}"))
+}
+
+/// §B.10: each outcome reaches `handle-io` once, never after `withdraw`, which returns the
+/// current text; paths are worktree files, never protected or private; sizes, labels and the
+/// open limit hold; turns reach the bridge; the instance's end closes its open reviews.
+#[gpui::test]
+async fn test_v0_4_review(cx: &mut TestAppContext) {
+    use ui_ext::review::{Decision, MAX_OPEN_PROPOSALS, MAX_PROPOSAL_BYTES};
+    let reviewer = Arc::new(FakeReviewer::default());
+    let root = context_worktree("review");
+    let extension = load(&review_setup(&reviewer, &root), cx).await.unwrap();
+    assert!(extension.review_available());
+    let mut events = extension.take_io_events().unwrap();
+
+    let first = propose(&extension, "1 a.rs new 1 s1 fn main() { run() }").await;
+    reviewer.decide(first, Ok((Decision::Partial, "fn main() {}")));
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        format!("decided {first} partial fn main() {{}}")
+    );
+    // Once only: a second outcome, or one after `withdraw`, goes nowhere.
+    reviewer.decide(first, Ok((Decision::Accepted, "again")));
+    let second = propose(&extension, "- a.rs diff 0 s1 @@ -1 +1 @@").await;
+    assert_eq!(
+        command(&extension, &format!("withdraw {second}")).await,
+        format!("withdrawn current {second}")
+    );
+    assert_eq!(
+        command(&extension, &format!("withdraw {second}")).await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, &format!("withdraw {first}")).await,
+        "invalid-argument"
+    );
+    reviewer.decide(second, Ok((Decision::Accepted, "late")));
+    let third = propose(&extension, "1 new.rs new 0 s2 fresh").await;
+    reviewer.decide(third, Err("the file went away"));
+    assert_eq!(
+        next_io_report(&extension, &mut events).await,
+        format!("decided {third} error: the file went away")
+    );
+
+    for (words, code) in [
+        ("1 missing.rs diff 0 s @@", "invalid-argument"),
+        ("- missing.rs new 0 s x", "invalid-argument"),
+        ("7 a.rs new 0 s x", "invalid-argument"),
+        ("1 . new 0 s x", "invalid-argument"),
+        ("1 ../a.rs new 0 s x", "invalid-argument"),
+        ("1 .env new 0 s x", "not-permitted"),
+        ("1 .git/config new 0 s x", "not-permitted"),
+        ("1 .vscode/tasks.json new 0 s x", "not-permitted"),
+        ("1 refused.rs new 0 s x", "unavailable"),
+    ] {
+        assert_eq!(
+            command(&extension, &format!("propose {words}")).await,
+            code,
+            "{words}"
+        );
+    }
+    assert_eq!(
+        command(
+            &extension,
+            &format!("propose-big a.rs {}", MAX_PROPOSAL_BYTES + 1)
+        )
+        .await,
+        "limit-exceeded"
+    );
+    assert_eq!(
+        command(&extension, "propose-title a.rs 257").await,
+        "invalid-argument"
+    );
+    assert!(
+        command(&extension, "propose-title a.rs 256")
+            .await
+            .parse::<u64>()
+            .is_ok()
+    );
+    // One is open now; fill up to the limit.
+    for _ in 1..MAX_OPEN_PROPOSALS {
+        propose(&extension, "1 a.rs new 0 s x").await;
+    }
+    assert_eq!(
+        command(&extension, "propose 1 a.rs new 0 s x").await,
+        "limit-exceeded"
+    );
+
+    assert_eq!(command(&extension, "begin s1").await, "done");
+    assert_eq!(command(&extension, "end s1 1:a.rs 1:new.rs").await, "done");
+    assert_eq!(
+        command(&extension, "end s1 7:a.rs").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "end s1 1:../x").await,
+        "invalid-argument"
+    );
+
+    drop(extension);
+    wait_for(cx, 10_000, || {
+        reviewer
+            .calls()
+            .last()
+            .is_some_and(|call| call.starts_with("close"))
+    });
+    let calls = reviewer.calls();
+    assert_eq!(
+        calls[..6],
+        [
+            "propose a.rs new true s1",
+            "propose a.rs diff false s1",
+            "withdraw",
+            "propose new.rs new false s2",
+            "propose a.rs new false s",
+            "propose a.rs new false s",
+        ]
+    );
+    assert_eq!(
+        calls[calls.len() - 3..],
+        [
+            "begin probe-v0-4 s1".to_string(),
+            "end s1 a.rs,new.rs".to_string(),
+            format!("close probe-v0-4 {MAX_OPEN_PROPOSALS}"),
+        ]
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Without the capability or a bridge the calls are refused; revoking `review:propose` closes
+/// the open reviews, and their outcomes go nowhere; a reloaded instance's reviews survive the
+/// old instance's drop.
+#[gpui::test]
+async fn test_v0_4_review_rules_revocation_and_reloads(cx: &mut TestAppContext) {
+    use ui_ext::review::Decision;
+    let reviewer = Arc::new(FakeReviewer::default());
+    let root = context_worktree("review-rules");
+    let undeclared = Setup {
+        capabilities: vec!["ui:panel"],
+        ..review_setup(&reviewer, &root)
+    };
+    let extension = load(&undeclared, cx).await.unwrap();
+    for refused in ["propose 1 a.rs new 0 s x", "withdraw 1", "begin s", "end s"] {
+        assert_eq!(
+            command(&extension, refused).await,
+            "not-permitted",
+            "{refused}"
+        );
+    }
+    drop(extension);
+    let unbridged = Setup {
+        review: None,
+        ..review_setup(&reviewer, &root)
+    };
+    let extension = load(&unbridged, cx).await.unwrap();
+    assert!(!extension.review_available());
+    assert_eq!(
+        command(&extension, "propose 1 a.rs new 0 s x").await,
+        "unavailable"
+    );
+    drop(extension);
+    assert!(reviewer.calls().is_empty());
+
+    let broker = Arc::new(GrantingBroker::default());
+    let setup = Setup {
+        broker: Some(broker.clone()),
+        ..review_setup(&reviewer, &root)
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    let mut events = extension.take_io_events().unwrap();
+    let revoked = propose(&extension, "1 a.rs new 0 s x").await;
+    broker.set(
+        ui_ext::review::CAPABILITY_REVIEW_PROPOSE,
+        PermissionState::Denied,
+    );
+    wait_for(cx, 10_000, || {
+        reviewer
+            .calls()
+            .last()
+            .is_some_and(|call| call == "close probe-v0-4 1")
+    });
+    reviewer.decide(revoked, Ok((Decision::Accepted, "x")));
+    // (Refusing calls while it is off is the broker's `check`, as for every T1 capability.)
+    broker.set(
+        ui_ext::review::CAPABILITY_REVIEW_PROPOSE,
+        PermissionState::Granted,
+    );
+    let after = propose(&extension, "1 a.rs new 0 s y").await;
+    reviewer.decide(after, Ok((Decision::Rejected, "x")));
+    assert_eq!(
+        next_decided(&extension, &mut events).await,
+        format!("decided {after} rejected x")
+    );
+
+    // Reload: the old instance's drop closes only its own reviews.
+    propose(&extension, "1 a.rs new 0 s old").await;
+    let new = load(&setup, cx).await.unwrap();
+    let mut new_events = new.take_io_events().unwrap();
+    let kept = propose(&new, "1 a.rs new 0 s z").await;
+    assert!(kept > after, "ids are unique in the process");
+    drop(extension);
+    wait_for(cx, 10_000, || {
+        reviewer
+            .calls()
+            .last()
+            .is_some_and(|call| call == "close probe-v0-4 1")
+            && reviewer.calls().len() == 6
+    });
+    reviewer.decide(kept, Ok((Decision::Accepted, "z")));
+    assert_eq!(
+        next_decided(&new, &mut new_events).await,
+        format!("decided {kept} accepted z")
+    );
+    drop(new);
     std::fs::remove_dir_all(&root).ok();
 }
