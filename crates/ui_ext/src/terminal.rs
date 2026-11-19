@@ -10,7 +10,11 @@
 //! `FYX_TERMINAL_TOKEN`, allocates handles and injects env into profile and "all new" terminals.
 //! No I/O here, so the harness can make the same checks.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -408,6 +412,48 @@ pub const ACCOUNT_DIR_ENV_NAMES: &[&str] = &[
     "QWEN_CODE_HOME",
     "AMP_HOME",
 ];
+
+/// The host's account profiles (`fyx.accounts`, §C.6), as the extension runtime needs them:
+/// `${account.<tool>}` for a terminal an extension creates, the user's own tools' config-dir
+/// variables (refused like [`ACCOUNT_DIR_ENV_NAMES`]), and the dirs extensions stay out of.
+/// Dirs are opaque paths: neither side looks inside, and the extension never sees one.
+pub trait AccountDirs: Send + Sync + 'static {
+    /// Every account profile's dir, `~` expanded.
+    fn dirs(&self) -> Vec<PathBuf>;
+    /// The config-dir variable of every tool in `fyx.accounts.tools`.
+    fn env_names(&self) -> Vec<String>;
+    /// The dir of the account chosen for `tool` in the project that holds `cwd`, if any. Never
+    /// another account of the tool: no choice means no dir.
+    fn account_dir(&self, tool: &str, cwd: &Path) -> Option<PathBuf>;
+}
+
+/// Whether `path` is one of `dirs` or inside one, compared as written and, where they exist, as
+/// the files they name (links resolved), in any letter case on Windows.
+pub fn in_account_dirs(path: &Path, dirs: &[PathBuf]) -> bool {
+    fn key(path: &Path) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(path.to_string_lossy().to_lowercase())
+        } else {
+            path.to_path_buf()
+        }
+    }
+    let spellings = |path: &Path| {
+        let mut spellings = vec![key(path)];
+        if let Ok(real) = path.canonicalize() {
+            let real = real
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_owned();
+            spellings.push(key(Path::new(&real)));
+        }
+        spellings
+    };
+    let paths = spellings(path);
+    dirs.iter()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| spellings(dir))
+        .any(|dir| paths.iter().any(|path| path.starts_with(&dir)))
+}
 
 /// Credentials (§C.6 rule 5), beside every name ending in one of [`CREDENTIAL_ENV_SUFFIXES`].
 pub const CREDENTIAL_ENV_NAMES: &[&str] = &[

@@ -10,7 +10,7 @@
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, LazyLock, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -64,6 +64,8 @@ struct PackageContext<'a> {
     package: Option<String>,
     relay: Option<String>,
     listeners: &'a crate::listeners::ListenersHandle,
+    /// Where the terminal starts, for `${account.<tool>}`: the account chosen for its project.
+    cwd: &'a Path,
 }
 
 impl TemplateContext for PackageContext<'_> {
@@ -79,8 +81,8 @@ impl TemplateContext for PackageContext<'_> {
     fn relay(&self) -> Option<String> {
         self.relay.clone()
     }
-    fn account_dir(&self, _: &str) -> Option<String> {
-        None
+    fn account_dir(&self, tool: &str) -> Option<String> {
+        crate::accounts::account_dir(tool, self.cwd).map(|dir| dir.to_string_lossy().into_owned())
     }
 }
 
@@ -646,10 +648,16 @@ impl TerminalState {
                     .as_ref()
                     .map(|binary| binary.to_string_lossy().into_owned()),
                 listeners: &self.listeners,
+                cwd: &cwd,
             })
         } else {
             Vec::new()
         };
+        // §C.6 rule 5: the user's own tools' config-dir variables too.
+        let env = env
+            .into_iter()
+            .filter(|(name, _)| !crate::accounts::is_user_tool_env(name))
+            .collect();
         let command = CreateCommand {
             program,
             args: request.args,
