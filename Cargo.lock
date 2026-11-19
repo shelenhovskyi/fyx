@@ -23004,6 +23004,7 @@ dependencies = [
  "tracing",
  "ui",
  "ui_ext_host",
+ "ui_ext_wasm",
  "ui_prompt",
  "url",
  "urlencoding",
