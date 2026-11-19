@@ -7014,6 +7014,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_gemini_cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_guard"
 version = "0.1.0"
 dependencies = [

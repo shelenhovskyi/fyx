@@ -55,7 +55,7 @@ if [[ "$world" == "0_3" || "$world" == "0_4" ]]; then
     demos+=(fyx_demo_t2)
 fi
 if [[ "$world" == "0_4" ]]; then
-    demos+=(fyx_demo_pseudo_terminal fyx_demo_terminal_profiles fyx_claude_code)
+    demos+=(fyx_demo_pseudo_terminal fyx_demo_terminal_profiles fyx_claude_code fyx_gemini_cli)
 fi
 for demo in "${demos[@]}"; do
     cargo_args+=(-p "$demo")

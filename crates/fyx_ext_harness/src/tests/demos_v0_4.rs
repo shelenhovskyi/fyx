@@ -1,7 +1,8 @@
 //! The 0.4-only demos' `fyx-ui-0-4` builds, loaded as packages (plan 5.10): the pseudo-terminal
 //! demo's shell runs headless on the harness's fake terminals, and the profile demo's
 //! `[[fyx_ui.terminal_profiles]]` start fake profile terminals. `fyx_claude_code` (plan 5.15)
-//! loads with its whole 0.4 manifest, and its profile asks for an account.
+//! and `fyx_gemini_cli` (5.16) load with their whole 0.4 manifests, and their profiles ask for
+//! an account.
 
 use std::sync::OnceLock;
 
@@ -11,10 +12,11 @@ const PANEL: &str = "pseudo-terminal";
 
 /// The demos that exist only for 0.4, built together: the SDK's 0.4 feature must not reach the
 /// 0.3 demos, so they get a target directory of their own.
-const DEMOS_V0_4: [&str; 3] = [
+const DEMOS_V0_4: [&str; 4] = [
     "fyx_demo_pseudo_terminal",
     "fyx_demo_terminal_profiles",
     "fyx_claude_code",
+    "fyx_gemini_cli",
 ];
 
 /// `extensions/<demo>` with its 0.4 component, in a folder of the test target directory, as
@@ -185,6 +187,44 @@ fn claude_code_loads_with_its_profile_and_plugin() {
         .collect();
     assert!(
         texts.contains(&"No Claude session is running.".to_owned()),
+        "{texts:?}"
+    );
+}
+
+/// The skeleton of plan 5.16: the manifest loads, and the profile runs `gemini` with the
+/// account the user picks. The companion protocol is tested natively until 5.14.
+#[test]
+fn gemini_cli_loads_with_its_profile() {
+    let mut harness = Harness::load_package(demo_package("fyx_gemini_cli")).expect("loads");
+    let profiles = harness.terminal_profiles();
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile.account_tool.as_deref()))
+            .collect::<Vec<_>>(),
+        [("gemini", Some("gemini"))]
+    );
+    let (program, args) = harness.profile_command_line("gemini").unwrap();
+    assert_eq!((program.as_str(), args.len()), ("gemini", 0));
+    let handle = harness.open_profile("gemini", Some("Personal")).unwrap();
+    assert_eq!(
+        harness.terminal(handle).unwrap().account.as_deref(),
+        Some("Personal")
+    );
+    harness.close_profile(handle).unwrap();
+
+    harness.mount("gemini-cli").expect("mounts");
+    let texts: Vec<String> = harness
+        .nodes("gemini-cli")
+        .unwrap()
+        .into_iter()
+        .filter_map(|node| match node.props {
+            model::Props::Text(text) => Some(text.content),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.contains(&"No edit is waiting for review.".to_owned()),
         "{texts:?}"
     );
 }

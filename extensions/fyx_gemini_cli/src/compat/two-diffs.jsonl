@@ -1,0 +1,16 @@
+{"format":"fyx-gemini-transcript","version":1,"gemini_cli":"0.69.0","recorded":"synthetic","root":"/work/app","note":"Written from the companion spec (17720a507b, 2026-11-18) and the CLI's packages/core/src/ide source at that date; not yet recorded from a live session. See README.md."}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"gemini-cli-ide-client","version":"0.69.0"}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"Fyx","version":"0.1.0"}}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","method":"notifications/initialized"}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"openDiff"},{"name":"closeDiff"}]}}}
+{"t":"editor","files":[["README.md",1763500000000],["src/app.py",1763500005000]],"selection":{"line":0,"column":4,"text":"greet"},"trusted":true}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","method":"ide/contextUpdate","params":{"workspaceState":{"openFiles":[{"path":"/work/app/src/app.py","timestamp":1763500005000,"isActive":true,"cursor":{"line":1,"character":5},"selectedText":"greet"},{"path":"/work/app/README.md","timestamp":1763500000000}],"isTrusted":true}}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"openDiff","arguments":{"filePath":"/work/app/src/app.py","newContent":"def greet():\n    return 'hi'\n"}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":2,"result":{"content":[]}}}
+{"t":"review","call":2,"decision":"partial","final_content":"def greet():\n    return 'hello'\n"}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","method":"ide/diffAccepted","params":{"filePath":"/work/app/src/app.py","content":"def greet():\n    return 'hello'\n"}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"openDiff","arguments":{"filePath":"/work/app/README.md","newContent":"# App\n\nSays hello.\n"}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":3,"result":{"content":[]}}}
+{"t":"mcp","dir":"in","msg":{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"closeDiff","arguments":{"filePath":"/work/app/README.md","suppressNotification":true}}}}
+{"t":"mcp","dir":"out","msg":{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"{\"content\":\"# App\\n\\nSays hello.\\n\"}"}]}}}
