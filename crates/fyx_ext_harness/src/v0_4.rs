@@ -417,6 +417,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
             id,
             outcome.map(wit_review_outcome),
         ))),
+        // The harness has no relay endpoint (W1's fyx_relay), so no hook request comes.
+        net::IoEvent::RelayRequest(_) => None,
     }
 }
 

@@ -390,7 +390,8 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         net::IoEvent::Listener(_)
         | net::IoEvent::Context(_)
         | net::IoEvent::DiagnosticsChanged(_)
-        | net::IoEvent::ReviewDecided(..) => None,
+        | net::IoEvent::ReviewDecided(..)
+        | net::IoEvent::RelayRequest(_) => None,
     }
 }
 

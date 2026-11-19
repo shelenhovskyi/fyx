@@ -2,8 +2,7 @@
 //! docs/fyx/wit-0.4/design.md): everything 0.3 has (`t2_shared.rs`), the ten T2 cases of
 //! `permissions`, `terminals` over [`crate::terminals`], `approvals` (§B.12) and `listeners`
 //! over [`crate::listeners`] (§B.7), `context` over [`crate::editor_context`] (§B.11) and `review`
-//! over [`crate::proposals`] (§B.10). `relay` traps when called until plan 5.12 builds it
-//! (`define_unbuilt_as_traps`).
+//! over [`crate::proposals`] (§B.10), and `relay` over [`crate::relay`] (§B.9).
 //!
 //! A `terminal` node becomes [`model::Props::Terminal`]; the renderer resolves its handle.
 
@@ -33,8 +32,8 @@ use bindings::fyx::ui::{
     agent_observe as wit_observe, approvals as wit_approvals, context as wit_context,
     decorations as wit_decorations, host as wit_host, images as wit_images, io as wit_io,
     listeners as wit_listeners, network as wit_network, notifications as wit_notifications,
-    permissions as wit_permissions, process as wit_process, review as wit_review,
-    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
+    permissions as wit_permissions, process as wit_process, relay as wit_relay,
+    review as wit_review, terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(
@@ -162,6 +161,17 @@ fn approval_option(option: wit_approvals::ApprovalOption) -> ui_ext::approvals::
         wit_approvals::ApprovalOption::AlwaysAllow => Option::AlwaysAllow,
         wit_approvals::ApprovalOption::Deny => Option::Deny,
     }
+}
+
+/// The 0.4 `io-event::relay-request` (design wit-0.4 §B.9).
+fn relay_io_event(request: ui_ext::integration::RelayRequest) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::RelayRequest((
+        request.id,
+        request.channel,
+        request.terminal.map(|handle| handle.0),
+        request.argv,
+        request.stdin,
+    )))
 }
 
 /// The 0.4 `io-event` cases of a listener's event (design wit-0.4 §B.7).
@@ -553,6 +563,31 @@ impl wit_listeners::Host for UiState {
     }
 }
 
+/// `relay` (design.md §B.9) over [`crate::relay::RelayHandle`].
+impl wit_relay::Host for UiState {
+    fn respond(
+        &mut self,
+        id: u64,
+        exit_code: u8,
+        stdout: String,
+        stderr: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(stdout.len() + stderr.len())?;
+        self.permission_state(ui_ext::integration::CAPABILITY_RELAY_HOOKS);
+        Ok(self
+            .relay
+            .respond(
+                id,
+                ui_ext::integration::RelayAnswer {
+                    exit: exit_code,
+                    stdout,
+                    stderr,
+                },
+            )
+            .map_err(Into::into))
+    }
+}
+
 /// `terminals` (design.md §B.1–§B.5, §B.11, §C.3) over [`crate::terminals::TerminalState`].
 impl wit_terminals::Host for UiState {
     fn open_pseudo(
@@ -800,6 +835,7 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "listeners",
     "context",
     "review",
+    "relay",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -821,5 +857,6 @@ pub(crate) fn add_to_linker(
     wit_listeners::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_context::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_review::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_relay::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

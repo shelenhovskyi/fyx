@@ -77,6 +77,7 @@ pub mod network;
 pub mod observe;
 pub mod process;
 mod proposals;
+mod relay;
 mod stderr;
 mod terminals;
 pub mod ticks;
@@ -923,6 +924,8 @@ pub struct UiState {
     context: Arc<editor_context::ContextHandle>,
     /// The 0.4 `review` import (§B.10).
     review: Arc<proposals::ReviewHandle>,
+    /// The 0.4 `relay` import (§B.9).
+    relay: Arc<relay::RelayHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -942,6 +945,7 @@ struct IoStates {
     listeners: Arc<listeners::ListenersHandle>,
     context: Arc<editor_context::ContextHandle>,
     review: Arc<proposals::ReviewHandle>,
+    relay: Arc<relay::RelayHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -998,6 +1002,7 @@ impl UiState {
             listeners,
             context,
             review,
+            relay,
             journal,
         } = io;
         Self {
@@ -1007,6 +1012,7 @@ impl UiState {
             listeners,
             context,
             review,
+            relay,
             journal,
             capability_check,
             diagnostics,
@@ -1633,6 +1639,8 @@ pub struct UiExtension {
     context: Arc<editor_context::ContextHandle>,
     /// The 0.4 proposals; their reviews close when the instance goes.
     review: Arc<proposals::ReviewHandle>,
+    /// The 0.4 relay channels; unanswered requests fail open when the instance goes.
+    relay: Arc<relay::RelayHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1800,6 +1808,12 @@ pub struct LoadOptions {
     /// The language-server side of the 0.4 `context.diagnostics` and `watch-diagnostics`
     /// (§B.11). Without it, they are `unavailable`.
     pub diagnostics_source: Option<Arc<dyn ui_ext::context::DiagnosticsSource>>,
+    /// `[[fyx_ui.relay_channels]]`; set by [`UiExtension::load_checked`]. Applies only to a 0.4
+    /// component that declares `relay:hooks` (§B.9).
+    pub relay_channels: Option<Vec<ui_ext::integration::RelayChannelSpec>>,
+    /// The `fyx-relay` binary, for `${relay}` in `terminal:env` values (§B.9); W1's glue fills
+    /// it from `terminal_host::relay_binary`. Without it such a value is left out.
+    pub relay_binary: Option<PathBuf>,
 }
 
 impl UiExtension {
@@ -1871,6 +1885,8 @@ impl UiExtension {
             context: context_host,
             review: review_host,
             diagnostics_source,
+            relay_channels,
+            relay_binary,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -2023,6 +2039,7 @@ impl UiExtension {
                         .unwrap_or_default(),
                     terminal_env,
                     package_dir,
+                    relay_binary,
                 )
             } else {
                 terminals::TerminalPolicy::default()
@@ -2051,6 +2068,14 @@ impl UiExtension {
                 review_host.filter(|_| is_v0_4),
                 workspace.clone(),
             ));
+            // 0.4 `relay:hooks` (§B.9): the declared channels.
+            let relay = Arc::new(relay::RelayHandle::new(
+                extension_id.clone(),
+                relay_channels
+                    .filter(|_| is_v0_4 && declares(ui_ext::integration::CAPABILITY_RELAY_HOOKS))
+                    .unwrap_or_default(),
+                capability_check.clone(),
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -2064,6 +2089,7 @@ impl UiExtension {
                 let listeners = listeners.clone();
                 let context = context.clone();
                 let review = review.clone();
+                let relay = relay.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
@@ -2073,6 +2099,7 @@ impl UiExtension {
                     listeners: Arc::downgrade(&listeners),
                     context: Arc::downgrade(&context),
                     review: Arc::downgrade(&review),
+                    relay: Arc::downgrade(&relay),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
@@ -2084,6 +2111,7 @@ impl UiExtension {
                         listeners.forward(&running);
                         context.forward(&running);
                         review.forward(&running);
+                        relay.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -2123,6 +2151,7 @@ impl UiExtension {
                                 listeners,
                                 context,
                                 review,
+                                relay,
                                 journal,
                             },
                         ),
@@ -2217,6 +2246,7 @@ impl UiExtension {
                     listeners,
                     context,
                     review,
+                    relay,
                 },
                 pushed_rx,
             ))
@@ -2281,6 +2311,7 @@ impl UiExtension {
             terminal_profiles: terminal::check_profiles(manifest.terminal_profiles.clone()).ok(),
             listeners: Some(manifest.listeners.clone()),
             discovery_files: Some(manifest.discovery_files.clone()),
+            relay_channels: Some(manifest.relay_channels.clone()),
             ..options
         };
         let (mut extension, pushed) =
@@ -2327,6 +2358,36 @@ impl UiExtension {
     /// Whether the 0.4 `review` import has a review bridge.
     pub fn review_available(&self) -> bool {
         self.review.available()
+    }
+
+    /// 0.4 `relay:hooks` (§B.9): a hook ran `fyx-relay --channel <extension-id>/<channel>`.
+    /// Delivers `io-event::relay-request` with a new id and returns it; `reply` gets the
+    /// extension's `relay.respond`, at most once. Refused, with the reason for the log, when the
+    /// channel is not declared, `relay:hooks` is not granted, stdin and argv exceed 1 MiB or 8
+    /// requests are unanswered. A refused, expired (the channel's `timeout_ms`) or revoked
+    /// request, or one whose instance goes, drops `reply` without calling it: answer the
+    /// channel's `on_failure` then. `terminal` is this extension's handle for the hook's
+    /// terminal, if it has one.
+    pub fn relay_request(
+        &self,
+        channel: &str,
+        terminal: Option<terminal::TerminalHandle>,
+        argv: Vec<String>,
+        stdin: String,
+        reply: ui_ext::integration::RelayReply,
+    ) -> Result<u64, String> {
+        self.relay.request(channel, terminal, argv, stdin, reply)
+    }
+
+    /// The declared `[[fyx_ui.relay_channels]]` (empty without `relay:hooks` or before 0.4),
+    /// granted or not: their `timeout_ms` and `on_failure` apply to refused requests too.
+    pub fn relay_channels(&self) -> &[ui_ext::integration::RelayChannelSpec] {
+        self.relay.channels()
+    }
+
+    /// Whether `relay:hooks` is declared, with channels, and granted now.
+    pub fn relay_granted(&self) -> bool {
+        self.relay.granted()
     }
 
     /// `${listen.<name>.port}` while the listener is open (tests and the Extension Inspector).
