@@ -227,6 +227,10 @@ struct Shared {
     t3_prompter: Option<mpsc::UnboundedSender<T3PromptRequest>>,
     /// The terminals of the T3 cards waiting for an answer, per extension.
     t3_pending: HashMap<String, Vec<HostTerminalId>>,
+    /// What the user shared from a terminal's menu, or "until it closes" on a card (§C.3).
+    shares: HashMap<(String, HostTerminalId), BTreeMap<T3Capability, T3Answer>>,
+    /// Dropped when the terminal closes: its open cards end with `Deny`.
+    t3_cancels: HashMap<HostTerminalId, Vec<oneshot::Sender<()>>>,
 }
 
 impl Shared {
@@ -843,6 +847,86 @@ impl ConsentStore {
             .collect()
     }
 
+    /// The terminal menu's "Share with <extension>…" (§C.3): for reading, the next request
+    /// (`Once`) or every request until the terminal closes (`UntilClosed`) needs no card; for
+    /// writing, it opens writes, each still confirmed on its card. `Deny` takes it back.
+    pub fn share_terminal(
+        &mut self,
+        extension_id: &str,
+        terminal: HostTerminalId,
+        capability: T3Capability,
+        answer: T3Answer,
+    ) {
+        {
+            let mut shared = self.lock();
+            let key = (extension_id.to_string(), terminal);
+            let shares = shared.shares.entry(key.clone()).or_default();
+            match answer {
+                T3Answer::Deny => {
+                    shares.remove(&capability);
+                }
+                T3Answer::Once | T3Answer::UntilClosed => {
+                    shares.insert(capability, answer);
+                }
+            }
+            if shares.is_empty() {
+                shared.shares.remove(&key);
+            }
+        }
+        self.journal(
+            extension_id,
+            JournalKind::ConsentChanged {
+                item_key: format!("{}#shared", capability.name()),
+                allowed: answer != T3Answer::Deny,
+            },
+        );
+    }
+
+    /// Everything shared from one terminal with one extension goes.
+    pub fn unshare(&mut self, extension_id: &str, terminal: HostTerminalId) {
+        let removed = self
+            .lock()
+            .shares
+            .remove(&(extension_id.to_string(), terminal));
+        for capability in removed.into_iter().flat_map(|shares| shares.into_keys()) {
+            self.journal(
+                extension_id,
+                JournalKind::ConsentChanged {
+                    item_key: format!("{}#shared", capability.name()),
+                    allowed: false,
+                },
+            );
+        }
+    }
+
+    /// A terminal closed: its shares go and its open cards end with `Deny`.
+    pub fn terminal_closed(&mut self, terminal: HostTerminalId) {
+        let mut shared = self.lock();
+        shared
+            .shares
+            .retain(|(_, shared_terminal), _| *shared_terminal != terminal);
+        shared.t3_cancels.remove(&terminal);
+    }
+
+    /// Who may use a terminal now, for its tab marker: what was shared from it (an "Always
+    /// allow" holds for every terminal: [`Self::always_allowed`]).
+    pub fn shared(&self, terminal: HostTerminalId) -> Vec<(String, T3Capability)> {
+        let shared = self.lock();
+        let mut shares: Vec<(String, T3Capability)> = shared
+            .shares
+            .iter()
+            .filter(|((_, shared_terminal), _)| *shared_terminal == terminal)
+            .flat_map(|((id, _), shares)| {
+                shares
+                    .iter()
+                    .filter(|(_, answer)| **answer != T3Answer::Deny)
+                    .map(|(capability, _)| (id.clone(), *capability))
+            })
+            .collect();
+        shares.sort();
+        shares
+    }
+
     /// Every extension's state changes, for the page, the status bar and the tab markers.
     pub fn changes(
         &self,
@@ -956,6 +1040,7 @@ impl ConsentStore {
             let answers = shared.t2.remove(extension_id);
             let items = shared.items.remove(extension_id).is_some();
             let always = shared.always_allow.remove(extension_id).is_some();
+            shared.shares.retain(|(id, _), _| id != extension_id);
             keys.extend(answers.iter().flat_map(|answers| answers.keys().cloned()));
             // Items first, as in `change`.
             let (items_keys, capabilities): (Vec<String>, Vec<String>) =
@@ -1269,6 +1354,32 @@ impl CapabilityCheck for Checker {
         if shared.always_allows(extension_id, capability) {
             return futures::future::ready(T3Answer::Once).boxed();
         }
+        let share_key = (extension_id.to_string(), prompt.terminal);
+        let shared_as = shared
+            .shares
+            .get(&share_key)
+            .and_then(|shares| shares.get(&capability))
+            .copied();
+        match (capability, shared_as) {
+            // Shared for reading: no card, once or until the terminal closes.
+            (T3Capability::Read, Some(T3Answer::UntilClosed)) => {
+                return futures::future::ready(T3Answer::Once).boxed();
+            }
+            (T3Capability::Read, Some(T3Answer::Once)) => {
+                if let Some(shares) = shared.shares.get_mut(&share_key) {
+                    shares.remove(&capability);
+                    if shares.is_empty() {
+                        shared.shares.remove(&share_key);
+                    }
+                }
+                return futures::future::ready(T3Answer::Once).boxed();
+            }
+            // Writes only on a terminal shared for writing, each one on its card.
+            (T3Capability::Write, None | Some(T3Answer::Deny)) => {
+                return futures::future::ready(T3Answer::Deny).boxed();
+            }
+            _ => {}
+        }
         let Some(prompter) = shared.t3_prompter.clone() else {
             return futures::future::ready(T3Answer::Deny).boxed();
         };
@@ -1284,6 +1395,10 @@ impl CapabilityCheck for Checker {
             return futures::future::ready(T3Answer::Deny).boxed();
         }
         pending.push(terminal);
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        let cancels = shared.t3_cancels.entry(terminal).or_default();
+        cancels.retain(|cancel| !cancel.is_canceled());
+        cancels.push(cancel);
         drop(shared);
         let guard = PendingT3 {
             shared: self.0.clone(),
@@ -1299,8 +1414,22 @@ impl CapabilityCheck for Checker {
             return futures::future::ready(T3Answer::Deny).boxed();
         }
         async move {
-            let _guard = guard;
-            receiver.await.unwrap_or(T3Answer::Deny)
+            let answer = match futures::future::select(receiver, cancelled).await {
+                futures::future::Either::Left((answer, _)) => answer.unwrap_or(T3Answer::Deny),
+                // The terminal closed: the card goes with it.
+                futures::future::Either::Right(_) => T3Answer::Deny,
+            };
+            if capability == T3Capability::Read && answer == T3Answer::UntilClosed {
+                guard
+                    .shared
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .shares
+                    .entry((guard.extension_id.clone(), guard.terminal))
+                    .or_default()
+                    .insert(capability, T3Answer::UntilClosed);
+            }
+            answer
         }
         .boxed()
     }
@@ -2167,8 +2296,8 @@ mod tests {
         );
         assert!(cards.next().now_or_never().is_none());
         assert!((&mut first).now_or_never().is_none());
-        answer.send(T3Answer::UntilClosed).unwrap();
-        assert_eq!(first.now_or_never(), Some(T3Answer::UntilClosed));
+        answer.send(T3Answer::Once).unwrap();
+        assert_eq!(first.now_or_never(), Some(T3Answer::Once));
 
         // Four terminals at once; the fifth is refused; a dropped request frees its place.
         let mut open: Vec<_> = (1..=4)
@@ -2193,6 +2322,73 @@ mod tests {
             assert_eq!(request.now_or_never(), Some(T3Answer::Deny));
         }
         drop(fifth);
+    }
+
+    /// §C.3: a terminal shared for reading needs no card (once, or until it closes); a card
+    /// answered "until it closes" shares it; writes need a terminal shared for writing and still
+    /// show their card; a closed terminal drops its shares and its open cards.
+    #[test]
+    fn test_shares() {
+        use futures::{FutureExt as _, StreamExt as _};
+        let mut store = ConsentStore::default();
+        let mut declared: Vec<String> = DECLARED.iter().map(|c| c.to_string()).collect();
+        declared.push("terminal:write".into());
+        store.declare("ext", declared);
+        let checker = store.checker();
+        let (prompter, mut cards) = mpsc::unbounded();
+        store.set_t3_prompter(prompter);
+        let ask = |capability, terminal| checker.t3_request("ext", prompt(capability, terminal));
+
+        store.share_terminal("ext", 7, T3Capability::Read, T3Answer::Once);
+        assert_eq!(
+            store.shared(7),
+            vec![("ext".to_string(), T3Capability::Read)]
+        );
+        assert_eq!(
+            ask(T3Capability::Read, 7).now_or_never(),
+            Some(T3Answer::Once)
+        );
+        assert!(store.shared(7).is_empty(), "once is used up");
+        assert!(cards.next().now_or_never().is_none());
+
+        // A card answered "until it closes".
+        let read = ask(T3Capability::Read, 7);
+        let (_, _, answer) = cards.next().now_or_never().flatten().unwrap();
+        answer.send(T3Answer::UntilClosed).unwrap();
+        assert_eq!(read.now_or_never(), Some(T3Answer::UntilClosed));
+        assert_eq!(
+            ask(T3Capability::Read, 7).now_or_never(),
+            Some(T3Answer::Once)
+        );
+        assert_eq!(
+            ask(T3Capability::Read, 7).now_or_never(),
+            Some(T3Answer::Once)
+        );
+
+        // Writes: refused with no card until shared, then each one on its card.
+        assert_eq!(
+            ask(T3Capability::Write, 7).now_or_never(),
+            Some(T3Answer::Deny)
+        );
+        assert!(cards.next().now_or_never().is_none());
+        store.share_terminal("ext", 7, T3Capability::Write, T3Answer::UntilClosed);
+        let mut write = ask(T3Capability::Write, 7);
+        assert!((&mut write).now_or_never().is_none());
+        let (_, card, _answer) = cards.next().now_or_never().flatten().unwrap();
+        assert_eq!(card.capability, T3Capability::Write);
+
+        // The terminal closes: the open card ends with Deny, and nothing stays shared.
+        store.terminal_closed(7);
+        assert_eq!(write.now_or_never(), Some(T3Answer::Deny));
+        assert!(store.shared(7).is_empty());
+        assert_eq!(
+            ask(T3Capability::Write, 7).now_or_never(),
+            Some(T3Answer::Deny)
+        );
+
+        store.share_terminal("ext", 8, T3Capability::Write, T3Answer::UntilClosed);
+        store.unshare("ext", 8);
+        assert!(store.shared(8).is_empty());
     }
 
     /// §C.4: an uninstall forgets the items and "Always allow" and clears the journal.
