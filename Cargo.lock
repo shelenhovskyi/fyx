@@ -7068,6 +7068,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_relay"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "gaoya"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18291,6 +18302,7 @@ name = "terminal_host"
 version = "0.1.0"
 dependencies = [
  "futures 0.3.34",
+ "fyx_relay",
  "gpui",
  "libc",
  "log",
