@@ -620,7 +620,10 @@ and extension host are global to the process.
 ## WIT diff (for W0)
 
 Copy-forward rule: `types`, `host` and every 0.3 interface are copied byte for byte except where
-a comment says "0.4". New parts:
+a comment says "0.4". New parts below. The sketch
+uses WIT's escape for keywords (`%list`), and no parameter is named after a keyword (`outcome`,
+not `result`). W2c's staged draft, `tasks/wit/fyx-ui-0.4.wit` on
+`claude/fyx-w2c-host-0-2-cbde2c` (145f748bbf), parses and wins where the two differ.
 
 ```wit
 // types: one new node kind, marked "0.4".
@@ -659,7 +662,7 @@ interface terminals {
     send-input: func(handle: terminal-handle, bytes: list<u8>) -> result<_, host-error>;
     close: func(handle: terminal-handle);
     set-status: func(handle: terminal-handle, status: option<terminal-status>) -> result<_, host-error>;
-    list: func() -> result<list<terminal-info>, host-error>;                             // terminal:observe
+    %list: func() -> result<list<terminal-info>, host-error>;                            // terminal:observe
     paste: func(handle: terminal-handle, text: string) -> result<_, host-error>;         // gesture
     request-read: func(handle: terminal-handle, scope: read-scope, lines: u16) -> result<u64, host-error>;  // T3, gesture
     request-write: func(handle: terminal-handle, text: string, submit: bool) -> result<u64, host-error>;    // T3, gesture
@@ -672,7 +675,7 @@ interface listeners {
     record mcp-call { call-id: u64, listener: string, connection: u64, tool: string, arguments: string }
     record mcp-error { code: s32, message: string }
     register-tools: func(listener: string, tools: list<tool-def>) -> result<_, host-error>;
-    respond: func(call-id: u64, result: result<string, mcp-error>) -> result<_, host-error>;
+    respond: func(call-id: u64, outcome: result<string, mcp-error>) -> result<_, host-error>;
     notify: func(listener: string, connection: option<u64>, method: string, params: string) -> result<_, host-error>;
     send: func(listener: string, connection: u64, text: string) -> result<_, host-error>;
     reply: func(request-id: u64, status: u16, body: string) -> result<_, host-error>;
