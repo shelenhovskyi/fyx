@@ -121,7 +121,7 @@ How the release fields of [registry-format.md](registry-format.md#indexjson) are
 | `version`, `name`, `description` | `extension.toml` at `source.commit` |
 | `capabilities` | `[fyx_ui] capabilities` in `extension.toml` |
 | `network_domains`, `processes` | the manifest fields that come with T2 (decisions 23, 24). Until `fyx-ext` knows them, CI refuses an entry that declares a T2 capability. |
-| `tier` | computed by CI: the highest tier among the capabilities (decision 21) |
+| `tier` | computed by CI: the highest tier among the capabilities (decision 21). **T3** (`terminal:read`, `terminal:write`, fyx:ui 0.4) counts as T2 here, so `tier` is only ever `t0`, `t1` or `t2`; `policy/capability-tiers.json` still lists those two as `t3` for the PR comment ([wit-0.4 design §C.1](../wit-0.4/design.md)). |
 | `package.url`, `.sha256`, `.size` | the package CI built, and its release asset URL |
 | `published_at` | the time the publish job signs the release |
 | `urgent` | the entry |
@@ -172,7 +172,7 @@ only.
 | **New extension, tier T0 or T1** | Nobody, if the agent review passes. Auto-merges on green CI. A `concern` adds `needs-owner`, and then the owner must approve. |
 | **New extension, tier T2** | The owner (`@shelenhovskyi`). |
 | **New version of an extension, tier T0 or T1**, no owner change | One of the entry's owners: as the PR's author, or by an approving review. Auto-merges once that holds and the agent review passes; a `concern` needs the owner. |
-| **Any PR whose release is T2**: a new version, a new T2 capability, a new network domain or a new process | The owner, for every version. A T2 update changes code that can reach the network or your files. |
+| **Any PR whose release is T2** (T3 counts as T2): a new version, a new T2 capability, a new network domain or a new process | The owner, for every version. A T2 update changes code that can reach the network or your files. |
 | **Owners added or removed** | An existing owner of the entry. |
 | **`urgent = true`** | The owner. It skips the 24 h age gate, but only for clients updating from a version the block list blocks; a fresh install waits (integration-6 R8). |
 | **A reserved id** (`policy/reserved-ids.txt`) | The owner, and the entry's only owner must be the registry owner. This is how Fyx's own `fyx-*` demos are registered. |
@@ -197,6 +197,47 @@ The check also fails while the PR has the label `needs-owner` and the owner has 
 The `report` job of `review.yml` posts the decision as a PR comment: the tier, what changed since
 the last release (capabilities, domains, processes, owners), who must approve, and the agent
 review's verdict. This comment is the reviewer's summary for a T2 PR.
+
+**The update diff** (fyx:ui 0.4, [design §C.5](../wit-0.4/design.md)). For a new version the
+comment also shows what clients will show the user before the update installs: **New in
+`<version>`**, the T1 and T2 items it adds or widens (a capability, a program or argument pattern,
+a domain, an env name or value, `scope = "all-new"`, a listener, a discovery path, a relay
+channel, each with its tier), and **Removed**. T0 additions are left out because they install
+silently. The `report` job derives it from `extension.toml` at the last published release's
+source commit and at the new one (`registry.py decision-input --last-manifest`, `diff_lines`);
+if either cannot be read, the comment says "Update diff: not available" and the reviewer reads the
+source diff. The text is the author's, so it is escaped like the agent's reasons. The diff only
+informs: clients hold the update for the user's approval whatever the registry decides.
+
+### Accounts and limits: what is not accepted
+
+Fyx never touches a user's credentials, never switches accounts for them and never carries a
+session to another account ([wit-0.4 design §C.6](../wit-0.4/design.md), rules 1–4). The registry
+holds extensions to the same rule. **An extension that does any of the following is not accepted,
+and is blocked if it is found later:**
+
+- **Rotates accounts.** It switches the user between accounts of a tool (Claude, Codex, Gemini,
+  Copilot, OpenCode, …), by itself or because a limit was reached, or it keeps a pool of accounts
+  and hands work to them. It carries a session, its history or its context from one account to
+  another to continue on the other account's limit.
+- **Gets around limits.** It hides a rate limit, retries to dodge one, spreads load over
+  accounts, or runs one task on several accounts at once.
+- **Shares or resells access.** It lets other people use the user's subscription or token, proxies
+  a tool's login, or sells or lends access.
+- **Handles credentials.** It reads, copies, stores or moves tokens or an account's config
+  directory, or asks the user to paste one. (Fyx also refuses the env names and paths that would
+  allow it: `terminal:env` and `process:spawn` refuse `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, the
+  other config-dir names, `*_API_KEY`, `*_TOKEN`, `*_SECRET` and the like; the one exception is a
+  `terminal:env` value that is exactly one `token_in_env` listener's own token. That check is the
+  host's backstop, not the rule: an extension can break the rule without naming any of these.)
+
+How it is enforced: the agent review looks for it (category `other`, with the file), so a PR that
+does it gets `needs-owner`. The owner declines it. For a release already published, the owner
+blocks it (`blocklist/blocklist.toml`, `reason` says which rule), and the next block-list refresh
+removes it from every client. The rule applies to what the code does, not only to what the
+manifest declares. An extension that only helps a person choose which account a terminal uses,
+through Fyx's own account profiles, does nothing wrong: the choice stays the user's, in their own
+tool's sign-in.
 
 **Why a T0–T1 update still needs an owner of the entry:** without it, anyone could open a PR that
 points someone else's extension at a commit in their own fork. The commit must also be reachable
@@ -264,8 +305,9 @@ It **never checks out or runs PR code**.
   artifacts is ignored, because the PR controls its own copy of `pr.yml`.
 - **Where its inputs come from:** the GitHub API (the PR, its author and reviews), `git show` of
   the entry and of `extension.toml` at the source commit, the source diff fetched with `git`
-  (never executed), and the published `index.json`. The `report` job recomputes the release and
-  the decision from these alone.
+  (never executed), and the published `index.json`, plus `extension.toml` at the last published
+  release's source commit for the update diff. The `report` job recomputes the release and the
+  decision from these alone.
 
 1. **`agent-review`** (decided 2026-11-18). An agent reviews every entry PR: the diff of the
    entry, the source diff since the last published commit of that id (the whole source for a new
@@ -277,6 +319,9 @@ It **never checks out or runs PR code**.
      sources);
    - network and process use (domains and programs against what the code does);
    - dubious assets (images that imitate Fyx's or another product's UI, hidden payloads);
+   - account rotation, limit evasion, shared or resold access, and handling of tokens or account
+     directories ([Accounts and limits](#accounts-and-limits-what-is-not-accepted)), category
+     `other`;
    - anything else a reviewer would flag.
 
    **Isolation:**

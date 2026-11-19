@@ -24,6 +24,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FakeRun::ok` | method | Prints `stdout` and exits with 0. |
 | `FakeRun::stderr` | field |  |
 | `FakeRun::stdout` | field |  |
+| `FakeTerminal` | re-export | `terminals::FakeTerminal` |
 | `FetchResponder` | type | What a test broker answers for one request it lets through. |
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
 | `Harness::accessible_name` | method | The name a screen reader announces for a button node, by the renderer's rule: its `accessible-label` (at most 256 bytes), else a non-empty label, else the tooltip, else the icon's name. `None` for a node that is not a button. |
@@ -37,6 +38,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::click` | method | Clicks the first button with this label. |
 | `Harness::click_v0_1` | method | `Harness::click` in the 0.1 model. |
 | `Harness::close_notification` | method | Closes an open notification as the user (`User`), its timer (`Expired`) or its window (`WindowClosed`) would; its owner, which must be mounted, gets `notification-closed`. |
+| `Harness::close_profile` | method | The user closes a profile terminal; with `terminal:observe`, `Harness::deliver_io` delivers `terminal-closed`. |
 | `Harness::decoration` | method | Where a live decoration is placed; its tree is `Harness::nodes` of its id. |
 | `Harness::decorations` | method | The live decoration ids. |
 | `Harness::deliver_io` | method | Delivers the outcome of every pending request through `handle-io`, oldest first, and applies each call's effects. A cancelled one ends `cancelled`. Otherwise the broker decides: an `Ask` state prompts once and takes the answer, a granted request gets the responder's answer, and anything else ends `denied`. Returns each call's effects and the extension's own result. |
@@ -45,6 +47,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::effects` | method | Every effect so far, in order, including those of loading. |
 | `Harness::event` | method | Sends one event to a mounted surface or decoration and applies its effects, then its reply. Typed text and a `row-selected` selection are written into the tree first. Use `Harness::dismiss` for `dismissed`. |
 | `Harness::event_v0_1` | method | `Harness::event` in the 0.1 model: the pushes and the reply only. |
+| `Harness::exit_terminal` | method | Ends a created terminal's program; `Harness::deliver_io` delivers `terminal-exited`. |
 | `Harness::fake_program` | method | Runs `program` for spawns of `name` instead of a real program. A declared program with no fake ends `spawn-failed(not-found)`. |
 | `Harness::find` | method | The first node in tree order whose props match. |
 | `Harness::find_button` | method |  |
@@ -67,27 +70,38 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::nodes` | method | The tree of a mounted surface or decoration, parents first. |
 | `Harness::notification_action` | method | Clicks button `action` of an open notification, as the user would: the notification closes and its owner, which must be mounted, gets `notification-action`. The click is a gesture, like a button click. |
 | `Harness::notifications` | method | The open notifications (design.md M.1), by id: shown and not yet dismissed, closed or acted on. The harness has no clock, so `auto_dismiss` ones stay until `Harness::close_notification`. |
+| `Harness::open_profile` | method | The user starts profile `id` from "+", with account profile `account` when the profile has an `account_tool` (design.md C.6; the extension sees only its name). With `terminal:observe`, `Harness::deliver_io` delivers `terminal-created`. Returns the extension's handle for it. |
 | `Harness::pending_fetches` | method | Requests `fetch` accepted that `Harness::deliver_io` has not delivered yet, oldest first. |
 | `Harness::pending_tick` | method | The delay of the surface's pending tick, already clamped up to `MIN_TICK_DELAY`. |
 | `Harness::processes` | method | Processes `spawn` accepted that have not finished, oldest first. |
+| `Harness::profile_command_line` | method | The command line the host would start for profile `id`: `${package}` is the package folder (`Harness::load_package`'s, or `<package>` for a harness loaded from bytes) and `${relay}` is `fyx-relay`. An argument whose placeholder has no value is left out, as the host does. |
 | `Harness::progresses` | method | The running progresses (M.2), by id, with their last value and message. |
 | `Harness::props` | method | The props of one node of a mounted surface or decoration. |
 | `Harness::pushed_v0_1` | method | Every update pushed so far, in order, in the 0.1 model; `Harness::effects` holds them in the newest one. |
+| `Harness::resize_terminal` | method | A new size for a terminal; `Harness::deliver_io` delivers the last one as `terminal-resized`. |
 | `Harness::rows` | method | Rows `start..start + count` of a list, each validated as a single-root tree; `indent` as the extension sent it. |
 | `Harness::rows_v0_1` | method | `Harness::rows` in the 0.1 model: each row's index and tree. |
 | `Harness::set_agent_reviews` | method | The host's open agent reviews, which `agent-observe.start` sends first as a snapshot (with this extension's opaque ids, cut as the host cuts them). `None`: there are no agent reviews here, so `start` is `unavailable`. |
+| `Harness::set_bracketed_paste` | method | Whether a profile terminal's program has bracketed paste on (it starts on); `paste` is `unavailable` while it is off (design.md B.11). |
 | `Harness::set_broker` | method | Installs the permission broker and network for `network:fetch`; see `TestBroker`. |
 | `Harness::set_edit_answer` | method | How the editor answers `workspace:edit` edits the user allowed; without one they apply. |
 | `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |
+| `Harness::terminal` | method | One of the extension's 0.4 terminals (pseudo, created or profile), while it is open. |
+| `Harness::terminal_nodes` | method | The handles the `terminal` nodes of a mounted surface show, in tree order. |
+| `Harness::terminal_profiles` | method | The checked `[[fyx_ui.terminal_profiles]]`, in manifest order. |
+| `Harness::terminals` | method | The extension's open 0.4 terminals, by handle. |
 | `Harness::text` | method | The content of a text node. |
 | `Harness::tick` | method | Runs the surface's pending tick, as the host does when it falls due, and applies its effects, then its reply. It fails without a call when no tick is pending, when the surface is not mounted, or after `MAX_CONSECUTIVE_TICK_ERRORS` failed ticks in a row until the next event on the surface. |
 | `Harness::tree_v0_1` | method | The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds it. |
+| `Harness::type_into_terminal` | method | Keys or text the user types into a pseudo-terminal; `Harness::deliver_io` hands them to the extension as `terminal-input`. |
 | `Harness::ui_api_version` | method |  |
 | `Harness::with_network_domains` | method | The hosts `network:fetch` may reach, as `[fyx_ui.network] domains` gives them; `Harness::load_package` reads them from the manifest. |
 | `Harness::with_package_root` | method | Checks asset images against the extension folder `dir`, as `Harness::load_package` does, for a harness loaded from bytes. |
 | `Harness::with_processes` | method | The programs `process:spawn` may run, as `[[fyx_ui.processes]]` and `[fyx_ui.process] env` declare them; `Harness::load_package` reads them from the manifest. |
+| `Harness::with_terminal_profiles` | method | The profiles the user can start from "+", as `[[fyx_ui.terminal_profiles]]` declares them (design.md B.1), with the host's checks: `terminal:profiles` is declared, the entries pass `ui_ext::terminal::check_profiles`, and `${package}` needs `package:files`. `Harness::load_package` reads them from the manifest. |
+| `Harness::with_terminal_programs` | method | The programs `terminal:create` may run, as `[[fyx_ui.terminal_programs]]` declares them; `Harness::load_package` reads them from the manifest. |
 | `HostEffect` | re-export | `api_state::HostEffect` |
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
 | `INSTANCES_LIMIT` | const |  |
@@ -132,4 +146,5 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TestBroker::state` | field | The state at the import. `Ask` accepts the request and asks when it is delivered. |
 | `api_version_section` | fn | The version in the component's `fyx:ui-api-version` section, if it has one. |
 | `cache_compiled_components` | re-export | `compile_cache::cache_compiled_components` |
+| `plain_text` | re-export | `terminals::plain_text` |
 | `variables_set` | fn | Whether `PACKAGE_VARIABLE` or `COMPONENT_VARIABLE` is set, as under `fyx-ext test`. A headless test skips when neither is, and fails when `Harness::from_env` fails although one is. |

@@ -65,8 +65,8 @@ fn serialize_pane(pane: &Entity<Pane>, active: bool, cx: &mut App) -> Serialized
         .filter_map(|item| {
             let terminal_view = item.act_as::<TerminalView>(cx)?;
             let terminal = terminal_view.read(cx).terminal().read(cx);
-            if terminal.task().is_some() || terminal.fyx.is_pseudo() {
-                // fyx: an extension's pseudo-terminal is not restored as a shell
+            if terminal.task().is_some() || terminal.fyx.origin().is_some() {
+                // fyx: an extension's terminal (pseudo or created) is not restored as a shell
                 None
             } else {
                 let id = item.item_id().as_u64();

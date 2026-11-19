@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# fyx: keep the cargo target dirs on this machine from growing without bound.
+#
+# Cargo never deletes old rlib and test-binary hashes, so every upstream merge or feature change
+# leaves a second copy of most of a target behind. For each target dir that no process is using,
+# this runs `cargo sweep --time 2` (files not touched in 2 days) and then script/fyx-prune-target
+# (superseded test and bin hashes). Then it prints the free space on D: and E:, with a WARN line
+# when D: is under 150 GB or E: under 40 GB.
+#
+# Usage: script/fyx-disk-guard [TARGET_DIR]...
+# With no arguments it takes the Windows dev box's targets (tasks/W0-integrator.md). A missing
+# dir is skipped. "In use" is fyx-prune-target's check: a busy dir is reported and left alone.
+# Windows-only (Git Bash), like fyx-prune-target.
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+targets=("$@")
+if [[ ${#targets[@]} -eq 0 ]]; then
+    targets=(
+        /d/fyx-targets-cold/main
+        /d/fyx-targets-cold/w1
+        /d/fyx-targets-cold/w3
+        /d/fyx-targets-cold/w4
+        /e/fyx-targets/w2c
+        /e/fyx-targets/w2c-light
+    )
+fi
+
+have_sweep=0
+if cargo sweep --version >/dev/null 2>&1; then
+    have_sweep=1
+else
+    echo "disk-guard: cargo-sweep is not installed; only fyx-prune-target runs (cargo install --locked cargo-sweep)"
+fi
+
+for dir in "${targets[@]}"; do
+    if [[ ! -d "$dir" ]]; then
+        echo "disk-guard: $dir: missing, skipped"
+        continue
+    fi
+    # fyx-prune-target refuses (exit 1) while any build tool or test binary refers to the dir.
+    if ! script/fyx-prune-target --dry-run "$dir" >/dev/null 2>&1; then
+        echo "disk-guard: $dir: in use, skipped"
+        continue
+    fi
+    if [[ $have_sweep -eq 1 ]]; then
+        # cargo-sweep finds the target dir through `cargo metadata` of a project, which honours
+        # CARGO_TARGET_DIR; this checkout's manifest stands in for every worktree's.
+        echo "disk-guard: $dir: cargo sweep --time 2"
+        CARGO_TARGET_DIR="$(cygpath -w "$dir")" cargo sweep --time 2 . 2>&1 | tail -2
+    fi
+    echo "disk-guard: $dir: fyx-prune-target"
+    script/fyx-prune-target "$dir" 2>&1 | tail -1
+done
+
+free_gb() {
+    powershell -NoProfile -Command "[math]::Round((Get-Volume $1 -ErrorAction SilentlyContinue).SizeRemaining/1GB,1)" 2>/dev/null | tr -d '\r'
+}
+d_free="$(free_gb D)"
+e_free="$(free_gb E)"
+echo "disk-guard: free D: ${d_free:-?} GB, E: ${e_free:-?} GB"
+if [[ -n "$d_free" ]] && awk "BEGIN { exit !($d_free < 150) }"; then
+    echo "disk-guard: WARN: D: has ${d_free} GB free (under 150 GB)"
+fi
+if [[ -n "$e_free" ]] && awk "BEGIN { exit !($e_free < 40) }"; then
+    echo "disk-guard: WARN: E: has ${e_free} GB free (under 40 GB)"
+fi

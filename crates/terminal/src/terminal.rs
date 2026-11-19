@@ -1115,6 +1115,12 @@ impl TerminalBuilder {
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
         let no_pty = HeadlessTerminal::is_enabled(cx);
+        terminal_ext::apply_env_hook(
+            &mut env,
+            working_directory.as_deref(),
+            is_remote_terminal,
+            cx,
+        ); // fyx: accounts, terminal:env
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
@@ -2514,6 +2520,17 @@ impl Terminal {
     }
 
     ///Paste text into the terminal
+    /// fyx: whether the program has bracketed paste on, read live from any thread (a hidden tab's
+    /// `last_content` is stale). For `fyx:ui` paste into a tool.
+    pub fn fyx_bracketed_paste(&self) -> impl Fn() -> bool + Send + Sync + use<> {
+        let term = self.term.clone();
+        move || {
+            term.lock()
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+        }
+    }
+
     pub fn paste(&mut self, text: &str) {
         let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
             format!("{}{}{}", "\x1b[200~", text.replace('\x1b', ""), "\x1b[201~")

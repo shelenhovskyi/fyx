@@ -1,0 +1,64 @@
+id = "fyx-gemini-cli"
+name = "Gemini CLI"
+description = "Runs Gemini CLI in Fyx's terminal as its IDE companion: your open files and selection as context, and Gemini's edits reviewed hunk by hunk in agent review (fyx:ui 0.4 only)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Plan 5.16, docs/fyx/wit-0.4/design.md "The first extensions". It follows Gemini CLI's documented
+# IDE companion spec (docs/ide-integration/ide-companion-spec.md), checked against the CLI's
+# source; the compat test pins Gemini CLI 0.69.0 (src/compat/README.md). It exists to show that
+# the 0.4 kit is general: what this manifest cannot say yet is listed there as gaps.
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+capabilities = [
+    "ui:panel",
+    # The "Gemini CLI" entry in the terminal panel's "+" menu (T1).
+    "terminal:profiles",
+    # GEMINI_CLI_IDE_SERVER_PORT, which picks this window when several have the workspace (T2).
+    "terminal:env",
+    # The companion's MCP server over streamable HTTP (T2).
+    "network:listen",
+    # gemini-ide-server-<pid>-<port>.json, how the CLI finds that server (T2).
+    "fs:discovery-file",
+    # `openDiff` becomes a proposal in agent review (T1).
+    "review:propose",
+    # `ide/contextUpdate` from the open files and selection.
+    "context:editor",
+]
+
+[[fyx_ui.terminal_profiles]]
+id = "gemini"
+name = "Gemini CLI"
+icon = "sparkle"
+program = "gemini"
+cwd = "worktree"
+# The user picks the account (GEMINI_CLI_HOME) for each terminal.
+account_tool = "gemini"
+
+[fyx_ui.terminal_env]
+vars = { GEMINI_CLI_IDE_SERVER_PORT = "${listen.ide.port}" }
+scope = "profiles"
+reason = "Tells Gemini CLI which Fyx window's IDE server to use."
+
+# The CLI posts to http://127.0.0.1:<port>/mcp with `Authorization: Bearer <authToken>`.
+[[fyx_ui.listeners]]
+name = "ide"
+protocol = "mcp-streamable-http"
+auth = { bearer = true }
+token_in_env = false
+reason = "Lets Gemini CLI in your terminal read your open files and propose edits."
+
+# The CLI wants {port: number, workspacePath: "<root>:<root>", authToken, ideInfo: {name,
+# displayName}}; without ideInfo it refuses IDE mode outside the editors it knows. The kit
+# cannot write a number, a nested object or a delimiter-joined list yet. The spec's POSIX dir,
+# gemini-ide-<uid>, puts a placeholder inside a folder name, which the kit refuses. So this
+# uses ${tmp}/gemini/ide, which the CLI reads on every OS (on Windows it is the spec's dir; on
+# POSIX it is the CLI's fallback). See the gaps in src/compat/README.md.
+[[fyx_ui.discovery_files]]
+listener = "ide"
+dir = "${tmp}/gemini/ide"
+name = "gemini-ide-server-${pid}-${port}.json"
+content = { port = "${port}", workspacePath = "${worktrees}", authToken = "${token}" }
+reason = "Gemini CLI finds Fyx's IDE server through this file."

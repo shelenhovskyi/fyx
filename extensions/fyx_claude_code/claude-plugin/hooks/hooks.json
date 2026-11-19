@@ -1,0 +1,84 @@
+{
+  "description": "Reports Claude's session, turns, tools and waits to Fyx through fyx-relay. Without FYX_RELAY (outside Fyx) each hook runs `true` and exits 0.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/user-prompt",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/pre-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/post-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/notification",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/session-end",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

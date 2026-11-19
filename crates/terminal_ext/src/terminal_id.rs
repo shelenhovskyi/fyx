@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use rand::TryRngCore as _;
 
+use crate::env_hook::{ACCOUNT_CHOICE_ENV, AccountBadge, PARKED_ACCOUNTS_ENV, decode_badges};
 use crate::inbox::Inbox;
 use crate::osc::OscEvent;
 use crate::status::{ExtensionStatus, StatusModel, TerminalStatus};
@@ -25,7 +26,16 @@ pub const TERMINAL_TOKEN_ENV: &str = "FYX_TERMINAL_TOKEN";
 ///
 /// `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set by Claude Desktop and turns off Claude Code's OSC 7501
 /// status reports, so a Fyx started from there would never show Claude's state.
-pub const BLANKED_INHERITED_ENV: &[&str] = &["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"];
+pub const BLANKED_INHERITED_ENV: &[&str] = &[
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    PARKED_TERMINAL_ENV,
+    ACCOUNT_CHOICE_ENV,
+    PARKED_ACCOUNTS_ENV,
+];
+
+/// Env entry naming a [`ParkedTerminal`]. [`TerminalExt::insert_env`] removes it, so the program
+/// never sees it.
+pub const PARKED_TERMINAL_ENV: &str = "FYX_PARKED_TERMINAL";
 
 /// Process-unique id of a terminal. Never reused while Fyx runs; not meaningful across restarts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,11 +64,7 @@ pub struct TerminalToken(String);
 
 impl TerminalToken {
     fn generate() -> Self {
-        let mut bytes = [0u8; 32];
-        OsRng
-            .try_fill_bytes(&mut bytes)
-            .expect("the OS random number generator failed");
-        Self(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        Self(random_hex())
     }
 
     pub fn expose(&self) -> &str {
@@ -70,6 +76,14 @@ impl fmt::Debug for TerminalToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TerminalToken(..)")
     }
+}
+
+fn random_hex() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the OS random number generator failed");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 static TOKENS: LazyLock<Mutex<HashMap<TerminalToken, TerminalId>>> =
@@ -110,6 +124,17 @@ impl fmt::Debug for Pseudo {
     }
 }
 
+/// The raw output of a created terminal (`fyx:ui` §B.3): its extension reads every byte its
+/// program writes, from the first one, as the pty wrote it.
+pub trait RawTap: Send + Sync + 'static {
+    /// Called on the pty's IO thread with the bytes of one read; must only queue.
+    fn output(&self, bytes: &[u8]);
+    /// The program is gone: its exit code, or `None` for a signal or a program that never
+    /// started. May be called more than once (the pty closing, then the terminal's state); only
+    /// the first call counts.
+    fn finished(&self, code: Option<i32>);
+}
+
 /// Which extension a terminal belongs to, for the tab's source line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionOrigin {
@@ -141,6 +166,50 @@ pub(crate) struct Shared {
     pub(crate) inbox: Mutex<Inbox>,
     pub(crate) status: Mutex<StatusModel>,
     pub(crate) origin: Mutex<Option<ExtensionOrigin>>,
+    pub(crate) accounts: Mutex<Vec<AccountBadge>>,
+    pub(crate) raw_tap: Option<Tap>,
+}
+
+pub(crate) struct Tap(pub(crate) Arc<dyn RawTap>);
+
+impl fmt::Debug for Tap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Tap(..)")
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // The terminal and its pty are both gone; normally the pty reported the exit already.
+        if let Some(Tap(tap)) = &self.raw_tap {
+            tap.finished(None);
+        }
+    }
+}
+
+static PARKED: LazyLock<Mutex<HashMap<String, TerminalExt>>> = LazyLock::new(Default::default);
+
+/// A [`TerminalExt`] waiting for `TerminalBuilder` to pick it up in [`TerminalExt::insert_env`].
+/// Put [`ParkedTerminal::env`] into the builder's env. Dropping this drops the state if the
+/// builder has not taken it.
+#[derive(Debug)]
+pub struct ParkedTerminal {
+    key: String,
+}
+
+impl ParkedTerminal {
+    /// The env entry that tells `insert_env` to use the parked state.
+    pub fn env(&self) -> (String, String) {
+        (PARKED_TERMINAL_ENV.to_owned(), self.key.clone())
+    }
+}
+
+impl Drop for ParkedTerminal {
+    fn drop(&mut self) {
+        // Dropped outside the lock: the state's drop may call its tap.
+        let parked = lock(&PARKED).remove(&self.key);
+        drop(parked);
+    }
 }
 
 impl TerminalExt {
@@ -158,6 +227,24 @@ impl TerminalExt {
             extension: extension.to_owned(),
         }));
         this
+    }
+
+    /// For a created terminal (§B.3): an id and a token like any pty terminal, the extension as
+    /// its origin, and `tap` sees every byte of its output. [`Self::park`] it and let
+    /// `TerminalBuilder` pick it up, so the tap is on the pty before the program starts.
+    pub fn created(extension: &str, tap: Arc<dyn RawTap>) -> Self {
+        let this = Self::with_parts(Some(TerminalToken::generate()), Some(Tap(tap)));
+        this.set_origin(Some(ExtensionOrigin::Created {
+            extension: extension.to_owned(),
+        }));
+        this
+    }
+
+    /// Parks this state for the `TerminalBuilder` whose env carries [`ParkedTerminal::env`].
+    pub fn park(self) -> ParkedTerminal {
+        let key = random_hex();
+        lock(&PARKED).insert(key.clone(), self);
+        ParkedTerminal { key }
     }
 
     pub fn is_pseudo(&self) -> bool {
@@ -193,10 +280,16 @@ impl TerminalExt {
         *lock(&self.shared.origin) = origin;
     }
 
-    /// For local pty terminals: allocates the id and token and writes Fyx's variables into the
-    /// terminal's environment.
+    /// For local pty terminals: allocates the id and token (or takes the [`ParkedTerminal`] the
+    /// env names) and writes Fyx's variables into the terminal's environment.
     pub fn insert_env<S: BuildHasher>(env: &mut HashMap<String, String, S>) -> Self {
-        let this = Self::with_token(Some(TerminalToken::generate()));
+        let parked = env
+            .remove(PARKED_TERMINAL_ENV)
+            .and_then(|key| lock(&PARKED).remove(&key));
+        let this = parked.unwrap_or_else(|| Self::with_token(Some(TerminalToken::generate())));
+        if let Some(badges) = env.remove(PARKED_ACCOUNTS_ENV) {
+            *lock(&this.shared.accounts) = decode_badges(&badges);
+        }
         env.insert(TERMINAL_ID_ENV.to_owned(), this.id.to_string());
         if let Some(token) = &this.token {
             env.insert(TERMINAL_TOKEN_ENV.to_owned(), token.expose().to_owned());
@@ -210,6 +303,10 @@ impl TerminalExt {
     }
 
     fn with_token(token: Option<TerminalToken>) -> Self {
+        Self::with_parts(token, None)
+    }
+
+    fn with_parts(token: Option<TerminalToken>, raw_tap: Option<Tap>) -> Self {
         let id = TerminalId::next();
         if let Some(token) = &token {
             TOKENS
@@ -224,6 +321,8 @@ impl TerminalExt {
                 inbox: Mutex::default(),
                 status: Mutex::default(),
                 origin: Mutex::default(),
+                accounts: Mutex::default(),
+                raw_tap,
             }),
             pseudo: None,
         }
@@ -251,6 +350,11 @@ impl TerminalExt {
             id: self.id,
             shared: self.shared.clone(),
         }
+    }
+
+    /// The account profiles the terminal was started with (design §C.6), for its tab.
+    pub fn accounts(&self) -> Vec<AccountBadge> {
+        lock(&self.shared.accounts).clone()
     }
 
     /// The user has seen the terminal (it got focus).
@@ -332,6 +436,64 @@ mod tests {
 
         drop(ext);
         assert_eq!(terminal_for_token(&token), None);
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        output: Mutex<Vec<u8>>,
+        finished: Mutex<Vec<Option<i32>>>,
+    }
+
+    impl RawTap for Recorder {
+        fn output(&self, bytes: &[u8]) {
+            lock(&self.output).extend_from_slice(bytes);
+        }
+
+        fn finished(&self, code: Option<i32>) {
+            lock(&self.finished).push(code);
+        }
+    }
+
+    #[test]
+    fn insert_env_takes_a_parked_terminal_and_removes_its_key() {
+        let tap = Arc::new(Recorder::default());
+        let created = TerminalExt::created("acme", tap.clone());
+        let id = created.id();
+        let parked = created.park();
+        let mut env = HashMap::from([parked.env()]);
+        let ext = TerminalExt::insert_env(&mut env);
+        assert_eq!(ext.id(), id);
+        assert!(!env.contains_key(PARKED_TERMINAL_ENV));
+        assert_eq!(env[TERMINAL_ID_ENV], id.to_string());
+        assert_eq!(
+            terminal_for_token(&env[TERMINAL_TOKEN_ENV]),
+            Some(id),
+            "a created terminal has a token like any pty terminal"
+        );
+        assert_eq!(
+            ext.origin(),
+            Some(ExtensionOrigin::Created {
+                extension: "acme".into()
+            })
+        );
+
+        // Taken once: the same key again makes a fresh terminal.
+        let mut again = HashMap::from([parked.env()]);
+        assert_ne!(TerminalExt::insert_env(&mut again).id(), id);
+        drop(parked);
+        assert!(lock(&tap.finished).is_empty());
+        drop(ext);
+        assert_eq!(*lock(&tap.finished), [None]);
+    }
+
+    #[test]
+    fn dropping_an_unused_parked_terminal_finishes_its_tap() {
+        let tap = Arc::new(Recorder::default());
+        let parked = TerminalExt::created("acme", tap.clone()).park();
+        let (_, key) = parked.env();
+        drop(parked);
+        assert!(!lock(&PARKED).contains_key(&key));
+        assert_eq!(*lock(&tap.finished), [None]);
     }
 
     #[test]

@@ -12,11 +12,13 @@ use futures::channel::mpsc::UnboundedSender;
 use terminal_ext::inbox::{Rate, RateLimiter};
 use terminal_ext::{ExtensionStatus, OutputSanitizer, StatusHandle, StatusSource, TerminalId, osc};
 use ui_ext::terminal::{
-    CreateCommand, MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND, MAX_STATUS_UPDATES_PER_SECOND,
-    MAX_WRITE_OUTPUT_BYTES, PseudoRequest, StatusState, TerminalError, TerminalEvent,
-    TerminalHandle, TerminalHost, TerminalInfo, TerminalOrigin, TerminalSink, TerminalStatus,
+    CreateCommand, MAX_CREATED_TERMINALS, MAX_PASTE_BYTES, MAX_PSEUDO_OUTPUT_BYTES_PER_SECOND,
+    MAX_SEND_INPUT_BYTES, MAX_STATUS_UPDATES_PER_SECOND, MAX_WRITE_OUTPUT_BYTES, PseudoRequest,
+    StatusState, TerminalError, TerminalEvent, TerminalHandle, TerminalHost, TerminalInfo,
+    TerminalOrigin, TerminalSink, TerminalStatus,
 };
 
+use crate::created::{CreatedOpen, OutputTap};
 use crate::pseudo::{self, PseudoOpen};
 
 /// The title another extension sees for a terminal that is not its own (W2c, 282e99d69a).
@@ -31,8 +33,45 @@ pub(crate) enum Command {
     OpenPseudo(PseudoOpen),
     /// Sanitised output for a pseudo-terminal, at most [`MAX_WRITE_OUTPUT_BYTES`].
     Output(TerminalId, Vec<u8>),
+    /// Start a created terminal's program and show its tab.
+    OpenCreated(CreatedOpen),
+    /// An extension's input for its created terminal, at most [`MAX_SEND_INPUT_BYTES`].
+    Input(TerminalId, Vec<u8>),
+    /// A bracketed paste ([`paste_bytes`]); dropped if the program turned bracketed paste off.
+    Paste(TerminalId, Vec<u8>),
     /// Close an extension's terminal (its tab, or the one the host holds for a panel).
     Close(TerminalId),
+    /// An extension's profiles and env; an empty one removes them.
+    Integration(String, crate::TerminalIntegration),
+}
+
+/// Whether a terminal's program has bracketed paste on, read live from any thread.
+pub(crate) type PasteProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// §B.11: the text without ESC or any other control character except tab and newline, at most
+/// [`MAX_PASTE_BYTES`] of it, between the bracketed-paste markers. `None` when nothing is left.
+pub(crate) fn paste_bytes(text: &str) -> Option<Vec<u8>> {
+    let mut clean = String::with_capacity(text.len().min(MAX_PASTE_BYTES));
+    for char in text
+        .chars()
+        .filter(|char| !char.is_control() || matches!(char, '\t' | '\n'))
+    {
+        if clean.len() + char.len_utf8() > MAX_PASTE_BYTES {
+            break;
+        }
+        clean.push(char);
+    }
+    if clean.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(PASTE_START.len() + clean.len() + PASTE_END.len());
+    bytes.extend_from_slice(PASTE_START);
+    bytes.extend_from_slice(clean.as_bytes());
+    bytes.extend_from_slice(PASTE_END);
+    Some(bytes)
 }
 
 /// The output side of a pseudo-terminal, owned by its extension.
@@ -66,6 +105,20 @@ struct Known {
     /// The status last reported to observers.
     reported: Option<TerminalStatus>,
     pseudo: Option<Arc<PseudoOutput>>,
+    /// A created terminal's extension. It hears of the end through `Exited`, from the pty.
+    created: Option<String>,
+    /// Set by the main thread once the terminal has a pty.
+    paste_probe: Option<PasteProbe>,
+}
+
+impl Known {
+    /// The extension whose own terminal this is: a pseudo or created one.
+    fn owning_extension(&self) -> Option<&str> {
+        self.pseudo
+            .as_ref()
+            .map(|pseudo| pseudo.extension.as_str())
+            .or(self.created.as_deref())
+    }
 }
 
 #[derive(Default)]
@@ -181,6 +234,14 @@ impl Known {
 }
 
 impl HostFront {
+    /// An extension's profiles and granted `terminal:env` (design §B.1, §B.4), set by the runtime
+    /// on every load; an empty integration removes them, and so does [`TerminalHost::close_all`].
+    /// Terminals already open keep their environment.
+    pub fn set_integration(&self, ext: &str, integration: crate::TerminalIntegration) {
+        self.send(Command::Integration(ext.to_owned(), integration))
+            .ok();
+    }
+
     pub(crate) fn new(commands: UnboundedSender<Command>) -> Self {
         Self {
             state: Mutex::default(),
@@ -218,6 +279,8 @@ impl HostFront {
                 cwd,
                 reported,
                 pseudo: None,
+                created: None,
+                paste_probe: None,
             };
             let State {
                 terminals,
@@ -279,7 +342,7 @@ impl HostFront {
             let Some(known) = state.terminals.remove(&id) else {
                 return;
             };
-            let owner = known.pseudo.as_ref().map(|pseudo| pseudo.extension.clone());
+            let owner = known.owning_extension().map(str::to_owned);
             let mut events: Vec<_> = known
                 .pseudo
                 .iter()
@@ -297,6 +360,44 @@ impl HostFront {
             events
         };
         deliver(events);
+    }
+
+    /// Main thread: a created terminal's pty is up; `paste` may now check its mode.
+    pub(crate) fn set_paste_probe(&self, id: TerminalId, probe: PasteProbe) {
+        if let Some(known) = self.lock().terminals.get_mut(&id) {
+            known.paste_probe = Some(probe);
+        }
+    }
+
+    /// The pseudo or created terminal behind `ext`'s `handle`, if `ext` owns it.
+    fn own_terminal(&self, ext: &str, handle: TerminalHandle) -> Result<TerminalId, TerminalError> {
+        let state = self.lock();
+        let id = *state
+            .extensions
+            .get(ext)
+            .and_then(|extension| extension.handles.get(&handle))
+            .ok_or(TerminalError::NotFound)?;
+        state
+            .terminals
+            .get(&id)
+            .filter(|known| known.owning_extension() == Some(ext))
+            .map(|_| id)
+            .ok_or(TerminalError::NotFound)
+    }
+
+    /// The created terminal behind `ext`'s `handle`, if `ext` owns it.
+    fn own_created(&self, ext: &str, handle: TerminalHandle) -> Result<TerminalId, TerminalError> {
+        let id = self.own_terminal(ext, handle)?;
+        let created = self
+            .lock()
+            .terminals
+            .get(&id)
+            .is_some_and(|known| known.created.is_some());
+        if created {
+            Ok(id)
+        } else {
+            Err(TerminalError::NotFound)
+        }
     }
 
     /// The pseudo-terminal behind `ext`'s `handle`, if `ext` owns it.
@@ -322,7 +423,7 @@ impl HostFront {
 
     /// For `ui_ext_host`'s `terminal` node: the terminal behind `ext`'s own `handle`.
     pub(crate) fn owned_terminal(&self, ext: &str, handle: TerminalHandle) -> Option<TerminalId> {
-        self.own_pseudo(ext, handle).ok().map(|(id, _)| id)
+        self.own_terminal(ext, handle).ok()
     }
 
     fn send(&self, command: Command) -> Result<(), TerminalError> {
@@ -365,6 +466,8 @@ impl TerminalHost for HostFront {
                 title: request.title.clone(),
                 cwd: None,
                 reported: None,
+                created: None,
+                paste_probe: None,
                 pseudo: Some(Arc::new(PseudoOutput {
                     extension: ext.to_owned(),
                     handle,
@@ -400,13 +503,74 @@ impl TerminalHost for HostFront {
 
     fn create(
         &self,
-        _ext: &str,
-        _command: CreateCommand,
-        _sink: TerminalSink,
+        ext: &str,
+        command: CreateCommand,
+        sink: TerminalSink,
     ) -> Result<TerminalHandle, TerminalError> {
-        Err(TerminalError::Unavailable(
-            "created terminals are not implemented yet".into(),
-        ))
+        let (tap, woken) = OutputTap::new();
+        let terminal = terminal_ext::TerminalExt::created(ext, tap.clone());
+        let id = terminal.id();
+        let title = command.title.clone().unwrap_or_else(|| {
+            command.program.file_stem().map_or_else(
+                || command.program.to_string_lossy().into_owned(),
+                |stem| stem.to_string_lossy().into_owned(),
+            )
+        });
+        let (handle, events) = {
+            let mut state = self.lock();
+            let State {
+                terminals,
+                extensions,
+            } = &mut *state;
+            let created = terminals
+                .values()
+                .filter(|known| known.created.as_deref() == Some(ext))
+                .count();
+            if created >= MAX_CREATED_TERMINALS {
+                return Err(TerminalError::Unavailable(format!(
+                    "an extension has at most {MAX_CREATED_TERMINALS} created terminals"
+                )));
+            }
+            let handle = extensions.entry(ext.to_owned()).or_default().handle_for(id);
+            let known = Known {
+                status: terminal.status_handle(),
+                owner: Some(Owner {
+                    extension: ext.to_owned(),
+                    origin: TerminalOrigin::Created,
+                    profile_name: None,
+                }),
+                title,
+                cwd: Some(command.cwd.to_string_lossy().into_owned()),
+                reported: None,
+                pseudo: None,
+                created: Some(ext.to_owned()),
+                paste_probe: None,
+            };
+            let events: Vec<_> = extensions
+                .iter_mut()
+                .filter_map(|(name, extension)| {
+                    let sink = extension.observer.clone()?;
+                    let handle = extension.handle_for(id);
+                    Some((sink, TerminalEvent::Created(known.info(name, handle))))
+                })
+                .collect();
+            terminals.insert(id, known);
+            (handle, events)
+        };
+        if let Err(error) = self.send(Command::OpenCreated(CreatedOpen {
+            id,
+            parked: terminal.park(),
+            tap,
+            woken,
+            sink,
+            handle,
+            command,
+        })) {
+            self.terminal_closed(id);
+            return Err(error);
+        }
+        deliver(events);
+        Ok(handle)
     }
 
     fn write_output(
@@ -438,22 +602,42 @@ impl TerminalHost for HostFront {
 
     fn send_input(
         &self,
-        _ext: &str,
-        _handle: TerminalHandle,
-        _bytes: Vec<u8>,
+        ext: &str,
+        handle: TerminalHandle,
+        bytes: Vec<u8>,
     ) -> Result<(), TerminalError> {
-        Err(TerminalError::NotFound)
+        if bytes.len() > MAX_SEND_INPUT_BYTES {
+            return Err(TerminalError::TooLarge(format!(
+                "send-input takes at most {MAX_SEND_INPUT_BYTES} bytes"
+            )));
+        }
+        let id = self.own_created(ext, handle)?;
+        if !bytes.is_empty() {
+            self.send(Command::Input(id, bytes))?;
+        }
+        Ok(())
     }
 
-    fn paste(
-        &self,
-        _ext: &str,
-        _handle: TerminalHandle,
-        _text: String,
-    ) -> Result<(), TerminalError> {
-        Err(TerminalError::Unavailable(
-            "paste is not implemented yet".into(),
-        ))
+    /// Into the extension's created terminals (profile terminals join with P2.4). The import
+    /// checks the user's gesture; the host checks the mode, because a newline outside bracketed
+    /// paste would run a command.
+    fn paste(&self, ext: &str, handle: TerminalHandle, text: String) -> Result<(), TerminalError> {
+        let id = self.own_created(ext, handle)?;
+        let probe = self
+            .lock()
+            .terminals
+            .get(&id)
+            .and_then(|known| known.paste_probe.clone())
+            .ok_or_else(|| TerminalError::Unavailable("the terminal is still starting".into()))?;
+        if !probe() {
+            return Err(TerminalError::Unavailable(
+                "the program in the terminal has bracketed paste off".into(),
+            ));
+        }
+        match paste_bytes(&text) {
+            Some(bytes) => self.send(Command::Paste(id, bytes)),
+            None => Ok(()),
+        }
     }
 
     fn set_status(
@@ -501,8 +685,8 @@ impl TerminalHost for HostFront {
     }
 
     fn close(&self, ext: &str, handle: TerminalHandle) {
-        match self.own_pseudo(ext, handle) {
-            Ok((id, _)) => {
+        match self.own_terminal(ext, handle) {
+            Ok(id) => {
                 self.send(Command::Close(id)).ok();
             }
             // A user terminal stays open: the extension only drops its status on it.
@@ -547,17 +731,17 @@ impl TerminalHost for HostFront {
             let owned: Vec<_> = state
                 .terminals
                 .iter()
-                .filter(|(_, known)| {
-                    known
-                        .pseudo
-                        .as_ref()
-                        .is_some_and(|pseudo| pseudo.extension == ext)
-                })
+                .filter(|(_, known)| known.owning_extension() == Some(ext))
                 .map(|(id, _)| *id)
                 .collect();
             (statuses, owned, extension)
         };
         drop(extension);
+        self.send(Command::Integration(
+            ext.to_owned(),
+            crate::TerminalIntegration::default(),
+        ))
+        .ok();
         for id in owned {
             self.send(Command::Close(id)).ok();
         }
@@ -828,6 +1012,190 @@ mod tests {
             .open_pseudo("acme", pseudo_request("again"), sink)
             .unwrap();
         assert_ne!(next, handle);
+    }
+
+    fn create_command(title: Option<&str>) -> CreateCommand {
+        CreateCommand {
+            program: std::path::PathBuf::from("/tools/codex.exe"),
+            args: vec!["--quiet".into()],
+            cwd: std::path::PathBuf::from("/work"),
+            title: title.map(str::to_owned),
+            env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn created_terminals_belong_to_their_extension_and_take_its_input() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let (observer, observed) = recorder();
+        host.observe("other", Some(observer));
+
+        let (sink, owner_events) = recorder();
+        let handle = host.create("acme", create_command(None), sink).unwrap();
+        let Ok(Command::OpenCreated(open)) = queued.try_recv() else {
+            panic!("no open command");
+        };
+        assert_eq!(open.handle, handle);
+        let id = open.id;
+        // The builder picks up the parked state: the tap is on the pty from the first byte.
+        let mut env = HashMap::from([open.parked.env()]);
+        let ext = TerminalExt::insert_env(&mut env);
+        assert_eq!(ext.id(), id);
+        assert!(ext.token().is_some());
+        assert_eq!(
+            ext.origin(),
+            Some(terminal_ext::ExtensionOrigin::Created {
+                extension: "acme".into()
+            })
+        );
+        assert!(matches!(
+            observed.lock().unwrap().as_slice(),
+            [TerminalEvent::Created(info)] if info.title == REDACTED && info.origin == TerminalOrigin::User
+        ));
+        let (own_observer, _) = recorder();
+        let mine = host.observe("acme", Some(own_observer));
+        assert_eq!(
+            (mine[0].handle, mine[0].origin, mine[0].title.as_str()),
+            (handle, TerminalOrigin::Created, "codex")
+        );
+        assert_eq!(mine[0].cwd.as_deref(), Some("/work"));
+
+        // Input: the owner's only, one call's worth at most.
+        host.send_input("acme", handle, b"y\r".to_vec()).unwrap();
+        assert!(
+            matches!(queued.try_recv(), Ok(Command::Input(input_id, bytes)) if input_id == id && bytes == b"y\r")
+        );
+        assert_eq!(
+            host.send_input("other", TerminalHandle(1), b"x".to_vec()),
+            Err(TerminalError::NotFound)
+        );
+        assert!(matches!(
+            host.send_input("acme", handle, vec![b'x'; MAX_SEND_INPUT_BYTES + 1]),
+            Err(TerminalError::TooLarge(_))
+        ));
+        // A created terminal is not a pseudo-terminal, and a pseudo-terminal takes no input.
+        assert_eq!(
+            host.write_output("acme", handle, b"x".to_vec()),
+            Err(TerminalError::NotFound)
+        );
+        let (pseudo_sink, _) = recorder();
+        let pseudo = host
+            .open_pseudo("acme", pseudo_request("p"), pseudo_sink)
+            .unwrap();
+        assert_eq!(
+            host.send_input("acme", pseudo, b"x".to_vec()),
+            Err(TerminalError::NotFound)
+        );
+        while queued.try_recv().is_ok() {}
+
+        // Closing asks the main thread; the owner hears `Exited` from the pty, not `Closed`.
+        host.close("acme", handle);
+        assert!(matches!(queued.try_recv(), Ok(Command::Close(close_id)) if close_id == id));
+        host.terminal_closed(id);
+        assert!(owner_events.lock().unwrap().is_empty());
+        assert!(matches!(
+            observed.lock().unwrap().last(),
+            Some(TerminalEvent::Closed(TerminalHandle(1)))
+        ));
+        assert_eq!(
+            host.send_input("acme", handle, b"x".to_vec()),
+            Err(TerminalError::NotFound)
+        );
+        drop(ext);
+    }
+
+    #[test]
+    fn pastes_are_bracketed_clean_and_capped() {
+        assert_eq!(
+            paste_bytes("@src/main.rs#L5-10\tok\n\x1b[201~rm -rf /\r\x07\u{9b}x").unwrap(),
+            b"\x1b[200~@src/main.rs#L5-10\tok\n[201~rm -rf /x\x1b[201~"
+        );
+        assert_eq!(paste_bytes("\x1b\x03\r"), None);
+        let long = "é".repeat(MAX_PASTE_BYTES);
+        let bytes = paste_bytes(&long).unwrap();
+        let inner = &bytes[PASTE_START.len()..bytes.len() - PASTE_END.len()];
+        assert!(inner.len() <= MAX_PASTE_BYTES && inner.len() > MAX_PASTE_BYTES - 2);
+        assert!(std::str::from_utf8(inner).is_ok());
+    }
+
+    #[test]
+    fn paste_goes_only_into_an_own_created_terminal_with_bracketed_paste_on() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let (sink, _) = recorder();
+        let handle = host.create("acme", create_command(None), sink).unwrap();
+        let Ok(Command::OpenCreated(open)) = queued.try_recv() else {
+            panic!("no open command");
+        };
+        assert!(matches!(
+            host.paste("acme", handle, "x".into()),
+            Err(TerminalError::Unavailable(_))
+        ));
+        let bracketed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        host.set_paste_probe(open.id, {
+            let bracketed = bracketed.clone();
+            Arc::new(move || bracketed.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        assert!(matches!(
+            host.paste("acme", handle, "x".into()),
+            Err(TerminalError::Unavailable(_))
+        ));
+        bracketed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            host.paste("other", handle, "x".into()),
+            Err(TerminalError::NotFound)
+        );
+        host.paste("acme", handle, "x\n".into()).unwrap();
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(Command::Paste(id, bytes)) if id == open.id && bytes == b"\x1b[200~x\n\x1b[201~"
+        ));
+        let (pseudo_sink, _) = recorder();
+        let pseudo = host
+            .open_pseudo("acme", pseudo_request("p"), pseudo_sink)
+            .unwrap();
+        assert_eq!(
+            host.paste("acme", pseudo, "x".into()),
+            Err(TerminalError::NotFound)
+        );
+    }
+
+    #[test]
+    fn an_extension_has_at_most_8_created_terminals_and_close_all_ends_them() {
+        let (commands, mut queued) = mpsc::unbounded();
+        let host = HostFront::new(commands);
+        let (sink, _) = recorder();
+        for _ in 0..MAX_CREATED_TERMINALS {
+            host.create("acme", create_command(Some("t")), sink.clone())
+                .unwrap();
+        }
+        assert!(matches!(
+            host.create("acme", create_command(None), sink.clone()),
+            Err(TerminalError::Unavailable(_))
+        ));
+        host.create("other", create_command(None), sink).unwrap();
+        let mut opened = Vec::new();
+        while let Ok(command) = queued.try_recv() {
+            if let Command::OpenCreated(open) = command {
+                opened.push(open);
+            }
+        }
+        assert_eq!(opened.len(), MAX_CREATED_TERMINALS + 1);
+        host.close_all("acme");
+        let mut closed: Vec<_> = std::iter::from_fn(|| queued.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::Close(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        closed.sort();
+        let mut acme: Vec<_> = opened[..MAX_CREATED_TERMINALS]
+            .iter()
+            .map(|open| open.id)
+            .collect();
+        acme.sort();
+        assert_eq!(closed, acme);
     }
 
     #[test]

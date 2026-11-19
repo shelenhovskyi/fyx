@@ -9,6 +9,7 @@
 //! OSC 7501 support query); nothing in a reply is built from program output.
 
 pub mod decorations;
+pub mod env_hook;
 pub mod inbox;
 pub mod osc;
 mod osc_scan;
@@ -17,15 +18,22 @@ pub mod status;
 mod tee_pty;
 mod terminal_id;
 
-pub use decorations::{TerminalDecorations, set_decorations, tab_indicator};
+pub use decorations::{
+    MenuEntry, TerminalDecorations, new_terminal_menu, set_decorations, tab_indicator,
+};
+pub use env_hook::{
+    ACCOUNT_CHOICE_ENV, AccountBadge, EnvAdditions, EnvRequest, TerminalEnvHook, apply_env_hook,
+    set_env_hook,
+};
 pub use osc::OscEvent;
 pub use osc_scan::{MAX_OSC_PAYLOAD, OscScanner};
 pub use sanitize::OutputSanitizer;
 pub use status::{ExtensionStatus, StatusSource, TerminalStatus};
 pub use tee_pty::{OscObserver, OscReplies, TeePty, tee, tee_with};
 pub use terminal_id::{
-    BLANKED_INHERITED_ENV, ExtensionOrigin, PseudoBackend, StatusHandle, TERMINAL_ID_ENV,
-    TERMINAL_TOKEN_ENV, TerminalExt, TerminalId, TerminalToken, terminal_for_token,
+    BLANKED_INHERITED_ENV, ExtensionOrigin, PARKED_TERMINAL_ENV, ParkedTerminal, PseudoBackend,
+    RawTap, StatusHandle, TERMINAL_ID_ENV, TERMINAL_TOKEN_ENV, TerminalExt, TerminalId,
+    TerminalToken, terminal_for_token,
 };
 
 /// OSC 7501 "Program Status" (rev 0.4, superlogical.com/rex/docs/build/program-status).
