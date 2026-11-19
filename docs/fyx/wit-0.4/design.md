@@ -853,7 +853,7 @@ interface approvals {
 //   terminal-output(tuple<u64, list<u8>, u64 /* dropped bytes */>), terminal-exited(tuple<u64, option<s32>>),
 //   terminal-created(terminal-info), terminal-closed(u64), terminal-status-changed(terminal-info),
 //   terminal-read-done(tuple<u64, result<string, string>>), terminal-write-done(tuple<u64, result<_, string>>),
-//   mcp-call(mcp-call), mcp-initialized(mcp-session), mcp-cancelled(u64), listener-message(tuple<string, u64, string>),
+//   mcp-call(mcp-call), mcp-cancelled(u64), mcp-initialized(mcp-session), listener-message(tuple<string, u64, string>),
 //   listener-request(tuple<u64, string, string, string> /* id, listener, path, body */),
 //   relay-request(tuple<u64, string, option<u64>, list<string>, string>),
 //   review-decided(tuple<u64, result<review-outcome, string>>), context-changed(editor-context),
