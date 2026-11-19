@@ -50,7 +50,7 @@ This is the skeleton with no host dependency:
 - the plugin;
 - the protocol core in plain Rust (`src/ide.rs`, `src/hooks.rs`), tested natively;
 - the compat test ([`src/compat/README.md`](src/compat/README.md)), pinned to Claude Code
-  2.1.326.
+  2.1.326, with transcripts recorded live from that version on 2026-11-19.
 
 The core is wired to the host's `mcp-call`, `relay-request`, `review-decided` and
 `context-changed` events once the SDK has them (plan 5.14).

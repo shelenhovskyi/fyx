@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use crate::hooks::{Channel, Effect, HookInput, Sessions, StatusState};
-use crate::ide::{self, DiffAnswer, IdeCall, Position, ReviewDecision, Roots, TextRange};
+use crate::ide::{
+    self, Diagnostic, DiffAnswer, IdeCall, Position, ReviewDecision, Roots, Severity, TextRange,
+};
 
 pub const FORMAT: &str = "fyx-claude-transcript";
 pub const VERSION: u64 = 1;
@@ -18,10 +20,20 @@ pub const VERSION: u64 = 1;
 pub const PINNED_CLAUDE_CODE: &str = "2.1.326";
 
 /// The transcripts, by file name.
-pub const TRANSCRIPTS: &[(&str, &str)] = &[(
-    "turn-with-diff.jsonl",
-    include_str!("compat/turn-with-diff.jsonl"),
-)];
+pub const TRANSCRIPTS: &[(&str, &str)] = &[
+    (
+        "turn-with-diff.jsonl",
+        include_str!("compat/turn-with-diff.jsonl"),
+    ),
+    (
+        "live-interactive.jsonl",
+        include_str!("compat/live-interactive.jsonl"),
+    ),
+    (
+        "live-print-hooks.jsonl",
+        include_str!("compat/live-print-hooks.jsonl"),
+    ),
+];
 
 /// The first line.
 #[derive(Debug)]
@@ -43,6 +55,54 @@ pub fn replay(text: &str) -> Result<Header, String> {
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty());
     let (_, first) = lines.next().ok_or("an empty transcript")?;
+    let (header, mut replay) = start(first, false)?;
+    for (index, line) in lines {
+        let at = |why: String| format!("line {}: {why}", index + 1);
+        let event: Value = serde_json::from_str(line).map_err(|error| at(error.to_string()))?;
+        replay.step(&event).map_err(at)?;
+    }
+    replay.finish()?;
+    Ok(header)
+}
+
+/// Turns a draft made from a recording into a transcript. The draft has Claude's messages, the
+/// hooks without `expect`, and the `review`, `editor`, `mention` and `diagnostics` events. Each
+/// message the extension produces is written after the event that produced it, and each hook
+/// gets the effects it has now. The draft's `out` lines are dropped, except the host's own
+/// (`initialize`, `tools/list`). Read the result against the recording before committing it:
+/// it states what the extension does, not what Claude accepted.
+pub fn fill(draft: &str) -> Result<String, String> {
+    let mut lines = draft
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty());
+    let (_, first) = lines.next().ok_or("an empty draft")?;
+    let (_, mut replay) = start(first, true)?;
+    let mut out = vec![first.to_owned()];
+    for (index, line) in lines {
+        let at = |why: String| format!("line {}: {why}", index + 1);
+        let mut event: Value = serde_json::from_str(line).map_err(|error| at(error.to_string()))?;
+        if event["t"] == "mcp" && event["dir"] == "out" {
+            let result = &event["msg"]["result"];
+            if result["serverInfo"].is_null() && result["tools"].is_null() {
+                continue;
+            }
+        }
+        replay.step(&event).map_err(at)?;
+        if event["t"] == "hook" {
+            event["expect"] = Value::Array(std::mem::take(&mut replay.last_effects));
+        }
+        out.push(event.to_string());
+        for message in replay.expected_out.drain(..) {
+            out.push(json!({ "t": "mcp", "dir": "out", "msg": message }).to_string());
+        }
+    }
+    replay.finish()?;
+    out.push(String::new());
+    Ok(out.join("\n"))
+}
+
+fn start(first: &str, filling: bool) -> Result<(Header, Replay), String> {
     let header: Value = serde_json::from_str(first).map_err(|error| format!("line 1: {error}"))?;
     let field = |name: &str| {
         header[name]
@@ -62,27 +122,16 @@ pub fn replay(text: &str) -> Result<Header, String> {
     if !matches!(header.mode.as_str(), "interactive" | "print") {
         return Err(format!("line 1: mode {:?}", header.mode));
     }
-    let mut replay = Replay {
+    let replay = Replay {
         roots: PrefixRoot(header.root.clone()),
         sessions: Sessions::default(),
         pending_diffs: BTreeMap::new(),
         expected_out: Vec::new(),
+        diagnostics: Vec::new(),
+        filling,
+        last_effects: Vec::new(),
     };
-    for (index, line) in lines {
-        let at = |why: String| format!("line {}: {why}", index + 1);
-        let event: Value = serde_json::from_str(line).map_err(|error| at(error.to_string()))?;
-        replay.step(&event).map_err(at)?;
-    }
-    if let Some(left) = replay.expected_out.first() {
-        return Err(format!("the extension never sent {left}"));
-    }
-    if !replay.pending_diffs.is_empty() {
-        return Err(format!(
-            "openDiff calls left open: {:?}",
-            replay.pending_diffs.keys()
-        ));
-    }
-    Ok(header)
+    Ok((header, replay))
 }
 
 /// The transcript's one workspace root, as worktree 1.
@@ -113,9 +162,27 @@ struct Replay {
     pending_diffs: BTreeMap<String, String>,
     /// Messages the extension produced that the transcript has not shown yet, in order.
     expected_out: Vec<Value>,
+    /// What the host reports for `getDiagnostics`, by absolute path; set by `diagnostics`.
+    diagnostics: Vec<(String, Vec<Diagnostic>)>,
+    /// [`fill`]: hooks are not checked, and their effects go to `last_effects`.
+    filling: bool,
+    last_effects: Vec<Value>,
 }
 
 impl Replay {
+    fn finish(&self) -> Result<(), String> {
+        if let Some(left) = self.expected_out.first() {
+            return Err(format!("the extension never sent {left}"));
+        }
+        if !self.pending_diffs.is_empty() {
+            return Err(format!(
+                "openDiff calls left open: {:?}",
+                self.pending_diffs.keys()
+            ));
+        }
+        Ok(())
+    }
+
     fn step(&mut self, event: &Value) -> Result<(), String> {
         match event["t"].as_str() {
             Some("mcp") => match event["dir"].as_str() {
@@ -126,6 +193,8 @@ impl Replay {
             Some("hook") => self.hook(event),
             Some("review") => self.review(event),
             Some("editor") => self.editor(event),
+            Some("mention") => self.mention(event),
+            Some("diagnostics") => self.set_diagnostics(event),
             other => Err(format!("unknown event type {other:?}")),
         }
     }
@@ -154,8 +223,16 @@ impl Replay {
             Ok(IdeCall::CloseAllDiffTabs) => {
                 self.respond(&id, Ok(ide::text_result("CLOSED_ALL_DIFF_TABS")));
             }
-            Ok(IdeCall::GetDiagnostics { .. }) => {
-                self.respond(&id, Ok(ide::diagnostics_result(&[])));
+            Ok(IdeCall::GetDiagnostics { file }) => {
+                // One file, or every file; a file the host has nothing for is left out.
+                let only = file.and_then(|file| self.roots.to_absolute(&file));
+                let files: Vec<_> = self
+                    .diagnostics
+                    .iter()
+                    .filter(|(path, _)| only.as_ref().is_none_or(|only| only == path))
+                    .cloned()
+                    .collect();
+                self.respond(&id, Ok(ide::diagnostics_result(&files)));
             }
             Ok(IdeCall::OpenFile { .. }) => {
                 self.respond(&id, Ok(ide::text_result("OK")));
@@ -274,6 +351,49 @@ impl Replay {
         Ok(())
     }
 
+    /// The user sent a file or lines to Claude (`at_mentioned`); `lines` is zero-based.
+    fn mention(&mut self, event: &Value) -> Result<(), String> {
+        let file = worktree_file(event)?;
+        let lines = match event["lines"].as_array().map(Vec::as_slice) {
+            Some([start, end]) => Some((position_number(start)?, position_number(end)?)),
+            _ => None,
+        };
+        let params = ide::at_mentioned(&file, lines, &self.roots)
+            .ok_or("the mention's file is outside the root")?;
+        self.expected_out.push(json!({
+            "jsonrpc": "2.0",
+            "method": "at_mentioned",
+            "params": serde_json::from_str::<Value>(&params).unwrap_or(Value::Null),
+        }));
+        Ok(())
+    }
+
+    /// What the host's diagnostics hold from now on: `files` as `{path, diagnostics}`, each
+    /// diagnostic `{range: {start: [line, column], end}, severity, message, source}`.
+    fn set_diagnostics(&mut self, event: &Value) -> Result<(), String> {
+        let files = event["files"]
+            .as_array()
+            .ok_or("diagnostics without files")?;
+        self.diagnostics = files
+            .iter()
+            .map(|entry| {
+                let file = worktree_file(entry)?;
+                let absolute = self
+                    .roots
+                    .to_absolute(&file)
+                    .ok_or("a diagnostics file outside the root")?;
+                let diagnostics = entry["diagnostics"]
+                    .as_array()
+                    .ok_or("a file without diagnostics")?
+                    .iter()
+                    .map(diagnostic)
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok((absolute, diagnostics))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(())
+    }
+
     /// A relay request; `expect` lists the effects, in [`describe`]'s form.
     fn hook(&mut self, event: &Value) -> Result<(), String> {
         let channel = event["channel"].as_str().ok_or("hook without channel")?;
@@ -283,11 +403,58 @@ impl Replay {
         let roots = &self.roots;
         let effects = self.sessions.apply(&input, |path| roots.to_ref(path));
         let effects: Vec<Value> = effects.iter().map(describe).collect();
+        if self.filling {
+            self.last_effects = effects;
+            return Ok(());
+        }
         let expected = event["expect"].as_array().cloned().unwrap_or_default();
         (effects == expected)
             .then_some(())
             .ok_or_else(|| format!("effects {effects:?}, expected {expected:?}"))
     }
+}
+
+/// `path` as a file of worktree 1.
+fn worktree_file(event: &Value) -> Result<ide::FileRef, String> {
+    Ok(ide::FileRef {
+        worktree: Some(1),
+        path: event["path"].as_str().ok_or("no path")?.to_owned(),
+    })
+}
+
+fn position_number(value: &Value) -> Result<u32, String> {
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!("a line or column, not {value}"))
+}
+
+/// One diagnostic of a `diagnostics` event.
+fn diagnostic(value: &Value) -> Result<Diagnostic, String> {
+    let at = |end: &str| -> Result<Position, String> {
+        Ok(Position {
+            line: position_number(&value["range"][end][0])?,
+            column: position_number(&value["range"][end][1])?,
+        })
+    };
+    Ok(Diagnostic {
+        range: TextRange {
+            start: at("start")?,
+            end: at("end")?,
+        },
+        severity: match value["severity"].as_str() {
+            Some("Error") => Severity::Error,
+            Some("Warning") => Severity::Warning,
+            Some("Information") => Severity::Information,
+            Some("Hint") => Severity::Hint,
+            other => return Err(format!("severity {other:?}")),
+        },
+        message: value["message"]
+            .as_str()
+            .ok_or("a diagnostic without message")?
+            .to_owned(),
+        source: value["source"].as_str().map(str::to_owned),
+    })
 }
 
 /// An effect as a transcript's `expect` writes it.
@@ -336,6 +503,20 @@ mod tests {
                 header.recorded
             );
         }
+    }
+
+    /// Not a check: fills a draft from `src/compat/recorder/convert.py` into a transcript.
+    /// `FYX_CLAUDE_DRAFT=<draft> FYX_CLAUDE_TRANSCRIPT=<out> cargo test -p fyx_claude_code
+    /// fill_draft -- --ignored`.
+    #[test]
+    #[ignore = "a tool for new recordings"]
+    fn fill_draft() {
+        let draft = std::env::var("FYX_CLAUDE_DRAFT").expect("FYX_CLAUDE_DRAFT");
+        let out = std::env::var("FYX_CLAUDE_TRANSCRIPT").expect("FYX_CLAUDE_TRANSCRIPT");
+        let text = std::fs::read_to_string(&draft).expect("the draft");
+        let transcript = fill(&text).unwrap_or_else(|error| panic!("{draft}: {error}"));
+        replay(&transcript).unwrap_or_else(|error| panic!("the filled transcript: {error}"));
+        std::fs::write(&out, transcript).expect("writing the transcript");
     }
 
     #[test]
