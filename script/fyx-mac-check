@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Builds and checks a local, unsigned (ad-hoc) Fyx for macOS (plan 7.1). Run it on a Mac from the
+# repository root. Never touches the real Fyx profile: the launch uses a temporary --user-data-dir.
+#
+# Usage: script/fyx-mac-check [--skip-tests] [--skip-build] [--debug]
+#   --skip-tests  skip the Fyx crates' tests
+#   --skip-build  check the bundle the last script/bundle-mac run left in target/
+#   --debug       build with script/bundle-mac -d (faster, no DMG)
+#
+# Exit code 0 means every check passed. Each failed check prints "FAIL"; warnings print "WARN".
+# Written on Windows without a Mac to run it on: see docs/fyx/mac-build.md ("Untested").
+
+set -euo pipefail
+
+skip_tests=false
+skip_build=false
+profile="release"
+for argument in "$@"; do
+    case "$argument" in
+        --skip-tests) skip_tests=true ;;
+        --skip-build) skip_build=true ;;
+        --debug) profile="debug" ;;
+        -h | --help)
+            sed -n '2,11p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $argument" >&2
+            exit 2
+            ;;
+    esac
+done
+
+failures=0
+step() { printf '\n== %s\n' "$1"; }
+pass() { printf 'ok    %s\n' "$1"; }
+fail() {
+    printf 'FAIL  %s\n' "$1"
+    failures=$((failures + 1))
+}
+warn() { printf 'WARN  %s\n' "$1"; }
+
+# The Fyx crates the FAST gate always covers (tasks/W*.md own them).
+FYX_CRATES=(ui_ext ui_ext_host ui_ext_sdk ui_ext_wasm agent_review terminal_ext terminal_host fyx_relay)
+
+step "Preflight"
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "fyx-mac-check runs on macOS only" >&2
+    exit 2
+fi
+if [[ ! -f crates/zed/RELEASE_CHANNEL ]]; then
+    echo "run fyx-mac-check from the repository root" >&2
+    exit 2
+fi
+for tool in cargo rustup xcrun codesign hdiutil /usr/libexec/PlistBuddy; do
+    if command -v "$tool" > /dev/null 2>&1; then
+        pass "$tool found"
+    else
+        fail "$tool not found"
+    fi
+done
+if [[ "$profile" == "release" && "$skip_build" == false ]] && ! command -v npm > /dev/null 2>&1; then
+    fail "npm not found (bundle-mac installs dmg-license with it): brew install node"
+fi
+if (( failures > 0 )); then
+    echo "preflight failed" >&2
+    exit 1
+fi
+channel=$(tr -d '[:space:]' < crates/zed/RELEASE_CHANNEL)
+case "$channel" in
+    stable) expected_name="Fyx"; expected_id="dev.fyx.Fyx" ;;
+    preview) expected_name="Fyx Preview"; expected_id="dev.fyx.Fyx-Preview" ;;
+    nightly) expected_name="Fyx Nightly"; expected_id="dev.fyx.Fyx-Nightly" ;;
+    dev) expected_name="Fyx Dev"; expected_id="dev.fyx.Fyx-Dev" ;;
+    *)
+        echo "unknown release channel: $channel" >&2
+        exit 2
+        ;;
+esac
+host_triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+arch_suffix="${host_triple%%-*}"
+echo "channel $channel, target $host_triple, profile $profile"
+
+if [[ "$skip_tests" == false ]]; then
+    step "Fyx crates' tests"
+    packages=()
+    for crate in "${FYX_CRATES[@]}"; do
+        packages+=(-p "$crate")
+    done
+    if command -v cargo-nextest > /dev/null 2>&1; then
+        test_command=(cargo nextest run --no-fail-fast "${packages[@]}")
+    else
+        warn "cargo-nextest not found (brew install cargo-nextest); using cargo test"
+        test_command=(cargo test --no-fail-fast "${packages[@]}")
+    fi
+    if "${test_command[@]}"; then
+        pass "tests of ${FYX_CRATES[*]}"
+    else
+        fail "tests of the Fyx crates (output above)"
+    fi
+fi
+
+if [[ "$skip_build" == false ]]; then
+    step "Bundle (script/bundle-mac)"
+    bundle_flags=()
+    if [[ "$profile" == "debug" ]]; then
+        bundle_flags+=(-d)
+    fi
+    if script/bundle-mac "${bundle_flags[@]+"${bundle_flags[@]}"}" "$host_triple"; then
+        pass "script/bundle-mac"
+    else
+        fail "script/bundle-mac (output above)"
+        echo "build failed, nothing to check" >&2
+        exit 1
+    fi
+fi
+
+step "Bundle contents"
+# bundle-mac moves a release .app into dmg/ next to the DMG; a debug .app stays in bundle/osx/.
+app_path=""
+for candidate in \
+    "target/$host_triple/$profile/dmg/$expected_name.app" \
+    "target/$host_triple/$profile/bundle/osx/$expected_name.app"; do
+    if [[ -d "$candidate" ]]; then
+        app_path="$candidate"
+        break
+    fi
+done
+if [[ -z "$app_path" ]]; then
+    fail "no $expected_name.app under target/$host_triple/$profile"
+    exit 1
+fi
+pass "app at $app_path"
+
+plist="$app_path/Contents/Info.plist"
+plist_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist" 2> /dev/null || true; }
+bundle_id=$(plist_value CFBundleIdentifier)
+bundle_name=$(plist_value CFBundleName)
+icon_file=$(plist_value CFBundleIconFile)
+if [[ "$bundle_id" == "$expected_id" ]]; then pass "bundle id $bundle_id"; else fail "bundle id '$bundle_id', expected $expected_id"; fi
+if [[ "$bundle_name" == "$expected_name" ]]; then pass "bundle name $bundle_name"; else fail "bundle name '$bundle_name', expected $expected_name"; fi
+if [[ -n "$icon_file" && -f "$app_path/Contents/Resources/${icon_file%.icns}.icns" ]]; then
+    pass "icon $icon_file"
+else
+    fail "icon '$icon_file' missing from Contents/Resources"
+fi
+if [[ -f "$app_path/Contents/Resources/Document.icns" ]]; then pass "Document.icns"; else fail "Document.icns missing"; fi
+zed_strings=$(plutil -convert xml1 -o - "$plist" | grep -c -i 'zed' || true)
+if [[ "$zed_strings" == "0" ]]; then
+    pass "Info.plist names no Zed"
+else
+    plutil -convert xml1 -o - "$plist" | grep -n -i 'zed' || true
+    warn "Info.plist has $zed_strings line(s) with 'zed' (above): check none is user-visible"
+fi
+if [[ -e "$app_path/Contents/embedded.provisionprofile" && -z "${FYX_MACOS_PROVISIONING_PROFILE:-}" ]]; then
+    fail "embedded.provisionprofile present (Zed's profile must not ship)"
+else
+    pass "no Zed provisioning profile"
+fi
+for binary in fyx cli git; do
+    if [[ -x "$app_path/Contents/MacOS/$binary" ]]; then pass "Contents/MacOS/$binary"; else fail "Contents/MacOS/$binary missing"; fi
+done
+
+step "Signature"
+if codesign --verify --deep --strict "$app_path" 2>&1; then
+    pass "codesign --verify --deep --strict"
+else
+    fail "signature does not verify"
+fi
+signature=$(codesign -dvv "$app_path" 2>&1 || true)
+if grep -q 'Signature=adhoc' <<< "$signature"; then
+    pass "ad-hoc signature"
+else
+    warn "not ad-hoc: $(grep -m1 '^Authority=' <<< "$signature" || echo 'unknown')"
+fi
+entitlements=$(codesign -d --entitlements - --xml "$app_path" 2> /dev/null || true)
+if grep -q 'com.apple.security.cs.allow-jit' <<< "$entitlements"; then
+    pass "entitlements include allow-jit (wasmtime)"
+else
+    fail "allow-jit missing from the signed entitlements"
+fi
+for dropped in device.camera device.audio-input personal-information.addressbook personal-information.photos-library; do
+    if grep -q "com.apple.security.$dropped" <<< "$entitlements"; then
+        fail "entitlement $dropped should not be there (crates/zed/resources/fyx.entitlements)"
+    fi
+done
+
+if [[ "$profile" == "release" ]]; then
+    step "DMG"
+    dmg_path="target/$host_triple/release/Fyx-$arch_suffix.dmg"
+    if [[ -f "$dmg_path" ]]; then
+        pass "DMG at $dmg_path"
+        if hdiutil verify "$dmg_path" > /dev/null 2>&1; then pass "hdiutil verify"; else fail "hdiutil verify $dmg_path"; fi
+    else
+        fail "no DMG at $dmg_path"
+    fi
+fi
+
+step "Launch smoke test (temporary --user-data-dir)"
+user_data_dir=$(mktemp -d "${TMPDIR:-/tmp}/fyx-mac-check.XXXXXX")
+# Logs go to ~/Library/Logs/Fyx whatever the data dir is (crates/paths logs_dir); only the lines
+# this run appends are read.
+log_file="$HOME/Library/Logs/Fyx/Fyx.log"
+log_offset=0
+if [[ -f "$log_file" ]]; then
+    log_offset=$(wc -c < "$log_file" | tr -d ' ')
+fi
+"$app_path/Contents/MacOS/fyx" --user-data-dir "$user_data_dir" > "$user_data_dir/stdout.log" 2>&1 &
+fyx_pid=$!
+cleanup() {
+    if kill -0 "$fyx_pid" 2> /dev/null; then
+        kill "$fyx_pid" 2> /dev/null || true
+        wait "$fyx_pid" 2> /dev/null || true
+    fi
+}
+trap cleanup EXIT
+alive=true
+for _ in $(seq 1 20); do
+    if ! kill -0 "$fyx_pid" 2> /dev/null; then
+        alive=false
+        break
+    fi
+    sleep 1
+done
+if [[ "$alive" == true ]]; then
+    pass "fyx still running after 20 s"
+else
+    if grep -q 'is already running' "$user_data_dir/stdout.log"; then
+        # Non-dev channels allow one instance per channel (mac_only_instance), whatever the data dir.
+        fail "another $expected_name is running: quit it and run the check again"
+    else
+        fail "fyx exited during the first 20 s; its output:"
+        tail -n 40 "$user_data_dir/stdout.log" || true
+    fi
+fi
+if [[ -n "$(find "$user_data_dir" -mindepth 1 -maxdepth 1 ! -name stdout.log -print -quit)" ]]; then
+    pass "wrote its data into the temporary dir ($user_data_dir)"
+else
+    fail "nothing written into $user_data_dir: --user-data-dir not honoured?"
+fi
+new_log=""
+if [[ -f "$log_file" ]]; then
+    new_log=$(tail -c "+$((log_offset + 1))" "$log_file")
+fi
+if grep -q -i 'panicked' <<< "$new_log$(cat "$user_data_dir/stdout.log")"; then
+    fail "a panic was logged:"
+    grep -i -A5 'panicked' <<< "$new_log" || true
+else
+    pass "no panic in the log"
+fi
+error_lines=$(grep -c ' ERROR ' <<< "$new_log" || true)
+if [[ "$error_lines" != "0" ]]; then
+    warn "$error_lines ERROR line(s) in $log_file during the launch:"
+    grep ' ERROR ' <<< "$new_log" | head -n 10
+fi
+cleanup
+trap - EXIT
+echo "the temporary profile stays at $user_data_dir for a look; delete it when done"
+
+printf '\n'
+if (( failures > 0 )); then
+    echo "fyx-mac-check: $failures check(s) failed"
+    exit 1
+fi
+echo "fyx-mac-check: all checks passed"
