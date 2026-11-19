@@ -5,6 +5,9 @@
 //!   drawn outside it. Rectangles, rounded rectangles and circles are quads; lines and paths are
 //!   `PathBuilder` paths (paths fill non-zero); text is a shaped line in the UI font (or the buffer
 //!   font) at the host's small, medium or large size.
+//! - **Texture (Q14):** only small lists without paths are painted op by op each frame; the others
+//!   are rasterised once per update, off the main thread, and drawn as one image
+//!   (`canvas_texture`).
 //! - **Fit:** `clip` keeps the box at its size, and a narrower parent clips it; `scale-down` shrinks
 //!   the box to the parent's width, keeping its aspect ratio, and never grows it.
 //! - **Colours:** theme tokens, or the eight `data-color` series. The series follow the
@@ -88,10 +91,12 @@ fn canvas_props(props: &ui_ext::v0_2::Props) -> Option<&CanvasProps> {
 }
 
 /// The element for a canvas node, from the tree's shared props (never copied per frame).
-/// `on_click` gets canvas coordinates; `None` when it is not clickable.
+/// `on_click` gets canvas coordinates; `None` when it is not clickable. With a `slot`, a long
+/// draw list is painted through a cached texture (`canvas_texture`).
 pub(crate) fn canvas_element(
     element_id: gpui::ElementId,
     shared: Arc<ui_ext::v0_2::Props>,
+    slot: Option<crate::canvas_texture::CanvasSlot>,
     on_click: Option<Rc<dyn Fn(f32, f32, &mut Window, &mut App)>>,
 ) -> gpui::AnyElement {
     let Some(props) = canvas_props(&shared) else {
@@ -106,7 +111,7 @@ pub(crate) fn canvas_element(
         move |bounds, _, _| record.set(Some(bounds)),
         move |bounds, (), window, cx| {
             if let Some(props) = canvas_props(&paint_props) {
-                paint_ops(props, bounds, window, cx)
+                crate::canvas_texture::paint(slot.as_ref(), &paint_props, props, bounds, window, cx)
             }
         },
     );
@@ -142,7 +147,12 @@ pub(crate) fn canvas_element(
         .into_any_element()
 }
 
-fn paint_ops(props: &CanvasProps, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+pub(crate) fn paint_ops(
+    props: &CanvasProps,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let scale = fit_scale(props, bounds.size.width);
     let at = |x: f32, y: f32| -> Point<Pixels> {
         point(
@@ -390,8 +400,8 @@ mod tests {
     }
 }
 
-/// Plan 4.14's paint bench (Q14): one 16384-op canvas painted frame after frame must stay within
-/// 4 ms, or canvases fall back to a texture cached per update. Ignored by default; meaningful
+/// Plan 4.14's paint bench (Q14): one 16384-op canvas painted frame after frame, directly and
+/// through its texture (`canvas_texture`), and the raster of one update on its own. Ignored by default; meaningful
 /// only in an optimized build:
 /// `cargo test --profile release-fast -p ui_ext_host --lib canvas_paint_bench -- --ignored --nocapture`.
 ///
@@ -535,15 +545,15 @@ mod bench {
         }
     }
 
-    fn canvas(op: fn(usize) -> DrawOp) -> Arc<CanvasProps> {
-        Arc::new(CanvasProps {
+    fn canvas(op: fn(usize) -> DrawOp) -> Arc<ui_ext::v0_2::Props> {
+        Arc::new(ui_ext::v0_2::Props::Canvas(CanvasProps {
             width: SIDE,
             height: SIDE,
             description: "bench".into(),
             ops: (0..OPS).map(op).collect(),
             clickable: false,
             fit: CanvasFit::Clip,
-        })
+        }))
     }
 
     struct Stats {
@@ -580,6 +590,73 @@ mod bench {
         duration.as_secs_f64() * 1000.
     }
 
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Baseline,
+        Direct,
+        Texture,
+    }
+
+    /// The paint and frame times of `FRAMES` frames of one canvas.
+    fn measure(
+        vcx: &mut gpui::VisualTestContext,
+        props: &Arc<ui_ext::v0_2::Props>,
+        mode: Mode,
+    ) -> (Stats, Stats) {
+        let slot = crate::canvas_texture::CanvasSlot {
+            key: crate::canvas_texture::SlotKey { view: 0, node: 0 },
+            extension_id: "bench".into(),
+        };
+        let paints = Rc::new(RefCell::new(Vec::new()));
+        let mut frames = Vec::new();
+        for frame in 0..WARMUP + FRAMES {
+            let (props, paints_in, slot) = (props.clone(), paints.clone(), slot.clone());
+            let start = Instant::now();
+            vcx.draw(
+                point(px(0.), px(0.)),
+                size(
+                    AvailableSpace::Definite(px(SIDE as f32)),
+                    AvailableSpace::Definite(px(SIDE as f32)),
+                ),
+                move |_, _| {
+                    gpui_canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, cx| {
+                            let Some(canvas) = canvas_props(&props) else {
+                                return;
+                            };
+                            let start = Instant::now();
+                            match mode {
+                                Mode::Baseline => raw_quads(bounds, window),
+                                Mode::Direct => paint_ops(canvas, bounds, window, cx),
+                                Mode::Texture => crate::canvas_texture::paint(
+                                    Some(&slot),
+                                    &props,
+                                    canvas,
+                                    bounds,
+                                    window,
+                                    cx,
+                                ),
+                            }
+                            paints_in.borrow_mut().push(start.elapsed());
+                        },
+                    )
+                    .w(px(SIDE as f32))
+                    .h(px(SIDE as f32))
+                },
+            );
+            let elapsed = start.elapsed();
+            // A real frame in between, so each measured paint starts on an empty scene (and the
+            // warm-up's raster finishes).
+            vcx.run_until_parked();
+            if frame >= WARMUP {
+                frames.push(elapsed);
+            }
+        }
+        let paints = stats(paints.borrow_mut().split_off(WARMUP));
+        (paints, stats(frames))
+    }
+
     #[gpui::test]
     #[ignore = "bench: run in release-fast with --ignored --nocapture"]
     fn canvas_paint_bench(cx: &mut TestAppContext) {
@@ -595,57 +672,65 @@ mod bench {
             ("mixed, 1/6 of each", mixed),
         ];
         let vcx = cx.add_empty_window();
-        println!("canvas paint bench: {OPS} ops, {SIDE} x {SIDE}, {FRAMES} frames after {WARMUP}");
-        println!(
-            "{:<34} {:>11} {:>8} {:>8} {:>13}",
-            "case", "paint med", "p95", "max", "frame med"
+        let scale = vcx.update(|window, _| window.scale_factor());
+        let device = (
+            (SIDE as f32 * scale).round() as u32,
+            (SIDE as f32 * scale).round() as u32,
         );
-        for (name, op) in cases {
+        println!(
+            "canvas paint bench: {OPS} ops, {SIDE} x {SIDE} at {scale}x, {FRAMES} frames after {WARMUP}"
+        );
+        println!(
+            "{:<34} {:>11} {:>8} {:>8} {:>13} {:>13} {:>13} {:>13}",
+            "case", "paint med", "p95", "max", "frame med", "tex paint", "tex frame", "raster med"
+        );
+        for (index, (name, op)) in cases.into_iter().enumerate() {
             let props = canvas(op);
-            let paints = Rc::new(RefCell::new(Vec::new()));
-            let mut frames = Vec::new();
-            for frame in 0..WARMUP + FRAMES {
-                let (props, paints_in) = (props.clone(), paints.clone());
-                let start = Instant::now();
-                vcx.draw(
-                    point(px(0.), px(0.)),
-                    size(
-                        AvailableSpace::Definite(px(SIDE as f32)),
-                        AvailableSpace::Definite(px(SIDE as f32)),
-                    ),
-                    move |_, _| {
-                        gpui_canvas(
-                            |_, _, _| (),
-                            move |bounds, (), window, cx| {
-                                let start = Instant::now();
-                                if name.starts_with("gpui") {
-                                    raw_quads(bounds, window);
-                                } else {
-                                    paint_ops(&props, bounds, window, cx);
-                                }
-                                paints_in.borrow_mut().push(start.elapsed());
-                            },
-                        )
-                        .w(px(SIDE as f32))
-                        .h(px(SIDE as f32))
-                    },
+            if index == 0 {
+                let (paints, frames) = measure(vcx, &props, Mode::Baseline);
+                println!(
+                    "{:<34} {:>8.2} ms {:>5.2} ms {:>5.2} ms {:>10.2} ms",
+                    name,
+                    ms(paints.median),
+                    ms(paints.p95),
+                    ms(paints.max),
+                    ms(frames.median),
                 );
-                let elapsed = start.elapsed();
-                // A real frame in between, so each measured paint starts on an empty scene.
-                vcx.run_until_parked();
-                if frame >= WARMUP {
-                    frames.push(elapsed);
-                }
+                continue;
             }
-            let paints = stats(paints.borrow_mut().split_off(WARMUP));
-            let frames = stats(frames);
+            let (paints, frames) = measure(vcx, &props, Mode::Direct);
+            let (texture_paints, texture_frames) = measure(vcx, &props, Mode::Texture);
+            assert!(
+                vcx.update(|_, cx| crate::canvas_texture::drawn_from_for_bench(&props, cx)),
+                "the texture case drew its texture"
+            );
+            // One update's raster on its own (main-thread colour lookup, SVG, resvg), as the
+            // background task does it.
+            let canvas = canvas_props(&props).unwrap();
+            let fonts = vcx.update(|_, cx| crate::images::shared_fonts(cx));
+            let rasters = stats(
+                (0..5)
+                    .map(|_| {
+                        let start = Instant::now();
+                        let palette = vcx.update(|_, cx| {
+                            crate::canvas_texture::Palette::resolve(canvas, 14., cx)
+                        });
+                        let svg = crate::canvas_texture::to_svg(canvas, &palette);
+                        crate::canvas_texture::rasterize(&svg, device, fonts.clone()).unwrap();
+                        start.elapsed()
+                    })
+                    .collect(),
+            );
             println!(
-                "{:<34} {:>8.2} ms {:>5.2} ms {:>5.2} ms {:>10.2} ms",
+                "{:<34} {:>8.2} ms {:>5.2} ms {:>5.2} ms {:>10.2} ms {:>10.3} ms {:>10.2} ms {:>10.1} ms",
                 name,
                 ms(paints.median),
                 ms(paints.p95),
                 ms(paints.max),
                 ms(frames.median),
+                ms(texture_paints.median),
+                ms(texture_frames.median),
+                ms(rasters.median),
             );
         }
     }
