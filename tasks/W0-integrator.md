@@ -5,6 +5,17 @@
 **Deliverable**
 - Merge worker branches into `integration` only through `script/gate.sh` (wasmtime backend policy + `cargo deny` advisories, then check + clippy + nextest on changed crates + license check). Red is never merged.
 - `FULL=1 script/gate.sh` (full `zed` build) on a schedule, not per merge.
+- Gate modes (coordinator, 2026-11-19):
+  - **FAST** (`FAST=1 script/gate.sh`) accepts a batch into `integration`. It tests the crates
+    changed since the last green `fyx/main` plus their workspace reverse dependencies, limited to
+    the crates Fyx changed since `FYX_UPSTREAM` (`script/fyx-gate-crates`). The workspace-wide
+    steps (wasmtime policy, `cargo deny`, API docs, template tests, licenses, lockfiles) still run.
+  - **FULL** (`FULL=1 script/gate.sh`): every crate Fyx changed since `FYX_UPSTREAM`, plus the
+    `zed` build. Run it before a push to `fyx/main`: at most once per ~3 FAST-green batches or
+    ~3 h, and always when a batch touches `Cargo.lock`, `crates/ui_ext/wit/`, or an upstream
+    `fyx:` hook in `editor`, `workspace` or `terminal`.
+  - Push `integration` after a green FAST gate. Fast-forward and push `fyx/main` only after a
+    green FULL gate.
 - Apply dependency and WIT change requests from other streams; announce WIT changes to W2, W3, W4, W8.
 - Weekly job: rebase the Fyx stack onto the newest stable tag, open an issue on conflict.
 

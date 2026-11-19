@@ -376,7 +376,7 @@ the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown
 
 | Key | Rule |
 |---|---|
-| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. |
+| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`), and `fyx-ext check` warns. `0.4.0` (terminals and CLI integrations) is staged after it, and only its manifest loads so far. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. Each `api_version` takes its own capabilities (see [the `fyx-ext` commands](#the-fyx-ext-commands)); a capability the world does not take fails the load with `<capability> needs fyx:ui 0.3; this extension targets <version>`. |
 
@@ -503,7 +503,8 @@ Every capability in `[fyx_ui].capabilities` has a tier:
 |---|---|---|
 | T0 | `ui:panel`, `ui:status-bar` (and the 0.2+ UI ones: `ui:modal`, `ui:notifications`, …) | no prompt; listed in the install dialog and on the extension's chips |
 | T1 | `workspace:read-buffers`, `workspace:read-files`, `workspace:diagnostics` | once, in the install dialog; `fyx_ui: revoke UI extension permission` takes it back |
-| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | 0.3 only: the first use asks, and the extensions page changes the answer; a manifest for 0.1 or 0.2 that asks for one is refused |
+| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | 0.3 only: the first use asks, and the extensions page changes the answer; a manifest for 0.1 or 0.2 that asks for one is refused. **(0.4, staged)** T2 is accepted at install, one checkbox per item, unticked by default; the first-use prompt stays only for dev installs without a dialog |
+| T3 | `terminal:read`, `terminal:write` | **(0.4, staged)** at the moment of action, on one terminal; see [Terminals and CLI integrations](#terminals-and-cli-integrations-staged-fyxui-04) |
 
 An unknown capability is refused at load, with its name in the error. An update that adds only
 T0 capabilities (or only changes the component) loads silently; one that adds a T1 capability is
@@ -964,7 +965,8 @@ headless test of the counter's contract; run it with
 
 Releases of Fyx run `fyx:ui` 0.1 and 0.2, which is frozen. The 0.3 world is staged: dev builds
 load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS` set), and `fyx-ext check` warns that it is
-staged.
+staged. The 0.4 world (terminals and CLI integrations) is staged after it; it has its own section,
+[Terminals and CLI integrations](#terminals-and-cli-integrations-staged-fyxui-04), at the end.
 Every snippet below is taken from a demo in `extensions/` that builds and is tested.
 
 ### Choosing a world
@@ -1220,3 +1222,357 @@ harness.deliver_io()?; // fetch-done, process output and exit, through handle_io
 - **Images:** `image_failures()` lists the images Fyx would draw as alt text.
 - **Comparison with the host:** `ui_ext_wasm`'s `harness_conformance*` tests run the same
   components in the host and the harness and compare every effect, so the harness cannot drift.
+
+## Terminals and CLI integrations: staged `fyx:ui` 0.4
+
+`fyx:ui` 0.4 lets an extension be a terminal of its own, and lets anyone build a full integration
+for a command-line tool (Claude Code, Gemini CLI, Codex, OpenCode, …). Fyx has no tool-specific
+code for this: it offers generic primitives, and each tool is an extension. The design, with every
+limit and the reasons, is [wit-0.4/design.md](wit-0.4/design.md); this section is the author's
+route through it.
+
+**Status.** 0.4 is staged, like 0.3 was: dev builds load it (debug builds, or with
+`FYX_UI_DEV_EXTENSIONS`). The WIT is `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`. What works today
+is the loader: it reads the six 0.4 manifest tables and the 0.4 capabilities, and checks them (a
+0.4 component is not instantiated yet). The host functions, the `ui_ext_sdk` 0.4 module, the
+harness fakes and the demo extensions arrive with plan P5 (tasks 5.5–5.16). Until then, use this
+section for the manifest and the WIT names, and the design for behaviour. Snippets here are
+manifest TOML or WIT calls; Rust SDK snippets will replace the calls when the SDK module lands.
+
+### What you can build
+
+- **A terminal of your own** (requirement 1): a *pseudo-terminal* is a tab or a panel area whose
+  backend is your code (SSH, a serial port, tmux control mode, a container, a TUI written in
+  WASM). Fyx draws it with its native terminal view: you send bytes, you get input and resizes.
+  There is no terminal emulator in WASM.
+- **An integration for any CLI tool** (requirement 2): a profile in the "+" menu that starts the
+  tool, environment for it, a loopback server it connects to (MCP), a discovery file that tells
+  it where to connect, command hooks that reach you, proposed edits that go through Fyx's agent
+  review, editor context, and approval cards for the tool's own permission prompts.
+- **Powerful things the user accepts by hand** (requirement 3): everything that runs code or
+  reaches outside Fyx is a T2 item the user ticks at install, one checkbox each.
+
+Fyx never gives you the byte stream of every terminal, never a write into the user's shell without
+the user's say-so, and never a write into `~`.
+
+### Choosing 0.4
+
+Set `api_version = "0.4.0"` in `[fyx_ui]`. The 0.4 tables and capabilities are errors for a lower
+world, so the install dialog never asks consent for something the world cannot use:
+
+```text
+[[fyx_ui.listeners]] needs fyx:ui 0.4; this extension targets 0.3.0
+```
+
+Everything 0.3 has works unchanged in 0.4.
+
+### Capabilities and tiers
+
+| Tier | New in 0.4 | When the user agrees |
+|---|---|---|
+| T0 | `package:files`, `ui:approvals` | never asked; shown on the extension page |
+| T1 | `terminal:profiles`, `terminal:pseudo`, `terminal:status`, `context:editor`, `workspace:open`, `review:propose` | listed in the install dialog; installing is the consent |
+| T2 | `terminal:create`, `terminal:env`, `terminal:observe`, `network:listen`, `fs:discovery-file`, `relay:hooks` (and 0.3's `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe`) | **one checkbox per item** in the install dialog, unticked by default |
+| T3 | `terminal:read`, `terminal:write` | **at the moment of action**, on one terminal, after a gesture |
+
+Until the T3 model is in the host (plan 5.6 and 5.18), a manifest that declares a T3 capability is
+refused.
+
+### What the user's consent means for your code
+
+- **T2 at install, per item.** Every T2 item in your manifest needs `reason = "…"`: one line of
+  plain text, at most 200 bytes. The install dialog shows it under the item as "The author says:
+  …". Write it for the person ticking the box. A missing or longer reason fails the load.
+- **An unticked item is `denied`.** Your extension still loads. Check what you are allowed to do,
+  and say what you cannot do instead of failing: a panel that explains "ticking *Create
+  terminals* on the extension page turns this on" is a normal extension.
+- **The user can turn items on later** on the extension page (one more confirmation with the same
+  text), and off at any time.
+- **Revocation stops everything at once.** Terminals you created and their process trees are
+  killed, listeners close, discovery files are removed, relay channels answer their `on_failure`,
+  and the env leaves new terminals. You get `io-event::permission-changed`.
+- **Updates show a diff.** A new version that adds or widens a T1 or T2 item (a capability, a
+  program or its argument patterns, a domain, an env name or value, a listener, a discovery path,
+  a relay channel, `scope = "all-new"`) is held. The old version keeps running until the user
+  approves. Removals and T0 additions install silently. The registry's PR comment shows you the
+  same diff, so check it before you ask for a review.
+- **T3 is not requested in advance.** You ask at the moment you need it, from a gesture in your own
+  UI. The user's answer is "Once" or "This terminal until it closes". "Always allow" exists, but
+  only the user can turn it on from a card or the extension page, with a warning in plain words,
+  and it resets when your component changes. Do not design around it.
+- **Never in an untrusted worktree.** Created terminals are unavailable there
+  (`untrusted-worktree`), and T3 never applies.
+- **A journal** on the extension page records what you did (programs started, listeners opened,
+  discovery files written, relay requests, proposals, consent changes). Terminal reads are
+  recorded without their content. It is the user's view of you: keep your behaviour explainable.
+
+### Terminal profiles (`terminal:profiles`, T1)
+
+A profile is a recipe. It shows in the terminal panel's "+" menu as "Name — Extension", and the
+user starts it. The terminal belongs to the user: you may set its status, give it env and paste
+into it; reading or writing it is T3.
+
+```toml
+[[fyx_ui.terminal_profiles]]
+id = "claude"                 # [a-z0-9-]{1,32}, unique in the extension
+name = "Claude Code"
+icon = "ai-claude"            # a frozen icon name; extension SVGs are not host chrome
+program = "claude"            # resolved like [[fyx_ui.processes]]: PATH outside worktrees
+args = ["--ide"]              # literal; may contain ${package} and ${relay}
+cwd = "worktree"              # "worktree" or "home"
+account_tool = "claude"       # optional: the user picks an account profile for it
+```
+
+The menu shows the full command line on hover, and marks a shell or interpreter "runs any command
+you type". At most 16 profiles, and `args` of at most 64 items of 1 KiB.
+
+### Pseudo-terminals and the `terminal` node (`terminal:pseudo`, T1)
+
+```text
+terminals.open-pseudo({ title, cols?, rows?, in-panel })  -> terminal-handle
+terminals.write-output(handle, bytes)     # at most 64 KiB per call, 4 MiB/s per terminal
+io-event::terminal-input(handle, bytes)   # coalesced to 30 per second
+io-event::terminal-resized(handle, cols, rows)   # the last size only
+```
+
+- `in-panel = true`, or a `terminal` node (`node-kind::terminal({ handle })`) in your panel, draws
+  the native terminal inside your UI, so you can build tabs, blocks or side panels around a real
+  terminal. One node per handle.
+- Fyx **removes** these from your output before the terminal sees it: OSC 52 (clipboard), OSC 8
+  (hyperlinks), OSC 1337, OSC 7501, and every sequence the terminal would answer (DA, DSR/CPR,
+  DECRQSS, XTGETTCAP, colour queries). The terminal never writes a reply built from your output.
+  Above the rate limit `write-output` fails with `rate-limited`.
+- The tab says which extension owns it.
+
+### Created terminals (`terminal:create`, T2)
+
+`terminals.create({ program, args, cwd?, title? })` runs a **declared** program in a real pty as
+your own terminal. You read its raw output and write its input.
+
+```toml
+[[fyx_ui.terminal_programs]]
+name = "codex"
+args = ["-c", "notify=*", "**"]     # argument patterns, as [[fyx_ui.processes]]
+reason = "Starts Codex in a terminal tab so you can use it inside Fyx."
+```
+
+```text
+io-event::terminal-output(handle, bytes, dropped)   # at most 30 per second, 64 KiB each
+io-event::terminal-exited(handle, exit-code?)
+terminals.send-input(handle, bytes)                 # at most 64 KiB per call
+```
+
+Output beyond the rate is buffered up to 1 MiB; then the oldest is dropped and the next event says
+how much. The tab says "started by <extension>". At most 8 per extension; each is killed with its
+process tree on reload, disable, uninstall and revocation. Programs in `RUNS_ANY_CODE` (shells,
+interpreters) are marked in the dialog, as in 0.3.
+
+### Environment for terminals (`terminal:env`, T2)
+
+```toml
+[fyx_ui.terminal_env]
+vars = { ENABLE_IDE_INTEGRATION = "true", CLAUDE_CODE_PLUGIN_DIRS = "${package}/claude-plugin" }
+scope = "profiles"                  # or "all-new"
+reason = "Tells Claude Code to connect to this extension and load its plugin."
+```
+
+- **Scope.** `profiles` (default) puts the vars in your own terminals only (profiles and created
+  terminals). `all-new` also puts them in every new terminal the user opens, which is a second,
+  stronger checkbox, unticked by default. If it is unticked you get `profiles`. Terminals already
+  open show "Restart to apply" when the scope widens.
+- **Values** are literals or templates: `${package}` (your installed folder, read-only),
+  `${listen.<name>.port}`, `${relay}` and `${account.<tool>}`. The host fills the templates; you
+  never see an account's path or a listener's token. `${listen.<name>.token}` is allowed only for
+  a listener with `token_in_env = true`. At most 32 names, 4 KiB per value, no NUL or newline.
+- **Refused at load**, in any letter case: code loaders and redirections (`LD_*`, `DYLD_*`,
+  `NODE_OPTIONS`, `PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, `GIT_*` editors, `RUSTC_WRAPPER`, …),
+  `PATH`, `PATHEXT`, `COMSPEC`, `HOME`, `USERPROFILE`, `XDG_*`, `ZDOTDIR`, `SHELL`, `TERM*`,
+  `FYX_*`, `ZED_*`, and the credential and config-dir names of
+  [Accounts](#accounts-and-what-an-extension-cannot-do) below. A `*_TOKEN` name is allowed in one
+  case: its value is exactly `${listen.<name>.token}` of one `token_in_env` listener. That token is
+  Fyx's own, not a credential.
+- The install checkbox lists every name and value. A value that points into your package shows as
+  "files from this extension".
+
+### Status, observing, pasting
+
+- `terminals.set-status(handle, status?)`: a state (`idle`, `working`, `blocked`, `done`,
+  `error`), a label (at most 64 bytes), optional detail and progress, and `attention`. On your own
+  terminals it needs no capability; on any other terminal it needs `terminal:status` (T1), and
+  the handle comes from `terminal:observe` or a relay request. The tab always shows who set it
+  ("from extension X"), at most 4 updates per second.
+- `terminal:observe` (T2): `terminals.list()` and `terminal-created`, `terminal-closed` and
+  `terminal-status-changed` events, with title, cwd, origin, status and the account profile's
+  **name**. Command lines in titles are redacted (`•••`) unless the user has shared the terminal
+  with you (T3).
+- `terminals.paste(handle, text)` pastes into your profile or own terminal, after a gesture in your
+  UI, and only while the program has bracketed paste on. Fyx strips control characters, wraps the
+  text in the paste markers and caps it at 16 KiB.
+
+### Loopback listeners and MCP (`network:listen`, T2)
+
+The host listens on `127.0.0.1:0` and checks everything first; you handle messages.
+
+```toml
+[[fyx_ui.listeners]]
+name = "ide"
+protocol = "mcp-websocket"          # "mcp-websocket", "mcp-streamable-http", "websocket", "http"
+auth = { header = "x-claude-code-ide-authorization" }   # or { bearer = true } or { query = "auth" }
+token_in_env = false
+reason = "Lets Claude Code in your terminal talk to Fyx about your open files."
+```
+
+- Fyx refuses, before you see anything: a wrong or missing token (128 random bits, new each run),
+  any `Origin` header, a `Host` that is not `127.0.0.1:<port>` or `localhost:<port>`, more than 16
+  connections, messages over 4 MiB and more than 100 messages a second per connection. At most 4
+  listeners.
+- **MCP:** the host speaks JSON-RPC and MCP. You register tools with
+  `listeners.register-tools(listener, tools)`, answer `io-event::mcp-call` with
+  `listeners.respond(call-id, outcome)` (a call may stay open until you answer, which a blocking
+  `openDiff` needs; it is cancelled when its connection closes: `io-event::mcp-cancelled`), and
+  send notifications with `listeners.notify`.
+- **`websocket` and `http`:** raw frames or requests arrive as `listener-message` and
+  `listener-request`; you answer with `listeners.send` and `listeners.reply`.
+- Your code never sees the token. It travels in a discovery file or, with `token_in_env`, in a
+  terminal's env.
+
+### Discovery files (`fs:discovery-file`, T2)
+
+CLI tools find an IDE through a file at a known path. The host writes it from your template.
+
+```toml
+[[fyx_ui.discovery_files]]
+listener = "ide"
+dir = "${account.claude}/ide"       # or "${tmp}/<name>"
+default_dir = "~/.claude/ide"       # used when no account profile applies
+name = "${port}.lock"
+content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx",
+            transport = "ws", authToken = "${token}" }
+reason = "Lets Claude Code find this window. Claude Code will run what this extension tells it."
+```
+
+- Placeholders: `${port}`, `${token}`, `${pid}`, `${worktrees}`, `${uid}`, `${tmp}`.
+- The `name` must contain `${port}` or `${pid}` and end in `.lock` or `.json`, so a discovery file
+  can never replace a tool's settings. No `..`, no symlink anywhere in the path. The file is
+  `0600` in a `0700` directory (an ACL for the user on Windows), written atomically.
+- It is removed on listener close, exit, revoke and uninstall; stale files from a crash are
+  removed at the next start. With several account profiles, one file goes into each account's
+  directory.
+- The dialog says what it means, because a discovery file counts as running code in that tool.
+  At most 8 files.
+
+### Command hooks through `fyx-relay` (`relay:hooks`, T2)
+
+Most tools' hooks can only run a command. `fyx-relay` ships next to the `fyx` CLI.
+
+```toml
+[[fyx_ui.relay_channels]]
+name = "pre-tool"
+timeout_ms = 30000                  # at most 600000
+on_failure = { exit = 0 }           # what the hook gets when Fyx or you do not answer
+reason = "Receives Claude Code's tool hooks so Fyx can show what it is about to do."
+```
+
+A hook runs `"$FYX_RELAY" --channel <extension-id>/pre-tool`; `FYX_RELAY` is in every Fyx terminal
+and `${relay}` gives the path to profile args. You get `io-event::relay-request(id, channel,
+terminal?, argv, stdin)` (stdin at most 1 MiB) and answer with
+`relay.respond(id, exit-code, stdout, stderr)`. **A relay hook fails open by default**: with Fyx
+closed, no token, an unknown channel, a revoked capability or a timeout, it exits 0 with no output,
+so your channel never blocks the user's tool. Declare `on_failure = { exit = 2 }` to fail closed;
+the install checkbox shows it. At most 16 channels and 8 requests in flight.
+
+### Proposed edits (`review:propose`, T1)
+
+```text
+review.propose({ path, change: new-content(text) | unified-diff(text), title, session, apply })  -> id
+io-event::review-decided(id, result<{ decision, final-content }, error>)
+review.begin-turn(session) / review.end-turn(session, changed-paths)
+```
+
+The user reviews the edit hunk by hunk in Fyx's agent review, and `final-content` is the text after
+their choices. A blocking protocol (Claude's `openDiff`) keeps its MCP call open until then; a
+notifying one (Gemini's `ide/diffAccepted`) sends a notification. `apply = false` (default) writes
+nothing: the tool writes the file itself. `apply = true` applies the accepted hunks as one
+undoable edit and never saves. Reviewing is the consent, so this needs no `workspace:edit`.
+Protected and private paths are refused; at most 64 open proposals and 8 MiB per file. You cannot
+answer a review: accepting and rejecting stay the user's.
+
+### Editor context, opening files, approval cards
+
+- `context:editor` (T1): `context.watch(on)` gives `io-event::context-changed` with the active
+  file, open files, cursor and selection (up to 64 KiB, debounced to 300 ms). Private files show as
+  "a private file" with no text. Combined with `network:*`, terminal writes or `relay:hooks`, the
+  dialog warns "It can pass what you select to <tool>".
+- `workspace:open` (T1): `context.open(path, range?, focus)` opens a worktree file. `focus = true`
+  needs the user's gesture, or a recent request from a terminal that has focus; otherwise the file
+  opens in the background and never steals typing.
+- `ui:approvals` (T0): `approvals.ask(title, detail, options)` shows a tool's permission question as
+  a Fyx card with "Allow once", "Always allow" and "Deny" (you choose which, at least one). The
+  card is drawn by the host with your name and a note that the tool's name is "as the extension
+  says". It has a 1 s click guard, no keyboard answer and grants nothing in Fyx. The answer comes
+  back as `io-event::approval-answered`; you pass it to the tool. At most 4 open.
+
+### Reading and writing the user's terminals (T3)
+
+`terminals.request-read(handle, scope, lines)` and `terminals.request-write(handle, text, submit)`
+need a gesture in your UI and show a host-drawn card. A read returns plain text without ANSI (the
+last command block, or the last N ≤ 500 lines) as `io-event::terminal-read-done`; a write shows
+the exact text for confirmation **every time**, takes printable text and tab only (no control keys,
+no ESC), and `submit` adds Enter after the confirmation. The tab shows "typed by <extension>" for
+5 s. The user's terminals stay the user's: pseudo and created terminals are yours; everything else
+needs T3.
+
+### Accounts, and what an extension cannot do
+
+People run several accounts of one tool (a personal and a work Claude, for example). Fyx's
+**account profiles** hold that choice, and the rules around them bind extensions too:
+
+- You never see an account's directory or credentials. `account_tool` on a profile, and the
+  `${account.<tool>}` template, let the *host* put the user's chosen account into a terminal or a
+  discovery path. You see only the account's name (in `terminal-info`).
+- These names are refused for `terminal:env` and `process:spawn`, in any case: config
+  directories (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `COPILOT_HOME`,
+  `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, `QWEN_CODE_HOME`,
+  `AMP_HOME`, and every name an account preset uses) and credentials (`CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `GH_TOKEN`, `GITHUB_TOKEN`,
+  `COPILOT_GITHUB_TOKEN`, and any name ending in `_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD` or
+  `_CREDENTIALS`, except the listener-token case above). Account directories are protected paths,
+  like `.claude/`.
+- **The registry does not accept** an extension that rotates accounts, switches them when a limit
+  is reached, spreads load over accounts, carries a session to another account to continue on its
+  limit, shares or resells access, or handles tokens. It is blocked if found later. Fyx itself
+  never does these things: there is no automatic switch and no "continue with another account"
+  button, and a limit message is shown as it is. See
+  [Accounts and limits](platform/registry-repo.md#accounts-and-limits-what-is-not-accepted).
+
+### Publishing a 0.4 extension to the registry
+
+- **Tier.** The registry rates a release by its highest capability, and **T3 counts as T2**, so
+  an extension with `terminal:read` or any T2 capability needs the owner's approval for every
+  version and never auto-merges. A T1-only integration (profiles, pseudo-terminals, status,
+  context, review proposals) follows the T0 and T1 rules. The registry does not accept T2
+  entries until `fyx-ext` reads `network_domains` and `processes`
+  ([registry-repo.md](platform/registry-repo.md#the-entry)); a 0.4 T2 extension can run as a
+  dev extension in the meantime.
+- **The diff in the PR comment.** For a new version, the comment lists what you add (each item
+  with its tier) and remove, the same text clients show before an update installs. Put a plain
+  `reason` on every T2 item, since a reviewer reads it next to the diff.
+
+### The first extensions
+
+`extensions/fyx_demo_pseudo_terminal` (a TUI written in WASM, in a panel), `fyx_claude_code`
+(profile with `account_tool`, the Claude plugin in package files, `http` hooks and `fyx-relay`,
+the IDE protocol over `mcp-websocket` with the lock file, `openDiff` → `review:propose`) and
+`fyx_gemini_cli` (the documented IDE companion spec over `mcp-streamable-http`, the `${tmp}`
+discovery file, `ide/contextUpdate` from `context:editor`) are the reference implementations. They
+are W4's tasks 5.10, 5.15 and 5.16; the second tool exists to prove the primitives are general,
+so if you need one that these two did not, say so before 0.4 freezes.
+
+### Testing 0.4 features headless
+
+**(coming, tasks 5.10 and 5.14.)** `fyx_ext_harness` will get fakes for terminals, listeners,
+relay and review, the way 0.3 got `fake_program`: the test plays the user (ticks a checkbox,
+answers a card), the tool (an MCP client, a relay hook) and the terminal. A recorded protocol
+transcript from a pinned tool version, replayed against the extension, is the compat test the
+Claude extension uses: if the tool changes its protocol, the test fails loudly.

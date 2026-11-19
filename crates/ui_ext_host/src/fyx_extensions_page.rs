@@ -264,6 +264,14 @@ impl RegistryHub {
         self.refresh_and_apply(Apply::Blocks, cx)
     }
 
+    /// The page's Refresh button: like [`Self::refresh`], with the block list fetched now even
+    /// when it is not due, as "Check for extension updates" does (the due interval stays for the
+    /// automatic refreshes: the page opening, after an install).
+    pub fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.blocklist_now = true;
+        self.refresh(cx)
+    }
+
     /// "Check for extension updates": the index and the block list now, then updates as the
     /// timer applies them.
     pub fn check_now(&mut self, cx: &mut Context<Self>) {
@@ -630,6 +638,27 @@ enum InstallMode {
     Update(InstalledExtension),
 }
 
+/// The Available row's button and note for an installed id: the installed version when the
+/// listing offers another one (a blocked installed version leaves an older one installable), and
+/// the store's disabled state, so a blocked install does not read as plainly "Installed".
+pub(crate) fn installed_row_state(
+    listed: &semver::Version,
+    installed: &semver::Version,
+    disabled: Option<&str>,
+) -> (String, Option<(String, Color)>) {
+    match disabled {
+        Some(reason) => (
+            "Disabled".to_string(),
+            Some((
+                format!("Installed {installed}: disabled, {reason}"),
+                Color::Error,
+            )),
+        ),
+        None if listed != installed => (format!("Installed {installed}"), None),
+        None => ("Installed".to_string(), None),
+    }
+}
+
 fn format_wait(seconds: u64) -> String {
     let minutes = seconds.div_ceil(60);
     if minutes < 60 {
@@ -974,7 +1003,15 @@ impl FyxExtensionsPage {
     ) -> impl IntoElement {
         let hub = self.hub.read(cx);
         let id = release.id.as_str().to_string();
-        let installed = hub.installed(&id).is_some();
+        let installed_state = hub.installed(&id).map(|installed| {
+            let disabled = hub
+                .disabled
+                .iter()
+                .find(|(disabled, _)| *disabled == id)
+                .map(|(_, reason)| reason.as_str());
+            installed_row_state(&release.version, &installed.active.version, disabled)
+        });
+        let installed = installed_state.is_some();
         let refusal = hub
             .listing
             .iter()
@@ -983,14 +1020,14 @@ impl FyxExtensionsPage {
         let workspace = self.workspace.clone();
         // Updates are on the installed row, where the plan decides them.
         let (button, note) = match (&refusal, installed) {
-            (_, true) => (
-                Button::new(
-                    SharedString::from(format!("fyx-reg-installed-{id}")),
-                    "Installed",
+            (_, true) => {
+                let (label, note) = installed_state.unwrap_or_default();
+                (
+                    Button::new(SharedString::from(format!("fyx-reg-installed-{id}")), label)
+                        .disabled(true),
+                    note,
                 )
-                .disabled(true),
-                None,
-            ),
+            }
             (Some(InstallRefusal::Blocked { block }), false) => (
                 Button::new(
                     SharedString::from(format!("fyx-reg-blocked-{id}")),
@@ -1270,7 +1307,7 @@ impl FyxExtensionsPage {
                     .into_iter()
                     .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
-            .children(permission_rows(&id, cx))
+            .children(consent_rows(&id, self.workspace.clone(), cx))
     }
 
     /// A dev extension or an installed folder (not the install store): where it is, "Enable"
@@ -1283,6 +1320,7 @@ impl FyxExtensionsPage {
             "Installed folder, not from the registry"
         };
         let pending = local.pending.clone();
+        let workspace = self.workspace.clone();
         v_flex()
             .p_3()
             .gap_1()
@@ -1308,12 +1346,18 @@ impl FyxExtensionsPage {
                             )
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
-                            .on_click(move |_, _, cx| {
-                                let fs = <dyn Fs>::global(cx);
-                                if let Some(registry) = UiExtensionRegistry::global(cx) {
-                                    registry
-                                        .update(cx, |registry, cx| registry.enable(&id, fs, cx));
-                                }
+                            // The grouped dialog (§C.2), ticked item by item.
+                            .on_click(move |_, window, cx| {
+                                let (Some(registry), Some(workspace)) =
+                                    (UiExtensionRegistry::global(cx), workspace.upgrade())
+                                else {
+                                    return;
+                                };
+                                workspace.update(cx, |workspace, cx| {
+                                    crate::registry::ask_pending_consent(
+                                        workspace, &registry, &id, window, cx,
+                                    )
+                                });
                             }),
                         )
                     }),
@@ -1338,7 +1382,181 @@ impl FyxExtensionsPage {
                         .color(Color::Warning),
                 )
             })
-            .children(permission_rows(&id, cx))
+            .children(consent_rows(&id, self.workspace.clone(), cx))
+    }
+}
+
+/// How many journal entries the page shows, newest first.
+const JOURNAL_ROWS: usize = 20;
+
+/// The 0.4 page rows (§C.2 "Later", §C.4): every consent item with its state and a switch, then
+/// the usage journal. Turning a T2 item on asks once more with the same text and the 1 s guard;
+/// turning one off applies at once. A T1 item turned off comes back with "Enable" on the next
+/// load. Without consent lines (a bare component) it falls back to the capability rows.
+fn consent_rows(
+    extension_id: &str,
+    workspace: WeakEntity<Workspace>,
+    cx: &App,
+) -> Vec<gpui::AnyElement> {
+    use crate::consent_model::{ConsentTier, journal_line};
+    use ui_ext_wasm::permissions::PermissionState;
+    let Some(registry) = UiExtensionRegistry::global(cx) else {
+        return Vec::new();
+    };
+    let registry_read = registry.read(cx);
+    let lines = registry_read.consent_lines(extension_id);
+    if lines.is_empty() {
+        return permission_rows(extension_id, cx);
+    }
+    let name = registry_read.provenance_name(extension_id);
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let state = registry_read.consent_item_state(extension_id, &line.item);
+        let (note, switch) = match (line.tier, state) {
+            (ConsentTier::T0, _) => continue,
+            (ConsentTier::T3, _) => ("asks you each time", None),
+            (ConsentTier::T1, PermissionState::Granted) => ("on", Some(true)),
+            (ConsentTier::T1, _) => ("off until Enable", None),
+            (ConsentTier::T2, PermissionState::Granted) => ("on", Some(true)),
+            (ConsentTier::T2, PermissionState::Unavailable) => ("not available here", None),
+            (ConsentTier::T2, _) => ("off", Some(false)),
+        };
+        let detail = (!line.details.is_empty()).then(|| line.details.join("  ·  "));
+        let row = h_flex()
+            .gap_2()
+            .justify_between()
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        Label::new(format!("{}: {note}", line.title))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .when_some(detail, |this, detail| {
+                        this.child(
+                            Label::new(detail)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    }),
+            )
+            .when_some(switch, |this, on| {
+                let (id, registry, line, workspace, name) = (
+                    extension_id.to_string(),
+                    registry.clone(),
+                    line.clone(),
+                    workspace.clone(),
+                    name.clone(),
+                );
+                let lines = lines.clone();
+                this.child(
+                    ui::Switch::new(
+                        SharedString::from(format!("fyx-consent-{extension_id}-{index}")),
+                        if on {
+                            ui::ToggleState::Selected
+                        } else {
+                            ui::ToggleState::Unselected
+                        },
+                    )
+                    .on_click(move |_, window, cx| {
+                        let fs = <dyn Fs>::global(cx);
+                        if on {
+                            registry.update(cx, |registry, cx| {
+                                if line.tier == ConsentTier::T1 {
+                                    if let Err(error) =
+                                        registry.revoke(&id, line.item.capability(), fs, cx)
+                                    {
+                                        log::error!("fyx:ui: {error:#}");
+                                    }
+                                } else {
+                                    registry
+                                        .set_consent_item(&id, &lines, &line.item, false, fs, cx)
+                                }
+                            });
+                            return;
+                        }
+                        let Some(workspace) = workspace.upgrade() else {
+                            return;
+                        };
+                        let answer = workspace.update(cx, |workspace, cx| {
+                            crate::consent_dialog::confirm_item(
+                                workspace,
+                                &name,
+                                line.clone(),
+                                window,
+                                cx,
+                            )
+                        });
+                        let (id, registry, line, lines) =
+                            (id.clone(), registry.clone(), line.clone(), lines.clone());
+                        cx.spawn(async move |cx| {
+                            if answer.await.is_ok_and(|ticked| ticked.contains(&line.item)) {
+                                cx.update(|cx| {
+                                    registry.update(cx, |registry, cx| {
+                                        registry
+                                            .set_consent_item(&id, &lines, &line.item, true, fs, cx)
+                                    })
+                                });
+                            }
+                        })
+                        .detach();
+                    }),
+                )
+            });
+        rows.push(row.into_any_element());
+    }
+    let journal = registry_read.journal(extension_id);
+    rows.push(
+        Label::new("Usage")
+            .size(LabelSize::Small)
+            .into_any_element(),
+    );
+    if journal.incomplete {
+        rows.push(
+            Label::new("Journal incomplete: some entries could not be written.")
+                .size(LabelSize::XSmall)
+                .color(Color::Warning)
+                .into_any_element(),
+        );
+    }
+    if journal.entries.is_empty() {
+        rows.push(
+            Label::new("Nothing recorded yet.")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+        );
+    }
+    let now = std::time::SystemTime::now();
+    rows.extend(
+        journal
+            .entries
+            .iter()
+            .rev()
+            .take(JOURNAL_ROWS)
+            .map(|entry| {
+                Label::new(format!(
+                    "{}  {}",
+                    ago(now, entry.at),
+                    journal_line(&entry.kind)
+                ))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element()
+            }),
+    );
+    rows
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 d ago".
+fn ago(now: std::time::SystemTime, at: std::time::SystemTime) -> String {
+    let seconds = now.duration_since(at).unwrap_or_default().as_secs();
+    match seconds {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", seconds / 60),
+        3600..86400 => format!("{} h ago", seconds / 3600),
+        _ => format!("{} d ago", seconds / 86400),
     }
 }
 
@@ -1475,7 +1693,7 @@ impl Render for FyxExtensionsPage {
                                     .style(ButtonStyle::Outlined)
                                     .disabled(refreshing)
                                     .on_click(move |_, _, cx| {
-                                        hub.update(cx, |hub, cx| hub.refresh(cx))
+                                        hub.update(cx, |hub, cx| hub.refresh_now(cx))
                                     }),
                             ),
                     ),
