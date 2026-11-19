@@ -12,11 +12,13 @@
 //! - **Compat test** (`compat`): transcripts of a pinned Gemini CLI version, replayed against
 //!   [`companion`].
 //!
-//! Host-free like `fyx_claude_code`: the wiring to `mcp-call`, `review-decided` and
-//! `context-changed` waits for plan 5.14. The primitives Gemini needs that Claude did not are
-//! listed in `compat/README.md`.
+//! Built for 0.4, [`companion::Server`] runs on the SDK's `listeners`, `context` and `review`
+//! (`wired.rs`): `mcp-call`, `review-decided` and `context-changed` drive it. What the kit still
+//! lacks for Gemini is listed in `compat/README.md`.
 
 pub mod companion;
+#[cfg(feature = "fyx-ui-0-4")]
+mod wired;
 
 #[cfg(test)]
 mod compat;
@@ -32,14 +34,48 @@ pub const FEATURES: [&str; 3] = [
 ];
 
 pub struct GeminiCli {
-    diffs: companion::Diffs,
+    server: companion::Server,
 }
 
 impl Extension for GeminiCli {
     fn new() -> Self {
-        Self {
-            diffs: companion::Diffs::default(),
+        // Registered before the listener opens; the host offers them when it does.
+        #[cfg(feature = "fyx-ui-0-4")]
+        {
+            wired::register_tools();
+            wired::watch_context();
         }
+        Self {
+            server: companion::Server::default(),
+        }
+    }
+
+    #[cfg(feature = "fyx-ui-0-4")]
+    fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
+        match event {
+            IoEvent::McpCall(call) if call.listener == companion::LISTENER => {
+                self.server.call(
+                    &mut wired::SdkHost,
+                    call.connection,
+                    call.call_id,
+                    &call.tool,
+                    &call.arguments,
+                );
+            }
+            IoEvent::ReviewDecided((proposal, outcome)) => {
+                self.server.review_decided(
+                    &mut wired::SdkHost,
+                    proposal,
+                    wired::decision(&outcome),
+                );
+            }
+            IoEvent::ContextChanged(editor) => {
+                self.server
+                    .context_changed(&mut wired::SdkHost, wired::context_update(editor));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn surfaces(&self) -> Vec<Surface> {
@@ -70,7 +106,7 @@ impl Extension for GeminiCli {
             for feature in FEATURES {
                 tree.text(TextProps::new(feature));
             }
-            let open = match self.diffs.len() {
+            let open = match self.server.open_diffs() {
                 0 => "No edit is waiting for review.".to_owned(),
                 1 => "1 edit is waiting for review.".to_owned(),
                 count => format!("{count} edits are waiting for review."),

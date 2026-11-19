@@ -299,8 +299,12 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
             ),
         ),
     ];
-    // `getDiagnostics` answers `[]` until 0.4 has a diagnostics read.
-    const COMPARED: [&str; 3] = ["openDiff", "close_tab", "closeAllDiffTabs"];
+    const COMPARED: [&str; 4] = [
+        "openDiff",
+        "close_tab",
+        "closeAllDiffTabs",
+        "getDiagnostics",
+    ];
     let package = demo_package("fyx_claude_code");
     let mut compared = 0;
     let mut notified = 0;
@@ -354,6 +358,49 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                     selection: Some((range, selection["text"].as_str().map(str::to_owned))),
                     trusted: Some(true),
                 });
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                receive(&mut harness, &mut answers, &mut notes);
+                continue;
+            }
+            if event["t"] == "diagnostics" {
+                use ui_ext::context::{Diagnostic, DiagnosticSeverity, FileDiagnostics};
+                let position = |at: &Value| ui_ext::edit::Position {
+                    line: at[0].as_u64().unwrap() as u32,
+                    column: at[1].as_u64().unwrap() as u32,
+                };
+                let files = event["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|file| FileDiagnostics {
+                        path: ui_ext::process::FileRef {
+                            worktree: Some(1),
+                            path: file["path"].as_str().unwrap().to_owned(),
+                        },
+                        diagnostics: file["diagnostics"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|entry| Diagnostic {
+                                range: ui_ext::edit::TextRange {
+                                    start: position(&entry["range"]["start"]),
+                                    end: position(&entry["range"]["end"]),
+                                },
+                                severity: match entry["severity"].as_str() {
+                                    Some("Error") => DiagnosticSeverity::Error,
+                                    Some("Warning") => DiagnosticSeverity::Warning,
+                                    Some("Information") => DiagnosticSeverity::Information,
+                                    Some("Hint") => DiagnosticSeverity::Hint,
+                                    other => panic!("{at}: severity {other:?}"),
+                                },
+                                message: entry["message"].as_str().unwrap().to_owned(),
+                                source: entry["source"].as_str().map(str::to_owned),
+                                code: None,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                harness.set_diagnostics(files);
                 harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
                 receive(&mut harness, &mut answers, &mut notes);
                 continue;
@@ -457,8 +504,9 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
     assert!(notified > 0, "no selection_changed was compared");
 }
 
-/// The skeleton of plan 5.16: the manifest loads, and the profile runs `gemini` with the
-/// account the user picks. The companion protocol is tested natively until 5.14.
+/// Plan 5.16: the manifest loads, and the profile runs `gemini` with the account the user
+/// picks. The companion runs on the fake `ide` listener
+/// (`gemini_cli_replays_the_compat_transcripts_on_its_listener`).
 #[test]
 fn gemini_cli_loads_with_its_profile() {
     let mut harness = Harness::load_package(demo_package("fyx_gemini_cli")).expect("loads");
@@ -493,6 +541,249 @@ fn gemini_cli_loads_with_its_profile() {
         texts.contains(&"No edit is waiting for review.".to_owned()),
         "{texts:?}"
     );
+}
+
+/// The discovery template passes the host's checks and has the shape the CLI reads: `port` a
+/// number (a whole `${port}`), `workspacePath` the joined roots, `ideInfo` an object.
+#[test]
+fn gemini_cli_discovery_file_has_the_cli_shape() {
+    let manifest: toml::Value = toml::from_str(
+        &std::fs::read_to_string(demo_package("fyx_gemini_cli").join("extension.toml")).unwrap(),
+    )
+    .unwrap();
+    let table = &manifest["fyx_ui"];
+    let listeners: Vec<ui_ext::integration::ListenerSpec> =
+        table["listeners"].clone().try_into().unwrap();
+    let discovery_files: Vec<ui_ext::integration::DiscoveryFileSpec> =
+        table["discovery_files"].clone().try_into().unwrap();
+    ui_ext::integration::IntegrationTables {
+        listeners: &listeners,
+        discovery_files: &discovery_files,
+        ..Default::default()
+    }
+    .check()
+    .expect("the host accepts the template");
+    use ui_ext::integration::DiscoveryValue as V;
+    let [file] = discovery_files.as_slice() else {
+        panic!("{discovery_files:?}");
+    };
+    assert_eq!(file.name, "gemini-ide-server-${pid}-${port}.json");
+    let text = |value: &str| V::Text(value.into());
+    assert_eq!(file.content["port"], text("${port}"));
+    assert_eq!(file.content["workspacePath"], text("${worktrees.joined}"));
+    assert_eq!(file.content["authToken"], text("${token}"));
+    let V::Table(ide_info) = &file.content["ideInfo"] else {
+        panic!("ideInfo is not a table");
+    };
+    assert_eq!(ide_info["name"], text("fyx"));
+    assert_eq!(ide_info["displayName"], text("Fyx"));
+}
+
+/// Plan 5.16: `fyx_gemini_cli`'s compat transcripts (Gemini CLI 0.69.0), replayed through the
+/// built 0.4 component on the fake `ide` listener. The host answers `initialize` and
+/// `tools/list`; the component answers `openDiff` and `closeDiff` through the review fake, and
+/// its notifications (`ide/contextUpdate`, `ide/diffAccepted`, `ide/diffRejected`) must equal
+/// the recorded ones, in order. A context update's `timestamp`s are ranks in the component
+/// (the editor feed has an order, not times), so only their order is compared.
+#[test]
+fn gemini_cli_replays_the_compat_transcripts_on_its_listener() {
+    use serde_json::Value;
+    use std::collections::VecDeque;
+    const TRANSCRIPTS: [(&str, &str); 1] = [(
+        "two-diffs",
+        include_str!("../../../../extensions/fyx_gemini_cli/src/compat/two-diffs.jsonl"),
+    )];
+    fn without_timestamps(mut message: Value) -> Value {
+        if let Some(files) = message["params"]["workspaceState"]["openFiles"].as_array_mut() {
+            for file in files {
+                file.as_object_mut().unwrap().remove("timestamp");
+            }
+        }
+        message
+    }
+    let package = demo_package("fyx_gemini_cli");
+    let (mut compared, mut notified) = (0, 0);
+    for (name, text) in TRANSCRIPTS {
+        let header: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(header["gemini_cli"], "0.69.0", "{name}");
+        let root = header["root"].as_str().expect("a root");
+        let mut harness = Harness::load_package(&package).expect("loads");
+        assert!(harness.listener_open("ide"));
+        harness.set_worktrees(&[(1, root)]);
+        // The feed's first context (nothing open) goes out before the CLI connects.
+        harness.deliver_io().unwrap();
+        // The transcript's `conn` ids, as the harness's connections.
+        let mut connections: HashMap<u64, u64> = HashMap::new();
+        let mut answers: HashMap<String, Value> = HashMap::new();
+        let mut notes: HashMap<u64, VecDeque<Value>> = HashMap::new();
+        let mut calls = Vec::new();
+        let mut proposal_of: HashMap<String, u64> = HashMap::new();
+        let receive = |harness: &mut Harness,
+                       connections: &HashMap<u64, u64>,
+                       answers: &mut HashMap<String, Value>,
+                       notes: &mut HashMap<u64, VecDeque<Value>>| {
+            for (&conn, &connection) in connections {
+                for text in harness.client_received(connection).unwrap() {
+                    let message: Value = serde_json::from_str(&text).unwrap();
+                    match message.get("id") {
+                        Some(id) => {
+                            answers.insert(id.to_string(), message);
+                        }
+                        None => notes.entry(conn).or_default().push_back(message),
+                    }
+                }
+            }
+        };
+        for (number, line) in text.lines().enumerate().skip(1) {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let at = format!("{name}.jsonl:{}", number + 1);
+            let event: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{at}: {e}"));
+            let conn = event["conn"].as_u64().unwrap_or(1);
+            connections
+                .entry(conn)
+                .or_insert_with(|| harness.connect("ide").unwrap());
+            match event["t"].as_str() {
+                Some("editor") => {
+                    let mut files: Vec<(String, u64)> = event["files"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|file| {
+                            (
+                                file[0].as_str().unwrap().to_owned(),
+                                file[1].as_u64().unwrap(),
+                            )
+                        })
+                        .collect();
+                    files.sort_by_key(|(_, focused_at)| std::cmp::Reverse(*focused_at));
+                    let open: Vec<ui_ext::process::FileRef> = files
+                        .into_iter()
+                        .map(|(path, _)| ui_ext::process::FileRef {
+                            worktree: Some(1),
+                            path,
+                        })
+                        .collect();
+                    let selection = event.get("selection").map(|selection| {
+                        let caret = ui_ext::edit::Position {
+                            line: selection["line"].as_u64().unwrap() as u32,
+                            column: selection["column"].as_u64().unwrap() as u32,
+                        };
+                        (
+                            ui_ext::edit::TextRange {
+                                start: caret,
+                                end: caret,
+                            },
+                            selection["text"].as_str().map(str::to_owned),
+                        )
+                    });
+                    harness.set_editor_context(ui_ext::context::EditorContext {
+                        active: open.first().cloned(),
+                        open,
+                        selection,
+                        trusted: event["trusted"].as_bool(),
+                    });
+                }
+                Some("review") => {
+                    use ui_ext::review::Decision;
+                    let proposal = proposal_of[&event["call"].to_string()];
+                    let final_content = event["final_content"].as_str().unwrap_or_default();
+                    let decided = match event["decision"].as_str() {
+                        Some("accepted") => {
+                            harness.decide_review(proposal, Decision::Accepted, final_content)
+                        }
+                        Some("partial") => {
+                            harness.decide_review(proposal, Decision::Partial, final_content)
+                        }
+                        Some("rejected") => harness.decide_review(proposal, Decision::Rejected, ""),
+                        Some("closed") => harness.fail_review(proposal, "the file went away"),
+                        other => panic!("{at}: decision {other:?}"),
+                    };
+                    assert!(decided, "{at}: proposal {proposal} is not open");
+                }
+                Some("mcp") if event["dir"] == "in" => {
+                    let message = &event["msg"];
+                    if message["method"] == "tools/call" {
+                        calls.push(message["id"].to_string());
+                    }
+                    let before: Vec<u64> = harness.proposals().iter().map(|(id, _)| *id).collect();
+                    harness
+                        .client_send(connections[&conn], &message.to_string())
+                        .unwrap_or_else(|e| panic!("{at}: {e}"));
+                    harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                    if message["params"]["name"] == "openDiff" {
+                        let (proposal, _) = harness
+                            .proposals()
+                            .into_iter()
+                            .find(|(id, _)| !before.contains(id))
+                            .unwrap_or_else(|| panic!("{at}: openDiff proposed nothing"));
+                        proposal_of.insert(message["id"].to_string(), proposal);
+                    }
+                }
+                Some("mcp") => {
+                    let message = &event["msg"];
+                    receive(&mut harness, &connections, &mut answers, &mut notes);
+                    match message.get("id").map(Value::to_string) {
+                        None => {
+                            let ours = notes
+                                .get_mut(&conn)
+                                .and_then(VecDeque::pop_front)
+                                .unwrap_or_else(|| panic!("{at}: nothing sent for {message}"));
+                            assert_eq!(
+                                without_timestamps(ours),
+                                without_timestamps(message.clone()),
+                                "{at}"
+                            );
+                            notified += 1;
+                        }
+                        Some(id) => {
+                            let ours = answers
+                                .get(&id)
+                                .unwrap_or_else(|| panic!("{at}: no answer to {id}"));
+                            if message["result"]["serverInfo"].is_object() {
+                                assert_eq!(
+                                    ours["result"]["protocolVersion"],
+                                    message["result"]["protocolVersion"],
+                                    "{at}"
+                                );
+                            } else if let Some(recorded) = message["result"]["tools"].as_array() {
+                                let names = |tools: &[Value]| -> Vec<String> {
+                                    tools
+                                        .iter()
+                                        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                                        .collect()
+                                };
+                                let listed = ours["result"]["tools"].as_array().expect("tools");
+                                assert_eq!(names(listed), names(recorded), "{at}");
+                            } else {
+                                assert_eq!(ours, message, "{at}");
+                                compared += 1;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                other => panic!("{at}: event {other:?}"),
+            }
+            harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+        }
+        receive(&mut harness, &connections, &mut answers, &mut notes);
+        for id in &calls {
+            assert!(
+                answers.contains_key(id),
+                "{name}: call {id} was never answered"
+            );
+        }
+        assert!(harness.open_mcp_calls().is_empty(), "{name}");
+        assert!(harness.proposals().is_empty(), "{name}");
+        assert!(
+            notes.values().all(VecDeque::is_empty),
+            "{name}: {notes:?} not in the transcript"
+        );
+    }
+    assert!(compared > 0, "no answer was compared");
+    assert!(notified > 0, "no notification was compared");
 }
 
 #[test]

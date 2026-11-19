@@ -754,6 +754,7 @@ fn main() {
         terminal_host::init(cx); // fyx: terminal status on tabs, the fyx:ui terminal host
         terminal_host::init_shell_integration(paths::data_dir().join("shell_integration"), cx); // fyx: plan 5.17
         terminal_host::init_discovery(paths::data_dir(), cx); // fyx: plan 5.12 discovery files
+        terminal_host::init_relay(paths::data_dir(), cx); // fyx: plan 5.12 fyx-relay endpoint
         if let Some(host) = terminal_host::host(cx) {
             ui_ext_host::set_terminal_host(host, cx); // fyx: before ui_ext_host loads any extension
         }
@@ -762,7 +763,7 @@ fn main() {
             cx,
         ); // fyx: terminal nodes in extension panels
         ui_ext_host::init(cx); // fyx: extension panels and status items
-        fyx_t3::init(cx); // fyx: terminal shares and closed terminals for the consent broker
+        fyx_t3::init(cx); // fyx: T3 shares, closed terminals, discovery-file writer
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);

@@ -157,7 +157,16 @@ pub(crate) fn locate(
     file: &FileRef,
     cx: &mut App,
 ) -> Result<(OpenWorktree, PathBuf), String> {
-    let open = OpenWorktrees::global(cx).all();
+    locate_in(&OpenWorktrees::global(cx), key, file)
+}
+
+/// [`locate`] without an `App`.
+pub(crate) fn locate_in(
+    open: &OpenWorktrees,
+    key: &str,
+    file: &FileRef,
+) -> Result<(OpenWorktree, PathBuf), String> {
+    let open = open.all();
     let mut candidates = open.into_iter().filter(|worktree| {
         file.worktree
             .is_none_or(|id| opaque_id(key, worktree.key) == id)

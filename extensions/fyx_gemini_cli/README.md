@@ -21,17 +21,14 @@ It uses `ui:panel`, `terminal:profiles`, `terminal:env`, `network:listen`,
 
 ## Status
 
-This is the host-free skeleton:
-- the manifest, which passes `fyx-ext check`;
-- the companion core (`src/companion.rs`), tested natively;
-- the compat test ([`src/compat/README.md`](src/compat/README.md)), pinned to Gemini CLI 0.69.0.
+Wired on the 0.4 SDK (`src/wired.rs`): `mcp-call`, `review-decided` and `context-changed` drive
+the companion (`src/companion.rs`), and the discovery template writes the shape the CLI reads.
+The compat test ([`src/compat/README.md`](src/compat/README.md)), pinned to Gemini CLI 0.69.0,
+replays natively and through the built component in `fyx_ext_harness`. The same README lists
+what the kit still lacks for Gemini.
 
-The same README lists the primitives Gemini needs that the kit lacks. One of them, typed
-discovery content, blocks IDE mode until the host can write it. The wiring to the host's events
-comes with plan 5.14.
-
-That README also gives the plan the coordinator decided for hooks and turns, which come after
-the skeleton. The hooks go in a settings file in the package, loaded through
+That README also gives the plan the coordinator decided for hooks and turns, which need the
+relay. The hooks go in a settings file in the package, loaded through
 `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` in profile terminals only.
 
 ```sh

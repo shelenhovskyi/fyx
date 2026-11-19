@@ -925,6 +925,20 @@ macro_rules! __fyx_context_shims {
         ) -> ::std::result::Result<::std::string::String, $crate::HostError> {
             $crate::__private::context::$world::absolute_path(path)
         }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_diagnostics(
+            path: ::std::option::Option<&$crate::FileRef>,
+        ) -> ::std::result::Result<$crate::context::DiagnosticsSnapshot, $crate::HostError> {
+            $crate::__private::context::$world::diagnostics(path)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_watch_diagnostics(
+            on: bool,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::watch_diagnostics(on)
+        }
     };
 }
 

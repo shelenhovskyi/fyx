@@ -15,6 +15,7 @@ doctest = false
 
 [dependencies]
 futures.workspace = true
+fyx_relay.workspace = true
 gpui.workspace = true
 ui_ext = { workspace = true, features = ["t2"] }
 log.workspace = true

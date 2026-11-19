@@ -8,12 +8,19 @@
 //!   `file://` URIs to worktree files and back. A private file is `not-permitted`.
 //! - [`open`] (`workspace:open`) opens a worktree file; `focus` needs a gesture or a recent
 //!   listener request while one of the extension's terminals has focus.
+//! - [`diagnostics`] (`workspace:diagnostics`) reads the language servers' diagnostics of one
+//!   file or of every worktree file (errors first, at most 500 entries, private files left out);
+//!   [`watch_diagnostics`] sends `IoEvent::DiagnosticsChanged` with the files that changed
+//!   (debounced 300 ms; empty when more than 200 did), with no entries: read them again.
 //!
-//! Exported as 0.2 or 0.1, every function here fails with `unavailable`. Off WASM, [`watch`]
-//! and [`open`] record a [`HostEffect::Context`](crate::HostEffect::Context), and the path
-//! mapping uses the roots [`set_worktree_roots`] gave (none: everything is outside).
+//! Exported as 0.2 or 0.1, every function here fails with `unavailable`. Off WASM, [`watch`],
+//! [`open`] and [`watch_diagnostics`] record a [`HostEffect::Context`](crate::HostEffect::Context),
+//! the path mapping uses the roots [`set_worktree_roots`] gave (none: everything is outside), and
+//! [`diagnostics`] answers from [`set_diagnostics`].
 
-pub use crate::bindings::fyx::ui::context::EditorContext;
+pub use crate::bindings::fyx::ui::context::{
+    Diagnostic, DiagnosticsSnapshot, EditorContext, FileDiagnostics, Severity,
+};
 use crate::{FileRef, HostError, TextRange};
 
 #[cfg(target_arch = "wasm32")]
@@ -26,6 +33,10 @@ unsafe extern "Rust" {
     ) -> Result<(), HostError>;
     safe fn __fyx_ui_context_to_file_ref(absolute: &str) -> Result<FileRef, HostError>;
     safe fn __fyx_ui_context_absolute_path(path: &FileRef) -> Result<String, HostError>;
+    safe fn __fyx_ui_context_diagnostics(
+        path: Option<&FileRef>,
+    ) -> Result<DiagnosticsSnapshot, HostError>;
+    safe fn __fyx_ui_context_watch_diagnostics(on: bool) -> Result<(), HostError>;
 }
 
 /// What a context function did, recorded off WASM in
@@ -38,10 +49,13 @@ pub enum ContextEffect {
         range: Option<TextRange>,
         focus: bool,
     },
+    WatchDiagnostics(bool),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
+    static DIAGNOSTICS: std::cell::RefCell<Vec<FileDiagnostics>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static ROOTS: std::cell::RefCell<Vec<(u64, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -156,6 +170,40 @@ pub fn absolute_path(path: &FileRef) -> Result<String, HostError> {
     })
 }
 
+/// Off WASM, what [`diagnostics`] answers on this thread: these files, as given. For unit tests
+/// of an extension.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_diagnostics(files: Vec<FileDiagnostics>) {
+    DIAGNOSTICS.set(files);
+}
+
+/// `workspace:diagnostics`: the diagnostics of `path`, or of every worktree file with any
+/// (`None`). A private file is `not-permitted`; a file outside every worktree is
+/// `invalid-argument`; a file without diagnostics answers no files.
+pub fn diagnostics(path: Option<&FileRef>) -> Result<DiagnosticsSnapshot, HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_diagnostics(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    Ok(DIAGNOSTICS.with_borrow(|files| DiagnosticsSnapshot {
+        files: files
+            .iter()
+            .filter(|file| path.is_none_or(|path| *path == file.path))
+            .cloned()
+            .collect(),
+        truncated: false,
+    }))
+}
+
+/// `workspace:diagnostics`: starts or stops `IoEvent::DiagnosticsChanged`.
+pub fn watch_diagnostics(on: bool) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_watch_diagnostics(on);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(ContextEffect::WatchDiagnostics(
+        on,
+    )))
+}
+
 /// What `register_extension!`'s context shims call, per exported world.
 #[doc(hidden)]
 pub mod glue {
@@ -182,6 +230,14 @@ pub mod glue {
 
         pub fn absolute_path(path: &FileRef) -> Result<String, HostError> {
             wit::absolute_path(path)
+        }
+
+        pub fn diagnostics(path: Option<&FileRef>) -> Result<wit::DiagnosticsSnapshot, HostError> {
+            wit::diagnostics(path)
+        }
+
+        pub fn watch_diagnostics(on: bool) -> Result<(), HostError> {
+            wit::watch_diagnostics(on)
         }
     }
 
@@ -219,6 +275,16 @@ pub mod glue {
 
                 pub fn absolute_path(_path: &FileRef) -> Result<String, HostError> {
                     Err(unavailable("absolute_path"))
+                }
+
+                pub fn diagnostics(
+                    _path: Option<&FileRef>,
+                ) -> Result<super::super::DiagnosticsSnapshot, HostError> {
+                    Err(unavailable("diagnostics"))
+                }
+
+                pub fn watch_diagnostics(_on: bool) -> Result<(), HostError> {
+                    Err(unavailable("watch_diagnostics"))
                 }
             }
         };
@@ -265,6 +331,39 @@ mod tests {
             ]
         );
         set_worktree_roots(&[]);
+    }
+
+    #[test]
+    fn diagnostics_off_wasm() {
+        take_host_effects();
+        let file = |path: &str| FileRef {
+            worktree: Some(1),
+            path: path.into(),
+        };
+        let entry = Diagnostic {
+            range: TextRange {
+                start: crate::Position { line: 1, column: 0 },
+                end: crate::Position { line: 1, column: 3 },
+            },
+            severity: Severity::Error,
+            message: "no".into(),
+            source: Some("rustc".into()),
+            code: None,
+        };
+        set_diagnostics(vec![FileDiagnostics {
+            path: file("a.rs"),
+            diagnostics: vec![entry],
+        }]);
+        assert_eq!(diagnostics(None).unwrap().files.len(), 1);
+        assert_eq!(diagnostics(Some(&file("a.rs"))).unwrap().files.len(), 1);
+        assert!(diagnostics(Some(&file("b.rs"))).unwrap().files.is_empty());
+        watch_diagnostics(true).unwrap();
+        assert_eq!(
+            take_host_effects(),
+            [HostEffect::Context(ContextEffect::WatchDiagnostics(true))]
+        );
+        set_diagnostics(Vec::new());
+        assert!(glue::v0_2::diagnostics(None).is_err());
     }
 
     #[test]

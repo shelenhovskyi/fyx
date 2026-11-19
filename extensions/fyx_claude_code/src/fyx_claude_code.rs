@@ -19,8 +19,8 @@
 //! [`ide::tools`] on the `ide` listener and answers `io-event::mcp-call` through
 //! [`ide::Server`] ([`wired`]); Claude's paths map to worktree files through `context`, which
 //! also feeds `selection_changed`, and `openDiff` is a proposal in agent review (`review`),
-//! withdrawn when Claude closes its tab first. The hooks arrive with the relay. The staged 0.4
-//! WIT has no diagnostics source yet, so `getDiagnostics` answers an empty list.
+//! withdrawn when Claude closes its tab first. `getDiagnostics` reads `context.diagnostics`;
+//! its answers are cached until `diagnostics-changed`. The hooks arrive with the relay.
 
 pub mod hooks;
 pub mod ide;
@@ -58,6 +58,7 @@ impl Extension for ClaudeCode {
         {
             wired::register_tools();
             wired::watch_context();
+            wired::watch_diagnostics();
         }
         Self {
             sessions: hooks::Sessions::default(),
@@ -80,6 +81,7 @@ impl Extension for ClaudeCode {
                 );
             }
             IoEvent::McpCancelled(call) => self.ide.cancelled(&mut wired::SdkHost, call),
+            IoEvent::DiagnosticsChanged(_) => self.ide.invalidate_diagnostics(),
             IoEvent::ReviewDecided((proposal, outcome)) => {
                 let answer = wired::diff_answer(outcome);
                 self.ide
