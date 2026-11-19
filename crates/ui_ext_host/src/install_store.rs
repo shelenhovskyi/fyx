@@ -928,6 +928,8 @@ mod tests {
                     path: folder.clone(),
                 },
             },
+            lines: Vec::new(),
+            diff: Default::default(),
         };
         assert!(crate::registry::consent_card_text(&pending(true)).contains(ZED_EXTENSION_WARNING));
         assert!(
