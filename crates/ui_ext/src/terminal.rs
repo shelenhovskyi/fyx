@@ -480,6 +480,9 @@ pub enum TemplatePart {
     Relay,
     /// `${account.<tool>}`: the terminal's account profile dir for `tool` (§C.6).
     Account(String),
+    /// `${pid}`: the Fyx process id, which IDE-integration tools match against their
+    /// discovery files (§B.8; `terminal:env` values only).
+    Pid,
 }
 
 /// A value with `${…}` placeholders, resolved by the host when a terminal starts. The extension
@@ -503,6 +506,10 @@ pub trait TemplateContext {
     fn listen_token(&self, listener: &str) -> Option<String>;
     fn relay(&self) -> Option<String>;
     fn account_dir(&self, tool: &str) -> Option<String>;
+    /// `${pid}`: this process unless the host says otherwise.
+    fn pid(&self) -> Option<u32> {
+        Some(std::process::id())
+    }
 }
 
 impl Template {
@@ -550,6 +557,7 @@ impl Template {
                 TemplatePart::ListenToken(name) => out.push_str(&cx.listen_token(name)?),
                 TemplatePart::Relay => out.push_str(&cx.relay()?),
                 TemplatePart::Account(tool) => out.push_str(&cx.account_dir(tool)?),
+                TemplatePart::Pid => out.push_str(&cx.pid()?.to_string()),
             }
         }
         Some(out)
@@ -574,6 +582,7 @@ fn parse_placeholder(
     let part = match inner.split('.').collect::<Vec<_>>().as_slice() {
         ["package"] => TemplatePart::Package,
         ["relay"] => TemplatePart::Relay,
+        ["pid"] => TemplatePart::Pid,
         ["listen", name, "port"] => {
             listener(name).ok_or_else(|| format!("no listener named {name:?}"))?;
             TemplatePart::ListenPort(name.to_string())
@@ -1034,6 +1043,7 @@ mod tests {
                 ("CLAUDE_CODE_PLUGIN_DIRS", "${package}/claude-plugin"),
                 ("TOOL_HOOK", "$HOME is literal, ${relay} --channel x"),
                 ("TOOL_DIR", "${account.claude}"),
+                ("TOOL_IDE_PID", "${pid}"),
             ]),
             &listeners,
         )
@@ -1072,6 +1082,7 @@ mod tests {
             !resolved.contains_key("TOOL_DIR"),
             "no account profile: left out"
         );
+        assert_eq!(resolved["TOOL_IDE_PID"], std::process::id().to_string());
 
         for (name, value) in [
             ("A", "${listen.nope.port}"),
