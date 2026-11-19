@@ -1190,10 +1190,11 @@ interface review {
 
     /// The outcome arrives as `io-event::review-decided` with the returned id.
     propose: func(request: proposal) -> result<u64, host-error>;
-    /// The tool closed its diff (the CLI's `close_tab`): an undecided proposal's review closes
-    /// and nothing is applied; its `review-decided` arrives as `err("withdrawn")`. An id that
-    /// is not the extension's or already decided is `invalid-argument`.
-    withdraw: func(id: u64) -> result<_, host-error>;
+    /// The tool closed its diff (Gemini's `closeDiff`, Claude's `close_tab`): an undecided
+    /// proposal's review closes, nothing is applied, and no `review-decided` follows. Returns the
+    /// proposal's current text, with the user's edits so far. An id that is not the extension's
+    /// or already decided is `invalid-argument`.
+    withdraw: func(id: u64) -> result<string, host-error>;
     begin-turn: func(session: string) -> result<_, host-error>;
     end-turn: func(session: string, changed: list<file-ref>) -> result<_, host-error>;
 }
