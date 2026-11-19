@@ -8,14 +8,10 @@ Older history: `archive/W2c.md`.
 - **At W0:** 0e7d6a00bb (5.5 step 3) and 54df51e48b (the 0.4 import side) go in one gate with
   W4's harness fix. The harness needs the two `V0_4_0` arms, `limits_match` (MAX 0.4) and
   `net::IoEvent::Terminal(_) => None` in `fyx_ext_harness/src/v0_3.rs` `io_event`.
-- **Done in 54df51e48b:** `fyx_ui_v0_4.rs` (bindgen since_v0.4.0, ten T2 cases, `terminals`
-  Host); the shared 0.3/0.4 imports in `t2_shared.rs` (`include!`d; each module defines
-  `t2_capability`, `t2_from_name`, `terminal_io_event`); `terminals.rs` (TerminalState checks,
-  TerminalsHandle: a non-blocking sink to forward to `IoEvent::Terminal`, close_all on drop and
-  on revoking create/env, stop observing on revoking observe); `permit_t1`, `permit_t2(_now)`
-  and `t2_granted` on UiState; LoadOptions `terminals`, `terminal_programs`, `terminal_env`,
-  `package_dir`; fixture `probe_v0_4`; `tests_v0_4.rs`. `terminal` nodes are refused until 5.7;
-  `request-read/write` answer `not-permitted` until T3.
+- **Done in 54df51e48b:** `fyx_ui_v0_4.rs` (bindgen, `terminals` Host); the 0.3/0.4 shared
+  imports in `t2_shared.rs` (`include!`d); `terminals.rs` (checks; a sink to
+  `IoEvent::Terminal`; close_all on drop and on revoking create/env); fixture `probe_v0_4`;
+  `tests_v0_4.rs`. `terminal` nodes are refused until 5.7; T3 calls answer `not-permitted`.
 - **Next:**
   1. 5.6, the broker. I sent W3 (local_31b10de5-…) an API sketch on 2026-11-19 and am waiting
      for its OK; check for its reply first. In the sketch:
