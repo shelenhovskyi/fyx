@@ -12,13 +12,23 @@
 //! - **Compat test** (`compat`): transcripts of a pinned Gemini CLI version, replayed against
 //!   [`companion`].
 //!
+//! - **Hooks** ([`hooks`]): `gemini-settings/system-defaults.json`, loaded through
+//!   `GEMINI_CLI_SYSTEM_DEFAULTS_PATH`, runs `fyx-relay` for Gemini's hooks. `BeforeAgent` begins
+//!   an agent turn and `AfterAgent` ends it with the files Gemini wrote; the tool, the waits and
+//!   the turn show on the terminal's tab. Every hook is answered at once with exit 0.
+//!
 //! Built for 0.4, [`companion::Server`] runs on the SDK's `listeners`, `context` and `review`
-//! (`wired.rs`): `mcp-call`, `review-decided` and `context-changed` drive it. What the kit still
-//! lacks for Gemini is listed in `compat/README.md`.
+//! (`wired.rs`): `mcp-call`, `review-decided` and `context-changed` drive it, and
+//! `relay-request` drives [`hooks::Sessions`]. What the kit still lacks for Gemini is listed in
+//! `compat/README.md`.
 
 pub mod companion;
+pub mod hooks;
 #[cfg(feature = "fyx-ui-0-4")]
 mod wired;
+
+#[cfg(feature = "fyx-ui-0-4")]
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 mod compat;
@@ -27,14 +37,63 @@ use ui_ext_sdk::*;
 
 const PANEL: &str = "gemini-cli";
 
-pub const FEATURES: [&str; 3] = [
+pub const FEATURES: [&str; 4] = [
     "Sends your open files, cursor and selection to Gemini as context.",
     "Shows Gemini's edits in agent review; your decision, with your edits, goes back to Gemini.",
     "Closes the review when you answer in the terminal instead.",
+    "Makes each prompt an agent turn and shows what Gemini does on the terminal's tab.",
 ];
 
 pub struct GeminiCli {
     server: companion::Server,
+    #[cfg_attr(not(feature = "fyx-ui-0-4"), allow(dead_code))]
+    sessions: hooks::Sessions,
+    /// The terminal each Gemini session's hooks last ran in, for its status.
+    #[cfg(feature = "fyx-ui-0-4")]
+    terminals: BTreeMap<String, terminals::TerminalHandle>,
+}
+
+#[cfg(feature = "fyx-ui-0-4")]
+impl GeminiCli {
+    /// The host, with the session `openDiff` proposals are named by.
+    fn host(&self) -> wired::SdkHost {
+        wired::SdkHost::new(self.sessions.current())
+    }
+
+    /// One hook, through `fyx-relay`. A hook the extension cannot read is logged; every hook is
+    /// answered with [`hooks::ANSWER`], so Gemini never waits on Fyx.
+    fn hook(&mut self, request: relay::RelayRequest) {
+        let input = hooks::Channel::from_relay(&request.channel)
+            .ok_or_else(|| format!("unknown relay channel {:?}", request.channel))
+            .and_then(|channel| hooks::HookInput::parse(channel, &request.stdin));
+        match input {
+            Ok(input) => {
+                if let Some(terminal) = request.terminal {
+                    self.terminals.insert(input.session.clone(), terminal);
+                }
+                let effects = self.sessions.apply(&input, wired::to_ref);
+                let terminal = self.terminals.get(&input.session).copied();
+                wired::run_hook_effects(terminal, &effects);
+                if input.channel == hooks::Channel::SessionEnd {
+                    self.terminals.remove(&input.session);
+                }
+            }
+            Err(error) => log(
+                LogLevel::Warn,
+                &format!("a Gemini hook was ignored: {error}"),
+            ),
+        }
+        let (exit_code, stdout, stderr) = hooks::ANSWER;
+        if let Err(error) = relay::respond(request.id, exit_code, stdout, stderr) {
+            log(
+                LogLevel::Warn,
+                &format!(
+                    "the answer to hook {} was refused: {}",
+                    request.id, error.message
+                ),
+            );
+        }
+    }
 }
 
 impl Extension for GeminiCli {
@@ -47,6 +106,9 @@ impl Extension for GeminiCli {
         }
         Self {
             server: companion::Server::default(),
+            sessions: hooks::Sessions::default(),
+            #[cfg(feature = "fyx-ui-0-4")]
+            terminals: BTreeMap::new(),
         }
     }
 
@@ -54,8 +116,9 @@ impl Extension for GeminiCli {
     fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
         match event {
             IoEvent::McpCall(call) if call.listener == companion::LISTENER => {
+                let mut host = self.host();
                 self.server.call(
-                    &mut wired::SdkHost,
+                    &mut host,
                     call.connection,
                     call.call_id,
                     &call.tool,
@@ -63,19 +126,27 @@ impl Extension for GeminiCli {
                 );
             }
             IoEvent::McpInitialized(session) if session.listener == companion::LISTENER => {
-                self.server
-                    .initialized(&mut wired::SdkHost, session.connection);
+                let mut host = self.host();
+                self.server.initialized(&mut host, session.connection);
             }
             IoEvent::ReviewDecided((proposal, outcome)) => {
-                self.server.review_decided(
-                    &mut wired::SdkHost,
-                    proposal,
-                    wired::decision(&outcome),
-                );
+                let mut host = self.host();
+                self.server
+                    .review_decided(&mut host, proposal, wired::decision(&outcome));
             }
             IoEvent::ContextChanged(editor) => {
+                let mut host = self.host();
                 self.server
-                    .context_changed(&mut wired::SdkHost, wired::context_update(editor));
+                    .context_changed(&mut host, wired::context_update(editor));
+            }
+            IoEvent::RelayRequest((id, channel, terminal, argv, stdin)) => {
+                self.hook(relay::RelayRequest {
+                    id,
+                    channel,
+                    terminal,
+                    argv,
+                    stdin,
+                });
             }
             _ => {}
         }

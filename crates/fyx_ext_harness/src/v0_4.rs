@@ -1,9 +1,9 @@
 //! The staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
 //! `v0_3` runs them (this file started as a copy of it), plus `terminals` on the fakes of
 //! [`crate::terminals`] (plan 5.10), `listeners` on those of [`crate::listeners`], `context`
-//! on [`crate::context`] and `review` on [`crate::review`] (plan 5.14). The other 0.4
-//! interfaces (`relay`, `approvals`) trap when called ([`define_unlinked_as_traps`]) until the
-//! rest of plan 5.14.
+//! on [`crate::context`], `review` on [`crate::review`] (plan 5.14) and `relay` on
+//! [`crate::relay`]. `approvals` traps when called ([`define_unlinked_as_traps`]) until the rest
+//! of plan 5.14.
 //!
 //! A `terminal` node becomes `ui_ext::v0_2::Props::Terminal`; [`terminal_node_handle`] reads its
 //! handle.
@@ -28,8 +28,8 @@ use bindings::fyx::ui::{
     agent_observe as wit_observe, context as wit_context, decorations as wit_decorations,
     host as wit_host, images as wit_images, io as wit_io, listeners as wit_listeners,
     network as wit_network, notifications as wit_notifications, permissions as wit_permissions,
-    process as wit_process, review as wit_review, terminals as wit_terminals, types as wit,
-    workspace_edit as wit_edit,
+    process as wit_process, relay as wit_relay, review as wit_review, terminals as wit_terminals,
+    types as wit, workspace_edit as wit_edit,
 };
 
 fn result(
@@ -63,6 +63,7 @@ pub(crate) fn add_to_linker(
     wit_listeners::add_to_linker::<_, State>(linker, |state| state)?;
     wit_context::add_to_linker::<_, State>(linker, |state| state)?;
     wit_review::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_relay::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
@@ -417,8 +418,13 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
             id,
             outcome.map(wit_review_outcome),
         ))),
-        // The harness has no relay endpoint (W1's fyx_relay), so no hook request comes.
-        net::IoEvent::RelayRequest(_) => None,
+        net::IoEvent::RelayRequest(request) => Some(wit_io::IoEvent::RelayRequest((
+            request.id,
+            request.channel,
+            request.terminal.map(|handle| handle.0),
+            request.argv,
+            request.stdin,
+        ))),
     }
 }
 
@@ -522,8 +528,9 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.4 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 14] = [
+const LINKED_INTERFACES: [&str; 15] = [
     "terminals",
+    "relay",
     "listeners",
     "context",
     "review",
@@ -1591,6 +1598,28 @@ fn wit_review_outcome(outcome: ui_ext::review::ReviewOutcome) -> wit_review::Rev
             Decision::Rejected => wit_review::Decision::Rejected,
         },
         final_content: outcome.final_content,
+    }
+}
+
+/// `relay`, on [`crate::relay::FakeRelay`]: needs `relay:hooks`.
+impl wit_relay::Host for State {
+    fn respond(
+        &mut self,
+        id: u64,
+        exit_code: u8,
+        stdout: String,
+        stderr: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(stdout.len() + stderr.len())?;
+        if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_RELAY_HOOKS) {
+            return Ok(Err(error));
+        }
+        let answer = ui_ext::integration::RelayAnswer {
+            exit: exit_code,
+            stdout,
+            stderr,
+        };
+        Ok(self.relay.respond(id, answer).map_err(Into::into))
     }
 }
 

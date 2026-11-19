@@ -27,6 +27,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::ProgressStart` | variant |  |
 | `HostEffect::ProgressUpdate` | variant |  |
 | `HostEffect::Push` | variant |  |
+| `HostEffect::Relay` | variant | `crate::relay::respond` (`fyx:ui` 0.4). |
 | `HostEffect::RemoveDecoration` | variant |  |
 | `HostEffect::RemoveImage` | variant |  |
 | `HostEffect::RemoveSurface` | variant |  |

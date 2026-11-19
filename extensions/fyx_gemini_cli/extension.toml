@@ -26,6 +26,12 @@ capabilities = [
     "review:propose",
     # `ide/contextUpdate` from the open files and selection.
     "context:editor",
+    # `${package}/gemini-settings/system-defaults.json` in GEMINI_CLI_SYSTEM_DEFAULTS_PATH (T0).
+    "package:files",
+    # The hooks of that settings file, through `fyx-relay` (T2).
+    "relay:hooks",
+    # The hooks' tool, waits and turns on the profile terminal's tab (T1).
+    "terminal:status",
 ]
 
 [[fyx_ui.terminal_profiles]]
@@ -37,10 +43,12 @@ cwd = "worktree"
 # The user picks the account (GEMINI_CLI_HOME) for each terminal.
 account_tool = "gemini"
 
+# GEMINI_CLI_SYSTEM_DEFAULTS_PATH replaces the CLI's system defaults file (there is none by
+# default); the user's and the project's settings still win over it, and their hooks run too.
 [fyx_ui.terminal_env]
-vars = { GEMINI_CLI_IDE_SERVER_PORT = "${listen.ide.port}" }
+vars = { GEMINI_CLI_IDE_SERVER_PORT = "${listen.ide.port}", GEMINI_CLI_SYSTEM_DEFAULTS_PATH = "${package}/gemini-settings/system-defaults.json" }
 scope = "profiles"
-reason = "Tells Gemini CLI which Fyx window's IDE server to use."
+reason = "Tells Gemini CLI which Fyx window's IDE server to use, and loads Fyx's hooks."
 
 # The CLI posts to http://127.0.0.1:<port>/mcp with `Authorization: Bearer <authToken>`.
 [[fyx_ui.listeners]]
@@ -67,3 +75,48 @@ port = "${port}"
 workspacePath = "${worktrees.joined}"
 authToken = "${token}"
 ideInfo = { name = "fyx", displayName = "Fyx" }
+
+# The hooks of gemini-settings/system-defaults.json (src/hooks.rs). Gemini runs them in a trusted
+# folder only, in PowerShell on Windows and bash elsewhere, so each is `node -e` with the relay
+# call. All of them only report, so they fail open fast.
+[[fyx_ui.relay_channels]]
+name = "session-start"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Shows which Gemini session runs in the terminal."
+
+[[fyx_ui.relay_channels]]
+name = "before-agent"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Starts an agent turn when you send Gemini a prompt."
+
+[[fyx_ui.relay_channels]]
+name = "before-tool"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Shows on the tab which tool Gemini is running."
+
+[[fyx_ui.relay_channels]]
+name = "after-tool"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Notes the files Gemini's write tools changed in the turn."
+
+[[fyx_ui.relay_channels]]
+name = "notification"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Marks the tab when Gemini waits for you, with its message."
+
+[[fyx_ui.relay_channels]]
+name = "after-agent"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Ends the agent turn when Gemini is done, with the files it changed."
+
+[[fyx_ui.relay_channels]]
+name = "session-end"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "Clears the tab when the Gemini session ends."

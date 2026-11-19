@@ -15,21 +15,27 @@ integration kit.
   terminal instead, the CLI calls `closeDiff`.
 - **Context.** `ide/contextUpdate` sends Gemini your open files (newest first), the active
   file's cursor and your selection.
+- **Turns.** The package's `gemini-settings/system-defaults.json`, loaded through
+  `GEMINI_CLI_SYSTEM_DEFAULTS_PATH` in the profile's terminal, runs Gemini's hooks through
+  `fyx-relay`. Each prompt is an agent turn with the files Gemini wrote, and the terminal's tab
+  shows the tool Gemini runs and when it waits for you. Gemini runs these hooks in trusted
+  folders only.
 
 It uses `ui:panel`, `terminal:profiles`, `terminal:env`, `network:listen`,
-`fs:discovery-file`, `review:propose` and `context:editor`.
+`fs:discovery-file`, `review:propose`, `context:editor`, `package:files`, `relay:hooks` and
+`terminal:status`.
 
 ## Status
 
 Wired on the 0.4 SDK (`src/wired.rs`): `mcp-call`, `review-decided` and `context-changed` drive
-the companion (`src/companion.rs`), and the discovery template writes the shape the CLI reads.
+the companion (`src/companion.rs`), `relay-request` drives the hooks (`src/hooks.rs`), and the
+discovery template writes the shape the CLI reads.
 The compat test ([`src/compat/README.md`](src/compat/README.md)), pinned to Gemini CLI 0.69.0,
 replays natively and through the built component in `fyx_ext_harness`. The same README lists
 what the kit still lacks for Gemini.
 
-That README also gives the plan the coordinator decided for hooks and turns, which need the
-relay. The hooks go in a settings file in the package, loaded through
-`GEMINI_CLI_SYSTEM_DEFAULTS_PATH` in profile terminals only.
+That README also says how the hooks work and what limits them (trusted folders, env
+redaction).
 
 ```sh
 cargo test -p fyx_gemini_cli

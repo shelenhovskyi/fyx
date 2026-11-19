@@ -213,7 +213,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `WorkspaceEdit::new` | method | An edit named `label` (1 to 128 bytes, one line): the undo step's name. |
 | `bindings` | module |  |
 | `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
-| `bindings` | module | The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus `terminals`, `listeners`, `context` and `review`. |
+| `bindings` | module | The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus `terminals`, `listeners`, `context`, `review` and `relay`. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |
 | `canvas::*` | re-export | `canvas::*` |
 | `context` | module |  |
@@ -222,6 +222,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `list_rows` | fn | Answers a `list-rows(start, count)` request for a list of `row_count` rows by calling `build_row` for each row that exists. See `list_row`; a row the host would reject is logged and left out, so the other rows still show. |
 | `listeners` | module |  |
 | `register_extension!` | macro | Exports a type implementing `Extension`. Call it once, at the root of the extension's `cdylib` crate. |
+| `relay` | module |  |
 | `review` | module |  |
 | `row_range` | fn | The row indices of a `list-rows(start, count)` request that exist in a list of `row_count` rows. The host may ask past the end while the list shrinks. |
 | `terminals` | module |  |
