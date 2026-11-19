@@ -10,7 +10,8 @@ use gpui::TestAppContext;
 use ui_ext::{
     terminal::{
         self, CreateCommand, PseudoRequest, ReadScope, T3Target, TerminalError, TerminalEvent,
-        TerminalHandle, TerminalHost, TerminalInfo, TerminalOrigin, TerminalSink, TerminalStatus,
+        TerminalHandle, TerminalHost, TerminalInfo, TerminalIntegration, TerminalOrigin,
+        TerminalSink, TerminalStatus,
     },
     v0_2::{Props, UiEvent, Update},
 };
@@ -34,6 +35,7 @@ struct FakeHost {
     created: Mutex<Vec<CreateCommand>>,
     /// The working directory of user terminal 50, for the T3 cards.
     t3_cwd: Mutex<Option<PathBuf>>,
+    integrations: Mutex<Vec<(String, TerminalIntegration)>>,
 }
 
 impl FakeHost {
@@ -194,6 +196,13 @@ impl TerminalHost for FakeHost {
         self.record(format!("write {} {text} {submit} {id}", handle.0));
         sink(TerminalEvent::WriteDone(id, Ok(())));
     }
+
+    fn set_integration(&self, ext: &str, integration: TerminalIntegration) {
+        self.integrations
+            .lock()
+            .unwrap()
+            .push((ext.into(), integration));
+    }
 }
 
 /// A broker that grants T1, answers T2 from a map (`granted` when absent), and answers every
@@ -267,6 +276,8 @@ struct Setup {
     journal: Arc<Recorder>,
     t3: T3Answer,
     cards: Arc<Mutex<Vec<T3Prompt>>>,
+    /// In place of a [`Broker`] over `states`.
+    broker: Option<Arc<dyn CapabilityCheck>>,
 }
 
 impl Default for Setup {
@@ -277,6 +288,7 @@ impl Default for Setup {
             journal: Arc::default(),
             t3: T3Answer::Once,
             cards: Arc::default(),
+            broker: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -309,11 +321,13 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
     let options = LoadOptions {
         allow_staged: Some(true),
         capabilities: Some(setup.capabilities.iter().map(|c| c.to_string()).collect()),
-        capability_check: Some(Arc::new(Broker(
-            setup.states.iter().copied().collect(),
-            setup.t3,
-            setup.cards.clone(),
-        ))),
+        capability_check: Some(setup.broker.clone().unwrap_or_else(|| {
+            Arc::new(Broker(
+                setup.states.iter().copied().collect(),
+                setup.t3,
+                setup.cards.clone(),
+            )) as Arc<dyn CapabilityCheck>
+        })),
         terminals: Some(setup.host.clone()),
         terminal_programs: Some(vec![terminal::TerminalProgramSpec {
             name: shell().into(),
@@ -322,6 +336,19 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
             reason: "runs the probe's shell".into(),
         }]),
         terminal_env: Some(env),
+        terminal_profiles: Some(
+            terminal::check_profiles(vec![terminal::TerminalProfileSpec {
+                id: "probe".into(),
+                name: "Probe".into(),
+                icon: None,
+                program: shell().into(),
+                path: None,
+                args: Vec::new(),
+                cwd: Default::default(),
+                account_tool: None,
+            }])
+            .unwrap(),
+        ),
         package_dir: Some(PathBuf::from("pkg")),
         journal: Some(setup.journal.clone()),
         workspace: setup
@@ -872,4 +899,166 @@ fn test_v0_4_icons_match_the_wit() {
         .map(|&icon| icon.into())
         .collect();
     assert_eq!(mapped, ui_ext::v0_2::Icon::ALL);
+}
+
+/// Waits, up to `millis`, for something the tokio side does (an instance's store is dropped there).
+fn wait_for(cx: &mut TestAppContext, millis: u64, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+    while !done() && std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// P2.4: when the registry starts an instance, the host gets the profiles and env as granted.
+/// The instance it replaced leaves the new one's integration and terminals alone when dropped;
+/// the last instance's drop empties the integration and closes the terminals.
+#[gpui::test]
+async fn test_v0_4_terminal_integration(cx: &mut TestAppContext) {
+    let mut capabilities = Setup::default().capabilities;
+    capabilities.extend([terminal::CAPABILITY_PROFILES, "package:files"]);
+    let setup = Setup {
+        capabilities,
+        ..Setup::default()
+    };
+    let integrations = || setup.host.integrations.lock().unwrap().clone();
+    let old = load(&setup, cx).await.unwrap();
+    assert!(
+        integrations().is_empty(),
+        "nothing before the registry starts it"
+    );
+    old.activate_terminals();
+    let [(ext, sent)] = integrations().try_into().unwrap();
+    assert_eq!(ext, "probe-v0-4");
+    assert_eq!(sent.profiles.len(), 1);
+    assert_eq!(sent.profiles[0].id, "probe");
+    assert_eq!(sent.env.unwrap().vars[0].0, "PROBE_HOME");
+    assert!(sent.env_all_new, "the broker grants the item");
+    assert_eq!(sent.package_dir, Some(PathBuf::from("pkg")));
+
+    let new = load(&setup, cx).await.unwrap();
+    new.activate_terminals();
+    assert_eq!(integrations().len(), 2);
+    drop(old);
+    // Give the old instance's store time to go; nothing reaches the host for it.
+    wait_for(cx, 500, || false);
+    assert_eq!(integrations().len(), 2, "{:?}", setup.host.calls());
+    assert!(
+        !setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    );
+
+    drop(new);
+    wait_for(cx, 10_000, || {
+        setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    });
+    assert!(
+        setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    );
+    assert_eq!(
+        integrations().last().unwrap().1,
+        TerminalIntegration::default()
+    );
+}
+
+/// P2.4: only what is granted goes; undeclared tables never do.
+#[gpui::test]
+async fn test_v0_4_terminal_integration_follows_the_grants(cx: &mut TestAppContext) {
+    let setup = Setup {
+        states: vec![("terminal:env#all-new", PermissionState::Denied)],
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    extension.activate_terminals();
+    let sent = setup.host.integrations.lock().unwrap()[0].1.clone();
+    assert!(
+        sent.profiles.is_empty(),
+        "terminal:profiles is not declared"
+    );
+    assert!(sent.package_dir.is_none(), "package:files is not declared");
+    assert!(sent.env.is_some());
+    assert!(!sent.env_all_new);
+
+    let denied = Setup {
+        states: vec![(terminal::CAPABILITY_ENV, PermissionState::Denied)],
+        ..Setup::default()
+    };
+    let extension = load(&denied, cx).await.unwrap();
+    extension.activate_terminals();
+    let sent = denied.host.integrations.lock().unwrap()[0].1.clone();
+    assert_eq!(sent, TerminalIntegration::default());
+}
+
+/// A broker whose states change while the instance runs, and which tells it.
+#[derive(Default)]
+struct ChangingBroker {
+    denied: Mutex<Vec<String>>,
+    listeners: Mutex<Vec<futures::channel::mpsc::UnboundedSender<(String, PermissionState)>>>,
+}
+
+impl ChangingBroker {
+    fn deny(&self, capability: &str) {
+        self.denied.lock().unwrap().push(capability.into());
+        for listener in self.listeners.lock().unwrap().iter() {
+            listener
+                .unbounded_send((capability.into(), PermissionState::Denied))
+                .ok();
+        }
+    }
+}
+
+impl CapabilityCheck for ChangingBroker {
+    fn check(&self, _: &str, _: &str) -> Result<(), CapabilityDenied> {
+        Ok(())
+    }
+
+    fn state(&self, _: &str, capability: &str) -> PermissionState {
+        if self.denied.lock().unwrap().iter().any(|c| c == capability) {
+            PermissionState::Denied
+        } else {
+            PermissionState::Granted
+        }
+    }
+
+    fn changes(
+        &self,
+        _: &str,
+    ) -> futures::channel::mpsc::UnboundedReceiver<(String, PermissionState)> {
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        self.listeners.lock().unwrap().push(sender);
+        receiver
+    }
+}
+
+/// P2.4: revoking `terminal:env` closes the terminals and sends the integration again, without
+/// the env.
+#[gpui::test]
+async fn test_v0_4_terminal_integration_after_a_revocation(cx: &mut TestAppContext) {
+    let broker = Arc::new(ChangingBroker::default());
+    let setup = Setup {
+        broker: Some(broker.clone()),
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    extension.activate_terminals();
+    let integrations = || setup.host.integrations.lock().unwrap().clone();
+    assert!(integrations()[0].1.env.is_some());
+    broker.deny(terminal::CAPABILITY_ENV);
+    wait_for(cx, 10_000, || integrations().len() == 2);
+    assert!(integrations()[1].1.env.is_none(), "{:?}", integrations());
+    assert!(
+        setup
+            .host
+            .calls()
+            .contains(&"close-all probe-v0-4".to_string())
+    );
+    drop(extension);
 }

@@ -1621,6 +1621,9 @@ Environment it may pass: {}",
         let initial_effects = extension.initial_effects().to_vec();
         let io_events = extension.take_io_events();
         self.io_instances.remove(&extension_id);
+        // P2.4: after consent, at every load and reload, the terminal host gets the profiles
+        // and env as granted; the instance this one replaces no longer closes its terminals.
+        extension.activate_terminals();
         if let Some(io_events) = io_events {
             self.start_io_loop(extension.clone(), io_events, cx);
         }

@@ -11,7 +11,10 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, LazyLock, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use futures::{
@@ -23,8 +26,8 @@ use ui_ext::{
     process::{SpawnRequest, check_spawn},
     terminal::{
         self, CreateCommand, PseudoRequest, ReadScope, TemplateContext, TerminalEnv, TerminalError,
-        TerminalEvent, TerminalHandle, TerminalHost, TerminalOrigin, TerminalProgramSpec,
-        TerminalSink, TerminalStatus,
+        TerminalEvent, TerminalHandle, TerminalHost, TerminalIntegration, TerminalOrigin,
+        TerminalProfile, TerminalProgramSpec, TerminalSink, TerminalStatus,
     },
     v0_2::{HostError, HostErrorCode},
 };
@@ -106,6 +109,61 @@ impl TerminalPolicy {
     }
 }
 
+/// P2.4: what the manifest declares for [`TerminalIntegration`]; the grants decide, each time
+/// it is sent, which of it goes.
+#[derive(Clone, Default)]
+pub(crate) struct IntegrationSource {
+    /// `[[fyx_ui.terminal_profiles]]`, checked, when `terminal:profiles` is declared.
+    pub(crate) profiles: Vec<TerminalProfile>,
+    /// `[fyx_ui.terminal_env]`, checked, when `terminal:env` is declared.
+    pub(crate) env: Option<TerminalEnv>,
+    /// The package directory, when `package:files` is declared.
+    pub(crate) package_dir: Option<PathBuf>,
+}
+
+impl IntegrationSource {
+    /// The integration as granted now: profiles with `terminal:profiles` (T1, accepted at
+    /// install), the env with `terminal:env`, and its `all-new` scope with the second checkbox.
+    /// Without a broker nothing is granted.
+    pub(crate) fn granted(
+        &self,
+        broker: Option<&dyn CapabilityCheck>,
+        extension_id: &str,
+    ) -> TerminalIntegration {
+        let Some(broker) = broker else {
+            return TerminalIntegration::default();
+        };
+        let profiles = if broker
+            .check(extension_id, terminal::CAPABILITY_PROFILES)
+            .is_ok()
+        {
+            self.profiles.clone()
+        } else {
+            Vec::new()
+        };
+        let env = self.env.clone().filter(|_| {
+            broker.state(extension_id, terminal::CAPABILITY_ENV) == PermissionState::Granted
+        });
+        let env_all_new = env.is_some()
+            && broker.item_state(extension_id, &crate::consent_items::ConsentItem::EnvAllNew)
+                == PermissionState::Granted;
+        TerminalIntegration {
+            profiles,
+            env,
+            env_all_new,
+            package_dir: self.package_dir.clone(),
+        }
+    }
+}
+
+/// Which instance of an extension speaks to a terminal host, by host and extension id. A
+/// reloaded instance takes over when the registry starts it ([`TerminalsHandle::activate`]);
+/// the old one, dropped later (an `io` loop may still hold it), then leaves the new one's
+/// terminals and integration alone.
+static CURRENT_INSTANCES: LazyLock<Mutex<HashMap<(usize, Arc<str>), u64>>> =
+    LazyLock::new(Default::default);
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
 /// One instance's tie to the terminal host: the sink its events leave through, and the cleanup
 /// when the instance goes (reload, disable, uninstall) or a capability is revoked.
 pub(crate) struct TerminalsHandle {
@@ -113,33 +171,39 @@ pub(crate) struct TerminalsHandle {
     host: Option<Arc<dyn TerminalHost>>,
     sender: mpsc::UnboundedSender<TerminalEvent>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<TerminalEvent>>>,
+    instance: u64,
+    integration: IntegrationSource,
+    broker: Option<Arc<dyn CapabilityCheck>>,
     /// T3 requests waiting for their card or the host, by id; aborted when the instance goes.
     t3_tasks: Arc<Mutex<HashMap<u64, AbortHandle>>>,
 }
 
 impl TerminalsHandle {
-    pub(crate) fn new(extension_id: Arc<str>, host: Option<Arc<dyn TerminalHost>>) -> Self {
+    pub(crate) fn new(
+        extension_id: Arc<str>,
+        host: Option<Arc<dyn TerminalHost>>,
+        integration: IntegrationSource,
+        broker: Option<Arc<dyn CapabilityCheck>>,
+    ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
         Self {
             extension_id,
             host,
             sender,
             receiver: Mutex::new(Some(receiver)),
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            integration,
+            broker,
             t3_tasks: Arc::default(),
         }
     }
 
     /// Starts the T3 requests of a call that returned (§C.3), on the current tokio runtime: the
-    /// card first (none on the extension's own terminals), then the host. A denied card, or no
-    /// broker, answers `Err("denied")`. Done reads and writes go to the journal (§C.4): a read's
-    /// size, never its text, and a write's exact text.
-    pub(crate) fn start_t3(
-        &self,
-        pending: Vec<PendingT3>,
-        broker: Option<Arc<dyn CapabilityCheck>>,
-        journal: Option<Arc<dyn Journal>>,
-    ) {
-        let Some(host) = &self.host else {
+    /// card first (none on the extension's own terminals), then the host; none on an instance that
+    /// a reload replaced. A denied card, or no broker, answers `Err("denied")`. Done reads and
+    /// writes go to the journal (§C.4): a read's size, never its text, and a write's exact text.
+    pub(crate) fn start_t3(&self, pending: Vec<PendingT3>, journal: Option<Arc<dyn Journal>>) {
+        let Some(host) = self.current_host() else {
             return;
         };
         for request in pending {
@@ -152,7 +216,7 @@ impl TerminalsHandle {
             let tasks = Arc::downgrade(&self.t3_tasks);
             let host = host.clone();
             let sink = self.sink();
-            let broker = broker.clone();
+            let broker = self.broker.clone();
             let journal = journal.clone();
             let extension_id = self.extension_id.clone();
             let work = async move {
@@ -196,6 +260,60 @@ impl TerminalsHandle {
         self.host.is_some()
     }
 
+    fn instance_key(&self, host: &Arc<dyn TerminalHost>) -> (usize, Arc<str>) {
+        (
+            Arc::as_ptr(host) as *const () as usize,
+            self.extension_id.clone(),
+        )
+    }
+
+    /// The host this instance may act on: it is the extension's current instance, or no instance
+    /// is (one that was never started, as in tests and the harness).
+    fn current_host(&self) -> Option<&Arc<dyn TerminalHost>> {
+        let host = self.host.as_ref()?;
+        let current = CURRENT_INSTANCES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&self.instance_key(host))
+            .copied();
+        current
+            .is_none_or(|current| current == self.instance)
+            .then_some(host)
+    }
+
+    /// The registry started this instance (after consent, at every load and reload): it becomes
+    /// the extension's current one and sends its integration.
+    pub(crate) fn activate(&self) {
+        let Some(host) = &self.host else {
+            return;
+        };
+        CURRENT_INSTANCES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(self.instance_key(host), self.instance);
+        self.send_integration();
+    }
+
+    /// P2.4: sends the profiles and env as granted now; again after a grant changes.
+    pub(crate) fn send_integration(&self) {
+        if let Some(host) = self.current_host() {
+            host.set_integration(
+                &self.extension_id,
+                self.integration
+                    .granted(self.broker.as_deref(), &self.extension_id),
+            );
+        }
+    }
+
+    /// Whether a change of `capability` (or of one of its items, `terminal:env#all-new`) changes
+    /// what [`TerminalsHandle::send_integration`] sends.
+    pub(crate) fn affects_integration(capability: &str) -> bool {
+        let capability = capability
+            .split_once('#')
+            .map_or(capability, |(capability, _)| capability);
+        capability == terminal::CAPABILITY_ENV || capability == terminal::CAPABILITY_PROFILES
+    }
+
     /// Where the host sends this instance's terminal events. It never blocks: events queue here
     /// and [`TerminalsHandle::forward`] hands them to `handle-io` in order. The host bounds the
     /// rate (30 events per second per terminal, §B.2–§B.3), so the queue stays short.
@@ -230,20 +348,22 @@ impl TerminalsHandle {
     /// `terminal:create` or `terminal:env` was revoked, or the instance is gone: every terminal
     /// of the extension closes, created ones with their process trees (§C.2).
     pub(crate) fn close_all(&self) {
-        if let Some(host) = &self.host {
+        if let Some(host) = self.current_host() {
             host.close_all(&self.extension_id);
         }
     }
 
     /// `terminal:observe` was revoked: no more events about other terminals.
     pub(crate) fn stop_observing(&self) {
-        if let Some(host) = &self.host {
+        if let Some(host) = self.current_host() {
             host.observe(&self.extension_id, None);
         }
     }
 }
 
 impl Drop for TerminalsHandle {
+    /// The instance is gone (reload, disable, uninstall, revocation): if it was the current one,
+    /// the extension's integration empties and its terminals close.
     fn drop(&mut self) {
         for (_, task) in self
             .t3_tasks
@@ -253,7 +373,18 @@ impl Drop for TerminalsHandle {
         {
             task.abort();
         }
-        self.close_all();
+        let Some(host) = self.current_host().cloned() else {
+            return;
+        };
+        host.set_integration(&self.extension_id, TerminalIntegration::default());
+        host.close_all(&self.extension_id);
+        let key = self.instance_key(&host);
+        let mut current = CURRENT_INSTANCES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if current.get(&key) == Some(&self.instance) {
+            current.remove(&key);
+        }
     }
 }
 
