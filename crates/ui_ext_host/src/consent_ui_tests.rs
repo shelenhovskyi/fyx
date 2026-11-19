@@ -155,6 +155,27 @@ fn test_consent_diff() {
     assert!(!same.needs_approval());
 }
 
+/// A registry update's dialog shows only what it adds or widens, and notes what it drops.
+#[test]
+fn test_registry_update_lines() {
+    let before = consent_items(&manifest(MANIFEST));
+    let newer = MANIFEST
+        .replace(r#"args = ["status"]"#, r#"args = ["status", "push"]"#)
+        .replace(r#""ui:approvals", "#, "")
+        + "[[terminal_programs]]
+name = \"claude\"
+reason = \"Runs Claude\"
+";
+    let (shown, removed) =
+        crate::fyx_extensions_page::update_lines(&before, consent_items(&manifest(&newer)));
+    let keys: Vec<String> = shown.iter().map(|line| line.item.key()).collect();
+    assert_eq!(keys, ["terminal:create#claude", "terminal:create#git"]);
+    let removed = removed.expect("a removal note");
+    assert!(removed.starts_with("No longer asks for: "), "{removed}");
+    let (shown, removed) = crate::fyx_extensions_page::update_lines(&before, before.clone());
+    assert!(shown.is_empty() && removed.is_none());
+}
+
 /// The stand-in broker fails closed: a capability is allowed only when every item of it is
 /// ticked; the page's switch turns it off at once.
 #[test]

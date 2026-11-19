@@ -49,7 +49,8 @@ use crate::{
         compiled_keyset, now,
     },
     store_actions::{
-        Outcome, expect_load, grant_and_rescan, installed_outcome, load_outcome, show_outcome,
+        Outcome, expect_load, grant_and_rescan, install_consent_and_rescan, installed_manifest,
+        installed_outcome, load_outcome, show_outcome,
     },
 };
 
@@ -668,9 +669,55 @@ fn format_wait(seconds: u64) -> String {
     }
 }
 
+/// The grouped dialog's notes for a registry install: where it comes from, and the Zed-extension
+/// warning when the package has one (owner's Q1; `verify_package` refuses a download that has
+/// one the release does not declare).
+pub(crate) fn registry_install_notes(release: &Release, zed_extension: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    if zed_extension || release.zed_extension {
+        notes.push(crate::install::ZED_EXTENSION_WARNING.to_string());
+    }
+    notes.push(format!(
+        "From the Fyx registry, published by {}. Source: {} at {}.",
+        release
+            .owners
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        release.source.repository,
+        &release.source.commit[..release.source.commit.len().min(12)],
+    ));
+    notes
+}
+
+/// An update's dialog (§C.2, §C.5): the lines it adds or widens, which show unticked (an item
+/// left unticked is denied, the others keep their state), and a note on what it no longer asks
+/// for.
+pub(crate) fn update_lines(
+    before: &[crate::consent_model::ItemLine],
+    after: Vec<crate::consent_model::ItemLine>,
+) -> (Vec<crate::consent_model::ItemLine>, Option<String>) {
+    let diff = crate::consent_model::consent_diff(before, &[], &after);
+    let removed = (!diff.removed.is_empty()).then(|| {
+        let titles: Vec<&str> = diff
+            .removed
+            .iter()
+            .map(|line| line.title.as_str())
+            .collect();
+        format!("No longer asks for: {}.", titles.join("; "))
+    });
+    (
+        diff.added.into_iter().chain(diff.widened).collect(),
+        removed,
+    )
+}
+
 /// Installs `release` (a fresh install, an update, or an approved held update), after the user
-/// confirmed what it asks for when it asks for anything new. The download plans again: a fresh
-/// install must get the same release (`download_for_install`), an update must still be planned.
+/// confirmed it in the grouped dialog (§C.2): always for a fresh install, for an update when it
+/// asks for anything new. The package is downloaded first, since the dialog lists what its
+/// manifest declares. The download plans again: a fresh install must get the same release
+/// (`download_for_install`), an update must still be planned.
 fn install_release(
     workspace: WeakEntity<Workspace>,
     release: Release,
@@ -699,42 +746,12 @@ fn install_release(
             let result: Result<Option<Outcome>> = async {
                 let base = approved_before.clone().unwrap_or_default();
                 let additions = base.additions(&release);
-                let asks = describe_additions(&additions);
-                // An update that starts running a Zed extension is an addition (W2c 226eea0e96),
-                // so it asks with the owner's Q1 warning among the asks.
-                if !asks.is_empty() {
-                    let detail = format!(
-                        "{}{}From the Fyx registry, published by {}.\nSource: {} at {}",
-                        if asks.is_empty() {
-                            String::new()
-                        } else {
-                            format!("It asks for:\n{}\n", asks.join("\n"))
-                        },
-                        // The signed release says it also runs a Zed extension (owner's Q1);
-                        // `verify_package` refuses a download that has one it does not declare.
-                        if release.zed_extension && !additions.zed_extension {
-                            format!("{}\n", crate::install::ZED_EXTENSION_WARNING)
-                        } else {
-                            String::new()
-                        },
-                        release.owners.iter().cloned().collect::<Vec<_>>().join(", "),
-                        release.source.repository,
-                        &release.source.commit[..release.source.commit.len().min(12)],
-                    );
-                    let answer = workspace.update_in(cx, |workspace, window, cx| {
-                        crate::choice::confirm(
-                            workspace,
-                            &format!("Install {} {}?", release.name, release.version),
-                            Some(&detail),
-                            &["Install", "Cancel"],
-                            window,
-                            cx,
-                        )
-                    })?;
-                    if answer.await != Ok(0) {
-                        return Ok(None);
-                    }
-                }
+                // A fresh install always shows the grouped dialog (§C.2). An update shows it when
+                // it asks for anything new; an update that starts running a Zed extension is an
+                // addition (W2c 226eea0e96).
+                let ask = matches!(mode, InstallMode::Fresh)
+                    || !describe_additions(&additions).is_empty();
+                // Download first: the dialog lists what the package's manifest declares.
                 let bytes = match &mode {
                     InstallMode::Fresh => {
                         let (planned, bytes) =
@@ -754,13 +771,77 @@ fn install_release(
                             .await?
                     }
                 };
+                let consent = if ask {
+                    let label = format!("{} {}", release.id, release.version);
+                    let info = store
+                        .inspect_package_bytes(bytes.clone(), &label, fs.as_ref())
+                        .await?;
+                    let mut lines = crate::consent_model::consent_items(&info.manifest);
+                    let mut notes = registry_install_notes(&release, info.zed_extension);
+                    if let InstallMode::Update(_) = &mode {
+                        let before =
+                            installed_manifest(&store, release.id.as_str(), fs.as_ref()).await?;
+                        let before = before
+                            .as_ref()
+                            .map(crate::consent_model::consent_items)
+                            .unwrap_or_default();
+                        let (shown, removed) = update_lines(&before, lines);
+                        lines = shown;
+                        notes.extend(removed);
+                    }
+                    let text = crate::consent_dialog::ConsentDialogText {
+                        title: match &mode {
+                            InstallMode::Fresh => {
+                                format!("Install {} {}?", release.name, release.version)
+                            }
+                            InstallMode::Update(_) => {
+                                format!("Update {} to {}?", release.name, release.version)
+                            }
+                        },
+                        notes,
+                        confirm: match &mode {
+                            InstallMode::Fresh => "Install".into(),
+                            InstallMode::Update(_) => "Approve and Update".into(),
+                        },
+                    };
+                    let answer = workspace.update_in(cx, |workspace, window, cx| {
+                        crate::consent_dialog::ask_consent(
+                            workspace,
+                            text,
+                            lines.clone(),
+                            window,
+                            cx,
+                        )
+                    })?;
+                    let Ok(ticked) = answer.await else {
+                        return Ok(None);
+                    };
+                    Some((lines, ticked))
+                } else {
+                    None
+                };
                 let mut approved = base;
                 approved.approve(&release);
                 let installed = store
                     .install_registry_package(bytes, &release, Some(approved), fs.as_ref())
                     .await?;
                 let waiter = cx.update(|_, cx| expect_load(&installed.extension_id, cx))?;
-                grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?;
+                match &consent {
+                    Some((lines, ticked)) => {
+                        install_consent_and_rescan(
+                            &store,
+                            &installed.extension_id,
+                            lines,
+                            ticked,
+                            fs.clone(),
+                            cx,
+                        )
+                        .await?
+                    }
+                    None => {
+                        grant_and_rescan(&store, &installed.extension_id, fs.clone(), cx).await?
+                    }
+                }
                 let loaded = load_outcome(waiter, cx).await;
                 Ok(Some(installed_outcome(
                     format!("Installed {} {}", release.name, release.version),

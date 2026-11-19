@@ -211,6 +211,48 @@ pub(crate) async fn grant_and_rescan(
     fs: Arc<dyn Fs>,
     cx: &mut gpui::AsyncApp,
 ) -> Result<()> {
+    record_consent_and_rescan(store, extension_id, None, fs, cx).await
+}
+
+/// [`grant_and_rescan`] with the grouped install dialog's answer (0.4, §C.2): the lines it
+/// showed and the T2 items the user ticked. Items it did not show keep their state.
+pub(crate) async fn install_consent_and_rescan(
+    store: &InstallStore,
+    extension_id: &str,
+    lines: &[crate::consent_model::ItemLine],
+    ticked: &[crate::consent_model::ConsentItem],
+    fs: Arc<dyn Fs>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
+    record_consent_and_rescan(store, extension_id, Some((lines, ticked)), fs, cx).await
+}
+
+/// The manifest of the active version of an installed extension.
+pub(crate) async fn installed_manifest(
+    store: &InstallStore,
+    extension_id: &str,
+    fs: &dyn Fs,
+) -> Result<Option<ui_ext_wasm::UiManifest>> {
+    let state = store.state(fs).await?;
+    let Some(entry) = state.extensions.get(extension_id) else {
+        return Ok(None);
+    };
+    let dir = store.version_dir(extension_id, &entry.active);
+    Ok(ui_ext_wasm::UiManifest::read(fs, &dir)
+        .await?
+        .map(|(_, manifest)| manifest))
+}
+
+async fn record_consent_and_rescan(
+    store: &InstallStore,
+    extension_id: &str,
+    answer: Option<(
+        &[crate::consent_model::ItemLine],
+        &[crate::consent_model::ConsentItem],
+    )>,
+    fs: Arc<dyn Fs>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<()> {
     let state = store.state(fs.as_ref()).await?;
     if let Some(entry) = state.extensions.get(extension_id) {
         let dir = store.version_dir(extension_id, &entry.active);
@@ -226,8 +268,16 @@ pub(crate) async fn grant_and_rescan(
             .await?;
             cx.update(|cx| {
                 if let Some(registry) = UiExtensionRegistry::global(cx) {
-                    registry.update(cx, |registry, cx| {
-                        registry.grant_consent(extension_id, record, fs.clone(), cx)
+                    registry.update(cx, |registry, cx| match answer {
+                        Some((lines, ticked)) => registry.install_consent(
+                            extension_id,
+                            record,
+                            lines,
+                            ticked,
+                            fs.clone(),
+                            cx,
+                        ),
+                        None => registry.grant_consent(extension_id, record, fs.clone(), cx),
                     });
                 }
             });
