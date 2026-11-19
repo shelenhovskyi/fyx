@@ -10,8 +10,9 @@
 //! Env values are resolved here, never by the extension: `${package}` to the extension's package
 //! dir, `${account.<tool>}` to the terminal's account dir (§C.6) and `${listen.<name>.port|token}`
 //! to the extension's open listener (plan 5.11, kept by the discovery writer). A variable whose
-//! listener is not open is left out. `${relay}` has no value until the relay exists, so a
-//! variable using it is left out, and a profile whose arguments use it does not start. Names that select an
+//! listener is not open is left out. `${relay}` is the `fyx-relay` binary next to Fyx (§B.9);
+//! without one, a variable using it is left out and a profile whose arguments use it does not
+//! start. Names that select an
 //! account's dir (the presets' and the user's `fyx.accounts.tools`) are dropped whatever the
 //! manifest check let through.
 
@@ -91,6 +92,7 @@ struct Values<'a> {
     package: Option<&'a Path>,
     accounts: &'a [FyxAccount],
     listeners: Listeners<'a>,
+    relay: Option<&'a Path>,
 }
 
 impl TemplateContext for Values<'_> {
@@ -110,7 +112,7 @@ impl TemplateContext for Values<'_> {
     }
 
     fn relay(&self) -> Option<String> {
-        None
+        self.relay.map(|relay| relay.to_string_lossy().into_owned())
     }
 
     fn account_dir(&self, tool: &str) -> Option<String> {
@@ -138,6 +140,7 @@ fn resolve_env(
     integration: &TerminalIntegration,
     accounts: &[FyxAccount],
     listeners: Listeners,
+    relay: Option<&Path>,
     settings: &FyxAccountsSettingsContent,
 ) -> Vec<(String, String)> {
     let Some(env) = &integration.env else {
@@ -147,6 +150,7 @@ fn resolve_env(
         package: integration.package_dir.as_deref(),
         accounts,
         listeners,
+        relay,
     };
     env.vars
         .iter()
@@ -185,12 +189,19 @@ pub(crate) fn all_new_env(
     cx: &App,
 ) -> Vec<(String, String)> {
     let writer = crate::discovery::discovery_writer(cx);
+    let relay = crate::relay::relay_binary(cx);
     integrations(cx)
         .iter()
         .filter(|(_, integration)| integration.env_all_new)
         .flat_map(|(ext, integration)| {
             let listeners = listeners_of(writer.as_deref(), ext);
-            resolve_env(integration, accounts, &listeners, settings)
+            resolve_env(
+                integration,
+                accounts,
+                &listeners,
+                relay.as_deref(),
+                settings,
+            )
         })
         .collect()
 }
@@ -317,7 +328,14 @@ fn launch(
         .first()
         .filter(|root| crate::created::in_trusted_worktree(root, cx))
         .cloned();
-    let start = match plan(profile, &integration, &roots, trusted_root.as_deref()) {
+    let relay = crate::relay::relay_binary(cx);
+    let start = match plan(
+        profile,
+        &integration,
+        &roots,
+        trusted_root.as_deref(),
+        relay.as_deref(),
+    ) {
         Ok(start) => start,
         Err(why) => {
             log::warn!("fyx: profile {ext}/{profile_id} did not start: {why}");
@@ -336,6 +354,7 @@ fn launch(
         &integration,
         &terminal_accounts,
         &listeners,
+        relay.as_deref(),
         &settings,
     ));
     if let Some(choice) = account_choice {
@@ -411,6 +430,7 @@ fn plan(
     integration: &TerminalIntegration,
     roots: &[PathBuf],
     trusted_root: Option<&Path>,
+    relay: Option<&Path>,
 ) -> Result<Start, String> {
     let cwd = match profile.cwd {
         ProfileCwd::Worktree => roots.first().cloned().ok_or("no local worktree is open")?,
@@ -432,6 +452,7 @@ fn plan(
         accounts: &[],
         // Profile args never name a listener (`TemplateUse::ProfileArg`).
         listeners: &|_| None,
+        relay,
     };
     let args = profile
         .args
@@ -597,6 +618,7 @@ mod tests {
             ]),
             std::slice::from_ref(&work),
             &|_| None,
+            None,
             &settings,
         );
         let package = Path::new("/pkg").to_string_lossy().into_owned();
@@ -616,6 +638,7 @@ mod tests {
             &integration(&[("MY_DIR", "${account.claude}")]),
             &[],
             &|_| None,
+            None,
             &settings,
         );
         assert!(none.is_empty(), "no account, no variable");
@@ -633,7 +656,7 @@ mod tests {
         ]);
         let open = |name: &str| (name == "ide").then(|| (4100, "secret".to_owned()));
         assert_eq!(
-            resolve_env(&vars, &[], &open, &settings),
+            resolve_env(&vars, &[], &open, None, &settings),
             [
                 ("CLAUDE_CODE_SSE_PORT".to_owned(), "4100".to_owned()),
                 ("TOOL_IDE_TOKEN".to_owned(), "secret".to_owned()),
@@ -715,16 +738,22 @@ mod tests {
         worktree_profile.path = Some(file.into());
         let integration = integration(&[]);
         assert!(
-            plan(&worktree_profile, &integration, &roots, None).is_err(),
+            plan(&worktree_profile, &integration, &roots, None, None).is_err(),
             "untrusted"
         );
-        let start = plan(&worktree_profile, &integration, &roots, Some(&repo)).unwrap();
+        let start = plan(&worktree_profile, &integration, &roots, Some(&repo), None).unwrap();
         assert_eq!(start.cwd, repo);
         assert_eq!(start.args, ["--ide"]);
 
         let mut relay = worktree_profile;
         relay.args = vec![template("${relay}", TemplateUse::ProfileArg)];
-        assert!(plan(&relay, &integration, &roots, Some(&repo)).is_err());
+        assert!(
+            plan(&relay, &integration, &roots, Some(&repo), None).is_err(),
+            "no relay binary"
+        );
+        let binary = repo.join("fyx-relay");
+        let start = plan(&relay, &integration, &roots, Some(&repo), Some(&binary)).unwrap();
+        assert_eq!(start.args, [binary.to_string_lossy().into_owned()]);
         std::fs::remove_dir_all(&base).ok();
     }
 
