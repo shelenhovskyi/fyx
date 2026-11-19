@@ -3,12 +3,14 @@
 //! `compat/README.md`. When the SDK and harness gain listeners and the relay (plan 5.14), the
 //! same transcripts are replayed through `fyx_ext_harness` against the built component.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::hooks::{Channel, Effect, HookInput, Sessions, StatusState};
 use crate::ide::{
-    self, Diagnostic, DiagnosticsCache, DiffAnswer, Diffs, IdeCall, Position, ReviewDecision,
-    Roots, Severity, TextRange,
+    self, Diagnostic, DiffAnswer, IdeHost, Position, ReviewDecision, Roots, Server, Severity,
+    TextRange,
 };
 
 pub const FORMAT: &str = "fyx-claude-transcript";
@@ -128,10 +130,11 @@ fn start(first: &str, filling: bool) -> Result<(Header, Replay), String> {
     let replay = Replay {
         roots: PrefixRoot(header.root.clone()),
         sessions: Sessions::default(),
-        diffs: Diffs::default(),
+        server: Server::default(),
+        calls: BTreeMap::new(),
+        next_call: 0,
         expected_out: Vec::new(),
         diagnostics: Vec::new(),
-        cache: DiagnosticsCache::default(),
         filling,
         last_effects: Vec::new(),
     };
@@ -170,14 +173,15 @@ impl Roots for PrefixRoot {
 struct Replay {
     roots: PrefixRoot,
     sessions: Sessions,
-    /// The open `openDiff` calls, by JSON-RPC id.
-    diffs: Diffs<String>,
+    /// The extension's IDE server, as the WASM side runs it.
+    server: Server,
+    /// The JSON-RPC id of each call the host turned into an `mcp-call`, by call id.
+    calls: BTreeMap<u64, Value>,
+    next_call: u64,
     /// Messages the extension produced that the transcript has not shown yet, in order.
     expected_out: Vec<Value>,
     /// What the host reports for `getDiagnostics`, by absolute path; set by `diagnostics`.
     diagnostics: Vec<(String, Vec<Diagnostic>)>,
-    /// Cleared by a `diagnostics` event and at each prompt.
-    cache: DiagnosticsCache,
     /// [`fill`]: hooks are not checked, and their effects go to `last_effects`.
     filling: bool,
     last_effects: Vec<Value>,
@@ -188,11 +192,13 @@ impl Replay {
         if let Some(left) = self.expected_out.first() {
             return Err(format!("the extension never sent {left}"));
         }
-        if !self.diffs.is_empty() {
-            return Err(format!(
-                "openDiff calls left open: {:?}",
-                self.diffs.keys().collect::<Vec<_>>()
-            ));
+        let open = self.server.open_diffs();
+        if !open.is_empty() {
+            let ids: Vec<&Value> = open
+                .iter()
+                .filter_map(|call| self.calls.get(call))
+                .collect();
+            return Err(format!("openDiff calls left open: {ids:?}"));
         }
         Ok(())
     }
@@ -222,64 +228,28 @@ impl Replay {
         if method != "tools/call" {
             return Ok(());
         }
-        let id = message["id"].to_string();
         let params = &message["params"];
         let tool = params["name"].as_str().ok_or("tools/call without a name")?;
         let arguments = params["arguments"].to_string();
-        match IdeCall::parse(tool, &arguments, &self.roots) {
-            Ok(IdeCall::OpenDiff { tab, .. }) => {
-                self.diffs.opened(tab, id);
-            }
-            // A close withdraws only a proposal that is still open, whose call then ends with
-            // `TAB_CLOSED`; after a decision it is a no-op.
-            Ok(IdeCall::CloseTab { tab }) => {
-                if let Some(call) = self.diffs.close(&tab) {
-                    self.respond(&call, Ok(DiffAnswer::TabClosed.result()));
-                }
-                self.respond(&id, Ok(ide::text_result("TAB_CLOSED")));
-            }
-            Ok(IdeCall::CloseAllDiffTabs) => {
-                for call in self.diffs.close_all() {
-                    self.respond(&call, Ok(DiffAnswer::TabClosed.result()));
-                }
-                self.respond(&id, Ok(ide::text_result("CLOSED_ALL_DIFF_TABS")));
-            }
-            Ok(IdeCall::GetDiagnostics { file }) => {
-                // One file, or every file; a file the host has nothing for is left out.
-                let only = file.as_ref().and_then(|file| self.roots.to_absolute(file));
-                let diagnostics = &self.diagnostics;
-                let answer = self.cache.answer(file, || {
-                    let files: Vec<_> = diagnostics
-                        .iter()
-                        .filter(|(path, _)| only.as_ref().is_none_or(|only| only == path))
-                        .cloned()
-                        .collect();
-                    ide::diagnostics_result(&files)
-                });
-                self.respond(&id, Ok(answer));
-            }
-            Ok(IdeCall::OpenFile { .. }) => {
-                self.respond(&id, Ok(ide::text_result("OK")));
-            }
-            Err(error) => self.respond(&id, Err(error)),
-        }
+        self.next_call += 1;
+        let call = self.next_call;
+        self.calls.insert(call, message["id"].clone());
+        let (server, mut host) = self.split();
+        server.call(&mut host, call, tool, &arguments);
         Ok(())
     }
 
-    fn respond(&mut self, id: &str, outcome: Result<String, ide::McpError>) {
-        let id: Value = serde_json::from_str(id).unwrap_or(Value::Null);
-        self.expected_out.push(match outcome {
-            Ok(result) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": serde_json::from_str::<Value>(&result).unwrap_or(Value::Null),
-            }),
-            Err(error) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": error.code, "message": error.message },
-            }),
-        });
+    /// The server and the host it answers through.
+    fn split(&mut self) -> (&mut Server, ReplayHost<'_>) {
+        (
+            &mut self.server,
+            ReplayHost {
+                roots: &self.roots,
+                diagnostics: &self.diagnostics,
+                calls: &self.calls,
+                out: &mut self.expected_out,
+            },
+        )
     }
 
     /// Fyx → Claude. A response or notification the extension produced must come next, as it
@@ -312,10 +282,12 @@ impl Replay {
 
     /// The user's decision on the open `openDiff` (in Fyx's agent review).
     fn review(&mut self, event: &Value) -> Result<(), String> {
-        let id = event["call"].to_string();
-        if !self.diffs.decided(&id) {
-            return Err(format!("no open openDiff with id {id}"));
-        }
+        let id = &event["call"];
+        let call = self
+            .calls
+            .iter()
+            .find(|(_, request)| *request == id)
+            .map(|(call, _)| *call);
         let answer = match event["decision"].as_str() {
             Some("accepted") => DiffAnswer::from_review(
                 ReviewDecision::Accepted,
@@ -335,7 +307,10 @@ impl Replay {
             Some("closed") => DiffAnswer::TabClosed,
             other => return Err(format!("review decision {other:?}")),
         };
-        self.respond(&id, Ok(answer.result()));
+        let (server, mut host) = self.split();
+        if !call.is_some_and(|call| server.decided(&mut host, call, &answer)) {
+            return Err(format!("no open openDiff with id {id}"));
+        }
         // Claude ends the turn after a rejection without `Stop`; the extension ends it.
         let effects: Vec<Value> = if answer == DiffAnswer::Rejected {
             self.sessions.diff_rejected().iter().map(describe).collect()
@@ -428,7 +403,7 @@ impl Replay {
                 Ok((absolute, diagnostics))
             })
             .collect::<Result<_, String>>()?;
-        self.cache.invalidate();
+        self.server.invalidate_diagnostics();
         Ok(())
     }
 
@@ -439,7 +414,7 @@ impl Replay {
             Channel::from_relay(channel).ok_or_else(|| format!("unknown channel {channel:?}"))?;
         let input = HookInput::parse(channel, &event["stdin"].to_string())?;
         if channel == Channel::UserPrompt {
-            self.cache.invalidate();
+            self.server.invalidate_diagnostics();
         }
         let roots = &self.roots;
         let effects = self.sessions.apply(&input, |path| roots.to_ref(path));
@@ -452,6 +427,44 @@ impl Replay {
         (effects == expected)
             .then_some(())
             .ok_or_else(|| format!("effects {effects:?}, expected {expected:?}"))
+    }
+}
+
+/// The replay's host: answers become the messages the transcript must show next.
+struct ReplayHost<'a> {
+    roots: &'a PrefixRoot,
+    diagnostics: &'a [(String, Vec<Diagnostic>)],
+    calls: &'a BTreeMap<u64, Value>,
+    out: &'a mut Vec<Value>,
+}
+
+impl IdeHost for ReplayHost<'_> {
+    fn roots(&self) -> &dyn Roots {
+        self.roots
+    }
+
+    fn respond(&mut self, call: u64, outcome: Result<String, ide::McpError>) {
+        let id = self.calls.get(&call).cloned().unwrap_or(Value::Null);
+        self.out.push(match outcome {
+            Ok(result) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": serde_json::from_str::<Value>(&result).unwrap_or(Value::Null),
+            }),
+            Err(error) => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": error.code, "message": error.message },
+            }),
+        });
+    }
+
+    fn diagnostics(&self, only: Option<&str>) -> Vec<(String, Vec<Diagnostic>)> {
+        self.diagnostics
+            .iter()
+            .filter(|(path, _)| only.is_none_or(|only| only == path))
+            .cloned()
+            .collect()
     }
 }
 
