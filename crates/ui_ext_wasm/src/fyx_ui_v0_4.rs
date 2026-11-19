@@ -148,8 +148,6 @@ fn terminal_io_event(event: model_terminal::TerminalEvent) -> Option<wit_io::IoE
         Event::Created(info) => wit_io::IoEvent::TerminalCreated(wit_info(info)),
         Event::Closed(handle) => wit_io::IoEvent::TerminalClosed(handle.0),
         Event::StatusChanged(info) => wit_io::IoEvent::TerminalStatusChanged(wit_info(info)),
-        Event::ReadDone(id, result) => wit_io::IoEvent::TerminalReadDone((id, result)),
-        Event::WriteDone(id, result) => wit_io::IoEvent::TerminalWriteDone((id, result)),
     })
 }
 

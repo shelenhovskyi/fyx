@@ -18,8 +18,7 @@ mod backend;
 mod canvas;
 mod canvas_texture;
 mod choice;
-// fyx: public for the 0.4 consent page and the terminal menu (W2c, design wit-0.4 §C).
-pub mod consent;
+mod consent;
 pub mod consent_dialog;
 pub mod consent_model;
 #[cfg(test)]
@@ -31,8 +30,6 @@ pub mod images;
 mod inspector;
 mod install;
 pub mod install_store;
-// fyx: the 0.4 usage journal's store (W2c, design wit-0.4 §C.4).
-pub mod journal;
 mod keyboard;
 mod modal;
 pub mod notifications;

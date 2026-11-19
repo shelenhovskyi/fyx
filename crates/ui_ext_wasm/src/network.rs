@@ -978,28 +978,6 @@ impl NetworkHandle {
                 let Some(running) = running.upgrade() else {
                     return;
                 };
-                // 0.4 (§C.2): one item of a capability, by its key (`process:spawn#codex`). The
-                // extension hears only of capabilities, so this is cleanup alone.
-                if let Some((item_capability, name)) = capability.split_once('#') {
-                    if state != PermissionState::Granted {
-                        match item_capability {
-                            crate::process::CAPABILITY_PROCESS => {
-                                if let Some(processes) = revocable.processes.upgrade() {
-                                    processes.kill_program(name);
-                                }
-                            }
-                            // The host closes created terminals as a whole.
-                            ui_ext::terminal::CAPABILITY_CREATE
-                            | ui_ext::terminal::CAPABILITY_ENV => {
-                                if let Some(terminals) = revocable.terminals.upgrade() {
-                                    terminals.close_all();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    continue;
-                }
                 if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
                     running.revoke_all();
                 }

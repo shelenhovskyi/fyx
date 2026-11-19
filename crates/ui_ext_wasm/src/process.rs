@@ -430,8 +430,6 @@ mod job {
 // The processes of one instance
 
 struct Entry {
-    /// The `[[fyx_ui.processes]]` name, for a revocation of that program alone (§C.2).
-    program: Option<String>,
     stdin: Option<mpsc::UnboundedSender<Vec<u8>>>,
     queued: Arc<AtomicUsize>,
     killer: Option<Arc<Killer>>,
@@ -465,18 +463,6 @@ impl ProcessSet {
             entry.killed.store(true, Ordering::SeqCst);
             if let Some(killer) = &entry.killer {
                 killer.kill();
-            }
-        }
-    }
-
-    /// One program's checkbox was turned off: its processes are killed.
-    pub(crate) fn kill_program(&self, program: &str) {
-        for entry in self.lock().values() {
-            if entry.program.as_deref() == Some(program) {
-                entry.killed.store(true, Ordering::SeqCst);
-                if let Some(killer) = &entry.killer {
-                    killer.kill();
-                }
             }
         }
     }
@@ -605,7 +591,6 @@ impl ProcessState {
         self.set.lock().insert(
             id,
             Entry {
-                program: spec.as_ref().map(|spec| spec.name.clone()),
                 stdin: sender,
                 queued: Arc::new(AtomicUsize::new(0)),
                 killer: None,
@@ -1003,35 +988,6 @@ fn make_killer(child: &tokio::process::Child) -> Result<Killer, SpawnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 0.4 (§C.2): turning one program's checkbox off kills that program's processes only.
-    #[test]
-    fn test_kill_program() {
-        let set = ProcessSet::default();
-        for (id, program) in [(1, Some("git")), (2, Some("codex")), (3, None)] {
-            set.lock().insert(
-                id,
-                Entry {
-                    program: program.map(str::to_string),
-                    stdin: None,
-                    queued: Arc::new(AtomicUsize::new(0)),
-                    killer: None,
-                    killed: Arc::new(AtomicBool::new(false)),
-                },
-            );
-        }
-        set.kill_program("git");
-        let killed: Vec<(u64, bool)> = {
-            let entries = set.lock();
-            let mut killed: Vec<_> = entries
-                .iter()
-                .map(|(id, entry)| (*id, entry.killed.load(Ordering::SeqCst)))
-                .collect();
-            killed.sort();
-            killed
-        };
-        assert_eq!(killed, [(1, true), (2, false), (3, false)]);
-    }
 
     #[cfg(windows)]
     #[test]

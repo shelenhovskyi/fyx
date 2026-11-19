@@ -404,14 +404,10 @@ pub fn consent_warnings(manifest: &UiManifest) -> Vec<String> {
 /// An update against what was granted (the lines stored with the grant, not the old manifest).
 /// Whether a widened item that is denied installs silently is the broker's call.
 pub fn consent_diff(granted: &[ItemLine], new: &UiManifest) -> ConsentDiff {
-    consent_diff_lines(granted, &consent_items(new))
-}
-
-/// [`consent_diff`] for lines already made with [`consent_items`].
-pub fn consent_diff_lines(granted: &[ItemLine], new_lines: &[ItemLine]) -> ConsentDiff {
+    let new_lines = consent_items(new);
     let held = |line: &ItemLine| matches!(line.tier, Tier::T1 | Tier::T2);
     let mut diff = ConsentDiff::default();
-    for line in new_lines {
+    for line in &new_lines {
         match granted.iter().find(|old| old.item == line.item) {
             None if held(line) => diff.added.push(line.clone()),
             None => {}
