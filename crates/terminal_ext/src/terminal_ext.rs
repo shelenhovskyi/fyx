@@ -9,6 +9,7 @@
 //! OSC 7501 support query); nothing in a reply is built from program output.
 
 pub mod decorations;
+pub mod env_hook;
 pub mod inbox;
 pub mod osc;
 mod osc_scan;
@@ -17,7 +18,13 @@ pub mod status;
 mod tee_pty;
 mod terminal_id;
 
-pub use decorations::{TerminalDecorations, set_decorations, tab_indicator};
+pub use decorations::{
+    MenuEntry, TerminalDecorations, new_terminal_menu, set_decorations, tab_indicator,
+};
+pub use env_hook::{
+    ACCOUNT_CHOICE_ENV, AccountBadge, EnvAdditions, EnvRequest, TerminalEnvHook, apply_env_hook,
+    set_env_hook,
+};
 pub use osc::OscEvent;
 pub use osc_scan::{MAX_OSC_PAYLOAD, OscScanner};
 pub use sanitize::OutputSanitizer;

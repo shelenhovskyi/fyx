@@ -101,5 +101,25 @@
       // example) waits for you or finishes while the window is in the background.
       "notifications": true,
     },
+    // Several accounts of one tool, each in its own config dir. Fyx only sets the tool's
+    // config-dir variable in a terminal or an agent; sign in with the tool's own command.
+    "accounts": {
+      // { "name": "Work", "tool": "claude", "dir": "~/.claude-work", "color": "red" }
+      "profiles": [],
+      // The account each project uses: { "~/work/api": { "claude": "Work" } }. Set from the
+      // terminal panel's "+" menu.
+      "projects": {},
+      "tools": {
+        "claude": {
+          "env": "CLAUDE_CONFIG_DIR",
+          "label": "Claude Code",
+          "agents": ["claude-acp"],
+        },
+        "codex": { "env": "CODEX_HOME", "label": "Codex", "agents": ["codex-acp"] },
+        "gemini": { "env": "GEMINI_CLI_HOME", "label": "Gemini CLI", "agents": ["gemini"] },
+        "copilot": { "env": "COPILOT_HOME", "label": "GitHub Copilot CLI" },
+        "opencode": { "env": "OPENCODE_CONFIG_DIR", "label": "OpenCode" },
+      },
+    },
   },
 }

@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use rand::TryRngCore as _;
 
+use crate::env_hook::{ACCOUNT_CHOICE_ENV, AccountBadge, PARKED_ACCOUNTS_ENV, decode_badges};
 use crate::inbox::Inbox;
 use crate::osc::OscEvent;
 use crate::status::{ExtensionStatus, StatusModel, TerminalStatus};
@@ -25,8 +26,12 @@ pub const TERMINAL_TOKEN_ENV: &str = "FYX_TERMINAL_TOKEN";
 ///
 /// `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set by Claude Desktop and turns off Claude Code's OSC 7501
 /// status reports, so a Fyx started from there would never show Claude's state.
-pub const BLANKED_INHERITED_ENV: &[&str] =
-    &["CLAUDE_CODE_DISABLE_TERMINAL_TITLE", PARKED_TERMINAL_ENV];
+pub const BLANKED_INHERITED_ENV: &[&str] = &[
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+    PARKED_TERMINAL_ENV,
+    ACCOUNT_CHOICE_ENV,
+    PARKED_ACCOUNTS_ENV,
+];
 
 /// Env entry naming a [`ParkedTerminal`]. [`TerminalExt::insert_env`] removes it, so the program
 /// never sees it.
@@ -161,6 +166,7 @@ pub(crate) struct Shared {
     pub(crate) inbox: Mutex<Inbox>,
     pub(crate) status: Mutex<StatusModel>,
     pub(crate) origin: Mutex<Option<ExtensionOrigin>>,
+    pub(crate) accounts: Mutex<Vec<AccountBadge>>,
     pub(crate) raw_tap: Option<Tap>,
 }
 
@@ -281,6 +287,9 @@ impl TerminalExt {
             .remove(PARKED_TERMINAL_ENV)
             .and_then(|key| lock(&PARKED).remove(&key));
         let this = parked.unwrap_or_else(|| Self::with_token(Some(TerminalToken::generate())));
+        if let Some(badges) = env.remove(PARKED_ACCOUNTS_ENV) {
+            *lock(&this.shared.accounts) = decode_badges(&badges);
+        }
         env.insert(TERMINAL_ID_ENV.to_owned(), this.id.to_string());
         if let Some(token) = &this.token {
             env.insert(TERMINAL_TOKEN_ENV.to_owned(), token.expose().to_owned());
@@ -312,6 +321,7 @@ impl TerminalExt {
                 inbox: Mutex::default(),
                 status: Mutex::default(),
                 origin: Mutex::default(),
+                accounts: Mutex::default(),
                 raw_tap,
             }),
             pseudo: None,
@@ -340,6 +350,11 @@ impl TerminalExt {
             id: self.id,
             shared: self.shared.clone(),
         }
+    }
+
+    /// The account profiles the terminal was started with (design §C.6), for its tab.
+    pub fn accounts(&self) -> Vec<AccountBadge> {
+        lock(&self.shared.accounts).clone()
     }
 
     /// The user has seen the terminal (it got focus).

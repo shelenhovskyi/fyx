@@ -124,12 +124,21 @@ fn fallback_failure(failure: anyhow::Error, negotiation: anyhow::Error) -> anyho
 pub async fn connect(
     agent_id: AgentId,
     project: Entity<Project>,
-    command: AgentServerCommand,
+    mut command: AgentServerCommand, // fyx: mut for the account env
     agent_server_store: WeakEntity<AgentServerStore>,
     default_mode: Option<acp_v2::SessionConfigValueId>,
     default_config_options: HashMap<String, settings::AgentConfigOptionValue>,
     cx: &mut AsyncApp,
 ) -> Result<Rc<dyn acp_thread::AgentConnection>> {
+    cx.update(|cx| {
+        crate::fyx::add_account_env(
+            &agent_id,
+            &project,
+            &agent_server_store,
+            &mut command.env,
+            cx,
+        )
+    }); // fyx: account profile (§C.6)
     let negotiation_error = if cx.update(|cx| cx.has_flag::<AcpBetaFeatureFlag>()) {
         match AcpV2Connection::stdio(
             agent_id.clone(),
@@ -712,6 +721,10 @@ fn first_class_terminal_auth_task(
             })?
             .context("Failed to get agent command")?
             .await?;
+        let mut command = command; // fyx: sign in with the agent's account
+        cx.update(|cx| {
+            crate::fyx::add_login_env(&agent_id, &store, command.env.get_or_insert_default(), cx)
+        }); // fyx
         Ok(terminal_auth_task(&command, &agent_id, &terminal))
     })
 }

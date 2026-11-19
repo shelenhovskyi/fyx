@@ -336,7 +336,7 @@ fn started_terminal<E: std::fmt::Debug>(
         window
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| {
-                    pseudo::add_tab(workspace, terminal.clone(), title, window, cx)
+                    pseudo::add_tab(workspace, terminal.clone(), title, false, window, cx)
                 })
             })
             .is_ok()
@@ -393,7 +393,7 @@ pub(crate) fn cancel(id: TerminalId, cx: &mut App) -> bool {
 
 /// Whether `cwd` is inside a visible worktree of an open project that the trust store trusts.
 /// Without a trust store (tests, a headless app) nothing is.
-fn in_trusted_worktree(cwd: &Path, cx: &mut App) -> bool {
+pub(crate) fn in_trusted_worktree(cwd: &Path, cx: &mut App) -> bool {
     let Some(trust) = TrustedWorktrees::try_get_global(cx) else {
         return false;
     };
