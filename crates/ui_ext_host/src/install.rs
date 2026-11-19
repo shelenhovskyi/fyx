@@ -16,7 +16,10 @@ use anyhow::{Result, bail};
 use fs::Fs;
 use gpui::{App, Context, PathPromptOptions, Window, actions};
 use settings::{RegisterSetting, Settings};
-use ui_ext_wasm::{CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest, permissions::tier_of};
+use ui_ext_wasm::{
+    CAPABILITY_PANEL, CAPABILITY_STATUS_BAR, UiManifest,
+    permissions::{capability_title, tier_of},
+};
 use workspace::{Toast, Workspace, notifications::NotificationId};
 
 use crate::{UiExtensionRegistry, consent::ConsentRecord};
@@ -192,7 +195,8 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
                 )
             }
             other => match tier_of(other) {
-                Some(_) => format!("Not used by this version of Fyx ({other})"),
+                // 0.4's capabilities: the install dialog's line (design §C.2).
+                Some(_) => format!("{} ({other})", capability_title(other)),
                 None => format!("Unknown to this version of Fyx ({other})"),
             },
         })
@@ -544,4 +548,43 @@ pub(crate) fn prompt_and_remove(
             .ok();
     })
     .detach();
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use ui_ext_wasm::permissions::{
+        T0_CAPABILITIES, T1_CAPABILITIES, T2_CAPABILITIES, T3_CAPABILITIES,
+    };
+
+    use super::describe_capability_ids;
+
+    /// Every capability this version knows has a line of its own: the extensions page's "Its
+    /// update waits for Enable" once said "Not used by this version of Fyx (terminal:status)".
+    #[test]
+    fn test_every_known_capability_is_described() {
+        let known: Vec<String> = [
+            T0_CAPABILITIES,
+            T1_CAPABILITIES,
+            T2_CAPABILITIES,
+            T3_CAPABILITIES,
+        ]
+        .concat()
+        .into_iter()
+        .map(String::from)
+        .collect();
+        for (capability, line) in known.iter().zip(describe_capability_ids(&known)) {
+            assert!(
+                !line.starts_with("Not used") && !line.starts_with(capability.as_str()),
+                "{capability}: {line}"
+            );
+        }
+        assert_eq!(
+            describe_capability_ids(&["terminal:status".into()]),
+            ["Shows status on terminals (terminal:status)"]
+        );
+        assert_eq!(
+            describe_capability_ids(&["terminal:frobnicate".into()]),
+            ["Unknown to this version of Fyx (terminal:frobnicate)"]
+        );
+    }
 }
