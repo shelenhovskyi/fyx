@@ -45,6 +45,7 @@ use fyx::ui::host::{self, HostError, HostErrorCode};
 use fyx::ui::io::IoEvent as Io;
 use fyx::ui::listeners;
 use fyx::ui::permissions::{self, T2Capability};
+use fyx::ui::review;
 use fyx::ui::terminals::{self, ReadScope, StatusState, TerminalOrigin, TerminalStatus};
 use fyx::ui::types::*;
 
@@ -292,6 +293,51 @@ fn run(words: &[&str]) -> Result<String, String> {
             Ok(path) => path,
             Err(error) => code(&error).into(),
         },
+        ["propose", worktree, path, kind, apply, session, text @ ..] => {
+            let text = text.join(" ");
+            id(review::propose(&review::Proposal {
+                path: file(worktree, path)?,
+                change: match *kind {
+                    "new" => review::Proposed::NewContent(text),
+                    "diff" => review::Proposed::UnifiedDiff(text),
+                    _ => return Err("kind".into()),
+                },
+                title: "probe".into(),
+                session: (*session).into(),
+                apply: *apply == "1",
+            }))
+        }
+        // A proposal of `bytes` bytes, or one whose title is `bytes` long.
+        ["propose-big", path, bytes] | ["propose-title", path, bytes] => {
+            let bytes: usize = bytes.parse().map_err(|_| "bytes")?;
+            let long = words[0] == "propose-title";
+            id(review::propose(&review::Proposal {
+                path: file("1", path)?,
+                change: review::Proposed::NewContent("x".repeat(if long { 1 } else { bytes })),
+                title: if long {
+                    "t".repeat(bytes)
+                } else {
+                    "probe".into()
+                },
+                session: "s".into(),
+                apply: false,
+            }))
+        }
+        ["withdraw", id] => match review::withdraw(id.parse().map_err(|_| "id")?) {
+            Ok(text) => format!("withdrawn {text}"),
+            Err(error) => code(&error).into(),
+        },
+        ["begin", session] => done(review::begin_turn(session)),
+        ["end", session, files @ ..] => {
+            let files = files
+                .iter()
+                .map(|spec| {
+                    let (worktree, path) = spec.split_once(':').ok_or("file")?;
+                    file(worktree, path)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            done(review::end_turn(session, &files))
+        }
         ["relay"] => done(fyx::ui::relay::respond(1, 0, "", "")),
         _ => return Err(format!("unknown command {words:?}")),
     })
@@ -403,6 +449,18 @@ impl Guest for Probe {
                     .trusted
                     .map_or("-".to_string(), |trusted| trusted.to_string()),
             ),
+            Io::ReviewDecided((id, result)) => match result {
+                Ok(outcome) => format!(
+                    "decided {id} {} {}",
+                    match outcome.decision {
+                        review::Decision::Accepted => "accepted",
+                        review::Decision::Partial => "partial",
+                        review::Decision::Rejected => "rejected",
+                    },
+                    outcome.final_content
+                ),
+                Err(why) => format!("decided {id} error: {why}"),
+            },
             Io::ListenerMessage((listener, connection, text)) => {
                 format!("message {listener} {connection} {text}")
             }

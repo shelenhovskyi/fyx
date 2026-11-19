@@ -922,6 +922,7 @@ pub(crate) struct Revocable {
     pub(crate) terminals: std::sync::Weak<crate::terminals::TerminalsHandle>,
     pub(crate) listeners: std::sync::Weak<crate::listeners::ListenersHandle>,
     pub(crate) context: std::sync::Weak<crate::editor_context::ContextHandle>,
+    pub(crate) review: std::sync::Weak<crate::proposals::ReviewHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
@@ -1050,6 +1051,12 @@ impl NetworkHandle {
                         ui_ext::context::CAPABILITY_CONTEXT_EDITOR => {
                             if let Some(context) = revocable.context.upgrade() {
                                 context.stop();
+                            }
+                        }
+                        // §B.10: open reviews close unapplied; no outcome follows.
+                        ui_ext::review::CAPABILITY_REVIEW_PROPOSE => {
+                            if let Some(review) = revocable.review.upgrade() {
+                                review.close_all();
                             }
                         }
                         ui_ext::terminal::CAPABILITY_OBSERVE => {
