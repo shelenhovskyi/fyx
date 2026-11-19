@@ -388,5 +388,210 @@ class Packages(unittest.TestCase):
         )
 
 
+def zip_of(*names: str) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name in names:
+            archive.writestr(name, b"\0asm")
+    return buffer.getvalue()
+
+
+class BuildOnlyZedExtensions(unittest.TestCase):
+    """integration-6 N3: an `extension.wasm` that only the build makes must not pass as T0."""
+
+    BUILT = 'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\ncomponent = "extension.wasm"\ncapabilities = ["ui:panel"]\n'
+    PLAIN = 'id = "todo"\nversion = "1.0.0"\n[fyx_ui]\ncomponent = "fyx_ui.wasm"\ncapabilities = ["ui:panel"]\n'
+
+    def test_the_decision_reads_the_component(self):
+        # A gitignored component: in no source file list, only named by extension.toml.
+        for component in ["extension.wasm", "target/wasm32-wasip2/release/Extension.WASM. "]:
+            with self.subTest(component):
+                manifest = self.BUILT.replace("extension.wasm", component)
+                self.assertEqual(registry.manifest_component(manifest), [component])
+                derived = registry.derive_release(entry(), manifest, b"", POLICY, ["src/lib.rs"])
+                self.assertEqual(derived["tier"], "t2")
+                self.assertIs(derived["zed_extension"], True)
+        self.assertEqual(registry.manifest_component(self.PLAIN), ["fyx_ui.wasm"])
+        self.assertEqual(registry.manifest_component("not toml ["), [])
+        self.assertEqual(registry.manifest_component(None), [])
+
+    def test_decision_input_flags_the_component(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "after" / "extensions").mkdir(parents=True)
+            (root / "after" / "extensions" / "todo.toml").write_text(entry_text())
+            data = registry.decision_input(
+                {"author": {"login": "alice"}, "files": [{"path": "extensions/todo.toml"}]},
+                None, root / "before", root / "after", self.BUILT, None, None, None, None,
+                POLICY, ["src/lib.rs", "Cargo.toml"],
+            )
+        self.assertEqual(data["zed_extension"], ["extension.wasm"])
+        self.assertEqual(data["release"]["tier"], "t2")
+        result = registry.decide(data)
+        self.assertFalse(result["auto_merge"])
+        self.assertFalse(result["owner_approved"])
+        self.assertEqual(
+            registry.tier_status(result), "tier=t2 zed_extension=true owner_approved=false"
+        )
+
+    def test_pr_build_fails_on_a_build_only_extension_wasm(self):
+        package = zip_of("extension.toml", "fyx_ui.wasm", "assets/extension.wasm")
+        build_only = registry.zed_check(package, self.PLAIN, ["extension.toml", "src/lib.rs"])
+        self.assertTrue(build_only["build_only"])
+        self.assertEqual(build_only["package"], ["assets/extension.wasm"])
+        # Seen by the decision through the source list or the component: a warning, not a failure.
+        for manifest, files in [
+            (self.PLAIN, ["assets/extension.wasm"]),
+            (self.BUILT, ["src/lib.rs"]),
+        ]:
+            with self.subTest(files):
+                self.assertFalse(registry.zed_check(package, manifest, files)["build_only"])
+        plain = registry.zed_check(zip_of("extension.toml", "fyx_ui.wasm"), self.PLAIN, [])
+        self.assertEqual(plain, {"package": [], "trusted": [], "build_only": False})
+
+    def test_zed_check_exit_code(self):
+        import contextlib
+        import io
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "p.fyxext").write_bytes(zip_of("extension.toml", "extension.wasm"))
+            (root / "extension.toml").write_text(self.PLAIN)
+            (root / "files.txt").write_text("src/lib.rs\n")
+            args = ["zed-check", "--package", str(root / "p.fyxext"),
+                    "--manifest", str(root / "extension.toml"),
+                    "--source-files", str(root / "files.txt")]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(registry.main(args), 1)
+                (root / "files.txt").write_text("src/lib.rs\nextension.wasm\n")
+                self.assertEqual(registry.main(args), 0)
+
+
+class PublishChecks(unittest.TestCase):
+    """integration-6 N3: publish.yml signs a T2 or Zed-extension release only after a T2
+    decision with the owner's approval."""
+
+    OWNER = "shelenhovskyi"
+    COMMIT = "c" * 40
+
+    def pr(self, author="alice", reviews=None, merged=None):
+        return {
+            "number": 7,
+            "author": {"login": author},
+            "reviews": reviews if reviews is not None else [
+                {"author": {"login": self.OWNER}, "state": "APPROVED"}
+            ],
+            "mergeCommit": {"oid": merged or self.COMMIT},
+        }
+
+    def status(self, description, login="github-actions[bot]"):
+        return {"context": "policy-tier", "description": description, "creator": {"login": login}}
+
+    def check(self, release_fields, pr="default", statuses=None):
+        rel = dict(release(tier=release_fields.pop("tier", "t0")), **release_fields)
+        if pr == "default":
+            pr = self.pr()
+        return registry.publish_check(rel, self.COMMIT, pr, statuses, self.OWNER)
+
+    APPROVED_ZED = "tier=t2 zed_extension=true owner_approved=true"
+
+    def test_t0_and_t1_need_nothing(self):
+        self.assertEqual(self.check({"tier": "t0"}, pr=None), [])
+        self.assertEqual(self.check({"tier": "t1"}, pr=None), [])
+
+    def test_an_approved_t2_decision_publishes(self):
+        zed = {"tier": "t2", "zed_extension": True}
+        self.assertEqual(self.check(dict(zed), statuses=[self.status(self.APPROVED_ZED)]), [])
+        # The owner's own PR counts as the approval.
+        self.assertEqual(
+            self.check(dict(zed), pr=self.pr(author=self.OWNER, reviews=[]),
+                       statuses=[self.status(self.APPROVED_ZED)]),
+            [],
+        )
+
+    def test_a_build_only_zed_extension_rated_t0_is_refused(self):
+        errors = self.check(
+            {"tier": "t2", "zed_extension": True},
+            statuses=[self.status("tier=t0 zed_extension=false owner_approved=false")],
+        )
+        self.assertTrue(any("rated it t0" in e for e in errors), errors)
+        self.assertTrue(any("did not see" in e for e in errors), errors)
+        self.assertTrue(any("owner's approval" in e for e in errors), errors)
+        # zed_extension alone is enough, whatever the tier field says.
+        self.assertNotEqual(self.check({"tier": "t0", "zed_extension": True}, statuses=[]), [])
+
+    def test_refusals(self):
+        zed = {"tier": "t2", "zed_extension": True}
+        cases = {
+            "no PR": dict(pr=None, statuses=[self.status(self.APPROVED_ZED)]),
+            "no status": dict(statuses=[]),
+            "a status from someone else": dict(
+                statuses=[self.status(self.APPROVED_ZED, login="mallory")]
+            ),
+            "the latest status is not approved": dict(statuses=[
+                self.status("tier=t2 zed_extension=true owner_approved=false"),
+                self.status(self.APPROVED_ZED),
+            ]),
+            "the decision missed the Zed extension": dict(
+                statuses=[self.status("tier=t2 zed_extension=false owner_approved=true")]
+            ),
+            "the owner's approval was withdrawn": dict(
+                pr=self.pr(reviews=[
+                    {"author": {"login": self.OWNER}, "state": "APPROVED"},
+                    {"author": {"login": self.OWNER}, "state": "DISMISSED"},
+                ]),
+                statuses=[self.status(self.APPROVED_ZED)],
+            ),
+            "a different merge commit": dict(
+                pr=self.pr(merged="d" * 40), statuses=[self.status(self.APPROVED_ZED)]
+            ),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                self.assertNotEqual(self.check(dict(zed), **kwargs), [])
+
+    def test_a_plain_t2_needs_no_zed_flag(self):
+        self.assertEqual(
+            self.check({"tier": "t2"},
+                       statuses=[self.status("tier=t2 zed_extension=false owner_approved=true")]),
+            [],
+        )
+
+    def test_publish_check_command_refuses(self):
+        import contextlib
+        import io
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "release.json").write_text(
+                json.dumps(dict(release(tier="t2"), zed_extension=True))
+            )
+            (root / "pr.json").write_text(json.dumps(self.pr()))
+            (root / "statuses.json").write_text(
+                json.dumps([self.status("tier=t0 zed_extension=false owner_approved=false")])
+            )
+            args = ["publish-check", str(root / "release.json"), "--commit", self.COMMIT,
+                    "--pr", str(root / "pr.json"), "--statuses", str(root / "statuses.json")]
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(registry.main(args), 2)
+            self.assertIn("rated it t0", err.getvalue())
+            (root / "statuses.json").write_text(json.dumps([self.status(self.APPROVED_ZED)]))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(registry.main(args), 0)
+            # No PR found (an empty file): refused.
+            (root / "pr.json").write_text("")
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(registry.main(args), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,7 @@ Cargo features (finding 3, migration.md §4), and the small points of finding 5.
 | J | `list-row.indent`, `button-props.tooltip` | backlog #8, W8 | **accepted**: indent on the row, not on flex |
 | K | `input-props.secret` | integration-2 W8-5 | **accepted** |
 | L | Editor decorations: `fyx:ui/decorations` with `place-decoration` / `remove-decoration` | backlog #10, W6 | **accepted**, in 0.2 (decided 2026-11-17) |
-| M | Notifications and progress: `fyx:ui/notifications` with `notify` / `dismiss-notification`, `progress-start` / `-update` / `-end`, three owner events | [platform spec](../platform/spec.md) decision 22 | **drafted 2026-11-18, for review**; WIT diff in M.6, not yet in the landed WIT, which still has its `TODO` |
+| M | Notifications and progress: `fyx:ui/notifications` with `notify` / `dismiss-notification`, `progress-start` / `-update` / `-end`, three owner events | [platform spec](../platform/spec.md) decision 22 | **in the WIT**: drafted 2026-11-18, added to the WIT (M.6, in place of its `TODO`) with the host side the same day (W2c `700077009f`); copied unchanged into 0.3 |
 | — | Panel visibility events, surface rename, commands, raw colours, in-row node clicks, `ignoreFocusOut` | various | **rejected or deferred**; see [Rejected and deferred](#rejected-and-deferred) |
 
 Not changed: the flat tree, theme tokens only, the `mount` / `handle-event` / `list-rows`
@@ -803,7 +803,7 @@ extension.
     host does not close older ones to make room, so an extension cannot rotate its notifications
     to stay on screen.
   - **Per call:** at most 4 notification effects per export call.
-- **Click guard.** For **750 ms** after a notification appears, its buttons ignore clicks: it may
+- **Click guard.** For **1 s** after a notification appears, its buttons ignore clicks: it may
   have popped up under the pointer just as the user clicked something else (classic
   click-jacking). The close button works at once.
 
@@ -845,7 +845,7 @@ extension.
 
 | Source | Grants the click-or-Enter activation? |
 |---|---|
-| `notification-action` | **Yes**: a real click on a button of this extension, after the 750 ms guard. "Pick a branch" can open the extension's picker modal. |
+| `notification-action` | **Yes**: a real click on a button of this extension, after the 1 s guard. "Pick a branch" can open the extension's picker modal. |
 | `notification-closed` (any reason) | No. Closing a notification is not a request for more UI. |
 | `progress-cancel-requested` | No (M.2). |
 | `notify`, `progress-*` themselves | Need no gesture: they do not take focus. |
@@ -1050,7 +1050,7 @@ notifications and progresses (A's id rule for host-chosen ids, 0.3 §0.5).
   - the 0.2 conversions.
 - **Renderer (W3), `crates/ui_ext_host`:**
   - **new `notifications.rs`:** a `MessageNotification`-style view with the provenance line,
-    level icon, up to two buttons with the 750 ms guard, the auto-dismiss timer with pause on
+    level icon, up to two buttons with the 1 s guard, the auto-dismiss timer with pause on
     hover and in the background, and close-reason tracking;
   - **new `progress.rs`:** the per-extension status-bar item, the panel bar in `panel.rs`'s
     header, and redraw coalescing;

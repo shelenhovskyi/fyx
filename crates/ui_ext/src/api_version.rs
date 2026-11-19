@@ -32,8 +32,8 @@ pub const MAX_TOOLTIP_BYTES: usize = 1024;
 pub enum ApiVersion {
     V0_1_0,
     V0_2_0,
-    /// Staged draft (docs/fyx/wit-0.3/design.md); the 0.2 rules apply to everything 0.3 copies
-    /// forward.
+    /// Frozen at integration-6 (docs/fyx/wit-0.3/design.md); the 0.2 rules apply to everything 0.3
+    /// copies forward.
     V0_3_0,
 }
 

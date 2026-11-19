@@ -129,11 +129,11 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
 pub const MAX_VERSION: Version = Version::new(0, 3, 0);
-/// The newest frozen version: 0.2 (integration-5 A2). Newer ones are staged: they load only where
-/// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). Freezing a
-/// version names it here explicitly; never set this to [`MAX_VERSION`], which may be a staged
-/// world (0.3 now).
-pub const MAX_FROZEN_VERSION: Version = Version::new(0, 2, 0);
+/// The newest frozen version: 0.3 (integration-6, plan 4.9). Newer ones are staged: they load only
+/// where [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2).
+/// Freezing a version names it here explicitly; never set this to [`MAX_VERSION`], which may be a
+/// staged world (none now).
+pub const MAX_FROZEN_VERSION: Version = Version::new(0, 3, 0);
 
 /// Custom section with the `fyx:ui` version a component targets: three big-endian `u16`s, the same
 /// encoding as `zed:api-version`.
@@ -597,7 +597,7 @@ impl UiManifest {
         anyhow::ensure!(
             is_supported_api_version(&api_version),
             "extension {id} targets fyx:ui {api_version}, this build supports 0.1.0, 0.2.0 and \
-             0.3.0 (staged)",
+             0.3.0",
         );
         let mut manifest = UiManifest::deserialize(table)
             .with_context(|| format!("parsing [fyx_ui] of {path:?}"))?;
@@ -1403,7 +1403,7 @@ pub struct LoadOptions {
     /// together with the broker. `None` (no manifest: tests and bare components) declares every
     /// UI capability. [`UiExtension::load_from_dir_with_options`] sets it from the manifest.
     pub capabilities: Option<Vec<String>>,
-    /// Whether a staged version (0.3 until it is frozen) may load; `None` means
+    /// Whether a staged version (none since 0.3 is frozen) may load; `None` means
     /// [`staged_api_allowed_by_default`].
     pub allow_staged: Option<bool>,
     /// `[fyx_ui.network] domains`; [`UiExtension::load_checked`] sets it from the manifest.
@@ -1541,7 +1541,7 @@ impl UiExtension {
                 let ui_api_version = known_api_version(&api_version).with_context(|| {
                     format!(
                         "extension {extension_id} targets fyx:ui {api_version}, this build \
-                         supports 0.1.0, 0.2.0 and 0.3.0 (staged)"
+                         supports 0.1.0, 0.2.0 and 0.3.0"
                     )
                 })?;
                 anyhow::ensure!(

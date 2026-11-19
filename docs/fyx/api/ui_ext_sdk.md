@@ -131,7 +131,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `SpawnRequest::arg` | method | At most 256 arguments, 128 KiB in total; they must fit the manifest's patterns. |
 | `SpawnRequest::args` | method |  |
 | `SpawnRequest::cwd` | method | A directory relative to the root of the one worktree that has it. |
-| `SpawnRequest::env` | method | Only names the manifest lists in `[fyx_ui.process] env`; at most 32. |
+| `SpawnRequest::env` | method | Only names the manifest lists in `[fyx_ui.process] env`; at most 32. That list is itself limited to the host's allowlist (locale, terminal and logging names such as `NO_COLOR`, `TERM`, `RUST_LOG`, plus `LC_*`). |
 | `SpawnRequest::new` | method | `program` as the manifest's `[[fyx_ui.processes]]` names it (never a path): no arguments, the first worktree's root, no environment, stdin closed. |
 | `SpawnRequest::stdin` | method | Keeps stdin open for `write_stdin` until `close_stdin`. |
 | `Surface::modal` | method | A modal, closed until `show_surface` opens it. Needs `ui:modal`. |
