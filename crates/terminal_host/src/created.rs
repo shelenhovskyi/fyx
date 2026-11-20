@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
-use gpui::{App, AppContext as _, BackgroundExecutor, Entity, Global, Window};
+use gpui::{App, AppContext as _, BackgroundExecutor, Global, Window};
 use project::trusted_worktrees::TrustedWorktrees;
 use settings::Settings as _;
 use terminal::terminal_settings::TerminalSettings;
@@ -401,28 +401,25 @@ pub(crate) fn in_trusted_worktree(cwd: &Path, window: Option<&Window>, cx: &mut 
     let Some(trust) = TrustedWorktrees::try_get_global(cx) else {
         return false;
     };
+    let projects_of = |multi_workspace: &MultiWorkspace, cx: &App| {
+        multi_workspace
+            .workspaces()
+            .map(|workspace| workspace.read(cx).project().clone())
+            .collect::<Vec<_>>()
+    };
     let current = window.map(|window| window.window_handle().window_id());
-    let mut multi_workspaces: Vec<Entity<MultiWorkspace>> = window
+    let mut projects: Vec<_> = window
         .and_then(|window| window.root::<MultiWorkspace>().flatten())
-        .into_iter()
-        .collect();
-    multi_workspaces.extend(
+        .map(|multi_workspace| projects_of(multi_workspace.read(cx), cx))
+        .unwrap_or_default();
+    projects.extend(
         cx.windows()
             .into_iter()
             .filter(|handle| Some(handle.window_id()) != current)
             .filter_map(|handle| handle.downcast::<MultiWorkspace>())
-            .filter_map(|handle| handle.root(cx).ok()),
+            .filter_map(|handle| handle.read_with(cx, projects_of).ok())
+            .flatten(),
     );
-    let projects: Vec<_> = multi_workspaces
-        .iter()
-        .flat_map(|multi_workspace| {
-            multi_workspace
-                .read(cx)
-                .workspaces()
-                .map(|workspace| workspace.read(cx).project().clone())
-                .collect::<Vec<_>>()
-        })
-        .collect();
     for project in projects {
         let (store, worktrees): (_, Vec<_>) = {
             let project = project.read(cx);
