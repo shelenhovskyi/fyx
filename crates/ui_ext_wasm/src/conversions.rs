@@ -535,6 +535,7 @@ macro_rules! conversions {
 
             fn try_from(value: wit::ListRow) -> Result<Self, model::HostError> {
                 Ok(Self {
+                    expansion: list_row_expansion(&value),
                     index: value.index,
                     indent: value.indent,
                     nodes: value

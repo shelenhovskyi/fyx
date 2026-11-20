@@ -24,6 +24,8 @@
     "terminal:pseudo": "t1",
     "terminal:status": "t1",
     "review:propose": "t1",
+    "diagnostics:publish": "t1",
+    "workspace:file-decorations": "t1",
     "network:fetch": "t2",
     "process:spawn": "t2",
     "workspace:edit": "t2",

@@ -1219,6 +1219,8 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
     let mut tree = TreeBuilder::new(&mut ids);
     build(&mut tree);
     let row = ListRow {
+        #[cfg(feature = "fyx-ui-0-4")]
+        expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
         index,
         indent: 0,
         nodes: tree.finish(),
@@ -1620,6 +1622,8 @@ impl SurfaceTree {
             | UiEvent::ProgressCancelRequested(_) => return,
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::CanvasClick(_) => return,
+            #[cfg(feature = "fyx-ui-0-4")]
+            UiEvent::RowToggled(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
@@ -1656,6 +1660,8 @@ impl SurfaceTree {
             | UiEvent::ProgressCancelRequested(_) => {}
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::CanvasClick(_) => {}
+            #[cfg(feature = "fyx-ui-0-4")]
+            UiEvent::RowToggled(_) => {}
         }
     }
 

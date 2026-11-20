@@ -42,5 +42,12 @@ conversions::conversions! {
         // Never sent: a 0.2 surface has no canvas, and `call_handle_event` drops the event
         // before it gets here (defence in depth, like 0.1's).
         model::UiEvent::CanvasClick(click) => Self::Click(click.canvas),
+        // Never sent either: a 0.2 row has no chevron.
+        model::UiEvent::RowToggled(id, row, _) => Self::RowSelected((id, row)),
     }
+}
+
+/// A row before 0.4 has no chevron (§F.4).
+fn list_row_expansion(_: &wit::ListRow) -> model::Expansion {
+    model::Expansion::Leaf
 }

@@ -989,6 +989,16 @@ conversions::conversions! {
             x: click.x.0,
             y: click.y.0,
         }),
+        model::UiEvent::RowToggled(id, row, expand) => Self::RowToggled((id, row, expand)),
+    }
+}
+
+/// A 0.4 row's chevron (§F.4).
+fn list_row_expansion(row: &wit::ListRow) -> model::Expansion {
+    match row.expansion {
+        wit::Expansion::Leaf => model::Expansion::Leaf,
+        wit::Expansion::Collapsed => model::Expansion::Collapsed,
+        wit::Expansion::Expanded => model::Expansion::Expanded,
     }
 }
 

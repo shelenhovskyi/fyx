@@ -198,7 +198,7 @@ impl Tier {
     /// `policy/capability-tiers.json` must list exactly these (a test checks it). The T3
     /// capabilities of fyx:ui 0.4 ([`Tier::T3_CAPABILITIES`]) count as T2 here: a release's tier
     /// has no T3 value (design wit-0.4 §C.1).
-    pub const KNOWN_CAPABILITIES: [(&'static str, Tier); 35] = [
+    pub const KNOWN_CAPABILITIES: [(&'static str, Tier); 37] = [
         ("ui:panel", Tier::T0),
         ("ui:status-bar", Tier::T0),
         ("ui:modal", Tier::T0),

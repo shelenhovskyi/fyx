@@ -2145,7 +2145,7 @@ impl UiExtension {
             ));
             // 0.4 marks (§E, §F.2): what the instance publishes goes with it.
             let marks = Arc::new(extension_marks::MarksHandle::new(
-                extension_id.clone().into(),
+                extension_id.clone(),
                 workspace.clone(),
                 diagnostics_publisher.filter(|_| is_v0_4),
                 file_decorations.filter(|_| is_v0_4),

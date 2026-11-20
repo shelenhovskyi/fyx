@@ -1029,6 +1029,32 @@ async fn test_v0_4_settings(cx: &mut TestAppContext) {
     );
 }
 
+/// §F.1 through the WIT: a 0.4 row's chevron reaches the model, and `row-toggled` reaches the
+/// extension with the list, the row and the direction.
+#[gpui::test]
+async fn test_v0_4_tree_rows(cx: &mut TestAppContext) {
+    let extension = load(&Setup::default(), cx).await.unwrap();
+    let rows = extension
+        .list_rows_v0_2(SURFACE, 7, 3, 3)
+        .await
+        .unwrap()
+        .value;
+    let expansions: Vec<_> = rows.iter().map(|row| (row.index, row.expansion)).collect();
+    assert_eq!(
+        expansions,
+        [
+            (3, ui_ext::v0_2::Expansion::Leaf),
+            (4, ui_ext::v0_2::Expansion::Collapsed),
+            (5, ui_ext::v0_2::Expansion::Expanded),
+        ]
+    );
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::RowToggled(7, 4, true))
+        .await
+        .unwrap();
+    assert_eq!(report(&reply.value), "toggled 7 4 true");
+}
+
 /// What the host was asked to publish and decorate (§E, §F.2).
 #[derive(Default)]
 struct MarksRecorder {

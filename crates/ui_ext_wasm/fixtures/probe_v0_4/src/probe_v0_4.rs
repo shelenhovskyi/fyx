@@ -527,6 +527,12 @@ impl Guest for Probe {
         let command = match event {
             UiEvent::InputChanged((_, command)) => command,
             UiEvent::Click(_) => std::mem::take(&mut *ARMED.lock().unwrap()),
+            UiEvent::RowToggled((list, row, expand)) => {
+                return Ok(Update::Replace(vec![text(
+                    1,
+                    &format!("toggled {list} {row} {expand}"),
+                )]));
+            }
             _ => return Ok(Update::Unchanged),
         };
         let words: Vec<&str> = command.split_whitespace().collect();
@@ -544,10 +550,22 @@ impl Guest for Probe {
     fn list_rows(
         _surface_id: String,
         _list_node: NodeId,
-        _start: u32,
-        _count: u32,
+        start: u32,
+        count: u32,
     ) -> Vec<ListRow> {
-        Vec::new()
+        // Tree rows (§F.1): a leaf, a collapsed and an expanded one, in turn.
+        (start..start + count)
+            .map(|index| ListRow {
+                index,
+                indent: 1,
+                nodes: vec![text(1, "row")],
+                expansion: match index % 3 {
+                    0 => Expansion::Leaf,
+                    1 => Expansion::Collapsed,
+                    _ => Expansion::Expanded,
+                },
+            })
+            .collect()
     }
 
     fn tick(_surface_id: String) -> Result<Update, String> {
