@@ -858,7 +858,8 @@ impl Terminal {
 
     fn truncated_output(&self, cx: &App) -> (String, usize) {
         let terminal = self.terminal.read(cx);
-        let mut content = terminal.get_content();
+        // fyx: the agent reads secret references, never their values.
+        let mut content = crate::fyx_secrets::redact_agent_secrets(terminal.get_content(), cx);
 
         let original_content_len = content.len();
 
@@ -981,6 +982,16 @@ pub async fn create_terminal_entity(
         })
         .unwrap_or_else(|| Shell::Program(get_default_system_shell_preferring_bash()));
     let is_windows = project.read_with(cx, |project, cx| project.path_style(cx).is_windows());
+    // fyx: the agent's `secret://name` references get their values in the env only.
+    let (command, args, env) = crate::fyx_secrets::resolve_agent_secrets(
+        None,
+        command,
+        args.to_vec(),
+        env,
+        task::ShellKind::new(shell.program(), is_windows),
+        cx,
+    )
+    .await;
     let (task_command, task_args) = task::ShellBuilder::new(&shell, is_windows)
         .redirect_stdin_to_dev_null()
         .build(Some(command.clone()), &args);

@@ -286,6 +286,92 @@ class ZeroPointFour(unittest.TestCase):
             self.assertIsNone(none["update_diff"])
 
 
+class ConsentWarnings(unittest.TestCase):
+    """Review p5-security-0.4: P3-P5 warnings mirrored from the install dialog, P9's rule."""
+
+    MANIFEST = (
+        'id = "cc"\nversion = "1.0.0"\n[fyx_ui]\n'
+        'capabilities = ["terminal:profiles", "terminal:env", "relay:hooks", "process:run"]\n'
+        '[[fyx_ui.processes]]\nname = "git"\nargs = ["status", "--porcelain=v2"]\n'
+        '[[fyx_ui.processes]]\nname = "git"\nargs = ["-c", "core.pager=x", "log"]\n'
+        '[[fyx_ui.terminal_profiles]]\nid = "friendly"\nname = "Friendly"\nprogram = "bash"\n'
+        'args = ["-c", "curl x | sh"]\n'
+        '[[fyx_ui.terminal_profiles]]\nid = "tool"\nname = "Tool"\nprogram = "tool"\n'
+        'args = ["--plugins", "${package}/p"]\n'
+        '[[fyx_ui.terminal_profiles]]\nid = "plain"\nname = "Plain"\nprogram = "codex"\n'
+        '[fyx_ui.terminal_env]\nvars = { NO_COLOR = "1", CLAUDE_CODE_PLUGIN_DIRS = "x", '
+        'MY_DIR = "${package}/d" }\nreason = "x"\n'
+        '[[fyx_ui.relay_channels]]\nname = "hook"\nreason = "x"\n'
+    )
+
+    def test_items_that_can_run_code_carry_the_dialogs_warning(self):
+        lines = registry.consent_warnings(self.MANIFEST)
+        runs = registry.WARNING_RUNS_ANY_CODE
+        self.assertEqual(
+            lines,
+            [
+                f"runs git: {runs}",
+                f"terminal profile Friendly: bash -c curl x | sh: {runs}",
+                f"terminal profile Tool: tool --plugins ${{package}}/p: {runs}",
+                "sets CLAUDE_CODE_PLUGIN_DIRS=x in its terminals (makes Claude Code load this "
+                f"extension's plugins): {runs}",
+                f"sets MY_DIR=${{package}}/d in its terminals (files from this extension): {runs}",
+                f"relay channel hook: {runs}; {registry.WARNING_HOOK_ANSWERS}",
+            ],
+        )
+        self.assertEqual(registry.consent_warnings(None), [])
+        self.assertEqual(registry.consent_warnings("id = ["), [])
+
+    def test_runs_any_code_matches_the_host(self):
+        for name in ("bash", "Python3", "node.exe", "PWSH.EXE", "npx.cmd", "python3.12",
+                     "lua-5.4", "uvx"):
+            self.assertTrue(registry.runs_any_code(name, None, []), name)
+        for name in ("rustfmt", "eslint", "hostname", "pythonic", "clang-format-18", "7z"):
+            self.assertFalse(registry.runs_any_code(name, None, []), name)
+        self.assertTrue(registry.runs_any_code("x", "tools/python.exe", []))
+        self.assertFalse(registry.runs_any_code("git", None, ["-C", "sub", "status", "**"]))
+        self.assertTrue(registry.runs_any_code("git", None, ["submodule", "foreach", "**"]))
+        self.assertTrue(registry.runs_any_code("git", None, ["--git-dir=tmp/x", "status"]))
+        self.assertTrue(registry.runs_any_code("git", None, ["*"]))
+
+    def test_the_comment_shows_the_warnings_escaped(self):
+        warnings = registry.consent_warnings(self.MANIFEST)
+        body = registry.comment(decision(consent_warnings=warnings))
+        self.assertIn("**Install dialog warns:** relay channel hook", body)
+        self.assertIn("bash -c curl x \\| sh", body)
+        self.assertNotIn("Install dialog warns", registry.comment(decision()))
+
+    def discovery(self, dir_, default_dir) -> str:
+        default = f'default_dir = "{default_dir}"\n' if default_dir else ""
+        return (
+            'id = "cc"\nversion = "1.0.0"\n[fyx_ui]\ncapabilities = ["fs:discovery-file"]\n'
+            f'[[fyx_ui.discovery_files]]\nlistener = "ide"\ndir = "{dir_}"\n{default}'
+            'name = "${port}.lock"\nreason = "x"\n'
+        )
+
+    def test_a_default_dir_outside_the_tools_folder_needs_the_owner(self):
+        for dir_, default_dir in (("${account.claude}/ide", "~/.claude/ide"),
+                                  ("${account.claude}/ide", "~/.claude"),
+                                  ("${tmp}/gemini/ide", None)):
+            self.assertEqual(registry.review_flags(self.discovery(dir_, default_dir)), [],
+                             default_dir)
+        for dir_, default_dir, where in (
+            ("${account.claude}/ide", "~/.config/autostart", "outside ~/.claude"),
+            ("${account.claude}/ide", "~/.claude-evil/ide", "outside ~/.claude"),
+            ("${tmp}/gemini/ide", "~/.gemini/ide", "with no tool folder in dir"),
+        ):
+            flags = registry.review_flags(self.discovery(dir_, default_dir))
+            self.assertEqual(
+                flags, [f"discovery file ${{port}}.lock: default_dir {default_dir} is {where}"]
+            )
+        flag = registry.review_flags(self.discovery("${account.claude}/ide", "~/.config/x"))
+        pending = decision(review_flags=flag)
+        self.assertEqual(pending["status"], "pending")
+        self.assertIn(flag[0], registry.comment(pending).replace("\\", ""))
+        approved = decision(review_flags=flag, approvals=["shelenhovskyi"])
+        self.assertEqual(approved["status"], "success")
+
+
 class Decisions(unittest.TestCase):
     def test_a_new_t0_extension_auto_merges(self):
         result = decision()

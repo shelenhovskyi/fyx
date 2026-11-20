@@ -218,6 +218,9 @@ pub struct SettingsContent {
     pub fyx_security: Option<FyxSecuritySettingsContent>, // fyx: fyx_guard
     /// Fyx's own settings.
     pub fyx: Option<FyxSettingsContent>, // fyx: settings of Fyx crates
+    /// Settings of UI extensions, one object per extension id. Read from user settings only: a
+    /// project's settings file has no such key. Each extension declares and checks its own keys.
+    pub fyx_extensions: Option<BTreeMap<String, serde_json::Value>>, // fyx: plan 6.1
 
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
@@ -415,7 +418,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
         call_hierarchy, command_palette, file_finder, git_panel, git_graph, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
-        agent_servers, agent_review, fyx_security, fyx, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics, // fyx: agent_review, fyx_security, fyx
+        agent_servers, agent_review, fyx_security, fyx, fyx_extensions, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics, // fyx: agent_review, fyx_security, fyx, fyx_extensions
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,

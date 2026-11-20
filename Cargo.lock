@@ -7090,6 +7090,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_update"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "gaoya"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -260,6 +260,129 @@ def manifest_grants(manifest_text: str | None, tiers: dict) -> dict[str, str] | 
     return items
 
 
+# The install dialog's "can run any program" warnings (`ui_ext_wasm/src/consent_items.rs`, review
+# p5-security-0.4 P3-P5), mirrored for the PR comment so the reviewer reads what the user will.
+# Keep these lists equal to `ui_ext/src/process.rs` RUNS_ANY_CODE / GIT_RUNS_ANY_CODE and
+# consent_items.rs PLUGIN_ENV_NAMES.
+WARNING_RUNS_ANY_CODE = "It can run any program on your computer"
+WARNING_HOOK_ANSWERS = "Its answers can approve what those tools run and add to your prompts"
+PLUGIN_ENV_NAMES = {"CLAUDE_CODE_PLUGIN_DIRS": "Claude Code"}
+RUNS_ANY_CODE = frozenset(
+    """
+    sh bash zsh fish dash ksh mksh csh tcsh nu elvish xonsh pwsh powershell cmd osascript wscript
+    cscript mshta node nodejs deno bun npx bunx python python2 python3 py pypy pypy3 perl ruby irb
+    php lua luajit tclsh wish rscript julia java jshell dotnet awk gawk mawk nawk env xargs sudo
+    doas runas nohup nice time timeout watch busybox start wsl ssh rundll32 regsvr32 msiexec
+    schtasks docker podman npm pnpm yarn cargo rustup go make gmake nmake cmake ninja just rake
+    bundle gem composer gradle gradlew mvn mvnw ant uv uvx pip pipx poetry conda mamba
+    """.split()
+)
+GIT_RUNS_ANY_CODE = frozenset(
+    "config bisect submodule rebase filter-branch difftool mergetool daemon".split()
+)
+
+
+def _without_version(program: str) -> str:
+    trimmed = program.rstrip("0123456789.").rstrip("-_")
+    return program if not trimmed or len(trimmed) == len(program) else trimmed
+
+
+def runs_any_code(name: object, path: object, args: object) -> bool:
+    """`ui_ext::process::runs_any_code`: a shell, interpreter or runner, or git with an option
+    or subcommand that makes a config value a command."""
+    base = re.split(r"[/\\]", str(path or name or ""))[-1].lower()
+    program = base
+    for extension in (".exe", ".cmd", ".bat", ".com", ".ps1"):
+        if base.endswith(extension):
+            program = base[: -len(extension)]
+            break
+    if program in RUNS_ANY_CODE or _without_version(program) in RUNS_ANY_CODE:
+        return True
+    if program != "git":
+        return False
+    patterns = iter([str(a) for a in args] if isinstance(args, list) else [])
+    for pattern in patterns:
+        if "*" in pattern:
+            return True
+        if not pattern.startswith("-"):
+            return pattern in GIT_RUNS_ANY_CODE
+        if pattern.startswith(("-c", "--config-env", "--exec-path", "--git-dir")):
+            return True
+        if pattern in ("-C", "--work-tree", "--namespace"):
+            next(patterns, None)
+    return False
+
+
+def consent_warnings(manifest_text: str | None) -> list[str]:
+    """The dialog's warnings, one line per item that carries one, as `<item>: <warning>`."""
+    if manifest_text is None:
+        return []
+    try:
+        fyx_ui = tomllib.loads(manifest_text).get("fyx_ui") or {}
+    except tomllib.TOMLDecodeError:
+        return []
+    lines: list[str] = []
+
+    def warn(item: str, *warnings: str) -> None:
+        lines.append(f"{item[:MAX_ITEM_CHARS]}: {'; '.join(warnings)}")
+
+    for spec in fyx_ui.get("processes", []):
+        if runs_any_code(spec.get("name"), spec.get("path"), spec.get("args")):
+            warn(f"runs {spec.get('name', '?')}", WARNING_RUNS_ANY_CODE)
+    for spec in fyx_ui.get("terminal_programs", []):
+        if runs_any_code(spec.get("name"), spec.get("path"), spec.get("args")):
+            warn(f"opens terminals running {spec.get('name', '?')}", WARNING_RUNS_ANY_CODE)
+    # P5: a profile runs on one click in the "+" menu.
+    for spec in fyx_ui.get("terminal_profiles", []):
+        args = spec.get("args") if isinstance(spec.get("args"), list) else []
+        if runs_any_code(spec.get("program"), spec.get("path"), args) or any(
+            "${package}" in str(arg) for arg in args
+        ):
+            command = _call(spec.get("path") or spec.get("program", "?"), args)
+            warn(f"terminal profile {spec.get('name', spec.get('id', '?'))}: {command}",
+                 WARNING_RUNS_ANY_CODE)
+    # P3: a tool given the extension's files (Claude Code plugins carry hooks) may run them.
+    env = fyx_ui.get("terminal_env") or {}
+    for name, value in sorted((env.get("vars") or {}).items()):
+        tool = PLUGIN_ENV_NAMES.get(str(name).upper())
+        if tool or "${package}" in str(value):
+            why = f"makes {tool} load this extension's plugins" if tool else (
+                "files from this extension")
+            warn(f"sets {name}={value} in its terminals ({why})", WARNING_RUNS_ANY_CODE)
+    # P4: a hook's answer is the tool's input (PreToolUse "allow", UserPromptSubmit context).
+    for spec in fyx_ui.get("relay_channels", []):
+        warn(f"relay channel {spec.get('name', '?')}", WARNING_RUNS_ANY_CODE,
+             WARNING_HOOK_ANSWERS)
+    return lines
+
+
+def review_flags(manifest_text: str | None) -> list[str]:
+    """Items the owner must look at although the client accepts them (review p5-security-0.4 P9):
+    a discovery file's `default_dir` outside the tool's own folder. The client allows any folder
+    under `~/`, so `~/.config/autostart` is reachable; the tool's folder is `~/.<tool>` for a
+    `dir` of `${account.<tool>}/…`, and there is none for any other `dir`."""
+    if manifest_text is None:
+        return []
+    try:
+        fyx_ui = tomllib.loads(manifest_text).get("fyx_ui") or {}
+    except tomllib.TOMLDecodeError:
+        return []
+    flags = []
+    for spec in fyx_ui.get("discovery_files", []):
+        default_dir = spec.get("default_dir")
+        if default_dir is None:
+            continue
+        default_dir = str(default_dir).rstrip("/")
+        match = re.match(r"^\$\{account\.([a-z0-9_-]+)\}", str(spec.get("dir", "")))
+        known = f"~/.{match.group(1)}" if match else None
+        if known is None or not (default_dir == known or default_dir.startswith(known + "/")):
+            where = f"outside {known}" if known else "with no tool folder in dir"
+            flags.append(
+                f"discovery file {spec.get('name', '?')}: default_dir {default_dir} is {where}"
+            )
+    return [flag[:MAX_ITEM_CHARS] for flag in flags]
+
+
 def update_diff(old_text: str | None, new_text: str | None, tiers: dict) -> dict | None:
     """What a new version adds or widens (T1 and T2 items) and what it removes, as design §C.5
     shows it on the extension page. T0 additions are not listed: they install silently. None if
@@ -550,6 +673,8 @@ def decide(data: dict) -> dict:
         required.append(
             {"who": owner, "reason": "a reserved id", "satisfied": approved_by_owner()}
         )
+    for flag in data.get("review_flags", []):
+        required.append({"who": owner, "reason": flag, "satisfied": approved_by_owner()})
     if after and after.get("urgent"):
         required.append(
             {"who": owner, "reason": "urgent skips the age gate", "satisfied": approved_by_owner()}
@@ -594,6 +719,8 @@ def decide(data: dict) -> dict:
         "zed_extension": data.get("zed_extension", []),
         # Design §C.5: what this version adds, widens or removes; None if it could not be read.
         "update_diff": data.get("update_diff"),
+        # What the install dialog warns about (P3-P5), shown to the reviewer.
+        "consent_warnings": data.get("consent_warnings", []),
         # Recorded as the `policy-tier` status, which publish.yml checks (integration-6 N3).
         "owner_approved": approved_by_owner(),
     }
@@ -720,6 +847,8 @@ def decision_input(
         "zed_extension": zed_extension_files(
             package or b"", source_files, manifest_component(manifest_text)
         ),
+        "consent_warnings": consent_warnings(manifest_text),
+        "review_flags": review_flags(manifest_text),
     }
     if len(entry_files) != 1:
         return data
@@ -839,6 +968,8 @@ def comment(decision: dict) -> str:
         files = ", ".join(escape(name) for name in decision["zed_extension"])
         lines.append(f"- **Warning:** this extension {ZED_EXTENSION_NOTICE}. Files: {files}")
     lines.append(f"- Status: **{decision['status']}**")
+    for warning in decision.get("consent_warnings", []):
+        lines.append(f"- **Install dialog warns:** {escape(warning)}")
     lines.extend(diff_lines(decision))
     for failure in decision["failures"]:
         lines.append(f"- Refused: {escape(failure)}")

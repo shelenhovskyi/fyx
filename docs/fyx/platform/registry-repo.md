@@ -176,6 +176,7 @@ only.
 | **Any PR whose release is T2** (T3 counts as T2): a new version, a new T2 capability, a new network domain or a new process | The owner, for every version. A T2 update changes code that can reach the network or your files. |
 | **Owners added or removed** | An existing owner of the entry. |
 | **`urgent = true`** | The owner. It skips the 24 h age gate, but only for clients updating from a version the block list blocks; a fresh install waits (integration-6 R8). |
+| **A discovery file's `default_dir` outside the tool's folder** (review p5-security-0.4 P9) | The owner. The client accepts any folder under `~/`, and the name rules stop a fixed settings file, but folders such as `~/.config/autostart` are still reachable. The tool's folder is `~/.<tool>` for a `dir` of `${account.<tool>}/…`; any other `dir` has none, so every `default_dir` there is flagged. |
 | **A reserved id** (`policy/reserved-ids.txt`) | The owner, and the entry's only owner must be the registry owner. This is how Fyx's own `fyx-*` demos are registered. |
 | **Entry deleted** | Refused. Releases are permanent; block the extension instead. |
 | **Anything under CODEOWNERS paths** | The owner, through Code Owners review. |
@@ -209,6 +210,17 @@ source commit and at the new one (`registry.py decision-input --last-manifest`, 
 if either cannot be read, the comment says "Update diff: not available" and the reviewer reads the
 source diff. The text is the author's, so it is escaped like the agent's reasons. The diff only
 informs: clients hold the update for the user's approval whatever the registry decides.
+
+**The install dialog's warnings** (review p5-security-0.4 P3-P5). The comment repeats, one
+"**Install dialog warns:**" line per item, the "It can run any program on your computer"
+warning the client shows: a process, terminal program or terminal profile that names a shell,
+interpreter or runner (the host's `RUNS_ANY_CODE` list, git with a config-running option or
+subcommand), a profile that passes `${package}`, a `terminal_env` value with `${package}` or a
+plugin name (`CLAUDE_CODE_PLUGIN_DIRS`), and every relay channel, which also gets "Its answers
+can approve what those tools run and add to your prompts" (`registry.py consent_warnings`,
+mirroring `ui_ext_wasm/src/consent_items.rs`). The lines inform the reviewer and need no approval
+by themselves: most of these items are T2 already, and a T1 profile's warning is the user's to
+read in the dialog.
 
 ### Accounts and limits: what is not accepted
 

@@ -459,6 +459,53 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   stays with W5).
 - **Limits:** 64 open proposals per extension, 8 MiB per file. Protected and private paths are
   refused (`protected.rs`, `is_private_path`).
+- **Review comments (plan 7.2).** The user comments on hunks in the review pane and sends the
+  open comments to the agent as one prompt, with file and line references ("Send comments to
+  agent", `agent_review::SendComments`). `agent_review` (W5, `review_comments.rs`) keeps them:
+  - A comment on a **rejected** hunk explains the rejection, so it stays in the decision's
+    feedback (the tool result, or `review-outcome` for an extension), as before.
+  - A comment on an **accepted** hunk asks for follow-up work, so it is no longer in the
+    feedback. It stays open until the user sends it, or goes in front of the user's next prompt
+    in the session, so nothing is lost when nobody presses Send.
+  - Comments on a review that is **still open** can be sent too; they are marked sent ("Sent to
+    the agent" in the pane) and left out of that review's feedback later.
+  - **Native agent panel (done):** the comments are the thread's next prompt
+    (`AcpThread::send`): at once when the thread is idle, queued until the turn stops when it is
+    generating, and open again if the turn ends in an error.
+  - **Extensions (terminal agents):** comments on an extension's proposals go to that extension.
+    `AgentReview::take_extension_comments(name) -> Vec<CommentBatch>` hands them over; the bridge
+    in `ui_ext_host` (W3) takes them on `AgentReviewEvent::CommentsChanged` and delivers one
+    `io-event::review-comments` per batch (WIT below, for W0). No new capability:
+    `review:propose` covers comments on the extension's own proposals. The extension forwards the
+    `prompt` to its tool on the tool's next hook through `fyx-relay` (§B.9): Claude Code's
+    `UserPromptSubmit` (or `PostToolUse`) answers `{"hookSpecificOutput": {"additionalContext":
+    prompt}}`, Gemini's `BeforeAgent` the same; a `Stop` hook that fires while comments wait
+    answers `{"decision": "block", "reason": prompt}`, so the agent works on them at once. Pasting
+    the prompt into the tool's terminal (§B.11) happens only if the user chooses it.
+
+  ```wit
+  // review gains (0.4):
+  enum comment-state { accepted, rejected, pending }
+  record review-comment {
+      path: file-ref,
+      /// Lines of the file after the change, 1-based and inclusive (`end` < `start`: lines were
+      /// removed after `start`); none when the review showed a fragment of the file.
+      lines: option<tuple<u32, u32>>,
+      state: comment-state,
+      /// The first changed line, at most 80 characters.
+      excerpt: string,
+      text: string,
+  }
+  record review-comments {
+      /// The proposals' `session`.
+      session: string,
+      comments: list<review-comment>,
+      /// The comments as one prompt for the agent, with paths relative to the project.
+      prompt: string,
+  }
+  // io-event gains (0.4), after review-decided:
+  //   review-comments(review-comments)
+  ```
 - **Crate owner:** `agent_review` is W5's. The bridge lives in `ui_ext_host` and uses only
   `agent_review`'s public API; a missing hook is asked of W5.
 
@@ -1060,7 +1107,8 @@ interface approvals {
 //   mcp-call(mcp-call), mcp-cancelled(u64), mcp-initialized(mcp-session), listener-message(tuple<string, u64, string>),
 //   listener-request(tuple<u64, string, string, string> /* id, listener, path, body */),
 //   relay-request(tuple<u64, string, option<u64>, list<string>, string>),
-//   review-decided(tuple<u64, result<review-outcome, string>>), context-changed(editor-context),
+//   review-decided(tuple<u64, result<review-outcome, string>>),
+//   review-comments(review-comments) /* plan 7.2, §B.10; record in review */, context-changed(editor-context),
 //   diagnostics-changed(list<file-ref> /* empty = anything may have changed */),
 //   approval-answered(tuple<u64, option<approval-option>>)
 //
