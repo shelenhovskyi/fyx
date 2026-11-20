@@ -5,7 +5,7 @@
 //! Apache-2.0, like the SDK, so extensions can use it as a dev-dependency, and host-only, so the
 //! SDK itself never pulls in wasmtime.
 //!
-//! It runs components of `fyx:ui` 0.1, 0.2 and the staged 0.3. Internally every value is the
+//! It runs components of `fyx:ui` 0.1, 0.2 and 0.3. Internally every value is the
 //! newest model (`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data
 //! converts without loss. The unsuffixed methods and [`Outcome`] show that model (decision D5);
 //! the `*_v0_1` methods show the 0.1 model, which is lossless for a 0.1 component and drops
@@ -60,7 +60,10 @@ mod compile_cache;
 mod context;
 mod listeners;
 mod notifications;
+mod published;
+mod relay;
 mod review;
+pub mod settings;
 mod terminals;
 mod v0_2;
 mod v0_3;
@@ -72,6 +75,11 @@ pub use api_state::{
 pub use compile_cache::cache_compiled_components;
 pub use context::OpenedFile;
 pub use listeners::{ListenerEvent, McpCall, McpError, ToolDef};
+pub use published::{
+    DECORATION_COLORS, FileDecoration, MAX_BADGE_CHARS, MAX_DECORATED_PATHS,
+    MAX_DECORATION_TOOLTIP_BYTES, MAX_DECORATIONS_PER_CALL, MAX_PUBLISHED, MAX_PUBLISHED_PER_FILE,
+    MAX_PUBLISHES_PER_SECOND,
+};
 pub use review::ReviewTurn;
 pub use terminals::{FakeTerminal, plain_text};
 
@@ -292,6 +300,23 @@ pub struct EventOutcome {
     pub touched: BTreeSet<NodeId>,
 }
 
+/// A row's chevron (0.4 `expansion`, plan 6.7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Expansion {
+    /// No chevron, an empty slot of its width.
+    #[default]
+    Leaf,
+    Collapsed,
+    Expanded,
+}
+
+/// A row from [`Harness::tree_rows`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeRow {
+    pub row: model::ListRow,
+    pub expansion: Expansion,
+}
+
 /// What one event or tick did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
@@ -323,8 +348,15 @@ pub(crate) struct State {
     listeners: listeners::FakeListeners,
     /// 0.4 `context`.
     context: context::FakeContext,
+    /// 0.4 `context` publishing: diagnostics and file decorations.
+    published: published::FakePublished,
+    /// The `expansion` of each row of the last 0.4 `list-rows` answer.
+    last_expansions: Vec<(u32, Expansion)>,
     /// 0.4 `review`.
     review: review::FakeReview,
+    /// 0.4 `relay`.
+    relay: relay::FakeRelay,
+    settings: settings::FakeSettings,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -498,7 +530,7 @@ struct Runtime {
     engine: Engine,
     linker_v0_1: Linker<State>,
     linker_v0_2: Linker<State>,
-    /// What the host implements of the staged 0.3 world; instantiation adds traps for the rest.
+    /// What the host implements of the 0.3 world; instantiation adds traps for the rest.
     linker_v0_3: Linker<State>,
     linker_v0_4: Linker<State>,
 }
@@ -727,15 +759,27 @@ impl Bindings {
                 .call_handle_event(&mut *store, surface_id, &event.into())?
                 .and_then(|update| guest_value(model::Update::try_from(update)))
                 .and_then(|update| checked_images(store, surface_id, update)),
-            Self::V0_4(extension) => extension
-                .call_handle_event(&mut *store, surface_id, &event.into())?
-                .and_then(|update| guest_value(model::Update::try_from(update)))
-                .and_then(|update| checked_images(store, surface_id, update))
-                .and_then(|update| {
-                    checked_terminals(store, api_state::update_props(&update))?;
-                    Ok(update)
-                }),
+            Self::V0_4(extension) => {
+                return Self::handle_event_v0_4(extension, store, surface_id, event.into());
+            }
         })
+    }
+
+    /// 0.4 `handle-event`, also for the events the 0.2 model has no case for (`row-toggled`).
+    fn handle_event_v0_4(
+        extension: &v0_4::UiExtension,
+        store: &mut Store<State>,
+        surface_id: &str,
+        event: v0_4::bindings::fyx::ui::types::UiEvent,
+    ) -> wasmtime::Result<std::result::Result<model::Update, String>> {
+        Ok(extension
+            .call_handle_event(&mut *store, surface_id, &event)?
+            .and_then(|update| guest_value(model::Update::try_from(update)))
+            .and_then(|update| checked_images(store, surface_id, update))
+            .and_then(|update| {
+                checked_terminals(store, api_state::update_props(&update))?;
+                Ok(update)
+            }))
     }
 
     fn list_rows(
@@ -801,32 +845,37 @@ impl Bindings {
         start: u32,
         count: u32,
     ) -> wasmtime::Result<std::result::Result<Vec<model::ListRow>, String>> {
-        Ok(guest_value(v0_4::try_collect::<_, model::ListRow>(
-            extension.call_list_rows(&mut *store, surface_id, list, start, count)?,
-        ))
-        .and_then(|rows| {
-            guest_value(
-                store.data().api.check_images(
-                    surface_id,
-                    rows.iter()
-                        .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
-                ),
-            )
-            .map(|()| rows)
-        })
-        .and_then(|rows| {
-            match rows
-                .iter()
-                .flat_map(|row| &row.nodes)
-                .find_map(|node| match node.props {
-                    model::Props::Canvas(_) => Some(ui_ext::TreeError::CanvasInRow(node.id)),
-                    model::Props::Terminal(_) => Some(ui_ext::TreeError::TerminalInRow(node.id)),
-                    _ => None,
-                }) {
-                Some(error) => Err(error.to_string()),
-                None => Ok(rows),
-            }
-        }))
+        let rows = extension.call_list_rows(&mut *store, surface_id, list, start, count)?;
+        store.data_mut().last_expansions = rows
+            .iter()
+            .map(|row| (row.index, row.expansion.into()))
+            .collect();
+        Ok(guest_value(v0_4::try_collect::<_, model::ListRow>(rows))
+            .and_then(|rows| {
+                guest_value(
+                    store.data().api.check_images(
+                        surface_id,
+                        rows.iter()
+                            .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                    ),
+                )
+                .map(|()| rows)
+            })
+            .and_then(|rows| {
+                match rows
+                    .iter()
+                    .flat_map(|row| &row.nodes)
+                    .find_map(|node| match node.props {
+                        model::Props::Canvas(_) => Some(ui_ext::TreeError::CanvasInRow(node.id)),
+                        model::Props::Terminal(_) => {
+                            Some(ui_ext::TreeError::TerminalInRow(node.id))
+                        }
+                        _ => None,
+                    }) {
+                    Some(error) => Err(error.to_string()),
+                    None => Ok(rows),
+                }
+            }))
     }
 
     /// A 0.1 component has no `tick`; it can never request one either.
@@ -1021,8 +1070,10 @@ impl Mounted {
                     list.selected = Some(*row);
                 }
             }
+            // The extension answers a toggle with new rows; the renderer keeps none of its own.
             model::UiEvent::Click(_)
             | model::UiEvent::RowClick(..)
+            | model::UiEvent::RowToggled(..)
             | model::UiEvent::Dismissed(_)
             | model::UiEvent::NotificationAction(_)
             | model::UiEvent::NotificationClosed(..)
@@ -1097,6 +1148,8 @@ pub struct Harness {
     package: Option<PathBuf>,
     /// `[fyx_ui.terminal_env]`, checked, from `load_package`.
     terminal_env: Option<ui_ext::terminal::TerminalEnv>,
+    /// The manifest's `id`, from `load_package`: a relay channel names it.
+    extension_id: Option<String>,
     /// What the renderer would draw as alt text: assets that are missing or bad, dead handles.
     image_failures: Vec<String>,
 }
@@ -1187,7 +1240,11 @@ impl Harness {
                 ),
                 listeners: fake_listeners,
                 context: context::FakeContext::default(),
+                published: published::FakePublished::default(),
+                last_expansions: Vec::new(),
                 review: review::FakeReview::default(),
+                relay: relay::FakeRelay::default(),
+                settings: settings::FakeSettings::default(),
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1214,7 +1271,7 @@ impl Harness {
                 v0_2::UiExtension::instantiate(&mut store, &component, &runtime.linker_v0_2)
                     .map(Bindings::V0_2)
             }
-            // What the host does not implement of the staged 0.3 world traps when called, as in
+            // What the host does not implement of the 0.3 world traps when called, as in
             // the host; a component that never calls it loads and runs.
             ApiVersion::V0_3_0 => {
                 let mut linker = runtime.linker_v0_3.clone();
@@ -1274,6 +1331,7 @@ impl Harness {
             disabled: None,
             package: None,
             terminal_env: None,
+            extension_id: None,
             image_failures: Vec::new(),
         };
         harness.record(&effects);
@@ -1408,8 +1466,25 @@ impl Harness {
                 .with_terminal_profiles(profiles)
                 .with_context(|| format!("in {manifest_path:?}"))?;
         }
+        if let Some(channels) = table.get("relay_channels") {
+            let channels: Vec<ui_ext::integration::RelayChannelSpec> = channels
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.relay_channels]] in {manifest_path:?}"))?;
+            harness
+                .set_relay_channels(channels)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(entries) = table.get("settings") {
+            let specs = settings::SettingSpec::parse_all(entries)
+                .map_err(|why| anyhow::anyhow!("{why} in {manifest_path:?}"))?;
+            harness
+                .set_setting_specs(specs)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
         if let Some(id) = manifest.get("id").and_then(toml::Value::as_str) {
             harness.store.data_mut().listeners.set_extension_id(id);
+            harness.extension_id = Some(id.to_owned());
         }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
@@ -1892,6 +1967,19 @@ impl Harness {
         self.store.data_mut().context.set_diagnostics(files);
     }
 
+    /// What the extension published with 0.4 `publish-diagnostics` (plan 6.6), by file in the
+    /// order first published; each `FileRef` names its worktree, `source` is `None` (the host
+    /// names the extension) and texts are cut as the host cuts them.
+    pub fn published_diagnostics(&self) -> Vec<ui_ext::context::FileDiagnostics> {
+        self.store.data().published.diagnostics()
+    }
+
+    /// The extension's project-panel decorations (0.4 `decorate-files`, plan 6.7), in the order
+    /// first set.
+    pub fn file_decorations(&self) -> Vec<FileDecoration> {
+        self.store.data().published.decorations()
+    }
+
     /// Whether the extension watches diagnostics.
     pub fn watching_diagnostics(&self) -> bool {
         self.store.data().context.is_watching_diagnostics()
@@ -1936,6 +2024,130 @@ impl Harness {
     /// The extension's `begin-turn` and `end-turn` calls, in order.
     pub fn review_turns(&self) -> Vec<ReviewTurn> {
         self.store.data().review.turns.clone()
+    }
+
+    /// The `[[fyx_ui.relay_channels]]` (0.4, design.md B.9), checked as the host checks them;
+    /// [`Harness::load_package`] reads them from the manifest. They need `relay:hooks`.
+    pub fn set_relay_channels(
+        &mut self,
+        channels: Vec<ui_ext::integration::RelayChannelSpec>,
+    ) -> Result<()> {
+        let state = self.store.data_mut();
+        if !channels.is_empty()
+            && !state
+                .api
+                .capabilities()
+                .iter()
+                .any(|name| name == ui_ext::integration::CAPABILITY_RELAY_HOOKS)
+        {
+            anyhow::bail!(
+                "[[fyx_ui.relay_channels]] needs the {} capability",
+                ui_ext::integration::CAPABILITY_RELAY_HOOKS
+            );
+        }
+        ui_ext::integration::IntegrationTables {
+            relay_channels: &channels,
+            ..Default::default()
+        }
+        .check()
+        .map_err(|why| anyhow::anyhow!(why))?;
+        state.relay.set_channels(channels);
+        Ok(())
+    }
+
+    /// The relay channels, in manifest order.
+    pub fn relay_channels(&self) -> &[ui_ext::integration::RelayChannelSpec] {
+        self.store.data().relay.channels()
+    }
+
+    /// The `[[fyx_ui.settings]]` (0.4, design.md §D), already checked with
+    /// [`settings::SettingSpec::parse_all`]; [`Harness::load_package`] reads them from the
+    /// manifest. Refused for a component below 0.4. The user's values are kept and checked again.
+    pub fn set_setting_specs(&mut self, specs: Vec<settings::SettingSpec>) -> Result<()> {
+        if !specs.is_empty() && self.api_version < Version::new(0, 4, 0) {
+            anyhow::bail!(
+                "[[fyx_ui.settings]] needs fyx:ui 0.4; the component targets {}",
+                self.api_version
+            );
+        }
+        self.store.data_mut().settings.set_specs(specs);
+        Ok(())
+    }
+
+    /// The declared settings, in manifest order.
+    pub fn setting_specs(&self) -> &[settings::SettingSpec] {
+        self.store.data().settings.specs()
+    }
+
+    /// What the extension gets from `settings.all`: every declared key's effective value, in
+    /// manifest order.
+    pub fn settings(&self) -> &[settings::Setting] {
+        self.store.data().settings.effective()
+    }
+
+    /// What the extension gets from `settings.get(key)`; `None` for an undeclared key.
+    pub fn setting(&self, key: &str) -> Option<&settings::Setting> {
+        self.store.data().settings.get(key)
+    }
+
+    /// Why the user's value for `key` is not passed on (the form shows it); `None` when it is
+    /// valid or unset.
+    pub fn setting_error(&self, key: &str) -> Option<&str> {
+        self.store.data().settings.error(key)
+    }
+
+    /// The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An
+    /// invalid value gives the extension its default. Returns the keys whose effective value
+    /// changed, in manifest order: what `io-event::settings-changed` carries; it is also queued
+    /// for [`Harness::deliver_io`] (design.md §D.4).
+    pub fn set_user_settings(&mut self, values: serde_json::Value) -> Result<Vec<String>> {
+        self.store
+            .data_mut()
+            .settings
+            .set_user(values)
+            .map_err(|why| anyhow::anyhow!(why))
+    }
+
+    /// The `settings-changed` events not yet delivered by [`Harness::deliver_io`], oldest first,
+    /// and forgets them.
+    pub fn take_settings_changed(&mut self) -> Vec<Vec<String>> {
+        self.store.data_mut().settings.changed.drain(..).collect()
+    }
+
+    /// A hook runs `fyx-relay --channel <channel>` in `terminal` (the extension's handle for it)
+    /// with `stdin`; [`Harness::deliver_io`] delivers `relay-request`. `channel` is
+    /// `<extension-id>/<name>`, as hooks pass it, or the bare name. Returns the request's id, or
+    /// why the host refuses it (the relay then prints the channel's `on_failure`).
+    pub fn relay_request(
+        &mut self,
+        channel: &str,
+        terminal: Option<u64>,
+        argv: &[&str],
+        stdin: &str,
+    ) -> Result<u64> {
+        let state = self.store.data_mut();
+        let capabilities = state.api.capabilities().to_vec();
+        state
+            .relay
+            .request(
+                &capabilities,
+                self.extension_id.as_deref(),
+                channel,
+                terminal.map(ui_ext::terminal::TerminalHandle),
+                argv.iter().map(|arg| (*arg).to_owned()).collect(),
+                stdin.to_owned(),
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The extension's `relay.respond` to request `id`, once.
+    pub fn relay_answer(&mut self, id: u64) -> Option<ui_ext::integration::RelayAnswer> {
+        self.store.data_mut().relay.take_answer(id)
+    }
+
+    /// The relay requests the extension has not answered, by id.
+    pub fn waiting_relay_requests(&self) -> Vec<u64> {
+        self.store.data().relay.waiting()
     }
 
     /// The MCP calls the extension has not answered, by call id.
@@ -2164,6 +2376,28 @@ impl Harness {
         }
         while let Some((id, outcome)) = self.store.data_mut().review.events.pop_front() {
             let event = ui_ext::network::IoEvent::ReviewDecided(id, outcome);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(keys) = self.store.data_mut().settings.changed.pop_front() {
+            let event = ui_ext::network::IoEvent::SettingsChanged(keys);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(request) = self.store.data_mut().relay.events.pop_front() {
+            let event = ui_ext::network::IoEvent::RelayRequest(request);
             let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
@@ -2643,6 +2877,63 @@ impl Harness {
             .collect())
     }
 
+    /// [`Harness::rows`] with each row's chevron (0.4, plan 6.7); rows of older worlds are
+    /// leaves.
+    pub fn tree_rows(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<TreeRow>> {
+        self.store.data_mut().last_expansions.clear();
+        let rows = self.rows(surface_id, list, start, count)?;
+        let expansions = std::mem::take(&mut self.store.data_mut().last_expansions);
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let expansion = expansions
+                    .iter()
+                    .find(|(index, _)| *index == row.index)
+                    .map_or(Expansion::Leaf, |(_, expansion)| *expansion);
+                TreeRow { row, expansion }
+            })
+            .collect())
+    }
+
+    /// A click on the chevron of row `index` of `list`, or Right (`expand`) or Left on it: sends
+    /// 0.4 `row-toggled` and applies the effects and the reply, as [`Harness::event`]. It grants
+    /// no activation. The host changes no rows itself; read them again with
+    /// [`Harness::tree_rows`].
+    pub fn toggle_row(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        index: u32,
+        expand: bool,
+    ) -> Result<Outcome> {
+        anyhow::ensure!(
+            matches!(self.extension, Bindings::V0_4(_)),
+            "row-toggled is a 0.4 event"
+        );
+        anyhow::ensure!(
+            self.mounted.contains_key(surface_id),
+            "surface {surface_id:?} is not mounted"
+        );
+        self.tick_errors.remove(surface_id);
+        let surface = surface_id.to_string();
+        let (result, effects) = self.call(move |extension, store| match extension {
+            Bindings::V0_4(extension) => Bindings::handle_event_v0_4(
+                extension,
+                store,
+                &surface,
+                v0_4::bindings::fyx::ui::types::UiEvent::RowToggled((list, index, expand)),
+            ),
+            _ => Ok(Err("row-toggled is a 0.4 event".to_string())),
+        })?;
+        self.finish(surface_id, "handle-event", result, effects)
+    }
+
     /// [`Harness::rows`] in the 0.1 model: each row's index and tree.
     pub fn rows_v0_1(
         &mut self,
@@ -3028,6 +3319,8 @@ impl Harness {
                 }
                 // Decoding is the renderer's; the harness checks what it can in check_images.
                 HostEffect::AddImage { .. } | HostEffect::RemoveImage { .. } => {}
+                // Recorded in `effects`; the Settings tab is the host's.
+                HostEffect::OpenSettings { .. } => {}
                 HostEffect::RemoveDecoration { id } => {
                     self.decorations.remove(id);
                     self.mounted.remove(id);

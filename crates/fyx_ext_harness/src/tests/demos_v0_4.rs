@@ -12,11 +12,13 @@ const PANEL: &str = "pseudo-terminal";
 
 /// The demos that exist only for 0.4, built together: the SDK's 0.4 feature must not reach the
 /// 0.3 demos, so they get a target directory of their own.
-const DEMOS_V0_4: [&str; 4] = [
+const DEMOS_V0_4: [&str; 6] = [
     "fyx_demo_pseudo_terminal",
     "fyx_demo_terminal_profiles",
     "fyx_claude_code",
     "fyx_gemini_cli",
+    "fyx_demo_lint",
+    "fyx_demo_bookmarks",
 ];
 
 /// `extensions/<demo>` with its 0.4 component, in a folder of the test target directory, as
@@ -143,8 +145,8 @@ fn the_profiles_demo_starts_profile_terminals() {
 }
 
 /// The skeleton of plan 5.15: the manifest loads, the plugin ships in the package, and the
-/// profile runs `claude --ide` with the account the user picks. Its relay and review wiring is
-/// tested natively (`extensions/fyx_claude_code`) until the harness has them (5.14).
+/// profile runs `claude --ide` with the account the user picks. The relay and review wiring is
+/// replayed below (`claude_code_replays_the_compat_transcripts_on_its_listener`).
 #[test]
 fn claude_code_loads_with_its_profile_and_plugin() {
     let package = demo_package("fyx_claude_code");
@@ -281,8 +283,9 @@ fn claude_code_answers_on_its_ide_listener() {
 /// harness against the built component, as far as listeners reach: every recorded message from
 /// Claude goes to the fake `ide` listener; the host's `initialize` and `tools/list` answers and
 /// the extension's answers to the calls that need no path must equal the recorded ones, and
-/// every call is answered. Hooks, review decisions, editor events and the calls with paths wait
-/// for the SDK's relay, review and context (the rest of 5.14).
+/// every call is answered. Each hook goes through the fake relay from the profile terminal and
+/// is answered with exit 0; a hook or review decision with `expect` must make those turns and
+/// leave the last expected status on the terminal's tab.
 #[test]
 fn claude_code_replays_the_compat_transcripts_on_its_listener() {
     use serde_json::Value;
@@ -320,12 +323,14 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
     let package = demo_package("fyx_claude_code");
     let mut compared = 0;
     let mut notified = 0;
+    let mut hooks = 0;
     for (name, text) in TRANSCRIPTS {
         let header: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         let root = header["root"].as_str().expect("a root");
         let mut harness = Harness::load_package(&package).expect("loads");
         harness.set_worktrees(&[(1, root)]);
         let connection = harness.connect("ide").unwrap();
+        let terminal = harness.open_profile("claude", None).unwrap();
         let mut tools = HashMap::new();
         let mut answers: HashMap<String, Value> = HashMap::new();
         let mut notes: VecDeque<Value> = VecDeque::new();
@@ -417,8 +422,32 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                 receive(&mut harness, &mut answers, &mut notes);
                 continue;
             }
+            if event["t"] == "hook" {
+                let turns = harness.review_turns().len();
+                let id = harness
+                    .relay_request(
+                        event["channel"].as_str().unwrap(),
+                        Some(terminal),
+                        &[],
+                        &event["stdin"].to_string(),
+                    )
+                    .unwrap_or_else(|e| panic!("{at}: {e}"));
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                receive(&mut harness, &mut answers, &mut notes);
+                assert_eq!(
+                    harness.relay_answer(id),
+                    Some(ui_ext::integration::RelayAnswer::default()),
+                    "{at}: every hook lets Claude go on"
+                );
+                if let Some(expect) = event["expect"].as_array() {
+                    check_hook_effects(&harness, terminal, turns, expect, &at);
+                    hooks += 1;
+                }
+                continue;
+            }
             if event["t"] == "review" {
                 use ui_ext::review::Decision;
+                let turns = harness.review_turns().len();
                 let call = event["call"].to_string();
                 let proposal = proposal_of[&call];
                 let final_content = event["final_content"].as_str().unwrap_or_default();
@@ -436,6 +465,10 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                 assert!(decided, "{at}: proposal {proposal} is not open");
                 harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
                 receive(&mut harness, &mut answers, &mut notes);
+                if let Some(expect) = event["expect"].as_array() {
+                    check_hook_effects(&harness, terminal, turns, expect, &at);
+                    hooks += 1;
+                }
                 continue;
             }
             if event["t"] != "mcp" {
@@ -510,10 +543,56 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
         }
         assert!(harness.open_mcp_calls().is_empty(), "{name}");
         assert!(harness.proposals().is_empty(), "{name}");
+        assert!(harness.waiting_relay_requests().is_empty(), "{name}");
         assert!(notes.is_empty(), "{name}: {notes:?} not in the transcript");
     }
     assert!(compared > 0, "no answer was compared");
     assert!(notified > 0, "no selection_changed was compared");
+    assert!(hooks > 0, "no hook's effects were compared");
+}
+
+/// The turns since the `turns`-th and the terminal's status, against a transcript's `expect` in
+/// `compat::describe`'s form: every `begin-turn` and `end-turn` in order, and the last `status`.
+fn check_hook_effects(
+    harness: &Harness,
+    terminal: u64,
+    turns: usize,
+    expect: &[serde_json::Value],
+    at: &str,
+) {
+    use serde_json::{Value, json};
+    let made: Vec<Value> = harness.review_turns()[turns..]
+        .iter()
+        .map(|turn| match turn {
+            ReviewTurn::Begin(session) => json!({ "begin-turn": session }),
+            ReviewTurn::End(session, changed) => json!({
+                "end-turn": {
+                    "session": session,
+                    "changed": changed.iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
+                }
+            }),
+        })
+        .collect();
+    let expected: Vec<Value> = expect
+        .iter()
+        .filter(|effect| effect.get("status").is_none())
+        .cloned()
+        .collect();
+    assert_eq!(made, expected, "{at}: turns");
+    if let Some(status) = expect.iter().rev().find_map(|effect| effect.get("status")) {
+        let shown = harness
+            .terminal(terminal)
+            .expect("the profile terminal")
+            .status
+            .as_ref()
+            .map_or(Value::Null, |shown| {
+                json!({
+                    "state": format!("{:?}", shown.state).to_lowercase(),
+                    "label": shown.label,
+                })
+            });
+        assert_eq!(&shown, status, "{at}: status");
+    }
 }
 
 /// Plan 5.16: the manifest loads, and the profile runs `gemini` with the account the user
@@ -532,17 +611,69 @@ fn gemini_cli_loads_with_its_profile() {
     );
     let (program, args) = harness.profile_command_line("gemini").unwrap();
     assert_eq!((program.as_str(), args.len()), ("gemini", 0));
+    // The profile's terminal finds the IDE server and loads the hooks shipped in the package.
+    let env: HashMap<String, String> = harness.profile_env("gemini").unwrap().into_iter().collect();
+    assert_eq!(env.len(), 2, "{env:?}");
     assert_eq!(
-        harness.profile_env("gemini").unwrap(),
-        [(
-            "GEMINI_CLI_IDE_SERVER_PORT".to_owned(),
-            harness.listener_port("ide").unwrap().to_string()
-        )]
+        env["GEMINI_CLI_IDE_SERVER_PORT"],
+        harness.listener_port("ide").unwrap().to_string()
     );
+    let defaults = PathBuf::from(&env["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"]);
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&defaults).expect("the package's defaults"))
+            .unwrap();
+    // Every channel has its hook in the file (src/hooks.rs checks the commands).
+    let hooks = settings["hooks"].as_object().expect("hooks");
+    let channels: Vec<String> = harness
+        .relay_channels()
+        .iter()
+        .map(|channel| channel.name.clone())
+        .collect();
+    assert_eq!(
+        channels,
+        [
+            "session-start",
+            "before-agent",
+            "before-tool",
+            "after-tool",
+            "notification",
+            "after-agent",
+            "session-end",
+        ]
+    );
+    for channel in &channels {
+        assert!(
+            hooks.values().any(|hook| hook
+                .to_string()
+                .contains(&format!("--channel fyx-gemini-cli/{channel}"))),
+            "{channel} has no hook"
+        );
+    }
+
     let handle = harness.open_profile("gemini", Some("Personal")).unwrap();
     assert_eq!(
         harness.terminal(handle).unwrap().account.as_deref(),
         Some("Personal")
+    );
+    // A hook from the profile terminal: a turn begins, the tab shows it, and Gemini goes on.
+    let id = harness
+        .relay_request(
+            "fyx-gemini-cli/before-agent",
+            Some(handle),
+            &[],
+            r#"{"hook_event_name":"BeforeAgent","session_id":"g1","cwd":"/work","prompt":"fix"}"#,
+        )
+        .unwrap();
+    harness.deliver_io().unwrap();
+    assert_eq!(
+        harness.relay_answer(id),
+        Some(ui_ext::integration::RelayAnswer::default())
+    );
+    assert_eq!(harness.review_turns(), [ReviewTurn::Begin("g1".to_owned())]);
+    let status = harness.terminal(handle).unwrap().status.clone();
+    assert_eq!(
+        status.map(|status| status.label),
+        Some("Thinking".to_owned())
     );
     harness.close_profile(handle).unwrap();
 
@@ -930,4 +1061,249 @@ fn status_line_or_error(harness: &Harness) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Plan 6.1 (design.md §D): a 0.4 package's `[[fyx_ui.settings]]` load with it, a user's
+/// invalid value gives the extension the default, and a valid one is a change of that key only.
+#[test]
+fn a_package_declares_settings_and_the_user_sets_them() {
+    let package = demo_package("fyx_demo_pseudo_terminal");
+    let manifest = package.join("extension.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(
+        r#"
+[[fyx_ui.settings]]
+key = "scrollback"
+title = "Scrollback lines"
+type = "integer"
+default = 1000
+min = 100
+max = 10000
+
+[[fyx_ui.settings]]
+key = "shell"
+title = "Shell"
+type = "choice"
+default = "bash"
+choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerShell" }]
+"#,
+    );
+    std::fs::write(&manifest, &text).unwrap();
+    let mut harness = Harness::load_package(&package).expect("loads");
+    let keys: Vec<&str> = harness
+        .setting_specs()
+        .iter()
+        .map(|spec| spec.key.as_str())
+        .collect();
+    assert_eq!(keys, ["scrollback", "shell"]);
+    assert_eq!(
+        harness.setting("scrollback").unwrap().value,
+        settings::SettingValue::Integer(1000)
+    );
+
+    let changed = harness
+        .set_user_settings(serde_json::json!({ "scrollback": 50, "shell": "pwsh" }))
+        .unwrap();
+    assert_eq!(changed, ["shell"]);
+    assert!(harness.setting("scrollback").unwrap().is_default);
+    assert!(
+        harness
+            .setting_error("scrollback")
+            .unwrap()
+            .contains("outside")
+    );
+    assert_eq!(
+        harness.setting("shell").unwrap().value,
+        settings::SettingValue::Choice("pwsh".into())
+    );
+    assert_eq!(harness.take_settings_changed(), [vec!["shell".to_owned()]]);
+    assert!(harness.setting("missing").is_none());
+    // `deliver_io` hands the next change to `handle-io` as `settings-changed`.
+    let changed = harness
+        .set_user_settings(serde_json::json!({ "scrollback": 500 }))
+        .unwrap();
+    assert_eq!(changed, ["scrollback", "shell"]);
+    assert!(!harness.deliver_io().expect("delivers").is_empty());
+    assert!(harness.take_settings_changed().is_empty());
+    // The demo read each changed key back through the SDK's `settings::get`.
+    let logged: Vec<&str> = harness
+        .logs()
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.starts_with("setting "))
+        .collect();
+    assert_eq!(
+        logged,
+        [
+            "setting scrollback = Integer(500)",
+            "setting shell = Choice(\"bash\")"
+        ]
+    );
+
+    // A broken declaration refuses the package.
+    std::fs::write(&manifest, text.replace("default = 1000", "default = 5")).unwrap();
+    let error = format!(
+        "{:#}",
+        Harness::load_package(&package).err().expect("refused")
+    );
+    assert!(error.contains("outside 100..=10000"), "{error}");
+}
+fn editor_selection(path: &str, line: u32, text: Option<&str>) -> ui_ext::context::EditorContext {
+    let file = ui_ext::process::FileRef {
+        worktree: Some(1),
+        path: path.to_owned(),
+    };
+    let at = |line| ui_ext::edit::Position { line, column: 0 };
+    ui_ext::context::EditorContext {
+        active: Some(file.clone()),
+        open: vec![file],
+        selection: Some((
+            ui_ext::edit::TextRange {
+                start: at(line),
+                end: at(line + 3),
+            },
+            text.map(str::to_owned),
+        )),
+        trusted: Some(true),
+    }
+}
+
+/// Plan 6.6 (design.md §E.4): the lint demo publishes the `TODO`s of a selection as warnings
+/// under no source of its own, a private file publishes nothing, and Clear clears every file.
+#[test]
+fn the_lint_demo_publishes_the_todos_of_a_selection() {
+    let mut harness = Harness::load_package(demo_package("fyx_demo_lint")).expect("loads");
+    harness.set_worktrees(&[(1, "/work")]);
+    harness.set_private_file(1, ".env");
+    harness.mount("lint").expect("mounts");
+    harness.deliver_io().expect("watching starts");
+
+    harness.set_editor_context(editor_selection(
+        "src/main.rs",
+        4,
+        Some("// TODO: name it\nlet x = 1;\n    TODO\n"),
+    ));
+    harness.deliver_io().expect("deliver");
+    let published = harness.published_diagnostics();
+    assert_eq!(published.len(), 1, "{published:?}");
+    assert_eq!(published[0].path.path, "src/main.rs");
+    let entries: Vec<_> = published[0]
+        .diagnostics
+        .iter()
+        .map(|entry| {
+            (
+                entry.range.start.line,
+                entry.range.start.column,
+                entry.severity,
+                entry.message.as_str(),
+                entry.source.as_deref(),
+            )
+        })
+        .collect();
+    use ui_ext::context::DiagnosticSeverity::Warning;
+    assert_eq!(
+        entries,
+        [
+            (4, 3, Warning, "TODO: name it", None),
+            (6, 4, Warning, "TODO", None)
+        ]
+    );
+    let list = harness
+        .find("lint", |props| matches!(props, model::Props::List(_)))
+        .expect("a list");
+    assert_eq!(harness.rows("lint", list, 0, 10).expect("rows").len(), 2);
+
+    // A private file has no selection text: nothing is published for it.
+    harness.set_editor_context(editor_selection(".env", 0, None));
+    harness.deliver_io().expect("deliver");
+    assert_eq!(harness.published_diagnostics().len(), 1);
+
+    // A selection without a TODO clears its file.
+    harness.set_editor_context(editor_selection("src/main.rs", 0, Some("fn main() {}")));
+    harness.deliver_io().expect("deliver");
+    assert!(harness.published_diagnostics().is_empty());
+
+    harness.set_editor_context(editor_selection("a.rs", 0, Some("TODO")));
+    harness.deliver_io().expect("deliver");
+    assert_eq!(harness.published_diagnostics().len(), 1);
+    harness.click("lint", "Clear").expect("clear");
+    assert!(harness.published_diagnostics().is_empty());
+}
+
+/// Plan 6.7 (design.md §F.5): the bookmarks demo badges a bookmarked file, shows a two-level
+/// tree whose folder rows fold on `row-toggled`, and removes the badge with the bookmark.
+#[test]
+fn the_bookmarks_demo_is_a_tree_with_badges() {
+    let mut harness = Harness::load_package(demo_package("fyx_demo_bookmarks")).expect("loads");
+    harness.set_worktrees(&[(1, "/work")]);
+    harness.mount("bookmarks").expect("mounts");
+    harness.deliver_io().expect("watching starts");
+    for path in ["src/main.rs", "src/lib.rs", "README.md"] {
+        harness.set_editor_context(editor_selection(path, 0, None));
+        harness.deliver_io().expect("deliver");
+        let name = path.rsplit('/').next().expect("a name");
+        harness
+            .click("bookmarks", &format!("Bookmark {name}"))
+            .expect("bookmark");
+    }
+    let badges: Vec<_> = harness
+        .file_decorations()
+        .into_iter()
+        .map(|decoration| (decoration.path.path, decoration.badge))
+        .collect();
+    assert_eq!(
+        badges,
+        [
+            ("src/main.rs".to_owned(), Some("\u{2605}".to_owned())),
+            ("src/lib.rs".to_owned(), Some("\u{2605}".to_owned())),
+            ("README.md".to_owned(), Some("\u{2605}".to_owned())),
+        ]
+    );
+
+    let list = harness
+        .find("bookmarks", |props| matches!(props, model::Props::List(_)))
+        .expect("a list");
+    let shape = |harness: &mut Harness| {
+        harness
+            .tree_rows("bookmarks", list, 0, 20)
+            .expect("rows")
+            .into_iter()
+            .map(|row| (row.row.indent, row.expansion))
+            .collect::<Vec<_>>()
+    };
+    use crate::Expansion::{Collapsed, Expanded, Leaf};
+    assert_eq!(
+        shape(&mut harness),
+        [
+            (0, Expanded),
+            (1, Leaf),
+            (0, Expanded),
+            (1, Leaf),
+            (1, Leaf)
+        ]
+    );
+
+    // Collapsing `src/` (row 2) asks for its rows again.
+    let outcome = harness
+        .toggle_row("bookmarks", list, 2, false)
+        .expect("toggle");
+    assert!(
+        outcome.invalidated.iter().any(|op| op.target == list),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        shape(&mut harness),
+        [(0, Expanded), (1, Leaf), (0, Collapsed)]
+    );
+    harness
+        .toggle_row("bookmarks", list, 2, true)
+        .expect("toggle");
+    assert_eq!(shape(&mut harness).len(), 5);
+
+    // README.md is still the active file: its button removes the bookmark and the badge.
+    harness
+        .click("bookmarks", "Remove README.md")
+        .expect("remove");
+    assert_eq!(harness.file_decorations().len(), 2);
+    assert_eq!(shape(&mut harness), [(0, Expanded), (1, Leaf), (1, Leaf)]);
 }

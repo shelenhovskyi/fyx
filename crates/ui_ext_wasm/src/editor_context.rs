@@ -431,7 +431,10 @@ fn hidden(source: &dyn DiagnosticsSource, full: &std::path::Path) -> bool {
     source.is_private(full) || crate::accounts::in_account_dir(full)
 }
 
-fn resolve(roots: &[(u64, PathBuf)], path: &FileRef) -> Result<(u64, PathBuf), HostError> {
+pub(crate) fn resolve(
+    roots: &[(u64, PathBuf)],
+    path: &FileRef,
+) -> Result<(u64, PathBuf), HostError> {
     let join = |root: &PathBuf| {
         path.path
             .split('/')

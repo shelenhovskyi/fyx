@@ -29,7 +29,10 @@ use ui_ext::v0_2::{
     IconProps, InputProps, ListProps, NodeId, Props, TableProps, TextProps, UiEvent, tree::Tree,
 };
 
-use crate::surface::{Phase, SurfaceState, fetch_range};
+use crate::{
+    subtree::{PlannedSegment, Segment, Snapshot, SubtreeView},
+    surface::{Phase, SurfaceState, fetch_range},
+};
 
 /// Typing is sent to the extension once the user pauses this long.
 pub const TYPING_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -84,6 +87,10 @@ pub struct SurfaceView {
     pub(crate) terminals: HashMap<u64, Option<gpui::AnyView>>,
     /// The state's `mount_count` at the last sync.
     synced_mount: u64,
+    /// Plan 7.7: the children of each chunked column (`None` is the panel body), by column.
+    chunk_plans: HashMap<Option<NodeId>, Vec<Segment>>,
+    /// The chunks by their first node, kept across tree changes so an unchanged one stays cached.
+    chunks: HashMap<NodeId, Entity<SubtreeView>>,
     _observe_state: Subscription,
     /// Redraws when an image this view may show finishes decoding (plan 4.11).
     _observe_images: Option<Subscription>,
@@ -129,6 +136,8 @@ impl SurfaceView {
             synced_mount: 0,
             synced_props: HashMap::default(),
             terminals: HashMap::default(),
+            chunk_plans: HashMap::default(),
+            chunks: HashMap::default(),
             _observe_state: observe_state,
             _observe_images: crate::images::ImageCache::global(cx)
                 .map(|images| cx.observe(&images, |_, _, cx| cx.notify())),
@@ -469,6 +478,98 @@ impl SurfaceView {
             }
         }
         self.restore_focus(focused_before, &old_order, window, cx);
+        self.sync_chunks(cx);
+    }
+
+    /// Plans the cached chunks of the new tree (plan 7.7). A chunk that drew from anything that
+    /// changed is drawn uncached and measured again; the rest stay cached.
+    fn sync_chunks(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let plans = match (self.compact, state.tree()) {
+            (false, Some(tree)) => crate::subtree::plan(tree)
+                .into_iter()
+                .map(|plan| {
+                    let chunks: Vec<(Vec<NodeId>, Snapshot)> = plan
+                        .segments
+                        .iter()
+                        .filter_map(|segment| match segment {
+                            PlannedSegment::Chunk(members) => {
+                                Some((members.clone(), Snapshot::of(tree, members)))
+                            }
+                            PlannedSegment::Node(_) => None,
+                        })
+                        .collect();
+                    (plan, chunks)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let surface = cx.entity().downgrade();
+        let mut old_chunks = std::mem::take(&mut self.chunks);
+        let mut chunk_plans = HashMap::default();
+        for (plan, chunks) in plans {
+            let mut chunks = chunks.into_iter();
+            let segments = plan
+                .segments
+                .into_iter()
+                .filter_map(|segment| match segment {
+                    PlannedSegment::Node(id) => Some(Segment::Node(id)),
+                    PlannedSegment::Chunk(_) => {
+                        let (members, snapshot) = chunks.next()?;
+                        let key = *members.first()?;
+                        let entity = match old_chunks.remove(&key) {
+                            Some(entity) => {
+                                entity.update(cx, |chunk, cx| {
+                                    chunk.update_plan(members, plan.gap, plan.align, snapshot, cx)
+                                });
+                                entity
+                            }
+                            None => cx.new(|_| {
+                                SubtreeView::new(
+                                    surface.clone(),
+                                    members,
+                                    plan.gap,
+                                    plan.align,
+                                    snapshot,
+                                )
+                            }),
+                        };
+                        self.chunks.insert(key, entity.clone());
+                        Some(Segment::Chunk(entity))
+                    }
+                })
+                .collect();
+            chunk_plans.insert(plan.column, segments);
+        }
+        self.chunk_plans = chunk_plans;
+    }
+
+    /// The nodes of one chunk, drawn as the surface draws them.
+    pub(crate) fn render_members(
+        &mut self,
+        members: &[NodeId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let state = self.state.read(cx);
+        let Some(tree) = state.tree() else {
+            return Vec::new();
+        };
+        let renderer = Renderer {
+            view: self,
+            state,
+            window,
+            cx,
+        };
+        members
+            .iter()
+            .map(|&id| renderer.node(tree, id, Scope::Surface))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chunks(&self) -> impl Iterator<Item = &Entity<SubtreeView>> {
+        self.chunks.values()
     }
 
     fn sync_input(
@@ -713,6 +814,7 @@ impl SurfaceView {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
         let state = self.state.read(cx);
         let compact = self.compact;
         let container = if compact {
@@ -768,10 +870,7 @@ impl Render for SurfaceView {
                     window,
                     cx,
                 };
-                let children = tree
-                    .roots()
-                    .iter()
-                    .map(|&id| renderer.node(tree, id, Scope::Surface));
+                let children = renderer.children(tree, None, tree.roots(), Scope::Surface);
                 if compact {
                     h_flex().gap_1().children(children).into_any_element()
                 } else {
@@ -840,6 +939,7 @@ impl Render for SurfaceView {
                     this.state.update(cx, |state, cx| state.dismiss_error(cx));
                 }))
         });
+        state.record_render(started.elapsed());
         container
             .key_context(crate::keyboard::SURFACE_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -853,6 +953,8 @@ impl Render for SurfaceView {
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::select_page_up))
             .on_action(cx.listener(Self::select_page_down))
+            .on_action(cx.listener(Self::expand_row))
+            .on_action(cx.listener(Self::collapse_row))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::cancel_input))
             .child(body)
@@ -952,7 +1054,7 @@ impl Renderer<'_, '_> {
             return div().into_any_element();
         };
         let element = match node.props() {
-            Props::Flex(props) => self.flex(tree, props, node.children(), scope),
+            Props::Flex(props) => self.flex(tree, id, props, node.children(), scope),
             Props::Text(props) => self.text(props),
             Props::Button(props) => self.button(id, props, scope),
             Props::Input(props) => self.input(id, props, scope),
@@ -973,9 +1075,33 @@ impl Renderer<'_, '_> {
         with_test_selector(element, id, scope, leaf)
     }
 
+    /// A column's children, with the runs plan 7.7 chunked drawn as cached chunks.
+    fn children(
+        &self,
+        tree: &Tree,
+        column: Option<NodeId>,
+        children: &[NodeId],
+        scope: Scope,
+    ) -> Vec<AnyElement> {
+        match (scope, self.view.chunk_plans.get(&column)) {
+            (Scope::Surface, Some(segments)) => segments
+                .iter()
+                .map(|segment| match segment {
+                    Segment::Node(id) => self.node(tree, *id, scope),
+                    Segment::Chunk(chunk) => SubtreeView::element(chunk, self.cx),
+                })
+                .collect(),
+            _ => children
+                .iter()
+                .map(|&child| self.node(tree, child, scope))
+                .collect(),
+        }
+    }
+
     fn flex(
         &self,
         tree: &Tree,
+        id: NodeId,
         props: &FlexProps,
         children: &[NodeId],
         scope: Scope,
@@ -998,7 +1124,7 @@ impl Renderer<'_, '_> {
             .when_some(props.background, |this, token| {
                 this.bg(token_hsla(token, self.cx))
             })
-            .children(children.iter().map(|&child| self.node(tree, child, scope)))
+            .children(self.children(tree, Some(id), children, scope))
             .into_any_element()
     }
 
@@ -1251,6 +1377,11 @@ impl Renderer<'_, '_> {
             extension_selected == Some(index) || self.view.selection.get(&list) == Some(&index);
         // Design J: nesting depth, clamped by the host; 0 for 0.1 rows.
         let indent = self.state.row_indent(list, index);
+        // §F.1: a chevron slot on every row of a tree list, so leaves line up with siblings.
+        let chevron = self
+            .state
+            .list_is_tree(list)
+            .then(|| self.chevron(list, index));
         let row = div()
             .id(ElementId::NamedInteger("fyx-row".into(), index as u64))
             // Tests find rows by `fyx-row-<list>-<index>`; a no-op outside test builds.
@@ -1276,6 +1407,7 @@ impl Renderer<'_, '_> {
                 }
                 this.dispatch(UiEvent::RowClick(list, index), cx)
             }));
+        let row = row.children(chevron);
         let Some(tree) = self.state.row(list, index) else {
             // Not fetched yet: an empty row of the right height.
             return row.into_any_element();
@@ -1297,6 +1429,42 @@ impl Renderer<'_, '_> {
             }
             _ => row.child(self.node(tree, root, scope)).into_any_element(),
         }
+    }
+
+    /// A tree row's chevron (§F.1): a click asks the extension to expand or collapse the row,
+    /// without selecting it. A `leaf` keeps the slot empty.
+    fn chevron(&self, list: NodeId, index: u32) -> AnyElement {
+        use ui_ext::v0_2::Expansion;
+        let slot = div()
+            .id(ElementId::NamedInteger(
+                "fyx-row-chevron".into(),
+                index as u64,
+            ))
+            .debug_selector(|| format!("fyx-row-chevron-{list}-{index}"))
+            .flex_none()
+            .w(px(16.))
+            .flex()
+            .items_center()
+            .justify_center();
+        let expand = match self.state.row_expansion(list, index) {
+            Expansion::Leaf => return slot.into_any_element(),
+            Expansion::Collapsed => true,
+            Expansion::Expanded => false,
+        };
+        slot.child(
+            ui::Icon::new(if expand {
+                ui::IconName::ChevronRight
+            } else {
+                ui::IconName::ChevronDown
+            })
+            .size(ui::IconSize::Small)
+            .color(ui::Color::Muted),
+        )
+        .on_click(self.cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.dispatch(UiEvent::RowToggled(list, index, expand), cx)
+        }))
+        .into_any_element()
     }
 
     /// A 0.3 `image` node as the muted box with its alt text that design.md §12 draws

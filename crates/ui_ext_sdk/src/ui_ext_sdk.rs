@@ -2,7 +2,7 @@
 //!
 //! Apache-2.0 so that extension authors, proprietary ones included, stay outside the GPL.
 //!
-//! The API is that of `fyx:ui@0.3.0`, which is staged: Dev and Nightly builds of Fyx run it. An
+//! The API is that of `fyx:ui@0.3.0`, which releases of Fyx run (0.1 to 0.4 are frozen). An
 //! extension implements [`Extension`] and exports it with [`register_extension!`]:
 //! `register_extension!(T)` exports 0.3, `register_extension!(T, v0_2)` exports 0.2 and
 //! `register_extension!(T, v0_1)` exports 0.1, all from the same code. Trees are
@@ -67,7 +67,11 @@ mod host_model;
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod listeners;
 #[cfg(feature = "fyx-ui-0-4")]
+pub mod relay;
+#[cfg(feature = "fyx-ui-0-4")]
 pub mod review;
+#[cfg(feature = "fyx-ui-0-4")]
+pub mod settings;
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod terminals;
 mod v0_1;
@@ -78,7 +82,7 @@ mod v0_2;
 pub use canvas::*;
 pub use host::*;
 
-/// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
+/// The bindings of the SDK's world: `fyx:ui@0.2.0`, or `fyx:ui@0.3.0` with the
 /// `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2
 /// component would list 0.3 interfaces.
 #[cfg(not(feature = "fyx-ui-0-3"))]
@@ -109,8 +113,8 @@ pub mod bindings {
     });
 }
 
-/// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
-/// [`listeners`], [`context`] and [`review`].
+/// `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
+/// [`listeners`], [`context`], [`review`] and [`relay`].
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod bindings {
     wit_bindgen::generate!({
@@ -164,7 +168,7 @@ pub use bindings::fyx::ui::workspace_edit::{EditError, FileEdit, TextEdit, Works
 pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
-/// patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature.
+/// patch): 0.2, or 0.3 with the `fyx-ui-0-3` feature.
 #[cfg(feature = "fyx-ui-0-4")]
 pub const API_VERSION: (u16, u16, u16) = (0, 4, 0);
 #[cfg(all(feature = "fyx-ui-0-3", not(feature = "fyx-ui-0-4")))]
@@ -524,6 +528,8 @@ macro_rules! __fyx_host_shims {
             $crate::__fyx_listener_shims!($world);
             $crate::__fyx_context_shims!($world);
             $crate::__fyx_review_shims!($world);
+            $crate::__fyx_relay_shims!($world);
+            $crate::__fyx_settings_shims!($world);
         };
     };
 }
@@ -939,6 +945,35 @@ macro_rules! __fyx_context_shims {
         ) -> ::std::result::Result<(), $crate::HostError> {
             $crate::__private::context::$world::watch_diagnostics(on)
         }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_publish_diagnostics(
+            path: &$crate::FileRef,
+            diagnostics: &[$crate::context::Diagnostic],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::publish_diagnostics(path, diagnostics)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_clear_diagnostics(
+            path: ::std::option::Option<&$crate::FileRef>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::clear_diagnostics(path)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_decorate_files(
+            decorations: &[$crate::context::FileDecoration],
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::decorate_files(decorations)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_context_clear_file_decorations(
+            paths: ::std::option::Option<&[$crate::FileRef]>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::context::$world::clear_file_decorations(paths)
+        }
     };
 }
 
@@ -993,6 +1028,66 @@ macro_rules! __fyx_review_shims {
     ($world:ident) => {};
 }
 
+/// The shim of the 0.4 [`relay`] function; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_relay_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_relay_respond(
+            id: u64,
+            exit_code: u8,
+            stdout: &str,
+            stderr: &str,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::relay::$world::respond(id, exit_code, stdout, stderr)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_relay_shims {
+    ($world:ident) => {};
+}
+
+/// The shims of the 0.4 [`settings`] functions; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_settings_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_get(
+            key: &str,
+        ) -> ::std::result::Result<$crate::settings::SettingValue, $crate::HostError> {
+            $crate::__private::settings::$world::get(key)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_all()
+        -> ::std::result::Result<::std::vec::Vec<$crate::settings::Setting>, $crate::HostError> {
+            $crate::__private::settings::$world::all()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_open(
+            key: ::std::option::Option<&str>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::settings::$world::open(key)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_settings_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
@@ -1003,7 +1098,11 @@ pub mod __private {
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::listeners::glue as listeners;
     #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::relay::glue as relay;
+    #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::review::glue as review;
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::settings::glue as settings;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::terminals::glue as terminals;
     pub use crate::v0_1::glue as v0_1;
@@ -1190,6 +1289,9 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         index,
         indent: 0,
         nodes: tree.finish(),
+        // fyx:ui 0.4 (plan 6.7): a plain row has no chevron.
+        #[cfg(feature = "fyx-ui-0-4")]
+        expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
     };
     ui_ext::Tree::from_row(
         row.nodes.iter().map(Into::into).collect(),
@@ -1204,6 +1306,23 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
     {
         return Err(TreeError::CanvasInRow);
     }
+    Ok(row)
+}
+
+/// fyx:ui 0.4 (plan 6.7): a row of a tree. The host draws `indent` levels and a chevron for
+/// `expansion` (an empty slot for `Expansion::Leaf`); a click on it, Right or Left sends
+/// `UiEvent::RowToggled((list, index, expand))`. The host changes no rows itself: answer with the
+/// new `row-count` and invalidate the rows from the toggled one on.
+#[cfg(feature = "fyx-ui-0-4")]
+pub fn tree_row(
+    index: u32,
+    indent: u8,
+    expansion: Expansion,
+    build: impl FnOnce(&mut TreeBuilder),
+) -> Result<ListRow, TreeError> {
+    let mut row = list_row(index, build)?;
+    row.indent = indent;
+    row.expansion = expansion;
     Ok(row)
 }
 
@@ -1588,6 +1707,8 @@ impl SurfaceTree {
             | UiEvent::ProgressCancelRequested(_) => return,
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::CanvasClick(_) => return,
+            #[cfg(feature = "fyx-ui-0-4")]
+            UiEvent::RowToggled(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
@@ -1624,6 +1745,8 @@ impl SurfaceTree {
             | UiEvent::ProgressCancelRequested(_) => {}
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::CanvasClick(_) => {}
+            #[cfg(feature = "fyx-ui-0-4")]
+            UiEvent::RowToggled(_) => {}
         }
     }
 
@@ -3121,6 +3244,27 @@ mod tests {
         assert_eq!(row.nodes[0].parent, None);
         assert_eq!(row.nodes[1].parent, Some(ROW_NODE_ID_BASE));
         assert_eq!(row.nodes[1].props, text("row 2"));
+    }
+
+    #[cfg(feature = "fyx-ui-0-4")]
+    #[test]
+    fn tree_rows_carry_indent_and_expansion() {
+        let row = tree_row(4, 2, Expansion::Collapsed, |tree| {
+            tree.text("src");
+        })
+        .unwrap();
+        assert_eq!((row.index, row.indent), (4, 2));
+        assert_eq!(row.expansion, Expansion::Collapsed);
+        assert_eq!(row.nodes[0].props, text("src"));
+        assert_eq!(
+            list_row(0, |tree| {
+                tree.text("a");
+            })
+            .unwrap()
+            .expansion,
+            Expansion::Leaf
+        );
+        assert!(tree_row(0, 0, Expansion::Leaf, |_| {}).is_err());
     }
 
     #[test]

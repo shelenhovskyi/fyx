@@ -139,6 +139,8 @@ pub fn observe(cx: &mut App) -> Option<Observation> {
             AgentReviewEvent::ModeChanged(enabled) => Some(ObservedEvent::ReviewMode(enabled)),
             // Shown to the user; observers see the decision in the turn's files.
             AgentReviewEvent::DecidedByRule { .. } => None,
+            // The user's comments for the agent are not part of the observed review state.
+            AgentReviewEvent::CommentsChanged => None,
         };
         if let Some(observed_event) = observed_event {
             sender.unbounded_send(observed_event).ok();

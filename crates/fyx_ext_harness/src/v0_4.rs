@@ -1,9 +1,9 @@
-//! The staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
+//! The frozen `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
 //! `v0_3` runs them (this file started as a copy of it), plus `terminals` on the fakes of
 //! [`crate::terminals`] (plan 5.10), `listeners` on those of [`crate::listeners`], `context`
-//! on [`crate::context`] and `review` on [`crate::review`] (plan 5.14). The other 0.4
-//! interfaces (`relay`, `approvals`) trap when called ([`define_unlinked_as_traps`]) until the
-//! rest of plan 5.14.
+//! on [`crate::context`], `review` on [`crate::review`] (plan 5.14) and `relay` on
+//! [`crate::relay`]. `approvals` traps when called ([`define_unlinked_as_traps`]) until the rest
+//! of plan 5.14.
 //!
 //! A `terminal` node becomes `ui_ext::v0_2::Props::Terminal`; [`terminal_node_handle`] reads its
 //! handle.
@@ -28,8 +28,8 @@ use bindings::fyx::ui::{
     agent_observe as wit_observe, context as wit_context, decorations as wit_decorations,
     host as wit_host, images as wit_images, io as wit_io, listeners as wit_listeners,
     network as wit_network, notifications as wit_notifications, permissions as wit_permissions,
-    process as wit_process, review as wit_review, terminals as wit_terminals, types as wit,
-    workspace_edit as wit_edit,
+    process as wit_process, relay as wit_relay, review as wit_review, settings as wit_settings,
+    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 fn result(
@@ -63,6 +63,8 @@ pub(crate) fn add_to_linker(
     wit_listeners::add_to_linker::<_, State>(linker, |state| state)?;
     wit_context::add_to_linker::<_, State>(linker, |state| state)?;
     wit_review::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_relay::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_settings::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
@@ -417,8 +419,17 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
             id,
             outcome.map(wit_review_outcome),
         ))),
-        // The harness has no relay endpoint (W1's fyx_relay), so no hook request comes.
-        net::IoEvent::RelayRequest(_) => None,
+        net::IoEvent::ReviewComments(comments) => Some(wit_io::IoEvent::ReviewComments(
+            wit_review_comments(comments),
+        )),
+        net::IoEvent::RelayRequest(request) => Some(wit_io::IoEvent::RelayRequest((
+            request.id,
+            request.channel,
+            request.terminal.map(|handle| handle.0),
+            request.argv,
+            request.stdin,
+        ))),
+        net::IoEvent::SettingsChanged(keys) => Some(wit_io::IoEvent::SettingsChanged(keys)),
     }
 }
 
@@ -522,8 +533,10 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.4 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 14] = [
+const LINKED_INTERFACES: [&str; 16] = [
     "terminals",
+    "relay",
+    "settings",
     "listeners",
     "context",
     "review",
@@ -1011,6 +1024,11 @@ impl TryFrom<wit::ListRow> for model::ListRow {
 
     fn try_from(row: wit::ListRow) -> Result<Self, Self::Error> {
         Ok(Self {
+            expansion: match row.expansion {
+                wit::Expansion::Leaf => model::Expansion::Leaf,
+                wit::Expansion::Collapsed => model::Expansion::Collapsed,
+                wit::Expansion::Expanded => model::Expansion::Expanded,
+            },
             index: row.index,
             indent: row.indent,
             nodes: try_collect(row.nodes)?,
@@ -1068,6 +1086,7 @@ impl From<model::UiEvent> for wit::UiEvent {
             model::UiEvent::InputSubmitted(id, text) => Self::InputSubmitted((id, text)),
             model::UiEvent::RowClick(id, row) => Self::RowClick((id, row)),
             model::UiEvent::RowSelected(id, row) => Self::RowSelected((id, row)),
+            model::UiEvent::RowToggled(id, row, expand) => Self::RowToggled((id, row, expand)),
             model::UiEvent::Dismissed(reason) => Self::Dismissed(match reason {
                 model::DismissReason::Escape => wit::DismissReason::Escape,
                 model::DismissReason::FocusLost => wit::DismissReason::FocusLost,
@@ -1548,6 +1567,122 @@ impl wit_context::Host for State {
         self.context.watch_diagnostics(on);
         Ok(Ok(()))
     }
+
+    // In the 0.4 WIT ahead of the host side, as in the host (plan 6.6 §E, 6.7 §F.2).
+    fn publish_diagnostics(
+        &mut self,
+        path: wit::FileRef,
+        diagnostics: Vec<wit_context::Diagnostic>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            path.path.len()
+                + diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.len())
+                    .sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
+            return Ok(Err(error));
+        }
+        let diagnostics = diagnostics.into_iter().map(model_diagnostic).collect();
+        result(
+            self.published
+                .publish(&self.context, &model_file_ref(path), diagnostics),
+        )
+    }
+
+    fn clear_diagnostics(
+        &mut self,
+        path: Option<wit::FileRef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(path.as_ref().map_or(0, |path| path.path.len()))?;
+        if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
+            return Ok(Err(error));
+        }
+        let path = path.map(model_file_ref);
+        result(
+            self.published
+                .clear_diagnostics(&self.context, path.as_ref()),
+        )
+    }
+
+    fn decorate_files(
+        &mut self,
+        decorations: Vec<wit_context::FileDecoration>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            decorations
+                .iter()
+                .map(|decoration| {
+                    decoration.path.path.len()
+                        + decoration.badge.as_ref().map_or(0, String::len)
+                        + decoration.tooltip.as_ref().map_or(0, String::len)
+                })
+                .sum(),
+        )?;
+        if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
+            return Ok(Err(error));
+        }
+        let decorations = decorations
+            .into_iter()
+            .map(|decoration| crate::FileDecoration {
+                path: model_file_ref(decoration.path),
+                badge: decoration.badge,
+                color: decoration.color.map(Into::into),
+                tooltip: decoration.tooltip,
+            })
+            .collect();
+        result(self.published.decorate(&self.context, decorations))
+    }
+
+    fn clear_file_decorations(
+        &mut self,
+        paths: Option<Vec<wit::FileRef>>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            paths
+                .as_ref()
+                .map_or(0, |paths| paths.iter().map(|path| path.path.len()).sum()),
+        )?;
+        if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
+            return Ok(Err(error));
+        }
+        let paths = paths.map(|paths| paths.into_iter().map(model_file_ref).collect());
+        result(self.published.clear_decorations(&self.context, paths))
+    }
+}
+
+fn model_diagnostic(diagnostic: wit_context::Diagnostic) -> ui_ext::context::Diagnostic {
+    use ui_ext::context::DiagnosticSeverity;
+    let position = |position: wit::Position| ui_ext::edit::Position {
+        line: position.line,
+        column: position.column,
+    };
+    ui_ext::context::Diagnostic {
+        range: ui_ext::edit::TextRange {
+            start: position(diagnostic.range.start),
+            end: position(diagnostic.range.end),
+        },
+        severity: match diagnostic.severity {
+            wit_context::Severity::Error => DiagnosticSeverity::Error,
+            wit_context::Severity::Warning => DiagnosticSeverity::Warning,
+            wit_context::Severity::Information => DiagnosticSeverity::Information,
+            wit_context::Severity::Hint => DiagnosticSeverity::Hint,
+        },
+        message: diagnostic.message,
+        source: diagnostic.source,
+        code: diagnostic.code,
+    }
+}
+
+impl From<wit::Expansion> for crate::Expansion {
+    fn from(expansion: wit::Expansion) -> Self {
+        match expansion {
+            wit::Expansion::Leaf => Self::Leaf,
+            wit::Expansion::Collapsed => Self::Collapsed,
+            wit::Expansion::Expanded => Self::Expanded,
+        }
+    }
 }
 
 fn wit_diagnostics_snapshot(
@@ -1591,6 +1726,98 @@ fn wit_review_outcome(outcome: ui_ext::review::ReviewOutcome) -> wit_review::Rev
             Decision::Rejected => wit_review::Decision::Rejected,
         },
         final_content: outcome.final_content,
+    }
+}
+
+/// `settings`, on [`crate::settings::FakeSettings`] (design.md §D.4): no capability.
+impl wit_settings::Host for State {
+    fn get(
+        &mut self,
+        key: String,
+    ) -> wasmtime::Result<Result<wit_settings::SettingValue, wit_host::HostError>> {
+        self.count_lifted_text(key.len())?;
+        Ok(match self.settings.get(&key) {
+            Some(setting) => Ok(wit_setting_value(setting.value.clone())),
+            None => Err(crate::api_state::undeclared_setting(&key).into()),
+        })
+    }
+
+    fn all(&mut self) -> wasmtime::Result<Vec<wit_settings::Setting>> {
+        Ok(self
+            .settings
+            .effective()
+            .iter()
+            .map(|setting| wit_settings::Setting {
+                key: setting.key.clone(),
+                value: wit_setting_value(setting.value.clone()),
+                is_default: setting.is_default,
+            })
+            .collect())
+    }
+
+    fn open(&mut self, key: Option<String>) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(key.as_ref().map_or(0, String::len))?;
+        Ok(self
+            .api
+            .open_settings(&self.settings, key)
+            .map_err(Into::into))
+    }
+}
+
+fn wit_setting_value(value: crate::settings::SettingValue) -> wit_settings::SettingValue {
+    use crate::settings::SettingValue as Value;
+    match value {
+        Value::Boolean(value) => wit_settings::SettingValue::Boolean(value),
+        Value::Integer(value) => wit_settings::SettingValue::Integer(value),
+        Value::Number(value) => wit_settings::SettingValue::Number(value),
+        Value::Text(value) => wit_settings::SettingValue::Text(value),
+        Value::Choice(value) => wit_settings::SettingValue::Choice(value),
+        Value::TextList(value) => wit_settings::SettingValue::TextList(value),
+    }
+}
+
+fn wit_review_comments(comments: ui_ext::review::ReviewComments) -> wit_review::ReviewComments {
+    use ui_ext::review::CommentState;
+    wit_review::ReviewComments {
+        session: comments.session,
+        comments: comments
+            .comments
+            .into_iter()
+            .map(|comment| wit_review::ReviewComment {
+                path: wit_file_ref(comment.path),
+                lines: comment.lines,
+                state: match comment.state {
+                    CommentState::Accepted => wit_review::CommentState::Accepted,
+                    CommentState::Rejected => wit_review::CommentState::Rejected,
+                    CommentState::Pending => wit_review::CommentState::Pending,
+                },
+                excerpt: comment.excerpt,
+                text: comment.text,
+            })
+            .collect(),
+        prompt: comments.prompt,
+    }
+}
+
+/// `relay`, on [`crate::relay::FakeRelay`]: needs `relay:hooks`.
+impl wit_relay::Host for State {
+    fn respond(
+        &mut self,
+        id: u64,
+        exit_code: u8,
+        stdout: String,
+        stderr: String,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(stdout.len() + stderr.len())?;
+        if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_RELAY_HOOKS) {
+            return Ok(Err(error));
+        }
+        let answer = ui_ext::integration::RelayAnswer {
+            exit: exit_code,
+            stdout,
+            stderr,
+        };
+        Ok(self.relay.respond(id, answer).map_err(Into::into))
     }
 }
 

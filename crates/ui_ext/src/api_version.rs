@@ -35,8 +35,8 @@ pub enum ApiVersion {
     /// Frozen at integration-6 (docs/fyx/wit-0.3/design.md); the 0.2 rules apply to everything 0.3
     /// copies forward.
     V0_3_0,
-    /// Staged (plan P5): terminals and CLI integrations (docs/fyx/wit-0.4/design.md). Loads only
-    /// where staged versions may; everything 0.3 has applies unchanged.
+    /// Frozen after plan 5.19: terminals and CLI integrations (docs/fyx/wit-0.4/design.md);
+    /// everything 0.3 has applies unchanged.
     V0_4_0,
 }
 

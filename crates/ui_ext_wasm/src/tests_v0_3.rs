@@ -665,6 +665,62 @@ mod network_fetch {
         );
     }
 
+    /// Plan 7.6: fetches reach the usage journal for the privacy report, the first one per host
+    /// at once and later ones summed when the instance ends.
+    #[gpui::test]
+    async fn test_fetches_reach_the_journal(cx: &mut TestAppContext) {
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<crate::journal::JournalKind>>);
+
+        impl crate::journal::Journal for Recorder {
+            fn record(&self, _: &str, kind: crate::journal::JournalKind) {
+                self.0.lock().unwrap().push(kind);
+            }
+        }
+
+        let server = server(cx);
+        let broker = Broker::new(PermissionState::Granted, PermissionState::Granted);
+        let journal = Arc::new(Recorder::default());
+        let extension = load_with(
+            LoadOptions {
+                allow_staged: Some(true),
+                capabilities: Some(vec![
+                    CAPABILITY_PANEL.to_string(),
+                    ui_ext::v0_2::CAPABILITY_STATUS_BAR.to_string(),
+                    ui_ext::v0_2::CAPABILITY_MODAL.to_string(),
+                    "network:fetch".into(),
+                ]),
+                network_domains: Some(vec![format!("localhost:{}", server.port)]),
+                capability_check: Some(broker as Arc<dyn CapabilityCheck>),
+                journal: Some(journal.clone()),
+                ..LoadOptions::default()
+            },
+            cx,
+        )
+        .await
+        .expect("loads");
+        let mut events = extension.take_io_events().expect("once");
+        let url = format!("http://localhost:{}/hello", server.port);
+        for _ in 0..3 {
+            command(&extension, &format!("fetch {url}")).await;
+            deliver(&extension, &mut events).await;
+        }
+        let fetched = |count| crate::journal::JournalKind::Fetched {
+            host: "localhost".into(),
+            count,
+        };
+        assert_eq!(*journal.0.lock().unwrap(), [fetched(1)]);
+        drop(events);
+        drop(extension);
+        // The instance ends on its own thread.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while journal.0.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(*journal.0.lock().unwrap(), [fetched(1), fetched(2)]);
+    }
+
     /// Plan 4.6, done: an undeclared domain is `denied` at the import.
     #[gpui::test]
     async fn test_what_the_import_refuses(cx: &mut TestAppContext) {

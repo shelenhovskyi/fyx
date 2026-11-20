@@ -682,6 +682,8 @@ pub(crate) struct Running {
     /// The Extension Inspector's record of each operation: started by the handles, finished here
     /// when its outcome is delivered.
     pub(crate) diagnostics: crate::diagnostics::DiagnosticsBuffer,
+    /// The privacy report's fetches and edits (plan 7.6), when the host keeps a journal.
+    pub(crate) usage: Option<Arc<crate::journal::UsageJournal>>,
 }
 
 /// What the Inspector shows of a URL: no user info, query or fragment, which may hold secrets.
@@ -731,6 +733,12 @@ impl Running {
             diagnostics,
             ..Self::default()
         }
+    }
+
+    /// Records fetches and edits in `usage` as well.
+    pub(crate) fn with_usage(mut self, usage: Option<crate::journal::UsageJournal>) -> Self {
+        self.usage = usage.map(Arc::new);
+        self
     }
 
     pub(crate) fn insert(&self, id: u64, handle: futures::future::AbortHandle) {
@@ -924,6 +932,7 @@ pub(crate) struct Revocable {
     pub(crate) context: std::sync::Weak<crate::editor_context::ContextHandle>,
     pub(crate) review: std::sync::Weak<crate::proposals::ReviewHandle>,
     pub(crate) relay: std::sync::Weak<crate::relay::RelayHandle>,
+    pub(crate) marks: std::sync::Weak<crate::extension_marks::MarksHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
@@ -1024,6 +1033,10 @@ impl NetworkHandle {
                 }
                 if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
                     running.revoke_all();
+                    // Plan 7.5: a sandboxed program's proxy allowed the declared domains.
+                    if let Some(processes) = revocable.processes.upgrade() {
+                        processes.kill_networked();
+                    }
                 }
                 if state != PermissionState::Granted {
                     match capability.as_str() {
@@ -1058,6 +1071,17 @@ impl NetworkHandle {
                         ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS => {
                             if let Some(context) = revocable.context.upgrade() {
                                 context.stop_diagnostics();
+                            }
+                        }
+                        // §E.1, §F.2: what the extension published goes.
+                        ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH => {
+                            if let Some(marks) = revocable.marks.upgrade() {
+                                marks.revoke_diagnostics();
+                            }
+                        }
+                        ui_ext::integration::CAPABILITY_FILE_DECORATIONS => {
+                            if let Some(marks) = revocable.marks.upgrade() {
+                                marks.revoke_decorations();
                             }
                         }
                         // §B.10: open reviews close unapplied; no outcome follows.
@@ -1097,6 +1121,9 @@ impl NetworkHandle {
                 id,
                 format!("{:?} {}", fetch.request.method, redacted_url(&fetch.url)),
             );
+            if let Some(usage) = &self.running.usage {
+                usage.fetched(fetch.url.host_str().unwrap_or_default());
+            }
             let running = self.running.clone();
             if fetch.cancelled {
                 tokio::spawn(async move {

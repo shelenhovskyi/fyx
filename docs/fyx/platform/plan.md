@@ -164,11 +164,70 @@ and W1 (5.12). Phases 4–5 are W4 with fixes from the owners. Phase 6 is W1 and
 beside phases 2–3 when a compiling slot is free. The owner's limit of 2 compiling streams plus the
 gatekeeper holds throughout.
 
+## P6 product basics
+
+Added by the owner on 2026-11-20 from [roadmap-and-vscode-port.md](../research/roadmap-and-vscode-port.md)
+section 1 (G-numbers there). Gaps users notice on day one, mostly because Fyx is cloud-off. Owners
+are suggestions for the coordinator. Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
+
+| # | Owner | Task | Size | Depends on | Done when |
+|---|---|---|---|---|---|
+| | | **P0, before the 1.0 cut** | | | |
+| 6.1 | W2c (WIT, model) + W3 (UI) + W4 (SDK) | Extension settings (G4): a `[settings]` table in the manifest (type, default, description, enum, min/max), a `settings` import that reads the current values and an event when they change, and a settings page per extension in the extensions UI generated from the schema. **In the 0.4 WIT, before it freezes** | M | 5.5 | a demo declares three settings; changing one in the UI reaches the guest without a reload; a wrong type is refused at install |
+| 6.2 | W1 | Self-updater with signed releases (G1): a release channel manifest signed with Ed25519 (the registry's signing scheme, its own key), download, signature and hash check, install on restart, keep the previous version and roll back; Zed's updater endpoint stays off. **Must work without notarization for now** (owner, 2026-11-20: no Apple Developer account): on the Mac it replaces an ad-hoc-signed `.app` and relies on Fyx's Ed25519 signature only; the Apple signature check is added once there is an account | M | — | a test channel offers 1.0.1; a tampered package is refused; rollback restores the previous version |
+| 6.3 | W5 successor (`agent_review`) | Local history and agent timeline (G3): a snapshot per save and per agent turn, a timeline per file and per turn, restore a file or a whole agent turn even after it was accepted; size cap and pruning | M | 1(b) of the Phase 5 backlog (review per turn) | accept an agent turn, then undo the whole turn from the timeline in one step |
+| 6.4 | W1 | Local crash reports (G5): panics and minidumps written under the Fyx data dir, a "Crash reports" view, and "Report" that opens a prefilled GitHub issue in the browser; nothing is uploaded | S | — | a forced panic shows in the view after restart with a working "Report" |
+| 6.5 | W1 (settings) + owner of AI settings | Local or bring-your-own edit predictions (G2): check which non-Zed providers upstream still ships (Copilot, Codestral, Ollama and others), enable them in the cloud-off build, add an OpenAI-compatible local endpoint (llama.cpp, Ollama) | M | — | inline predictions work with a local `llama-server` and no network |
+| | | **P1, after 1.0** | | | |
+| 6.6 | W2c + W3 | Diagnostics from extensions (G7): a diagnostics collection per extension shown in the editor and the diagnostics panel like LSP ones, with source and severity | S–M | 0.4 or the first post-1.0 WIT | a linter demo marks lines and lists them in the panel |
+| 6.7 | W2c + W3 | Tree views and file decorations (G8): nested tree rows with expand and collapse on top of `list`, and badges or colours on project-panel entries contributed by an extension (one `fyx:` hook in `project_panel`) | M | 6.6 | a bookmarks demo shows a tree and marks bookmarked files in the project panel |
+
+**Order.** 6.1 goes with phase 2 of P5 (5.5, 5.6) so it is in the 0.4 freeze. 6.2 and 6.4 are
+W1's, after 5.8 or whenever a compiling slot is free, and must land before the 1.0 cut. 6.3
+follows backlog item 1(b). 6.5 can start at once; it is mostly configuration and one provider.
+6.6 and 6.7 wait for the post-1.0 WIT. VS Code compatibility is not part of P6 (owner, 2026-11-20).
+
+## P7 differentiators
+
+Added by the owner on 2026-11-20 from section 4 of
+[roadmap-and-vscode-port.md](../research/roadmap-and-vscode-port.md) (its ids in brackets). The
+owner works mainly on macOS, so the Mac comes first. Local models on Apple Silicon (D17 + M6) were
+skipped by the owner. **There is no Apple Developer account for now**, so Mac builds are local,
+unsigned or ad-hoc signed, built and run by the owner; no notarization and no paid services.
+Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
+
+| # | Owner | Task | Size | Depends on | Done when |
+|---|---|---|---|---|---|
+| 7.1 | W1 (+ W0 for the gate script) | **Local Mac build [M1]**: `script/bundle-mac` builds a Fyx-branded `.app` and DMG without an Apple account: Fyx bundle id, name and icon (license audit F2), Fyx entitlements reviewed from `zed.entitlements` (keep what wasmtime's JIT needs), no `dmg-license` with Zed's Terms of Service (F3), ad-hoc signature by default; a `script/fyx-mac-check` the owner runs on his Mac (build, FAST tests of the Fyx crates, launch smoke test with `--user-data-dir`); a short "first launch" note for Gatekeeper (right-click → Open, or `xattr -dr com.apple.quarantine`) | M | — | the owner builds the DMG on his Mac, installs it, and Fyx starts with Fyx's name and icon; `fyx-mac-check` passes |
+| 7.2 | W5 successor (`agent_review`) | **Review comments to the agent [D1]**: comment on hunks in the review view, then send all open comments as the agent's next turn, with file and line references | S–M | — | three comments on two files reach the agent as one prompt and the agent's next diff answers them |
+| 7.3 | W5 successor + W2c (`fyx_guard`) | **Agent guardrails [D6]**: scan every agent diff for secrets before accept (high-entropy strings and known key formats), protected paths from `.fyx/review.toml` that always need review, `.env` and account dirs kept out of agent context | S–M | Phase 5 backlog 1(d) (`.fyx/review.toml`) | an agent diff that adds an AWS-style key is held with a warning; a protected path cannot be auto-accepted |
+| 7.4 | W1 (Keychain, Touch ID) + W2c (resolution, redaction) | **Agent secrets vault [S1 + M3]**: secrets stored in the macOS Keychain (Windows Credential Manager on Windows); the agent sees only `secret://name`; Fyx injects real values only into the env of processes it spawns (agent terminal tool, tasks, MCP servers, profile terminals); exact values and their base64, hex and URL encodings are replaced by `secret://name` in every tool and terminal output returned to the agent; each use asks for approval with Touch ID (Windows Hello); uses are journaled without values. **Limit, shown in the UI:** encoded or exfiltrated values cannot all be caught; the strong form is 7.5's per-secret host allow-list | M | 7.3 | a script uses `secret://github` to call the API; the value never appears in the thread, its database or the provider request; `printenv` output shows the reference |
+| 7.5 | W2c | **Seatbelt for extensions and agents [M2], with network policy [D10, Mac]**: run `process:spawn` children (4.7), MCP servers and the agent's terminal tool under a Seatbelt profile built with `crates/sandbox` (`macos_seatbelt.rs`) from the declared paths; a per-project egress allow-list, and a per-secret host allow-list for 7.4 (`GITHUB_TOKEN` only to `api.github.com`). Windows keeps job objects for now; its network policy is later (L) | M | 4.7, 7.4 for the per-secret part | a spawned tool cannot read outside its declared paths or reach an undeclared host; a secret sent to a host outside its list is refused |
+| 7.6 | W3 | **Privacy and permissions report [D9]**: per extension and agent, what it read, wrote, fetched, spawned and which secrets it used this week, from the 5.6 journal and the Inspector records, with one-click revoke | S–M | 5.6, 7.4 for secret uses | the report lists a demo's fetches and file reads; revoke stops them at once |
+| 7.7 | W3 | **Fast extension UI [D15]**: fix the full-tree re-render (perf-1 finding 1) so a caret blink or a one-node reply does not re-render the whole surface; a per-extension memory and frame-time line in the Inspector | M | 1.1 (`.cwasm` cache) for load times | the 4096-text panel stays under 8 ms per frame while typing in its input |
+| 7.8 | W1 (Dock, menu bar) + W3 (meters) | **Cost and context meters with an attention badge [D3 + M4]**: tokens, money and context use per session and per day from ACP usage and relay data, a soft daily cap that pauses agents; on the Mac a Dock badge with the number of agents waiting and a menu-bar item listing sessions | S–M | 5.4 | two sessions show their cost; the Dock badge counts a blocked agent; the cap pauses an agent with a notice |
+| 7.9 | W3 | **Agent sessions board [D2]**: every agent (ACP threads, CLI agents in terminals via OSC 7501 and the relay), its worktree, state, diff size and cost, "needs you" first, click to focus. Kept to the narrow layer of [worktrees research §8](../../research/worktrees-and-parallel-agents.md): no worktree manager | M | 5.4, 5.12, 7.8 | a Claude Code CLI session and an ACP thread show side by side with live state |
+
+**Order.** 7.1 first: it gives the owner a Mac build and a Mac check for everything after it.
+Then the agent-review lane in order 7.2 → 7.3 → 7.4. 7.5 follows 4.7 and pairs with 7.4. 7.7 is
+W3's as soon as a compiling slot is free, before 7.6 and 7.9, which add more UI. 7.8 and 7.9 come
+after P5 phase 3 (5.12). The owner's limit of 2 compiling streams plus the gatekeeper holds.
+
+**Later, not planned yet:** signing and notarization once there is an Apple Developer account
+(then 7.1 gets a CI job and 6.2 checks the Apple signature), the MCP manager [D5], worktree review
+and merge [D4], Finder and Shortcuts integration [M5], the verified build badge [D11], terminal
+"fix with agent" [D19], plan mode [D7], review bundles [D13], local automations [D8].
+
 ## Deferred after 1.0
 
 TypeScript extensions are deferred until after 1.0, and whether to do them at all is re-evaluated
 then (owner, 2026-11-18; spec decision 3). P3 builds and signs Rust extensions only. `sdks/ts`
 stays in the repository as an unsupported prototype.
+
+**VS Code extensions: not supported (owner, 2026-11-20).** No Node sidecar and no `.vsix`
+conversion as a feature; PLAN.md backlog item 12 is dropped. `sidecars/vscode-host` and
+`tools/vsix-convert` stay as unsupported code until a separate removal step
+([research](../research/roadmap-and-vscode-port.md)).
 
 | # | Was | Task | Revisit |
 |---|---|---|---|

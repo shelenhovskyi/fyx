@@ -6285,6 +6285,7 @@ mod tests {
                 "encoding_selector",
                 "feedback",
                 "file_finder",
+                "fyx",          // fyx: crash report actions (fyx_crash_reports)
                 "fyx_terminal", // fyx: terminal_host actions
                 "fyx_ui",       // fyx: ui_ext_host actions
                 "git",

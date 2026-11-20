@@ -48,6 +48,8 @@ pub struct Row {
     pub index: u32,
     pub indent: u8,
     pub tree: Tree,
+    /// 0.4 (§F.1): the row's chevron; `leaf` from older worlds.
+    pub expansion: ui_ext::v0_2::Expansion,
 }
 
 /// `ui_ext_wasm`'s rejection, with its context chain, as the renderer's.
@@ -256,6 +258,7 @@ impl UiBackend for UiExtension {
                             Ok(Row {
                                 index: row.index,
                                 indent,
+                                expansion: row.expansion,
                                 tree: Tree::from_row(row.nodes, TreeLimits::default())?,
                             })
                         })

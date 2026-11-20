@@ -391,7 +391,9 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
         | net::IoEvent::Context(_)
         | net::IoEvent::DiagnosticsChanged(_)
         | net::IoEvent::ReviewDecided(..)
-        | net::IoEvent::RelayRequest(_) => None,
+        | net::IoEvent::ReviewComments(_)
+        | net::IoEvent::RelayRequest(_)
+        | net::IoEvent::SettingsChanged(_) => None,
     }
 }
 
@@ -977,6 +979,7 @@ impl TryFrom<wit::ListRow> for model::ListRow {
 
     fn try_from(row: wit::ListRow) -> Result<Self, Self::Error> {
         Ok(Self {
+            expansion: model::Expansion::Leaf,
             index: row.index,
             indent: row.indent,
             nodes: try_collect(row.nodes)?,
@@ -1034,6 +1037,8 @@ impl From<model::UiEvent> for wit::UiEvent {
             model::UiEvent::InputSubmitted(id, text) => Self::InputSubmitted((id, text)),
             model::UiEvent::RowClick(id, row) => Self::RowClick((id, row)),
             model::UiEvent::RowSelected(id, row) => Self::RowSelected((id, row)),
+            // Never sent: a 0.3 row has no chevron.
+            model::UiEvent::RowToggled(id, row, _) => Self::RowSelected((id, row)),
             model::UiEvent::Dismissed(reason) => Self::Dismissed(match reason {
                 model::DismissReason::Escape => wit::DismissReason::Escape,
                 model::DismissReason::FocusLost => wit::DismissReason::FocusLost,

@@ -14,6 +14,7 @@ mod sessions_panel;
 mod settings;
 mod t3;
 mod tab_status;
+pub mod usage_meters;
 
 use gpui::App;
 use workspace::Workspace;
@@ -187,6 +188,11 @@ pub fn extension_terminal_view(
         terminal_view::TerminalView::new(terminal, weak, database_id, project, window, cx)
     });
     Some(view.into())
+}
+
+/// Plan 7.8: cost and context meters for every agent thread; day totals in `data_dir`.
+pub fn init_usage_meters(data_dir: std::path::PathBuf, cx: &mut App) {
+    usage_meters::init(Some(data_dir), cx);
 }
 
 pub fn init(cx: &mut App) {

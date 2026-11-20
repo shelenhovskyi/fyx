@@ -73,12 +73,15 @@ pub mod journal;
 mod accounts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod editor_context;
+mod extension_marks;
+mod extension_settings;
 mod listeners;
 pub mod network;
 pub mod observe;
 pub mod process;
 mod proposals;
 mod relay;
+mod spawn_sandbox;
 pub use accounts::set_account_dirs;
 mod stderr;
 mod terminals;
@@ -140,13 +143,13 @@ fn parse_version_custom_section(data: &[u8]) -> Option<Version> {
 }
 
 pub const MIN_VERSION: Version = Version::new(0, 1, 0);
-/// The newest version this build knows: the staged 0.4 (plan P5).
+/// The newest version this build knows: 0.4 (plan P5).
 pub const MAX_VERSION: Version = Version::new(0, 4, 0);
-/// The newest frozen version: 0.3 (integration-6, plan 4.9). Newer ones are staged: they load only
-/// where [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2).
-/// Freezing a version names it here explicitly; never set this to [`MAX_VERSION`], which may be a
-/// staged world (0.4 now).
-pub const MAX_FROZEN_VERSION: Version = Version::new(0, 3, 0);
+/// The newest frozen version: 0.4 (plan 5.19). Newer ones are staged: they load only where
+/// [`LoadOptions::allow_staged`] allows them (docs/fyx/wit-0.2/migration.md, section 2). Freezing a
+/// version names it here explicitly; never set this to [`MAX_VERSION`], which may be a staged world
+/// (none now).
+pub const MAX_FROZEN_VERSION: Version = Version::new(0, 4, 0);
 
 /// Custom section with the `fyx:ui` version a component targets: three big-endian `u16`s, the same
 /// encoding as `zed:api-version`.
@@ -347,6 +350,10 @@ pub struct UiManifest {
     /// 0.4: `[[fyx_ui.relay_channels]]`, for `relay:hooks` (§B.9).
     #[serde(default)]
     pub relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
+    /// 0.4: `[[fyx_ui.settings]]`, the extension's settings (design §D.1, plan 6.1); no
+    /// capability. Checked by [`UiManifest::settings_specs`].
+    #[serde(default)]
+    pub settings: Vec<ui_ext::settings::SettingEntry>,
 }
 
 /// What each world's manifest may declare (wit-0.3/migration.md §2): a capability a world cannot
@@ -410,6 +417,9 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         integration::CAPABILITY_REVIEW_PROPOSE,
         integration::CAPABILITY_CONTEXT_EDITOR,
         integration::CAPABILITY_WORKSPACE_OPEN,
+        integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+        integration::CAPABILITY_DIAGNOSTICS_PUBLISH,
+        integration::CAPABILITY_FILE_DECORATIONS,
         integration::CAPABILITY_APPROVALS,
     ];
     if *version >= Version::new(0, 4, 0) {
@@ -555,6 +565,7 @@ impl UiManifest {
                     "[[fyx_ui.discovery_files]]",
                 ),
                 (!self.relay_channels.is_empty(), "[[fyx_ui.relay_channels]]"),
+                (!self.settings.is_empty(), "[[fyx_ui.settings]]"),
             ] {
                 anyhow::ensure!(
                     !present,
@@ -608,6 +619,12 @@ impl UiManifest {
         };
         let env = self.terminal_env.clone()?;
         terminal::check_terminal_env(env, &|name| integration.listener(name)).ok()
+    }
+
+    /// `[[fyx_ui.settings]]`, checked (design §D.1): the declarations the host computes the
+    /// effective values from. Empty without the table.
+    pub fn settings_specs(&self) -> Result<Vec<ui_ext::settings::SettingSpec>> {
+        ui_ext::settings::check_settings(&self.settings).map_err(anyhow::Error::msg)
     }
 
     /// The 0.4 terminal and integration tables (design §B, plan 5.5): each goes with its
@@ -838,6 +855,9 @@ impl UiManifest {
         manifest
             .check_terminals()
             .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .settings_specs()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             !manifest.component.is_empty()
                 && Path::new(&manifest.component)
@@ -928,6 +948,10 @@ pub struct UiState {
     review: Arc<proposals::ReviewHandle>,
     /// The 0.4 `relay` import (§B.9).
     relay: Arc<relay::RelayHandle>,
+    /// The 0.4 `settings` import (§D.4).
+    settings: Arc<extension_settings::SettingsHandle>,
+    /// The 0.4 `context` marks: published diagnostics and file decorations (§E, §F.2).
+    marks: Arc<extension_marks::MarksHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -948,6 +972,8 @@ struct IoStates {
     context: Arc<editor_context::ContextHandle>,
     review: Arc<proposals::ReviewHandle>,
     relay: Arc<relay::RelayHandle>,
+    settings: Arc<extension_settings::SettingsHandle>,
+    marks: Arc<extension_marks::MarksHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -1005,6 +1031,8 @@ impl UiState {
             context,
             review,
             relay,
+            settings,
+            marks,
             journal,
         } = io;
         Self {
@@ -1015,9 +1043,11 @@ impl UiState {
             context,
             review,
             relay,
+            settings,
+            marks,
             journal,
             capability_check,
-            diagnostics,
+            diagnostics: diagnostics.clone(),
             api,
             network,
             process,
@@ -1031,7 +1061,7 @@ impl UiState {
             pushes: Vec::new(),
             pushed_items: 0,
             lifted_text: 0,
-            limits: UiLimits::new(),
+            limits: UiLimits::reporting_to(diagnostics),
             call_started: Instant::now(),
             call_budget: UI_INIT_BUDGET,
             executed: Duration::ZERO,
@@ -1355,6 +1385,8 @@ pub fn validate_surfaces(surfaces: &[ui_ext::Surface]) -> Result<()> {
 pub(crate) struct UiLimits {
     inner: wasmtime::StoreLimits,
     memory_total: usize,
+    /// Where the Inspector reads `memory_total` from; `None` in tests of the limiter alone.
+    report: Option<diagnostics::DiagnosticsBuffer>,
 }
 
 impl UiLimits {
@@ -1362,6 +1394,14 @@ impl UiLimits {
         Self {
             inner: ui_store_limits(),
             memory_total: 0,
+            report: None,
+        }
+    }
+
+    fn reporting_to(diagnostics: diagnostics::DiagnosticsBuffer) -> Self {
+        Self {
+            report: Some(diagnostics),
+            ..Self::new()
         }
     }
 }
@@ -1384,6 +1424,9 @@ impl wasmtime::ResourceLimiter for UiLimits {
             );
         }
         self.memory_total = total;
+        if let Some(report) = &self.report {
+            report.memory(total);
+        }
         Ok(true)
     }
 
@@ -1643,6 +1686,8 @@ pub struct UiExtension {
     review: Arc<proposals::ReviewHandle>,
     /// The 0.4 relay channels; unanswered requests fail open when the instance goes.
     relay: Arc<relay::RelayHandle>,
+    /// The 0.4 extension settings (design §D): declarations and effective values.
+    settings: Arc<extension_settings::SettingsHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1816,6 +1861,18 @@ pub struct LoadOptions {
     /// The `fyx-relay` binary, for `${relay}` in `terminal:env` values (§B.9); W1's glue fills
     /// it from `terminal_host::relay_binary`. Without it such a value is left out.
     pub relay_binary: Option<PathBuf>,
+    /// `[[fyx_ui.settings]]`, checked; set by [`UiExtension::load_checked`]. Applies only to a
+    /// 0.4 component (design §D).
+    pub settings: Option<Vec<ui_ext::settings::SettingSpec>>,
+    /// The extension's object under `fyx_extensions.<id>` in the **user** settings file at load,
+    /// never project settings (§D.2). Later changes go to [`UiExtension::set_user_settings`].
+    pub user_settings: Option<ui_ext::settings::RawValue>,
+    /// 0.4 `diagnostics:publish` (§E): where published diagnostics go. Without it the calls
+    /// are `unavailable`.
+    pub diagnostics_publisher: Option<Arc<dyn ui_ext::published_diagnostics::DiagnosticsPublisher>>,
+    /// 0.4 `workspace:file-decorations` (§F.2): the project panel's decorations. Without it the
+    /// calls are `unavailable`.
+    pub file_decorations: Option<Arc<dyn ui_ext::file_decorations::FileDecorationsHost>>,
 }
 
 impl UiExtension {
@@ -1889,6 +1946,10 @@ impl UiExtension {
             diagnostics_source,
             relay_channels,
             relay_binary,
+            settings: setting_specs,
+            user_settings,
+            diagnostics_publisher,
+            file_decorations,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -1941,7 +2002,7 @@ impl UiExtension {
                 let ui_api_version = known_api_version(&api_version).with_context(|| {
                     format!(
                         "extension {extension_id} targets fyx:ui {api_version}, this build \
-                         supports 0.1.0, 0.2.0, 0.3.0 and the staged 0.4.0"
+                         supports 0.1.0, 0.2.0, 0.3.0 and 0.4.0"
                     )
                 })?;
                 anyhow::ensure!(
@@ -1972,7 +2033,13 @@ impl UiExtension {
             } else {
                 network::DomainList::default()
             });
-            let running = Arc::new(network::Running::new(diagnostics.clone()));
+            let running = Arc::new(
+                network::Running::new(diagnostics.clone()).with_usage(
+                    journal
+                        .clone()
+                        .map(|journal| journal::UsageJournal::new(extension_id.clone(), journal)),
+                ),
+            );
             let network = Arc::new(network::NetworkHandle::new(
                 extension_id.clone(),
                 domains.clone(),
@@ -1996,6 +2063,7 @@ impl UiExtension {
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
                 journal.clone(),
+                domains.clone(),
             ));
             let is_v0_3 = has_io;
             let edit_set = Arc::new(edit::EditSet::default());
@@ -2078,6 +2146,18 @@ impl UiExtension {
                     .unwrap_or_default(),
                 capability_check.clone(),
             ));
+            // 0.4 settings (§D): the declarations and the user's values at load.
+            let settings = Arc::new(extension_settings::SettingsHandle::new(
+                setting_specs.filter(|_| is_v0_4).unwrap_or_default(),
+                user_settings.as_ref(),
+            ));
+            // 0.4 marks (§E, §F.2): what the instance publishes goes with it.
+            let marks = Arc::new(extension_marks::MarksHandle::new(
+                extension_id.clone(),
+                workspace.clone(),
+                diagnostics_publisher.filter(|_| is_v0_4),
+                file_decorations.filter(|_| is_v0_4),
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -2092,6 +2172,8 @@ impl UiExtension {
                 let context = context.clone();
                 let review = review.clone();
                 let relay = relay.clone();
+                let settings = settings.clone();
+                let marks = marks.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
@@ -2102,6 +2184,7 @@ impl UiExtension {
                     context: Arc::downgrade(&context),
                     review: Arc::downgrade(&review),
                     relay: Arc::downgrade(&relay),
+                    marks: Arc::downgrade(&marks),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
@@ -2114,6 +2197,7 @@ impl UiExtension {
                         context.forward(&running);
                         review.forward(&running);
                         relay.forward(&running);
+                        settings.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -2154,6 +2238,8 @@ impl UiExtension {
                                 context,
                                 review,
                                 relay,
+                                settings,
+                                marks,
                                 journal,
                             },
                         ),
@@ -2249,6 +2335,7 @@ impl UiExtension {
                     context,
                     review,
                     relay,
+                    settings,
                 },
                 pushed_rx,
             ))
@@ -2314,6 +2401,7 @@ impl UiExtension {
             listeners: Some(manifest.listeners.clone()),
             discovery_files: Some(manifest.discovery_files.clone()),
             relay_channels: Some(manifest.relay_channels.clone()),
+            settings: manifest.settings_specs().ok(),
             ..options
         };
         let (mut extension, pushed) =
@@ -2385,6 +2473,26 @@ impl UiExtension {
     /// granted or not: their `timeout_ms` and `on_failure` apply to refused requests too.
     pub fn relay_channels(&self) -> &[ui_ext::integration::RelayChannelSpec] {
         self.relay.channels()
+    }
+
+    /// The checked `[[fyx_ui.settings]]` of a 0.4 extension, in manifest order, for the Settings
+    /// tab (design §D.3); empty without the table or below 0.4.
+    pub fn setting_specs(&self) -> &[ui_ext::settings::SettingSpec] {
+        self.settings.specs()
+    }
+
+    /// The effective values the extension gets now, with the user's invalid values' errors and
+    /// the unknown keys, for the Settings tab (§D.2, §D.3).
+    pub fn effective_settings(&self) -> ui_ext::settings::EffectiveSettings {
+        self.settings.effective()
+    }
+
+    /// The user settings file changed: `user` is the extension's object under
+    /// `fyx_extensions.<id>` in the **user** settings (never project settings, §D.2), `None`
+    /// when there is none. Returns the keys whose effective value changed, in manifest order;
+    /// a running 0.4 extension gets them as `settings-changed` (§D.4).
+    pub fn set_user_settings(&self, user: Option<&ui_ext::settings::RawValue>) -> Vec<String> {
+        self.settings.update(user)
     }
 
     /// Whether `relay:hooks` is declared, with channels, and granted now.

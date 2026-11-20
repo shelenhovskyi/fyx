@@ -22,6 +22,9 @@ pub struct Hunk {
     pub new_bytes: Range<usize>,
     pub decision: HunkDecision,
     pub comment: Option<String>,
+    /// The comment already went to the agent as a review comment (plan 7.2), so the decision's
+    /// feedback leaves it out. Editing the comment opens it again.
+    pub comment_sent: bool,
 }
 
 impl Hunk {
@@ -161,8 +164,24 @@ impl ProposedEdit {
         let comment = comment
             .map(|comment| comment.trim().to_string())
             .filter(|comment| !comment.is_empty());
-        self.hunk_mut(hunk_index)?.comment = comment;
+        let hunk = self.hunk_mut(hunk_index)?;
+        if hunk.comment != comment {
+            hunk.comment = comment;
+            hunk.comment_sent = false;
+        }
         Ok(())
+    }
+
+    /// Marks every comment as sent to the agent; returns how many were not sent before.
+    pub fn mark_comments_sent(&mut self) -> usize {
+        let mut marked = 0;
+        for hunk in &mut self.hunks {
+            if hunk.comment.is_some() && !hunk.comment_sent {
+                hunk.comment_sent = true;
+                marked += 1;
+            }
+        }
+        marked
     }
 
     fn hunk_mut(&mut self, hunk_index: usize) -> Result<&mut Hunk> {
@@ -263,30 +282,25 @@ impl ProposedEdit {
             if let Some(hunk) = matching {
                 hunk.decision = earlier_hunk.decision;
                 hunk.comment = earlier_hunk.comment.clone();
+                hunk.comment_sent = earlier_hunk.comment_sent;
                 adopted += 1;
             }
         }
         adopted
     }
 
-    /// What the agent is told after the review, or `None` when everything landed without comments.
+    /// What the agent is told with the decision, or `None` when everything landed. Comments on
+    /// accepted hunks are not in it: they ask for follow-up work and go to the agent as review
+    /// comments (`review_comments`), once the user sends them or with the next prompt.
     pub fn feedback(&self) -> Option<String> {
-        let resolution = self.resolution();
-        let has_comments = self.hunks.iter().any(|hunk| hunk.comment.is_some());
         let path = self.abs_path.display();
-        let mut feedback = match resolution {
-            Resolution::Unchanged | Resolution::AcceptedAll if !has_comments => return None,
-            Resolution::Unchanged | Resolution::AcceptedAll => format!(
-                "Your edit to {path} was applied in full; do not write it again. The user left \
-                 comments on it:"
-            ),
+        let mut feedback = match self.resolution() {
+            Resolution::Unchanged | Resolution::AcceptedAll => return None,
             Resolution::RejectedAll => {
                 format!("The user rejected your edit to {path}; the file is unchanged.")
             }
             Resolution::Partial { accepted, .. } => format!(
-                "The user applied {accepted} of {} hunks of your edit to {path}; the rejected hunks \
-                 were not written and must not be written again. Re-read the file before editing \
-                 it.",
+                "The user applied {accepted} of {} hunks of your edit to {path}; the rejected hunks                  were not written and must not be written again. Re-read the file before editing                  it.",
                 self.hunks.len()
             ),
             Resolution::Pending { undecided } => {
@@ -294,19 +308,18 @@ impl ProposedEdit {
             }
         };
         for (index, hunk) in self.hunks.iter().enumerate() {
-            let verdict = match hunk.decision {
-                HunkDecision::Rejected => "rejected",
-                HunkDecision::Accepted if hunk.comment.is_some() => "applied",
-                _ => continue,
-            };
+            if hunk.decision != HunkDecision::Rejected {
+                continue;
+            }
             write!(
                 feedback,
-                "\n- Hunk {} ({}) {verdict}",
+                "
+- Hunk {} ({}) rejected",
                 index + 1,
                 hunk.label()
             )
             .ok();
-            if let Some(comment) = &hunk.comment {
+            if let Some(comment) = hunk.comment.as_ref().filter(|_| !hunk.comment_sent) {
                 write!(feedback, ": {comment}").ok();
             }
         }
@@ -346,6 +359,7 @@ fn line_hunks(old_text: &str, new_text: &str) -> Option<Vec<Hunk>> {
             new_rows,
             decision: HunkDecision::Pending,
             comment: None,
+            comment_sent: false,
         });
     }
     let reproduced = apply_hunks(old_text, new_text, &hunks, |_| true).ok()?;
@@ -372,6 +386,7 @@ fn whole_text_hunk(old_text: &str, new_text: &str) -> Hunk {
         new_bytes: 0..new_text.len(),
         decision: HunkDecision::Pending,
         comment: None,
+        comment_sent: false,
     }
 }
 

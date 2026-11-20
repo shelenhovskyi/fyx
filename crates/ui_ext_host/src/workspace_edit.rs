@@ -101,12 +101,15 @@ pub(crate) fn unregister_workspace(id: EntityId, cx: &mut App) {
 
 /// Whether an extension may not see `abs_path`'s contents (integration-5 S1): it matches
 /// `file_scan_exclusions` or `private_files` (always, not only in shield mode), or `fyx_guard`
-/// refuses an agent read of it, in any open project that has it.
+/// refuses an agent read of it, in any open project that has it. Fails closed (5.19 P7): a path
+/// that no registered project resolves, or any path before a project is registered, counts as
+/// private. Callers that only show worktree files check the worktree themselves.
 pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
     let Some(workspaces) = cx.try_global::<EditWorkspaces>() else {
-        return false;
+        return true;
     };
-    workspaces.0.values().any(|registered| {
+    let mut resolved = false;
+    let private = workspaces.0.values().any(|registered| {
         let Some(project) = registered.project.upgrade() else {
             return false;
         };
@@ -114,6 +117,7 @@ pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
         let Some(project_path) = project.find_project_path(abs_path, cx) else {
             return false;
         };
+        resolved = true;
         let path = project_path.path.as_ref();
         let settings = WorktreeSettings::get(
             Some(SettingsLocation {
@@ -128,10 +132,11 @@ pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
             || settings.is_path_private(path)
             || global.is_path_private(path)
             || fyx_guard::extension_read_denial(project, &project_path, cx).is_some()
-    })
+    });
+    private || !resolved
 }
 
-fn registered(
+pub(crate) fn registered(
     worktree: &OpenWorktree,
     cx: &App,
 ) -> Option<(Option<WeakEntity<Workspace>>, Entity<Project>)> {

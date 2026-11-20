@@ -80,6 +80,7 @@ pub mod cursor_excerpt;
 pub mod data_collection;
 pub mod example_spec;
 pub mod fim;
+mod fyx_prompt_format; // fyx: plan 6.5
 mod license_detection;
 pub mod mercury;
 pub mod metrics;

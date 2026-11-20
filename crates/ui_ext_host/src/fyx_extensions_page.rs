@@ -48,6 +48,8 @@ use crate::{
         RefreshOutcome, Registry, RegistryLocation, RegistryStateDir, UPDATE_CHECK_INTERVAL,
         compiled_keyset, now,
     },
+    settings_form::{ExtensionSettingsForm, take_pending_open},
+    settings_model::settings_store,
     store_actions::{
         Outcome, expect_load, grant_and_rescan, install_consent_and_rescan, installed_manifest,
         installed_outcome, load_outcome, show_outcome, update_lines,
@@ -962,6 +964,9 @@ pub struct FyxExtensionsPage {
     workspace: WeakEntity<Workspace>,
     query: Entity<Editor>,
     hub: Entity<RegistryHub>,
+    /// Settings sections (plan 6.1), by extension id; shown while in `settings_shown`.
+    settings_forms: collections::HashMap<String, Entity<ExtensionSettingsForm>>,
+    settings_shown: collections::HashSet<String>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -994,8 +999,63 @@ impl FyxExtensionsPage {
             workspace,
             query,
             hub,
+            settings_forms: Default::default(),
+            settings_shown: Default::default(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Shows or hides `extension_id`'s Settings section, making its form on first use.
+    fn toggle_settings(&mut self, extension_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_shown.remove(extension_id) {
+            self.show_settings(extension_id, None, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn show_settings(
+        &mut self,
+        extension_id: &str,
+        key: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_shown.insert(extension_id.to_owned());
+        let form = self
+            .settings_forms
+            .entry(extension_id.to_owned())
+            .or_insert_with(|| {
+                cx.new(|cx| ExtensionSettingsForm::new(extension_id.to_owned(), window, cx))
+            })
+            .clone();
+        form.update(cx, |form, cx| form.highlight(key, window, cx));
+    }
+
+    /// The "Settings" toggle of an extension that declares settings, and the form while shown.
+    fn settings_section(
+        &self,
+        extension_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let count = settings_store(cx).specs(extension_id, cx).len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let shown = self.settings_shown.contains(extension_id);
+        let id = extension_id.to_owned();
+        let toggle = Button::new(
+            SharedString::from(format!("fyx-reg-settings-{extension_id}")),
+            if shown { "Hide Settings" } else { "Settings" },
+        )
+        .style(ButtonStyle::Subtle)
+        .label_size(LabelSize::Small)
+        .on_click(cx.listener(move |page, _, window, cx| page.toggle_settings(&id, window, cx)))
+        .into_any_element();
+        let mut elements = vec![h_flex().child(toggle).into_any_element()];
+        if shown && let Some(form) = self.settings_forms.get(extension_id) {
+            elements.push(form.clone().into_any_element());
+        }
+        elements
     }
 
     /// Opens the page in the active pane, or shows the open one.
@@ -1372,6 +1432,7 @@ impl FyxExtensionsPage {
                 request_journal(&id, cx);
                 consent_rows(&id, self.workspace.clone(), cx)
             })
+            .children(self.settings_section(&id, cx))
     }
 
     /// A dev extension or an installed folder (not the install store): where it is, "Enable"
@@ -1450,6 +1511,7 @@ impl FyxExtensionsPage {
                 request_journal(&id, cx);
                 consent_rows(&id, self.workspace.clone(), cx)
             })
+            .children(self.settings_section(&id, cx))
     }
 }
 
@@ -1745,6 +1807,9 @@ fn permission_rows(extension_id: &str, cx: &App) -> Vec<gpui::AnyElement> {
 
 impl Render for FyxExtensionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((extension_id, key)) = take_pending_open(cx) {
+            self.show_settings(&extension_id, key, window, cx);
+        }
         let listing: Vec<Release> = self
             .hub
             .read(cx)

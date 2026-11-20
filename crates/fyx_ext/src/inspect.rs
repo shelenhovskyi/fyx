@@ -251,6 +251,10 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "terminal:env",
     "terminal:status",
     "terminal:observe",
+    // `request-read` and `request-write` are functions of `fyx:ui/terminals`, not interfaces of
+    // their own, so no import names them.
+    "terminal:read",
+    "terminal:write",
     "package:files",
     "network:listen",
     "fs:discovery-file",
@@ -259,6 +263,9 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "context:editor",
     "workspace:open",
     "ui:approvals",
+    "workspace:diagnostics",
+    "diagnostics:publish",
+    "workspace:file-decorations",
 ];
 
 /// Declared capabilities against the imports that need them: an import whose capability is not
@@ -468,6 +475,44 @@ pub mod tests {
         let mut report = Report::default();
         check_capabilities(&["ui:panel".into()], &info.imports, &mut report);
         assert!(report.errors.is_empty(), "{report:?}");
+    }
+
+    /// Every capability the host provides is used by an import, a surface, a call or a manifest
+    /// table, so `fyx-ext check` never calls a provided capability unused because of how it is
+    /// reached (`terminal:read` and `terminal:write` are functions, not interfaces).
+    #[test]
+    fn every_provided_capability_is_reachable() {
+        let by_import: Vec<&str> = crate::manifest::KNOWN_CAPABILITIES
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    import_need(&format!("fyx:ui/{name}")),
+                    ImportNeed::Capability(capability) if capability == *name
+                )
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        for (capability, status) in crate::manifest::KNOWN_CAPABILITIES {
+            if !matches!(status, crate::manifest::CapabilityStatus::Since(_)) {
+                continue;
+            }
+            assert!(
+                SURFACE_CAPABILITIES.contains(capability)
+                    || PER_CALL_CAPABILITIES.contains(capability)
+                    || by_import.contains(capability),
+                "{capability:?} would be reported as declared but unused"
+            );
+        }
+        // The probe's case: a 0.4 component that imports the terminals interface and declares
+        // terminal:read and terminal:write.
+        let mut report = Report::default();
+        check_capabilities(
+            &["terminal:read".to_owned(), "terminal:write".to_owned()],
+            &["fyx:ui/terminals@0.4.0".to_owned()],
+            &mut report,
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
     }
 
     #[test]

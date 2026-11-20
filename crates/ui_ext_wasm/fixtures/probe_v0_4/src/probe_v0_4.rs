@@ -28,6 +28,14 @@
 //!   `watch-diag <on|off>`: `context.watch-diagnostics`;
 //! - `relay-respond <id> <exit> <stdout|-> <stderr|->`: `relay.respond`; `relay-long <id>`
 //!   answers with 1 MiB and a byte of stdout;
+//! - `setting <key>`: `settings.get` as its value, or the error code; `settings`: `settings.all`
+//!   as `<key>=<value>[*]`, comma-separated (`*` when `is-default`); `open-settings [<key>]`:
+//!   `settings.open`;
+//! - `publish <worktree|-> <path> <count>`: `context.publish-diagnostics` of `count` warnings
+//!   (line `i`, columns 0..4, source `rust-analyzer`); `clear-diag [<worktree|-> <path>]`:
+//!   `clear-diagnostics`; `decorate <worktree|-> <path> <badge> [<color>]`: `decorate-files`
+//!   (colour `warning` unless given: `surface` for a refused one); `clear-deco
+//!   [<worktree|-> <path>]`: `clear-file-decorations`;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
@@ -40,7 +48,7 @@
 //! `request <id> <listener> <path> <body>`,
 //! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`,
 //! `diagnostics-changed <path,...|*>` (`*` for the empty list),
-//! `relay <id> <channel> <terminal|-> <argv,...|-> <stdin>`.
+//! `relay <id> <channel> <terminal|-> <argv,...|-> <stdin>`, `settings-changed <key,...>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -53,6 +61,7 @@ use fyx::ui::io::IoEvent as Io;
 use fyx::ui::listeners;
 use fyx::ui::permissions::{self, T2Capability};
 use fyx::ui::review;
+use fyx::ui::settings::{self, SettingValue};
 use fyx::ui::terminals::{self, ReadScope, StatusState, TerminalOrigin, TerminalStatus};
 use fyx::ui::types::*;
 
@@ -91,6 +100,16 @@ fn code(error: &HostError) -> &'static str {
         HostErrorCode::Denied => "denied",
         HostErrorCode::UntrustedWorktree => "untrusted-worktree",
         HostErrorCode::NoWorktree => "no-worktree",
+    }
+}
+
+fn setting_value(value: &SettingValue) -> String {
+    match value {
+        SettingValue::Boolean(value) => value.to_string(),
+        SettingValue::Integer(value) => value.to_string(),
+        SettingValue::Number(value) => value.to_string(),
+        SettingValue::Text(value) | SettingValue::Choice(value) => value.clone(),
+        SettingValue::TextList(items) => items.join("|"),
     }
 }
 
@@ -334,6 +353,24 @@ fn run(words: &[&str]) -> Result<String, String> {
             status.parse().map_err(|_| "status")?,
             &body.join(" "),
         )),
+        ["setting", key] => match settings::get(key) {
+            Ok(value) => setting_value(&value),
+            Err(error) => code(&error).into(),
+        },
+        ["settings"] => settings::all()
+            .iter()
+            .map(|setting| {
+                format!(
+                    "{}={}{}",
+                    setting.key,
+                    setting_value(&setting.value),
+                    if setting.is_default { "*" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        ["open-settings"] => done(settings::open(None)),
+        ["open-settings", key] => done(settings::open(Some(key))),
         ["watch", on] => done(fyx::ui::context::watch(*on == "on")),
         ["open", worktree, path, focus] => done(fyx::ui::context::open(
             &file(worktree, path)?,
@@ -357,6 +394,48 @@ fn run(words: &[&str]) -> Result<String, String> {
         }
         ["diag-all"] => diagnostics(fyx::ui::context::diagnostics(None)),
         ["watch-diag", on] => done(fyx::ui::context::watch_diagnostics(*on == "on")),
+        ["publish", worktree, path, count] => {
+            let count: u32 = count.parse().map_err(|_| "count")?;
+            let entries: Vec<fyx::ui::context::Diagnostic> = (0..count)
+                .map(|line| fyx::ui::context::Diagnostic {
+                    range: TextRange {
+                        start: Position { line, column: 0 },
+                        end: Position { line, column: 4 },
+                    },
+                    severity: fyx::ui::context::Severity::Warning,
+                    message: format!("m{line}"),
+                    source: Some("rust-analyzer".into()),
+                    code: None,
+                })
+                .collect();
+            done(fyx::ui::context::publish_diagnostics(
+                &file(worktree, path)?,
+                &entries,
+            ))
+        }
+        ["clear-diag"] => done(fyx::ui::context::clear_diagnostics(None)),
+        ["clear-diag", worktree, path] => done(fyx::ui::context::clear_diagnostics(Some(
+            &file(worktree, path)?,
+        ))),
+        ["decorate", worktree, path, badge, color @ ..] => {
+            let color = match color {
+                [] => ColorToken::Warning,
+                ["surface"] => ColorToken::Surface,
+                _ => return Err("color".into()),
+            };
+            done(fyx::ui::context::decorate_files(&[
+                fyx::ui::context::FileDecoration {
+                    path: file(worktree, path)?,
+                    badge: Some((*badge).into()),
+                    color: Some(color),
+                    tooltip: None,
+                },
+            ]))
+        }
+        ["clear-deco"] => done(fyx::ui::context::clear_file_decorations(None)),
+        ["clear-deco", worktree, path] => done(fyx::ui::context::clear_file_decorations(Some(
+            &[file(worktree, path)?],
+        ))),
         ["propose", worktree, path, kind, apply, session, text @ ..] => {
             let text = text.join(" ");
             id(review::propose(&review::Proposal {
@@ -448,6 +527,12 @@ impl Guest for Probe {
         let command = match event {
             UiEvent::InputChanged((_, command)) => command,
             UiEvent::Click(_) => std::mem::take(&mut *ARMED.lock().unwrap()),
+            UiEvent::RowToggled((list, row, expand)) => {
+                return Ok(Update::Replace(vec![text(
+                    1,
+                    &format!("toggled {list} {row} {expand}"),
+                )]));
+            }
             _ => return Ok(Update::Unchanged),
         };
         let words: Vec<&str> = command.split_whitespace().collect();
@@ -465,10 +550,22 @@ impl Guest for Probe {
     fn list_rows(
         _surface_id: String,
         _list_node: NodeId,
-        _start: u32,
-        _count: u32,
+        start: u32,
+        count: u32,
     ) -> Vec<ListRow> {
-        Vec::new()
+        // Tree rows (§F.1): a leaf, a collapsed and an expanded one, in turn.
+        (start..start + count)
+            .map(|index| ListRow {
+                index,
+                indent: 1,
+                nodes: vec![text(1, "row")],
+                expansion: match index % 3 {
+                    0 => Expansion::Leaf,
+                    1 => Expansion::Collapsed,
+                    _ => Expansion::Expanded,
+                },
+            })
+            .collect()
     }
 
     fn tick(_surface_id: String) -> Result<Update, String> {
@@ -573,6 +670,7 @@ impl Guest for Probe {
                     argv.join(",")
                 },
             ),
+            Io::SettingsChanged(keys) => format!("settings-changed {}", keys.join(",")),
             _ => "other".into(),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))

@@ -84,6 +84,21 @@ pub struct FyxSettingsContent {
     pub terminal: Option<FyxTerminalSettingsContent>,
     /// Account profiles for CLI tools and agents (`crates/terminal_host`, design §C.6).
     pub accounts: Option<FyxAccountsSettingsContent>,
+    /// Fyx's own updates (`crates/fyx_update_host`, `docs/fyx/platform/self-update.md`).
+    pub updates: Option<FyxUpdatesSettingsContent>,
+}
+
+/// `fyx.updates`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxUpdatesSettingsContent {
+    /// Check once a day whether a new Fyx release is out, from the releases of
+    /// `shelenhovskyi/fyx` on GitHub (two small requests, no identifiers). A new version is only
+    /// offered; nothing is downloaded or installed until you press "Install". "fyx: check for
+    /// updates" checks once, whatever this says.
+    ///
+    /// Default: false
+    pub check: Option<bool>,
 }
 
 /// `fyx.terminal`.
@@ -102,6 +117,12 @@ pub struct FyxTerminalSettingsContent {
     ///
     /// Default: true
     pub shell_integration: Option<bool>,
+    /// A soft daily cap on agents' cost in US dollars, from the cost they report (plan 7.8).
+    /// Reaching it stops the running agent turns with a notice; "Continue today" lifts it until
+    /// the next day. 0 means no cap.
+    ///
+    /// Default: 0
+    pub daily_cost_cap: Option<f32>,
 }
 
 /// `fyx.extensions`.

@@ -8,6 +8,8 @@ use settings::{RegisterSetting, Settings};
 pub struct FyxTerminalSettings {
     pub notifications: bool,
     pub shell_integration: bool,
+    /// USD; `None` for no cap.
+    pub daily_cost_cap: Option<f64>,
 }
 
 impl Settings for FyxTerminalSettings {
@@ -20,6 +22,10 @@ impl Settings for FyxTerminalSettings {
             shell_integration: terminal
                 .and_then(|terminal| terminal.shell_integration)
                 .unwrap_or(true),
+            daily_cost_cap: terminal
+                .and_then(|terminal| terminal.daily_cost_cap)
+                .filter(|cap| *cap > 0.0)
+                .map(f64::from),
         }
     }
 }

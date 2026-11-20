@@ -13,6 +13,9 @@ pub mod canvas;
 pub mod context;
 #[cfg(feature = "t2")]
 pub mod edit;
+/// fyx:ui 0.4 file decorations (plan 6.7, design §F.2).
+#[cfg(feature = "t2")]
+pub mod file_decorations;
 pub mod image;
 /// fyx:ui 0.4 integration kit manifest tables (plan 5.5).
 #[cfg(feature = "t2")]
@@ -24,8 +27,16 @@ pub mod observe;
 #[cfg(feature = "t2")]
 pub mod process;
 pub mod protected;
+/// fyx:ui 0.4 diagnostics from extensions (plan 6.6, design §E).
+#[cfg(feature = "t2")]
+pub mod published_diagnostics;
 #[cfg(feature = "t2")]
 pub mod review;
+/// Plan 7.5: the macOS Seatbelt profile of a `process:spawn` child (pure text, every OS).
+#[cfg(feature = "process")]
+pub mod seatbelt;
+/// fyx:ui 0.4 extension settings (plan 6.1, design §D): no capability, no format crate.
+pub mod settings;
 /// fyx:ui 0.4 terminals (plan 5.5); behind `t2` until W0 adds a `terminal` feature alias.
 #[cfg(feature = "t2")]
 pub mod terminal;

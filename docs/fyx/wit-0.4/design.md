@@ -1,10 +1,11 @@
 # `fyx:ui@0.4.0`: terminals and CLI integrations
 
-Status (2026-11-19): **design, for implementation** (platform plan P5). The direction and the rule
+Status (2026-11-20): **frozen** as `fyx:ui@0.4.0` (W0 5097d410e7, after the P5 security review;
+the WIT is `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`). Below, the design as decided (platform plan P5). The direction and the rule
 changes in [§C.7](#c7-rules-that-change-decided-by-the-owner-2026-11-19) were decided by the owner
 on 2026-11-19. The open technical questions were answered by the coordinator the same day
-([Decisions](#decisions-2026-11-19)). Nothing is implemented yet. The WIT below is a diff for W0,
-who stages it in `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` (integrator-only).
+([Decisions](#decisions-2026-11-19)). The WIT blocks below were diffs for W0; the frozen file is the
+source.
 
 **Source.** The owner's research, in Ukrainian: [`terminal-api/research.md`](../terminal-api/research.md)
 (branch `fyx/terminal-api-research`, f21c198c92). That file has the survey (what the terminal code
@@ -58,6 +59,7 @@ content does not change.
 | B.12 | Approval cards for a tool's own permission prompts | 5.13 | `ui:approvals` T0 |
 | C.1–C.5 | Consent: T2 accepted at install with checkboxes, T3 at the moment of action, journal, update diff | 5.5–5.7 | `terminal:read` T3, `terminal:write` T3 |
 | C.6 | Multiple accounts: forbidden auth and config-dir names, account profiles, Fyx profiles (variant A) | 5.5, 5.20 | none |
+| D | Extension settings: typed `[[fyx_ui.settings]]`, a host-drawn form, values read and watched | 6.1 | none |
 
 The research's names map to these: `net:listen` is `network:listen` (next to `network:fetch`),
 "relay" is `relay:hooks`, "context" is `context:editor`, "package files" is `package:files`.
@@ -458,6 +460,53 @@ An extension passes a tool's proposed edit to Fyx's agent review, hunk by hunk.
   stays with W5).
 - **Limits:** 64 open proposals per extension, 8 MiB per file. Protected and private paths are
   refused (`protected.rs`, `is_private_path`).
+- **Review comments (plan 7.2).** The user comments on hunks in the review pane and sends the
+  open comments to the agent as one prompt, with file and line references ("Send comments to
+  agent", `agent_review::SendComments`). `agent_review` (W5, `review_comments.rs`) keeps them:
+  - A comment on a **rejected** hunk explains the rejection, so it stays in the decision's
+    feedback (the tool result, or `review-outcome` for an extension), as before.
+  - A comment on an **accepted** hunk asks for follow-up work, so it is no longer in the
+    feedback. It stays open until the user sends it, or goes in front of the user's next prompt
+    in the session, so nothing is lost when nobody presses Send.
+  - Comments on a review that is **still open** can be sent too; they are marked sent ("Sent to
+    the agent" in the pane) and left out of that review's feedback later.
+  - **Native agent panel (done):** the comments are the thread's next prompt
+    (`AcpThread::send`): at once when the thread is idle, queued until the turn stops when it is
+    generating, and open again if the turn ends in an error.
+  - **Extensions (terminal agents):** comments on an extension's proposals go to that extension.
+    `AgentReview::take_extension_comments(name) -> Vec<CommentBatch>` hands them over; the bridge
+    in `ui_ext_host` (W3) takes them on `AgentReviewEvent::CommentsChanged` and delivers one
+    `io-event::review-comments` per batch (WIT below, for W0). No new capability:
+    `review:propose` covers comments on the extension's own proposals. The extension forwards the
+    `prompt` to its tool on the tool's next hook through `fyx-relay` (§B.9): Claude Code's
+    `UserPromptSubmit` (or `PostToolUse`) answers `{"hookSpecificOutput": {"additionalContext":
+    prompt}}`, Gemini's `BeforeAgent` the same; a `Stop` hook that fires while comments wait
+    answers `{"decision": "block", "reason": prompt}`, so the agent works on them at once. Pasting
+    the prompt into the tool's terminal (§B.11) happens only if the user chooses it.
+
+  ```wit
+  // review gains (0.4):
+  enum comment-state { accepted, rejected, pending }
+  record review-comment {
+      path: file-ref,
+      /// Lines of the file after the change, 1-based and inclusive (`end` < `start`: lines were
+      /// removed after `start`); none when the review showed a fragment of the file.
+      lines: option<tuple<u32, u32>>,
+      state: comment-state,
+      /// The first changed line, at most 80 characters.
+      excerpt: string,
+      text: string,
+  }
+  record review-comments {
+      /// The proposals' `session`.
+      session: string,
+      comments: list<review-comment>,
+      /// The comments as one prompt for the agent, with paths relative to the project.
+      prompt: string,
+  }
+  // io-event gains (0.4), after review-decided:
+  //   review-comments(review-comments)
+  ```
 - **Crate owner:** `agent_review` is W5's. The bridge lives in `ui_ext_host` and uses only
   `agent_review`'s public API; a missing hook is asked of W5.
 
@@ -720,6 +769,423 @@ and extension host are global to the process.
 | Upstream edits are minimal hooks | `.claude/CLAUDE.md` | Unchanged: about 25 lines in three Zed files plus the ACP hook (§A). It changes only if the `TeePty` prototype fails and the alacritty fork needs a patch, which then goes to the owner. |
 | Protected paths for extensions | 0.3 design §10, `protected.rs` | Unchanged for extensions. The host writes discovery files by the declared template (§B.8), and `fyx_guard` allows that explicitly. Account dirs join the protected paths. |
 
+## D. Extension settings (plan 6.1)
+
+Status (2026-11-20): **design, for implementation**, written by W4 at the coordinator's request.
+It has to land in this world before it freezes. The SDK side (`ui_ext_sdk::settings`) and the
+harness fake (`fyx_ext_harness::settings`) are built; the host side (W2c model and broker, W3
+UI) and the WIT (W0) are below.
+
+**The problem.** An extension has no way to let the user choose anything. `fyx_claude_code`
+hard-codes that `openDiff` blocks; `fyx_gemini_cli` cannot turn its hooks off; a linter demo
+cannot take a severity. Each would build its own panel form and store nothing, since
+extensions have no storage.
+
+**The answer.** The manifest declares typed settings. The host stores the values in the user's
+settings file, draws the form, checks every value against the declaration, and gives the
+extension only checked values. The extension reads them and is told when they change. It
+never draws the form and never writes a value in 0.4.
+
+### D.1 Manifest: `[[fyx_ui.settings]]`
+
+```toml
+[[fyx_ui.settings]]
+key = "block-on-diff"
+title = "Wait for review"
+description = "Claude waits until you decide on a diff in agent review."
+type = "boolean"
+default = true
+
+[[fyx_ui.settings]]
+key = "max-open-diffs"
+title = "Open diffs at most"
+type = "integer"
+default = 8
+min = 1
+max = 64
+
+[[fyx_ui.settings]]
+key = "severity"
+title = "Report as"
+type = "choice"
+default = "warning"
+choices = [
+    { value = "error", title = "Error" },
+    { value = "warning", title = "Warning" },
+]
+
+[[fyx_ui.settings]]
+key = "extra-args"
+title = "Extra arguments"
+type = "text-list"
+default = []
+max_items = 16
+max_length = 256
+```
+
+| Field | Rule |
+|---|---|
+| `key` | 1 to 64 bytes of `a-z`, `0-9` and `-`, starting with a letter; unique in the manifest. It is also the key in the settings file. |
+| `title` | 1 to 80 bytes, one line. Drawn as the control's label. |
+| `description` | Optional, at most 500 bytes, plain text (no Markdown, no links). |
+| `type` | `boolean`, `integer`, `number`, `text`, `choice` or `text-list`. |
+| `default` | Required, and valid for its own declaration (the same rules as a user's value). |
+| `min`, `max` | `integer` (whole numbers, i64) and `number` (finite f64) only; optional; `min <= max`. |
+| `max_length` | `text` and `text-list` items: at most this many bytes, 1 to 4096; default 256. One line: no control characters. |
+| `max_items` | `text-list` only: 1 to 64, default 16. |
+| `choices` | `choice` only: 2 to 32 entries `{ value, title }`, `value` as a key (unique), `title` 1 to 80 bytes. |
+
+- At most **32 settings** per extension.
+- **No capability.** Reading its own settings gives an extension nothing it did not declare.
+  The install dialog lists nothing for them (they are not consent), and the extension page
+  shows the form.
+- **No secrets.** There is no secret or password type, and a `key` that contains `token`,
+  `secret`, `password`, `api-key` or `apikey` is refused: values sit in the user's plain
+  `settings.json`, which users share. Credentials stay with the tool (`account_tool`, §C.6).
+- **No paths and no commands as types.** A `text` value is a string; what the extension does
+  with it is its own business, under its capabilities. Nothing a setting says widens a
+  capability: a `text` setting cannot add a program to `[[fyx_ui.terminal_programs]]`.
+- The table is refused for a world below 0.4, like the other 0.4 tables (`world_capabilities`).
+
+### D.2 Storage and the effective value
+
+The values live in the **user** settings file, under the extension's id:
+
+```json
+"fyx_extensions": {
+  "fyx-claude-code": { "block-on-diff": false, "max-open-diffs": 4 }
+}
+```
+
+- The effective value of a key is the user's value when it is valid, else the default.
+- An invalid value (wrong type, out of range, unknown choice, too long, too many items) is
+  **not** passed on: the extension gets the default, and the form shows the user's value with
+  the error next to it. An unknown key under the extension's id is ignored and shown greyed out
+  ("not used by this version") so an update that drops a setting loses nothing.
+- **User level only in 0.4.** Project settings (`.zed/settings.json` in a worktree) cannot set
+  `fyx_extensions`, the same rule as M6.1 for review: a repository must not change how an
+  extension behaves without the user. Per-project values are in [Not in 0.4](#not-in-04).
+- Values are never shared between extensions. Uninstalling keeps them (like Zed keeps an
+  extension's settings) until the user deletes them; the extension page offers "Reset".
+
+### D.3 The form (host-drawn)
+
+W3 draws the form from the declarations, on the extension's page in **Fyx Extensions** under
+a **Settings** tab, and links it from the extension's panel menu.
+
+| Type | Control |
+|---|---|
+| `boolean` | switch |
+| `integer`, `number` | number field with `min`/`max` |
+| `text` | one-line text field |
+| `choice` | dropdown of the titles |
+| `text-list` | list of one-line fields with add and remove |
+
+Each control shows the title, the description, a "Reset to default" button when the value is
+not the default, and the error of an invalid value. A change writes the user settings file
+through Zed's settings store (the same write the settings UI makes), so editing
+`settings.json` by hand works too and goes through the same check.
+
+### D.4 Reading and watching
+
+```wit
+/// 0.4. The extension's own settings (design.md §D): declared in `[[fyx_ui.settings]]`, set by
+/// the user, checked by the host. No capability.
+interface settings {
+    use host.{host-error};
+
+    variant setting-value {
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+        /// The choice's `value`, never its title.
+        choice(string),
+        text-list(list<string>),
+    }
+
+    record setting {
+        key: string,
+        value: setting-value,
+        /// False when the user set a valid value (which may equal the default).
+        is-default: bool,
+    }
+
+    /// The effective value of one declared key; `invalid-argument` for a key the manifest does
+    /// not declare.
+    get: func(key: string) -> result<setting-value, host-error>;
+    /// Every declared key, in manifest order.
+    all: func() -> list<setting>;
+    /// Shows the extension's Settings tab; `key` scrolls to that setting. Only while the user
+    /// acts on one of the extension's surfaces (an event call), else `not-permitted`.
+    open: func(key: option<string>) -> result<_, host-error>;
+}
+```
+
+- `io-event::settings-changed(list<string>)`: the keys whose **effective** value changed, in
+  manifest order, delivered through `handle-io` once per settings-file change. A change that
+  leaves every effective value the same (an invalid value replaced by another invalid one, a
+  key the extension does not declare) sends nothing. No watch call: every 0.4 extension with
+  `[[fyx_ui.settings]]` gets it.
+- The values are fixed for the length of one export call: a change made while the extension
+  runs arrives as the next `handle-io`.
+- `get` and `all` are cheap host reads (no I/O); an extension may call them on every event, but
+  the SDK's pattern is to read at `new()` and on `settings-changed`.
+- Reload, disable and uninstall need nothing: values are read, not held by the host for the
+  extension.
+
+### D.5 SDK and harness (W4, built behind `fyx-ui-0-4`)
+
+- `ui_ext_sdk::settings`: `SettingValue` (with `as_bool`, `as_integer`, `as_number`,
+  `as_text`, `as_choice`, `as_text_list`), `Setting`, `get`, `all` and `open`. Until W0
+  stages the interface, the calls return `unavailable` on WASM; off WASM they answer from
+  `set_settings` (for an extension's unit tests) and `open` records `HostEffect::Settings`.
+  `IoEvent::SettingsChanged` and the WASM glue come with the staged WIT.
+- `fyx_ext_harness::settings`: the reference checks of §D.1 and §D.2 on the manifest's TOML
+  (`SettingSpec::parse_all`), and a fake store: `Harness::settings()`,
+  `Harness::set_user_settings(json)` (returns the changed keys, as the host would send them),
+  `Harness::setting(key)`, `Harness::setting_error(key)`, `Harness::take_settings_changed()`.
+  `load_package` reads `[[fyx_ui.settings]]`. Once the WIT is staged,
+  the fake links `settings` and queues `settings-changed` for `deliver_io`.
+- `fyx-ext check` runs the same checks on `[[fyx_ui.settings]]`.
+
+The checks are written once, in the harness, as the reference. W2c ports them into
+`ui_ext::settings` for the host (or makes the harness use them, once they are there);
+`harness_conformance` then pins the two together, as for the other tables.
+
+### D.6 Host side (W2c, W3)
+
+| Owner | Work |
+|---|---|
+| W2c | `ui_ext::settings`: `SettingSpec`, `SettingValue`, the checks of §D.1 (manifest) and §D.2 (values); `FyxUiTable.settings`; the `settings` import in `ui_ext_wasm`; reading `fyx_extensions.<id>` from the user settings store (never project settings), computing effective values, and sending `settings-changed` on a store change |
+| W3 | The Settings tab and its controls (§D.3), "Reset" for one key and for all, the greyed-out unknown keys, `settings.open` |
+| W0 | The WIT below, and `settings` in the V0_4 world lists (`ui_ext_wasm`, `fyx_ext`, harness) |
+
+### D.7 Tests
+
+- A manifest with a duplicate key, a `default` outside `min`/`max`, a `choice` default not in
+  `choices`, a key with `token` in it, or 33 settings is refused; so is the table on a 0.3
+  world.
+- A user value of the wrong type or out of range gives the default to the extension and an
+  error in the form; fixing it sends `settings-changed` with that key only.
+- Project settings that set `fyx_extensions` change nothing.
+- `open` outside an event call is `not-permitted`.
+- The harness and the host agree on every check (`harness_conformance`).
+
+## E. Diagnostics from extensions (plan 6.6)
+
+Plan 6.6 lets an extension report problems in files (a linter, a spell checker, a policy check) the
+way a language server does: squiggles in the editor, entries in the diagnostics panel and the
+status-bar counts, with the extension as the source. It is planned for "0.4 or the first post-1.0
+WIT"; the diff below fits either, and reuses the 0.4 `context` types of §B.11.
+
+### E.1 What the extension sees (`diagnostics:publish`, T1)
+
+- New capability `diagnostics:publish`, T1 ("Shows problems in your files"). It is independent of
+  `workspace:diagnostics` (reading what language servers report): a linter that only publishes
+  needs no read.
+- `context.publish-diagnostics(path, list<diagnostic>)` replaces this extension's diagnostics of
+  one file; an empty list clears them. `context.clear-diagnostics(none)` clears every file.
+- The `diagnostic` record of §B.11 is reused: `range` 0-based with UTF-8 byte columns, `severity`,
+  `message` (cut at 2 KiB), `code`. **`source` is ignored**: the host sets it to the extension's
+  display name, so an extension cannot pose as `rust-analyzer`.
+- Worktree files only: a `file-ref` in no worktree is `invalid-argument`, a private file
+  (`is_private_path`) is `not-permitted`.
+- Limits: 500 entries per file and 5,000 per extension (more is `invalid-argument` and changes
+  nothing); 20 publishes per second per extension (more is `unavailable`, retry later). A range
+  past the end of the file is clamped to it.
+- An extension's diagnostics last while it runs: stopping, crashing, uninstalling, disabling or
+  revoking the capability clears them all. A hot reload (1.3) clears them too; the new instance
+  publishes again.
+
+### E.2 Host side (W2c, W3)
+
+The project already shows diagnostics from any source through `LspStore::merge_diagnostic_entries`
+(public). Each running extension instance gets its own `LanguageServerId` from
+`project.languages().next_language_server_id()` per project; it is never registered as a server,
+so nothing sends LSP requests to it.
+
+- `publish-diagnostics` resolves the `file-ref` to an absolute path, converts each range to
+  `Unclipped<PointUtf16>` against the file's text (the open buffer's snapshot, or the file loaded
+  through the project's `Fs` when it is not open; columns are UTF-8 bytes in the WIT), and calls
+  `merge_diagnostic_entries` with one `DocumentDiagnosticsUpdate { server_id, diagnostics:
+  DocumentDiagnostics { document_abs_path, version: None, diagnostics }, result_id: None,
+  registration_id: None, disk_based_sources: &[] }` and a merge that keeps nothing old of that
+  server (`|_, _, _| false`).
+- Each entry is a `DiagnosticEntry` with `Diagnostic { source: Some(<display name>), severity,
+  message, code, source_kind: DiagnosticSourceKind::Other, is_primary: true, group_id: <unique per
+  entry>, .. }`.
+- Clearing is the same call with an empty list for each file the extension published; the host
+  keeps that set per instance.
+- The diagnostics panel, the editor and the status bar need no change: they follow
+  `Event::DiagnosticsUpdated` for any server id. Remote projects: local projects only in the first
+  version (a remote host has its own `LspStore`; the update would have to be forwarded).
+
+| Owner | Work |
+|---|---|
+| W0 | The WIT below; `diagnostics:publish` in the capability lists and the install-dialog text |
+| W2c | The import in `ui_ext_wasm`, the checks of §E.1, the limits |
+| W3 | The per-instance collection in `ui_ext_host`: server ids, conversion, publish, clear on stop, crash, reload, uninstall and revoke |
+| W5 (W4's part) | `fyx_sdk` wrapper and harness double; a linter demo (`fyx-lint-demo`: marks `TODO` lines) |
+
+### E.3 WIT diff
+
+In `interface context` (0.4 file, or the next world's copy), after `watch-diagnostics`:
+
+```wit
+    /// Plan 6.6, `diagnostics:publish`: replaces this extension's diagnostics of `path` (an empty
+    /// list clears them). `source` is ignored: the host names the extension. In no worktree is
+    /// `invalid-argument`, a private file `not-permitted`; over 500 entries per file or 5,000 per
+    /// extension is `invalid-argument`; over 20 calls a second is `unavailable`.
+    publish-diagnostics: func(path: file-ref, diagnostics: list<diagnostic>) -> result<_, host-error>;
+    /// `diagnostics:publish`: clears this extension's diagnostics of one file, or of every file
+    /// with `none`.
+    clear-diagnostics: func(path: option<file-ref>) -> result<_, host-error>;
+```
+
+### E.4 Tests
+
+- The linter demo publishes two entries in a worktree file: the editor shows them, the panel
+  lists them with the extension's name as source, and the status bar counts them.
+- `source: some("rust-analyzer")` is shown as the extension's name.
+- Publishing an empty list clears the file; stopping the extension clears every file.
+- A private file and a file outside the worktrees are refused and publish nothing.
+- 501 entries for one file are refused and leave the previous ones.
+- Columns: a line with a multi-byte character before the range lands on the same characters.
+
+## F. Tree views and file decorations (plan 6.7)
+
+Plan 6.7 adds two things a bookmarks, outline or test-explorer extension needs: rows that expand
+and collapse, and badges or colours on project-panel entries. The `list` node already draws
+`list-row.indent`; what is missing is the chevron, its event and the keys. Like §E, the diff fits
+0.4 or the first post-1.0 world.
+
+### F.1 Tree rows (no capability)
+
+- `list-row` gets `expansion: expansion`, an enum `leaf`, `collapsed`, `expanded`. The host draws
+  a chevron before the row's nodes (right for `collapsed`, down for `expanded`, an empty slot of
+  the same width for `leaf`, so leaves line up with their siblings), after the indentation.
+- A click on the chevron, or Right on a `collapsed` row and Left on an `expanded` one while the
+  list has keyboard focus, sends the new event `row-toggled(tuple<node-id, u32, bool>)`: the list,
+  the row index, and whether the row asks to be expanded. It is not a `row-click`, and it grants no
+  activation (§C.3 gestures): expanding is browsing.
+- The host changes nothing itself. The extension answers with the new `row-count` and an
+  `invalidate-rows` patch from the toggled row on (or a smaller range), and sets the row's
+  `expansion` in the rows it returns. Until then the old rows stay. This keeps the extension the
+  owner of the tree's shape, as with every other list state, and keeps virtualization working
+  for trees of any size.
+- Left on a `leaf` or `collapsed` row moves the selection to the nearest earlier row with a
+  smaller `indent` (its parent) and reports `row-selected`, as arrow keys do in modals today. That
+  needs no extension code.
+- Existing 0.4 extensions are unchanged: a row without the field (an older world) is a `leaf`,
+  and no chevron slot is drawn when no row of the list has ever been anything but `leaf`.
+
+### F.2 File decorations (`workspace:file-decorations`, T1)
+
+- New capability `workspace:file-decorations`, T1 ("Marks files in the project panel").
+- `context.decorate-files(list<file-decoration>)` sets or replaces this extension's decoration of
+  each listed file or directory; `context.clear-file-decorations(option<list<file-ref>>)` removes
+  some, or all with `none`.
+- `record file-decoration { path: file-ref, badge: option<string>, color: option<color-token>,
+  tooltip: option<string> }`. `badge` is at most 2 characters (graphemes), drawn after the name
+  like the git status letter; `color` tints the file name (`text-accent`, `warning`, `error`,
+  `success`, `text-muted`; the other tokens are `invalid-argument`); `tooltip` (at most 256 bytes)
+  is added to the entry's tooltip under the extension's name.
+- Worktree entries only; private paths are `not-permitted`. At most 10,000 decorated paths per
+  extension and 500 per call; more is `invalid-argument` and changes nothing.
+- Several extensions on one entry: badges are shown side by side, at most 2, in extension id
+  order; the colour of the first one with a colour wins. Git status and diagnostics colours are
+  drawn as today and win over an extension's colour.
+- A decoration is not inherited by a folder's children, and does not propagate to parents: the
+  extension decorates what it means.
+- Decorations last while the extension runs, like §E: stop, crash, reload, uninstall, disable or
+  revoke clear them.
+
+### F.3 Host side
+
+- **Tree rows (W3, `ui_ext_host`):** the chevron slot, its click handler and the Left/Right keys in
+  the list renderer; `row-toggled` routed like `row-click`.
+- **Decorations:** a new Fyx file in an upstream crate both sides already depend on,
+  `crates/project/src/fyx_file_decorations.rs` (W2c, with a `fyx:` `mod` line): a `Global` entity
+  `FileDecorations` holding, per extension, a map from `ProjectPath` to the decoration, and an
+  event when it changes. `ui_ext_host` (W3) writes it; `project_panel` reads it. No new crate
+  dependency, so no Cargo change.
+- **Project panel hook (W3, one `fyx:` block in `project_panel.rs`):** `EntryDetails` gets the
+  entry's decorations from the global when the panel builds its visible entries, and
+  `render_entry` draws the badges next to `git_indicator` and applies the colour where
+  `filename_text_color` is chosen when no git or diagnostic colour applies. The panel subscribes
+  to the global's event and calls `cx.notify()`.
+
+| Owner | Work |
+|---|---|
+| W0 | The WIT below; `workspace:file-decorations` in the capability lists and the install-dialog text |
+| W2c | `fyx_file_decorations.rs` in `project`; the imports and checks in `ui_ext_wasm` |
+| W3 | Chevrons, `row-toggled` and keys in the list renderer; the project-panel hook; clearing on stop |
+| W5 (W4's part) | `fyx_sdk` wrappers, harness doubles, a `fyx-bookmarks-demo` (a tree of bookmarks grouped by folder, bookmarked files badged `★`) |
+
+### F.4 WIT diff
+
+In `interface types`, before `record list-row`, and one field in it:
+
+```wit
+    /// Plan 6.7. A tree row's chevron. `leaf` draws an empty chevron slot.
+    enum expansion { leaf, collapsed, expanded }
+
+    record list-row {
+        index: u32,
+        indent: u8,
+        nodes: list<node>,
+        /// Plan 6.7. The chevron; Right, Left or a click on it sends `row-toggled`.
+        expansion: expansion,
+    }
+```
+
+In `variant ui-event`, after `row-selected`:
+
+```wit
+        /// Plan 6.7. The list node, the row index, and `true` when the row asks to be expanded.
+        /// The host changes no rows: the extension answers with new rows. Grants no activation.
+        row-toggled(tuple<node-id, u32, bool>),
+```
+
+In `interface context`, after the §E functions:
+
+```wit
+    /// Plan 6.7, `workspace:file-decorations`.
+    record file-decoration {
+        path: file-ref,
+        /// At most 2 characters, after the name.
+        badge: option<string>,
+        /// `text-accent`, `warning`, `error`, `success` or `text-muted`.
+        color: option<color-token>,
+        /// At most 256 bytes, under the extension's name in the entry's tooltip.
+        tooltip: option<string>,
+    }
+
+    /// Sets or replaces this extension's decoration of each path. At most 500 per call and
+    /// 10,000 per extension (`invalid-argument`, nothing changes); a private file is
+    /// `not-permitted`, one in no worktree `invalid-argument`.
+    decorate-files: func(decorations: list<file-decoration>) -> result<_, host-error>;
+    /// Removes this extension's decorations of these paths, or all of them with `none`.
+    clear-file-decorations: func(paths: option<list<file-ref>>) -> result<_, host-error>;
+```
+
+`list-row` is a record, so adding a field changes the type: in 0.4 that is fine while the world is
+staged; after it ships, the next world carries a new `list-row` and the host maps an older
+extension's rows to `leaf`.
+
+### F.5 Tests
+
+- The bookmarks demo shows a two-level tree; a click on a folder's chevron sends `row-toggled`
+  with `true`, the demo returns the children, and the panel shows them indented under it.
+- Right and Left on the focused list expand and collapse; Left on a leaf selects its parent.
+- `row-toggled` does not count as a gesture: `workspace.open` with `focus: true` in its handler is
+  `not-permitted`.
+- Bookmarked files show `★` in the project panel; removing a bookmark clears it; stopping the
+  extension clears every badge.
+- A badge of 3 characters and the colour `surface` are refused; a private file is refused.
+- Two extensions on one file show both badges in id order.
+
 ## WIT diff (for W0)
 
 Copy-forward rule: `types`, `host` and every 0.3 interface are copied byte for byte except where
@@ -856,7 +1322,8 @@ interface approvals {
 //   mcp-call(mcp-call), mcp-cancelled(u64), mcp-initialized(mcp-session), listener-message(tuple<string, u64, string>),
 //   listener-request(tuple<u64, string, string, string> /* id, listener, path, body */),
 //   relay-request(tuple<u64, string, option<u64>, list<string>, string>),
-//   review-decided(tuple<u64, result<review-outcome, string>>), context-changed(editor-context),
+//   review-decided(tuple<u64, result<review-outcome, string>>),
+//   review-comments(review-comments) /* plan 7.2, §B.10; record in review */, context-changed(editor-context),
 //   diagnostics-changed(list<file-ref> /* empty = anything may have changed */),
 //   approval-answered(tuple<u64, option<approval-option>>)
 //
@@ -865,9 +1332,38 @@ interface approvals {
 // answered per request, not by query().
 ```
 
+Extension settings (§D), for the same staged world:
+
+```wit
+/// 0.4. The extension's own settings (design.md §D). No capability.
+interface settings {
+    use host.{host-error};
+
+    variant setting-value {
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+        choice(string),
+        text-list(list<string>),
+    }
+    record setting { key: string, value: setting-value, is-default: bool }
+
+    get: func(key: string) -> result<setting-value, host-error>;
+    all: func() -> list<setting>;
+    open: func(key: option<string>) -> result<_, host-error>;
+}
+
+// io: `use settings.{}` is not needed (keys are strings); io-event gains, after
+// approval-answered:
+//   /// 0.4. The keys whose effective value changed, in manifest order.
+//   settings-changed(list<string>)
+// world ui-extension: `import settings;` after `import approvals;`.
+```
+
 The manifest gains `[[fyx_ui.terminal_profiles]]`, `[[fyx_ui.terminal_programs]]`,
-`[fyx_ui.terminal_env]`, `[[fyx_ui.listeners]]`, `[[fyx_ui.discovery_files]]` and
-`[[fyx_ui.relay_channels]]`. Each T2 item takes a `reason`. All of them are refused for a world
+`[fyx_ui.terminal_env]`, `[[fyx_ui.listeners]]`, `[[fyx_ui.discovery_files]]`,
+`[[fyx_ui.relay_channels]]` and `[[fyx_ui.settings]]` (§D.1). Each T2 item takes a `reason`. All of them are refused for a world
 below 0.4 (`world_capabilities`, integration-5 A4), and `fyx-ext` and the harness mirror the
 lists.
 
@@ -936,7 +1432,7 @@ limitation: Gemini's Docker sandbox is refused by the `Host` check (§B.7).
 | WIT model, manifest, permissions broker, listeners, review bridge, context | W2c | `crates/ui_ext` (0.4 model, manifest tables, forbidden names of §B.4/§C.6), `crates/ui_ext_wasm` (0.4 bindings, `listeners.rs`, `relay.rs` host side), `crates/ui_ext_host/src/permissions.rs` and `consent.rs` (T2-at-install states, T3, journal store) |
 | Consent UI, terminal node, sessions panel, cards | W3 | `ui_ext_host`: install dialog with checkboxes, extension page switches and journal, update diff, T3 cards and "Always allow", `terminal` node in the panel container, agent sessions panel, approval cards |
 | SDK, harness, demos, first extensions | W4 | `ui_ext_sdk` 0.4 module, `fyx_ext_harness` fakes for terminals, listeners, relay and review; `extensions/fyx_demo_pseudo_terminal`, `extensions/fyx_claude_code`, `extensions/fyx_gemini_cli` |
-| Staged WIT | W0 | `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` |
+| Frozen WIT | W0 | `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` |
 | Registry template | W10 | `tools/fyx-extensions-template` `policy/capability-tiers.json` (T3 counts as T2 for the release tier, so `fyx_registry`'s signed `tier` gains no value), the diff in `registry.py comment` |
 
 ## Tests
@@ -991,3 +1487,6 @@ limitation: Gemini's Docker sandbox is refused by the `Host` check (§B.7).
 | SSH and remote terminals for listeners and relay | Phase 6 (5.17): loopback from a remote machine needs a tunnel |
 | Named pipes and Unix sockets for listeners | Loopback TCP on every OS ([Decisions](#decisions-2026-11-19)) |
 | Variant B Fyx profiles (in one process) | §C.6 |
+| Per-project extension settings | §D.2: a repository must not change an extension's behaviour; later, as a user-level "for this project" value, like the per-project account |
+| An extension writing its own settings | §D: the user owns the values; an extension that needs state gets storage, a separate design |
+| Secret settings (tokens, passwords) | §D.1: `settings.json` is plain and shared; credentials stay with the tool |

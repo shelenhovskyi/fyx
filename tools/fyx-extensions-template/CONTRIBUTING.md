@@ -33,6 +33,7 @@ Who has to approve:
 | New version, T0 or T1 | one of the entry's owners (as the PR's author, or by approving) |
 | Anything T2 (network, processes, editing files, observing agents, and for `fyx:ui` 0.4 creating terminals, environment, listeners, discovery files, relay hooks; reading or writing terminals is T3, which counts as T2 here) | the registry owner, every version |
 | `urgent = true` (skips the 24 h wait before installs) | the registry owner |
+| A discovery file's `default_dir` outside the tool's own `~/.<tool>` folder | the registry owner |
 | Owners added or removed | an existing owner of the entry |
 | A review concern (`needs-owner`) | the registry owner |
 

@@ -632,12 +632,12 @@ fn test_api_version_gating() {
     assert!(api_version_range(false).contains(&Version::new(0, 2, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 1, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 3, 0)));
-    // 0.4 is staged (plan P5): known, and loaded only where staged versions may.
+    // 0.4 is frozen too (plan 5.19).
     assert_eq!(
         known_api_version(&Version::new(0, 4, 0)),
         Some(ApiVersion::V0_4_0)
     );
-    assert!(!api_version_range(false).contains(&Version::new(0, 4, 0)));
+    assert!(api_version_range(false).contains(&Version::new(0, 4, 0)));
     assert!(api_version_range(true).contains(&Version::new(0, 4, 0)));
     assert!(!staged_api_allowed(false, false));
     assert!(staged_api_allowed(true, false));
@@ -839,20 +839,19 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
-        // The harness runs every version the host knows; it runs the staged 0.4 on fake
-        // terminals ahead of the host (plan 5.10).
+        // The harness runs every version the host knows (0.4 on fake terminals, plan 5.10).
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(
             harness_versions,
             [
                 MIN_VERSION,
                 Version::new(0, 2, 0),
-                MAX_FROZEN_VERSION,
+                Version::new(0, 3, 0),
                 MAX_VERSION
             ]
         );
         assert!(harness_versions.iter().all(is_supported_api_version));
-        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 4, 0));
         assert_eq!(MAX_VERSION, Version::new(0, 4, 0));
     }
 
@@ -965,4 +964,159 @@ fn test_memory_budget_covers_every_memory() {
     let mut table = ResourceTable::new();
     table.set_max_capacity(UI_RESOURCE_TABLE_LIMIT);
     assert_eq!(table.max_capacity(), UI_RESOURCE_TABLE_LIMIT);
+}
+
+/// Every `extensions/*/extension.toml` with a `[fyx_ui]` table reads, `check_world` included, in
+/// the world it names and in each newer world `script/fyx-build-demos` builds it for (its
+/// `# fyx-ui-0-N:` lines applied the way that script applies them). `world_capabilities` once
+/// lacked `workspace:diagnostics` in 0.4 and refused fyx_claude_code; unit tests that grant
+/// capabilities directly did not catch it.
+#[gpui::test]
+async fn test_shipped_manifests_pass_their_worlds(cx: &mut TestAppContext) {
+    let extensions = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+    let mut entries = std::fs::read_dir(&extensions)
+        .expect("extensions dir")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| path.join("extension.toml").is_file())
+        .collect::<Vec<_>>();
+    entries.sort();
+    let fs = fs::FakeFs::new(cx.executor());
+    let mut checked = Vec::new();
+    for path in entries {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("name")
+            .to_owned();
+        let text = std::fs::read_to_string(path.join("extension.toml")).expect("manifest");
+        let Some(declared) = declared_api_minor(&text) else {
+            continue;
+        };
+        for world in declared..=4 {
+            let copy = world_manifest(&text, world);
+            let dir = format!("/ext/{name}-0-{world}");
+            fs.create_dir(Path::new(&dir)).await.expect("dir");
+            fs.insert_file(format!("{dir}/extension.toml"), copy.into_bytes())
+                .await;
+            let result = UiManifest::read(fs.as_ref(), Path::new(&dir)).await;
+            match result {
+                Ok(Some((_, manifest))) => {
+                    assert_eq!(manifest.api_version, Version::new(0, world, 0), "{name}");
+                }
+                Ok(None) => panic!("{name}: no [fyx_ui] in the 0.{world} copy"),
+                Err(error) => panic!("{name} in fyx:ui 0.{world}: {error:#}"),
+            }
+            checked.push(format!("{name}@0.{world}"));
+        }
+    }
+    for expected in [
+        "fyx_claude_code@0.4",
+        "fyx_gemini_cli@0.4",
+        "fyx_demo_counter@0.1",
+    ] {
+        assert!(
+            checked.iter().any(|checked| checked == expected),
+            "{expected} not checked: {checked:?}"
+        );
+    }
+}
+
+/// The minor of `api_version` in a manifest's `[fyx_ui]` table, `None` without one.
+fn declared_api_minor(text: &str) -> Option<u64> {
+    let toml: toml::Value = toml::from_str(text).expect("toml");
+    let version = toml.get("fyx_ui")?.get("api_version")?.as_str()?;
+    Some(Version::parse(version).expect("api_version").minor)
+}
+
+/// The manifest `script/fyx-build-demos` writes for fyx:ui 0.`world` (its `world_manifest` and
+/// the `api_version` rewrite).
+fn world_manifest(text: &str, world: u64) -> String {
+    let markers = (2..=world)
+        .rev()
+        .map(|minor| format!("# fyx-ui-0-{minor}: "));
+    let capabilities = markers
+        .filter_map(|marker| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(marker.as_str()))
+                .filter(|rest| rest.starts_with("capabilities = "))
+                .map(str::to_owned)
+        })
+        .next();
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = if line.starts_with("capabilities = ")
+            && let Some(capabilities) = &capabilities
+        {
+            capabilities.clone()
+        } else if let Some(rest) = line.strip_prefix("# fyx-ui-0-") {
+            let Some((minor, body)) = rest.split_once(": ") else {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            };
+            let minor = minor.parse::<u64>().expect("marker minor");
+            if body.starts_with("capabilities = ") || minor > world {
+                continue;
+            }
+            body.to_owned()
+        } else if line.starts_with("api_version = \"0.") {
+            format!("api_version = \"0.{world}.0\"")
+        } else {
+            line.to_owned()
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Plan 6.1, design §D.1, §D.7: `[[fyx_ui.settings]]` is read and checked with the manifest,
+/// and refused below 0.4 and when a declaration is invalid.
+#[gpui::test]
+async fn test_settings_table_is_read_and_checked(cx: &mut TestAppContext) {
+    let fs = fs::FakeFs::new(cx.executor());
+    let manifest = |api: &str, settings: &str| {
+        format!(
+            "id = \"s\"\nname = \"S\"\nversion = \"0.1.0\"\nschema_version = 1\n[fyx_ui]\n\
+             api_version = \"{api}\"\ncomponent = \"fyx_ui.wasm\"\ncapabilities = [\"ui:panel\"]\n\
+             {settings}"
+        )
+    };
+    let good = "[[fyx_ui.settings]]\nkey = \"block-on-diff\"\ntitle = \"Wait for review\"\n\
+                type = \"boolean\"\ndefault = true\n\
+                [[fyx_ui.settings]]\nkey = \"ratio\"\ntitle = \"Ratio\"\ntype = \"number\"\n\
+                default = 0.5\nmin = 0\nmax = 1\n";
+    let read = |dir: &'static str, text: String| {
+        let fs = fs.clone();
+        async move {
+            fs.create_dir(Path::new(dir)).await.expect("dir");
+            fs.insert_file(format!("{dir}/extension.toml"), text.into_bytes())
+                .await;
+            UiManifest::read(fs.as_ref(), Path::new(dir)).await
+        }
+    };
+    let (_, manifest_v0_4) = read("/ext/good", manifest("0.4.0", good))
+        .await
+        .expect("read")
+        .expect("fyx_ui");
+    let specs = manifest_v0_4.settings_specs().expect("specs");
+    let keys: Vec<_> = specs.iter().map(|spec| spec.key.as_str()).collect();
+    assert_eq!(keys, ["block-on-diff", "ratio"]);
+
+    let error = read("/ext/old", manifest("0.3.0", good))
+        .await
+        .err()
+        .expect("refused below 0.4");
+    assert!(
+        format!("{error:#}").contains("needs fyx:ui 0.4"),
+        "{error:#}"
+    );
+
+    let secret = "[[fyx_ui.settings]]\nkey = \"api-token\"\ntitle = \"Token\"\ntype = \"text\"\n\
+                  default = \"\"\n";
+    let error = read("/ext/secret", manifest("0.4.0", secret))
+        .await
+        .err()
+        .expect("refused");
+    assert!(format!("{error:#}").contains("credentials"), "{error:#}");
 }

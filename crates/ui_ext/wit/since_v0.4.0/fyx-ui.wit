@@ -1,7 +1,9 @@
-// STAGED: fyx:ui 0.4.0 (platform plan P5, task 5.5). Draft by W2c from docs/fyx/wit-0.4/design.md
-// "WIT diff"; W0 stages it as crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit. Not frozen: any part may
-// change until the 0.4 freeze. Plan 4.2-4.4 (decoration extras, picker, code lens, hover, virtual
-// documents, commands; wit-0.3/design.md sections 1-6) join this world in a later step.
+// FROZEN: fyx:ui 0.4.0, frozen after the P5 security review (platform plan 5.19,
+// tasks/reviews/p5-security-0.4.md) with settings (plan 6.1), review comments (7.2), published
+// diagnostics (6.6) and tree rows with file decorations (6.7). Only the integrator (W0) edits this
+// file, and only comments; any other change goes into the next version. Design:
+// docs/fyx/wit-0.4/design.md. Plan 4.2-4.4 (decoration extras, picker, code lens, hover, virtual
+// documents, commands; wit-0.3/design.md sections 1-6) join a later world.
 //
 // Everything of 0.3 is copied forward from ../since_v0.3.0/fyx-ui.wit, byte for byte except where a
 // comment says "0.4".
@@ -461,6 +463,9 @@ interface types {
         patches(list<patch>),
     }
 
+    /// 0.4 (plan 6.7, design.md §F.1). A tree row's chevron. `leaf` draws an empty chevron slot.
+    enum expansion { leaf, collapsed, expanded }
+
     record list-row {
         index: u32,
         /// Nesting depth, drawn by the host as indentation (tree views). The host draws at most
@@ -468,6 +473,8 @@ interface types {
         indent: u8,
         /// A subtree whose single root has `parent: none`. Ids are row-local (see `node-id`).
         nodes: list<node>,
+        /// 0.4 (plan 6.7). The chevron; Right, Left or a click on it sends `row-toggled`.
+        expansion: expansion,
     }
 
     /// Why the host closed a modal. Never sent when the extension closed it itself.
@@ -492,6 +499,10 @@ interface types {
         /// The user moved a list's selection with the keyboard (modals only). The host has already
         /// set `selected` in its tree; the extension need not echo it.
         row-selected(tuple<node-id, u32>),
+        /// 0.4 (plan 6.7). The list node, the row index, and `true` when the row asks to be
+        /// expanded. The host changes no rows: the extension answers with new rows. Grants no
+        /// activation.
+        row-toggled(tuple<node-id, u32, bool>),
         /// The host closed a modal surface; its tree is gone. The reply must be `unchanged`.
         dismissed(dismiss-reason),
         /// 0.3. A click on a `clickable` canvas, in canvas coordinates (after `scale-down`, so
@@ -1197,6 +1208,28 @@ interface review {
         final-content: string,
     }
 
+    /// 0.4 (plan 7.2). A comment's hunk: accepted (follow-up work), rejected (why) or still open.
+    enum comment-state { accepted, rejected, pending }
+    record review-comment {
+        path: file-ref,
+        /// Lines of the file after the change, 1-based and inclusive (`end` < `start`: lines were
+        /// removed after `start`); none when the review showed a fragment of the file.
+        lines: option<tuple<u32, u32>>,
+        state: comment-state,
+        /// The first changed line, at most 80 characters.
+        excerpt: string,
+        text: string,
+    }
+
+    /// 0.4 (plan 7.2). The user's comments on this extension's proposals, sent as one batch.
+    record review-comments {
+        /// The proposals' `session`.
+        session: string,
+        comments: list<review-comment>,
+        /// The comments as one prompt for the agent, with paths relative to the project.
+        prompt: string,
+    }
+
     /// The outcome arrives as `io-event::review-decided` with the returned id.
     propose: func(request: proposal) -> result<u64, host-error>;
     /// The tool closed its diff (Gemini's `closeDiff`, Claude's `close_tab`): an undecided
@@ -1211,7 +1244,7 @@ interface review {
 /// 0.4. Editor context and opening files (design.md B.11).
 interface context {
     use host.{host-error};
-    use types.{file-ref, text-range};
+    use types.{file-ref, text-range, color-token};
 
     record editor-context {
         active: option<file-ref>,
@@ -1269,6 +1302,33 @@ interface context {
     /// `workspace:diagnostics`: `io-event::diagnostics-changed`, debounced 300 ms, while on.
     /// `diagnostics` works without it; it is a fresh read.
     watch-diagnostics: func(on: bool) -> result<_, host-error>;
+
+    /// 0.4 (plan 6.6, design.md §E), `diagnostics:publish`: replaces this extension's diagnostics
+    /// of `path` (an empty list clears them). `source` is ignored: the host names the extension.
+    /// In no worktree is `invalid-argument`, a private file `not-permitted`; over 500 entries per
+    /// file or 5,000 per extension is `invalid-argument`; over 20 calls a second is `unavailable`.
+    publish-diagnostics: func(path: file-ref, diagnostics: list<diagnostic>) -> result<_, host-error>;
+    /// `diagnostics:publish`: clears this extension's diagnostics of one file, or of every file
+    /// with `none`.
+    clear-diagnostics: func(path: option<file-ref>) -> result<_, host-error>;
+
+    /// 0.4 (plan 6.7, design.md §F.2), `workspace:file-decorations`.
+    record file-decoration {
+        path: file-ref,
+        /// At most 2 characters, after the name.
+        badge: option<string>,
+        /// `text-accent`, `warning`, `error`, `success` or `text-muted`.
+        color: option<color-token>,
+        /// At most 256 bytes, under the extension's name in the entry's tooltip.
+        tooltip: option<string>,
+    }
+
+    /// Sets or replaces this extension's decoration of each path. At most 500 per call and
+    /// 10,000 per extension (`invalid-argument`, nothing changes); a private file is
+    /// `not-permitted`, one in no worktree `invalid-argument`.
+    decorate-files: func(decorations: list<file-decoration>) -> result<_, host-error>;
+    /// Removes this extension's decorations of these paths, or all of them with `none`.
+    clear-file-decorations: func(paths: option<list<file-ref>>) -> result<_, host-error>;
 }
 
 /// 0.4. Approval cards for a tool's own permission prompts (design.md B.12): `ui:approvals`. The
@@ -1286,6 +1346,37 @@ interface approvals {
     ask: func(tool: string, title: string, detail: string, options: list<approval-option>) -> result<u64, host-error>;
 }
 
+/// 0.4. The extension's own settings (design.md §D). No capability: the keys are the ones its
+/// `[[fyx_ui.settings]]` declares, and the user's values live in the user settings file.
+interface settings {
+    use host.{host-error};
+
+    variant setting-value {
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+        /// The choice's `value`, never its title.
+        choice(string),
+        text-list(list<string>),
+    }
+
+    /// `is-default` is true when the user set no value and `value` is the manifest's default.
+    record setting {
+        key: string,
+        value: setting-value,
+        is-default: bool,
+    }
+
+    /// The effective value of a declared key; `invalid-argument` for a key the manifest does not
+    /// declare.
+    get: func(key: string) -> result<setting-value, host-error>;
+    /// Every declared setting, in manifest order.
+    all: func() -> list<setting>;
+    /// Opens Fyx's settings at this extension's section, or at `key`. Needs a user gesture.
+    open: func(key: option<string>) -> result<_, host-error>;
+}
+
 /// 0.3. Outcomes of work that runs outside a call, delivered through `handle-io`.
 interface io {
     use network.{http-response, fetch-error};
@@ -1295,7 +1386,7 @@ interface io {
     use permissions.{t2-capability, permission-state};
     use terminals.{terminal-handle, terminal-info};
     use listeners.{mcp-call, mcp-session};
-    use review.{review-outcome};
+    use review.{review-outcome, review-comments};
     use context.{editor-context};
     use approvals.{approval-option};
     use types.{file-ref};
@@ -1343,6 +1434,8 @@ interface io {
         relay-request(tuple<u64, string, option<terminal-handle>, list<string>, string>),
         /// 0.4.
         review-decided(tuple<u64, result<review-outcome, string>>),
+        /// 0.4 (plan 7.2, design.md §B.10). Comments the user sent on this extension's proposals.
+        review-comments(review-comments),
         /// 0.4.
         context-changed(editor-context),
         /// 0.4. The files whose diagnostics changed, at most 200; empty when more changed (anything
@@ -1350,6 +1443,8 @@ interface io {
         diagnostics-changed(list<file-ref>),
         /// 0.4. None when the card closed unanswered.
         approval-answered(tuple<u64, option<approval-option>>),
+        /// 0.4. The keys whose effective value changed, in manifest order (design.md §D).
+        settings-changed(list<string>),
     }
 }
 
@@ -1477,6 +1572,7 @@ world ui-extension {
     import review;
     import context;
     import approvals;
+    import settings;
 
     // ---- 0.2, unchanged ----
 

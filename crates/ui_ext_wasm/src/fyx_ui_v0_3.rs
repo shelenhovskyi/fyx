@@ -88,6 +88,11 @@ fn diagnostics_io_event(_: Vec<ui_ext::process::FileRef>) -> Option<wit_io::IoEv
     None
 }
 
+/// 0.3 has no extension settings.
+fn settings_io_event(_: Vec<String>) -> Option<wit_io::IoEvent> {
+    None
+}
+
 /// 0.3 has no relay.
 fn relay_io_event(_: ui_ext::integration::RelayRequest) -> Option<wit_io::IoEvent> {
     None
@@ -98,6 +103,11 @@ fn review_io_event(
     _: u64,
     _: Result<ui_ext::review::ReviewOutcome, String>,
 ) -> Option<wit_io::IoEvent> {
+    None
+}
+
+/// 0.3 has no proposed edits, so no comments on them.
+fn review_comments_io_event(_: ui_ext::review::ReviewComments) -> Option<wit_io::IoEvent> {
     None
 }
 
@@ -134,7 +144,14 @@ conversions::conversions! {
             x: click.x.0,
             y: click.y.0,
         }),
+        // Never sent: a 0.3 row has no chevron.
+        model::UiEvent::RowToggled(id, row, _) => Self::RowSelected((id, row)),
     }
+}
+
+/// A row before 0.4 has no chevron (§F.4).
+fn list_row_expansion(_: &wit::ListRow) -> model::Expansion {
+    model::Expansion::Leaf
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.

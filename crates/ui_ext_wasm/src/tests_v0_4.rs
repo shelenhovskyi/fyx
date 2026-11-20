@@ -292,6 +292,10 @@ struct Setup {
     diagnostics: Option<Arc<dyn ui_ext::context::DiagnosticsSource>>,
     relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
     relay_binary: Option<PathBuf>,
+    /// `[[fyx_ui.settings]]`, checked, and the user's object for the extension.
+    settings: Vec<ui_ext::settings::SettingSpec>,
+    user_settings: Option<ui_ext::settings::RawValue>,
+    marks: Option<Arc<MarksRecorder>>,
 }
 
 impl Default for Setup {
@@ -312,6 +316,9 @@ impl Default for Setup {
             diagnostics: None,
             relay_channels: Vec::new(),
             relay_binary: None,
+            settings: Vec::new(),
+            user_settings: None,
+            marks: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -392,6 +399,16 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         diagnostics_source: setup.diagnostics.clone(),
         relay_channels: Some(setup.relay_channels.clone()),
         relay_binary: setup.relay_binary.clone(),
+        settings: Some(setup.settings.clone()),
+        user_settings: setup.user_settings.clone(),
+        diagnostics_publisher: setup
+            .marks
+            .clone()
+            .map(|marks| marks as Arc<dyn ui_ext::published_diagnostics::DiagnosticsPublisher>),
+        file_decorations: setup
+            .marks
+            .clone()
+            .map(|marks| marks as Arc<dyn ui_ext::file_decorations::FileDecorationsHost>),
         workspace: setup
             .workspace
             .clone()
@@ -923,6 +940,285 @@ async fn test_v0_4_approvals_need_the_capability(cx: &mut TestAppContext) {
         .retain(|capability| *capability != ui_ext::approvals::CAPABILITY_APPROVALS);
     let extension = load(&setup, cx).await.unwrap();
     assert_eq!(command(&extension, "ask - t once").await, "not-permitted");
+}
+
+/// Design §D.4, §D.7: `get` and `all` answer the effective values (an invalid user value gives
+/// the default), an undeclared key is `invalid-argument`, `open` needs a gesture, and a change of
+/// the user's values reaches `handle-io` as `settings-changed` with the changed keys only.
+#[gpui::test]
+async fn test_v0_4_settings(cx: &mut TestAppContext) {
+    let entries: Vec<ui_ext::settings::SettingEntry> = serde_json::from_value(serde_json::json!([
+        {"key": "block-on-diff", "title": "Wait for review", "type": "boolean", "default": true},
+        {"key": "max-open-diffs", "title": "Open diffs", "type": "integer", "default": 8,
+         "min": 1, "max": 64},
+    ]))
+    .unwrap();
+    let raw = |value: serde_json::Value| {
+        serde_json::from_value::<ui_ext::settings::RawValue>(value).unwrap()
+    };
+    let setup = Setup {
+        settings: ui_ext::settings::check_settings(&entries).unwrap(),
+        user_settings: Some(raw(serde_json::json!({"max-open-diffs": 100}))),
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, "settings").await,
+        "block-on-diff=true*,max-open-diffs=8*"
+    );
+    assert_eq!(command(&extension, "setting max-open-diffs").await, "8");
+    assert_eq!(
+        command(&extension, "setting nope").await,
+        "invalid-argument"
+    );
+    assert!(
+        extension
+            .effective_settings()
+            .errors
+            .contains_key("max-open-diffs")
+    );
+
+    // `open`: not-permitted without a gesture; with one, an effect for the host.
+    assert_eq!(command(&extension, "open-settings").await, "not-permitted");
+    assert_eq!(
+        click(&extension, "open-settings nope").await,
+        "invalid-argument"
+    );
+    let armed = extension
+        .handle_event_v0_2(
+            SURFACE,
+            UiEvent::InputChanged(1, "arm open-settings max-open-diffs".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report(&armed.value), "armed");
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::Click(1))
+        .await
+        .unwrap();
+    assert_eq!(report(&reply.value), "done");
+    assert_eq!(
+        reply.effects,
+        [HostEffect::OpenSettings {
+            key: Some("max-open-diffs".into())
+        }]
+    );
+
+    let mut events = extension.take_io_events().unwrap();
+    assert_eq!(
+        extension.set_user_settings(Some(&raw(serde_json::json!({"max-open-diffs": 4})))),
+        ["max-open-diffs"]
+    );
+    // Nothing changes, nothing is sent.
+    assert!(
+        extension
+            .set_user_settings(Some(&raw(serde_json::json!({"max-open-diffs": 4, "x": 1}))))
+            .is_empty()
+    );
+    assert_eq!(extension.set_user_settings(None), ["max-open-diffs"]);
+    assert_eq!(
+        pushed(&extension, &mut events, 2).await,
+        [
+            "settings-changed max-open-diffs",
+            "settings-changed max-open-diffs"
+        ]
+    );
+    assert_eq!(
+        command(&extension, "settings").await,
+        "block-on-diff=true*,max-open-diffs=8*"
+    );
+}
+
+/// §F.1 through the WIT: a 0.4 row's chevron reaches the model, and `row-toggled` reaches the
+/// extension with the list, the row and the direction.
+#[gpui::test]
+async fn test_v0_4_tree_rows(cx: &mut TestAppContext) {
+    let extension = load(&Setup::default(), cx).await.unwrap();
+    let rows = extension
+        .list_rows_v0_2(SURFACE, 7, 3, 3)
+        .await
+        .unwrap()
+        .value;
+    let expansions: Vec<_> = rows.iter().map(|row| (row.index, row.expansion)).collect();
+    assert_eq!(
+        expansions,
+        [
+            (3, ui_ext::v0_2::Expansion::Leaf),
+            (4, ui_ext::v0_2::Expansion::Collapsed),
+            (5, ui_ext::v0_2::Expansion::Expanded),
+        ]
+    );
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::RowToggled(7, 4, true))
+        .await
+        .unwrap();
+    assert_eq!(report(&reply.value), "toggled 7 4 true");
+}
+
+/// What the host was asked to publish and decorate (§E, §F.2).
+#[derive(Default)]
+struct MarksRecorder {
+    calls: Mutex<Vec<String>>,
+}
+
+impl MarksRecorder {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+}
+
+impl ui_ext::published_diagnostics::DiagnosticsPublisher for MarksRecorder {
+    fn publish(
+        &self,
+        extension_id: &str,
+        path: ui_ext::process::FileRef,
+        diagnostics: Vec<ui_ext::context::Diagnostic>,
+    ) -> Result<(), String> {
+        let sources = diagnostics
+            .iter()
+            .filter(|entry| entry.source.is_some())
+            .count();
+        self.calls.lock().unwrap().push(format!(
+            "publish {extension_id} {:?}:{} {} sources:{sources}",
+            path.worktree,
+            path.path,
+            diagnostics.len()
+        ));
+        Ok(())
+    }
+
+    fn clear_all(&self, extension_id: &str) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("clear-all {extension_id}"));
+    }
+
+    fn is_private(&self, absolute: &std::path::Path) -> bool {
+        absolute.ends_with(".env")
+    }
+}
+
+impl ui_ext::file_decorations::FileDecorationsHost for MarksRecorder {
+    fn decorate(
+        &self,
+        extension_id: &str,
+        decorations: Vec<ui_ext::file_decorations::FileDecoration>,
+    ) -> Result<(), String> {
+        for decoration in decorations {
+            self.calls.lock().unwrap().push(format!(
+                "decorate {extension_id} {}:{:?}",
+                decoration.path.path, decoration.badge
+            ));
+        }
+        Ok(())
+    }
+
+    fn clear(&self, extension_id: &str, paths: Option<Vec<ui_ext::process::FileRef>>) {
+        self.calls.lock().unwrap().push(format!(
+            "clear {extension_id} {:?}",
+            paths.map(|paths| paths.len())
+        ));
+    }
+
+    fn is_private(&self, absolute: &std::path::Path) -> bool {
+        absolute.ends_with(".env")
+    }
+}
+
+/// Design §E.4, §F.5 through the WIT: the capability first, then the path rules and limits;
+/// what the instance published goes when it is dropped.
+#[gpui::test]
+async fn test_v0_4_publish_diagnostics_and_decorate_files(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    for file in ["src/a.rs", ".env"] {
+        std::fs::write(dir.path().join(file), "TODO\n").unwrap();
+    }
+    let marks = Arc::new(MarksRecorder::default());
+    let mut setup = Setup {
+        marks: Some(marks.clone()),
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: dir.path().to_path_buf(),
+            trusted: true,
+        }]),
+        ..Setup::default()
+    };
+    // Without the capabilities.
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, "publish - src/a.rs 1").await,
+        "not-permitted"
+    );
+    assert_eq!(
+        command(&extension, "decorate - src/a.rs X").await,
+        "not-permitted"
+    );
+    drop(extension);
+
+    setup.capabilities.extend([
+        ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH,
+        ui_ext::integration::CAPABILITY_FILE_DECORATIONS,
+    ]);
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&extension, "publish - src/a.rs 2").await, "done");
+    assert_eq!(
+        marks.take(),
+        ["publish probe-v0-4 Some(1):src/a.rs 2 sources:0"]
+    );
+    assert_eq!(
+        command(&extension, "publish - .env 1").await,
+        "not-permitted"
+    );
+    assert_eq!(
+        command(&extension, "publish - missing.rs 1").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "publish - src/a.rs 501").await,
+        "invalid-argument"
+    );
+    assert_eq!(command(&extension, "clear-diag - src/a.rs").await, "done");
+    assert_eq!(
+        marks.take(),
+        ["publish probe-v0-4 Some(1):src/a.rs 0 sources:0"]
+    );
+    assert_eq!(command(&extension, "clear-diag").await, "done");
+    assert_eq!(marks.take(), ["clear-all probe-v0-4"]);
+
+    assert_eq!(command(&extension, "decorate - src ★").await, "done");
+    assert_eq!(
+        command(&extension, "decorate - src/a.rs abc").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "decorate - src/a.rs X surface").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "decorate - .env X").await,
+        "not-permitted"
+    );
+    assert_eq!(command(&extension, "clear-deco - src").await, "done");
+    assert_eq!(command(&extension, "publish - src/a.rs 1").await, "done");
+    assert_eq!(command(&extension, "decorate - src/a.rs X").await, "done");
+    assert_eq!(
+        marks.take(),
+        [
+            "decorate probe-v0-4 src:Some(\"★\")",
+            "clear probe-v0-4 Some(1)",
+            "publish probe-v0-4 Some(1):src/a.rs 1 sources:0",
+            "decorate probe-v0-4 src/a.rs:Some(\"X\")",
+        ]
+    );
+
+    // The instance goes: its marks go at the host.
+    drop(extension);
+    wait_for(cx, 2000, || marks.calls.lock().unwrap().len() >= 2);
+    let mut cleared = marks.take();
+    cleared.sort();
+    assert_eq!(cleared, ["clear probe-v0-4 None", "clear-all probe-v0-4"]);
 }
 
 #[test]

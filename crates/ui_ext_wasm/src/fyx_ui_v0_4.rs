@@ -33,7 +33,8 @@ use bindings::fyx::ui::{
     decorations as wit_decorations, host as wit_host, images as wit_images, io as wit_io,
     listeners as wit_listeners, network as wit_network, notifications as wit_notifications,
     permissions as wit_permissions, process as wit_process, relay as wit_relay,
-    review as wit_review, terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
+    review as wit_review, settings as wit_settings, terminals as wit_terminals, types as wit,
+    workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(
@@ -298,6 +299,39 @@ fn review_io_event(
     )))
 }
 
+/// The `review-comments` case (design wit-0.4 §B.10, plan 7.2).
+fn review_comments_io_event(comments: ui_ext::review::ReviewComments) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::ReviewComments(wit_review_comments(
+        comments,
+    )))
+}
+
+fn wit_review_comments(comments: ui_ext::review::ReviewComments) -> wit_review::ReviewComments {
+    use ui_ext::review::CommentState;
+    wit_review::ReviewComments {
+        session: comments.session,
+        comments: comments
+            .comments
+            .into_iter()
+            .map(|comment| wit_review::ReviewComment {
+                path: wit::FileRef {
+                    worktree: comment.path.worktree,
+                    path: comment.path.path,
+                },
+                lines: comment.lines,
+                state: match comment.state {
+                    CommentState::Accepted => wit_review::CommentState::Accepted,
+                    CommentState::Rejected => wit_review::CommentState::Rejected,
+                    CommentState::Pending => wit_review::CommentState::Pending,
+                },
+                excerpt: comment.excerpt,
+                text: comment.text,
+            })
+            .collect(),
+        prompt: comments.prompt,
+    }
+}
+
 /// `context` (design.md §B.11) over [`crate::editor_context::ContextHandle`]: `watch`,
 /// `to-file-ref` and `absolute-path` need `context:editor`, `open` needs `workspace:open`,
 /// `diagnostics` and `watch-diagnostics` need `workspace:diagnostics`.
@@ -376,6 +410,114 @@ impl wit_context::Host for UiState {
             return Ok(Err(error.into()));
         }
         Ok(self.context.watch_diagnostics(on).map_err(Into::into))
+    }
+
+    // Staged in the 0.4 WIT ahead of the host side (plan 6.6 §E: W2c checks, W3 collection;
+    // plan 6.7 §F.2: W3 project panel).
+    fn publish_diagnostics(
+        &mut self,
+        path: wit::FileRef,
+        diagnostics: Vec<wit_context::Diagnostic>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            path.path.len()
+                + diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.len())
+                    .sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .marks
+            .publish_diagnostics(
+                file_ref(path),
+                diagnostics.into_iter().map(model_diagnostic).collect(),
+            )
+            .map_err(Into::into))
+    }
+
+    fn clear_diagnostics(
+        &mut self,
+        path: Option<wit::FileRef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(path.as_ref().map_or(0, |path| path.path.len()))?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .marks
+            .clear_diagnostics(path.map(file_ref))
+            .map_err(Into::into))
+    }
+
+    fn decorate_files(
+        &mut self,
+        decorations: Vec<wit_context::FileDecoration>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            decorations
+                .iter()
+                .map(|decoration| {
+                    decoration.path.path.len()
+                        + decoration.badge.as_ref().map_or(0, String::len)
+                        + decoration.tooltip.as_ref().map_or(0, String::len)
+                })
+                .sum(),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .marks
+            .decorate_files(
+                decorations
+                    .into_iter()
+                    .map(|decoration| ui_ext::file_decorations::FileDecoration {
+                        path: file_ref(decoration.path),
+                        badge: decoration.badge,
+                        color: decoration.color.map(Into::into),
+                        tooltip: decoration.tooltip,
+                    })
+                    .collect(),
+            )
+            .map_err(Into::into))
+    }
+
+    fn clear_file_decorations(
+        &mut self,
+        paths: Option<Vec<wit::FileRef>>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            paths
+                .as_ref()
+                .map_or(0, |paths| paths.iter().map(|path| path.path.len()).sum()),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
+            return Ok(Err(error.into()));
+        }
+        Ok(self
+            .marks
+            .clear_file_decorations(paths.map(|paths| paths.into_iter().map(file_ref).collect()))
+            .map_err(Into::into))
+    }
+}
+
+/// A published `diagnostic` (§E.1); `source` is dropped by the checks.
+fn model_diagnostic(entry: wit_context::Diagnostic) -> ui_ext::context::Diagnostic {
+    use ui_ext::context::DiagnosticSeverity;
+    ui_ext::context::Diagnostic {
+        range: text_range(entry.range),
+        severity: match entry.severity {
+            wit_context::Severity::Error => DiagnosticSeverity::Error,
+            wit_context::Severity::Warning => DiagnosticSeverity::Warning,
+            wit_context::Severity::Information => DiagnosticSeverity::Information,
+            wit_context::Severity::Hint => DiagnosticSeverity::Hint,
+        },
+        message: entry.message,
+        source: entry.source,
+        code: entry.code,
     }
 }
 
@@ -481,6 +623,63 @@ impl wit_approvals::Host for UiState {
         };
         Ok(self.api.ask_approval(request).map_err(Into::into))
     }
+}
+
+/// `settings` (design.md §D.4) over [`crate::extension_settings::SettingsHandle`]: no
+/// capability; the keys are the manifest's `[[fyx_ui.settings]]`, the values the user's (user
+/// settings file only), checked, else the defaults.
+impl wit_settings::Host for UiState {
+    fn get(
+        &mut self,
+        key: String,
+    ) -> wasmtime::Result<Result<wit_settings::SettingValue, wit_host::HostError>> {
+        self.count_lifted_text(key.len())?;
+        Ok(self
+            .settings
+            .get(&key)
+            .map(setting_value)
+            .map_err(Into::into))
+    }
+
+    fn all(&mut self) -> wasmtime::Result<Vec<wit_settings::Setting>> {
+        Ok(self
+            .settings
+            .all()
+            .into_iter()
+            .map(|setting| wit_settings::Setting {
+                key: setting.key,
+                value: setting_value(setting.value),
+                is_default: setting.is_default,
+            })
+            .collect())
+    }
+
+    /// Only while the user acts on one of the extension's surfaces (an event call), else
+    /// `not-permitted`; `invalid-argument` for an undeclared key.
+    fn open(&mut self, key: Option<String>) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(key.as_ref().map_or(0, String::len))?;
+        Ok(self
+            .api
+            .open_settings(&self.settings, key)
+            .map_err(Into::into))
+    }
+}
+
+fn setting_value(value: ui_ext::settings::SettingValue) -> wit_settings::SettingValue {
+    use ui_ext::settings::SettingValue as Value;
+    match value {
+        Value::Boolean(value) => wit_settings::SettingValue::Boolean(value),
+        Value::Integer(value) => wit_settings::SettingValue::Integer(value),
+        Value::Number(value) => wit_settings::SettingValue::Number(value),
+        Value::Text(value) => wit_settings::SettingValue::Text(value),
+        Value::Choice(value) => wit_settings::SettingValue::Choice(value),
+        Value::TextList(value) => wit_settings::SettingValue::TextList(value),
+    }
+}
+
+/// The `settings-changed` case.
+fn settings_io_event(keys: Vec<String>) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::SettingsChanged(keys))
 }
 
 /// `listeners` (design.md §B.7) over [`crate::listeners::ListenersHandle`]: a listener the
@@ -823,6 +1022,16 @@ conversions::conversions! {
             x: click.x.0,
             y: click.y.0,
         }),
+        model::UiEvent::RowToggled(id, row, expand) => Self::RowToggled((id, row, expand)),
+    }
+}
+
+/// A 0.4 row's chevron (§F.4).
+fn list_row_expansion(row: &wit::ListRow) -> model::Expansion {
+    match row.expansion {
+        wit::Expansion::Leaf => model::Expansion::Leaf,
+        wit::Expansion::Collapsed => model::Expansion::Collapsed,
+        wit::Expansion::Expanded => model::Expansion::Expanded,
     }
 }
 
@@ -844,6 +1053,7 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "context",
     "review",
     "relay",
+    "settings",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -866,5 +1076,6 @@ pub(crate) fn add_to_linker(
     wit_context::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_review::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_relay::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_settings::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

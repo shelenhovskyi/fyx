@@ -115,6 +115,8 @@ struct CachedRow {
     tree: Option<Tree>,
     /// Levels to indent the row by (0.2's `list-row.indent`, clamped).
     indent: u8,
+    /// 0.4 (§F.1): the row's chevron.
+    expansion: ui_ext::v0_2::Expansion,
 }
 
 /// An event waiting for the extension, with what it was aimed at when the user made it.
@@ -124,6 +126,9 @@ struct QueuedEvent {
     /// before this event is sent makes the index point at another row, so the event is dropped.
     row_generation: Option<u64>,
 }
+
+/// Frames whose render time the Inspector's slowest figure covers.
+const RENDER_TIMES_KEPT: usize = 64;
 
 pub struct SurfaceState {
     backend: Rc<dyn UiBackend>,
@@ -168,6 +173,9 @@ pub struct SurfaceState {
     next_row_generation: u64,
     /// Recent events and updates, for the Extension Inspector.
     history: VecDeque<HistoryEntry>,
+    /// How long the views took to render the last frames, for the Inspector (plan 7.7). Written
+    /// while rendering, which only reads the state.
+    render_times: std::cell::RefCell<VecDeque<Duration>>,
     /// What differs by the component's `fyx:ui` version.
     rules: ApiRules,
     /// The raw error of the failure that stopped the extension, behind "Copy Error Details".
@@ -424,6 +432,7 @@ impl SurfaceState {
             last_remount: None,
             next_row_generation: 0,
             history: VecDeque::new(),
+            render_times: Default::default(),
             rules: ApiRules::for_version(&backend_version),
             backend_epoch: 0,
             failure_detail: None,
@@ -625,6 +634,28 @@ impl SurfaceState {
         &self.history
     }
 
+    /// A view rendered the surface: a new frame's render time.
+    pub(crate) fn record_render(&self, duration: Duration) {
+        let mut times = self.render_times.borrow_mut();
+        if times.len() == RENDER_TIMES_KEPT {
+            times.pop_front();
+        }
+        times.push_back(duration);
+    }
+
+    /// A cached chunk rendered in the same frame, after the view.
+    pub(crate) fn add_to_last_render(&self, duration: Duration) {
+        if let Some(last) = self.render_times.borrow_mut().back_mut() {
+            *last += duration;
+        }
+    }
+
+    /// The last frame's render time and the slowest of the recent ones.
+    pub fn render_times(&self) -> Option<(Duration, Duration)> {
+        let times = self.render_times.borrow();
+        Some((*times.back()?, times.iter().max().copied()?))
+    }
+
     /// The instance's recent calls, `log` output and capability checks, if the backend keeps them.
     pub fn diagnostics(&self) -> Option<ui_ext_wasm::diagnostics::Diagnostics> {
         self.backend.diagnostics()
@@ -700,7 +731,9 @@ impl SurfaceState {
         let row_generation = match &event {
             // The generation of the row the user saw, which may be older than the list's
             // current one while its replacement is on the way (integration-3 finding 9).
-            UiEvent::RowClick(list, index) => Some(self.drawn_row_generation(*list, *index)),
+            UiEvent::RowClick(list, index) | UiEvent::RowToggled(list, index, _) => {
+                Some(self.drawn_row_generation(*list, *index))
+            }
             _ => None,
         };
         self.events.push_back(Queued::Event(QueuedEvent {
@@ -781,9 +814,10 @@ impl SurfaceState {
                 Some(target) => self.tree().is_some_and(|tree| tree.contains(target)),
             };
             let same_rows = match (&event, row_generation) {
-                (UiEvent::RowClick(list, _), Some(generation)) => {
-                    self.row_generation(*list) == generation
-                }
+                (
+                    UiEvent::RowClick(list, _) | UiEvent::RowToggled(list, _, _),
+                    Some(generation),
+                ) => self.row_generation(*list) == generation,
                 _ => true,
             };
             if still_there && same_rows {
@@ -1217,6 +1251,33 @@ impl SurfaceState {
             .map_or(0, |row| row.indent)
     }
 
+    /// 0.4 (§F.1): the row's chevron; `leaf` while it is not fetched.
+    pub fn row_expansion(&self, list: NodeId, index: u32) -> ui_ext::v0_2::Expansion {
+        self.lists
+            .get(&list)
+            .and_then(|cache| cache.rows.get(&index))
+            .map(|row| row.expansion)
+            .unwrap_or_default()
+    }
+
+    /// Whether `list` draws a chevron slot: some fetched row is not a `leaf` (§F.1).
+    pub fn list_is_tree(&self, list: NodeId) -> bool {
+        self.lists
+            .get(&list)
+            .is_some_and(|cache| cache.rows.values().any(|row| !row.expansion.is_leaf()))
+    }
+
+    /// The nearest fetched row above `index` that is indented less: the row Left moves to.
+    pub fn parent_row(&self, list: NodeId, index: u32) -> Option<u32> {
+        let cache = self.lists.get(&list)?;
+        let indent = cache.rows.get(&index)?.indent;
+        (0..index)
+            .rev()
+            .map_while(|above| cache.rows.get(&above).map(|row| (above, row.indent)))
+            .find(|(_, above)| *above < indent)
+            .map(|(above, _)| above)
+    }
+
     /// Makes sure rows `range` of `list` are fetched, without waiting for them. Cheap when they
     /// are cached, so views call it for the visible range on every layout. Requests made during
     /// one layout are merged into one `list-rows` call, made right after it.
@@ -1345,6 +1406,7 @@ impl SurfaceState {
                     for index in range.clone() {
                         let row = answered.remove(&index);
                         let indent = row.as_ref().map_or(0, |row| row.indent);
+                        let expansion = row.as_ref().map(|row| row.expansion).unwrap_or_default();
                         let tree = row.map(|row| row.tree);
                         cache.rows.insert(
                             index,
@@ -1352,6 +1414,7 @@ impl SurfaceState {
                                 generation,
                                 tree,
                                 indent,
+                                expansion,
                             },
                         );
                     }

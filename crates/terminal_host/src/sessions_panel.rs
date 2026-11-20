@@ -44,6 +44,8 @@ pub struct AgentSessionsPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
     _observe_sessions: Subscription,
+    /// Plan 7.8: today's cost line follows the meters.
+    _observe_meters: Option<Subscription>,
 }
 
 impl AgentSessionsPanel {
@@ -54,6 +56,8 @@ impl AgentSessionsPanel {
     ) -> Self {
         Self {
             _observe_sessions: cx.observe(&sessions, |_, _, cx| cx.notify()),
+            _observe_meters: crate::usage_meters::global(cx)
+                .map(|meters| cx.observe(&meters, |_, _, cx| cx.notify())),
             workspace,
             sessions,
             focus_handle: cx.focus_handle(),
@@ -165,6 +169,10 @@ impl Render for AgentSessionsPanel {
                         )
                 }))
         };
+        let today = crate::usage_meters::global(cx).and_then(|meters| {
+            let meters = meters.read(cx);
+            crate::usage_meters::today_line(&meters.today(), meters.cap_state(cx))
+        });
         v_flex()
             .key_context("AgentSessionsPanel")
             .track_focus(&self.focus_handle)
@@ -177,6 +185,18 @@ impl Render for AgentSessionsPanel {
                     .overflow_y_scroll()
                     .child(body),
             )
+            .children(today.map(|(line, reached)| {
+                h_flex()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(Label::new(line).size(LabelSize::Small).color(if reached {
+                        Color::Warning
+                    } else {
+                        Color::Muted
+                    }))
+            }))
     }
 }
 

@@ -1,7 +1,7 @@
 # `ui_ext_sdk` reference
 
 `ui_ext_sdk` is the Rust guest SDK for Fyx UI extensions, built on `wit-bindgen` 0.41 over the
-`fyx:ui@0.2.0` world, or the staged `fyx:ui@0.3.0` world (Dev and Nightly builds of Fyx run it)
+`fyx:ui@0.2.0` world, or the `fyx:ui@0.3.0` world (or 0.4 with `fyx-ui-0-4`)
 with its `fyx-ui-0-3` feature; one source also exports the older worlds. It is licensed Apache-2.0, so extensions (proprietary ones included) stay
 outside the GPL. It is not on crates.io yet, so depend on it by path (see
 [Project layout](extension-authoring.md#project-layout)).
@@ -133,8 +133,8 @@ register_extension!(MyExtension, v0_2);  // exports fyx:ui 0.2
 register_extension!(MyExtension, v0_1);  // exports fyx:ui 0.1, for hosts that only run 0.1
 ```
 
-The SDK's types and functions are those of its world (`API_VERSION`): `fyx:ui@0.2.0`, or the
-staged `fyx:ui@0.3.0` with the SDK's `fyx-ui-0-3` cargo feature. The feature is off by default,
+The SDK's types and functions are those of its world (`API_VERSION`): `fyx:ui@0.2.0`, or
+`fyx:ui@0.3.0` with the SDK's `fyx-ui-0-3` cargo feature. The feature is off by default,
 so that only a 0.3 build links the 0.3 world description; a 0.1 or 0.2 component then imports
 `fyx:ui` interfaces of its own version only. One extension source exports any world up to the
 SDK's. Code that must build both ways uses `DecorationLocation::at(path, line, placement)` and
@@ -648,6 +648,19 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - a spawn needs an open, trusted worktree;
   - at most 4 processes, 256 arguments (128 KiB), 32 environment pairs;
   - stdin: 1 MiB per write and 4 MiB queued.
+- **On macOS (plan 7.5):** the program runs under a Seatbelt profile (`ui_ext::seatbelt`).
+  - It reads the system, toolchain directories (`~/.cargo`, `~/.rustup`, `~/.nvm`, …, and the
+    home directories on its `PATH`), its own directory and its worktree. The rest of the home
+    directory and other worktrees are denied.
+  - It writes its worktree, except `.git/hooks`, `.git/config`, `.zed`, `.fyx`, `.vscode`,
+    `.idea` and `.envrc`, and its own `TMPDIR`, which is removed when it exits.
+  - It has no network, unless the extension declares `[fyx_ui.network] domains` and holds
+    `network:fetch`. Then `HTTPS_PROXY` points at a Fyx proxy that allows those hosts (ports
+    and loopback are not passed on), and revoking `network:fetch` kills the program.
+  - A project can narrow that with `.fyx/egress.json` in the worktree root,
+    `{"hosts": ["api.github.com", "*.crates.io"]}`. Only declared hosts the list covers stay.
+    A file that does not parse allows nothing.
+  - Windows keeps the job object and Linux the process group for now.
 - **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
 
 With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `workspace:edit` and `agent:observe` (design

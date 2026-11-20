@@ -37,9 +37,11 @@ findings that belong to an item are noted next to it (`tasks/reviews/integration
 | 9 | W2c (later) | Move `crates/extension_host/src/wasm_host/fyx_ui*` into a Fyx-owned crate, no hook in `extension_host` (done: `crates/ui_ext_wasm`, W3) | Also integration-1 #11 and F2 |
 | 10 | W0 | `fyx:ui` 0.2 design as one world: `request-tick` and `modal` first, then the rest of `tasks/wit-0.2.md` | Add `push-update -> result` (integration-3 #6) |
 | 11 | W0 | Own CI: `fyx_*` GitHub workflows (gate, lockfile check, licenses, demo build). All 46 upstream Zed workflows are disabled on the fork | Mark the `Cargo.toml` members (integration-1 #13) |
-| 12 | W8 | VS Code adapter, Rust side: launch the sidecar under `--permission`, bridge JSON-RPC to the `ui_ext` tree and answer `push-update` | W8-7 to W8-10, `main.ts` sandbox check (W8-9) |
+| 12 | W8 | ~~VS Code adapter, Rust side: launch the sidecar under `--permission`, bridge JSON-RPC to the `ui_ext` tree and answer `push-update`~~ **Dropped (owner, 2026-11-20).** Fyx does not support VS Code extensions at all | Reason: [roadmap-and-vscode-port.md](docs/fyx/research/roadmap-and-vscode-port.md): the extensions users miss are Microsoft-licensed, LSP-based or webview-based; Node `--permission` is no sandbox; 5–15× memory and slower start. `sidecars/vscode-host` and `tools/vsix-convert` are unsupported; removal is a separate step |
 | 13 | W5 + W3 | One shared end-to-end dev driver, built from W5's review script driver, that also drives `fyx:ui` panels. Compiled only into dev builds | Replaces per-stream drivers |
 | 14 | W7 | Fix the author docs' drift (D1–D10), then keep `docs/fyx/` checked against each merge | integration-3, docs section |
+| 15 | W1, W2c, W3, W4, W5 | **P6 product basics** (owner, 2026-11-20): extension settings in the 0.4 WIT (6.1), self-updater (6.2), local history and agent timeline (6.3), local crash reports (6.4), local/BYO edit predictions (6.5); after 1.0, extension diagnostics (6.6) and tree views with file badges (6.7) | [docs/fyx/platform/plan.md P6](docs/fyx/platform/plan.md#p6-product-basics); 6.1 before the 0.4 freeze, 6.2–6.5 before 1.0 |
+| 16 | W1, W2c, W3, W5 | **P7 differentiators** (owner, 2026-11-20): local unsigned Mac build and Mac check (7.1), review comments to the agent (7.2), agent guardrails (7.3), agent secrets vault with Keychain and Touch ID (7.4), Seatbelt and network policy (7.5), privacy report (7.6), fast extension UI (7.7), cost meters and Dock badge (7.8), agent sessions board (7.9). No Apple Developer account for now; local models skipped | [docs/fyx/platform/plan.md P7](docs/fyx/platform/plan.md#p7-differentiators); 7.1 first |
 
 ## Rules for every agent
 
@@ -67,7 +69,7 @@ findings that belong to an item are noted next to it (`tasks/reviews/integration
 | W5 Agent change review | [tasks/W5-agent-review.md](tasks/W5-agent-review.md) | W3 container |
 | W6 Decorations (stretch) | [tasks/W6-decorations.md](tasks/W6-decorations.md) | W3 |
 | W7 Judge/reviewer/docs | [tasks/W7-judge.md](tasks/W7-judge.md) | — |
-| W8 VS Code adapter | [tasks/W8-vscode-adapter.md](tasks/W8-vscode-adapter.md) | tree schema (W2), JSON-RPC can be mocked |
+| W8 VS Code adapter (dropped 2026-11-20) | [tasks/W8-vscode-adapter.md](tasks/W8-vscode-adapter.md) | tree schema (W2), JSON-RPC can be mocked |
 
 Scale the non-compiling streams (W7, W8, demo authors, `ui_ext` unit tests) to use spare capacity;
 compiling streams (W3, W5, W6) are capped by disk and CPU.
@@ -85,6 +87,11 @@ running more than 2–3 compiling streams at once.
 - Trademark: several US FYX marks exist in classes 9 and 42; talk to a trademark lawyer before any
   commercialisation.
 - Whether the build may talk to Zed's extension registry at all (Zed ToS apply).
+
+**Decided:** Fyx does not support VS Code extensions: no Node sidecar, no `.vsix` import or
+conversion as a feature (owner, 2026-11-20). Backlog item 12 is dropped; the W8 code stays in the
+repository, unsupported, until a separate removal step. Research:
+[roadmap-and-vscode-port.md](docs/fyx/research/roadmap-and-vscode-port.md).
 
 **Decided:** the Fyx extension registry repo is `shelenhovskyi/fyx-extensions`, next to `fyx`
 (owner, 2026-11-17). It is created in Platform 1 task 3.1, not before.

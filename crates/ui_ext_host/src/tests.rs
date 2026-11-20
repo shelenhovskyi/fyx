@@ -87,6 +87,8 @@ struct FakeBackend {
     modals_closed: RefCell<Vec<String>>,
     /// The guest execution the Inspector records for the last tick call, if any.
     tick_executed: Cell<Option<Duration>>,
+    /// Rows as a tree (§F.1): even rows collapsed parents, odd rows their indented leaves.
+    tree_rows: Cell<bool>,
 }
 
 struct FakeLink(Rc<FakeBackend>);
@@ -397,9 +399,15 @@ impl UiBackend for FakeBackend {
                         None,
                         text(format!("Row {} of {total}", index + 1)),
                     )];
+                    let (indent, expansion) = match (self.tree_rows.get(), index % 2) {
+                        (false, _) => (0, ui_ext::v0_2::Expansion::Leaf),
+                        (true, 0) => (0, ui_ext::v0_2::Expansion::Collapsed),
+                        (true, _) => (1, ui_ext::v0_2::Expansion::Leaf),
+                    };
                     crate::backend::Row {
                         index,
-                        indent: 0,
+                        indent,
+                        expansion,
                         tree: Tree::from_row(row, TreeLimits::default()).expect("valid row"),
                     }
                 })
@@ -1448,6 +1456,50 @@ async fn test_list_selection_keys_and_enter(cx: &mut TestAppContext) {
     assert_eq!(backend.events(), [UiEvent::RowClick(LIST, 2)]);
 }
 
+/// §F.1: a tree list draws chevrons; a chevron click and Right ask to expand a collapsed row,
+/// Left on a leaf selects its parent; none of it selects or clicks a row.
+#[gpui::test]
+async fn test_tree_rows_toggle(cx: &mut TestAppContext) {
+    init_test(cx);
+    let backend = Rc::new(FakeBackend::default());
+    backend.count.set(4);
+    backend.tree_rows.set(true);
+    let state = new_state(&backend, cx);
+    let (view, vcx) = open_view(&state, cx);
+    vcx.run_until_parked();
+    assert!(state.read_with(vcx, |state, _| state.list_is_tree(LIST)));
+    backend.take_calls();
+
+    let chevron = vcx
+        .debug_bounds(format!("fyx-row-chevron-{LIST}-2").leak())
+        .expect("a chevron on row 2");
+    vcx.simulate_click(chevron.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(backend.events(), [UiEvent::RowToggled(LIST, 2, true)]);
+    assert_eq!(
+        view.read_with(vcx, |view, _| view.selection.get(&LIST).copied()),
+        None,
+        "the chevron does not select"
+    );
+    backend.take_calls();
+
+    let list_focus = view.read_with(vcx, |view, _| view.list_focus[&LIST].clone());
+    vcx.update(|window, cx| list_focus.focus(window, cx));
+    vcx.run_until_parked();
+    key("down", vcx);
+    key("right", vcx);
+    assert_eq!(backend.events(), [UiEvent::RowToggled(LIST, 0, true)]);
+    backend.take_calls();
+    key("down", vcx);
+    key("left", vcx);
+    assert_eq!(
+        view.read_with(vcx, |view, _| view.selection.get(&LIST).copied()),
+        Some(0),
+        "Left on a leaf selects its parent"
+    );
+    assert!(backend.events().is_empty());
+}
+
 #[gpui::test]
 async fn test_focus_moves_on_when_its_node_is_removed(cx: &mut TestAppContext) {
     init_test(cx);
@@ -1511,6 +1563,7 @@ async fn test_a_stale_row_answer_after_a_remount_is_dropped(cx: &mut TestAppCont
                 crate::backend::Row {
                     index,
                     indent: 0,
+                    expansion: Default::default(),
                     tree: Tree::from_row(row, TreeLimits::default()).expect("valid row"),
                 }
             })
