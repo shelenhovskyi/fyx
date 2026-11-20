@@ -529,6 +529,7 @@ macro_rules! __fyx_host_shims {
             $crate::__fyx_context_shims!($world);
             $crate::__fyx_review_shims!($world);
             $crate::__fyx_relay_shims!($world);
+            $crate::__fyx_settings_shims!($world);
         };
     };
 }
@@ -1023,6 +1024,41 @@ macro_rules! __fyx_relay_shims {
     ($world:ident) => {};
 }
 
+/// The shims of the 0.4 [`settings`] functions; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_settings_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_get(
+            key: &str,
+        ) -> ::std::result::Result<$crate::settings::SettingValue, $crate::HostError> {
+            $crate::__private::settings::$world::get(key)
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_all()
+        -> ::std::result::Result<::std::vec::Vec<$crate::settings::Setting>, $crate::HostError> {
+            $crate::__private::settings::$world::all()
+        }
+
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_settings_open(
+            key: ::std::option::Option<&str>,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::settings::$world::open(key)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_settings_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
@@ -1036,6 +1072,8 @@ pub mod __private {
     pub use crate::relay::glue as relay;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::review::glue as review;
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::settings::glue as settings;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::terminals::glue as terminals;
     pub use crate::v0_1::glue as v0_1;
