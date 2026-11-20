@@ -62,6 +62,7 @@ mod listeners;
 mod notifications;
 mod relay;
 mod review;
+pub mod settings;
 mod terminals;
 mod v0_2;
 mod v0_3;
@@ -328,6 +329,7 @@ pub(crate) struct State {
     review: review::FakeReview,
     /// 0.4 `relay`.
     relay: relay::FakeRelay,
+    settings: settings::FakeSettings,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -1194,6 +1196,7 @@ impl Harness {
                 context: context::FakeContext::default(),
                 review: review::FakeReview::default(),
                 relay: relay::FakeRelay::default(),
+                settings: settings::FakeSettings::default(),
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1422,6 +1425,13 @@ impl Harness {
                 .with_context(|| format!("[[fyx_ui.relay_channels]] in {manifest_path:?}"))?;
             harness
                 .set_relay_channels(channels)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(entries) = table.get("settings") {
+            let specs = settings::SettingSpec::parse_all(entries)
+                .map_err(|why| anyhow::anyhow!("{why} in {manifest_path:?}"))?;
+            harness
+                .set_setting_specs(specs)
                 .with_context(|| format!("in {manifest_path:?}"))?;
         }
         if let Some(id) = manifest.get("id").and_then(toml::Value::as_str) {
@@ -1987,6 +1997,59 @@ impl Harness {
     /// The relay channels, in manifest order.
     pub fn relay_channels(&self) -> &[ui_ext::integration::RelayChannelSpec] {
         self.store.data().relay.channels()
+    }
+
+    /// The `[[fyx_ui.settings]]` (0.4, design.md §D), already checked with
+    /// [`settings::SettingSpec::parse_all`]; [`Harness::load_package`] reads them from the
+    /// manifest. Refused for a component below 0.4. The user's values are kept and checked again.
+    pub fn set_setting_specs(&mut self, specs: Vec<settings::SettingSpec>) -> Result<()> {
+        if !specs.is_empty() && self.api_version < Version::new(0, 4, 0) {
+            anyhow::bail!(
+                "[[fyx_ui.settings]] needs fyx:ui 0.4; the component targets {}",
+                self.api_version
+            );
+        }
+        self.store.data_mut().settings.set_specs(specs);
+        Ok(())
+    }
+
+    /// The declared settings, in manifest order.
+    pub fn setting_specs(&self) -> &[settings::SettingSpec] {
+        self.store.data().settings.specs()
+    }
+
+    /// What the extension gets from `settings.all`: every declared key's effective value, in
+    /// manifest order.
+    pub fn settings(&self) -> &[settings::Setting] {
+        self.store.data().settings.effective()
+    }
+
+    /// What the extension gets from `settings.get(key)`; `None` for an undeclared key.
+    pub fn setting(&self, key: &str) -> Option<&settings::Setting> {
+        self.store.data().settings.get(key)
+    }
+
+    /// Why the user's value for `key` is not passed on (the form shows it); `None` when it is
+    /// valid or unset.
+    pub fn setting_error(&self, key: &str) -> Option<&str> {
+        self.store.data().settings.error(key)
+    }
+
+    /// The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An
+    /// invalid value gives the extension its default. Returns the keys whose effective value
+    /// changed, in manifest order: what `io-event::settings-changed` carries once the WIT has
+    /// it (design.md §D.4).
+    pub fn set_user_settings(&mut self, values: serde_json::Value) -> Result<Vec<String>> {
+        self.store
+            .data_mut()
+            .settings
+            .set_user(values)
+            .map_err(|why| anyhow::anyhow!(why))
+    }
+
+    /// The `settings-changed` events the host would have sent, oldest first, and forgets them.
+    pub fn take_settings_changed(&mut self) -> Vec<Vec<String>> {
+        self.store.data_mut().settings.changed.drain(..).collect()
     }
 
     /// A hook runs `fyx-relay --channel <channel>` in `terminal` (the extension's handle for it)
