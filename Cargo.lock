@@ -7118,6 +7118,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_update_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures 0.3.34",
+ "fyx_update",
+ "gpui",
+ "hex",
+ "http_client",
+ "log",
+ "paths",
+ "release_channel",
+ "ring",
+ "semver",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "ui",
+ "workspace",
+]
+
+[[package]]
 name = "gaoya"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22958,6 +22982,7 @@ dependencies = [
  "fs",
  "futures 0.3.34",
  "fyx_guard",
+ "fyx_update_host",
  "git",
  "git_hosting_providers",
  "git_ui",
