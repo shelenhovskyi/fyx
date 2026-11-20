@@ -1,7 +1,8 @@
 # Fyx user guide
 
 This guide is for people who install and use Fyx. If you want to write a UI extension, read
-[Writing a Fyx UI extension](extension-authoring.md) instead.
+[Writing a Fyx UI extension](extension-authoring.md) instead. On a Mac there is no signed
+download yet: build Fyx yourself as described in [Local Mac build](mac-build.md).
 
 It describes `origin/integration` (64d6c67f63) as of 2026-11-18. Features that are built on a stream's branch
 but not merged into `integration` yet are marked **(coming)**.
