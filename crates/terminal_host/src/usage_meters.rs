@@ -184,6 +184,27 @@ impl UsageMeters {
     }
 }
 
+/// The panel's footer: today's agent cost and the cap, and whether the cap is reached; `None`
+/// before any cost and without a cap.
+pub fn today_line(today: &[Cost], cap: CapState) -> Option<(String, bool)> {
+    let spent = if today.is_empty() {
+        "$0.00".to_string()
+    } else {
+        today.iter().map(Cost::text).collect::<Vec<_>>().join(" + ")
+    };
+    match cap {
+        CapState::NoCap if today.is_empty() => None,
+        CapState::NoCap => Some((format!("Agents today: {spent}"), false)),
+        CapState::Under { cap, .. } => {
+            Some((format!("Agents today: {spent} of the ${cap:.2} cap"), false))
+        }
+        CapState::Reached { cap, .. } => Some((
+            format!("Agents today: {spent}, the ${cap:.2} cap is reached"),
+            true,
+        )),
+    }
+}
+
 /// The UTC day of `time` as `YYYY-MM-DD` (days are UTC: there is no time-zone data here).
 pub fn day_of(time: std::time::SystemTime) -> String {
     let days = time
@@ -403,6 +424,24 @@ fn cap(cx: &App) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_today_line() {
+        let usd = |amount| Cost {
+            amount,
+            currency: "USD".into(),
+        };
+        assert_eq!(today_line(&[], CapState::NoCap), None);
+        assert_eq!(
+            today_line(&[usd(1.5)], CapState::NoCap),
+            Some(("Agents today: $1.50".into(), false))
+        );
+        assert_eq!(
+            today_line(&[], CapState::Under { spent: 0.0, cap: 5.0 }),
+            Some(("Agents today: $0.00 of the $5.00 cap".into(), false))
+        );
+        assert!(today_line(&[usd(6.0)], CapState::Reached { spent: 6.0, cap: 5.0 }).unwrap().1);
+    }
 
     #[test]
     fn test_day_of() {
