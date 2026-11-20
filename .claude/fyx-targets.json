@@ -1,8 +1,4 @@
 {
-  "_comment": "Cargo target dir per worktree dir name (.claude/worktrees/<name>), read by .claude/hooks/session-env.sh. Unknown names, or a target folder that does not exist, get no CARGO_TARGET_DIR. On this PC D:/fyx-targets/w1..w4 are junctions to D:/fyx-targets-cold.",
-  "fyx-w1-rebrand-904c67": "D:/fyx-targets/w1",
-  "fyx-w3-renderer-e20d2b": "D:/fyx-targets/w3",
-  "fyx-w4-sdk-demos-5d1497": "D:/fyx-targets/w4",
-  "fyx-w5-agent-review-45eb11": "D:/fyx-targets/w5",
-  "fyx-w8-vscode-adapter-6395b4": "D:/fyx-targets/w2c"
+  "_comment": "Cargo target dir by worktree dir name (.claude/worktrees/<name>), read by .claude/hooks/session-env.sh; \"*\" is every other folder, the main checkout included. Since 2026-11-20 every folder shares one target, so cargo's build-directory lock runs one build at a time on this PC (owner's decision). D:/fyx-targets is a junction to E:/fyx-targets on the Dev Drive. .claude/hooks/guard-commands.sh denies cargo builds into any other target dir.",
+  "*": "D:/fyx-targets/shared"
 }

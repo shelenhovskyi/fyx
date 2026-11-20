@@ -143,9 +143,10 @@ for dir in "${profile_candidates[@]}"; do
 done
 rm -rf "$test_home"
 # Cargo's timing report of a build step (`--timings`), one copy per commit and step outside the
-# target dir: FYX_GATE_TIMINGS_DIR, on the Windows dev box D:\fyx-builds\gate-timings.
+# target dir: FYX_GATE_TIMINGS_DIR, on the Windows dev box D:\fyx\builds\gate-timings (D:\fyx-builds before 2026-11-20).
 timings_dir="${FYX_GATE_TIMINGS_DIR:-}"
-if [[ -z "$timings_dir" && -d /d/fyx-builds ]]; then timings_dir=/d/fyx-builds/gate-timings; fi
+if [[ -z "$timings_dir" && -d /d/fyx/builds ]]; then timings_dir=/d/fyx/builds/gate-timings
+elif [[ -z "$timings_dir" && -d /d/fyx-builds ]]; then timings_dir=/d/fyx-builds/gate-timings; fi
 keep_timings() {
     local report copy
     report=$(ls -t "${CARGO_TARGET_DIR:-target}"/cargo-timings/cargo-timing*.html 2>/dev/null | head -1)
@@ -158,9 +159,10 @@ keep_timings() {
 keep_timings test
 # Per-test timing (.config/nextest.toml writes junit.xml): keep one copy per commit outside the
 # target dir, which gets pruned. FYX_GATE_JUNIT_DIR overrides; on the Windows dev box the default
-# is D:\fyx-builds\gate-junit.
+# is D:\fyx\builds\gate-junit (D:\fyx-builds before 2026-11-20).
 junit_dir="${FYX_GATE_JUNIT_DIR:-}"
-if [[ -z "$junit_dir" && -d /d/fyx-builds ]]; then junit_dir=/d/fyx-builds/gate-junit; fi
+if [[ -z "$junit_dir" && -d /d/fyx/builds ]]; then junit_dir=/d/fyx/builds/gate-junit
+elif [[ -z "$junit_dir" && -d /d/fyx-builds ]]; then junit_dir=/d/fyx-builds/gate-junit; fi
 junit_src="${CARGO_TARGET_DIR:-target}/nextest/default/junit.xml"
 if [[ -n "$junit_dir" && -f "$junit_src" ]]; then
     mkdir -p "$junit_dir"
