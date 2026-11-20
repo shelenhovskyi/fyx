@@ -122,7 +122,13 @@ mod tests {
             "marked wins"
         );
         assert_eq!(
-            label_color(Color::Default, plain, false, false, &EntryDecorations::default()),
+            label_color(
+                Color::Default,
+                plain,
+                false,
+                false,
+                &EntryDecorations::default()
+            ),
             Color::Default
         );
         assert!(badges(&EntryDecorations::default()).is_none());

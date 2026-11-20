@@ -32,7 +32,9 @@ use gpui::{App, AsyncApp, Entity, EntityId, SharedString, WeakEntity};
 use language::{Bias, DiagnosticEntry, LanguageServerId, Point, PointUtf16, Rope, Unclipped};
 use project::{
     Project, ProjectPath,
-    fyx_file_decorations::{FileDecoration as PanelDecoration, FileDecorationColor, FileDecorations},
+    fyx_file_decorations::{
+        FileDecoration as PanelDecoration, FileDecorationColor, FileDecorations,
+    },
     lsp_store::{DocumentDiagnostics, DocumentDiagnosticsUpdate},
 };
 use ui_ext::{
@@ -78,8 +80,8 @@ fn display_name(extension_id: &str, cx: &App) -> SharedString {
 /// The project and absolute path of a worktree file of the load keyed by `key`.
 fn resolve(key: &str, file: &FileRef, cx: &mut App) -> Result<(Entity<Project>, PathBuf), String> {
     let (worktree, abs_path) = locate(key, file, cx)?;
-    let (_, project) = crate::workspace_edit::registered(&worktree, cx)
-        .ok_or("the file's project is not open")?;
+    let (_, project) =
+        crate::workspace_edit::registered(&worktree, cx).ok_or("the file's project is not open")?;
     Ok((project, abs_path))
 }
 
