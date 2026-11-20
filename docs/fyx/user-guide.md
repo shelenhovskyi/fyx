@@ -746,5 +746,13 @@ to `allow_env` if you want agents to push.
 **The agent asks you to sign in or has no model.** Fyx has no zed.dev models. Set an API key for
 Anthropic or another provider in the agent panel's settings, or use an external ACP agent.
 
+**Fyx crashed.** Fyx writes each crash to the `crashes` folder of its data dir: a summary
+(`<session>.json`) and, for most crashes, a minidump (`<session>.dmp`). Nothing is uploaded. At the
+next start a notification offers **Report on GitHub**, which opens a prefilled issue in your
+browser for you to read, complete and submit; `fyx: open crash reports` lists the last 20 crashes
+(Enter reports one, the secondary confirm key shows its files). Attach the minidump only if you
+want to: it can hold parts of memory, such as open files. Set `FYX_CRASH_REPORTS=0` to turn the
+crash handler off.
+
 **Start from a clean profile.** Run `fyx --user-data-dir <empty folder>`. Your normal profile is
 left alone.

@@ -1,6 +1,7 @@
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod fyx_crash_reports; // fyx: plan 6.4 local crash reports
 mod fyx_t3; // fyx: T3 shares between terminal_host and ui_ext_host
 mod reliability;
 mod watcher_debug;
@@ -223,7 +224,7 @@ fn main() {
 
     // `zed --crash-handler` Makes zed operate in minidump crash handler mode
     if let Some(socket) = &args.crash_handler {
-        crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
+        crashes::crash_server(socket.as_path(), fyx_crash_reports::handler_dir(socket)); // fyx: plan 6.4
         return;
     }
 
@@ -387,7 +388,7 @@ fn main() {
     ));
 
     let should_install_crash_handler =
-        client::telemetry::should_install_crash_handler(*release_channel::RELEASE_CHANNEL);
+        fyx_crash_reports::should_install_crash_handler(*release_channel::RELEASE_CHANNEL); // fyx: local only, plan 6.4
 
     let crash_handler = if should_install_crash_handler {
         Some(
@@ -414,7 +415,7 @@ fn main() {
                         background_executor1.spawn(task).detach();
                     }
                 },
-                |pid| paths::temp_dir().join(format!("zed-crash-handler-{pid}")),
+                fyx_crash_reports::socket_path, // fyx: records the crash dir for the handler
                 move |duration| background_executor.timer(duration),
             )),
         )
@@ -768,6 +769,7 @@ fn main() {
         ); // fyx: terminal nodes in extension panels
         ui_ext_host::init(cx); // fyx: extension panels and status items
         fyx_t3::init(cx); // fyx: T3 shares, closed terminals, discovery-file writer
+        fyx_crash_reports::init(cx); // fyx: plan 6.4 crash reports list and notice
         tasks_ui::init(cx);
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
