@@ -8,6 +8,10 @@
 # Gates only crates under crates/ and extensions/ that changed since base; never crates/collab
 # (server-only, not built by Fyx) and never docs/.
 set -euo pipefail
+# fyx: one command at a time in the shared cargo target, with fresh artifacts (script/fyx-cargo).
+if [[ -z "${FYX_CARGO_LOCKED:-}" && -x "$(dirname "$0")/fyx-cargo" ]]; then
+    exec "$(dirname "$0")/fyx-cargo" --exec "$0" "$@"
+fi
 
 cd "$(git rev-parse --show-toplevel)"
 base="${1:-$(cat FYX_UPSTREAM)}"

@@ -175,7 +175,13 @@ check_segment() {
                         [[ "${FYX_INTEGRATOR:-}" == 1 ]] && continue
                         deny "cargo $subcommand changes Cargo.toml/Cargo.lock, which only the integrator (W0) edits: list the change for the integrator in your progress file" ;;
                     build | b | check | c | test | t | nextest | clippy | run | r | bench | doc | rustc)
-                        check_target_dir "$subcommand" "${words[@]:next+1}" ;;
+                        check_target_dir "$subcommand" "${words[@]:next+1}"
+                        # The shared target needs one command at a time and the touch of files
+                        # that differ from the worktree that built last (script/fyx-cargo).
+                        if [[ -d "$shared_target_dir" ]]; then
+                            deny "a bare cargo $subcommand is blocked on this PC: run it as script/fyx-cargo $subcommand ... (from the repository root), which waits for the shared target's lock and makes sure another worktree's artifacts are not reused. script/gate.sh and script/clippy take the lock themselves."
+                        fi
+                        ;;
                 esac
                 ;;
         esac

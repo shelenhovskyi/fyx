@@ -30,3 +30,11 @@
 - Weekly job: rebase the Fyx stack onto the newest stable tag, open an issue on conflict.
 
 **Done when:** `integration` builds `zed`, the app launches, and the demo panel works by hand.
+
+**Shared cargo target (Windows dev box, 2026-11-20).** Every folder builds into
+`D:/fyx-targets/shared` (on E:) through `script/fyx-cargo` (`script/gate.sh` and `script/clippy`
+call it themselves; `guard-commands.sh` denies a bare `cargo build/check/test/nextest/clippy/run`).
+It holds a lock in the target for the whole command, touches the files that differ from the
+worktree that built last (cargo names workspace artifacts by their path relative to the workspace,
+so worktrees share them and an older file here looks up to date), and prunes superseded hashes
+(`script/fyx-prune-target`) when the target holds over 120 GB or E: has under 30 GB free.

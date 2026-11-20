@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# fyx: run cargo (or a whole script, with --exec) against the one shared cargo target on the
+# Windows dev box, safely.
+#
+#   script/fyx-cargo check -p ui_ext_host
+#   script/fyx-cargo nextest run -p terminal_host
+#   script/fyx-cargo --exec script/gate.sh        (gate.sh and script/clippy do this themselves)
+#
+# 1. Lock: one command at a time across every worktree, for the whole command (cargo's own lock
+#    covers one build step only). The lock is a directory in the target; a holder that died is
+#    detected through its pid and the lock is taken over.
+# 2. Fresh artifacts: cargo names a workspace crate's artifacts by its path relative to the
+#    workspace root, so every worktree writes the same files, and a file that differs between two
+#    worktrees but is older here looks up to date. Before building, every crates/, extensions/
+#    and tooling/ file that differs between this worktree and the one that built last (committed
+#    or not) is touched, so only the crates that really differ rebuild.
+# 3. Size cap: afterwards, when the target's drive has less than FYX_CARGO_MIN_FREE_GB (30) free
+#    or the target holds more than FYX_CARGO_MAX_USED_GB (120), script/fyx-prune-target removes superseded
+#    artifact hashes.
+#
+# Without CARGO_TARGET_DIR (macOS, CI) it only runs the command. Nested calls (a script run
+# with --exec that calls this again) do not take the lock twice.
+set -uo pipefail
+
+if [[ "${1:-}" == --exec ]]; then
+    shift
+    run=("$@")
+else
+    run=(cargo "$@")
+fi
+if ((${#run[@]} == 0)); then
+    echo "usage: script/fyx-cargo <cargo args> | script/fyx-cargo --exec <command> [args]" >&2
+    exit 2
+fi
+
+target="${CARGO_TARGET_DIR:-}"
+if [[ -z "$target" || -n "${FYX_CARGO_LOCKED:-}" ]]; then
+    exec "${run[@]}"
+fi
+case "${OSTYPE:-}" in msys* | cygwin*) target="$(cygpath -u "$target")" ;; esac
+if [[ ! -d "$target" ]]; then
+    exec "${run[@]}"
+fi
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
+lock="$target/.fyx-lock"
+last="$target/.fyx-last-worktree"
+
+holder() { cat "$lock/owner" 2>/dev/null; }
+waited=""
+while ! mkdir "$lock" 2>/dev/null; do
+    owner="$(holder)"
+    pid="${owner%% *}"
+    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+        echo "fyx-cargo: the lock's holder ($owner) is gone; taking the lock over" >&2
+        rm -rf "$lock"
+        continue
+    fi
+    if [[ -z "$owner" ]]; then
+        # Just created by another process that has not written its owner yet, or left empty by
+        # one killed in between: give it a moment, then treat an old empty lock as stale.
+        if [[ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+            rm -rf "$lock"
+            continue
+        fi
+    elif [[ -z "$waited" ]]; then
+        echo "fyx-cargo: waiting for the shared target, held by: $owner" >&2
+        waited=1
+    fi
+    sleep 3
+done
+printf '%s %s %s\n' "$$" "$root" "${run[*]:0:6}" >"$lock/owner"
+trap 'rm -rf "$lock"' EXIT
+trap 'exit 130' INT TERM
+
+# Touch what differs from the worktree that built last.
+if [[ -f "$last" ]]; then
+    read -r last_root last_head <"$last" || true
+    if [[ -n "${last_root:-}" && "$last_root" != "$root" ]]; then
+        {
+            [[ -n "${last_head:-}" ]] && git -C "$root" diff --name-only "$last_head" -- 2>/dev/null
+            git -C "$root" diff --name-only HEAD -- 2>/dev/null
+            git -C "$root" ls-files --others --exclude-standard 2>/dev/null
+            if [[ -d "$last_root" ]]; then
+                git -C "$last_root" diff --name-only HEAD -- 2>/dev/null
+                git -C "$last_root" ls-files --others --exclude-standard 2>/dev/null
+            fi
+        } | grep -E '^(crates|extensions|tooling)/' | sort -u | while IFS= read -r file; do
+            [[ -f "$root/$file" ]] && touch "$root/$file"
+        done
+    fi
+fi
+
+FYX_CARGO_LOCKED=1 "${run[@]}"
+status=$?
+
+printf '%s %s\n' "$root" "$(git -C "$root" rev-parse HEAD 2>/dev/null)" >"$last"
+
+# Size cap. The target's own size is measured at most every 30 minutes (du on a large target
+# takes a while); the drive's free space every time.
+read -r free < <(df -BG --output=avail "$target" 2>/dev/null | tail -1 | tr -d 'G ') || true
+size_file="$target/.fyx-size-gb"
+if [[ -z "$(find "$size_file" -mmin -30 2>/dev/null)" ]]; then
+    du -s --block-size=1G "$target" 2>/dev/null | cut -f1 >"$size_file"
+fi
+used="$(cat "$size_file" 2>/dev/null)"
+min_free="${FYX_CARGO_MIN_FREE_GB:-30}"
+max_used="${FYX_CARGO_MAX_USED_GB:-120}"
+if [[ "${free:-}" =~ ^[0-9]+$ && "${used:-}" =~ ^[0-9]+$ ]]     && ((free < min_free || used > max_used)) && [[ -x "$root/script/fyx-prune-target" ]]; then
+    echo "fyx-cargo: the target holds ${used} GB, ${free} GB free on its drive: pruning superseded artifacts" >&2
+    "$root/script/fyx-prune-target" "$target" 2>&1 | tail -1 >&2
+    rm -f "$size_file"
+fi
+exit "$status"
