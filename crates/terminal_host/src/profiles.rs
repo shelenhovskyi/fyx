@@ -326,7 +326,10 @@ fn profile_items(
             } else {
                 " (runs any command you type)"
             };
-            let name = if names.get(profile.name.as_str()).is_some_and(|count| *count > 1) {
+            let name = if names
+                .get(profile.name.as_str())
+                .is_some_and(|count| *count > 1)
+            {
                 format!("{} ({})", profile.name, integration.extension_name)
             } else {
                 profile.name.clone()
@@ -494,9 +497,11 @@ fn launch(
         window
             .update(cx, |_, window, cx| {
                 let terminal = cx.new(|cx| builder.subscribe(cx));
+                // 7.14 (b): the program's own title once it sets one, the profile's name before.
+                terminal.read(cx).fyx.set_fallback_title(Some(title));
                 workspace
                     .update(cx, |workspace, cx| {
-                        crate::pseudo::add_tab(workspace, terminal, Some(title), true, window, cx)
+                        crate::pseudo::add_tab(workspace, terminal, None, true, window, cx)
                     })
                     .ok();
             })

@@ -3698,7 +3698,11 @@ fn close_notification_view(open: OpenNotification, cx: &mut App) {
 /// (decision Q1), and a dev folder's path.
 pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
     let folder = if pending.is_dev {
-        format!(" Folder: {}", pending.dir.display())
+        format!(
+            "
+Folder: {}",
+            pending.dir.display()
+        )
     } else {
         String::new()
     };
@@ -3708,10 +3712,22 @@ pub(crate) fn consent_card_text(pending: &PendingConsent) -> String {
         String::new()
     };
     if pending.new_capabilities.is_empty() {
+        // Plan 7.12 case 1: a count here, the grouped list in the dialog behind Enable.
+        let chosen = pending
+            .lines
+            .iter()
+            .filter(|line| line.tier == crate::consent_model::ConsentTier::T2)
+            .count();
+        let asks = match (pending.lines.len(), chosen) {
+            (0, _) => "It asks for nothing beyond its own UI.".to_string(),
+            (count, 0) => format!("It asks for {count} permissions; Enable lists them."),
+            (count, chosen) => format!(
+                "It asks for {count} permissions, {chosen} of them riskier ones you choose;                  Enable lists them."
+            ),
+        };
         format!(
-            "The UI extension {} is installed but not enabled. It asks for: {}.{zed}{folder}",
-            pending.extension_id,
-            crate::install::describe_capability_ids(&pending.capabilities).join("; "),
+            "The UI extension {} is installed but not enabled. {asks}{zed}{folder}",
+            pending.extension_id
         )
     } else if pending.diff.needs_approval() {
         format!(

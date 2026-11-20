@@ -83,7 +83,10 @@ pub use decorations::{
     DEV_DECORATIONS_ENV, DecorationId, DecorationPath, DecorationPlacement, DecorationTarget,
     Decorations, text_tree,
 };
-pub use fyx_extensions_page::{OpenFyxExtensions, fyx_extensions_button};
+pub use fyx_extensions_page::{
+    ExtensionsTab, FyxExtensionsPage, OpenFyxExtensions, extensions_tab_switch, fyx_extensions_tab,
+    install_dev_extension_menu, zed_registry_notice,
+};
 pub use inspector::{ExtensionInspector, InspectorSnapshot, ToggleExtensionInspector};
 pub use install::{
     FyxExtensionsSettings, InstallDevUiExtension, RemoveDevUiExtension, check_dev_folder,

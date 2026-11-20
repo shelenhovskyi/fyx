@@ -12,7 +12,7 @@
 # 2. Fresh artifacts: cargo names a workspace crate's artifacts by its path relative to the
 #    workspace root, so every worktree writes the same files, and a file that differs between two
 #    worktrees but is older here looks up to date. Before building, every crates/, extensions/
-#    and tooling/ file that differs between this worktree and the one that built last (committed
+#    and tooling/ file that differs between this worktree and the last 8 that built (committed
 #    or not) is touched, so only the crates that really differ rebuild.
 # 3. Size cap: afterwards, when the target's drive has less than FYX_CARGO_MIN_FREE_GB (30) free
 #    or the target holds more than FYX_CARGO_MAX_USED_GB (120), script/fyx-prune-target removes superseded
@@ -73,28 +73,41 @@ printf '%s %s %s\n' "$$" "$root" "${run[*]:0:6}" >"$lock/owner"
 trap 'rm -rf "$lock"' EXIT
 trap 'exit 130' INT TERM
 
-# Touch what differs from the worktree that built last.
-if [[ -f "$last" ]]; then
-    read -r last_root last_head <"$last" || true
-    if [[ -n "${last_root:-}" && "$last_root" != "$root" ]]; then
-        {
-            [[ -n "${last_head:-}" ]] && git -C "$root" diff --name-only "$last_head" -- 2>/dev/null
-            git -C "$root" diff --name-only HEAD -- 2>/dev/null
-            git -C "$root" ls-files --others --exclude-standard 2>/dev/null
-            if [[ -d "$last_root" ]]; then
-                git -C "$last_root" diff --name-only HEAD -- 2>/dev/null
-                git -C "$last_root" ls-files --others --exclude-standard 2>/dev/null
+# Touch what differs from the worktrees that built recently. Not only the last one: `cargo check`
+# and clippy write other artifacts (metadata only) than builds and tests, so the check artifacts
+# may come from a worktree several builds back.
+recent="$target/.fyx-recent-worktrees"
+if [[ ! -f "$recent" && -f "$last" ]]; then
+    cp "$last" "$recent"
+fi
+head="$(git -C "$root" rev-parse HEAD 2>/dev/null)"
+if [[ -f "$recent" ]]; then
+    {
+        git -C "$root" diff --name-only HEAD -- 2>/dev/null
+        git -C "$root" ls-files --others --exclude-standard 2>/dev/null
+        while read -r other_root other_head; do
+            [[ -z "${other_root:-}" ]] && continue
+            [[ "$other_root" == "$root" && "${other_head:-}" == "$head" ]] && continue
+            [[ -n "${other_head:-}" ]] && git -C "$root" diff --name-only "$other_head" -- 2>/dev/null
+            if [[ "$other_root" != "$root" && -d "$other_root" ]]; then
+                git -C "$other_root" diff --name-only HEAD -- 2>/dev/null
+                git -C "$other_root" ls-files --others --exclude-standard 2>/dev/null
             fi
-        } | grep -E '^(crates|extensions|tooling)/' | sort -u | while IFS= read -r file; do
-            [[ -f "$root/$file" ]] && touch "$root/$file"
-        done
-    fi
+        done <"$recent"
+    } | grep -E '^(crates|extensions|tooling)/' | sort -u | while IFS= read -r file; do
+        [[ -f "$root/$file" ]] && touch "$root/$file"
+    done
 fi
 
 FYX_CARGO_LOCKED=1 "${run[@]}"
 status=$?
 
 printf '%s %s\n' "$root" "$(git -C "$root" rev-parse HEAD 2>/dev/null)" >"$last"
+# The last 8 builders, one line per worktree, newest last.
+{
+    grep -v -F "$root " "$recent" 2>/dev/null | tail -7
+    cat "$last"
+} >"$recent.new" && mv -f "$recent.new" "$recent"
 
 # Size cap. The target's own size is measured at most every 30 minutes (du on a large target
 # takes a while); the drive's free space every time.

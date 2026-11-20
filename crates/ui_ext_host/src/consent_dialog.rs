@@ -18,17 +18,21 @@ use std::collections::BTreeSet;
 
 use futures::channel::oneshot;
 use gpui::{
-    App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, Window, div, prelude::*, rems,
+    App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, FontWeight, ScrollHandle,
+    Window, div, prelude::*, rems,
 };
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon as _, ButtonStyle, Checkbox, Clickable as _, Color, Disableable as _,
-    Label, LabelCommon as _, LabelSize, StyledExt as _, ToggleState, h_flex, v_flex,
+    Label, LabelCommon as _, LabelSize, StyledExt as _, ToggleState, WithScrollbar as _, h_flex,
+    v_flex,
 };
 use workspace::{ModalView, Workspace};
 
 use crate::{
-    consent_model::{ConsentItem, ConsentTier, ItemLine, ItemLineExt as _},
+    consent_model::{
+        ConsentItem, ConsentTier, ItemLine, ItemLineExt as _, readable_text, unique_warnings,
+    },
     notifications::{CLICK_GUARD, ClickGuard},
 };
 
@@ -136,6 +140,7 @@ pub struct ConsentDialog {
     focus_handle: FocusHandle,
     /// False for a warning with nothing to list ("Always allow", §C.3): no "Shows in Fyx".
     show_groups: bool,
+    scroll: ScrollHandle,
 }
 
 impl ConsentDialog {
@@ -153,6 +158,7 @@ impl ConsentDialog {
             answer: Some(answer),
             focus_handle: cx.focus_handle(),
             show_groups: true,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -211,6 +217,21 @@ impl ConsentDialog {
         cx.emit(DismissEvent);
     }
 
+    /// Plan 7.12, owner's decision: one click enables everything, with the risks listed above
+    /// the button. Ignored inside the click guard.
+    pub(crate) fn install_all(&mut self, cx: &mut Context<Self>) {
+        if !self.armed(cx) {
+            return;
+        }
+        self.ticked = self
+            .lines
+            .iter()
+            .filter(|line| line.has_checkbox())
+            .map(|line| line.item.clone())
+            .collect();
+        self.install(cx);
+    }
+
     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
     }
@@ -226,7 +247,7 @@ impl ConsentDialog {
         armed: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let title = Label::new(line.title.clone()).size(LabelSize::Small);
+        let title = Label::new(readable_text(&line.title)).size(LabelSize::Small);
         let head = if line.has_checkbox() {
             let item = line.item.clone();
             let state = if self.ticked.contains(&line.item) {
@@ -250,8 +271,13 @@ impl ConsentDialog {
             v_flex()
                 .pl_6()
                 .when(!line.details.is_empty(), |this| {
+                    let details: Vec<String> = line
+                        .details
+                        .iter()
+                        .map(|detail| readable_text(detail))
+                        .collect();
                     this.child(
-                        Label::new(line.details.join("  ·  "))
+                        Label::new(details.join("  ·  "))
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
@@ -263,12 +289,7 @@ impl ConsentDialog {
                             .color(Color::Muted)
                             .italic(),
                     )
-                })
-                .children(line.warnings.iter().map(|warning| {
-                    Label::new(warning.clone())
-                        .size(LabelSize::XSmall)
-                        .color(Color::Warning)
-                })),
+                }),
         )
     }
 }
@@ -283,18 +304,24 @@ impl Focusable for ConsentDialog {
 
 impl ModalView for ConsentDialog {}
 
-fn heading(text: &'static str) -> impl IntoElement {
+/// A group heading: heavier than the lines under it, T2's in the warning colour.
+fn heading(text: &'static str, tier: Option<ConsentTier>) -> impl IntoElement {
     Label::new(text)
         .size(LabelSize::Small)
-        .color(Color::Default)
+        .weight(FontWeight::SEMIBOLD)
+        .color(if tier == Some(ConsentTier::T2) {
+            Color::Warning
+        } else {
+            Color::Default
+        })
 }
 
 impl Render for ConsentDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let armed = self.armed(cx);
         let shows: Vec<String> = self
             .group(ConsentTier::T0)
-            .map(|line| line.title.clone())
+            .map(|line| readable_text(&line.title))
             .collect();
         let lines = self.lines.clone();
         let mut sections = Vec::new();
@@ -309,13 +336,21 @@ impl Render for ConsentDialog {
                 sections.push(
                     v_flex()
                         .gap_1()
-                        .child(heading(name))
-                        .children(rows)
+                        .child(heading(name, Some(tier)))
+                        .child(v_flex().pl_2().gap_1().children(rows))
                         .into_any_element(),
                 );
             }
         }
         let has_checkboxes = lines.iter().any(ItemLine::has_checkbox);
+        // The risks, once, above the buttons: what the T2 items do, then each warning once.
+        let t2_titles: Vec<String> = lines
+            .iter()
+            .filter(|line| line.has_checkbox())
+            .map(|line| readable_text(&line.title))
+            .collect();
+        let warnings = unique_warnings(&lines);
+        let nothing_ticked = self.ticked.is_empty();
         v_flex()
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
@@ -326,44 +361,80 @@ impl Render for ConsentDialog {
             .bg(cx.theme().colors().elevated_surface_background)
             // Escape cancels; nothing confirms from the keyboard.
             .on_action(cx.listener(Self::cancel))
-            .child(Label::new(self.text.title.clone()))
+            .child(Label::new(self.text.title.clone()).weight(FontWeight::SEMIBOLD))
             .child(
                 v_flex()
-                    .id("fyx-consent-groups")
-                    .overflow_y_scroll()
-                    .gap_2()
-                    .when(self.shows_t0_group(), |this| {
-                        this.child(
-                            v_flex().gap_1().child(heading("Shows in Fyx")).child(
-                                Label::new(if shows.is_empty() {
-                                    "Nothing beyond its own UI".to_string()
-                                } else {
-                                    shows.join(", ")
-                                })
+                    .id("fyx-consent-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        v_flex()
+                            .id("fyx-consent-groups")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .gap_2()
+                            .when(self.shows_t0_group(), |this| {
+                                this.child(
+                                    v_flex().gap_1().child(heading("Shows in Fyx", None)).child(
+                                        Label::new(if shows.is_empty() {
+                                            "Nothing beyond its own UI".to_string()
+                                        } else {
+                                            shows.join(", ")
+                                        })
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    ),
+                                )
+                            })
+                            .children(sections)
+                            .children(self.text.notes.iter().map(|note| {
+                                div().child(
+                                    Label::new(note.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                            })),
+                    )
+                    .vertical_scrollbar_for(&self.scroll, window, cx),
+            )
+            .when(has_checkboxes || !warnings.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .pt_2()
+                        .gap_0p5()
+                        .border_t_1()
+                        .border_color(cx.theme().colors().border_variant)
+                        .when(has_checkboxes, |this| {
+                            this.child(
+                                Label::new(format!(
+                                    "With all permissions it also: {}.",
+                                    t2_titles.join("; ")
+                                ))
                                 .size(LabelSize::Small)
-                                .color(Color::Muted),
-                            ),
-                        )
-                    })
-                    .children(sections)
-                    .when(has_checkboxes, |this| {
-                        this.child(
-                            Label::new(
-                                "Unticked items stay off. You can change each one later on the \
-                                 extension's page.",
+                                .color(Color::Warning),
                             )
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                        )
-                    })
-                    .children(self.text.notes.iter().map(|note| {
-                        div().child(
-                            Label::new(note.clone())
+                        })
+                        .children(warnings.iter().map(|warning| {
+                            Label::new(warning.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning)
+                        }))
+                        .when(has_checkboxes, |this| {
+                            this.child(
+                                Label::new(
+                                    "Without them, those stay off and what needs them does not \
+                                     work. You can turn each one on later on the extension's \
+                                     page.",
+                                )
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
-                        )
-                    })),
-            )
+                            )
+                        }),
+                )
+            })
             .child(
                 h_flex()
                     .justify_end()
@@ -374,11 +445,33 @@ impl Render for ConsentDialog {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
                     )
                     .child(
-                        Button::new("fyx-consent-install", self.text.confirm.clone())
+                        Button::new(
+                            "fyx-consent-install",
+                            match (has_checkboxes, nothing_ticked) {
+                                (false, _) => self.text.confirm.clone(),
+                                (true, true) => format!("{} Without These", self.text.confirm),
+                                (true, false) => format!("{} With Ticked Only", self.text.confirm),
+                            },
+                        )
+                        .style(if has_checkboxes {
+                            ButtonStyle::Outlined
+                        } else {
+                            ButtonStyle::Filled
+                        })
+                        .disabled(!armed)
+                        .on_click(cx.listener(|this, _, _, cx| this.install(cx))),
+                    )
+                    .when(has_checkboxes, |this| {
+                        this.child(
+                            Button::new(
+                                "fyx-consent-install-all",
+                                format!("{} With All Permissions", self.text.confirm),
+                            )
                             .style(ButtonStyle::Filled)
                             .disabled(!armed)
-                            .on_click(cx.listener(|this, _, _, cx| this.install(cx))),
-                    ),
+                            .on_click(cx.listener(|this, _, _, cx| this.install_all(cx))),
+                        )
+                    }),
             )
     }
 }

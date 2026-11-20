@@ -11,7 +11,7 @@ use cloud_api_types::{ExtensionMetadata, ExtensionProvides};
 use collections::{BTreeMap, BTreeSet};
 use command_palette_hooks::CommandPaletteFilter;
 use editor::{Editor, EditorElement, EditorStyle};
-use extension_host::{ExtensionIndexEntry, ExtensionManifest, ExtensionStore};
+use extension_host::{ExtensionIndexEntry, ExtensionManifest, ExtensionSettings, ExtensionStore}; // fyx: ExtensionSettings
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use git::{GitHostingProviderRegistry, parse_git_remote_url};
 use gpui::{
@@ -139,8 +139,13 @@ pub fn init(cx: &mut App) {
                         .items()
                         .find_map(|item| item.downcast::<ExtensionsPage>());
 
+                    // fyx: plan 7.10, a Zed category or id opens the Zed tab, else the Fyx tab
+                    let fyx_tab = ui_ext_host::ExtensionsTab::for_request(
+                        provides_filter.is_some() || action.id.is_some(),
+                    );
                     if let Some(existing) = existing {
                         existing.update(cx, |extensions_page, cx| {
+                            extensions_page.fyx_select_tab(fyx_tab, window, cx); // fyx: plan 7.10
                             if provides_filter.is_some() {
                                 extensions_page.change_provides_filter(provides_filter, cx);
                             }
@@ -158,6 +163,9 @@ pub fn init(cx: &mut App) {
                             window,
                             cx,
                         );
+                        extensions_page.update(cx, |extensions_page, cx| {
+                            extensions_page.fyx_select_tab(fyx_tab, window, cx) // fyx: plan 7.10
+                        });
                         workspace.add_item_to_active_pane(
                             Box::new(extensions_page),
                             None,
@@ -168,6 +176,10 @@ pub fn init(cx: &mut App) {
                     }
                 },
             )
+            // fyx: plan 7.10, the Fyx tab of this page
+            .register_action(|_, _: &ui_ext_host::OpenFyxExtensions, window, cx| {
+                window.dispatch_action(Box::new(zed_actions::Extensions::default()), cx)
+            })
             .register_action(move |workspace, _: &InstallDevExtension, window, cx| {
                 let store = ExtensionStore::global(cx);
                 let prompt = workspace.prompt_for_open_path(
@@ -408,6 +420,11 @@ pub struct ExtensionsPage {
     extension_fetch_task: Option<Task<()>>,
     local_search_task: Option<Task<()>>,
     upsells: BTreeSet<Feature>,
+    // fyx: plan 7.10, the Fyx / Zed tabs
+    fyx_tab: ui_ext_host::ExtensionsTab,
+    fyx_page: Option<Entity<ui_ext_host::FyxExtensionsPage>>,
+    /// Zed's registry is asked when the Zed tab first shows.
+    fyx_fetch_pending: bool,
 }
 
 impl ExtensionsPage {
@@ -472,11 +489,48 @@ impl ExtensionsPage {
                 _subscriptions: subscriptions,
                 query_editor,
                 upsells: BTreeSet::default(),
+                fyx_tab: ui_ext_host::ExtensionsTab::default(), // fyx: plan 7.10
+                fyx_page: ui_ext_host::fyx_extensions_tab(workspace.weak_handle(), window, cx),
+                fyx_fetch_pending: false,
             };
             this.update_local_search_results(cx);
-            this.fetch_extensions(FetchDebounce::Immediate, None, cx);
+            // fyx: plan 7.10, the Fyx tab opens first and asks Zed's registry nothing
+            if this.fyx_page.is_some() {
+                this.fyx_fetch_pending = true;
+            } else {
+                this.fetch_extensions(FetchDebounce::Immediate, None, cx);
+            }
             this
         })
+    }
+
+    /// fyx: plan 7.10, shows the Fyx or the Zed tab.
+    fn fyx_select_tab(
+        &mut self,
+        tab: ui_ext_host::ExtensionsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.fyx_page.is_none() {
+            return;
+        }
+        if tab == ui_ext_host::ExtensionsTab::Fyx
+            && let Some(page) = &self.fyx_page
+        {
+            page.update(cx, |page, cx| page.refresh(cx));
+            if self.fyx_tab != tab {
+                window.focus(&page.focus_handle(cx), cx);
+            }
+        } else {
+            if std::mem::take(&mut self.fyx_fetch_pending) {
+                self.fetch_extensions(FetchDebounce::Immediate, None, cx);
+            }
+            if self.fyx_tab != tab {
+                window.focus(&self.query_editor.focus_handle(cx), cx);
+            }
+        }
+        self.fyx_tab = tab;
+        cx.notify();
     }
 
     fn get_repository_icon(&self, repository_url: &str) -> IconName {
@@ -1472,6 +1526,16 @@ impl PickerDelegate for DevExtensionRebuildPickerDelegate {
 
 impl Render for ExtensionsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // fyx: plan 7.10, the Fyx tab replaces the Zed list below the header
+        let fyx_page = self
+            .fyx_page
+            .clone()
+            .filter(|_| self.fyx_tab == ui_ext_host::ExtensionsTab::Fyx);
+        let fyx_zed_tab = fyx_page.is_none();
+        let fyx_zed_registry_on = ExtensionSettings::get_global(cx)
+            .zed_registry_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty());
         v_flex()
             .size_full()
             .bg(cx.theme().colors().editor_background)
@@ -1487,17 +1551,32 @@ impl Render for ExtensionsPage {
                             .gap_1p5()
                             .justify_between()
                             .child(Headline::new("Extensions").size(HeadlineSize::Large))
-                            .child(ui_ext_host::fyx_extensions_button()) // fyx: Fyx registry page
-                            .child(
-                                Button::new("install-dev-extension", "Install Dev Extension")
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Medium)
-                                    .on_click(|_event, window, cx| {
-                                        window.dispatch_action(Box::new(InstallDevExtension), cx)
+                            // fyx: plan 7.10, the tabs and a dev-install menu for both kinds
+                            .when(self.fyx_page.is_some(), |this| {
+                                this.child(ui_ext_host::extensions_tab_switch(
+                                    self.fyx_tab,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.fyx_select_tab(
+                                            ui_ext_host::ExtensionsTab::Fyx,
+                                            window,
+                                            cx,
+                                        )
                                     }),
-                            ),
+                                    cx.listener(|this, _, window, cx| {
+                                        this.fyx_select_tab(
+                                            ui_ext_host::ExtensionsTab::Zed,
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                                ))
+                            })
+                            .child(ui_ext_host::install_dev_extension_menu(Box::new(
+                                InstallDevExtension,
+                            ))),
                     )
-                    .child(
+                    .when(fyx_zed_tab, |this| {
+                        this.child(
                         h_flex()
                             .w_full()
                             .flex_wrap()
@@ -1546,9 +1625,11 @@ impl Render for ExtensionsPage {
                                     .into_any_element(),
                                 ),
                             ),
-                    ),
+                        )
+                    }),
             )
-            .child(
+            .when(fyx_zed_tab, |this| {
+                this.child(
                 h_flex()
                     .id("filter-row")
                     .gap_2()
@@ -1598,9 +1679,21 @@ impl Render for ExtensionsPage {
                                     })
                             }),
                     ),
-            )
-            .child(self.render_feature_upsells(cx))
-            .child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {
+                )
+            })
+            .when(fyx_zed_tab, |this| {
+                this.child(self.render_feature_upsells(cx)).child(
+                    div()
+                        .px_4()
+                        .pt_2()
+                        .child(ui_ext_host::zed_registry_notice(fyx_zed_registry_on)),
+                )
+            })
+            .when_some(fyx_page, |this, fyx_page| {
+                this.child(div().flex_1().min_h_0().child(fyx_page))
+            })
+            .when(fyx_zed_tab, |this| {
+                this.child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {
                 let count = self.displayed_extensions.len();
 
                 if count == 0 {
@@ -1609,7 +1702,8 @@ impl Render for ExtensionsPage {
                     let scroll_handle = &self.list;
                     this.when(
                         self.fetch_state == ExtensionFetchState::Failed
-                            && self.filter == ExtensionFilter::All,
+                            && self.filter == ExtensionFilter::All
+                            && fyx_zed_registry_on, // fyx: no error while Zed's registry is off
                         |this| {
                             this.child(
                                 div().pt_4().child(
@@ -1636,6 +1730,7 @@ impl Render for ExtensionsPage {
                     .into_any_element()
                 }
             }))
+            })
     }
 }
 

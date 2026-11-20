@@ -61,6 +61,65 @@ pub fn diff_text(diff: &ConsentDiff) -> String {
     parts.join(" ")
 }
 
+/// Plan 7.12: a line's title or detail as people read it. The stored text stays as it is (an
+/// update is compared detail by detail), only what is drawn changes: `${package}` and the other
+/// templates become words, listener protocols their names, and a hook channel loses its exit code
+/// when that is 0.
+pub fn readable_text(text: &str) -> String {
+    match text {
+        "mcpwebsocket" => return "MCP over WebSocket".into(),
+        "mcpstreamablehttp" => return "MCP over HTTP".into(),
+        "websocket" => return "WebSocket".into(),
+        "http" => return "HTTP".into(),
+        _ => {}
+    }
+    if let Some(channel) = text.strip_prefix("channel ") {
+        let (name, exit) = match channel.split_once(" (on failure: exit ") {
+            Some((name, exit)) => (name, exit.trim_end_matches(')')),
+            None => (channel, "0"),
+        };
+        return if exit == "0" {
+            format!("{name} hook")
+        } else {
+            format!("{name} hook (exits {exit} when Fyx does not answer)")
+        };
+    }
+    let mut readable = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        let Some(end) = rest[start..].find('}') else {
+            break;
+        };
+        readable.push_str(&rest[..start]);
+        let placeholder = &rest[start + 2..start + end];
+        let words = match placeholder.split('.').collect::<Vec<_>>().as_slice() {
+            ["package"] => "<this extension's folder>".to_string(),
+            ["relay"] => "<Fyx's hook relay>".to_string(),
+            ["pid"] => "<Fyx's process id>".to_string(),
+            ["port"] => "<port>".to_string(),
+            ["listen", name, "port"] => format!("<the port Fyx picks for {name}>"),
+            ["listen", name, "token"] => format!("<{name}'s token>"),
+            ["account", tool] => format!("<the {tool} account you choose>"),
+            _ => format!("${{{placeholder}}}"),
+        };
+        readable.push_str(&words);
+        rest = &rest[start + end + 1..];
+    }
+    readable.push_str(rest);
+    readable
+}
+
+/// Every warning once, in order of the lines: the dialog lists the risks together, once.
+pub fn unique_warnings(lines: &[ItemLine]) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
+    for warning in lines.iter().flat_map(|line| &line.warnings) {
+        if !warnings.contains(warning) {
+            warnings.push(warning.clone());
+        }
+    }
+    warnings
+}
+
 /// When an entry happened. The journal is a file on disk: a time past what `SystemTime` holds (a
 /// damaged or hand-edited line) reads as the epoch rather than panicking while the page renders.
 pub fn entry_time(entry: &JournalEntry) -> std::time::SystemTime {
@@ -146,6 +205,36 @@ mod tests {
                 bytes: 10,
             },
         }
+    }
+
+    #[test]
+    fn templates_protocols_and_hook_channels_read_as_words() {
+        assert_eq!(
+            readable_text("CLAUDE_CODE_PLUGIN_DIRS=${package}/plugin"),
+            "CLAUDE_CODE_PLUGIN_DIRS=<this extension's folder>/plugin"
+        );
+        assert_eq!(
+            readable_text("CLAUDE_CODE_SSE_PORT=${listen.ide.port}"),
+            "CLAUDE_CODE_SSE_PORT=<the port Fyx picks for ide>"
+        );
+        assert_eq!(
+            readable_text("${account.claude}/ide/${port}.lock"),
+            "<the claude account you choose>/ide/<port>.lock"
+        );
+        assert_eq!(readable_text("mcpwebsocket"), "MCP over WebSocket");
+        assert_eq!(
+            readable_text("channel session-start (on failure: exit 0)"),
+            "session-start hook"
+        );
+        assert_eq!(
+            readable_text("channel pre-tool-use (on failure: exit 2)"),
+            "pre-tool-use hook (exits 2 when Fyx does not answer)"
+        );
+        assert_eq!(readable_text("with -c"), "with -c");
+        assert_eq!(
+            readable_text("odd ${unknown} and ${open"),
+            "odd ${unknown} and ${open"
+        );
     }
 
     /// `u64::MAX` ms overflows Windows' `SystemTime` (100 ns ticks in a `u64`); Unix's holds it.

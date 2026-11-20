@@ -26,19 +26,18 @@ use fyx_registry::{
     PlannedAction, Release, Timestamp, Unavailable,
 };
 use gpui::{
-    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
+    App, AsyncWindowContext, ClickEvent, Context, Entity, FocusHandle, Focusable, Global,
     SharedString, Task, WeakEntity, Window, actions, div, prelude::*,
 };
 use settings::Settings as _;
 use theme::ActiveTheme as _;
 use ui::{
-    Button, ButtonCommon as _, ButtonStyle, Chip, Clickable as _, Color, Disableable as _,
-    Headline, HeadlineSize, Label, LabelCommon as _, LabelSize, h_flex, v_flex,
+    Banner, Button, ButtonCommon as _, ButtonSize, ButtonStyle, Chip, Clickable as _, Color,
+    ContextMenu, Disableable as _, Icon, IconName, IconSize, Label, LabelCommon as _, LabelSize,
+    PopoverMenu, Severity, ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, h_flex,
+    v_flex,
 };
-use workspace::{
-    Workspace,
-    item::{Item, ItemEvent},
-};
+use workspace::Workspace;
 
 use crate::{
     UiExtensionRegistry,
@@ -59,7 +58,7 @@ use crate::{
 actions!(
     fyx_ui,
     [
-        /// Opens the Fyx Extensions page: UI extensions from the Fyx registry.
+        /// Opens the Extensions page on its Fyx tab: UI extensions from the Fyx registry.
         OpenFyxExtensions,
         /// Checks the Fyx registry for extension updates now (the block list too) and applies
         /// them, as the 6 h check does.
@@ -225,7 +224,10 @@ impl RegistryHub {
             self.url = url.clone();
             match RegistryLocation::parse(&url) {
                 Ok(None) => {
-                    self.off = Some("The registry is off (fyx.extensions.registry_url).".into())
+                    self.off = Some(
+                        "No Fyx registry is set up, so only extensions you install from a file or a folder show here. Set fyx.extensions.registry_url in the settings to browse one."
+                            .into(),
+                    )
                 }
                 Err(error) => {
                     self.off = Some(format!("fyx.extensions.registry_url: {error:#}").into())
@@ -967,6 +969,9 @@ pub struct FyxExtensionsPage {
     /// Settings sections (plan 6.1), by extension id; shown while in `settings_shown`.
     settings_forms: collections::HashMap<String, Entity<ExtensionSettingsForm>>,
     settings_shown: collections::HashSet<String>,
+    /// UX-1: cards are collapsed (name, origin, buttons, notes); these show their permissions,
+    /// usage log and settings.
+    expanded: collections::HashSet<String>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -1001,8 +1006,47 @@ impl FyxExtensionsPage {
             hub,
             settings_forms: Default::default(),
             settings_shown: Default::default(),
+            expanded: Default::default(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// UX-1: the "Details" toggle of a card.
+    fn details_toggle(&self, extension_id: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let expanded = self.expanded.contains(extension_id);
+        let id = extension_id.to_owned();
+        Button::new(
+            SharedString::from(format!("fyx-reg-details-{extension_id}")),
+            if expanded { "Hide Details" } else { "Details" },
+        )
+        .style(ButtonStyle::Subtle)
+        .label_size(LabelSize::Small)
+        .end_icon(
+            Icon::new(if expanded {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronDown
+            })
+            .size(IconSize::Small),
+        )
+        .on_click(cx.listener(move |page, _, _, cx| {
+            if !page.expanded.remove(&id) {
+                page.expanded.insert(id.clone());
+            }
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// A card's permissions, usage log and settings, while expanded.
+    fn card_details(&self, extension_id: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if !self.expanded.contains(extension_id) {
+            return Vec::new();
+        }
+        request_journal(extension_id, cx);
+        let mut elements = consent_rows(extension_id, self.workspace.clone(), cx);
+        elements.extend(self.settings_section(extension_id, cx));
+        elements
     }
 
     /// Shows or hides `extension_id`'s Settings section, making its form on first use.
@@ -1058,19 +1102,9 @@ impl FyxExtensionsPage {
         elements
     }
 
-    /// Opens the page in the active pane, or shows the open one.
-    pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-        let Some(hub) = RegistryHub::global(cx) else {
-            return;
-        };
-        if let Some(page) = workspace.item_of_type::<FyxExtensionsPage>(cx) {
-            workspace.activate_item(&page, true, true, window, cx);
-            hub.update(cx, |hub, cx| hub.refresh(cx));
-            return;
-        }
-        let weak = cx.entity().downgrade();
-        let page = cx.new(|cx| FyxExtensionsPage::new(weak, hub, window, cx));
-        workspace.add_item_to_active_pane(Box::new(page), None, true, window, cx);
+    /// Fetches the listing again when the Fyx tab comes back into view.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.hub.update(cx, |hub, cx| hub.refresh(cx));
     }
 
     fn matches(&self, release: &Release, cx: &App) -> bool {
@@ -1347,7 +1381,7 @@ impl FyxExtensionsPage {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(Label::new(id.clone()))
+                            .child(card_title(&id, cx))
                             .child(
                                 Label::new(installed.active.version.to_string())
                                     .size(LabelSize::Small)
@@ -1428,11 +1462,8 @@ impl FyxExtensionsPage {
                     .into_iter()
                     .map(|(note, color)| Label::new(note).size(LabelSize::Small).color(color)),
             )
-            .children({
-                request_journal(&id, cx);
-                consent_rows(&id, self.workspace.clone(), cx)
-            })
-            .children(self.settings_section(&id, cx))
+            .child(h_flex().child(self.details_toggle(&id, cx)))
+            .children(self.card_details(&id, cx))
     }
 
     /// A dev extension or an installed folder (not the install store): where it is, "Enable"
@@ -1456,7 +1487,7 @@ impl FyxExtensionsPage {
                 h_flex()
                     .justify_between()
                     .child(
-                        h_flex().gap_2().child(Label::new(id.clone())).child(
+                        h_flex().gap_2().child(card_title(&id, cx)).child(
                             Label::new(origin)
                                 .size(LabelSize::XSmall)
                                 .color(Color::Warning),
@@ -1487,11 +1518,13 @@ impl FyxExtensionsPage {
                         )
                     }),
             )
-            .child(
-                Label::new(local.path.display().to_string())
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
+            .when(self.expanded.contains(&id), |this| {
+                this.child(
+                    Label::new(local.path.display().to_string())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
             .when_some(pending, |this, new| {
                 let note = if new.is_empty() {
                     "Not enabled".to_string()
@@ -1507,11 +1540,8 @@ impl FyxExtensionsPage {
                         .color(Color::Warning),
                 )
             })
-            .children({
-                request_journal(&id, cx);
-                consent_rows(&id, self.workspace.clone(), cx)
-            })
-            .children(self.settings_section(&id, cx))
+            .child(h_flex().child(self.details_toggle(&id, cx)))
+            .children(self.card_details(&id, cx))
     }
 }
 
@@ -1573,7 +1603,7 @@ fn consent_rows(
     workspace: WeakEntity<Workspace>,
     cx: &App,
 ) -> Vec<gpui::AnyElement> {
-    use crate::consent_model::{ConsentTier, journal_line};
+    use crate::consent_model::{ConsentTier, journal_line, readable_text};
     use ui_ext_wasm::permissions::PermissionState;
     let Some(registry) = UiExtensionRegistry::global(cx) else {
         return Vec::new();
@@ -1587,7 +1617,32 @@ fn consent_rows(
     let can_always_allow = registry_read.can_always_allow(extension_id);
     let always_allowed = registry_read.always_allowed();
     let mut rows: Vec<gpui::AnyElement> = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
+    // 7.12 case 4: grouped by tier as in the dialog, T2 in the warning colour.
+    let mut ordered: Vec<(usize, &crate::consent_model::ItemLine)> =
+        lines.iter().enumerate().collect();
+    ordered.sort_by_key(|(_, line)| match line.tier {
+        ConsentTier::T0 => 0,
+        ConsentTier::T1 => 1,
+        ConsentTier::T2 => 2,
+        ConsentTier::T3 => 3,
+    });
+    let mut last_tier = None;
+    for (index, line) in ordered {
+        if line.tier != ConsentTier::T0 && last_tier != Some(line.tier) {
+            last_tier = Some(line.tier);
+            let (heading, color) = match line.tier {
+                ConsentTier::T2 => ("Riskier, allowed by you", Color::Warning),
+                ConsentTier::T3 => ("Asks you each time", Color::Default),
+                _ => ("Allowed without asking", Color::Default),
+            };
+            rows.push(
+                Label::new(heading)
+                    .size(LabelSize::Small)
+                    .weight(gpui::FontWeight::SEMIBOLD)
+                    .color(color)
+                    .into_any_element(),
+            );
+        }
         let state = registry_read.consent_item_state(extension_id, &line.item);
         // T3 (§C.3): "Always allow" can be turned on here too, for a component with a hash.
         let t3 = ui_ext_wasm::permissions::T3Capability::from_name(line.item.capability());
@@ -1609,18 +1664,27 @@ fn consent_rows(
             (ConsentTier::T2, PermissionState::Unavailable) => ("not available here", None),
             (ConsentTier::T2, _) => ("off", Some(false)),
         };
-        let detail = (!line.details.is_empty()).then(|| line.details.join("  ·  "));
+        let detail = (!line.details.is_empty()).then(|| {
+            line.details
+                .iter()
+                .map(|detail| readable_text(detail))
+                .collect::<Vec<_>>()
+                .join("  ·  ")
+        });
+        // A switch already says on or off; the text says it only without one.
+        let title = readable_text(&line.title);
+        let text = if switch.is_some() && matches!(note, "on" | "off") {
+            title
+        } else {
+            format!("{title}: {note}")
+        };
         let row = h_flex()
             .gap_2()
             .justify_between()
             .child(
                 v_flex()
                     .min_w_0()
-                    .child(
-                        Label::new(format!("{}: {note}", line.title))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
+                    .child(Label::new(text).size(LabelSize::Small))
                     .when_some(detail, |this, detail| {
                         this.child(
                             Label::new(detail)
@@ -1700,6 +1764,7 @@ fn consent_rows(
     rows.push(
         Label::new("Usage")
             .size(LabelSize::Small)
+            .weight(gpui::FontWeight::SEMIBOLD)
             .into_any_element(),
     );
     if journal.incomplete {
@@ -1726,10 +1791,19 @@ fn consent_rows(
             .rev()
             .take(JOURNAL_ROWS)
             .map(|entry| {
+                // 7.12 case 4: an item's name, not its key ("Writes the discovery file
+                // <port>.lock turned on", not "fs:discovery-file#${port}.lock turned on").
+                let mut text = journal_line(&entry.kind);
+                if let crate::consent_model::JournalKind::ConsentChanged { item_key, .. } =
+                    &entry.kind
+                    && let Some(line) = lines.iter().find(|line| &line.item.key() == item_key)
+                {
+                    text = text.replace(item_key.as_str(), &line.title);
+                }
                 Label::new(format!(
                     "{}  {}",
                     ago(now, crate::consent_model::entry_time(entry)),
-                    journal_line(&entry.kind)
+                    readable_text(&text)
                 ))
                 .size(LabelSize::XSmall)
                 .color(Color::Muted)
@@ -1822,6 +1896,7 @@ impl Render for FyxExtensionsPage {
         let installed = self.hub.read(cx).installed.clone();
         let status = self.status_line(cx);
         let refreshing = self.hub.read(cx).is_refreshing();
+        let registry_on = self.hub.read(cx).off_reason().is_none();
         let hub = self.hub.clone();
         let releases: Vec<_> = listing
             .iter()
@@ -1856,40 +1931,28 @@ impl Render for FyxExtensionsPage {
             .bg(cx.theme().colors().editor_background)
             .child(
                 h_flex()
-                    .justify_between()
-                    .child(Headline::new("Fyx Extensions").size(HeadlineSize::Large))
+                    .justify_end()
+                    .gap_1()
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("fyx-reg-from-file", "Install from File…")
-                                    .style(ButtonStyle::Outlined)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(crate::InstallUiExtensionFromFile),
-                                            cx,
-                                        )
-                                    }),
-                            )
-                            .child(
-                                Button::new("fyx-reg-dev", "Install Dev Extension…")
-                                    .style(ButtonStyle::Outlined)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(crate::InstallDevUiExtension),
-                                            cx,
-                                        )
-                                    }),
-                            )
-                            .child(
-                                Button::new("fyx-reg-refresh", "Refresh")
-                                    .style(ButtonStyle::Outlined)
-                                    .disabled(refreshing)
-                                    .on_click(move |_, _, cx| {
-                                        hub.update(cx, |hub, cx| hub.refresh_now(cx))
-                                    }),
-                            ),
-                    ),
+                        Button::new("fyx-reg-from-file", "Install from File…")
+                            .style(ButtonStyle::Outlined)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(crate::InstallUiExtensionFromFile),
+                                    cx,
+                                )
+                            }),
+                    )
+                    .when(registry_on, |this| {
+                        this.child(
+                            Button::new("fyx-reg-refresh", "Refresh")
+                                .style(ButtonStyle::Outlined)
+                                .disabled(refreshing)
+                                .on_click(move |_, _, cx| {
+                                    hub.update(cx, |hub, cx| hub.refresh_now(cx))
+                                }),
+                        )
+                    }),
             )
             .when_some(status, |this, (status, color)| {
                 this.child(Label::new(status).size(LabelSize::Small).color(color))
@@ -1899,28 +1962,32 @@ impl Render for FyxExtensionsPage {
                     .size(LabelSize::Small)
                     .color(Color::Muted)
             }))
-            .child(
-                div()
-                    .h_8()
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .rounded_md()
-                    .border_color(cx.theme().colors().border)
-                    .child(self.query.clone()),
-            )
-            .child(
-                Label::new("Available")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .children(releases)
-            .when(listing.is_empty(), |this| {
+            .when(registry_on, |this| {
                 this.child(
-                    Label::new("Nothing to show.")
+                    div()
+                        .h_8()
+                        .px_2()
+                        .py_1()
+                        .border_1()
+                        .rounded_md()
+                        .border_color(cx.theme().colors().border)
+                        .child(self.query.clone()),
+                )
+            })
+            .when(registry_on, |this| {
+                this.child(
+                    Label::new("Available")
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
+                .children(releases)
+                .when(listing.is_empty(), |this| {
+                    this.child(
+                        Label::new("Nothing to show.")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                })
             })
             .child(
                 Label::new("Installed")
@@ -1938,46 +2005,126 @@ impl Render for FyxExtensionsPage {
     }
 }
 
-impl EventEmitter<ItemEvent> for FyxExtensionsPage {}
-
 impl Focusable for FyxExtensionsPage {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.query.read(cx).focus_handle(cx)
     }
 }
 
-impl Item for FyxExtensionsPage {
-    type Event = ItemEvent;
+/// Plan 7.10: the tabs of the Extensions page. Fyx is the default; Zed shows upstream's list of
+/// Zed extensions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExtensionsTab {
+    #[default]
+    Fyx,
+    Zed,
+}
 
-    fn tab_content_text(&self, _: usize, _: &App) -> SharedString {
-        "Fyx Extensions".into()
-    }
-
-    fn show_toolbar(&self) -> bool {
-        false
-    }
-
-    fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
-        f(*event)
+impl ExtensionsTab {
+    /// The tab `zed: extensions` opens on: Zed when it asks for a Zed category or extension id.
+    pub fn for_request(asks_for_zed_extensions: bool) -> Self {
+        if asks_for_zed_extensions {
+            Self::Zed
+        } else {
+            Self::Fyx
+        }
     }
 }
 
-/// The Extensions page's "Fyx Extensions" button (its one `fyx:` hook).
-pub fn fyx_extensions_button() -> impl IntoElement {
-    Button::new("fyx-open-fyx-extensions", "Fyx Extensions")
-        .style(ButtonStyle::Outlined)
-        .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenFyxExtensions), cx))
+/// The Fyx tab's body, made once per Extensions page. `None` before `ui_ext_host::init` (tests of
+/// upstream's page).
+pub fn fyx_extensions_tab(
+    workspace: WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<FyxExtensionsPage>> {
+    let hub = RegistryHub::global(cx)?;
+    Some(cx.new(|cx| FyxExtensionsPage::new(workspace, hub, window, cx)))
+}
+
+/// The Fyx / Zed switch in the Extensions page header.
+pub fn extensions_tab_switch(
+    active: ExtensionsTab,
+    on_fyx: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_zed: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    ToggleButtonGroup::single_row(
+        "fyx-extensions-tabs",
+        [
+            ToggleButtonSimple::new("Fyx", on_fyx),
+            ToggleButtonSimple::new("Zed", on_zed),
+        ],
+    )
+    .style(ToggleButtonGroupStyle::Outlined)
+    .label_size(LabelSize::Default)
+    .auto_width()
+    .selected_index(match active {
+        ExtensionsTab::Fyx => 0,
+        ExtensionsTab::Zed => 1,
+    })
+}
+
+/// The Extensions page's "Install Dev Extension" menu: a Zed extension (upstream's action, passed
+/// in) or a Fyx UI extension.
+pub fn install_dev_extension_menu(zed_dev_extension: Box<dyn gpui::Action>) -> impl IntoElement {
+    PopoverMenu::new("fyx-install-dev-extension")
+        .menu(move |window, cx| {
+            let zed_dev_extension = zed_dev_extension.boxed_clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                menu.action("Zed Extension…", zed_dev_extension)
+                    .action("UI Extension…", Box::new(crate::InstallDevUiExtension))
+            }))
+        })
+        .anchor(gpui::Anchor::TopRight)
+        .trigger(
+            Button::new("install-dev-extension", "Install Dev Extension")
+                .style(ButtonStyle::Outlined)
+                .size(ButtonSize::Medium)
+                .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::Small)),
+        )
+}
+
+/// The Zed tab's note on where Zed extensions come from.
+pub fn zed_registry_notice(registry_on: bool) -> impl IntoElement {
+    let text = if registry_on {
+        "Zed extensions come from Zed's registry at api.zed.dev. Fyx does not review or sign them, \
+         and the language servers and debug adapters they add can download and run programs with \
+         your access."
+    } else {
+        "Zed's extension registry is off (fyx.extensions.zed_registry_url is empty), so only \
+         installed Zed extensions show here."
+    };
+    Banner::new()
+        .severity(Severity::Info)
+        .child(Label::new(text).size(LabelSize::Small).mt_0p5())
 }
 
 pub(crate) fn register(workspace: &mut Workspace) {
-    workspace.register_action(|workspace, _: &OpenFyxExtensions, window, cx| {
-        FyxExtensionsPage::open(workspace, window, cx)
-    });
-    // The check runs first, so the page that opens shows it (its own refresh waits for it).
-    workspace.register_action(|workspace, _: &CheckForExtensionUpdates, window, cx| {
+    // The check runs first, so the page that opens shows it (its own refresh waits for it). The
+    // Extensions page (`extensions_ui`) handles `OpenFyxExtensions`.
+    workspace.register_action(|_, _: &CheckForExtensionUpdates, window, cx| {
         if let Some(hub) = RegistryHub::global(cx) {
             hub.update(cx, |hub, cx| hub.check_now(cx));
         }
-        FyxExtensionsPage::open(workspace, window, cx)
+        window.dispatch_action(Box::new(OpenFyxExtensions), cx)
     });
+}
+
+/// A card's title: the extension's name, its id beside it in muted text when they differ
+/// (7.12 case 4: the id alone was the title).
+fn card_title(extension_id: &str, cx: &App) -> impl IntoElement {
+    let name = UiExtensionRegistry::global(cx)
+        .map(|registry| registry.read(cx).provenance_name(extension_id))
+        .unwrap_or_else(|| SharedString::from(extension_id.to_owned()));
+    let show_id = name.as_ref() != extension_id;
+    h_flex()
+        .gap_1()
+        .child(Label::new(name).weight(gpui::FontWeight::SEMIBOLD))
+        .when(show_id, |this| {
+            this.child(
+                Label::new(extension_id.to_owned())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+        })
 }

@@ -75,17 +75,19 @@ then apply. The `ZED_SERVER_URL` environment variable also overrides the setting
 
 ### Zed's extension registry
 
-The Extensions page (`zed: extensions`) lists, installs and updates Zed extensions from Zed's
-registry at `https://api.zed.dev`, the address in `fyx.extensions.zed_registry_url`. Only these
+The Extensions page (`zed: extensions`) has two tabs. **Fyx** (the default) holds Fyx UI
+extensions; see [UI extensions](#ui-extensions). **Zed** lists, installs and updates Zed
+extensions from Zed's registry at `https://api.zed.dev`, the address in `fyx.extensions.zed_registry_url`. Only these
 requests use it: the rest of Zed's cloud stays off through `server_url`. Zed's terms apply to the
 registry.
 
-- **When Fyx connects.** When you open the Extensions page or search it, when you install an
+- **When Fyx connects.** When you open the Zed tab or search it, when you install an
   extension, and at startup when Zed extensions from the registry are installed, to check them
   for updates. With none installed, nothing is sent at startup.
 - **Turning it off.** Set `"fyx": { "extensions": { "zed_registry_url": "" } }` in your settings.
-  The registry address then comes from `server_url` again, which points nowhere. Installed
-  extensions keep working, and dev extensions install from a folder either way.
+  The registry address then comes from `server_url` again, which points nowhere, and the Zed tab
+  shows installed Zed extensions only. Installed extensions keep working, and dev extensions
+  install from a folder either way (**Install Dev Extension** → **Zed Extension…**).
 - **Fyx's own folders.** Fyx does not see extensions installed in Zed: install them again in Fyx.
 
 <!-- crates/extension_host/src/fyx_zed_registry.rs; crates/extension_host/src/extension_host.rs (fyx:); assets/settings/fyx.json -->
@@ -397,9 +399,10 @@ it is now. The install command records your consent when you click **Install**. 
 appears there waits for you, for example a folder copied there by hand or linked by Zed's
 **Install Dev Extension**. Fyx then shows a notification:
 
-> The UI extension `<id>` is installed but not enabled. It asks for: …
+> The UI extension `<id>` is installed but not enabled. It asks for 6 permissions, 2 of them
+> riskier ones you choose; Enable lists them.
 
-- **Enable** loads the extension and remembers your answer.
+- **Enable** opens the install dialog (below), which lists them by group.
 - **Not now** leaves it unloaded until the next start.
 
 Fyx asks again when the extension asks for more capabilities. It also asks again when its
@@ -576,9 +579,13 @@ groups, named by how consent works:
 4. **Asks you each time.** The powers it may ask for at the moment it needs them (below). No
    checkbox: nothing is granted in advance.
 
-Click **Install** to install with what you ticked. An item you leave unticked is simply denied;
-the extension loads and should tell you what it cannot do. Every checkbox ignores clicks for one
-second after the dialog opens, so a double click cannot tick one by accident.
+Above the buttons the dialog sums up, once, what the riskier items allow and every warning that
+goes with them. **Install With All Permissions** ticks every checkbox and installs.
+**Install Without These** (or **Install With Ticked Only** once you tick some) installs with
+what you ticked. An item you leave unticked is simply denied; the extension loads and should tell
+you what it cannot do. Every checkbox and button ignores clicks for one second after the dialog
+opens, so a double click cannot tick one or install by accident. The same dialog, with Enable or
+Approve and Update in place of Install, appears for a dev folder and for a held update.
 
 Later, the extension's page lists every item with a switch. Turning one on asks once more, with the
 same text.

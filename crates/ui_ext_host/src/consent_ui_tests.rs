@@ -265,6 +265,33 @@ async fn test_consent_dialog_guard_and_ticks(cx: &mut TestAppContext) {
     assert_eq!(answer.try_recv().unwrap(), Some(vec![program("codex")]));
 }
 
+/// Plan 7.12, owner's decision: "With All Permissions" ticks every T2 line and answers them, and
+/// waits for the click guard like Install.
+#[gpui::test]
+async fn test_consent_dialog_install_all(cx: &mut TestAppContext) {
+    let (workspace, mut answer, cx) = open_dialog(cx).await;
+    let view = dialog(&workspace, cx);
+    view.update(cx, |dialog, cx| dialog.install_all(cx));
+    cx.run_until_parked();
+    assert!(answer.try_recv().unwrap().is_none(), "inside the guard");
+
+    cx.executor()
+        .advance_clock(CLICK_GUARD + Duration::from_millis(1));
+    let expected: Vec<ConsentItem> = {
+        let mut items: Vec<ConsentItem> = consent_items(&manifest(MANIFEST))
+            .into_iter()
+            .filter(|line| line.tier == crate::consent_model::ConsentTier::T2)
+            .map(|line| line.item)
+            .collect();
+        items.sort();
+        items
+    };
+    assert!(!expected.is_empty(), "the demo manifest has T2 lines");
+    view.update(cx, |dialog, cx| dialog.install_all(cx));
+    cx.run_until_parked();
+    assert_eq!(answer.try_recv().unwrap(), Some(expected));
+}
+
 /// §C.2 headings; an update (§C.5) shows only the groups that changed, without "Shows in Fyx"
 /// when T0 did not.
 #[gpui::test]
