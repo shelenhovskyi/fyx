@@ -46,6 +46,10 @@ pub mod registry_service;
 #[cfg(test)]
 mod registry_service_tests;
 pub mod review_bridge;
+pub mod settings_form;
+#[cfg(test)]
+mod settings_form_tests;
+pub mod settings_model;
 mod store_actions;
 mod surface;
 pub mod t3_cards;
@@ -90,6 +94,8 @@ pub use registry::{
     DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver,
     T3ShareTarget, UiExtensionRegistry,
 };
+pub use settings_form::open_extension_settings;
+pub use settings_model::{ExtensionSettingsStore, set_extension_settings_store};
 pub use store_actions::{
     InstallUiExtensionFromFile, OpenExtensionPanel, RestartUiExtension,
     RevokeUiExtensionPermission, RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
