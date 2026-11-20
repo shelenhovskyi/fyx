@@ -504,8 +504,16 @@ async fn test_private_paths_for_observe(cx: &mut TestAppContext) {
     cx.update(|cx| {
         assert!(is_private_path(Path::new(path!("/work/.env")), cx));
         assert!(!is_private_path(Path::new(path!("/work/a.txt")), cx));
-        assert!(!is_private_path(Path::new(path!("/elsewhere/x")), cx));
+        // 5.19 P7: fails closed outside every registered project.
+        assert!(is_private_path(Path::new(path!("/elsewhere/x")), cx));
     });
+}
+
+/// 5.19 P7: before any project is registered, every path counts as private.
+#[gpui::test]
+fn test_private_paths_fail_closed_without_projects(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    cx.update(|cx| assert!(is_private_path(Path::new(path!("/work/a.txt")), cx)));
 }
 
 /// integration-5 S8: a file on disk the worktree has no entry for (an ignored, unscanned
