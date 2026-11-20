@@ -1,3 +1,4 @@
+mod fyx_decorations; // fyx: plan 6.7, extensions' marks on entries
 pub mod project_panel_settings;
 mod undo;
 mod utils;
@@ -318,6 +319,8 @@ struct EntryDetails {
     is_private: bool,
     worktree_id: WorktreeId,
     canonical_path: Option<Arc<Path>>,
+    // fyx: plan 6.7, extensions' badges and colour.
+    fyx_decorations: project::fyx_file_decorations::EntryDecorations,
 }
 
 /// The glyph a row's diagnostic mark decorates, and the shape of that mark.
@@ -855,6 +858,7 @@ impl ProjectPanel {
                 cx.notify();
             })
             .detach();
+            fyx_decorations::follow(cx); // fyx: plan 6.7
 
             let mut project_panel_settings = *ProjectPanelSettings::get_global(cx);
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
@@ -6228,6 +6232,7 @@ impl ProjectPanel {
             .git_status_indicator
             .then(|| git_status_indicator(details.git_status))
             .flatten();
+        let fyx_badges = fyx_decorations::badges(&details.fyx_decorations); // fyx: plan 6.7
 
         let id: ElementId = if is_sticky {
             SharedString::from(format!("project_panel_sticky_item_{}", entry_id.to_usize())).into()
@@ -6636,7 +6641,8 @@ impl ProjectPanel {
                     .when(
                         canonical_path.is_some()
                             || diagnostic_count.is_some()
-                            || git_indicator.is_some(),
+                            || git_indicator.is_some()
+                            || fyx_badges.is_some(), // fyx: plan 6.7
                         |this| {
                             let symlink_element = canonical_path.map(|path| {
                                 div()
@@ -6679,6 +6685,7 @@ impl ProjectPanel {
                                             },
                                         )
                                     })
+                                    .children(fyx_badges) // fyx: plan 6.7
                                     .when_some(git_indicator, |this, (label, color)| {
                                         let git_indicator = if kind.is_dir() {
                                             Indicator::dot()
@@ -7201,6 +7208,15 @@ impl ProjectPanel {
 
         let filename_text_color =
             entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+        // fyx: plan 6.7, an extension's colour where git gives none.
+        let fyx_decorations = fyx_decorations::for_entry(worktree_id, &entry.path, cx);
+        let filename_text_color = fyx_decorations::label_color(
+            filename_text_color,
+            git_status,
+            entry.is_ignored,
+            is_marked,
+            &fyx_decorations,
+        );
 
         let is_cut = self
             .clipboard
@@ -7231,6 +7247,7 @@ impl ProjectPanel {
             is_private: entry.is_private,
             worktree_id,
             canonical_path: entry.canonical_path.clone(),
+            fyx_decorations,
         }
     }
 
