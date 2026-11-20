@@ -60,7 +60,9 @@ mod compile_cache;
 mod context;
 mod listeners;
 mod notifications;
+mod relay;
 mod review;
+pub mod settings;
 mod terminals;
 mod v0_2;
 mod v0_3;
@@ -325,6 +327,9 @@ pub(crate) struct State {
     context: context::FakeContext,
     /// 0.4 `review`.
     review: review::FakeReview,
+    /// 0.4 `relay`.
+    relay: relay::FakeRelay,
+    settings: settings::FakeSettings,
     logs: Vec<(ui_ext::LogLevel, String)>,
     call_started: Instant,
     call_budget: Duration,
@@ -1097,6 +1102,8 @@ pub struct Harness {
     package: Option<PathBuf>,
     /// `[fyx_ui.terminal_env]`, checked, from `load_package`.
     terminal_env: Option<ui_ext::terminal::TerminalEnv>,
+    /// The manifest's `id`, from `load_package`: a relay channel names it.
+    extension_id: Option<String>,
     /// What the renderer would draw as alt text: assets that are missing or bad, dead handles.
     image_failures: Vec<String>,
 }
@@ -1188,6 +1195,8 @@ impl Harness {
                 listeners: fake_listeners,
                 context: context::FakeContext::default(),
                 review: review::FakeReview::default(),
+                relay: relay::FakeRelay::default(),
+                settings: settings::FakeSettings::default(),
                 logs: Vec::new(),
                 call_started: Instant::now(),
                 call_budget: INIT_BUDGET,
@@ -1274,6 +1283,7 @@ impl Harness {
             disabled: None,
             package: None,
             terminal_env: None,
+            extension_id: None,
             image_failures: Vec::new(),
         };
         harness.record(&effects);
@@ -1408,8 +1418,25 @@ impl Harness {
                 .with_terminal_profiles(profiles)
                 .with_context(|| format!("in {manifest_path:?}"))?;
         }
+        if let Some(channels) = table.get("relay_channels") {
+            let channels: Vec<ui_ext::integration::RelayChannelSpec> = channels
+                .clone()
+                .try_into()
+                .with_context(|| format!("[[fyx_ui.relay_channels]] in {manifest_path:?}"))?;
+            harness
+                .set_relay_channels(channels)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
+        if let Some(entries) = table.get("settings") {
+            let specs = settings::SettingSpec::parse_all(entries)
+                .map_err(|why| anyhow::anyhow!("{why} in {manifest_path:?}"))?;
+            harness
+                .set_setting_specs(specs)
+                .with_context(|| format!("in {manifest_path:?}"))?;
+        }
         if let Some(id) = manifest.get("id").and_then(toml::Value::as_str) {
             harness.store.data_mut().listeners.set_extension_id(id);
+            harness.extension_id = Some(id.to_owned());
         }
         harness.package =
             Some(std::fs::canonicalize(dir).with_context(|| format!("resolving {dir:?}"))?);
@@ -1938,6 +1965,129 @@ impl Harness {
         self.store.data().review.turns.clone()
     }
 
+    /// The `[[fyx_ui.relay_channels]]` (0.4, design.md B.9), checked as the host checks them;
+    /// [`Harness::load_package`] reads them from the manifest. They need `relay:hooks`.
+    pub fn set_relay_channels(
+        &mut self,
+        channels: Vec<ui_ext::integration::RelayChannelSpec>,
+    ) -> Result<()> {
+        let state = self.store.data_mut();
+        if !channels.is_empty()
+            && !state
+                .api
+                .capabilities()
+                .iter()
+                .any(|name| name == ui_ext::integration::CAPABILITY_RELAY_HOOKS)
+        {
+            anyhow::bail!(
+                "[[fyx_ui.relay_channels]] needs the {} capability",
+                ui_ext::integration::CAPABILITY_RELAY_HOOKS
+            );
+        }
+        ui_ext::integration::IntegrationTables {
+            relay_channels: &channels,
+            ..Default::default()
+        }
+        .check()
+        .map_err(|why| anyhow::anyhow!(why))?;
+        state.relay.set_channels(channels);
+        Ok(())
+    }
+
+    /// The relay channels, in manifest order.
+    pub fn relay_channels(&self) -> &[ui_ext::integration::RelayChannelSpec] {
+        self.store.data().relay.channels()
+    }
+
+    /// The `[[fyx_ui.settings]]` (0.4, design.md §D), already checked with
+    /// [`settings::SettingSpec::parse_all`]; [`Harness::load_package`] reads them from the
+    /// manifest. Refused for a component below 0.4. The user's values are kept and checked again.
+    pub fn set_setting_specs(&mut self, specs: Vec<settings::SettingSpec>) -> Result<()> {
+        if !specs.is_empty() && self.api_version < Version::new(0, 4, 0) {
+            anyhow::bail!(
+                "[[fyx_ui.settings]] needs fyx:ui 0.4; the component targets {}",
+                self.api_version
+            );
+        }
+        self.store.data_mut().settings.set_specs(specs);
+        Ok(())
+    }
+
+    /// The declared settings, in manifest order.
+    pub fn setting_specs(&self) -> &[settings::SettingSpec] {
+        self.store.data().settings.specs()
+    }
+
+    /// What the extension gets from `settings.all`: every declared key's effective value, in
+    /// manifest order.
+    pub fn settings(&self) -> &[settings::Setting] {
+        self.store.data().settings.effective()
+    }
+
+    /// What the extension gets from `settings.get(key)`; `None` for an undeclared key.
+    pub fn setting(&self, key: &str) -> Option<&settings::Setting> {
+        self.store.data().settings.get(key)
+    }
+
+    /// Why the user's value for `key` is not passed on (the form shows it); `None` when it is
+    /// valid or unset.
+    pub fn setting_error(&self, key: &str) -> Option<&str> {
+        self.store.data().settings.error(key)
+    }
+
+    /// The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An
+    /// invalid value gives the extension its default. Returns the keys whose effective value
+    /// changed, in manifest order: what `io-event::settings-changed` carries once the WIT has
+    /// it (design.md §D.4).
+    pub fn set_user_settings(&mut self, values: serde_json::Value) -> Result<Vec<String>> {
+        self.store
+            .data_mut()
+            .settings
+            .set_user(values)
+            .map_err(|why| anyhow::anyhow!(why))
+    }
+
+    /// The `settings-changed` events the host would have sent, oldest first, and forgets them.
+    pub fn take_settings_changed(&mut self) -> Vec<Vec<String>> {
+        self.store.data_mut().settings.changed.drain(..).collect()
+    }
+
+    /// A hook runs `fyx-relay --channel <channel>` in `terminal` (the extension's handle for it)
+    /// with `stdin`; [`Harness::deliver_io`] delivers `relay-request`. `channel` is
+    /// `<extension-id>/<name>`, as hooks pass it, or the bare name. Returns the request's id, or
+    /// why the host refuses it (the relay then prints the channel's `on_failure`).
+    pub fn relay_request(
+        &mut self,
+        channel: &str,
+        terminal: Option<u64>,
+        argv: &[&str],
+        stdin: &str,
+    ) -> Result<u64> {
+        let state = self.store.data_mut();
+        let capabilities = state.api.capabilities().to_vec();
+        state
+            .relay
+            .request(
+                &capabilities,
+                self.extension_id.as_deref(),
+                channel,
+                terminal.map(ui_ext::terminal::TerminalHandle),
+                argv.iter().map(|arg| (*arg).to_owned()).collect(),
+                stdin.to_owned(),
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+
+    /// The extension's `relay.respond` to request `id`, once.
+    pub fn relay_answer(&mut self, id: u64) -> Option<ui_ext::integration::RelayAnswer> {
+        self.store.data_mut().relay.take_answer(id)
+    }
+
+    /// The relay requests the extension has not answered, by id.
+    pub fn waiting_relay_requests(&self) -> Vec<u64> {
+        self.store.data().relay.waiting()
+    }
+
     /// The MCP calls the extension has not answered, by call id.
     pub fn open_mcp_calls(&self) -> Vec<u64> {
         self.store.data().listeners.open_calls()
@@ -2164,6 +2314,17 @@ impl Harness {
         }
         while let Some((id, outcome)) = self.store.data_mut().review.events.pop_front() {
             let event = ui_ext::network::IoEvent::ReviewDecided(id, outcome);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(request) = self.store.data_mut().relay.events.pop_front() {
+            let event = ui_ext::network::IoEvent::RelayRequest(request);
             let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };

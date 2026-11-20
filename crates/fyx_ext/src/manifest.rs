@@ -93,6 +93,7 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         integration::CAPABILITY_CONTEXT_EDITOR,
         integration::CAPABILITY_WORKSPACE_OPEN,
         integration::CAPABILITY_APPROVALS,
+        integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
     ];
     if *version >= Version::new(0, 4, 0) {
         Some(V0_4)
@@ -142,10 +143,6 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
         CapabilityStatus::Planned("a later release"),
     ),
     (
-        "workspace:diagnostics",
-        CapabilityStatus::Planned("a later release"),
-    ),
-    (
         "workspace:edit",
         CapabilityStatus::Since(Version::new(0, 3, 0)),
     ),
@@ -173,6 +170,7 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     (integration::CAPABILITY_CONTEXT_EDITOR, SINCE_V0_4),
     (integration::CAPABILITY_WORKSPACE_OPEN, SINCE_V0_4),
     (integration::CAPABILITY_APPROVALS, SINCE_V0_4),
+    (integration::CAPABILITY_WORKSPACE_DIAGNOSTICS, SINCE_V0_4),
 ];
 
 const SINCE_V0_4: CapabilityStatus = CapabilityStatus::Since(Version::new(0, 4, 0));
@@ -244,6 +242,10 @@ pub struct FyxUiTable {
     /// 0.4, with `relay:hooks`.
     #[serde(default)]
     pub relay_channels: Vec<integration::RelayChannelSpec>,
+    /// 0.4, no capability: the extension's settings (design.md §D), checked by
+    /// `fyx_ext_harness::settings`.
+    #[serde(default)]
+    pub settings: Vec<toml::Value>,
 }
 
 /// `[fyx_ui.process]`.
@@ -428,6 +430,7 @@ pub fn parse(dir: &Path, text: &str, report: &mut Report) -> Result<Manifest> {
     check_network(&table, report);
     check_processes(&table, report);
     check_terminals(&table, report);
+    check_settings(&table, report);
     let package_files = check_package_files(dir, &table, report);
 
     Ok(Manifest {
@@ -524,6 +527,7 @@ fn check_world_tables(table: &FyxUiTable, version: &Version, report: &mut Report
             .into_iter()
             .map(|(present, name, _)| (present, name, &v0_4)),
     );
+    tables.push((!table.settings.is_empty(), "[[fyx_ui.settings]]", &v0_4));
     for (present, name, since) in tables {
         if present && version < since {
             report.error(format!(
@@ -635,6 +639,23 @@ fn check_terminals(table: &FyxUiTable, report: &mut Report) {
     ];
     for error in checks.into_iter().filter_map(Result::err) {
         report.error(error);
+    }
+}
+
+/// `[[fyx_ui.settings]]` with the harness's reference checks (design.md §D.1). The host reads
+/// the table once W2c builds §D.6, so a passing table is also a note until then.
+fn check_settings(table: &FyxUiTable, report: &mut Report) {
+    if table.settings.is_empty() {
+        return;
+    }
+    match fyx_ext_harness::settings::SettingSpec::parse_all(&toml::Value::Array(
+        table.settings.clone(),
+    )) {
+        Ok(specs) => report.note(format!(
+            "[[fyx_ui.settings]]: {} settings; the staged 0.4 host reads them once              design.md §D is built",
+            specs.len()
+        )),
+        Err(why) => report.error(why),
     }
 }
 
@@ -925,6 +946,95 @@ capabilities = ["ui:panel"]
                 "{report:?}"
             );
         }
+    }
+
+    /// The table follows the host: every demo in `extensions/` passes, so `fyx-ext check` skips
+    /// none of them (`workspace:diagnostics` was still "planned" here while 0.4 provided it).
+    #[test]
+    fn settings_tables_are_checked_and_need_0_4() {
+        let settings = r#"
+[[fyx_ui.settings]]
+key = "severity"
+title = "Report as"
+type = "choice"
+default = "warning"
+choices = [{ value = "error", title = "Error" }, { value = "warning", title = "Warning" }]
+"#;
+        let check = |api_version: &str, extra: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("extension.toml"),
+                format!(
+                    "id = \"demo\"\nname = \"Demo\"\nversion = \"0.1.0\"\n\n[fyx_ui]\napi_version = \"{api_version}\"\ncomponent = \"fyx_ui.wasm\"\ncapabilities = [\"ui:panel\"]\n{extra}"
+                ),
+            )
+            .unwrap();
+            let mut report = Report::default();
+            read(dir.path(), &mut report).unwrap();
+            report
+        };
+        let report = check("0.4.0", settings);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(
+            report.notes.iter().any(|note| note.contains("1 settings")),
+            "{:?}",
+            report.notes
+        );
+        let report = check("0.3.0", settings);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("[[fyx_ui.settings]] needs fyx:ui 0.4.0")),
+            "{:?}",
+            report.errors
+        );
+        let report = check(
+            "0.4.0",
+            &settings.replace("\"warning\"\nchoices", "\"info\"\nchoices"),
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("not one of the choices")),
+            "{:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn shipped_demos_pass_the_manifest_check() {
+        let extensions = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&extensions).expect("extensions/ exists") {
+            let dir = entry.expect("readable entry").path();
+            let Ok(text) = std::fs::read_to_string(dir.join("extension.toml")) else {
+                continue;
+            };
+            if !text.contains("[fyx_ui]") {
+                continue;
+            }
+            let mut report = Report::default();
+            let manifest = parse(&dir, &text, &mut report);
+            assert!(manifest.is_ok(), "{}: {manifest:?}", dir.display());
+            assert!(report.errors.is_empty(), "{}: {report:?}", dir.display());
+            assert!(
+                !report.warnings.iter().any(|w| w.contains("arrives with")),
+                "{}: {report:?}",
+                dir.display()
+            );
+            checked += 1;
+        }
+        assert!(checked > 1, "found {checked} fyx_ui demos");
+        assert!(capability_available(
+            integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+            Some(&Version::new(0, 4, 0))
+        ));
+        assert!(!capability_available(
+            integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+            Some(&Version::new(0, 3, 0))
+        ));
     }
 
     #[test]

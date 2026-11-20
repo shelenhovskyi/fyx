@@ -40,6 +40,7 @@ branch are listed under [Coming](#coming).
 ## Development
 
 - [ci.md](ci.md): Fyx's own GitHub workflows, the merge gate and the advisory triage.
+- [mac-build.md](mac-build.md): local unsigned Mac build, `script/fyx-mac-check`, first launch past Gatekeeper.
 - [manual-tests.md](manual-tests.md): phase 4 manual test scripts for the running editor.
 
 ## Reviews and audits (`tasks/reviews/`)

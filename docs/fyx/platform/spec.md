@@ -290,8 +290,8 @@ unsupported experiment (decision 3); capability chips
 
 ## 5. Out of scope
 
-- New first-party extensions; the VS Code adapter (Phase 5 #12 keeps its place, it is not part of
-  this milestone); webviews (`ui:web`); key capture and overlay labels; inlay hints; graph
+- New first-party extensions; the VS Code adapter (dropped by the owner on 2026-11-20: Fyx does
+  not support VS Code extensions); webviews (`ui:web`); key capture and overlay labels; inlay hints; graph
   columns; ratings, reviews and download counts in the registry; paid extensions; settings sync of
   extensions; a registry for Zed-format extensions (languages, themes); agent review policy
   (W5's Phase 5 #1 stays separate; this milestone only adds `agent:observe` for extensions);

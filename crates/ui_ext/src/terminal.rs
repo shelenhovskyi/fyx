@@ -396,8 +396,35 @@ const SHELL_ENV_NAMES: &[&str] = &[
     "INPUTRC",
     "FPATH",
     "CDPATH",
+    // p5-security-0.4 P1: prompts are expanded, so `PS1='$(cmd)'` runs cmd in the user's shell
+    // (bash `promptvars`, zsh `PROMPT_SUBST`); `HISTFILE=~/.bashrc` appends typed lines to it.
+    "PS0",
+    "PS1",
+    "PS2",
+    "PS3",
+    "PS4",
+    "PROMPT",
+    "RPROMPT",
+    "RPS1",
+    "RPS2",
+    "HISTFILE",
+    // p5-security-0.4 P2: proxies and certificate stores move a tool's traffic, with the user's
+    // credentials in it, to another host.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "FTP_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
 ];
 const SHELL_ENV_PREFIXES: &[&str] = &["XDG_", "TERM", "FYX_", "ZED_"];
+/// p5-security-0.4 P2: a tool's API endpoint (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+/// `OPENAI_API_BASE`, ...) gets the user's key with every request.
+const ENDPOINT_ENV_SUFFIXES: &[&str] = &["_BASE_URL", "_API_BASE", "_API_URL", "_ENDPOINT"];
 
 /// Account config dirs (§C.6 rule 5). Every env name an account-profile preset uses must be in
 /// this list (`fyx.accounts` presets are settings data, W1).
@@ -487,11 +514,7 @@ fn terminal_env_refusal(name: &str) -> Option<&'static str> {
     let upper = name.to_ascii_uppercase();
     if process::is_forbidden_env(name) {
         Some("loads code into the shell or the programs it starts")
-    } else if SHELL_ENV_NAMES.contains(&upper.as_str())
-        || SHELL_ENV_PREFIXES
-            .iter()
-            .any(|prefix| upper.starts_with(prefix))
-    {
+    } else if terminal_env_refusal_without_credentials(&upper).is_some() {
         Some("changes where the shell finds programs or its configuration, or is Fyx's own")
     } else if ACCOUNT_DIR_ENV_NAMES.contains(&upper.as_str()) {
         Some("selects an account's config dir, which only Fyx's account profiles set")
@@ -587,6 +610,23 @@ impl Template {
         literal.push_str(rest);
         if !literal.is_empty() {
             parts.push(TemplatePart::Literal(literal));
+        }
+        // p5-security-0.4 P6: `${package}/../..` would name files outside the extension under
+        // "files from this extension", and `${account.<tool>}/../<other>` another account's dir,
+        // which the extension never chooses (§C.6). No `..` component after either.
+        let mut after_dir = false;
+        for part in &parts {
+            match part {
+                TemplatePart::Package | TemplatePart::Account(_) => after_dir = true,
+                TemplatePart::Literal(text)
+                    if after_dir && text.split(['/', '\\']).any(|component| component == "..") =>
+                {
+                    return Err(format!(
+                        "{text:?}: no .. after ${{package}} or ${{account.…}}"
+                    ));
+                }
+                _ => {}
+            }
         }
         Ok(Self(parts))
     }
@@ -931,12 +971,15 @@ pub fn check_terminal_env(
     })
 }
 
-/// [`terminal_env_refusal`] for the shell and host names alone.
+/// [`terminal_env_refusal`] for the shell, host and endpoint names alone.
 fn terminal_env_refusal_without_credentials(upper: &str) -> Option<()> {
     (SHELL_ENV_NAMES.contains(&upper)
         || SHELL_ENV_PREFIXES
             .iter()
-            .any(|prefix| upper.starts_with(prefix)))
+            .any(|prefix| upper.starts_with(prefix))
+        || ENDPOINT_ENV_SUFFIXES
+            .iter()
+            .any(|suffix| upper.ends_with(suffix)))
     .then_some(())
 }
 
@@ -1002,6 +1045,31 @@ mod tests {
         }
     }
 
+    /// p5-security-0.4 P6: no `..` after `${package}` or `${account.<tool>}`.
+    #[test]
+    fn no_parent_after_package_or_account() {
+        for text in [
+            "${package}/../../.ssh",
+            "${account.claude}/../work",
+            "${package}\\..\\x",
+        ] {
+            assert!(
+                Template::parse(text, TemplateUse::EnvValue, &listeners).is_err(),
+                "{text}"
+            );
+        }
+        for text in [
+            "../${package}",
+            "${package}/a..b/c",
+            "${account.claude}/settings.json",
+        ] {
+            assert!(
+                Template::parse(text, TemplateUse::EnvValue, &listeners).is_ok(),
+                "{text}"
+            );
+        }
+    }
+
     /// Plan 5.5 "done when": `PATH`, `HOME`, `CLAUDE_CONFIG_DIR` and `FOO_API_KEY` are refused, in
     /// any letter case, with the rest of §B.4 and §C.6.
     #[test]
@@ -1035,6 +1103,22 @@ mod tests {
             "DB_PASSWORD",
             "GIT_SSH_COMMAND",
             "RUSTC_WRAPPER",
+            // p5-security-0.4 P1/P2.
+            "PS1",
+            "ps0",
+            "PROMPT",
+            "HISTFILE",
+            "https_proxy",
+            "NODE_EXTRA_CA_CERTS",
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_API_BASE",
+            "GIT_TERMINAL_PROMPT",
+            "GOFLAGS",
+            "CLASSPATH",
+            "LUA_INIT_5_4",
+            "GEM_HOME",
+            "PIP_INDEX_URL",
+            "UV_INDEX_URL",
         ] {
             assert!(is_forbidden_terminal_env(name), "{name}");
             let refused = check_terminal_env(env(&[(name, "x")]), &listeners);
@@ -1080,6 +1164,27 @@ mod tests {
             let refused = check_terminal_env(env(&[(name, value)]), &listeners);
             assert!(refused.is_err(), "{name}={value}: {refused:?}");
         }
+    }
+
+    /// Gemini gap 3 (W4): the CLI finds its IDE by `GEMINI_CLI_IDE_PID`, Fyx's own pid.
+    #[test]
+    fn the_host_pid_goes_in_an_env_value() {
+        let checked = check_terminal_env(
+            env(&[
+                ("GEMINI_CLI_IDE_PID", "${pid}"),
+                ("GEMINI_CLI_IDE_SERVER_PORT", "${listen.ide.port}"),
+            ]),
+            &listeners,
+        )
+        .unwrap();
+        assert!(
+            checked
+                .vars
+                .iter()
+                .any(|(name, value)| name == "GEMINI_CLI_IDE_PID"
+                    && value.0 == [TemplatePart::Pid]),
+            "{checked:?}"
+        );
     }
 
     #[test]

@@ -82,6 +82,21 @@ const FORBIDDEN_ENV_NAMES: &[&str] = &[
     "JDK_JAVA_OPTIONS",
     "DOTNET_STARTUP_HOOKS",
     "PSMODULEPATH",
+    // p5-security-0.4 P1: more loaders and the package sources a build fetches code from.
+    "CLASSPATH",
+    "GCONV_PATH",
+    "GOFLAGS",
+    "GOENV",
+    "GOPROXY",
+    "GOTOOLCHAIN",
+    "GOINSECURE",
+    "GONOSUMDB",
+    "GONOSUMCHECK",
+    "GOPRIVATE",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
+    "PYTHONWARNINGS",
+    "PERL5DB",
     // Shells.
     "BASH_ENV",
     "ENV",
@@ -124,6 +139,14 @@ const FORBIDDEN_ENV_PREFIXES: &[&str] = &[
     "CARGO_",
     "COR_",
     "CORECLR_",
+    // p5-security-0.4 P1: every git switch (config, hooks, programs it runs), Lua's init code,
+    // and the package indexes of gem, bundler, pip and uv.
+    "GIT_",
+    "LUA_INIT",
+    "GEM_",
+    "BUNDLE_",
+    "PIP_",
+    "UV_",
 ];
 
 /// One `[[fyx_ui.processes]]` entry.

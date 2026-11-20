@@ -203,7 +203,7 @@ fn project_folder(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
         .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
 }
 
-/// "+" menu: per tool with accounts, "<Tool> account in this project" and a choice of them.
+/// "+" menu: per tool with accounts, "<Tool>: in this project, use" and a choice of them.
 pub(crate) fn menu_entries(window: &Window, cx: &App) -> Vec<MenuEntry> {
     let Some(workspace) = Workspace::for_window(window, cx) else {
         return Vec::new();
@@ -272,7 +272,7 @@ fn menu_model(settings: &FyxAccountsSettingsContent, folder: &Path) -> Vec<MenuI
             .map(|account| account.name.clone());
         items.push(MenuItem::Separator);
         items.push(MenuItem::Header(format!(
-            "{} account in this project",
+            "{}: in this project, use",
             settings.tool_label(&tool)
         )));
         for account in accounts.iter().filter(|account| account.tool == tool) {
@@ -497,9 +497,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(checked, ["Work", "Default (no profile)"]);
         assert!(items.contains(&MenuItem::Header(
-            "Claude Code account in this project".into()
+            "Claude Code: in this project, use".into()
         )));
-        assert!(items.contains(&MenuItem::Header("codex account in this project".into())));
+        assert!(items.contains(&MenuItem::Header("codex: in this project, use".into())));
         assert!(menu_model(&FyxAccountsSettingsContent::default(), Path::new("/x")).is_empty());
     }
 

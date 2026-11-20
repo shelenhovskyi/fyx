@@ -758,6 +758,9 @@ fn main() {
         if let Some(host) = terminal_host::host(cx) {
             ui_ext_host::set_terminal_host(host, cx); // fyx: before ui_ext_host loads any extension
         }
+        if let Some(focus) = terminal_host::terminal_focus(cx) {
+            ui_ext_host::set_terminal_focus(focus, cx); // fyx: §B.11 focus rule
+        }
         ui_ext_wasm::set_account_dirs(Some(terminal_host::account_dirs(cx))); // fyx: plan 5.20
         ui_ext_host::set_terminal_node_views(
             std::rc::Rc::new(terminal_host::extension_terminal_view),

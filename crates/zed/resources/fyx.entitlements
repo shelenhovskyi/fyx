@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fyx's entitlements (plan 7.1), reviewed from zed.entitlements. They only take effect under the
+  hardened runtime (a notarized build); the ad-hoc build records them. Kept:
+  - allow-jit, allow-unsigned-executable-memory: wasmtime compiles extension components to
+    executable memory at run time.
+  - automation.apple-events: programs in Fyx's terminals and tasks that run osascript.
+  Dropped from Zed's set: camera, microphone, contacts, calendars, location and photos (Zed lets
+  terminal programs inherit them; Fyx runs agents there and keeps them out), and the two
+  files.* entitlements, which apply only to sandboxed apps.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>

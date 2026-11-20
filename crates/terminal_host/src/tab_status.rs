@@ -183,20 +183,28 @@ fn typed_by_marker(
 /// §C.3: an eye on a user terminal that an extension may read or type into now.
 fn access_marker(
     terminal: &TerminalExt,
-    access: Vec<String>,
+    access: crate::t3::Access,
     rest: Option<AnyElement>,
 ) -> AnyElement {
+    let label = access.label();
     h_flex()
         .gap_1()
         .child(
-            div()
+            h_flex()
                 .id(("fyx-terminal-access", terminal.id().as_u64()))
+                .gap_0p5()
                 .child(
                     Icon::new(IconName::Eye)
                         .size(IconSize::Small)
                         .color(Color::Warning),
                 )
-                .tooltip(Tooltip::text(access.join("\n"))),
+                // An "Always allow" is named on the tab itself, not only in the tooltip (§C.3).
+                .children(label.map(|label| {
+                    Label::new(label)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning)
+                }))
+                .tooltip(Tooltip::text(access.lines.join("\n"))),
         )
         .children(rest)
         .into_any_element()

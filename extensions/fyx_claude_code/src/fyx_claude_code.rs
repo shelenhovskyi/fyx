@@ -20,12 +20,18 @@
 //! [`ide::Server`] ([`wired`]); Claude's paths map to worktree files through `context`, which
 //! also feeds `selection_changed`, and `openDiff` is a proposal in agent review (`review`),
 //! withdrawn when Claude closes its tab first. `getDiagnostics` reads `context.diagnostics`;
-//! its answers are cached until `diagnostics-changed`. The hooks arrive with the relay.
+//! its answers are cached until `diagnostics-changed`. The hooks arrive as
+//! `io-event::relay-request` and are answered at once ([`hooks::ANSWER`]); their turns name
+//! Claude's sessions, and so do the proposals of the one session in a turn. A rejected
+//! `openDiff` ends that turn ([`hooks::Sessions::diff_rejected`]).
 
 pub mod hooks;
 pub mod ide;
 #[cfg(feature = "fyx-ui-0-4")]
 mod wired;
+
+#[cfg(feature = "fyx-ui-0-4")]
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 mod compat;
@@ -49,6 +55,56 @@ pub struct ClaudeCode {
     /// The last `selection_changed` params sent, so an unchanged selection is not sent again.
     #[cfg(feature = "fyx-ui-0-4")]
     selection: Option<String>,
+    /// The terminal each Claude session's hooks last ran in, for its status.
+    #[cfg(feature = "fyx-ui-0-4")]
+    terminals: BTreeMap<String, terminals::TerminalHandle>,
+}
+
+#[cfg(feature = "fyx-ui-0-4")]
+impl ClaudeCode {
+    /// The host, with the session `openDiff` proposals are named by.
+    fn host(&self) -> wired::SdkHost {
+        wired::SdkHost::new(self.sessions.current())
+    }
+
+    /// One hook, through `fyx-relay`. A hook the extension cannot read is logged; every hook is
+    /// answered with [`hooks::ANSWER`], so Claude never waits on Fyx.
+    fn hook(&mut self, request: relay::RelayRequest) {
+        let input = hooks::Channel::from_relay(&request.channel)
+            .ok_or_else(|| format!("unknown relay channel {:?}", request.channel))
+            .and_then(|channel| hooks::HookInput::parse(channel, &request.stdin));
+        match input {
+            Ok(input) => {
+                // As in the compat replay: a new turn reads diagnostics afresh.
+                if input.channel == hooks::Channel::UserPrompt {
+                    self.ide.invalidate_diagnostics();
+                }
+                if let Some(terminal) = request.terminal {
+                    self.terminals.insert(input.session.clone(), terminal);
+                }
+                let effects = self.sessions.apply(&input, wired::to_ref);
+                let terminal = self.terminals.get(&input.session).copied();
+                wired::run_hook_effects(terminal, &effects);
+                if input.channel == hooks::Channel::SessionEnd {
+                    self.terminals.remove(&input.session);
+                }
+            }
+            Err(error) => log(
+                LogLevel::Warn,
+                &format!("a Claude hook was ignored: {error}"),
+            ),
+        }
+        let (exit_code, stdout, stderr) = hooks::ANSWER;
+        if let Err(error) = relay::respond(request.id, exit_code, stdout, stderr) {
+            log(
+                LogLevel::Warn,
+                &format!(
+                    "the answer to hook {} was refused: {}",
+                    request.id, error.message
+                ),
+            );
+        }
+    }
 }
 
 impl Extension for ClaudeCode {
@@ -66,6 +122,8 @@ impl Extension for ClaudeCode {
             ide: ide::Server::default(),
             #[cfg(feature = "fyx-ui-0-4")]
             selection: None,
+            #[cfg(feature = "fyx-ui-0-4")]
+            terminals: BTreeMap::new(),
         }
     }
 
@@ -73,14 +131,20 @@ impl Extension for ClaudeCode {
     fn handle_io(&mut self, event: IoEvent) -> Result<(), String> {
         match event {
             IoEvent::McpCall(call) if call.listener == ide::LISTENER => {
-                self.ide.call(
-                    &mut wired::SdkHost,
-                    call.call_id,
-                    &call.tool,
-                    &call.arguments,
-                );
+                let mut host = self.host();
+                self.ide
+                    .call(&mut host, call.call_id, &call.tool, &call.arguments);
             }
-            IoEvent::McpCancelled(call) => self.ide.cancelled(&mut wired::SdkHost, call),
+            IoEvent::McpCancelled(call) => self.ide.cancelled(&mut self.host(), call),
+            IoEvent::RelayRequest((id, channel, terminal, argv, stdin)) => {
+                self.hook(relay::RelayRequest {
+                    id,
+                    channel,
+                    terminal,
+                    argv,
+                    stdin,
+                });
+            }
             // A client that just finished the handshake gets the current selection.
             IoEvent::McpInitialized(session) if session.listener == ide::LISTENER => {
                 if let Some(params) = &self.selection {
@@ -90,8 +154,18 @@ impl Extension for ClaudeCode {
             IoEvent::DiagnosticsChanged(_) => self.ide.invalidate_diagnostics(),
             IoEvent::ReviewDecided((proposal, outcome)) => {
                 let answer = wired::diff_answer(outcome);
-                self.ide
-                    .review_decided(&mut wired::SdkHost, proposal, &answer);
+                let answered = self.ide.review_decided(&mut self.host(), proposal, &answer);
+                // Claude ends the turn after DIFF_REJECTED without a Stop hook.
+                if answered && answer == ide::DiffAnswer::Rejected {
+                    let effects = self.sessions.diff_rejected();
+                    let terminal = effects.iter().find_map(|effect| match effect {
+                        hooks::Effect::EndTurn { session, .. } => {
+                            self.terminals.get(session).copied()
+                        }
+                        _ => None,
+                    });
+                    wired::run_hook_effects(terminal, &effects);
+                }
             }
             IoEvent::ContextChanged(editor) => {
                 let params = wired::selection_changed(editor);

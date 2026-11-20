@@ -230,6 +230,18 @@ impl Tunnel {
     /// Starts `command` once `previous` (the host's tunnel before) is gone, so its forwards are
     /// free again.
     fn start(command: TunnelCommand, plan: &Plan, previous: Option<Tunnel>) -> Self {
+        Self::start_with_grace(command, plan, previous, STOP_GRACE)
+    }
+
+    /// [`Self::start`] with `grace` for the script to end after its stdin closes before it is
+    /// killed. Tests give a slow machine more than [`STOP_GRACE`]: a killed `sh` on Windows
+    /// leaves its `cat` running, holding the pipes.
+    fn start_with_grace(
+        command: TunnelCommand,
+        plan: &Plan,
+        previous: Option<Tunnel>,
+        grace: Duration,
+    ) -> Self {
         let state = Arc::new(State::default());
         let (stop, stopped) = mpsc::channel();
         let (gone_tx, gone) = mpsc::channel();
@@ -240,9 +252,9 @@ impl Tunnel {
             .name("fyx-ssh-tunnel".into())
             .spawn(move || {
                 if let Some(previous_gone) = previous_gone {
-                    previous_gone.recv_timeout(STOP_GRACE * 2).ok();
+                    previous_gone.recv_timeout(grace * 2).ok();
                 }
-                if let Err(error) = run(command, &stdin, &thread_state, &stopped) {
+                if let Err(error) = run(command, &stdin, &thread_state, &stopped, grace) {
                     log::warn!("fyx: SSH tunnel: {error}");
                 }
                 thread_state.ended.store(true, Ordering::SeqCst);
@@ -281,6 +293,7 @@ fn run(
     stdin: &[u8],
     state: &Arc<State>,
     stopped: &mpsc::Receiver<()>,
+    grace: Duration,
 ) -> Result<(), String> {
     let mut child = util::command::new_std_command(&command.program)
         .args(&command.args)
@@ -333,13 +346,13 @@ fn run(
         }
     }
     drop(input);
-    stop(&mut child);
+    stop(&mut child, grace);
     Ok(())
 }
 
-/// Gives the script [`STOP_GRACE`] to remove its files after its stdin closed, then kills `ssh`.
-fn stop(child: &mut Child) {
-    let deadline = Instant::now() + STOP_GRACE;
+/// Gives the script `grace` to remove its files after its stdin closed, then kills `ssh`.
+fn stop(child: &mut Child, grace: Duration) {
+    let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         if !matches!(child.try_wait(), Ok(None)) {
             return;
@@ -618,8 +631,39 @@ mod tests {
         }
     }
 
+    /// Generous bounds: a FAST gate runs these next to other builds, where Git's `sh` on Windows
+    /// can take seconds to start. Passing runs never wait them out.
+    const TEST_BOUND: Duration = Duration::from_secs(120);
+
+    fn start(command: TunnelCommand, plan: &Plan, previous: Option<Tunnel>) -> Tunnel {
+        Tunnel::start_with_grace(command, plan, previous, TEST_BOUND)
+    }
+
+    /// Stops the tunnel and waits until its process is gone, also when an assertion fails, so
+    /// no `sh` or `cat` outlives the test (nextest reports those as leaks).
+    struct Stopped(Option<Tunnel>);
+
+    impl Stopped {
+        fn tunnel(&self) -> &Tunnel {
+            self.0.as_ref().expect("a running tunnel")
+        }
+
+        fn take(&mut self) -> Tunnel {
+            self.0.take().expect("a running tunnel")
+        }
+    }
+
+    impl Drop for Stopped {
+        fn drop(&mut self) {
+            if let Some(Tunnel { gone, _stop, .. }) = self.0.take() {
+                drop(_stop);
+                Closing(gone.into_iter().collect()).wait(TEST_BOUND);
+            }
+        }
+    }
+
     fn wait_for(what: &str, condition: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + TEST_BOUND;
         while !condition() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
@@ -648,8 +692,12 @@ mod tests {
         let lock = home.join(".claude/ide/4100.lock");
         let gemini = tmp.join("gemini/ide/gemini-ide-server-0-4300.json");
 
-        let tunnel = Tunnel::start(sh_command(&sh, &plan, &home, &tmp), &plan, None);
-        wait_for("ready", || tunnel.ready());
+        let mut tunnel = Stopped(Some(start(
+            sh_command(&sh, &plan, &home, &tmp),
+            &plan,
+            None,
+        )));
+        wait_for("ready", || tunnel.tunnel().ready());
         assert_eq!(read_json(&lock)["authToken"], json!(TOKEN));
         assert_eq!(read_json(&lock)["pid"], json!(0));
         assert_eq!(read_json(&gemini)["port"], json!(4300));
@@ -664,14 +712,15 @@ mod tests {
 
         // A new plan (another worktree) replaces the tunnel once the old one is gone.
         let next = super::plan(&open(), &["/srv/other".into()]);
-        let replaced = Tunnel::start(sh_command(&sh, &next, &home, &tmp), &next, Some(tunnel));
-        wait_for("the new tunnel", || replaced.ready());
+        let replaced = Stopped(Some(start(
+            sh_command(&sh, &next, &home, &tmp),
+            &next,
+            Some(tunnel.take()),
+        )));
+        wait_for("the new tunnel", || replaced.tunnel().ready());
         assert_eq!(read_json(&lock)["workspaceFolders"], json!(["/srv/other"]));
 
-        let Tunnel { gone, _stop, .. } = replaced;
-        let closing = Closing(gone.into_iter().collect());
-        drop(_stop);
-        closing.wait(Duration::from_secs(20));
+        drop(replaced);
         assert!(!lock.exists() && !gemini.exists(), "removed on stop");
         assert!(home.join(".claude/ide/9999.lock").exists());
     }
@@ -691,8 +740,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::os::unix::fs::symlink(root.path().join("elsewhere"), tmp.join("gemini")).unwrap();
         let plan = plan(&open(), &["/srv/app".into()]);
-        let tunnel = Tunnel::start(sh_command(&sh, &plan, &home, &tmp), &plan, None);
-        wait_for("ready", || tunnel.ready());
+        let tunnel = Stopped(Some(start(
+            sh_command(&sh, &plan, &home, &tmp),
+            &plan,
+            None,
+        )));
+        wait_for("ready", || tunnel.tunnel().ready());
         assert!(home.join(".claude/ide/4100.lock").exists());
         let elsewhere = std::fs::read_dir(root.path().join("elsewhere/ide")).unwrap();
         assert_eq!(elsewhere.count(), 0);
@@ -707,8 +760,8 @@ mod tests {
             args: Vec::new(),
             env: Vec::new(),
         };
-        let tunnel = Tunnel::start(command, &plan, None);
-        wait_for("the end", || tunnel.ended());
-        assert!(!tunnel.ready());
+        let tunnel = Stopped(Some(start(command, &plan, None)));
+        wait_for("the end", || tunnel.tunnel().ended());
+        assert!(!tunnel.tunnel().ready());
     }
 }

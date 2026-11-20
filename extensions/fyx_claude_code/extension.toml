@@ -28,6 +28,8 @@ capabilities = [
     "fs:discovery-file",
     # The plugin's hooks, through `fyx-relay` (T2).
     "relay:hooks",
+    # The hooks' tool, waits and turns on the profile terminal's tab (T1).
+    "terminal:status",
     # `openDiff` becomes a blocking proposal in agent review; prompts and stops are turns (T1).
     "review:propose",
     # `selection_changed` and `at_mentioned` come from the editor's selection.

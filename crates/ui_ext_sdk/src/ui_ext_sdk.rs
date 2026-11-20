@@ -67,7 +67,11 @@ mod host_model;
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod listeners;
 #[cfg(feature = "fyx-ui-0-4")]
+pub mod relay;
+#[cfg(feature = "fyx-ui-0-4")]
 pub mod review;
+#[cfg(feature = "fyx-ui-0-4")]
+pub mod settings;
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod terminals;
 mod v0_1;
@@ -110,7 +114,7 @@ pub mod bindings {
 }
 
 /// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
-/// [`listeners`], [`context`] and [`review`].
+/// [`listeners`], [`context`], [`review`] and [`relay`].
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod bindings {
     wit_bindgen::generate!({
@@ -524,6 +528,7 @@ macro_rules! __fyx_host_shims {
             $crate::__fyx_listener_shims!($world);
             $crate::__fyx_context_shims!($world);
             $crate::__fyx_review_shims!($world);
+            $crate::__fyx_relay_shims!($world);
         };
     };
 }
@@ -993,6 +998,31 @@ macro_rules! __fyx_review_shims {
     ($world:ident) => {};
 }
 
+/// The shim of the 0.4 [`relay`] function; none without the `fyx-ui-0-4` feature.
+#[cfg(feature = "fyx-ui-0-4")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_relay_shims {
+    ($world:ident) => {
+        #[unsafe(no_mangle)]
+        fn __fyx_ui_relay_respond(
+            id: u64,
+            exit_code: u8,
+            stdout: &str,
+            stderr: &str,
+        ) -> ::std::result::Result<(), $crate::HostError> {
+            $crate::__private::relay::$world::respond(id, exit_code, stdout, stderr)
+        }
+    };
+}
+
+#[cfg(not(feature = "fyx-ui-0-4"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __fyx_relay_shims {
+    ($world:ident) => {};
+}
+
 #[doc(hidden)]
 pub mod __private {
     use super::*;
@@ -1002,6 +1032,8 @@ pub mod __private {
     pub use crate::host::newest;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::listeners::glue as listeners;
+    #[cfg(feature = "fyx-ui-0-4")]
+    pub use crate::relay::glue as relay;
     #[cfg(feature = "fyx-ui-0-4")]
     pub use crate::review::glue as review;
     #[cfg(feature = "fyx-ui-0-4")]

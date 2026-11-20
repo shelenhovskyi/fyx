@@ -757,7 +757,8 @@ mod tests {
                 ("CLAUDE_CODE_SSE_PORT".to_owned(), "4100".to_owned()),
                 ("TOOL_IDE_TOKEN".to_owned(), "secret".to_owned()),
             ],
-            "a listener that is not open leaves its variable out; a credential or Fyx name never              carries the token, whatever the manifest check let through"
+            "a listener that is not open leaves its variable out; a credential or Fyx name never \
+             carries the token, whatever the manifest check let through"
         );
     }
 
