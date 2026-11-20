@@ -2,8 +2,10 @@
 //! `io-event::relay-request(id, channel, terminal, argv, stdin)` with Claude's hook input JSON on
 //! stdin (design "The first extensions", items 2 and 4).
 //!
-//! Every hook only reports, so every answer is exit 0 with no output ([`ANSWER`]): Claude goes
-//! on as if the hook were not there. [`Sessions::apply`] turns the reports into the effects the
+//! Every hook but one only reports, so its answer is exit 0 with no output ([`ANSWER`]): Claude
+//! goes on as if the hook were not there. The exception is a `Bash` command that zsh would
+//! silently change (`"$M:refs/heads/dev"`, see [`crate::zsh`]): its `pre-tool` hook denies it
+//! and says how to write it ([`answer`]). [`Sessions::apply`] turns the reports into the effects the
 //! extension performs: agent turns (`review.begin-turn`, `review.end-turn`) and the terminal's
 //! status (`terminals.set-status`). OSC 7501 already gives the tab its state; the hooks add the
 //! tool, the waiting message and the turn.
@@ -17,8 +19,37 @@ use crate::ide::FileRef;
 /// The extension id, as `--channel <id>/<name>` names it.
 pub const EXTENSION_ID: &str = "fyx-claude-code";
 
-/// `relay.respond(id, exit-code, stdout, stderr)` for every channel: let Claude go on.
+/// `relay.respond(id, exit-code, stdout, stderr)` for a hook that only reports: let Claude go
+/// on.
 pub const ANSWER: (u8, &str, &str) = (0, "", "");
+
+/// The `pre-tool` hook's arguments after the channel: `--shell "$CLAUDE_CODE_SHELL" "$SHELL"`,
+/// the variables Claude Code picks its Bash tool's shell from.
+pub const PRE_TOOL_ARGS: &str = r#" --shell "${CLAUDE_CODE_SHELL:-}" "${SHELL:-}""#;
+
+/// The answer to one hook. `argv` is the relay request's: for `pre-tool`, [`PRE_TOOL_ARGS`]
+/// expanded. A `Bash` command with a zsh modifier hazard, run by zsh, is denied; everything else
+/// gets [`ANSWER`].
+pub fn answer(input: Option<&HookInput>, argv: &[String]) -> (u8, String, String) {
+    let reported = || (ANSWER.0, ANSWER.1.to_owned(), ANSWER.2.to_owned());
+    let Some(command) = input
+        .filter(|input| input.channel == Channel::PreTool)
+        .and_then(|input| input.command.as_deref())
+    else {
+        return reported();
+    };
+    let shells = argv
+        .iter()
+        .position(|argument| argument == "--shell")
+        .map_or(&[][..], |position| &argv[position + 1..]);
+    if !crate::zsh::shell_is_zsh(shells.iter().map(String::as_str)) {
+        return reported();
+    }
+    match crate::zsh::deny_answer(&crate::zsh::hazards(command)) {
+        Some(stdout) => (0, stdout, String::new()),
+        None => reported(),
+    }
+}
 
 /// The `[[fyx_ui.relay_channels]]` of `extension.toml`, with the Claude hook event each carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -90,6 +121,8 @@ pub struct HookInput {
     /// The file a write tool (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`) touched, as Claude
     /// names it (absolute).
     pub edited_path: Option<String>,
+    /// `PreToolUse` of `Bash`: the command it runs.
+    pub command: Option<String>,
 }
 
 /// The tools whose `tool_input.file_path` (or `notebook_path`) is a file they write.
@@ -120,12 +153,21 @@ impl HookInput {
                 .map(str::to_owned),
             _ => None,
         };
+        let command = match (channel, tool.as_deref()) {
+            (Channel::PreTool, Some("Bash")) => input
+                .get("tool_input")
+                .and_then(|tool_input| tool_input.get("command"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        };
         Ok(Self {
             channel,
             session,
             tool,
             message: text("message"),
             edited_path,
+            command,
         })
     }
 }
@@ -392,10 +434,15 @@ mod tests {
             let command = hooks[channel.hook_event()][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap();
+            let arguments = if channel == Channel::PreTool {
+                PRE_TOOL_ARGS
+            } else {
+                ""
+            };
             assert_eq!(
                 command,
                 format!(
-                    "\"${{FYX_RELAY:-true}}\" --channel {EXTENSION_ID}/{}",
+                    "\"${{FYX_RELAY:-true}}\" --channel {EXTENSION_ID}/{}{arguments}",
                     channel.name()
                 )
             );
@@ -405,6 +452,50 @@ mod tests {
             );
         }
         assert_eq!(Channel::from_relay("other/stop"), None);
+    }
+
+    /// Only a zsh `Bash` command with a modifier hazard is denied; the shell comes from the
+    /// `pre-tool` hook's `--shell` arguments.
+    #[test]
+    fn pre_tool_denies_zsh_modifier_hazards_only() {
+        let bash = |command: &str| {
+            input(
+                Channel::PreTool,
+                &format!(
+                    r#","tool_name":"Bash","tool_input":{{"command":{}}}"#,
+                    serde_json::to_string(command).unwrap()
+                ),
+            )
+        };
+        let argv = |claude_code_shell: &str, shell: &str| {
+            ["--shell", claude_code_shell, shell].map(str::to_owned).to_vec()
+        };
+        let pushed = bash(r#"git push origin "$M:refs/heads/dev""#);
+        assert_eq!(pushed.command.as_deref(), Some(r#"git push origin "$M:refs/heads/dev""#));
+
+        let (exit, stdout, stderr) = answer(Some(&pushed), &argv("", "/bin/zsh"));
+        assert_eq!((exit, stderr.as_str()), (0, ""));
+        let stdout: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
+
+        let reported = (0, String::new(), String::new());
+        assert_eq!(answer(Some(&pushed), &argv("/bin/bash", "/bin/zsh")), reported);
+        assert_eq!(answer(Some(&pushed), &argv("", "")), reported);
+        assert_eq!(answer(Some(&pushed), &[]), reported);
+        assert_eq!(answer(None, &argv("", "/bin/zsh")), reported);
+        assert_eq!(
+            answer(
+                Some(&bash(r#"git push origin "${M}:refs/heads/dev""#)),
+                &argv("", "/bin/zsh")
+            ),
+            reported
+        );
+        let edit = input(
+            Channel::PreTool,
+            r#","tool_name":"Edit","tool_input":{"command":"echo $M:r"}"#,
+        );
+        assert_eq!(edit.command, None);
+        assert_eq!(answer(Some(&edit), &argv("", "/bin/zsh")), reported);
     }
 
     #[test]

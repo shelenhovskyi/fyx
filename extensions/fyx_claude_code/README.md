@@ -30,7 +30,11 @@ Claude Code in Fyx's terminal, connected to the editor (plan 5.15,
   - `Notification` (Claude waits for you);
   - `Stop`, which ends the turn with the files it changed.
 
-  Every hook exits 0 at once, so Claude never waits on Fyx. Outside Fyx `FYX_RELAY` is unset and
+  Every hook exits 0 at once, so Claude never waits on Fyx. One answer is not empty: when
+  Claude's Bash tool runs zsh (`CLAUDE_CODE_SHELL`, else `SHELL`), `PreToolUse` denies a command
+  with an unbraced `$NAME:` followed by a zsh modifier letter outside single quotes, such as
+  `git push origin "$M:refs/heads/dev"`. zsh reads `:r` there as "remove the extension" and
+  silently changes the string; the denial tells Claude to write `${M}:` instead. Outside Fyx `FYX_RELAY` is unset and
   each hook runs `true`. An interactive Claude runs the plugin's hooks only after you trust the
   folder in Claude.
 
