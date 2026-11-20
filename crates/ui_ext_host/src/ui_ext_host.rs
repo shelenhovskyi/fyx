@@ -51,6 +51,7 @@ pub mod settings_form;
 mod settings_form_tests;
 pub mod settings_model;
 mod store_actions;
+mod subtree;
 mod surface;
 pub mod t3_cards;
 mod view;

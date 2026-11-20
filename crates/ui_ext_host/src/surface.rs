@@ -125,6 +125,9 @@ struct QueuedEvent {
     row_generation: Option<u64>,
 }
 
+/// Frames whose render time the Inspector's slowest figure covers.
+const RENDER_TIMES_KEPT: usize = 64;
+
 pub struct SurfaceState {
     backend: Rc<dyn UiBackend>,
     surface: Surface,
@@ -168,6 +171,9 @@ pub struct SurfaceState {
     next_row_generation: u64,
     /// Recent events and updates, for the Extension Inspector.
     history: VecDeque<HistoryEntry>,
+    /// How long the views took to render the last frames, for the Inspector (plan 7.7). Written
+    /// while rendering, which only reads the state.
+    render_times: std::cell::RefCell<VecDeque<Duration>>,
     /// What differs by the component's `fyx:ui` version.
     rules: ApiRules,
     /// The raw error of the failure that stopped the extension, behind "Copy Error Details".
@@ -424,6 +430,7 @@ impl SurfaceState {
             last_remount: None,
             next_row_generation: 0,
             history: VecDeque::new(),
+            render_times: Default::default(),
             rules: ApiRules::for_version(&backend_version),
             backend_epoch: 0,
             failure_detail: None,
@@ -623,6 +630,28 @@ impl SurfaceState {
     /// Recent events and updates, oldest first.
     pub fn history(&self) -> &VecDeque<HistoryEntry> {
         &self.history
+    }
+
+    /// A view rendered the surface: a new frame's render time.
+    pub(crate) fn record_render(&self, duration: Duration) {
+        let mut times = self.render_times.borrow_mut();
+        if times.len() == RENDER_TIMES_KEPT {
+            times.pop_front();
+        }
+        times.push_back(duration);
+    }
+
+    /// A cached chunk rendered in the same frame, after the view.
+    pub(crate) fn add_to_last_render(&self, duration: Duration) {
+        if let Some(last) = self.render_times.borrow_mut().back_mut() {
+            *last += duration;
+        }
+    }
+
+    /// The last frame's render time and the slowest of the recent ones.
+    pub fn render_times(&self) -> Option<(Duration, Duration)> {
+        let times = self.render_times.borrow();
+        Some((*times.back()?, times.iter().max().copied()?))
     }
 
     /// The instance's recent calls, `log` output and capability checks, if the backend keeps them.
