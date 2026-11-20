@@ -71,6 +71,8 @@ pub mod relay;
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod review;
 #[cfg(feature = "fyx-ui-0-4")]
+pub mod settings;
+#[cfg(feature = "fyx-ui-0-4")]
 pub mod terminals;
 mod v0_1;
 #[cfg(feature = "fyx-ui-0-3")]

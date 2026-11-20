@@ -1060,3 +1060,68 @@ fn status_line_or_error(harness: &Harness) -> String {
         })
         .unwrap_or_default()
 }
+
+/// Plan 6.1 (design.md §D): a 0.4 package's `[[fyx_ui.settings]]` load with it, a user's
+/// invalid value gives the extension the default, and a valid one is a change of that key only.
+#[test]
+fn a_package_declares_settings_and_the_user_sets_them() {
+    let package = demo_package("fyx_demo_pseudo_terminal");
+    let manifest = package.join("extension.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(
+        r#"
+[[fyx_ui.settings]]
+key = "scrollback"
+title = "Scrollback lines"
+type = "integer"
+default = 1000
+min = 100
+max = 10000
+
+[[fyx_ui.settings]]
+key = "shell"
+title = "Shell"
+type = "choice"
+default = "bash"
+choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerShell" }]
+"#,
+    );
+    std::fs::write(&manifest, &text).unwrap();
+    let mut harness = Harness::load_package(&package).expect("loads");
+    let keys: Vec<&str> = harness
+        .setting_specs()
+        .iter()
+        .map(|spec| spec.key.as_str())
+        .collect();
+    assert_eq!(keys, ["scrollback", "shell"]);
+    assert_eq!(
+        harness.setting("scrollback").unwrap().value,
+        settings::SettingValue::Integer(1000)
+    );
+
+    let changed = harness
+        .set_user_settings(serde_json::json!({ "scrollback": 50, "shell": "pwsh" }))
+        .unwrap();
+    assert_eq!(changed, ["shell"]);
+    assert!(harness.setting("scrollback").unwrap().is_default);
+    assert!(
+        harness
+            .setting_error("scrollback")
+            .unwrap()
+            .contains("outside")
+    );
+    assert_eq!(
+        harness.setting("shell").unwrap().value,
+        settings::SettingValue::Choice("pwsh".into())
+    );
+    assert_eq!(harness.take_settings_changed(), [vec!["shell".to_owned()]]);
+    assert!(harness.setting("missing").is_none());
+
+    // A broken declaration refuses the package.
+    std::fs::write(&manifest, text.replace("default = 1000", "default = 5")).unwrap();
+    let error = format!(
+        "{:#}",
+        Harness::load_package(&package).err().expect("refused")
+    );
+    assert!(error.contains("outside 100..=10000"), "{error}");
+}

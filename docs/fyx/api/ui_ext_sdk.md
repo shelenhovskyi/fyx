@@ -225,4 +225,5 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `relay` | module |  |
 | `review` | module |  |
 | `row_range` | fn | The row indices of a `list-rows(start, count)` request that exist in a list of `row_count` rows. The host may ask past the end while the list shrinks. |
+| `settings` | module |  |
 | `terminals` | module |  |

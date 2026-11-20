@@ -111,10 +111,17 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::set_listener_granted` | method | Grants or revokes `network:listen#<name>`. Revoking closes the listener: its connections end, and `Harness::deliver_io` delivers `mcp-cancelled` for their open calls. |
 | `Harness::set_private_file` | method | A file the user keeps private: `to-file-ref` and `absolute-path` refuse it, and the context carries no selection text of it. |
 | `Harness::set_relay_channels` | method | The `[[fyx_ui.relay_channels]]` (0.4, design.md B.9), checked as the host checks them; `Harness::load_package` reads them from the manifest. They need `relay:hooks`. |
+| `Harness::set_setting_specs` | method | The `[[fyx_ui.settings]]` (0.4, design.md §D), already checked with `settings::SettingSpec::parse_all`; `Harness::load_package` reads them from the manifest. Refused for a component below 0.4. The user's values are kept and checked again. |
+| `Harness::set_user_settings` | method | The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An invalid value gives the extension its default. Returns the keys whose effective value changed, in manifest order: what `io-event::settings-changed` carries once the WIT has it (design.md §D.4). |
 | `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
 | `Harness::set_worktrees` | method | The open worktrees for `context` (0.4): (id, root as the host spells it, `\` or `/`). The roots need not exist. |
+| `Harness::setting` | method | What the extension gets from `settings.get(key)`; `None` for an undeclared key. |
+| `Harness::setting_error` | method | Why the user's value for `key` is not passed on (the form shows it); `None` when it is valid or unset. |
+| `Harness::setting_specs` | method | The declared settings, in manifest order. |
+| `Harness::settings` | method | What the extension gets from `settings.all`: every declared key's effective value, in manifest order. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |
+| `Harness::take_settings_changed` | method | The `settings-changed` events the host would have sent, oldest first, and forgets them. |
 | `Harness::terminal` | method | One of the extension's 0.4 terminals (pseudo, created or profile), while it is open. |
 | `Harness::terminal_nodes` | method | The handles the `terminal` nodes of a mounted surface show, in tree order. |
 | `Harness::terminal_profiles` | method | The checked `[[fyx_ui.terminal_profiles]]`, in manifest order. |
@@ -184,4 +191,5 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `api_version_section` | fn | The version in the component's `fyx:ui-api-version` section, if it has one. |
 | `cache_compiled_components` | re-export | `compile_cache::cache_compiled_components` |
 | `plain_text` | re-export | `terminals::plain_text` |
+| `settings` | module |  |
 | `variables_set` | fn | Whether `PACKAGE_VARIABLE` or `COMPONENT_VARIABLE` is set, as under `fyx-ext test`. A headless test skips when neither is, and fails when `Harness::from_env` fails although one is. |
