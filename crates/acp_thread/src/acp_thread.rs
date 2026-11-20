@@ -7,6 +7,7 @@ pub mod content;
 mod diff;
 pub mod elicitation;
 pub mod fyx_review; // fyx: agent write review gate
+pub mod fyx_secrets; // fyx: secret references in agent terminals
 mod mention;
 pub mod notices;
 pub mod prompt_capabilities;
@@ -8330,6 +8331,7 @@ impl AcpThread {
         let headless = HeadlessTerminal::is_enabled(cx);
 
         let terminal_id = acp_v2::TerminalId::new(Uuid::new_v4().to_string());
+        let session_id = self.session_id().clone(); // fyx: secret references
         let terminal_task = cx.spawn({
             let terminal_id = terminal_id.clone();
             async move |_this, cx| {
@@ -8341,6 +8343,22 @@ impl AcpThread {
                             .and_then(|r| r.read(cx).default_system_shell())
                     })
                     .unwrap_or_else(|| get_default_system_shell_preferring_bash());
+                // fyx: the agent's `secret://name` references get their values in the env only.
+                let display_command = format!("{} {}", command, args.join(" "));
+                let secret_shell = if cfg!(target_os = "windows") && sandbox_wrap.is_some() {
+                    util::shell::ShellKind::Posix
+                } else {
+                    util::shell::ShellKind::new(&shell, is_windows)
+                };
+                let (command, args, env) = fyx_secrets::resolve_agent_secrets(
+                    Some(session_id),
+                    command,
+                    args,
+                    env,
+                    secret_shell,
+                    cx,
+                )
+                .await;
 
                 // The sandbox owns the network proxy (for restricted-network
                 // policies) and injects the child's proxy env vars, returning
@@ -8427,7 +8445,7 @@ impl AcpThread {
                 anyhow::Ok(cx.new(|cx| {
                     Terminal::new(
                         terminal_id,
-                        &format!("{} {}", command, args.join(" ")),
+                        &display_command, // fyx: shows the references, not the values
                         cwd,
                         output_byte_limit.map(|l| l as usize),
                         terminal,
@@ -16871,6 +16889,71 @@ mod tests {
             .expect("client process exit")
             .await;
         assert_eq!(exit.exit_code, Some(0));
+    }
+
+    // fyx: a secret reference runs with its value in the env, and the output shows the reference.
+    #[gpui::test]
+    async fn test_fyx_secret_reference_reaches_only_the_process(cx: &mut TestAppContext) {
+        struct FakeSecrets;
+
+        const FAKE_VALUE: &str = "fake-secret-value-123";
+
+        impl fyx_secrets::AgentSecrets for FakeSecrets {
+            fn resolve(
+                &self,
+                mut process: fyx_secrets::AgentProcess,
+                _: &mut App,
+            ) -> Task<fyx_secrets::AgentProcess> {
+                process.command = process
+                    .command
+                    .replace("secret://demo", &(process.env_reference)("FYX_SECRET_DEMO"));
+                process
+                    .env
+                    .insert("FYX_SECRET_DEMO".into(), FAKE_VALUE.into());
+                Task::ready(process)
+            }
+
+            fn redact(&self, text: &str, _: &App) -> Option<String> {
+                text.contains(FAKE_VALUE)
+                    .then(|| text.replace(FAKE_VALUE, "<redacted demo>"))
+            }
+        }
+
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            cx.set_global(::terminal::HeadlessTerminal(true));
+            fyx_secrets::set_agent_secrets(Rc::new(FakeSecrets), cx);
+        });
+        let terminal = thread
+            .update(cx, |thread, cx| {
+                thread.create_terminal(
+                    "echo \"token=secret://demo\"".into(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("client process");
+        let exit = terminal
+            .read_with(cx, |terminal, _| terminal.wait_for_exit())
+            .expect("client process exit");
+        exit.await;
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, cx| {
+            let output = terminal.current_output(cx).output;
+            // The shell expanded the value, and the output shows what redaction made of it.
+            assert!(output.contains("token=<redacted demo>"), "{output}");
+            assert!(!output.contains(FAKE_VALUE));
+            let command = terminal.command().read(cx).source().to_string();
+            assert!(command.contains("secret://demo"), "{command}");
+            assert!(!command.contains(FAKE_VALUE));
+        });
     }
 
     #[gpui::test]
