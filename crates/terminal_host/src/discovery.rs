@@ -447,6 +447,8 @@ impl Writer {
         let Some(path) = self.registry.as_deref() else {
             return;
         };
+        // Other Fyx instances on the same data dir record their files here too.
+        let _other_instances = fyx_relay::lock_beside(path);
         let mut registry = self.load_registry();
         registry.files.retain(|file| file.pid != self.pid);
         registry
@@ -468,6 +470,7 @@ impl Writer {
         let Some(path) = self.registry.as_deref() else {
             return;
         };
+        let _other_instances = fyx_relay::lock_beside(path);
         let mut registry = self.load_registry();
         if registry.files.is_empty() {
             return;

@@ -26,7 +26,7 @@ pub use policy::{
 /// declined does not apply silently at the next start (security-2 T3).
 pub const CONFIRMED_FILE: &str = "fyx_security_confirmed.toml";
 
-/// Writes [`CONFIRMED_FILE`] off the main thread. Each change queues its contents and spawns a
+/// Writes [`CONFIRMED_FILE`] (and `agent_review`'s confirmed rules) off the main thread. Each change queues its contents and spawns a
 /// [`Self::flush`]; flushes may run in any order and at the same time, so each one writes the
 /// newest contents, not its own, and through a temporary file, so neither an older value nor half
 /// a file is left behind (a stale "off" would let a later lowering through without a prompt).
@@ -69,9 +69,14 @@ impl ConfirmedWriter {
         if let Some(directory) = self.path.parent() {
             std::fs::create_dir_all(directory)?;
         }
+        let name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let temporary = self
             .path
-            .with_extension(format!("toml.{}.tmp", std::process::id()));
+            .with_file_name(format!("{name}.{}.tmp", std::process::id()));
         std::fs::write(&temporary, contents)?;
         std::fs::rename(&temporary, &self.path)
     }
@@ -417,15 +422,15 @@ mod tests {
 
     #[test]
     fn confirmed_writer_keeps_the_newest_whatever_order_flushes_run_in() {
-        let directory = std::env::temp_dir().join(format!(
-            "fyx-guard-core-writer-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("fyx-guard-core-writer-{}", std::process::id()));
         let path = directory.join(CONFIRMED_FILE);
         std::fs::remove_file(&path).ok();
         let writer = ConfirmedWriter::new(path.clone());
         let off = config(SecurityMode::Off, &[]).to_confirmed_toml().unwrap();
-        let shield = config(SecurityMode::Shield, &[]).to_confirmed_toml().unwrap();
+        let shield = config(SecurityMode::Shield, &[])
+            .to_confirmed_toml()
+            .unwrap();
         // Two changes, then their flushes: the first flush writes the newest, the second
         // finds nothing left and must not write the older value it was spawned for.
         writer.queue(off);

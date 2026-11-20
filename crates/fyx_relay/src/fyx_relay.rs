@@ -145,8 +145,60 @@ impl State {
         std::fs::rename(&temporary, path)
     }
 
+    /// [`Self::save`] for one of several Fyx instances that share the data dir (Stable beside Dev
+    /// or Preview): under [`lock_beside`], what this run changed since `base` (what it last saved,
+    /// or found at start) goes over the file as it is now, so another run's channels stay.
+    pub fn save_merged(&self, base: &State, path: &Path) -> io::Result<()> {
+        let _other_instances = lock_beside(path);
+        let mut merged = State::load(path);
+        let channels: std::collections::BTreeSet<&String> = self
+            .on_failure
+            .keys()
+            .chain(base.on_failure.keys())
+            .collect();
+        for channel in channels {
+            let ours = self.on_failure.get(channel);
+            if ours == base.on_failure.get(channel) {
+                continue;
+            }
+            match ours {
+                Some(exit) => merged.on_failure.insert(channel.clone(), *exit),
+                None => merged.on_failure.remove(channel),
+            };
+        }
+        merged.save(path)
+    }
+
     pub fn exit_for(&self, channel: &str) -> u8 {
         self.on_failure.get(channel).copied().unwrap_or(0)
+    }
+}
+
+/// Locks `<path>.lock` until the returned file is dropped, so Fyx instances that share a data dir
+/// do not read and rewrite `path` at once. `None` when it cannot be locked (logged): the caller
+/// goes ahead unlocked rather than not saving.
+pub fn lock_beside(path: &Path) -> Option<std::fs::File> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".lock");
+    if let Some(dir) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(dir)
+    {
+        log::warn!("fyx: cannot lock {}: {error}", path.display());
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_file_name(name))
+        .inspect_err(|error| log::warn!("fyx: cannot lock {}: {error}", path.display()))
+        .ok()?;
+    match file.lock() {
+        Ok(()) => Some(file),
+        Err(error) => {
+            log::warn!("fyx: cannot lock {}: {error}", path.display());
+            None
+        }
     }
 }
 
@@ -484,6 +536,34 @@ mod tests {
     use std::time::Instant;
 
     const TOKEN: &str = "terminal-token";
+
+    fn state(channels: &[(&str, u8)]) -> State {
+        State {
+            on_failure: channels
+                .iter()
+                .map(|(channel, exit)| (channel.to_string(), *exit))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn two_instances_keep_each_others_channels() {
+        let root = tempfile::tempdir().unwrap();
+        let path = state_path(root.path());
+        let at_start = state(&[("old/guard", 2)]);
+        at_start.save(&path).unwrap();
+        // Two runs started from the same file; each changes its own extension.
+        let stable = state(&[("old/guard", 2), ("a/guard", 3)]);
+        stable.save_merged(&at_start, &path).unwrap();
+        let dev = state(&[("b/guard", 4)]);
+        dev.save_merged(&at_start, &path).unwrap();
+        assert_eq!(
+            State::load(&path),
+            state(&[("a/guard", 3), ("b/guard", 4)]),
+            "dev removed old/guard, stable's a/guard stays"
+        );
+        assert!(path.with_file_name("relay.json.lock").exists());
+    }
 
     /// `ext/echo` answers at once, `ext/slow` never (exit 2 on failure), `ext/closed` fails
     /// closed with exit 3 and has no terminal.

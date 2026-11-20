@@ -1442,6 +1442,12 @@ pub async fn read_file(path: &Path, fs: &dyn Fs) -> (BTreeMap<String, ConsentRec
     let Ok(text) = fs.load(path).await else {
         return Default::default();
     };
+    if let Ok(read) = serde_json::from_str::<serde_json::Value>(&text) {
+        BASE.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(path.to_path_buf())
+            .or_insert(read);
+    }
     match serde_json::from_str::<ConsentFile>(&text) {
         Ok(file) => (
             file.extensions,
@@ -1466,6 +1472,101 @@ static NEWEST: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
     std::sync::LazyLock::new(Default::default);
 static WRITING: std::sync::LazyLock<futures::lock::Mutex<()>> =
     std::sync::LazyLock::new(Default::default);
+/// What this run last meant each consent file to hold: the file as it was read, then each save's
+/// own contents. Another Fyx (Stable beside Dev or Preview: same data dir, separate instances)
+/// writes the same file, so a save writes only this run's changes since then over what is on disk
+/// now, instead of putting back what the other one revoked.
+static BASE: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, serde_json::Value>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Three-way merge of JSON documents: what `ours` changed since `base` goes over `theirs`. When
+/// both changed the same value, a `false` wins over a `true` and a list keeps only what is in
+/// both, so a revocation made by either side stays revoked; otherwise `ours` wins.
+fn merge_json(
+    base: Option<&serde_json::Value>,
+    ours: Option<&serde_json::Value>,
+    theirs: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    if ours == base {
+        return theirs.cloned();
+    }
+    if theirs == base || theirs == ours {
+        return ours.cloned();
+    }
+    match (base, ours, theirs) {
+        (_, None, _) | (_, _, None) => None,
+        (base, Some(Value::Object(ours)), Some(Value::Object(theirs))) => {
+            let base = base.and_then(Value::as_object);
+            let keys: BTreeSet<&String> = ours
+                .keys()
+                .chain(theirs.keys())
+                .chain(base.into_iter().flat_map(|base| base.keys()))
+                .collect();
+            let merged = keys
+                .into_iter()
+                .filter_map(|key| {
+                    merge_json(
+                        base.and_then(|base| base.get(key)),
+                        ours.get(key),
+                        theirs.get(key),
+                    )
+                    .map(|value| (key.clone(), value))
+                })
+                .collect();
+            Some(Value::Object(merged))
+        }
+        (_, Some(Value::Bool(ours)), Some(Value::Bool(theirs))) => {
+            Some(Value::Bool(*ours && *theirs))
+        }
+        (_, Some(Value::Array(ours)), Some(Value::Array(theirs))) => Some(Value::Array(
+            ours.iter()
+                .filter(|value| theirs.contains(value))
+                .cloned()
+                .collect(),
+        )),
+        (_, Some(ours), Some(_)) => Some(ours.clone()),
+    }
+}
+
+/// `text` (this run's newest contents of `path`) merged with what another Fyx wrote there since
+/// this run last read or wrote it.
+fn merged_with_disk(path: &Path, text: &str, on_disk: Option<&str>) -> String {
+    let Ok(ours) = serde_json::from_str::<serde_json::Value>(text) else {
+        return text.to_string();
+    };
+    let mut bases = BASE.lock().unwrap_or_else(PoisonError::into_inner);
+    let theirs = on_disk.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+    let merged = match &theirs {
+        Some(theirs) => merge_json(bases.get(path), Some(&ours), Some(theirs)),
+        None => Some(ours.clone()),
+    };
+    bases.insert(path.to_path_buf(), ours);
+    merged
+        .and_then(|merged| serde_json::to_string_pretty(&merged).ok())
+        .unwrap_or_else(|| text.to_string())
+}
+
+/// Locks `<path>.lock` for this process until the file is dropped, so two Fyx instances do not
+/// read and write `path` at once. `None` when it cannot be locked: the write goes ahead unlocked.
+fn lock_beside(path: &Path) -> Option<std::fs::File> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_file_name(name))
+        .inspect_err(|error| log::warn!("fyx:ui: cannot lock {}: {error}", path.display()))
+        .ok()?;
+    match file.lock() {
+        Ok(()) => Some(file),
+        Err(error) => {
+            log::warn!("fyx:ui: cannot lock {}: {error}", path.display());
+            None
+        }
+    }
+}
 
 fn record_newest(path: &Path, text: &str) {
     NEWEST
@@ -1492,6 +1593,10 @@ pub async fn save(path: PathBuf, text: String, fs: &dyn Fs) {
         );
         return;
     }
+    // Held to the end of the save (the fake file system of tests has no file to lock).
+    let _other_instances = (!fs.is_fake()).then(|| lock_beside(&path)).flatten();
+    let on_disk = fs.load(&path).await.ok();
+    let text = merged_with_disk(&path, &text, on_disk.as_deref());
     if let Err(error) = fs.atomic_write(path.clone(), text).await {
         log::error!(
             "fyx:ui: cannot save consent to {}: {error:#}",
@@ -1503,6 +1608,49 @@ pub async fn save(path: PathBuf, text: String, fs: &dyn Fs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_instances_revocation_survives_this_ones_save() {
+        let path = PathBuf::from("/merge-test/fyx-ui-consent.json");
+        let read = serde_json::json!({
+            "extensions": {},
+            "t2": { "a": { "network:fetch": true } },
+            "items": { "a": { "items": { "fs:read#x": true }, "granted": [] } },
+        });
+        BASE.lock().unwrap().insert(path.clone(), read.clone());
+        // This run grants something new to `b`; the other one revoked `a`'s grants meanwhile.
+        let mut ours = read.clone();
+        ours["t2"]["b"] = serde_json::json!({ "network:fetch": true });
+        let mut theirs = read;
+        theirs["t2"]["a"]["network:fetch"] = serde_json::json!(false);
+        theirs["items"]["a"]["items"]["fs:read#x"] = serde_json::json!(false);
+        let merged: serde_json::Value = serde_json::from_str(&merged_with_disk(
+            &path,
+            &ours.to_string(),
+            Some(&theirs.to_string()),
+        ))
+        .unwrap();
+        assert_eq!(merged["t2"]["a"]["network:fetch"], false);
+        assert_eq!(merged["items"]["a"]["items"]["fs:read#x"], false);
+        assert_eq!(merged["t2"]["b"]["network:fetch"], true);
+
+        // Both changed the same answer: the revocation wins whichever side made it.
+        let base = serde_json::json!({ "x": true, "caps": ["a", "b"] });
+        let ours = serde_json::json!({ "x": false, "caps": ["a", "b", "c"] });
+        let theirs = serde_json::json!({ "x": true, "caps": ["b"] });
+        assert_eq!(
+            merge_json(Some(&base), Some(&ours), Some(&theirs)),
+            Some(serde_json::json!({ "x": false, "caps": ["b"] }))
+        );
+        // A key this run removed (an uninstall) stays removed; one only they added stays.
+        let base = serde_json::json!({ "gone": 1 });
+        let ours = serde_json::json!({});
+        let theirs = serde_json::json!({ "gone": 1, "new": 2 });
+        assert_eq!(
+            merge_json(Some(&base), Some(&ours), Some(&theirs)),
+            Some(serde_json::json!({ "new": 2 }))
+        );
+    }
 
     fn record(capabilities: &[&str], grant: Grant) -> ConsentRecord {
         ConsentRecord {

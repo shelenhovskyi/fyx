@@ -27,11 +27,11 @@ use project::{
 use settings::{FyxSecurityMode, RegisterSetting, Settings, SettingsStore};
 use util::rel_path::RelPath;
 
-use fyx_guard_core::{AccountDir, CONFIRMED_FILE, ConfirmedWriter, enforce, scrub};
+use fyx_guard_core::{AccountDir, CONFIRMED_FILE, enforce, scrub};
 pub use fyx_guard_core::{
-    RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, SecurityConfig, SecurityMode,
-    env_name_matches, is_credential_url, protected_config, protected_config_rel, sanitize_for_log,
-    secret_env_names, secret_env_vars,
+    ConfirmedWriter, RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, SecurityConfig,
+    SecurityMode, env_name_matches, is_credential_url, protected_config, protected_config_rel,
+    sanitize_for_log, secret_env_names, secret_env_vars,
 };
 
 /// `fyx_security` in user settings (schema in `settings_content::FyxSecuritySettingsContent`,
