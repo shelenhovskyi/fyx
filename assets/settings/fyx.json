@@ -93,6 +93,14 @@
       "max_age_days": 30,
       "max_file_mb": 8,
     },
+    "mcp_sandbox": {
+      // macOS: start stdio MCP servers under a sandbox that lets them write only their project
+      // folder (and the folders listed per server), read the rest, and use the network.
+      "enabled": false,
+      // Per server, by its name under "context_servers":
+      // "github": { "enabled": false }, "files": { "writable": ["~/.npm"] }
+      "servers": {},
+    },
     "extensions": {
       // Folders of UI extensions in development, loaded on every start and reloaded when
       // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".

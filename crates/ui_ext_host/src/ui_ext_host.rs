@@ -38,6 +38,7 @@ pub mod install_store;
 pub mod journal;
 mod keyboard;
 mod main_thread;
+pub mod mcp_sandbox;
 mod modal;
 pub mod notifications;
 mod panel;
@@ -162,6 +163,7 @@ pub fn init(cx: &mut App) {
     progress::init(cx);
     images::init(cx);
     fyx_extensions_page::init(cx);
+    mcp_sandbox::init(cx);
     // A `.fyxext` dropped on a pane opens the install dialog.
     cx.set_global(workspace::FyxPackageDrop(
         store_actions::install_dropped_package,

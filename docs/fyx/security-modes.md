@@ -213,6 +213,38 @@ Shield covers what passes through Fyx; it is not a sandbox. Until step 2:
 - `.fyx/security.toml` is not read from remote worktrees; if one exists there, the worktree fails
   closed under shield.
 
+## MCP server sandbox (macOS, opt-in)
+
+Plan 7.5. `fyx.mcp_sandbox.enabled` (default `false`) starts every stdio MCP server (a
+`context_servers` entry with a `command`) under a Seatbelt profile built by `ui_ext::seatbelt`
+(`crates/ui_ext_host/src/mcp_sandbox.rs`, through the `context_server::fyx_sandbox` hook):
+
+- **Writes:** only the project folder the server starts in, a temporary folder of its own
+  (`TMPDIR`), and the folders listed for it. Inside the project, `.git/hooks`, `.git/config`,
+  `.zed`, `.fyx`, `.vscode`, `.idea` and `.envrc` stay read-only, since they run later outside the
+  sandbox.
+- **Reads:** the home folder, the system and toolchain locations, and the folders listed for it.
+- **Network:** any host. MCP servers declare no hosts, so the sandbox confines files only; a
+  per-server host list is later work with the per-secret list (7.4).
+
+Per server, keyed by its name under `context_servers`:
+
+```json
+"fyx": {
+  "mcp_sandbox": {
+    "enabled": true,
+    "servers": {
+      "github": { "enabled": false },
+      "files": { "writable": ["~/.npm"], "readable": ["/opt/data"] }
+    }
+  }
+}
+```
+
+`enabled` on a server wins over the global switch either way. Servers started by `npx` or `uvx`
+keep a cache in the home folder and need it in `writable` (`~/.npm`, `~/.cache/uv`). The setting is
+read when a server starts; restart a server after changing it. Windows and Linux ignore it.
+
 ## Hooks
 
 The whole upstream surface is listed by `git grep -n 'fyx:'`. Every hook is a no-op with the mode
