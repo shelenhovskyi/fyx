@@ -7085,6 +7085,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_history_host"
+version = "0.1.0"
+
+[[package]]
 name = "fyx_registry"
 version = "0.1.0"
 dependencies = [
@@ -23000,6 +23004,7 @@ dependencies = [
  "fs",
  "futures 0.3.34",
  "fyx_guard",
+ "fyx_history_host",
  "fyx_update_host",
  "git",
  "git_hosting_providers",
