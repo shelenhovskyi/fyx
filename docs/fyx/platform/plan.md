@@ -207,6 +207,11 @@ Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
 | 7.7 | W3 | **Fast extension UI [D15]**: fix the full-tree re-render (perf-1 finding 1) so a caret blink or a one-node reply does not re-render the whole surface; a per-extension memory and frame-time line in the Inspector | M | 1.1 (`.cwasm` cache) for load times | the 4096-text panel stays under 8 ms per frame while typing in its input |
 | 7.8 | W1 (Dock, menu bar) + W3 (meters) | **Cost and context meters with an attention badge [D3 + M4]**: tokens, money and context use per session and per day from ACP usage and relay data, a soft daily cap that pauses agents; on the Mac a Dock badge with the number of agents waiting and a menu-bar item listing sessions | S–M | 5.4 | two sessions show their cost; the Dock badge counts a blocked agent; the cap pauses an agent with a notice |
 | 7.9 | W3 | **Agent sessions board [D2]**: every agent (ACP threads, CLI agents in terminals via OSC 7501 and the relay), its worktree, state, diff size and cost, "needs you" first, click to focus. Kept to the narrow layer of [worktrees research §8](../../research/worktrees-and-parallel-agents.md): no worktree manager | M | 5.4, 5.12, 7.8 | a Claude Code CLI session and an ACP thread show side by side with live state |
+| 7.10 | W3 (page) + W1 (`extension_host` hook, setting) | **One Extensions page with Fyx and Zed tabs, Zed's registry opt-in**: see [7.10 below](#710-extensions-page-fyx-and-zed-tabs) | S–M | 3.5 | the page opens on the Fyx tab; the Zed tab shows installed Zed extensions with no error banner until the user turns the registry on, then searches and installs from it; nothing but extension requests reaches zed.dev |
+| 7.11 | W5 successor (`agent_review`) | **"Review Agent Edits" as a switch**: in the agent panel's options menu the entry is a `toggleable_entry`, which hides its check mark when off and leaves an empty indent that reads as a layout bug. Draw it in `review_mode_menu_entry` as a `custom_entry` with the label and a `ui::Switch` at the end; while `FYX_AGENT_REVIEW` overrides the setting, a non-selectable `custom_row` with a disabled switch. Only this entry: the other menus keep Zed's check-mark style (a square for every toggle would edit upstream `ui` and depart from macOS menus) | S | — | the menu shows the switch on and off; clicking the row toggles `agent_review.enabled`; with the variable set the switch is disabled |
+| 7.12 | W7 (audit) + W3 (fixes) | **Readable prompts and notices (ux-2)**, known cases in [7.12 below](#712-known-cases): the dev-folder notice "The UI extension … is installed but not enabled. It asks for: …" (`ui_ext_host/src/registry.rs`) is one paragraph with every capability, its id, the folder and the buttons run together; the T2 ones (`terminal:env`, `network:listen`, `fs:discovery-file`, `relay:hooks`) look the same as `ui:panel`. **First an audit, in the running Mac build** (ux-1 only read the code): every Fyx-made notification, toast, prompt, consent and install dialog, permission card, banner and empty or error state in `ui_ext_host`, `ui_ext_wasm`, `agent_review`, `terminal_ext`, `fyx_registry` and the `fyx:` hooks, with a screenshot of each; findings in `tasks/reviews/ux-2.md`. **Rules the fixes follow:** a short title that says what happens; capabilities as a list, grouped by tier, T2 first with a warning style, ids secondary or in a details toggle; paths and ids in a muted or code style, never inside the sentence; one decision per prompt with verb buttons ("Enable", not "OK"); details behind "Show details"; the same layout for one consent wherever it appears (dev folder, install, registry, approve-and-update). **Then the fixes**, starting with the consent notice and the install prompt, as a shared consent view in `ui_ext_host` | M | — | `ux-2.md` lists every surface with a screenshot and a verdict; the consent notice and the install prompt show grouped lists with T2 marked; no Fyx prompt is a single paragraph over three lines |
+| 7.13 | owner (repo settings) + W0 (check) | **Turn on GitHub Issues for `shelenhovskyi/fyx`**: the crash dialog's "Report on GitHub" (`NEW_ISSUE_URL` in `crates/zed/src/fyx_crash_reports.rs`) opens `issues/new` with the title and body filled in, but Issues are off on the repository (`hasIssuesEnabled: false`), so GitHub answers 404. Turn them on (Settings → Features → Issues, or `gh repo edit shelenhovskyi/fyx --enable-issues`); add a crash-report issue template and a `crash` label; a CI check that fails if the repository named in `NEW_ISSUE_URL` has Issues off | S | — | the crash dialog's button opens a filled-in new issue; the check passes |
+| 7.14 | W1 (`terminal_host`, restore) + W4 (`fyx_claude_code`) + W3 (tab) | **Profile terminals that survive a restart, with a readable tab**: seen by the owner on 2026-11-20 with `fyx-claude-code`. (a) **Restore:** after a restart the "Claude Code" tab comes back as a plain zsh in the same folder and the Claude session is gone. Profile terminals have no restore path: persist the extension id, profile id and account with the tab, and on restore start the profile again; the extension may add resume arguments (for Claude, the `session_id` its SessionStart hook already reports, so `claude --ide --resume <id>`), and the user can turn resume off. (b) **Title:** the tab always reads "Claude Code", the profile's name. Use the program's own title (OSC 0/2, which Claude sets to the session topic; check what 2.1.329 sends) with the profile name as fallback, and the session name when the extension reports one. (c) **Tab layout:** today one line holds the status icon (✓), the account dot and name ("● Work") and the title, all at the same weight. Decide one order and style: title first; the account as a coloured edge or a small chip; the status as one icon that changes (running, waiting for you, done, error) with a tooltip; nothing duplicated between the tab and the sessions list | M | 5.8, 5.15, 5.20 | after a restart the Claude tab resumes the same session; the tab shows the session's topic; a review of the tab with three states and two accounts passes ux-2 (7.12) |
 
 **Order.** 7.1 first: it gives the owner a Mac build and a Mac check for everything after it.
 Then the agent-review lane in order 7.2 → 7.3 → 7.4. 7.5 follows 4.7 and pairs with 7.4. 7.7 is
@@ -217,6 +222,104 @@ after P5 phase 3 (5.12). The owner's limit of 2 compiling streams plus the gatek
 (then 7.1 gets a CI job and 6.2 checks the Apple signature), the MCP manager [D5], worktree review
 and merge [D4], Finder and Shortcuts integration [M5], the verified build badge [D11], terminal
 "fix with agent" [D19], plan mode [D7], review bundles [D13], local automations [D8].
+
+### 7.10 Extensions page: Fyx and Zed tabs
+
+Decided by the owner on 2026-11-20 after the first Mac build. **Problem:** Fyx sets
+`server_url` to `http://127.0.0.1:0`, so Zed's Extensions page always shows "Failed to load
+extensions" and its "Not Installed" filter is always empty, while the Fyx registry (3.5) hides
+behind a "Fyx Extensions" button that opens a separate page. Plan 3.5 asked for a tab.
+
+- **Tabs** in the Extensions page header: `Fyx` (default) and `Zed`. The Fyx tab renders the body
+  of today's `fyx_extensions_page` (search, install with permission confirmation, pin, roll back,
+  held updates). `fyx_ui: open fyx extensions` opens the page on the Fyx tab. The "Fyx
+  Extensions" button goes.
+- **Zed tab, registry off (default):** installed Zed extensions only; no request to the registry,
+  no error banner, no All / Installed / Not Installed filter. A banner instead: Zed extensions come
+  from Zed's registry, which Fyx neither verifies nor signs; language servers and debug adapters
+  can download and run binaries with full access; requests go to api.zed.dev. Button **Turn on
+  Zed's registry** sets the new setting `fyx.zed_extensions_registry: true`.
+- **Zed tab, registry on:** search, Not Installed and install work as in Zed, and installed Zed
+  extensions get updates again. A slim reminder banner stays, and each card from Zed's registry
+  has a "Zed registry" chip.
+- **Only extension traffic goes to Zed:** one `fyx:` hook in `extension_host` sends its three
+  `build_zed_api_url` calls to `https://api.zed.dev` when the setting is on. `server_url` stays
+  `127.0.0.1:0`, so sign-in, telemetry, collab and file-type extension suggestions stay off.
+- **Install Dev Extension** becomes a menu: "Zed extension…" (today's action) and "UI extension…"
+  (`fyx_ui: install dev UI extension`).
+- **Not merged into one list:** the two registries install differently (permission confirmation,
+  signed hash, pin and rollback against a plain download), and one list would mean rewriting
+  upstream `extensions_ui`. The tabs need about three `fyx:` hooks there (tab switch, skipping the
+  registry fetch while off, the dev-install menu); the logic stays in `ui_ext_host`.
+- **Docs:** the user guide's "No Zed extension registry" becomes "Zed's extension registry is off
+  until you turn it on in Extensions → Zed".
+- **Tests (7.10):** with the setting off, no request leaves for any host; with it on, extension requests
+  go to api.zed.dev and nothing else does; the Fyx tab opens by default and from the action.
+
+### 7.12 Known cases
+
+Seen by the owner on the Mac build on 2026-11-20 while enabling `fyx-claude-code`. The audit
+starts from these and looks for the same faults everywhere else.
+
+1. **Dev-folder notice** ("… is installed but not enabled. It asks for: …"): one paragraph with
+   every capability as "Description (id)" joined by semicolons, then the folder; T2 not marked.
+2. **Enable dialog** ("Enable the UI extension fyx-claude-code?"):
+   - the title uses the id, not the name ("Claude Code");
+   - group headings ("Shows in Fyx", "Allowed without asking", "Off unless you tick it") look
+     like the items under them; "A panel, Files from its own package" joins two items in one line;
+   - manifest templates are shown raw: `${package}`, `${listen.ide.port}`, `${account.claude}`,
+     `${port}.lock`. Show what they become ("this extension's folder", "a port Fyx picks",
+     "the Claude account you choose") or the resolved value;
+   - raw ids: `mcpwebsocket` (the protocol, with its hyphen lost), `channel session-start (on
+     failure: exit 0)` for every hook channel;
+   - warnings repeat (two `CLAUDE_CODE_PLUGIN_DIRS` lines) and "It can run any program on your
+     computer" says neither why nor how much;
+   - every T2 box starts unticked and Enable works with none ticked, but the dialog does not say
+     what the extension can still do then (here: nearly nothing), and enabling it fully takes
+     four ticks plus Enable;
+   - **required fix, owner's decision:** warn, but do not make the user click through. Add a
+     primary button **Enable with all permissions** next to **Enable without T2** (or a single
+     "Allow all" checkbox above the T2 list that ticks every box). The risks are listed once,
+     above the buttons, in one short summary ("runs programs in its terminals, listens on a
+     local port, writes a file into your Claude config, receives Claude's hooks"); the per-item
+     boxes stay below for anyone who wants to pick. Enable without T2 says what will not work.
+     The same choice appears wherever this consent appears (dev folder, install, registry,
+     approve-and-update);
+   - the list scrolls inside the dialog with no sign that more is below; the hook list is cut
+     off at the bottom edge.
+3. **After Enable, no "what next"**: the owner enabled `fyx-claude-code` and could not tell what
+   it added or where. Nothing points to its one entry point, **Claude Code** in the terminal
+   panel's **+** menu. Fix: after Enable, a toast "Claude Code is ready: open it from the
+   terminal panel's + menu" with a button that opens the panel and that menu; and on the card a
+   short "Adds" line built from the manifest (terminal profile "Claude Code", panel names,
+   status items) with the same open buttons. Every extension that contributes UI gets this.
+4. **Fyx Extensions page** (the card after enabling):
+   - "The registry is off (fyx.extensions.registry_url)" shows a setting key as the
+     explanation; say what it means and how to turn it on, or hide it until 7.10;
+   - "Available: Nothing to show." with the registry off is a dead section;
+   - the card's title is the id `fyx-claude-code`, not the name; the folder path is the
+     second line;
+   - every permission reads "…: on" next to a switch that already says on;
+   - the same raw templates and ids as the dialog (`${package}`, `${listen.ide.port}`,
+     `mcpwebsocket`, the hook channels with `on failure: exit 0`);
+   - the Usage log prints capability ids (`fs:discovery-file#${port}.lock turned on`) instead
+     of the names used above it;
+   - twelve rows with switches on one card and no grouping: group by tier as in the dialog,
+     T0/T1 folded into one line, T2 rows expanded.
+5. **Terminal "+" menu with accounts** (profiles from `terminal_host::profiles`, accounts from
+   5.20): every account makes its own row, "Claude Code — Personal — fyx-claude-code", "Claude
+   Code — Work — fyx-claude-code", with the extension id in each; below them a second section
+   "Claude Code: in this project, use" repeats the same accounts as radio items plus "Default
+   (no profile)". The account appears twice and in two meanings (start with it, remember it).
+   Fix:
+   - one row per profile, "Claude Code", with the project's account as a muted suffix ("Work")
+     or the account colour; clicking it starts with that account;
+   - "Claude Code with…" (submenu or a secondary row) lists the accounts for a one-off start,
+     and its last item "Use for this project…" holds the remembered choice; drop the separate
+     section;
+   - the extension id only in a tooltip, or as a suffix when two extensions offer profiles of
+     the same name;
+   - "Default (no profile)" becomes "The tool's default account (~/.claude)", naming the dir.
 
 ## Deferred after 1.0
 
