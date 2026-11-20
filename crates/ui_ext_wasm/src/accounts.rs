@@ -87,7 +87,13 @@ pub(crate) mod tests {
             self.profiles
                 .iter()
                 .find(|(profile_tool, _, project)| {
-                    *profile_tool == tool && cwd.starts_with(project)
+                    // The runtime passes `cwd` canonically, and macOS's temp dir is a symlink
+                    // (`/var` → `/private/var`).
+                    *profile_tool == tool
+                        && (cwd.starts_with(project)
+                            || std::fs::canonicalize(project).is_ok_and(|project| {
+                                cwd.starts_with(without_verbatim_prefix(&project))
+                            }))
                 })
                 .map(|(_, dir, _)| dir.clone())
         }
