@@ -1082,6 +1082,27 @@ mod tests {
         }
     }
 
+    /// Gemini gap 3 (W4): the CLI finds its IDE by `GEMINI_CLI_IDE_PID`, Fyx's own pid.
+    #[test]
+    fn the_host_pid_goes_in_an_env_value() {
+        let checked = check_terminal_env(
+            env(&[
+                ("GEMINI_CLI_IDE_PID", "${pid}"),
+                ("GEMINI_CLI_IDE_SERVER_PORT", "${listen.ide.port}"),
+            ]),
+            &listeners,
+        )
+        .unwrap();
+        assert!(
+            checked
+                .vars
+                .iter()
+                .any(|(name, value)| name == "GEMINI_CLI_IDE_PID"
+                    && value.0 == [TemplatePart::Pid]),
+            "{checked:?}"
+        );
+    }
+
     #[test]
     fn env_values_and_templates() {
         let checked = check_terminal_env(
