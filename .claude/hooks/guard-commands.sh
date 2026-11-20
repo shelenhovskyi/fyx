@@ -4,6 +4,8 @@
 #   with --tags/--follow-tags/--mirror/--all, a force push (-f, --force*, +refspec) and a remote
 #   delete (--delete, -d, :refspec). Catches `git -C <dir> push`, which settings.json's deny list
 #   cannot.
+# - cargo builds (build/check/test/nextest/clippy/run/...) into any target dir but the shared
+#   D:/fyx-targets/shared, and from PowerShell without one (it would use ./target).
 # - `cargo add/remove/update/generate-lockfile`: they change Cargo.toml/Cargo.lock (W0 only).
 #   FYX_INTEGRATOR=1 in the session's env (.claude/settings.local.json "env") allows them.
 #   It also allows pushing fyx/main (W0, after a green FULL gate); main is never allowed.
@@ -43,6 +45,42 @@ command="${command//\'/}"
 command="${command//\"/}"
 
 is_protected() { [[ "$protected_branches" == *" ${1#refs/heads/} "* ]]; }
+
+# One shared cargo target dir on the Windows dev box (owner, 2026-11-20): cargo's lock on it runs
+# one build at a time, and no per-worktree target grows. Enforced only where the dir exists.
+shared_target_dir=/d/fyx-targets/shared
+tool_name=""
+if [[ "$input" =~ \"tool_name\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then tool_name="${BASH_REMATCH[1]}"; fi
+explicit_target=""
+if [[ "$command" =~ CARGO_TARGET_DIR[[:space:]]*=[[:space:]]*([^[:space:]]+) ]]; then explicit_target="${BASH_REMATCH[1]}"; fi
+
+is_shared_target() {
+    local value="${1//\\//}"
+    value="${value,,}"
+    [[ "$value" == *fyx-targets/shared* ]]
+}
+
+check_target_dir() {
+    # $1: cargo subcommand; the rest: its arguments.
+    [[ -d "$shared_target_dir" ]] || return 0
+    local subcommand="$1" argument value="$explicit_target" take=""
+    shift
+    for argument in "$@"; do
+        if [[ -n "$take" ]]; then value="$argument"; take=""; continue; fi
+        case "$argument" in
+            --target-dir) take=1 ;;
+            --target-dir=*) value="${argument#--target-dir=}" ;;
+        esac
+    done
+    local hint="every Fyx folder builds into the one shared target D:/fyx-targets/shared, so only one build runs at a time and caches stay bounded"
+    if [[ -n "$value" ]]; then
+        is_shared_target "$value" || deny "cargo $subcommand into $value is blocked: $hint. Drop the CARGO_TARGET_DIR/--target-dir override (Bash calls already get the shared one)."
+        return 0
+    fi
+    if [[ "$tool_name" == PowerShell ]]; then
+        deny "cargo $subcommand from PowerShell would build into ./target: $hint. Run it from Bash, or prefix \$env:CARGO_TARGET_DIR='D:/fyx-targets/shared';"
+    fi
+}
 
 check_push() {
     # $1: git's working dir; the rest: push's arguments.
@@ -129,13 +167,15 @@ check_segment() {
                 fi
                 ;;
             cargo | cargo.exe | */cargo | */cargo.exe | *\\cargo.exe)
-                [[ "${FYX_INTEGRATOR:-}" == 1 ]] && continue
                 local subcommand="" next=$((index + 1))
                 while ((next < count)) && [[ "${words[next]}" == [-+]* ]]; do next=$((next + 1)); done
                 subcommand="${words[next]:-}"
                 case "$subcommand" in
                     add | remove | rm | update | upgrade | generate-lockfile)
+                        [[ "${FYX_INTEGRATOR:-}" == 1 ]] && continue
                         deny "cargo $subcommand changes Cargo.toml/Cargo.lock, which only the integrator (W0) edits: list the change for the integrator in your progress file" ;;
+                    build | b | check | c | test | t | nextest | clippy | run | r | bench | doc | rustc)
+                        check_target_dir "$subcommand" "${words[@]:next+1}" ;;
                 esac
                 ;;
         esac

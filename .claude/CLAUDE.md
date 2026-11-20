@@ -49,3 +49,10 @@ Every tool round re-reads the whole context, so fewer rounds and a smaller conte
 - `.claude/hooks/session-env.sh` already puts cargo, CMake and WinGet on `PATH` and sets
   `CARGO_TARGET_DIR` (from `.claude/fyx-targets.json`) and `CARGO_BUILD_JOBS` for Bash calls; do not
   re-export them.
+- On the Windows dev box every folder builds into one shared target, `D:/fyx-targets/shared`
+  (owner, 2026-11-20): cargo's lock on it runs one build at a time, so a second build waits
+  ("Blocking waiting for file lock"). Do not override `CARGO_TARGET_DIR`/`--target-dir`, and run
+  cargo builds from Bash: `guard-commands.sh` denies other targets and PowerShell builds without
+  one. `script/fyx-disk-guard` (W0, after each FULL gate) sweeps it and wipes its `debug/` when E:
+  drops under 40 GB free. Fyx folders live under `D:\fyx\` (repo `D:\fyx\fyx`, registry
+  `D:\fyx\fyx-extensions`, `builds`, `user-check`, `scratch`); the old paths are junctions.
