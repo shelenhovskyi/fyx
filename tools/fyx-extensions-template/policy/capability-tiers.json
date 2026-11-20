@@ -18,6 +18,8 @@
     "workspace:read-buffers": "t1",
     "workspace:read-files": "t1",
     "workspace:diagnostics": "t1",
+    "diagnostics:publish": "t1",
+    "workspace:file-decorations": "t1",
     "context:editor": "t1",
     "workspace:open": "t1",
     "terminal:profiles": "t1",

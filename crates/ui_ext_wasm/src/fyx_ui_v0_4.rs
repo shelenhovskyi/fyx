@@ -411,6 +411,79 @@ impl wit_context::Host for UiState {
         }
         Ok(self.context.watch_diagnostics(on).map_err(Into::into))
     }
+
+    // Staged in the 0.4 WIT ahead of the host side (plan 6.6 §E: W2c checks, W3 collection;
+    // plan 6.7 §F.2: W3 project panel).
+    fn publish_diagnostics(
+        &mut self,
+        path: wit::FileRef,
+        diagnostics: Vec<wit_context::Diagnostic>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            path.path.len()
+                + diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.len())
+                    .sum::<usize>(),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
+            return Ok(Err(error.into()));
+        }
+        Ok(Err(staged_unavailable("publishing diagnostics")))
+    }
+
+    fn clear_diagnostics(
+        &mut self,
+        path: Option<wit::FileRef>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(path.as_ref().map_or(0, |path| path.path.len()))?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
+            return Ok(Err(error.into()));
+        }
+        Ok(Err(staged_unavailable("publishing diagnostics")))
+    }
+
+    fn decorate_files(
+        &mut self,
+        decorations: Vec<wit_context::FileDecoration>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            decorations
+                .iter()
+                .map(|decoration| {
+                    decoration.path.path.len()
+                        + decoration.badge.as_ref().map_or(0, String::len)
+                        + decoration.tooltip.as_ref().map_or(0, String::len)
+                })
+                .sum(),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
+            return Ok(Err(error.into()));
+        }
+        Ok(Err(staged_unavailable("file decorations")))
+    }
+
+    fn clear_file_decorations(
+        &mut self,
+        paths: Option<Vec<wit::FileRef>>,
+    ) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(
+            paths
+                .as_ref()
+                .map_or(0, |paths| paths.iter().map(|path| path.path.len()).sum()),
+        )?;
+        if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
+            return Ok(Err(error.into()));
+        }
+        Ok(Err(staged_unavailable("file decorations")))
+    }
+}
+
+fn staged_unavailable(what: &str) -> wit_host::HostError {
+    wit_host::HostError {
+        code: wit_host::HostErrorCode::Unavailable,
+        message: format!("{what} is not available yet"),
+    }
 }
 
 /// `review` (design.md §B.10) over [`crate::proposals::ReviewHandle`]: every call needs

@@ -66,6 +66,8 @@ pub const T1_CAPABILITIES: &[&str] = &[
     "workspace:read-files",
     "workspace:diagnostics",
     // 0.4.
+    "diagnostics:publish",
+    "workspace:file-decorations",
     "context:editor",
     "workspace:open",
     "terminal:profiles",
