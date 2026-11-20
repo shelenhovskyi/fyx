@@ -86,7 +86,7 @@ fn invalid_values_fall_back_to_the_default_with_an_error() {
     assert!(diff.error.is_none() && diff.can_reset());
     let max = form.row("max-open-diffs").expect("row");
     assert_eq!(max.effective, SettingValue::Integer(8));
-    assert_eq!(max.error.as_deref(), Some("100 is outside 1 to 64"));
+    assert_eq!(max.error.as_deref(), Some("100 is outside 1..=64"));
     assert_eq!(row_text(max), "100");
     let severity = form.row("severity").expect("row");
     assert_eq!(severity.effective, SettingValue::Choice("warning".into()));
@@ -106,7 +106,7 @@ fn fields_write_only_checked_values() {
     assert_eq!(checked_field(max, "12"), Ok(json!(12)));
     assert_eq!(checked_field(max, " 12 "), Ok(json!(12)));
     assert_eq!(checked_field(max, "x"), Err("Enter a whole number".into()));
-    assert_eq!(checked_field(max, "0"), Err("0 is outside 1 to 64".into()));
+    assert_eq!(checked_field(max, "0"), Err("0 is outside 1..=64".into()));
     let args = &specs[3];
     assert_eq!(checked_items(args, vec!["-v".into()]), Ok(json!(["-v"])));
     assert!(checked_items(args, vec!["much-too-long".into()]).is_err());
@@ -152,7 +152,7 @@ async fn test_form_fields_write_through_the_store(cx: &mut TestAppContext) {
     assert_eq!(user.get("max-open-diffs"), Some(&json!(12)));
     assert_eq!(
         form.read_with(cx, |form, _| form.field_error("max-open-diffs")),
-        Some("99 is outside 1 to 64".into())
+        Some("99 is outside 1..=64".into())
     );
 
     form.update_in(cx, |form, window, cx| {
@@ -174,4 +174,65 @@ fn test_open_extension_settings_leaves_a_pending_open(cx: &mut TestAppContext) {
         );
         assert_eq!(take_pending_open(cx), None);
     });
+}
+
+/// Plan 6.1: the real store reads `fyx_extensions.<id>` from the user settings file only, and the
+/// form's edits land there; "Reset all" removes the extension's object.
+#[gpui::test]
+async fn user_settings_file_store_reads_and_writes_fyx_extensions(cx: &mut TestAppContext) {
+    use crate::settings_model::UserSettingsFileStore;
+    crate::tests::init_test(cx);
+    let fs = fs::FakeFs::new(cx.executor());
+    fs.insert_tree(paths::config_dir(), json!({})).await;
+    cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+    let store = UserSettingsFileStore;
+
+    cx.update(|cx| {
+        gpui::BorrowAppContext::update_global::<settings::SettingsStore, _>(cx, |settings, cx| {
+            settings
+                .set_user_settings(
+                    r#"{ "fyx_extensions": { "acme.todo": { "limit": 5 }, "acme.bad": 3 } }"#,
+                    cx,
+                )
+                .expect("valid user settings");
+        });
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            Value::Object(store.user_values("acme.todo", cx)),
+            json!({ "limit": 5 })
+        );
+        assert!(store.user_values("acme.bad", cx).is_empty(), "not an object");
+        assert!(store.user_values("acme.none", cx).is_empty());
+        // Nothing is loaded, so nothing declares a setting.
+        assert!(store.specs("acme.todo", cx).is_empty());
+    });
+
+    // The file keeps Zed's comments, so it is read as text.
+    let written = |fs: &std::sync::Arc<fs::FakeFs>| {
+        let text = fs
+            .read_file_sync(paths::settings_file())
+            .expect("the settings file");
+        String::from_utf8(text).expect("utf-8")
+    };
+    cx.update(|cx| {
+        store.write(
+            "acme.todo",
+            SettingsEdit::Set {
+                key: "mode".into(),
+                value: json!("fast"),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let text = written(&fs);
+    assert!(
+        text.contains("\"acme.todo\"") && text.contains("\"mode\": \"fast\""),
+        "the edit goes to the user settings file: {text}"
+    );
+    cx.update(|cx| store.write("acme.todo", SettingsEdit::ResetAll, cx));
+    cx.run_until_parked();
+    let text = written(&fs);
+    assert!(!text.contains("acme.todo"), "reset all removes the object: {text}");
 }

@@ -30,7 +30,7 @@ use ui::{
 };
 
 use crate::settings_model::{
-    SettingKind, SettingRow, SettingSpec, SettingValue, SettingsEdit, SettingsForm, field_text,
+    SettingKind, SettingSpecJson as _, SettingRow, SettingSpec, SettingValue, SettingsEdit, SettingsForm, field_text,
     settings_store,
 };
 
