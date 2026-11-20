@@ -7087,6 +7087,20 @@ dependencies = [
 [[package]]
 name = "fyx_history_host"
 version = "0.1.0"
+dependencies = [
+ "agent_review",
+ "anyhow",
+ "fyx_history",
+ "gpui",
+ "language",
+ "log",
+ "paths",
+ "project",
+ "settings",
+ "tempfile",
+ "ui",
+ "workspace",
+]
 
 [[package]]
 name = "fyx_registry"

@@ -754,6 +754,7 @@ fn main() {
         outline_panel::init(cx);
         terminal_host::init(cx); // fyx: terminal status on tabs, the fyx:ui terminal host
         fyx_update_host::init(cx); // fyx: plan 6.2 self-update
+        fyx_history_host::init(cx); // fyx: plan 6.3 local history
         terminal_host::init_shell_integration(paths::data_dir().join("shell_integration"), cx); // fyx: plan 5.17
         terminal_host::init_discovery(paths::data_dir(), cx); // fyx: plan 5.12 discovery files
         terminal_host::init_relay(paths::data_dir(), cx); // fyx: plan 5.12 fyx-relay endpoint
