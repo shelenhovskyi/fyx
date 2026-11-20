@@ -54,11 +54,14 @@ account_tool = "claude"
 # After a restart Fyx reopens the terminal with `--resume <session id>` (the id from the hooks).
 resume_flag = "--resume"
 
-# Profile terminals only by default; "all-new" would ask for the stronger checkbox.
+# "all-new": with the second checkbox ("Also adds these to every new terminal you open") a plain
+# `claude` in any new local terminal connects to Fyx as its IDE, as in VS Code's terminal: Claude
+# Code connects by itself when CLAUDE_CODE_SSE_PORT is set and takes the lock file with that port
+# whatever its cwd. Unticked (the default), the vars stay in this extension's profile terminals.
 [fyx_ui.terminal_env]
 vars = { CLAUDE_CODE_SSE_PORT = "${listen.ide.port}", ENABLE_IDE_INTEGRATION = "true", CLAUDE_CODE_PLUGIN_DIRS = "${package}/claude-plugin" }
-scope = "profiles"
-reason = "Tells Claude Code where Fyx's IDE server is and loads this extension's Claude plugin."
+scope = "all-new"
+reason = "Tells Claude Code where Fyx's IDE server is and loads this extension's Claude plugin, so `claude` opens its edits in agent review."
 
 # Claude connects with the WebSocket subprotocol "mcp" and sends the lock file's authToken in
 # this header.

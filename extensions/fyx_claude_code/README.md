@@ -8,13 +8,21 @@ Claude Code in Fyx's terminal, connected to the editor (plan 5.15,
   `claude --ide` in the active worktree. You pick the account (Claude config dir) for each
   terminal (`account_tool = "claude"`). The terminal is yours: the extension cannot read it or
   type into it.
-- **Env** (profile terminals only):
+- **Env** (`scope = "all-new"`):
   - `CLAUDE_CODE_SSE_PORT`: the port of Fyx's IDE server;
   - `ENABLE_IDE_INTEGRATION=true`;
   - `CLAUDE_CODE_PLUGIN_DIRS=${package}/claude-plugin`, the Claude plugin shipped in this
     package.
+
+  The profile terminals always get them. Tick **Also adds these to every new terminal you open**
+  (at install, or later on the extension's page) and every new local terminal gets them too: a
+  plain `claude` there connects to Fyx by itself, as in VS Code's terminal, so `openDiff` opens in
+  agent review without `/ide`. Claude Code connects on its own when `CLAUDE_CODE_SSE_PORT` is
+  set, and takes the lock file with that port whatever its cwd. Terminals that were open before
+  need a restart.
 - **IDE server.** Fyx listens on `127.0.0.1` (`mcp-websocket`, header
-  `x-claude-code-ide-authorization`) and writes `<account>/ide/<port>.lock` for Claude to find it.
+  `x-claude-code-ide-authorization`) and writes `<account>/ide/<port>.lock` for Claude to find it,
+  in each account profile's dir and in `~/.claude/ide` (terminals with no profile).
   The extension offers these tools:
   - `openFile`;
   - `openDiff`: a blocking proposal in agent review, hunk by hunk. Claude writes the final text;

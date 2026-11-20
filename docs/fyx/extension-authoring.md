@@ -1451,7 +1451,7 @@ CLI tools find an IDE through a file at a known path. The host writes it from yo
 [[fyx_ui.discovery_files]]
 listener = "ide"
 dir = "${account.claude}/ide"       # or "${tmp}/<name>"
-default_dir = "~/.claude/ide"       # used when no account profile applies
+default_dir = "~/.claude/ide"       # also written beside the account dirs, once
 name = "${port}.lock"
 content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx",
             transport = "ws", authToken = "${token}" }
@@ -1464,7 +1464,7 @@ reason = "Lets Claude Code find this window. Claude Code will run what this exte
   `0600` in a `0700` directory (an ACL for the user on Windows), written atomically.
 - It is removed on listener close, exit, revoke and uninstall; stale files from a crash are
   removed at the next start. With several account profiles, one file goes into each account's
-  directory.
+  directory, and one into `default_dir` for terminals with no profile.
 - The dialog says what it means, because a discovery file counts as running code in that tool.
   At most 8 files.
 

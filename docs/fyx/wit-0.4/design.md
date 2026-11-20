@@ -329,7 +329,7 @@ declares it.
 [[fyx_ui.discovery_files]]
 listener = "ide"
 dir = "${account.claude}/ide"         # or "${tmp}/<name>"; resolved by the host
-default_dir = "~/.claude/ide"         # used when no account profile applies
+default_dir = "~/.claude/ide"         # also written beside the account dirs, once
 name = "${port}.lock"
 content = { pid = "${pid}", workspaceFolders = "${worktrees}", ideName = "Fyx",
             transport = "ws", authToken = "${token}" }

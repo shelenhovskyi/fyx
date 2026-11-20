@@ -740,13 +740,14 @@ mod tests {
                 "transport": "ws", "authToken": "secret" })
         );
 
-        // Two account profiles: one file in each, and the default one goes.
+        // Two account profiles: one file in each, and the default one stays for terminals with
+        // no profile.
         discovery.set_context(Context {
             worktrees: vec!["/p".into(), "/q".into()],
             accounts: BTreeMap::from([("claude".into(), vec![work.clone(), me.clone()])]),
         });
         discovery.flush();
-        assert!(!default.exists());
+        assert_eq!(read(&default)["workspaceFolders"], json!(["/p", "/q"]));
         for dir in [&work, &me] {
             assert_eq!(
                 read(&dir.join("ide/4100.lock"))["workspaceFolders"],
@@ -755,13 +756,17 @@ mod tests {
         }
         let recorded: Registry =
             serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
-        assert_eq!(recorded.files.len(), 2);
+        assert_eq!(recorded.files.len(), 3);
 
         // The grant goes: `opened` with no files removes them; a file nobody wrote stays.
         std::fs::write(work.join("ide/9999.lock"), b"{}").unwrap();
         discovery.opened("fyx-claude-code", listener(4100, Vec::new()));
         discovery.flush();
-        assert!(!work.join("ide/4100.lock").exists() && !me.join("ide/4100.lock").exists());
+        assert!(
+            !work.join("ide/4100.lock").exists()
+                && !me.join("ide/4100.lock").exists()
+                && !default.exists()
+        );
         assert!(work.join("ide/9999.lock").exists());
 
         // Reopened, then closed; then quit removes what is left of another listener.
