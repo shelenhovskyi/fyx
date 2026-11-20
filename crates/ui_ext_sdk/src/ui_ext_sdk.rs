@@ -1224,6 +1224,9 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         index,
         indent: 0,
         nodes: tree.finish(),
+        // fyx:ui 0.4 (plan 6.7): staged; a plain row has no chevron.
+        #[cfg(feature = "fyx-ui-0-4")]
+        expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
     };
     ui_ext::Tree::from_row(
         row.nodes.iter().map(Into::into).collect(),
