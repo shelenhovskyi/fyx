@@ -699,14 +699,19 @@ impl AgentReview {
     /// Records files that changed on disk while the session's turn runs. Files the turn reviewed are
     /// skipped: their writes are the reviewed ones.
     /// Whether `path` went through the turn's review (decided, or waiting).
-    fn reviewed_in_turn(&self, turn: TurnId, path: &Path) -> bool {
+    /// The paths reviewed in `turn`, built once per batch of changed paths: checking each path
+    /// against the whole history and every open review was O(paths × history) per worktree event.
+    fn reviewed_in_turn(&self, turn: TurnId) -> HashSet<&Path> {
         self.turn_history(turn)
             .iter()
-            .any(|entry| entry.path == path)
-            || self
-                .reviews
-                .iter()
-                .any(|review| review.turn == turn && review.edit.abs_path() == path)
+            .map(|entry| entry.path.as_path())
+            .chain(
+                self.reviews
+                    .iter()
+                    .filter(|review| review.turn == turn)
+                    .map(|review| review.edit.abs_path()),
+            )
+            .collect()
     }
 
     pub fn note_changed_paths(
@@ -721,10 +726,13 @@ impl AgentReview {
         let Some(turn) = self.turns.get(session_id).copied() else {
             return;
         };
-        let new_paths = paths
-            .into_iter()
-            .filter(|path| !self.reviewed_in_turn(turn, path))
-            .collect::<Vec<_>>();
+        let new_paths = {
+            let reviewed = self.reviewed_in_turn(turn);
+            paths
+                .into_iter()
+                .filter(|path| !reviewed.contains(path.as_path()))
+                .collect::<Vec<_>>()
+        };
         let unreviewed = self.turn_unreviewed.entry(turn).or_default();
         let mut added = 0;
         for path in new_paths {

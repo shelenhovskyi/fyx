@@ -914,6 +914,10 @@ impl TerminalHost for HostFront {
         }
     }
 
+    fn want_command_blocks(&self) -> Box<dyn std::any::Any + Send + Sync> {
+        Box::new(terminal_ext::CommandBlockReader::acquire())
+    }
+
     fn close_all(&self, ext: &str) {
         let (statuses, owned, extension) = {
             let mut state = self.lock();

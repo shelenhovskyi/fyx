@@ -335,6 +335,12 @@ pub trait TerminalHost: Send + Sync + 'static {
     /// Reload, disable, uninstall, revocation: every terminal of `ext` closes, created ones with
     /// their process trees, and observing stops.
     fn close_all(&self, ext: &str);
+    /// §C.3 `last-command` reads a command block, which costs a second parse of every running
+    /// command's output: the host records blocks only while one of these tokens is held, by an
+    /// instance that declared `terminal:read`.
+    fn want_command_blocks(&self) -> Box<dyn std::any::Any + Send + Sync> {
+        Box::new(())
+    }
     /// P2.4: the extension's profiles and env, sent at load and again when a grant changes;
     /// [`TerminalHost::close_all`] clears it.
     fn set_integration(&self, ext: &str, integration: TerminalIntegration) {

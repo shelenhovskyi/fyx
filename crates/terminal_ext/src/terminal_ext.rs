@@ -20,7 +20,7 @@ pub mod status;
 mod tee_pty;
 mod terminal_id;
 
-pub use blocks::CommandBlock;
+pub use blocks::{CommandBlock, CommandBlockReader};
 pub use decorations::{
     MenuEntry, TerminalDecorations, new_terminal_menu, set_decorations, tab_indicator,
     terminal_menu,

@@ -11,9 +11,38 @@
 //! its command line came with the nonce: an untrusted command line is shown as the program's
 //! claim, never as what the user typed.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use alacritty_terminal::vte::{Parser, Perform};
 
 use crate::osc::{OscEvent, ShellMark};
+
+/// How many [`CommandBlockReader`]s are alive, in the whole process.
+static READERS: AtomicUsize = AtomicUsize::new(0);
+
+/// While one is alive, terminals record command blocks. Recording parses every running command's
+/// output a second time on the IO thread, so with no reader (no loaded extension declares
+/// `terminal:read`) the marks are still tracked but no output is kept. A block is recorded from
+/// the next command that starts after the first reader appears.
+#[derive(Debug)]
+pub struct CommandBlockReader(());
+
+impl CommandBlockReader {
+    pub fn acquire() -> Self {
+        READERS.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+impl Drop for CommandBlockReader {
+    fn drop(&mut self) {
+        READERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn readers_alive() -> bool {
+    READERS.load(Ordering::Relaxed) > 0
+}
 
 /// A block keeps the last this many bytes of its output.
 pub const MAX_BLOCK_OUTPUT_BYTES: usize = 256 * 1024;
@@ -90,6 +119,9 @@ impl Blocks {
                         Some((line, trusted)) => (Some(line), trusted),
                         None => (None, false),
                     };
+                    if !readers_alive() {
+                        return;
+                    }
                     self.running = Some(Running {
                         block: CommandBlock {
                             command_line,
@@ -197,6 +229,7 @@ mod tests {
     use crate::osc;
 
     fn feed(blocks: &mut Blocks, bytes: &[u8], nonce: &str) {
+        let _reader = CommandBlockReader::acquire();
         // As the tap does: output up to each OSC's end, then the mark.
         let mut scanner = crate::OscScanner::new(crate::MAX_OSC_PAYLOAD);
         let mut last = 0;
