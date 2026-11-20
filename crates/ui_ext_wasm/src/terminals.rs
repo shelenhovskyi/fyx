@@ -188,6 +188,8 @@ pub(crate) struct TerminalsHandle {
     broker: Option<Arc<dyn CapabilityCheck>>,
     /// T3 requests waiting for their card or the host, by id; aborted when the instance goes.
     t3_tasks: Arc<Mutex<HashMap<u64, AbortHandle>>>,
+    /// Held while this instance may read a command block (`terminal:read`); dropped with it.
+    _command_blocks: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl TerminalsHandle {
@@ -196,8 +198,13 @@ impl TerminalsHandle {
         host: Option<Arc<dyn TerminalHost>>,
         integration: IntegrationSource,
         broker: Option<Arc<dyn CapabilityCheck>>,
+        reads_terminals: bool,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
+        let command_blocks = host
+            .as_ref()
+            .filter(|_| reads_terminals)
+            .map(|host| host.want_command_blocks());
         Self {
             extension_id,
             host,
@@ -207,6 +214,7 @@ impl TerminalsHandle {
             integration,
             broker,
             t3_tasks: Arc::default(),
+            _command_blocks: command_blocks,
         }
     }
 

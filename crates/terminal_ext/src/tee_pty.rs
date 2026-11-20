@@ -415,6 +415,7 @@ mod tests {
 
     #[test]
     fn the_last_command_block_is_recorded_with_its_nonce() {
+        let _reader = crate::CommandBlockReader::acquire();
         let ext = TerminalExt::new();
         let run = |output: Vec<u8>| {
             let (mut pty, _) = tee(

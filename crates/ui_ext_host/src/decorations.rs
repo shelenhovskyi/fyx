@@ -471,22 +471,22 @@ pub(crate) fn init(cx: &mut App) {
             return;
         }
         cx.observe_in(&decorations, window, |editor, _, window, cx| {
-            sync_editor(editor, window, cx)
+            sync_editor(editor, None, window, cx)
         })
         .detach();
         cx.subscribe_in(
             &cx.entity(),
             window,
-            |editor, _, event: &EditorEvent, window, cx| {
-                if matches!(
-                    event,
-                    EditorEvent::BufferRangesUpdated { .. }
-                        | EditorEvent::BuffersRemoved { .. }
-                        | EditorEvent::TitleChanged
-                        | EditorEvent::Saved
-                ) {
-                    sync_editor(editor, window, cx);
+            |editor, _, event: &EditorEvent, window, cx| match event {
+                // One event per buffer as a multibuffer fills (project search, diagnostics): only
+                // that buffer is looked at, or filling N buffers walked all of them N times.
+                EditorEvent::BufferRangesUpdated { buffer, .. } => {
+                    sync_editor(editor, Some(buffer.read(cx).remote_id()), window, cx);
                 }
+                EditorEvent::BuffersRemoved { .. }
+                | EditorEvent::TitleChanged
+                | EditorEvent::Saved => sync_editor(editor, None, window, cx),
+                _ => {}
             },
         )
         .detach();
@@ -498,7 +498,7 @@ pub(crate) fn init(cx: &mut App) {
                 .ok();
         })
         .detach();
-        sync_editor(editor, window, cx);
+        sync_editor(editor, None, window, cx);
     })
     .detach();
 
@@ -510,13 +510,20 @@ pub(crate) fn init(cx: &mut App) {
 /// Brings an editor's blocks in line with the decorations: one block per decoration and matching
 /// buffer, at the decoration's anchor in that buffer. The review pane's editors (marked
 /// `AgentReviewEditor`) get none, so no extension can draw inside the agent review UI (design.md
-/// 0.3 §11).
-fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
+/// 0.3 §11). With `only`, just that buffer's blocks are brought in line; the others stay as they are.
+fn sync_editor(
+    editor: &mut Editor,
+    only: Option<BufferId>,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) {
     let Some(decorations) = Decorations::global(cx) else {
         return;
     };
     let editor_id = cx.entity_id();
     let in_review = editor.addon::<agent_review::AgentReviewEditor>().is_some();
+    // The review pane takes away every block, not one buffer's.
+    let only = only.filter(|_| !in_review);
     {
         // Nothing to place and nothing placed: no editor-wide work (triage 3, PERF 10).
         let decorations = decorations.read(cx);
@@ -531,7 +538,10 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
         // Takes away what was placed before the review pane marked it.
         Vec::new()
     } else {
-        multibuffer.all_buffers_iter().collect()
+        match only {
+            Some(only) => multibuffer.buffer(only).into_iter().collect(),
+            None => multibuffer.all_buffers_iter().collect(),
+        }
     };
     let snapshot = multibuffer.snapshot(cx);
 
@@ -601,7 +611,9 @@ fn sync_editor(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor
 
     let wanted_keys: HashSet<_> = wanted.iter().map(|(key, ..)| *key).collect();
     let stale: HashSet<CustomBlockId> = placed
-        .extract_if(|key, _| !wanted_keys.contains(key))
+        .extract_if(|key, _| {
+            only.is_none_or(|only| key.1 == only) && !wanted_keys.contains(key)
+        })
         .map(|(_, placed)| placed.block)
         .collect();
     if !stale.is_empty() {

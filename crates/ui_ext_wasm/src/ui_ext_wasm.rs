@@ -2100,6 +2100,7 @@ impl UiExtension {
                 terminal_host.filter(|_| is_v0_4),
                 integration,
                 capability_check.clone(),
+                declares(terminal::CAPABILITY_READ),
             ));
             let declares_create = declares(terminal::CAPABILITY_CREATE);
             let terminal_policy = Arc::new(if is_v0_4 {

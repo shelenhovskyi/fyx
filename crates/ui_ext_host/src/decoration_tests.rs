@@ -1080,3 +1080,55 @@ async fn test_same_height_updates_do_not_resync_editors(cx: &mut TestAppContext)
     set_text("two\nlines", cx);
     assert_eq!(notified.get(), 1, "taller: one resync");
 }
+
+/// A multibuffer filling one buffer at a time (project search) syncs only the new buffer: the
+/// block already placed in another buffer stays, and the new buffer's block is placed.
+#[gpui::test]
+async fn test_multibuffer_syncs_each_added_buffer(cx: &mut TestAppContext) {
+    let decorations = init(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/root/scratch"),
+        serde_json::json!({ "a.txt": "a\nb\n", "b.txt": "c\nd\n" }),
+    )
+    .await;
+    let project = Project::test(fs, [Path::new(path!("/root/scratch"))], cx).await;
+    let mut buffers = Vec::new();
+    for file in [path!("/root/scratch/a.txt"), path!("/root/scratch/b.txt")] {
+        let buffer = project
+            .update(cx, |project, cx| project.open_local_buffer(file, cx))
+            .await
+            .expect("buffer opens");
+        buffers.push(buffer);
+    }
+    let on_a = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("scratch/a.txt", 0), text_tree("on a"), cx)
+        })
+        .expect("valid tree");
+    let on_b = decorations
+        .update(cx, |decorations, cx| {
+            decorations.add_tree(below("scratch/b.txt", 1), text_tree("on b"), cx)
+        })
+        .expect("valid tree");
+    let multibuffer = cx.new(|_| editor::MultiBuffer::new(language::Capability::ReadWrite));
+    let window = cx.add_window(|window, cx| {
+        Editor::for_multibuffer(multibuffer.clone(), Some(project.clone()), window, cx)
+    });
+    let editor = window.root(cx).expect("editor window");
+    let mut vcx = VisualTestContext::from_window(*window, cx);
+    for (index, buffer) in buffers.iter().enumerate() {
+        multibuffer.update(&mut vcx, |multibuffer, cx| {
+            multibuffer.set_excerpts_for_path(
+                editor::PathKey::sorted(index as u64),
+                buffer.clone(),
+                [Point::new(0, 0)..Point::new(2, 0)],
+                0,
+                cx,
+            );
+        });
+        redraw(&mut vcx);
+    }
+    only_block(&decorations, &editor, on_a, &mut vcx);
+    only_block(&decorations, &editor, on_b, &mut vcx);
+}
