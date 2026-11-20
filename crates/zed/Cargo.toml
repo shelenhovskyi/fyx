@@ -209,6 +209,7 @@ tasks_ui.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true
 terminal_host.workspace = true # fyx
+fyx_history_host.workspace = true # fyx
 fyx_update_host.workspace = true # fyx
 terminal_view.workspace = true
 theme.workspace = true

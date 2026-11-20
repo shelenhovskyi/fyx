@@ -1,0 +1,16 @@
+[package]
+name = "fyx_history_host"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Fyx local history host (plan 6.3): stub staged by W0, W1 brings the crate"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_history_host.rs"
+doctest = false
+
+[dependencies]
