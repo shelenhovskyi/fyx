@@ -11,6 +11,8 @@ mod review_comments;
 mod review_pane;
 mod review_rules;
 mod secret_scan;
+mod secrets_modal;
+pub mod secrets_vault;
 mod unified_diff;
 // dev-only: never compiled into release builds unless the `review-script` feature asks for it, because a
 // script can approve agent edits the user never saw.
@@ -55,9 +57,9 @@ pub use review_comments::{
 };
 pub use review_pane::{
     AcceptAllHunks, AcceptHunk, AcceptTurn, AgentReviewEditor, ApplyReviewRules, ClearTurnDecision,
-    CommentHunk, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk,
-    RejectTurn, ReviewPane, SendComments, ShowReviewRules, SubmitReview, ToggleReviewMode,
-    permission_card_notice,
+    CommentHunk, ManageSecrets, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks,
+    RejectAndClose, RejectHunk, RejectTurn, ReviewPane, SendComments, ShowReviewRules,
+    SubmitReview, ToggleReviewMode, permission_card_notice,
 };
 use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
@@ -225,8 +227,10 @@ pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
     review.update(cx, |review, cx| {
         review.user_auto_accept = user_auto_accept(cx)
     });
-    // Without the app's file system (tests), confirmed rules last for the run only.
+    // Without the app's file system (tests), confirmed rules last for the run only, and there is
+    // no secrets vault unless a test installs one.
     if let Some(fs) = fs {
+        secrets_vault::init(cx);
         let memory = Rc::new(FileRulesMemory::new(fs));
         let review = review.downgrade();
         cx.spawn(async move |cx| {

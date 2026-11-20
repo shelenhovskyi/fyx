@@ -76,6 +76,8 @@ actions!(
         /// Sends the turn's open review comments to the agent as one prompt, with file and line
         /// references.
         SendComments,
+        /// Adds or removes the secrets agents can use as `secret://name`.
+        ManageSecrets,
         /// Opens the review panes of every open review in this workspace.
         OpenReviews,
         /// Turns review of agent edits on or off.
@@ -96,6 +98,9 @@ pub(crate) fn init(cx: &mut App) {
         };
         workspace.register_action(|workspace, _: &OpenReviews, window, cx| {
             open_reviews(workspace, None, window, cx);
+        });
+        workspace.register_action(|workspace, _: &ManageSecrets, window, cx| {
+            crate::secrets_modal::open(workspace, window, cx);
         });
         workspace.register_action(|_, _: &ToggleReviewMode, _, cx| {
             crate::set_review_mode_setting(!crate::review_mode(cx), cx);
