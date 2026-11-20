@@ -1,7 +1,7 @@
 # Web views as extensions (pluggable providers, CEF first)
 
 Status: research and plan, 2026-11-20. No product code until the owner approves. Targets
-`fyx:ui@0.5.0` (0.4 is frozen). Plan item: [platform plan 7.17](../platform/plan.md#717-web-views-as-extensions).
+`fyx:ui@0.5.0` (0.4 is frozen). Plan item: [platform plan 7.26](../platform/plan.md#726-web-views-as-extensions).
 Builds on [servo-webview.md](servo-webview.md), which this document generalises.
 
 ## Recommendation
@@ -300,18 +300,18 @@ partition.
 
 | Step | What | Size | Depends on |
 | --- | --- | --- | --- |
-| 17a spike | Standalone repo: `cef` crate, OSR with shared textures, one page, IOSurface handed to a tiny GPUI test app over a mach rendezvous; then the same on Windows with a D3D11 handle. Measure download/disk size, RSS for 1 and 5 pages, cold start, ad-hoc signing on Apple Silicon, `cef_sandbox` with our MSVC | S (4–5 days) | — |
-| 17b core | `webview_host` crate: protocol v1, supervisor (spawn, restart, idle stop, job object), `WebViewElement` with input, focus, IME, cursor, dialogs; CPU path; a dev setting `fyx.webview.dev_helper_path` to run a locally built helper; macOS | M (2 weeks) | 17a; W0: new member in `Cargo.toml` |
-| 17c macOS zero-copy | IOSurface pool to `paint_surface` | S | 17b |
-| 17d provider + registry | `[fyx_webview_provider]`, optional `component`, `native:helper` consent, downloader and verifier, natives in `ui_ext_registry`, `fyx-registry` + `policy` rules, provider repo CI with attestation; template change in fyx and fyx-extensions together | M | 17b, 1.1, 5.6/5.7, P3 |
-| 17e sandbox | macOS Seatbelt profile for the helper; network policy in the helper | S | 17d, 7.5 |
-| 17f WIT 0.5 | `webview` node, events, `webview` import, `ui:web` T1, `[fyx_ui.web]`; SDK, harness fake, demo (a docs viewer) | M | 17c; 0.5 opened by W0 |
-| 17g agent tools | agent browser tab, `web_*` tools, web policy, consent | M | 17d, 7.16 relay MCP mode for the MCP route |
-| 17h Windows | `fyx:` hook for D3D11 surfaces in GPUI, shared-handle pool, `cef_sandbox`, job object | M | 17b; Windows build of the provider |
-| 17i later | Linux on the CPU path; Servo provider on protocol v1; wry overlay provider; external CDP endpoint | — | 17f |
+| 26a spike | Standalone repo: `cef` crate, OSR with shared textures, one page, IOSurface handed to a tiny GPUI test app over a mach rendezvous; then the same on Windows with a D3D11 handle. Measure download/disk size, RSS for 1 and 5 pages, cold start, ad-hoc signing on Apple Silicon, `cef_sandbox` with our MSVC | S (4–5 days) | — |
+| 26b core | `webview_host` crate: protocol v1, supervisor (spawn, restart, idle stop, job object), `WebViewElement` with input, focus, IME, cursor, dialogs; CPU path; a dev setting `fyx.webview.dev_helper_path` to run a locally built helper; macOS | M (2 weeks) | 26a; W0: new member in `Cargo.toml` |
+| 26c macOS zero-copy | IOSurface pool to `paint_surface` | S | 26b |
+| 26d provider + registry | `[fyx_webview_provider]`, optional `component`, `native:helper` consent, downloader and verifier, natives in `ui_ext_registry`, `fyx-registry` + `policy` rules, provider repo CI with attestation; template change in fyx and fyx-extensions together | M | 26b, 1.1, 5.6/5.7, P3 |
+| 26e sandbox | macOS Seatbelt profile for the helper; network policy in the helper | S | 26d, 7.5 |
+| 26f WIT 0.5 | `webview` node, events, `webview` import, `ui:web` T1, `[fyx_ui.web]`; SDK, harness fake, demo (a docs viewer) | M | 26c; 0.5 opened by W0 |
+| 26g agent tools | agent browser tab, `web_*` tools, web policy, consent | M | 26d, 7.16 relay MCP mode for the MCP route |
+| 26h Windows | `fyx:` hook for D3D11 surfaces in GPUI, shared-handle pool, `cef_sandbox`, job object | M | 26b; Windows build of the provider |
+| 26i later | Linux on the CPU path; Servo provider on protocol v1; wry overlay provider; external CDP endpoint | — | 26f |
 
-Total to a usable macOS feature (17a–17g): about 8–10 engineer-weeks; Windows adds about 2.
-At most two of these compile at once (owner limit); 17a and the registry half of 17d do not
+Total to a usable macOS feature (26a–26g): about 8–10 engineer-weeks; Windows adds about 2.
+At most two of these compile at once (owner limit); 26a and the registry half of 26d do not
 compile Fyx and run alongside.
 
 ## Integrator notes
@@ -319,7 +319,7 @@ compile Fyx and run alongside.
 - New workspace member `crates/webview_host` (GPUI, `postcard`, `async-tar`, `zstd`,
   `sha2`; no CEF). Integrator `Cargo.toml` change.
 - `fyx:` hooks: Windows `SurfaceSource` variant + `draw_surfaces`; maybe a streaming-texture hook
-  for CPU frames (17a decides); none on macOS.
+  for CPU frames (26a decides); none on macOS.
 - WIT 0.5: the `webview` node, events and import; `ui:web` (reserved in ARCHITECTURE.md layer 6).
   `spec.md` §5 lists web views as out of scope for platform 1; this item moves them to 0.5.
 - Registry format: the `natives` field, its rules, and `policy/native-providers.toml`; change
@@ -346,5 +346,5 @@ compile Fyx and run alongside.
   `crates/gpui/src/window.rs` (`paint_surface`), `crates/gpui_windows/src/directx_renderer.rs`
   (`draw_surfaces` no-op).
 
-Facts marked by the spike (17a): CEF sizes, RSS, macOS shared-texture behaviour on the CEF
+Facts marked by the spike (26a): CEF sizes, RSS, macOS shared-texture behaviour on the CEF
 version we pin, and `cef_sandbox` with our toolchain. The CEF size figures above are estimates.
