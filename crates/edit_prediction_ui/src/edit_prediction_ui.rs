@@ -1,5 +1,6 @@
 mod edit_prediction_button;
 mod edit_prediction_context_view;
+mod fyx_providers; // fyx: plan 6.5
 mod rate_prediction_modal;
 
 use command_palette_hooks::CommandPaletteFilter;
