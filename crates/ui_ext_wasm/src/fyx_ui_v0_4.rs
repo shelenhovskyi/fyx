@@ -429,7 +429,13 @@ impl wit_context::Host for UiState {
         if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
             return Ok(Err(error.into()));
         }
-        Ok(Err(staged_unavailable("publishing diagnostics")))
+        Ok(self
+            .marks
+            .publish_diagnostics(
+                file_ref(path),
+                diagnostics.into_iter().map(model_diagnostic).collect(),
+            )
+            .map_err(Into::into))
     }
 
     fn clear_diagnostics(
@@ -440,7 +446,10 @@ impl wit_context::Host for UiState {
         if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
             return Ok(Err(error.into()));
         }
-        Ok(Err(staged_unavailable("publishing diagnostics")))
+        Ok(self
+            .marks
+            .clear_diagnostics(path.map(file_ref))
+            .map_err(Into::into))
     }
 
     fn decorate_files(
@@ -460,7 +469,20 @@ impl wit_context::Host for UiState {
         if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
             return Ok(Err(error.into()));
         }
-        Ok(Err(staged_unavailable("file decorations")))
+        Ok(self
+            .marks
+            .decorate_files(
+                decorations
+                    .into_iter()
+                    .map(|decoration| ui_ext::file_decorations::FileDecoration {
+                        path: file_ref(decoration.path),
+                        badge: decoration.badge,
+                        color: decoration.color.map(Into::into),
+                        tooltip: decoration.tooltip,
+                    })
+                    .collect(),
+            )
+            .map_err(Into::into))
     }
 
     fn clear_file_decorations(
@@ -475,14 +497,27 @@ impl wit_context::Host for UiState {
         if let Err(error) = self.permit_t1(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
             return Ok(Err(error.into()));
         }
-        Ok(Err(staged_unavailable("file decorations")))
+        Ok(self
+            .marks
+            .clear_file_decorations(paths.map(|paths| paths.into_iter().map(file_ref).collect()))
+            .map_err(Into::into))
     }
 }
 
-fn staged_unavailable(what: &str) -> wit_host::HostError {
-    wit_host::HostError {
-        code: wit_host::HostErrorCode::Unavailable,
-        message: format!("{what} is not available yet"),
+/// A published `diagnostic` (§E.1); `source` is dropped by the checks.
+fn model_diagnostic(entry: wit_context::Diagnostic) -> ui_ext::context::Diagnostic {
+    use ui_ext::context::DiagnosticSeverity;
+    ui_ext::context::Diagnostic {
+        range: text_range(entry.range),
+        severity: match entry.severity {
+            wit_context::Severity::Error => DiagnosticSeverity::Error,
+            wit_context::Severity::Warning => DiagnosticSeverity::Warning,
+            wit_context::Severity::Information => DiagnosticSeverity::Information,
+            wit_context::Severity::Hint => DiagnosticSeverity::Hint,
+        },
+        message: entry.message,
+        source: entry.source,
+        code: entry.code,
     }
 }
 
@@ -987,6 +1022,16 @@ conversions::conversions! {
             x: click.x.0,
             y: click.y.0,
         }),
+        model::UiEvent::RowToggled(id, row, expand) => Self::RowToggled((id, row, expand)),
+    }
+}
+
+/// A 0.4 row's chevron (§F.4).
+fn list_row_expansion(row: &wit::ListRow) -> model::Expansion {
+    match row.expansion {
+        wit::Expansion::Leaf => model::Expansion::Leaf,
+        wit::Expansion::Collapsed => model::Expansion::Collapsed,
+        wit::Expansion::Expanded => model::Expansion::Expanded,
     }
 }
 

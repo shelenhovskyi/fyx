@@ -924,6 +924,7 @@ pub(crate) struct Revocable {
     pub(crate) context: std::sync::Weak<crate::editor_context::ContextHandle>,
     pub(crate) review: std::sync::Weak<crate::proposals::ReviewHandle>,
     pub(crate) relay: std::sync::Weak<crate::relay::RelayHandle>,
+    pub(crate) marks: std::sync::Weak<crate::extension_marks::MarksHandle>,
 }
 
 /// Starts accepted requests and hands their outcomes to the host, once per instance. Dropping
@@ -1058,6 +1059,17 @@ impl NetworkHandle {
                         ui_ext::context::CAPABILITY_WORKSPACE_DIAGNOSTICS => {
                             if let Some(context) = revocable.context.upgrade() {
                                 context.stop_diagnostics();
+                            }
+                        }
+                        // §E.1, §F.2: what the extension published goes.
+                        ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH => {
+                            if let Some(marks) = revocable.marks.upgrade() {
+                                marks.revoke_diagnostics();
+                            }
+                        }
+                        ui_ext::integration::CAPABILITY_FILE_DECORATIONS => {
+                            if let Some(marks) = revocable.marks.upgrade() {
+                                marks.revoke_decorations();
                             }
                         }
                         // §B.10: open reviews close unapplied; no outcome follows.

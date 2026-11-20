@@ -23,29 +23,14 @@ use ui_ext::v0_2::{HostError, HostErrorCode};
 
 use crate::context::FakeContext;
 
-/// Entries one `publish-diagnostics` may hold for its file.
-pub const MAX_PUBLISHED_PER_FILE: usize = 500;
+// The host's limits, from `ui_ext` (one source of truth with `ui_ext_wasm`).
+pub use ui_ext::file_decorations::{
+    DECORATION_COLORS, MAX_BADGE_CHARS, MAX_DECORATED_PATHS, MAX_DECORATION_TOOLTIP_BYTES,
+    MAX_DECORATIONS_PER_CALL,
+};
 /// Entries one extension may have published over all files.
-pub const MAX_PUBLISHED: usize = 5_000;
-/// `publish-diagnostics` calls per second; more is `unavailable`.
-pub const MAX_PUBLISHES_PER_SECOND: usize = 20;
-/// Decorations one `decorate-files` may hold.
-pub const MAX_DECORATIONS_PER_CALL: usize = 500;
-/// Paths one extension may have decorated.
-pub const MAX_DECORATED_PATHS: usize = 10_000;
-/// Characters of a badge.
-pub const MAX_BADGE_CHARS: usize = 2;
-/// Bytes of a decoration's tooltip line.
-pub const MAX_DECORATION_TOOLTIP_BYTES: usize = 256;
-
-/// The colours a decoration may tint a file name with.
-pub const DECORATION_COLORS: [ColorToken; 5] = [
-    ColorToken::TextAccent,
-    ColorToken::Warning,
-    ColorToken::Error,
-    ColorToken::Success,
-    ColorToken::TextMuted,
-];
+pub use ui_ext::published_diagnostics::MAX_PUBLISHED_PER_EXTENSION as MAX_PUBLISHED;
+pub use ui_ext::published_diagnostics::{MAX_PUBLISHED_PER_FILE, MAX_PUBLISHES_PER_SECOND};
 
 /// `context.file-decoration`, as the host keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -31,6 +31,11 @@
 //! - `setting <key>`: `settings.get` as its value, or the error code; `settings`: `settings.all`
 //!   as `<key>=<value>[*]`, comma-separated (`*` when `is-default`); `open-settings [<key>]`:
 //!   `settings.open`;
+//! - `publish <worktree|-> <path> <count>`: `context.publish-diagnostics` of `count` warnings
+//!   (line `i`, columns 0..4, source `rust-analyzer`); `clear-diag [<worktree|-> <path>]`:
+//!   `clear-diagnostics`; `decorate <worktree|-> <path> <badge> [<color>]`: `decorate-files`
+//!   (colour `warning` unless given: `surface` for a refused one); `clear-deco
+//!   [<worktree|-> <path>]`: `clear-file-decorations`;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
@@ -389,6 +394,48 @@ fn run(words: &[&str]) -> Result<String, String> {
         }
         ["diag-all"] => diagnostics(fyx::ui::context::diagnostics(None)),
         ["watch-diag", on] => done(fyx::ui::context::watch_diagnostics(*on == "on")),
+        ["publish", worktree, path, count] => {
+            let count: u32 = count.parse().map_err(|_| "count")?;
+            let entries: Vec<fyx::ui::context::Diagnostic> = (0..count)
+                .map(|line| fyx::ui::context::Diagnostic {
+                    range: TextRange {
+                        start: Position { line, column: 0 },
+                        end: Position { line, column: 4 },
+                    },
+                    severity: fyx::ui::context::Severity::Warning,
+                    message: format!("m{line}"),
+                    source: Some("rust-analyzer".into()),
+                    code: None,
+                })
+                .collect();
+            done(fyx::ui::context::publish_diagnostics(
+                &file(worktree, path)?,
+                &entries,
+            ))
+        }
+        ["clear-diag"] => done(fyx::ui::context::clear_diagnostics(None)),
+        ["clear-diag", worktree, path] => done(fyx::ui::context::clear_diagnostics(Some(
+            &file(worktree, path)?,
+        ))),
+        ["decorate", worktree, path, badge, color @ ..] => {
+            let color = match color {
+                [] => ColorToken::Warning,
+                ["surface"] => ColorToken::Surface,
+                _ => return Err("color".into()),
+            };
+            done(fyx::ui::context::decorate_files(&[
+                fyx::ui::context::FileDecoration {
+                    path: file(worktree, path)?,
+                    badge: Some((*badge).into()),
+                    color: Some(color),
+                    tooltip: None,
+                },
+            ]))
+        }
+        ["clear-deco"] => done(fyx::ui::context::clear_file_decorations(None)),
+        ["clear-deco", worktree, path] => done(fyx::ui::context::clear_file_decorations(Some(
+            &[file(worktree, path)?],
+        ))),
         ["propose", worktree, path, kind, apply, session, text @ ..] => {
             let text = text.join(" ");
             id(review::propose(&review::Proposal {
@@ -480,6 +527,12 @@ impl Guest for Probe {
         let command = match event {
             UiEvent::InputChanged((_, command)) => command,
             UiEvent::Click(_) => std::mem::take(&mut *ARMED.lock().unwrap()),
+            UiEvent::RowToggled((list, row, expand)) => {
+                return Ok(Update::Replace(vec![text(
+                    1,
+                    &format!("toggled {list} {row} {expand}"),
+                )]));
+            }
             _ => return Ok(Update::Unchanged),
         };
         let words: Vec<&str> = command.split_whitespace().collect();
@@ -497,10 +550,22 @@ impl Guest for Probe {
     fn list_rows(
         _surface_id: String,
         _list_node: NodeId,
-        _start: u32,
-        _count: u32,
+        start: u32,
+        count: u32,
     ) -> Vec<ListRow> {
-        Vec::new()
+        // Tree rows (§F.1): a leaf, a collapsed and an expanded one, in turn.
+        (start..start + count)
+            .map(|index| ListRow {
+                index,
+                indent: 1,
+                nodes: vec![text(1, "row")],
+                expansion: match index % 3 {
+                    0 => Expansion::Leaf,
+                    1 => Expansion::Collapsed,
+                    _ => Expansion::Expanded,
+                },
+            })
+            .collect()
     }
 
     fn tick(_surface_id: String) -> Result<Update, String> {
