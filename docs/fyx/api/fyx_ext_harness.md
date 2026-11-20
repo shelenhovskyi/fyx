@@ -112,7 +112,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::set_private_file` | method | A file the user keeps private: `to-file-ref` and `absolute-path` refuse it, and the context carries no selection text of it. |
 | `Harness::set_relay_channels` | method | The `[[fyx_ui.relay_channels]]` (0.4, design.md B.9), checked as the host checks them; `Harness::load_package` reads them from the manifest. They need `relay:hooks`. |
 | `Harness::set_setting_specs` | method | The `[[fyx_ui.settings]]` (0.4, design.md §D), already checked with `settings::SettingSpec::parse_all`; `Harness::load_package` reads them from the manifest. Refused for a component below 0.4. The user's values are kept and checked again. |
-| `Harness::set_user_settings` | method | The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An invalid value gives the extension its default. Returns the keys whose effective value changed, in manifest order: what `io-event::settings-changed` carries once the WIT has it (design.md §D.4). |
+| `Harness::set_user_settings` | method | The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An invalid value gives the extension its default. Returns the keys whose effective value changed, in manifest order: what `io-event::settings-changed` carries; it is also queued for `Harness::deliver_io` (design.md §D.4). |
 | `Harness::set_worktree` | method | The worktree `spawn` runs in: `None` for no open worktree (`unavailable`), or whether it is trusted (an untrusted one is `denied`). Trusted by default. |
 | `Harness::set_worktrees` | method | The open worktrees for `context` (0.4): (id, root as the host spells it, `\` or `/`). The roots need not exist. |
 | `Harness::setting` | method | What the extension gets from `settings.get(key)`; `None` for an undeclared key. |
@@ -121,7 +121,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::settings` | method | What the extension gets from `settings.all`: every declared key's effective value, in manifest order. |
 | `Harness::surfaces` | method | The live surfaces: the static ones, then those `add-surface` added, minus removed ones. |
 | `Harness::surfaces_v0_1` | method | `Harness::surfaces` in the 0.1 model; a 0.2 component's modals are left out. |
-| `Harness::take_settings_changed` | method | The `settings-changed` events the host would have sent, oldest first, and forgets them. |
+| `Harness::take_settings_changed` | method | The `settings-changed` events not yet delivered by `Harness::deliver_io`, oldest first, and forgets them. |
 | `Harness::terminal` | method | One of the extension's 0.4 terminals (pseudo, created or profile), while it is open. |
 | `Harness::terminal_nodes` | method | The handles the `terminal` nodes of a mounted surface show, in tree order. |
 | `Harness::terminal_profiles` | method | The checked `[[fyx_ui.terminal_profiles]]`, in manifest order. |
