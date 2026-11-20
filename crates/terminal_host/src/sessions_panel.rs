@@ -83,17 +83,23 @@ impl AgentSessionsPanel {
         agent_board::board(terminals, threads)
     }
 
+    /// Deferred: the terminal panel can share this panel's dock, and focusing it deactivates this
+    /// panel, which cannot be updated while its own click handler runs.
     fn jump_to(
         &mut self,
         view: &Entity<TerminalView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace
-            .update(cx, |workspace, cx| {
-                sessions::reveal(workspace, view, window, cx)
-            })
-            .ok();
+        let workspace = self.workspace.clone();
+        let view = view.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    sessions::reveal(workspace, &view, window, cx)
+                })
+                .ok();
+        });
     }
 }
 
