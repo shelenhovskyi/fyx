@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/pre-tool",
+            "command": "\"${FYX_RELAY:-true}\" --channel fyx-claude-code/pre-tool --shell \"${CLAUDE_CODE_SHELL:-}\" \"${SHELL:-}\"",
             "timeout": 10
           }
         ]

@@ -21,7 +21,8 @@
 //! also feeds `selection_changed`, and `openDiff` is a proposal in agent review (`review`),
 //! withdrawn when Claude closes its tab first. `getDiagnostics` reads `context.diagnostics`;
 //! its answers are cached until `diagnostics-changed`. The hooks arrive as
-//! `io-event::relay-request` and are answered at once ([`hooks::ANSWER`]); their turns name
+//! `io-event::relay-request` and are answered at once ([`hooks::answer`]: exit 0, and a `deny`
+//! for a `Bash` command zsh would silently change, [`zsh`]); their turns name
 //! Claude's sessions, and so do the proposals of the one session in a turn. A rejected
 //! `openDiff` ends that turn ([`hooks::Sessions::diff_rejected`]).
 
@@ -29,6 +30,7 @@ pub mod hooks;
 pub mod ide;
 #[cfg(feature = "fyx-ui-0-4")]
 mod wired;
+pub mod zsh;
 
 #[cfg(feature = "fyx-ui-0-4")]
 use std::collections::BTreeMap;
@@ -68,11 +70,12 @@ impl ClaudeCode {
     }
 
     /// One hook, through `fyx-relay`. A hook the extension cannot read is logged; every hook is
-    /// answered with [`hooks::ANSWER`], so Claude never waits on Fyx.
+    /// answered at once ([`hooks::answer`]), so Claude never waits on Fyx.
     fn hook(&mut self, request: relay::RelayRequest) {
         let input = hooks::Channel::from_relay(&request.channel)
             .ok_or_else(|| format!("unknown relay channel {:?}", request.channel))
             .and_then(|channel| hooks::HookInput::parse(channel, &request.stdin));
+        let (exit_code, stdout, stderr) = hooks::answer(input.as_ref().ok(), &request.argv);
         match input {
             Ok(input) => {
                 // As in the compat replay: a new turn reads diagnostics afresh.
@@ -94,8 +97,7 @@ impl ClaudeCode {
                 &format!("a Claude hook was ignored: {error}"),
             ),
         }
-        let (exit_code, stdout, stderr) = hooks::ANSWER;
-        if let Err(error) = relay::respond(request.id, exit_code, stdout, stderr) {
+        if let Err(error) = relay::respond(request.id, exit_code, &stdout, &stderr) {
             log(
                 LogLevel::Warn,
                 &format!(

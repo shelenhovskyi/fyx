@@ -629,6 +629,52 @@ mod tests {
         input
     }
 
+    /// A zsh `Bash` command with `$M:r` is denied through the relay, with the `pre-tool` hook's
+    /// `--shell` arguments; the tab still shows the tool.
+    #[test]
+    fn a_zsh_modifier_hazard_is_denied_through_the_relay() {
+        use ui_ext_sdk::relay::RelayEffect;
+        set_worktree_roots(&[(1, "/work/app")]);
+        let mut extension = ClaudeCode::new();
+        take_host_effects();
+        extension
+            .handle_io(IoEvent::RelayRequest((
+                7,
+                "fyx-claude-code/pre-tool".into(),
+                Some(9),
+                ["--shell", "", "/bin/zsh"].map(str::to_owned).to_vec(),
+                hook_input(
+                    "PreToolUse",
+                    serde_json::json!({
+                        "tool_name": "Bash",
+                        "tool_input": { "command": "git push origin \"$M:refs/heads/dev\"" },
+                    }),
+                )
+                .to_string(),
+            )))
+            .unwrap();
+        let effects = take_host_effects();
+        let answer = effects
+            .iter()
+            .find_map(|effect| match effect {
+                HostEffect::Relay(RelayEffect {
+                    id: 7,
+                    exit_code: 0,
+                    stdout,
+                    ..
+                }) => serde_json::from_str::<serde_json::Value>(stdout).ok(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, HostEffect::Terminal(_))),
+            "{effects:?}"
+        );
+    }
+
     /// The plugin's hooks through the relay: every one is answered at once with exit 0, a
     /// prompt begins a turn named by Claude's session, the openDiff of that turn carries the
     /// session, and a rejected diff ends the turn (Claude sends no Stop then).
