@@ -209,7 +209,7 @@ Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
 | 7.9 | W3 | **Agent sessions board [D2]**: every agent (ACP threads, CLI agents in terminals via OSC 7501 and the relay), its worktree, state, diff size and cost, "needs you" first, click to focus. Kept to the narrow layer of [worktrees research §8](../../research/worktrees-and-parallel-agents.md): no worktree manager | M | 5.4, 5.12, 7.8 | a Claude Code CLI session and an ACP thread show side by side with live state |
 | 7.10 | W3 (page) + W1 (`extension_host` hook, setting) | **One Extensions page with Fyx and Zed tabs, Zed's registry opt-in**: see [7.10 below](#710-extensions-page-fyx-and-zed-tabs) | S–M | 3.5 | the page opens on the Fyx tab; the Zed tab shows installed Zed extensions with no error banner until the user turns the registry on, then searches and installs from it; nothing but extension requests reaches zed.dev |
 | 7.11 | W5 successor (`agent_review`) | **"Review Agent Edits" as a switch**: in the agent panel's options menu the entry is a `toggleable_entry`, which hides its check mark when off and leaves an empty indent that reads as a layout bug. Draw it in `review_mode_menu_entry` as a `custom_entry` with the label and a `ui::Switch` at the end; while `FYX_AGENT_REVIEW` overrides the setting, a non-selectable `custom_row` with a disabled switch. Only this entry: the other menus keep Zed's check-mark style (a square for every toggle would edit upstream `ui` and depart from macOS menus) | S | — | the menu shows the switch on and off; clicking the row toggles `agent_review.enabled`; with the variable set the switch is disabled |
-| 7.12 | W7 (audit) + W3 (fixes) | **Readable prompts and notices (ux-2)**: the dev-folder notice "The UI extension … is installed but not enabled. It asks for: …" (`ui_ext_host/src/registry.rs`) is one paragraph with every capability, its id, the folder and the buttons run together; the T2 ones (`terminal:env`, `network:listen`, `fs:discovery-file`, `relay:hooks`) look the same as `ui:panel`. **First an audit, in the running Mac build** (ux-1 only read the code): every Fyx-made notification, toast, prompt, consent and install dialog, permission card, banner and empty or error state in `ui_ext_host`, `ui_ext_wasm`, `agent_review`, `terminal_ext`, `fyx_registry` and the `fyx:` hooks, with a screenshot of each; findings in `tasks/reviews/ux-2.md`. **Rules the fixes follow:** a short title that says what happens; capabilities as a list, grouped by tier, T2 first with a warning style, ids secondary or in a details toggle; paths and ids in a muted or code style, never inside the sentence; one decision per prompt with verb buttons ("Enable", not "OK"); details behind "Show details"; the same layout for one consent wherever it appears (dev folder, install, registry, approve-and-update). **Then the fixes**, starting with the consent notice and the install prompt, as a shared consent view in `ui_ext_host` | M | — | `ux-2.md` lists every surface with a screenshot and a verdict; the consent notice and the install prompt show grouped lists with T2 marked; no Fyx prompt is a single paragraph over three lines |
+| 7.12 | W7 (audit) + W3 (fixes) | **Readable prompts and notices (ux-2)**, known cases in [7.12 below](#712-known-cases): the dev-folder notice "The UI extension … is installed but not enabled. It asks for: …" (`ui_ext_host/src/registry.rs`) is one paragraph with every capability, its id, the folder and the buttons run together; the T2 ones (`terminal:env`, `network:listen`, `fs:discovery-file`, `relay:hooks`) look the same as `ui:panel`. **First an audit, in the running Mac build** (ux-1 only read the code): every Fyx-made notification, toast, prompt, consent and install dialog, permission card, banner and empty or error state in `ui_ext_host`, `ui_ext_wasm`, `agent_review`, `terminal_ext`, `fyx_registry` and the `fyx:` hooks, with a screenshot of each; findings in `tasks/reviews/ux-2.md`. **Rules the fixes follow:** a short title that says what happens; capabilities as a list, grouped by tier, T2 first with a warning style, ids secondary or in a details toggle; paths and ids in a muted or code style, never inside the sentence; one decision per prompt with verb buttons ("Enable", not "OK"); details behind "Show details"; the same layout for one consent wherever it appears (dev folder, install, registry, approve-and-update). **Then the fixes**, starting with the consent notice and the install prompt, as a shared consent view in `ui_ext_host` | M | — | `ux-2.md` lists every surface with a screenshot and a verdict; the consent notice and the install prompt show grouped lists with T2 marked; no Fyx prompt is a single paragraph over three lines |
 
 **Order.** 7.1 first: it gives the owner a Mac build and a Mac check for everything after it.
 Then the agent-review lane in order 7.2 → 7.3 → 7.4. 7.5 follows 4.7 and pairs with 7.4. 7.7 is
@@ -251,8 +251,32 @@ behind a "Fyx Extensions" button that opens a separate page. Plan 3.5 asked for 
   registry fetch while off, the dev-install menu); the logic stays in `ui_ext_host`.
 - **Docs:** the user guide's "No Zed extension registry" becomes "Zed's extension registry is off
   until you turn it on in Extensions → Zed".
-- **Tests:** with the setting off, no request leaves for any host; with it on, extension requests
+- **Tests (7.10):** with the setting off, no request leaves for any host; with it on, extension requests
   go to api.zed.dev and nothing else does; the Fyx tab opens by default and from the action.
+
+### 7.12 Known cases
+
+Seen by the owner on the Mac build on 2026-11-20 while enabling `fyx-claude-code`. The audit
+starts from these and looks for the same faults everywhere else.
+
+1. **Dev-folder notice** ("… is installed but not enabled. It asks for: …"): one paragraph with
+   every capability as "Description (id)" joined by semicolons, then the folder; T2 not marked.
+2. **Enable dialog** ("Enable the UI extension fyx-claude-code?"):
+   - the title uses the id, not the name ("Claude Code");
+   - group headings ("Shows in Fyx", "Allowed without asking", "Off unless you tick it") look
+     like the items under them; "A panel, Files from its own package" joins two items in one line;
+   - manifest templates are shown raw: `${package}`, `${listen.ide.port}`, `${account.claude}`,
+     `${port}.lock`. Show what they become ("this extension's folder", "a port Fyx picks",
+     "the Claude account you choose") or the resolved value;
+   - raw ids: `mcpwebsocket` (the protocol, with its hyphen lost), `channel session-start (on
+     failure: exit 0)` for every hook channel;
+   - warnings repeat (two `CLAUDE_CODE_PLUGIN_DIRS` lines) and "It can run any program on your
+     computer" says neither why nor how much;
+   - every T2 box starts unticked and Enable works with none ticked, but the dialog does not say
+     what the extension can still do then (here: nearly nothing). Say so, or offer "Tick all
+     that this extension needs" with the risks listed once;
+   - the list scrolls inside the dialog with no sign that more is below; the hook list is cut
+     off at the bottom edge.
 
 ## Deferred after 1.0
 
