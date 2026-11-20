@@ -73,6 +73,7 @@ pub mod journal;
 mod accounts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod editor_context;
+mod extension_marks;
 mod extension_settings;
 mod listeners;
 pub mod network;
