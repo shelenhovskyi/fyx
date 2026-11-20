@@ -1575,7 +1575,11 @@ impl wit_context::Host for State {
         if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
             return Ok(Err(error));
         }
-        Ok(Err(staged_unavailable("publishing diagnostics")))
+        let diagnostics = diagnostics.into_iter().map(model_diagnostic).collect();
+        result(
+            self.published
+                .publish(&self.context, &model_file_ref(path), diagnostics),
+        )
     }
 
     fn clear_diagnostics(
@@ -1586,7 +1590,11 @@ impl wit_context::Host for State {
         if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH) {
             return Ok(Err(error));
         }
-        Ok(Err(staged_unavailable("publishing diagnostics")))
+        let path = path.map(model_file_ref);
+        result(
+            self.published
+                .clear_diagnostics(&self.context, path.as_ref()),
+        )
     }
 
     fn decorate_files(
@@ -1606,7 +1614,16 @@ impl wit_context::Host for State {
         if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
             return Ok(Err(error));
         }
-        Ok(Err(staged_unavailable("file decorations")))
+        let decorations = decorations
+            .into_iter()
+            .map(|decoration| crate::FileDecoration {
+                path: model_file_ref(decoration.path),
+                badge: decoration.badge,
+                color: decoration.color.map(Into::into),
+                tooltip: decoration.tooltip,
+            })
+            .collect();
+        result(self.published.decorate(&self.context, decorations))
     }
 
     fn clear_file_decorations(
@@ -1621,14 +1638,41 @@ impl wit_context::Host for State {
         if let Err(error) = self.permit(ui_ext::integration::CAPABILITY_FILE_DECORATIONS) {
             return Ok(Err(error));
         }
-        Ok(Err(staged_unavailable("file decorations")))
+        let paths = paths.map(|paths| paths.into_iter().map(model_file_ref).collect());
+        result(self.published.clear_decorations(&self.context, paths))
     }
 }
 
-fn staged_unavailable(what: &str) -> wit_host::HostError {
-    wit_host::HostError {
-        code: wit_host::HostErrorCode::Unavailable,
-        message: format!("{what} is not available yet"),
+fn model_diagnostic(diagnostic: wit_context::Diagnostic) -> ui_ext::context::Diagnostic {
+    use ui_ext::context::DiagnosticSeverity;
+    let position = |position: wit::Position| ui_ext::edit::Position {
+        line: position.line,
+        column: position.column,
+    };
+    ui_ext::context::Diagnostic {
+        range: ui_ext::edit::TextRange {
+            start: position(diagnostic.range.start),
+            end: position(diagnostic.range.end),
+        },
+        severity: match diagnostic.severity {
+            wit_context::Severity::Error => DiagnosticSeverity::Error,
+            wit_context::Severity::Warning => DiagnosticSeverity::Warning,
+            wit_context::Severity::Information => DiagnosticSeverity::Information,
+            wit_context::Severity::Hint => DiagnosticSeverity::Hint,
+        },
+        message: diagnostic.message,
+        source: diagnostic.source,
+        code: diagnostic.code,
+    }
+}
+
+impl From<wit::Expansion> for crate::Expansion {
+    fn from(expansion: wit::Expansion) -> Self {
+        match expansion {
+            wit::Expansion::Leaf => Self::Leaf,
+            wit::Expansion::Collapsed => Self::Collapsed,
+            wit::Expansion::Expanded => Self::Expanded,
+        }
     }
 }
 
