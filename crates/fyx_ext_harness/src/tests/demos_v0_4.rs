@@ -12,11 +12,13 @@ const PANEL: &str = "pseudo-terminal";
 
 /// The demos that exist only for 0.4, built together: the SDK's 0.4 feature must not reach the
 /// 0.3 demos, so they get a target directory of their own.
-const DEMOS_V0_4: [&str; 4] = [
+const DEMOS_V0_4: [&str; 6] = [
     "fyx_demo_pseudo_terminal",
     "fyx_demo_terminal_profiles",
     "fyx_claude_code",
     "fyx_gemini_cli",
+    "fyx_demo_lint",
+    "fyx_demo_bookmarks",
 ];
 
 /// `extensions/<demo>` with its 0.4 component, in a folder of the test target directory, as
@@ -1169,7 +1171,6 @@ fn editor_selection(path: &str, line: u32, text: Option<&str>) -> ui_ext::contex
 /// Plan 6.6 (design.md §E.4): the lint demo publishes the `TODO`s of a selection as warnings
 /// under no source of its own, a private file publishes nothing, and Clear clears every file.
 #[test]
-#[ignore = "needs W0's workspace members for fyx_demo_lint and fyx_demo_bookmarks; then add both to DEMOS_V0_4"]
 fn the_lint_demo_publishes_the_todos_of_a_selection() {
     let mut harness = Harness::load_package(demo_package("fyx_demo_lint")).expect("loads");
     harness.set_worktrees(&[(1, "/work")]);
@@ -1232,7 +1233,6 @@ fn the_lint_demo_publishes_the_todos_of_a_selection() {
 /// Plan 6.7 (design.md §F.5): the bookmarks demo badges a bookmarked file, shows a two-level
 /// tree whose folder rows fold on `row-toggled`, and removes the badge with the bookmark.
 #[test]
-#[ignore = "needs W0's workspace members for fyx_demo_lint and fyx_demo_bookmarks; then add both to DEMOS_V0_4"]
 fn the_bookmarks_demo_is_a_tree_with_badges() {
     let mut harness = Harness::load_package(demo_package("fyx_demo_bookmarks")).expect("loads");
     harness.set_worktrees(&[(1, "/work")]);
