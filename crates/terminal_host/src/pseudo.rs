@@ -160,12 +160,17 @@ pub(crate) fn hold(id: TerminalId, terminal: Entity<Terminal>, cx: &mut App) {
     cx.default_global::<HeldTerminals>().0.insert(id, terminal);
 }
 
-pub(crate) fn target_workspace(cx: &App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
-    let windows = cx.active_window().into_iter().chain(cx.windows());
+/// The active window's workspace, else any window's. Meant for the host's command loop, outside
+/// every window update: a window gpui is updating is skipped (its handle cannot reach it), where
+/// `read_with` would panic.
+pub(crate) fn target_workspace(cx: &mut App) -> Option<(AnyWindowHandle, Entity<Workspace>)> {
+    let windows: Vec<_> = cx.active_window().into_iter().chain(cx.windows()).collect();
     windows.into_iter().find_map(|window| {
         let multi_workspace = window.downcast::<MultiWorkspace>()?;
         let workspace = multi_workspace
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
             .ok()?;
         Some((window, workspace))
     })
