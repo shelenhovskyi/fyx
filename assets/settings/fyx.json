@@ -103,6 +103,9 @@
       // Load Fyx's shell integration (command blocks, prompt marks) into zsh, bash, fish and
       // PowerShell. Your own startup files are sourced first and never changed.
       "shell_integration": true,
+      // A soft daily cap on agents' cost in US dollars: reaching it stops the running agent
+      // turns with a notice. 0 means no cap.
+      "daily_cost_cap": 0,
     },
     // Several accounts of one tool, each in its own config dir. Fyx only sets the tool's
     // config-dir variable in a terminal or an agent; sign in with the tool's own command.
