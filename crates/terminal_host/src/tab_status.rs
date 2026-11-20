@@ -288,8 +288,9 @@ pub(crate) fn status_icon(status: &TerminalStatus) -> Option<AnyElement> {
 const MAX_TOOLTIP_DETAIL: usize = 200;
 
 /// "Claude Code: needs permission — Run tests?", "40% · cargo test · Claude Code via OSC 7501".
-pub(crate) fn tooltip_text(status: &TerminalStatus) -> (String, String) {
-    let state = match (status.state, status.kind) {
+/// The state alone, lower case ("working", "needs permission").
+pub(crate) fn state_text(status: &TerminalStatus) -> &'static str {
+    match (status.state, status.kind) {
         (StatusState::Blocked, Some(BlockedKind::Permission)) => "needs permission",
         (StatusState::Blocked, Some(BlockedKind::Question)) => "has a question",
         (StatusState::Blocked, Some(BlockedKind::Auth)) => "needs sign-in",
@@ -298,7 +299,11 @@ pub(crate) fn tooltip_text(status: &TerminalStatus) -> (String, String) {
         (StatusState::Done, _) => "done",
         (StatusState::Error, _) => "failed",
         (StatusState::Idle | StatusState::Clear, _) => "idle",
-    };
+    }
+}
+
+pub(crate) fn tooltip_text(status: &TerminalStatus) -> (String, String) {
+    let state = state_text(status);
     let mut title = match (&status.source, status.source.app()) {
         (_, Some(app)) => format!("{}: {state}", app_display_name(app)),
         (StatusSource::Extension { id }, None) => format!("{id}: {state}"),
@@ -323,7 +328,7 @@ pub(crate) fn tooltip_text(status: &TerminalStatus) -> (String, String) {
     (title, meta.join(" · "))
 }
 
-fn capitalize(text: &str) -> String {
+pub(crate) fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     chars
         .next()

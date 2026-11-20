@@ -14,13 +14,13 @@ use gpui::{
 use terminal_ext::TerminalStatus;
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::TerminalPanel;
-use ui::{CountBadge, Indicator, Tab, Tooltip, prelude::*};
+use ui::{CountBadge, Tab, Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::item::ItemHandle;
 use workspace::{HideStatusItem, StatusItemView};
 
 use crate::sessions::{self, Sessions};
-use crate::tab_status::{status_icon, tooltip_text};
+use crate::tab_status::{capitalize, state_text, status_icon, tooltip_text};
 
 actions!(
     fyx_terminal,
@@ -183,9 +183,26 @@ impl AgentSessionsPanel {
             .p_1()
             .gap_0p5()
             .children(rows.into_iter().enumerate().map(|(index, (view, status))| {
-                let terminal_title = view.read(cx).terminal().read(cx).title(true);
-                let accounts = view.read(cx).terminal().read(cx).fyx.accounts();
-                let (title, meta) = tooltip_text(&status);
+                // Only the session's title and its state; where it came from, the command and the
+                // account are in the tooltip.
+                let terminal = view.read(cx).terminal().read(cx);
+                let terminal_title = terminal.title(true);
+                let accounts = terminal.fyx.accounts();
+                let session_title = status
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| terminal_title.clone());
+                let state = capitalize(state_text(&status));
+                let (status_title, meta) = tooltip_text(&status);
+                let mut tooltip = vec![status_title, terminal_title, meta];
+                tooltip.extend(crate::accounts::describe(&accounts, cx));
+                let tooltip = tooltip.join("
+");
+                let state_color = if status.attention {
+                    Color::Accent
+                } else {
+                    Color::Muted
+                };
                 let icon = status_icon(&status).unwrap_or_else(|| {
                     Icon::new(IconName::Terminal)
                         .size(IconSize::Small)
@@ -198,41 +215,22 @@ impl AgentSessionsPanel {
                     .px_2()
                     .py_1()
                     .gap_2()
-                    .items_start()
                     .rounded_sm()
                     .cursor_pointer()
                     .hover(|style| style.bg(cx.theme().colors().element_hover))
-                    .child(div().pt_0p5().child(icon))
+                    .tooltip(Tooltip::text(tooltip))
+                    .child(icon)
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(Label::new(terminal_title).single_line().truncate())
-                                    .children(
-                                        accounts
-                                            .iter()
-                                            .map(|account| crate::accounts::badge(account, cx)),
-                                    )
-                                    .when(status.attention, |this| {
-                                        this.child(Indicator::dot().color(Color::Accent))
-                                    }),
-                            )
-                            .child(
-                                Label::new(title)
-                                    .size(LabelSize::Small)
-                                    .single_line()
-                                    .truncate(),
-                            )
-                            .child(
-                                Label::new(meta)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .single_line()
-                                    .truncate(),
-                            ),
+                        Label::new(session_title)
+                            .single_line()
+                            .truncate()
+                            .flex_1(),
+                    )
+                    .child(
+                        Label::new(state)
+                            .size(LabelSize::Small)
+                            .color(state_color)
+                            .single_line(),
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.jump_to(&view, window, cx)),
