@@ -598,6 +598,19 @@ pub struct AgentReview {
     /// Agent edits that add a secret-looking value are held for review whatever the mode
     /// (plan 7.3, [`secret_scan`]). On in the app; off in [`AgentReview::default`] (tests).
     scan_secrets: bool,
+    /// Told about every decided file (plan 6.3 local history, [`AgentReview::set_decided_file_observer`]).
+    decided_file_observer: Option<Rc<dyn Fn(DecidedFile, &mut App)>>,
+}
+
+/// A file decided in an agent turn, for local history (plan 6.3): its text before the edit and the
+/// text the decision lands (the old text again when every hunk was rejected).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecidedFile {
+    pub session_id: acp_v2::SessionId,
+    pub turn: TurnId,
+    pub abs_path: PathBuf,
+    pub old_text: String,
+    pub landed_text: String,
 }
 
 /// What the rules make of a change, once its paths are resolved.
@@ -623,6 +636,11 @@ impl AgentReview {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Calls `observer` (deferred, outside this entity's update) for every file decided in a turn.
+    pub fn set_decided_file_observer(&mut self, observer: Rc<dyn Fn(DecidedFile, &mut App)>) {
+        self.decided_file_observer = Some(observer);
     }
 
     /// Turning review mode off leaves open reviews in place; writes already held still wait for a
@@ -909,6 +927,7 @@ impl AgentReview {
                 .map(|rule| format!(" by rule {}", rule.describe()))
                 .unwrap_or_default()
         );
+        self.notify_decided_file(turn, edit, cx);
         let history = self.turn_history.entry(turn).or_default();
         history.push(TurnEntry {
             path: edit.abs_path().to_path_buf(),
@@ -919,6 +938,38 @@ impl AgentReview {
             let entry = history.len() - 1;
             cx.emit(AgentReviewEvent::DecidedByRule { turn, entry });
         }
+    }
+
+    fn notify_decided_file(&self, turn: TurnId, edit: &ProposedEdit, cx: &mut Context<Self>) {
+        let Some(observer) = self.decided_file_observer.clone() else {
+            return;
+        };
+        let Some(session_id) = self
+            .turns
+            .iter()
+            .find(|(_, session_turn)| **session_turn == turn)
+            .map(|(session_id, _)| session_id.clone())
+        else {
+            return;
+        };
+        let landed_text = match edit.apply_accepted() {
+            Ok(text) => text,
+            Err(error) => {
+                log::error!(
+                    "fyx: local history: {}: {error:#}",
+                    edit.abs_path().display()
+                );
+                return;
+            }
+        };
+        let file = DecidedFile {
+            session_id,
+            turn,
+            abs_path: edit.abs_path().to_path_buf(),
+            old_text: edit.old_text().to_string(),
+            landed_text,
+        };
+        cx.defer(move |cx| observer(file, cx));
     }
 
     /// The project rule for `abs_path`, from the innermost worktree with rules.
@@ -2831,6 +2882,38 @@ mod tests {
             events.borrow()[events.borrow().len() - 2..],
             [AgentReviewEvent::Resolved(id), AgentReviewEvent::Closed(id)]
         );
+    }
+
+    #[gpui::test]
+    async fn decided_files_reach_the_local_history_observer(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let decided = Rc::new(RefCell::new(Vec::new()));
+        review.update(cx, |review, cx| {
+            let decided = decided.clone();
+            review.set_decided_file_observer(Rc::new(move |file, _| {
+                decided.borrow_mut().push(file);
+            }));
+            review.set_enabled(true, cx);
+        });
+        let task = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        review.update(cx, |review, cx| {
+            review
+                .set_decision(id, 0, HunkDecision::Accepted, cx)
+                .unwrap();
+            review
+                .set_decision(id, 1, HunkDecision::Rejected, cx)
+                .unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        task.await.unwrap();
+        cx.run_until_parked();
+        let decided = decided.borrow();
+        assert_eq!(decided.len(), 1);
+        assert_eq!(decided[0].abs_path, PathBuf::from("/p/a.txt"));
+        assert_eq!(decided[0].session_id, session());
+        assert_eq!(decided[0].old_text, OLD);
+        assert_eq!(decided[0].landed_text, "ONE\ntwo\nthree\nfour\nfive\n");
     }
 
     #[gpui::test]

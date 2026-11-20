@@ -84,6 +84,15 @@
       // "fyx: check for updates" checks once either way.
       "check": false,
     },
+    "history": {
+      // Snapshots of files on every save and of every file an agent turn changed, kept on
+      // this machine only ("fyx: local history" restores a file or undoes a whole turn).
+      "enabled": true,
+      // Disk space per worktree in MB, age in days, and the largest file kept in MB.
+      "max_total_mb": 256,
+      "max_age_days": 30,
+      "max_file_mb": 8,
+    },
     "extensions": {
       // Folders of UI extensions in development, loaded on every start and reloaded when
       // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".

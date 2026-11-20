@@ -87,7 +87,10 @@ fn credentials_url(name: &str) -> String {
 /// user, so each profile gets its own namespace and a test profile never reads, lists or
 /// overwrites the default profile's secrets.
 fn profile_credentials_url(data_dir: &str, name: &str) -> String {
-    format!("fyx-secret://profile-{:016x}/{name}", fnv1a(data_dir.as_bytes()))
+    format!(
+        "fyx-secret://profile-{:016x}/{name}",
+        fnv1a(data_dir.as_bytes())
+    )
 }
 
 /// FNV-1a, 64-bit: stable across builds and Rust versions, unlike `DefaultHasher`.

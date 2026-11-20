@@ -86,6 +86,33 @@ pub struct FyxSettingsContent {
     pub accounts: Option<FyxAccountsSettingsContent>,
     /// Fyx's own updates (`crates/fyx_update_host`, `docs/fyx/platform/self-update.md`).
     pub updates: Option<FyxUpdatesSettingsContent>,
+    /// Local history of files and agent turns (`crates/fyx_history_host`,
+    /// `docs/fyx/platform/local-history.md`).
+    pub history: Option<FyxHistorySettingsContent>,
+}
+
+/// `fyx.history`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxHistorySettingsContent {
+    /// Keep a snapshot of a file on every save and of every file an agent turn changed, on this
+    /// machine only, so a file or a whole agent turn can be restored ("fyx: local history").
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// The most disk space the history of one worktree may use, in megabytes; the oldest
+    /// snapshots go first.
+    ///
+    /// Default: 256
+    pub max_total_mb: Option<u64>,
+    /// Snapshots older than this many days are deleted.
+    ///
+    /// Default: 30
+    pub max_age_days: Option<u64>,
+    /// Files larger than this many megabytes are not kept (their changes are still listed).
+    ///
+    /// Default: 8
+    pub max_file_mb: Option<u64>,
 }
 
 /// `fyx.updates`.

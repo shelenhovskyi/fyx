@@ -299,6 +299,11 @@ impl History {
         Ok(history)
     }
 
+    /// New limits apply to the next record and the next prune.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
     pub fn skipped_lines(&self) -> usize {
         self.skipped_lines
     }
