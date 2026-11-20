@@ -234,6 +234,7 @@ impl UiBackend for StaticBackend {
                 .map(|index| crate::backend::Row {
                     index,
                     indent: 0,
+                    expansion: Default::default(),
                     tree: table_row(index),
                 })
                 .collect()

@@ -41,6 +41,10 @@ actions!(
         SelectPageUp,
         /// Moves a list's selection down by a page.
         SelectPageDown,
+        /// Expands the selected row of a tree list (Right).
+        ExpandRow,
+        /// Collapses the selected row of a tree list, or selects its parent (Left).
+        CollapseRow,
     ]
 );
 
@@ -76,6 +80,8 @@ pub(crate) fn intercept_keys(cx: &mut App) {
             ("space", false) if in_context(BUTTON_CONTEXT) => Box::new(Activate),
             ("pageup", false) if in_context(LIST_CONTEXT) => Box::new(SelectPageUp),
             ("pagedown", false) if in_context(LIST_CONTEXT) => Box::new(SelectPageDown),
+            ("right", false) if in_context(LIST_CONTEXT) => Box::new(ExpandRow),
+            ("left", false) if in_context(LIST_CONTEXT) => Box::new(CollapseRow),
             // A modal moves its first list by a page (design C, integration-5 L4).
             ("pageup", false) if in_context(MODAL_CONTEXT) => Box::new(SelectPageUp),
             ("pagedown", false) if in_context(MODAL_CONTEXT) => Box::new(SelectPageDown),
@@ -246,6 +252,53 @@ impl SurfaceView {
             self.dispatch(UiEvent::RowClick(list, index), cx);
         } else {
             cx.propagate();
+        }
+    }
+
+    /// Right and Left on a tree list (§F.1): Right expands a collapsed row, Left collapses an
+    /// expanded one or selects the row's parent. The host changes no rows; the extension answers
+    /// `row-toggled` with new ones.
+    pub(crate) fn expand_row(
+        &mut self,
+        _: &ExpandRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_selected_row(true, window, cx);
+    }
+
+    pub(crate) fn collapse_row(
+        &mut self,
+        _: &CollapseRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_selected_row(false, window, cx);
+    }
+
+    fn toggle_selected_row(&mut self, expand: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use ui_ext::v0_2::Expansion;
+        let Some((list, _, _)) = self.focused_list(window, cx) else {
+            return;
+        };
+        let Some(&index) = self.selection.get(&list) else {
+            return;
+        };
+        let state = self.state().read(cx);
+        match (expand, state.row_expansion(list, index)) {
+            (true, Expansion::Collapsed) => {
+                self.dispatch(UiEvent::RowToggled(list, index, true), cx)
+            }
+            (false, Expansion::Expanded) => {
+                self.dispatch(UiEvent::RowToggled(list, index, false), cx)
+            }
+            (false, _) => {
+                if let Some(parent) = state.parent_row(list, index) {
+                    self.selection.insert(list, parent);
+                    cx.notify();
+                }
+            }
+            (true, _) => {}
         }
     }
 

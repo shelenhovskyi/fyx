@@ -115,6 +115,14 @@ pub fn journal_line(kind: &JournalKind) -> String {
         JournalKind::ProposedEdit { path, outcome } => {
             format!("Proposed an edit to {path}: {outcome}")
         }
+        JournalKind::Fetched { host, count } => match count {
+            1 => format!("Fetched from {host}"),
+            count => format!("Fetched from {host} {count} times"),
+        },
+        JournalKind::FileEdited { path, count } => match count {
+            1 => format!("Edited {path}"),
+            count => format!("Edited {path} {count} times"),
+        },
         JournalKind::ConsentChanged { item_key, allowed } => format!(
             "{item_key} {}",
             if *allowed { "turned on" } else { "turned off" }

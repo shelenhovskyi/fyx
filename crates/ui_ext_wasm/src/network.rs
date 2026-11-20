@@ -682,6 +682,8 @@ pub(crate) struct Running {
     /// The Extension Inspector's record of each operation: started by the handles, finished here
     /// when its outcome is delivered.
     pub(crate) diagnostics: crate::diagnostics::DiagnosticsBuffer,
+    /// The privacy report's fetches and edits (plan 7.6), when the host keeps a journal.
+    pub(crate) usage: Option<Arc<crate::journal::UsageJournal>>,
 }
 
 /// What the Inspector shows of a URL: no user info, query or fragment, which may hold secrets.
@@ -731,6 +733,12 @@ impl Running {
             diagnostics,
             ..Self::default()
         }
+    }
+
+    /// Records fetches and edits in `usage` as well.
+    pub(crate) fn with_usage(mut self, usage: Option<crate::journal::UsageJournal>) -> Self {
+        self.usage = usage.map(Arc::new);
+        self
     }
 
     pub(crate) fn insert(&self, id: u64, handle: futures::future::AbortHandle) {
@@ -1109,6 +1117,9 @@ impl NetworkHandle {
                 id,
                 format!("{:?} {}", fetch.request.method, redacted_url(&fetch.url)),
             );
+            if let Some(usage) = &self.running.usage {
+                usage.fetched(fetch.url.host_str().unwrap_or_default());
+            }
             let running = self.running.clone();
             if fetch.cancelled {
                 tokio::spawn(async move {

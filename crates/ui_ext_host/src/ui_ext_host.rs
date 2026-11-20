@@ -41,6 +41,7 @@ mod main_thread;
 mod modal;
 pub mod notifications;
 mod panel;
+pub mod privacy_report;
 pub mod progress;
 mod registry;
 pub mod registry_service;
@@ -92,6 +93,7 @@ pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
 };
+pub use privacy_report::OpenPrivacyReport;
 pub use registry::{
     DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver,
     T3ShareTarget, UiExtensionRegistry,

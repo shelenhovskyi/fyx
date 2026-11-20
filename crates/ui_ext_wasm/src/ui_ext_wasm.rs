@@ -2032,7 +2032,13 @@ impl UiExtension {
             } else {
                 network::DomainList::default()
             });
-            let running = Arc::new(network::Running::new(diagnostics.clone()));
+            let running = Arc::new(
+                network::Running::new(diagnostics.clone()).with_usage(
+                    journal
+                        .clone()
+                        .map(|journal| journal::UsageJournal::new(extension_id.clone(), journal)),
+                ),
+            );
             let network = Arc::new(network::NetworkHandle::new(
                 extension_id.clone(),
                 domains.clone(),

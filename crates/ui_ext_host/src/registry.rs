@@ -481,6 +481,20 @@ impl UiExtensionRegistry {
             .collect()
     }
 
+    /// Every extension the privacy report covers (plan 7.6): loaded, waiting for "Enable",
+    /// holding a grant or with a journal read, sorted.
+    pub fn known_extension_ids(&self) -> Vec<Arc<str>> {
+        let mut ids: std::collections::BTreeSet<Arc<str>> = self
+            .backends
+            .keys()
+            .chain(self.sources.keys())
+            .chain(self.journals.keys())
+            .cloned()
+            .collect();
+        ids.extend(self.revocable().into_iter().map(|(id, _)| Arc::from(id)));
+        ids.into_iter().collect()
+    }
+
     /// Granted capabilities that can be taken back, as (extension id, capability).
     pub fn revocable(&self) -> Vec<(String, String)> {
         self.consent.revocable()
@@ -2246,6 +2260,16 @@ Environment it may pass: {}",
                         diagnostics_source: Some(cx.update(|cx| {
                             crate::diagnostics_host::for_extension(&found.extension_id, cx)
                         })),
+                        // diagnostics:publish and workspace:file-decorations (plans 6.6, 6.7).
+                        diagnostics_publisher: Some(cx.update(|cx| {
+                            crate::extension_marks::publisher_for_extension(&found.extension_id, cx)
+                        })),
+                        file_decorations: Some(cx.update(|cx| {
+                            crate::extension_marks::decorations_for_extension(
+                                &found.extension_id,
+                                cx,
+                            )
+                        })),
                         // `${relay}` in terminal:env (plan 5.12).
                         relay_binary: this
                             .read_with(cx, |this, _| this.relay_binary.clone())
@@ -2742,7 +2766,11 @@ Environment it may pass: {}",
             }
             // W3 (design wit-0.4 §D.6): show the extension's Settings tab at `key`.
             HostEffect::OpenSettings { key } => {
-                log::info!("extension {extension_id:?} asked to open its settings at {key:?}");
+                // Deferred: it opens the Fyx Extensions page, which reads this registry.
+                let extension_id = extension_id.to_string();
+                cx.defer(move |cx| {
+                    crate::settings_form::open_extension_settings(&extension_id, key.as_deref(), cx)
+                });
             }
         }
     }
@@ -3230,6 +3258,7 @@ fn attach_to_workspace(
 
     crate::store_actions::register(workspace);
     crate::fyx_extensions_page::register(workspace);
+    crate::privacy_report::register(workspace);
     if crate::inspector::inspector_enabled(cx) {
         let inspector =
             cx.new(|cx| crate::inspector::ExtensionInspector::new(registry.clone(), cx));
@@ -4075,6 +4104,12 @@ async fn load_dev_extension(path: PathBuf, cx: &mut AsyncApp) -> anyhow::Result<
         diagnostics_source: Some(
             cx.update(|cx| crate::diagnostics_host::for_extension(&path.to_string_lossy(), cx)),
         ),
+        diagnostics_publisher: Some(cx.update(|cx| {
+            crate::extension_marks::publisher_for_extension(&path.to_string_lossy(), cx)
+        })),
+        file_decorations: Some(cx.update(|cx| {
+            crate::extension_marks::decorations_for_extension(&path.to_string_lossy(), cx)
+        })),
         relay_binary: cx.update(|cx| {
             UiExtensionRegistry::global(cx)
                 .and_then(|registry| registry.read(cx).relay_binary.clone())
