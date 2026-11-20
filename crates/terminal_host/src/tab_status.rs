@@ -101,6 +101,10 @@ fn title_and_cwd(terminal: &Entity<Terminal>, cx: &App) -> (String, Option<Strin
 struct TabStatus;
 
 impl TerminalDecorations for TabStatus {
+    fn panel_sidebar(&self, workspace: gpui::EntityId, cx: &App) -> Option<gpui::AnyView> {
+        crate::sessions_panel::sidebar(workspace, cx).map(gpui::AnyView::from)
+    }
+
     fn tab_indicator(&self, terminal: &TerminalExt, cx: &App) -> Option<AnyElement> {
         let status = status_indicator(terminal);
         let status = match crate::t3::typed_by(terminal.id(), cx) {
