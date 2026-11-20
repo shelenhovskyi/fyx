@@ -1116,6 +1116,13 @@ choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerS
     );
     assert_eq!(harness.take_settings_changed(), [vec!["shell".to_owned()]]);
     assert!(harness.setting("missing").is_none());
+    // `deliver_io` hands the next change to `handle-io` as `settings-changed`.
+    let changed = harness
+        .set_user_settings(serde_json::json!({ "scrollback": 500 }))
+        .unwrap();
+    assert_eq!(changed, ["scrollback", "shell"]);
+    assert!(!harness.deliver_io().expect("delivers").is_empty());
+    assert!(harness.take_settings_changed().is_empty());
 
     // A broken declaration refuses the package.
     std::fs::write(&manifest, text.replace("default = 1000", "default = 5")).unwrap();

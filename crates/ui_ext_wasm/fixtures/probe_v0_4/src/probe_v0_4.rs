@@ -28,6 +28,9 @@
 //!   `watch-diag <on|off>`: `context.watch-diagnostics`;
 //! - `relay-respond <id> <exit> <stdout|-> <stderr|->`: `relay.respond`; `relay-long <id>`
 //!   answers with 1 MiB and a byte of stdout;
+//! - `setting <key>`: `settings.get` as its value, or the error code; `settings`: `settings.all`
+//!   as `<key>=<value>[*]`, comma-separated (`*` when `is-default`); `open-settings [<key>]`:
+//!   `settings.open`;
 //! - `node`: answers a `terminal` node instead of the report.
 //!
 //! `handle-io` pushes each terminal event to `probe` as one text node (id 1): `input <h> <text>`,
@@ -40,7 +43,7 @@
 //! `request <id> <listener> <path> <body>`,
 //! `context <active|-> <open,...> <selection bytes|none|-> <trusted|->`,
 //! `diagnostics-changed <path,...|*>` (`*` for the empty list),
-//! `relay <id> <channel> <terminal|-> <argv,...|-> <stdin>`.
+//! `relay <id> <channel> <terminal|-> <argv,...|-> <stdin>`, `settings-changed <key,...>`.
 
 wit_bindgen::generate!({
     path: "../../../ui_ext/wit/since_v0.4.0",
@@ -53,6 +56,7 @@ use fyx::ui::io::IoEvent as Io;
 use fyx::ui::listeners;
 use fyx::ui::permissions::{self, T2Capability};
 use fyx::ui::review;
+use fyx::ui::settings::{self, SettingValue};
 use fyx::ui::terminals::{self, ReadScope, StatusState, TerminalOrigin, TerminalStatus};
 use fyx::ui::types::*;
 
@@ -91,6 +95,16 @@ fn code(error: &HostError) -> &'static str {
         HostErrorCode::Denied => "denied",
         HostErrorCode::UntrustedWorktree => "untrusted-worktree",
         HostErrorCode::NoWorktree => "no-worktree",
+    }
+}
+
+fn setting_value(value: &SettingValue) -> String {
+    match value {
+        SettingValue::Boolean(value) => value.to_string(),
+        SettingValue::Integer(value) => value.to_string(),
+        SettingValue::Number(value) => value.to_string(),
+        SettingValue::Text(value) | SettingValue::Choice(value) => value.clone(),
+        SettingValue::TextList(items) => items.join("|"),
     }
 }
 
@@ -334,6 +348,24 @@ fn run(words: &[&str]) -> Result<String, String> {
             status.parse().map_err(|_| "status")?,
             &body.join(" "),
         )),
+        ["setting", key] => match settings::get(key) {
+            Ok(value) => setting_value(&value),
+            Err(error) => code(&error).into(),
+        },
+        ["settings"] => settings::all()
+            .iter()
+            .map(|setting| {
+                format!(
+                    "{}={}{}",
+                    setting.key,
+                    setting_value(&setting.value),
+                    if setting.is_default { "*" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        ["open-settings"] => done(settings::open(None)),
+        ["open-settings", key] => done(settings::open(Some(key))),
         ["watch", on] => done(fyx::ui::context::watch(*on == "on")),
         ["open", worktree, path, focus] => done(fyx::ui::context::open(
             &file(worktree, path)?,
@@ -573,6 +605,7 @@ impl Guest for Probe {
                     argv.join(",")
                 },
             ),
+            Io::SettingsChanged(keys) => format!("settings-changed {}", keys.join(",")),
             _ => "other".into(),
         };
         host::push_update(SURFACE_ID, &Update::Replace(vec![text(1, &report)]))
