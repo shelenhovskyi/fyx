@@ -18,7 +18,7 @@ use crate::{
     v0_2::{HostError, HostErrorCode},
 };
 
-pub const CAPABILITY_DIAGNOSTICS_PUBLISH: &str = "diagnostics:publish";
+pub use crate::integration::CAPABILITY_DIAGNOSTICS_PUBLISH;
 /// §E.1: entries of one file; more is `invalid-argument` and changes nothing.
 pub const MAX_PUBLISHED_PER_FILE: usize = 500;
 /// §E.1: entries of one extension across its files.

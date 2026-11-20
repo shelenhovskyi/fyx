@@ -295,6 +295,7 @@ struct Setup {
     /// `[[fyx_ui.settings]]`, checked, and the user's object for the extension.
     settings: Vec<ui_ext::settings::SettingSpec>,
     user_settings: Option<ui_ext::settings::RawValue>,
+    marks: Option<Arc<MarksRecorder>>,
 }
 
 impl Default for Setup {
@@ -317,6 +318,7 @@ impl Default for Setup {
             relay_binary: None,
             settings: Vec::new(),
             user_settings: None,
+            marks: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -399,6 +401,14 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         relay_binary: setup.relay_binary.clone(),
         settings: Some(setup.settings.clone()),
         user_settings: setup.user_settings.clone(),
+        diagnostics_publisher: setup
+            .marks
+            .clone()
+            .map(|marks| marks as Arc<dyn ui_ext::published_diagnostics::DiagnosticsPublisher>),
+        file_decorations: setup
+            .marks
+            .clone()
+            .map(|marks| marks as Arc<dyn ui_ext::file_decorations::FileDecorationsHost>),
         workspace: setup
             .workspace
             .clone()
@@ -1017,6 +1027,172 @@ async fn test_v0_4_settings(cx: &mut TestAppContext) {
         command(&extension, "settings").await,
         "block-on-diff=true*,max-open-diffs=8*"
     );
+}
+
+/// What the host was asked to publish and decorate (§E, §F.2).
+#[derive(Default)]
+struct MarksRecorder {
+    calls: Mutex<Vec<String>>,
+}
+
+impl MarksRecorder {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+}
+
+impl ui_ext::published_diagnostics::DiagnosticsPublisher for MarksRecorder {
+    fn publish(
+        &self,
+        extension_id: &str,
+        path: ui_ext::process::FileRef,
+        diagnostics: Vec<ui_ext::context::Diagnostic>,
+    ) -> Result<(), String> {
+        let sources = diagnostics
+            .iter()
+            .filter(|entry| entry.source.is_some())
+            .count();
+        self.calls.lock().unwrap().push(format!(
+            "publish {extension_id} {:?}:{} {} sources:{sources}",
+            path.worktree,
+            path.path,
+            diagnostics.len()
+        ));
+        Ok(())
+    }
+
+    fn clear_all(&self, extension_id: &str) {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("clear-all {extension_id}"));
+    }
+
+    fn is_private(&self, absolute: &std::path::Path) -> bool {
+        absolute.ends_with(".env")
+    }
+}
+
+impl ui_ext::file_decorations::FileDecorationsHost for MarksRecorder {
+    fn decorate(
+        &self,
+        extension_id: &str,
+        decorations: Vec<ui_ext::file_decorations::FileDecoration>,
+    ) -> Result<(), String> {
+        for decoration in decorations {
+            self.calls.lock().unwrap().push(format!(
+                "decorate {extension_id} {}:{:?}",
+                decoration.path.path, decoration.badge
+            ));
+        }
+        Ok(())
+    }
+
+    fn clear(&self, extension_id: &str, paths: Option<Vec<ui_ext::process::FileRef>>) {
+        self.calls.lock().unwrap().push(format!(
+            "clear {extension_id} {:?}",
+            paths.map(|paths| paths.len())
+        ));
+    }
+
+    fn is_private(&self, absolute: &std::path::Path) -> bool {
+        absolute.ends_with(".env")
+    }
+}
+
+/// Design §E.4, §F.5 through the WIT: the capability first, then the path rules and limits;
+/// what the instance published goes when it is dropped.
+#[gpui::test]
+async fn test_v0_4_publish_diagnostics_and_decorate_files(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    for file in ["src/a.rs", ".env"] {
+        std::fs::write(dir.path().join(file), "TODO\n").unwrap();
+    }
+    let marks = Arc::new(MarksRecorder::default());
+    let mut setup = Setup {
+        marks: Some(marks.clone()),
+        workspace: Some(vec![WorktreeRoot {
+            id: 1,
+            root: dir.path().to_path_buf(),
+            trusted: true,
+        }]),
+        ..Setup::default()
+    };
+    // Without the capabilities.
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, "publish - src/a.rs 1").await,
+        "not-permitted"
+    );
+    assert_eq!(
+        command(&extension, "decorate - src/a.rs X").await,
+        "not-permitted"
+    );
+    drop(extension);
+
+    setup.capabilities.extend([
+        ui_ext::integration::CAPABILITY_DIAGNOSTICS_PUBLISH,
+        ui_ext::integration::CAPABILITY_FILE_DECORATIONS,
+    ]);
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(command(&extension, "publish - src/a.rs 2").await, "done");
+    assert_eq!(
+        marks.take(),
+        ["publish probe-v0-4 Some(1):src/a.rs 2 sources:0"]
+    );
+    assert_eq!(
+        command(&extension, "publish - .env 1").await,
+        "not-permitted"
+    );
+    assert_eq!(
+        command(&extension, "publish - missing.rs 1").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "publish - src/a.rs 501").await,
+        "invalid-argument"
+    );
+    assert_eq!(command(&extension, "clear-diag - src/a.rs").await, "done");
+    assert_eq!(
+        marks.take(),
+        ["publish probe-v0-4 Some(1):src/a.rs 0 sources:0"]
+    );
+    assert_eq!(command(&extension, "clear-diag").await, "done");
+    assert_eq!(marks.take(), ["clear-all probe-v0-4"]);
+
+    assert_eq!(command(&extension, "decorate - src ★").await, "done");
+    assert_eq!(
+        command(&extension, "decorate - src/a.rs abc").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "decorate - src/a.rs X surface").await,
+        "invalid-argument"
+    );
+    assert_eq!(
+        command(&extension, "decorate - .env X").await,
+        "not-permitted"
+    );
+    assert_eq!(command(&extension, "clear-deco - src").await, "done");
+    assert_eq!(command(&extension, "publish - src/a.rs 1").await, "done");
+    assert_eq!(command(&extension, "decorate - src/a.rs X").await, "done");
+    assert_eq!(
+        marks.take(),
+        [
+            "decorate probe-v0-4 src:Some(\"★\")",
+            "clear probe-v0-4 Some(1)",
+            "publish probe-v0-4 Some(1):src/a.rs 1 sources:0",
+            "decorate probe-v0-4 src/a.rs:Some(\"X\")",
+        ]
+    );
+
+    // The instance goes: its marks go at the host.
+    drop(extension);
+    wait_for(cx, 2000, || marks.calls.lock().unwrap().len() >= 2);
+    let mut cleared = marks.take();
+    cleared.sort();
+    assert_eq!(cleared, ["clear probe-v0-4 None", "clear-all probe-v0-4"]);
 }
 
 #[test]
