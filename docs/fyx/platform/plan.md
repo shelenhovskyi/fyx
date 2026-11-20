@@ -306,6 +306,20 @@ starts from these and looks for the same faults everywhere else.
      of the names used above it;
    - twelve rows with switches on one card and no grouping: group by tier as in the dialog,
      T0/T1 folded into one line, T2 rows expanded.
+5. **Terminal "+" menu with accounts** (profiles from `terminal_host::profiles`, accounts from
+   5.20): every account makes its own row, "Claude Code — Personal — fyx-claude-code", "Claude
+   Code — Work — fyx-claude-code", with the extension id in each; below them a second section
+   "Claude Code: in this project, use" repeats the same accounts as radio items plus "Default
+   (no profile)". The account appears twice and in two meanings (start with it, remember it).
+   Fix:
+   - one row per profile, "Claude Code", with the project's account as a muted suffix ("Work")
+     or the account colour; clicking it starts with that account;
+   - "Claude Code with…" (submenu or a secondary row) lists the accounts for a one-off start,
+     and its last item "Use for this project…" holds the remembered choice; drop the separate
+     section;
+   - the extension id only in a tooltip, or as a suffix when two extensions offer profiles of
+     the same name;
+   - "Default (no profile)" becomes "The tool's default account (~/.claude)", naming the dir.
 
 ## Deferred after 1.0
 
