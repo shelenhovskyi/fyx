@@ -517,33 +517,61 @@ impl wit_approvals::Host for UiState {
     }
 }
 
-/// `settings` (design.md §D, plan 6.1): staged in the 0.4 WIT ahead of the host side (W2c's
-/// `ui_ext::settings` store). Until then no setting is known: `get` and `open` are `unavailable`
-/// and `all` is empty.
+/// `settings` (design.md §D.4) over [`crate::extension_settings::SettingsHandle`]: no
+/// capability; the keys are the manifest's `[[fyx_ui.settings]]`, the values the user's (user
+/// settings file only), checked, else the defaults.
 impl wit_settings::Host for UiState {
     fn get(
         &mut self,
         key: String,
     ) -> wasmtime::Result<Result<wit_settings::SettingValue, wit_host::HostError>> {
         self.count_lifted_text(key.len())?;
-        Ok(Err(settings_unavailable()))
+        Ok(self
+            .settings
+            .get(&key)
+            .map(setting_value)
+            .map_err(Into::into))
     }
 
     fn all(&mut self) -> wasmtime::Result<Vec<wit_settings::Setting>> {
-        Ok(Vec::new())
+        Ok(self
+            .settings
+            .all()
+            .into_iter()
+            .map(|setting| wit_settings::Setting {
+                key: setting.key,
+                value: setting_value(setting.value),
+                is_default: setting.is_default,
+            })
+            .collect())
     }
 
+    /// Only while the user acts on one of the extension's surfaces (an event call), else
+    /// `not-permitted`; `invalid-argument` for an undeclared key.
     fn open(&mut self, key: Option<String>) -> wasmtime::Result<Result<(), wit_host::HostError>> {
         self.count_lifted_text(key.as_ref().map_or(0, String::len))?;
-        Ok(Err(settings_unavailable()))
+        Ok(self
+            .api
+            .open_settings(&self.settings, key)
+            .map_err(Into::into))
     }
 }
 
-fn settings_unavailable() -> wit_host::HostError {
-    wit_host::HostError {
-        code: wit_host::HostErrorCode::Unavailable,
-        message: "extension settings are not available yet".into(),
+fn setting_value(value: ui_ext::settings::SettingValue) -> wit_settings::SettingValue {
+    use ui_ext::settings::SettingValue as Value;
+    match value {
+        Value::Boolean(value) => wit_settings::SettingValue::Boolean(value),
+        Value::Integer(value) => wit_settings::SettingValue::Integer(value),
+        Value::Number(value) => wit_settings::SettingValue::Number(value),
+        Value::Text(value) => wit_settings::SettingValue::Text(value),
+        Value::Choice(value) => wit_settings::SettingValue::Choice(value),
+        Value::TextList(value) => wit_settings::SettingValue::TextList(value),
     }
+}
+
+/// The `settings-changed` case.
+fn settings_io_event(keys: Vec<String>) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::SettingsChanged(keys))
 }
 
 /// `listeners` (design.md §B.7) over [`crate::listeners::ListenersHandle`]: a listener the

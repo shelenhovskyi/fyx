@@ -402,6 +402,7 @@ pub(crate) fn io_event(event: network::IoEvent) -> Option<wit_io::IoEvent> {
         network::IoEvent::ReviewDecided(id, result) => return review_io_event(id, result),
         network::IoEvent::ReviewComments(comments) => return review_comments_io_event(comments),
         network::IoEvent::RelayRequest(request) => return relay_io_event(request),
+        network::IoEvent::SettingsChanged(keys) => return settings_io_event(keys),
         network::IoEvent::ApprovalAnswered(id, answer) => {
             return approval_io_event(id, answer);
         }

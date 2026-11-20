@@ -88,6 +88,11 @@ fn diagnostics_io_event(_: Vec<ui_ext::process::FileRef>) -> Option<wit_io::IoEv
     None
 }
 
+/// 0.3 has no extension settings.
+fn settings_io_event(_: Vec<String>) -> Option<wit_io::IoEvent> {
+    None
+}
+
 /// 0.3 has no relay.
 fn relay_io_event(_: ui_ext::integration::RelayRequest) -> Option<wit_io::IoEvent> {
     None

@@ -2740,6 +2740,10 @@ Environment it may pass: {}",
             HostEffect::AskApproval { id, request } => {
                 self.ask_approval(extension_id, id, request, cx)
             }
+            // W3 (design wit-0.4 §D.6): show the extension's Settings tab at `key`.
+            HostEffect::OpenSettings { key } => {
+                log::info!("extension {extension_id:?} asked to open its settings at {key:?}");
+            }
         }
     }
 

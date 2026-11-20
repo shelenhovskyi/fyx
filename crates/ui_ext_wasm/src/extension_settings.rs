@@ -7,23 +7,22 @@
 //! settings-file change; this module never reads a file. The values are fixed for one export
 //! call: the import reads a snapshot, and a change made during a call is delivered after it.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use futures::{StreamExt as _, channel::mpsc};
 use ui_ext::settings::{EffectiveSettings, RawValue, Setting, SettingSpec, SettingValue};
 use ui_ext::v0_2::{HostError, HostErrorCode};
 
+use crate::network::{IoEvent, Running};
+
 /// One extension instance's settings.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct SettingsHandle {
     specs: Vec<SettingSpec>,
-    state: Mutex<State>,
-}
-
-#[derive(Debug, Default)]
-struct State {
-    effective: EffectiveSettings,
-    /// `settings-changed` lists not yet delivered, oldest first.
-    changed: Vec<Vec<String>>,
+    effective: Mutex<EffectiveSettings>,
+    /// `settings-changed` lists, oldest first, until [`SettingsHandle::forward`] delivers them.
+    sender: mpsc::UnboundedSender<Vec<String>>,
+    receiver: Mutex<Option<mpsc::UnboundedReceiver<Vec<String>>>>,
 }
 
 impl SettingsHandle {
@@ -31,17 +30,41 @@ impl SettingsHandle {
     /// user's object for this extension at load.
     pub(crate) fn new(specs: Vec<SettingSpec>, user: Option<&RawValue>) -> Self {
         let effective = EffectiveSettings::compute(&specs, user);
+        let (sender, receiver) = mpsc::unbounded();
         Self {
             specs,
-            state: Mutex::new(State {
-                effective,
-                changed: Vec::new(),
-            }),
+            effective: Mutex::new(effective),
+            sender,
+            receiver: Mutex::new(Some(receiver)),
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn current(&self) -> std::sync::MutexGuard<'_, EffectiveSettings> {
+        self.effective
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Delivers the `settings-changed` lists to the running instance through `handle-io`, once
+    /// it runs on tokio (0.4 only). Lists queued before it ran are delivered first.
+    pub(crate) fn forward(&self, running: &Arc<Running>) {
+        let Some(mut receiver) = self
+            .receiver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let running = Arc::downgrade(running);
+        tokio::spawn(async move {
+            while let Some(keys) = receiver.next().await {
+                let Some(running) = running.upgrade() else {
+                    return;
+                };
+                running.deliver(IoEvent::SettingsChanged(keys)).await;
+            }
+        });
     }
 
     pub(crate) fn specs(&self) -> &[SettingSpec] {
@@ -50,15 +73,12 @@ impl SettingsHandle {
 
     /// What the extension gets now, with the form's errors and unknown keys.
     pub(crate) fn effective(&self) -> EffectiveSettings {
-        self.state().effective.clone()
+        self.current().clone()
     }
 
     /// `settings.get`: `invalid-argument` for a key the manifest does not declare.
-    // Linked by the `settings` import once W0 stages it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn get(&self, key: &str) -> Result<SettingValue, HostError> {
-        self.state()
-            .effective
+        self.current()
             .get(key)
             .map(|setting| setting.value.clone())
             .ok_or_else(|| HostError {
@@ -68,30 +88,40 @@ impl SettingsHandle {
     }
 
     /// `settings.all`: every declared key, in manifest order.
-    // Linked by the `settings` import once W0 stages it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn all(&self) -> Vec<Setting> {
-        self.state().effective.settings.clone()
+        self.current().settings.clone()
     }
 
     /// The user's object changed: recomputes and returns the keys whose effective value
-    /// changed, in manifest order, also queued for [`SettingsHandle::take_changed`]. Nothing is
-    /// queued when no effective value changed (§D.4).
+    /// changed, in manifest order, also sent as `settings-changed`. Nothing is sent when no
+    /// effective value changed (§D.4).
     pub(crate) fn update(&self, user: Option<&RawValue>) -> Vec<String> {
         let next = EffectiveSettings::compute(&self.specs, user);
-        let mut state = self.state();
-        let changed = next.changed_since(&state.effective);
-        state.effective = next;
+        let mut current = self.current();
+        let changed = next.changed_since(&current);
+        *current = next;
         if !changed.is_empty() {
-            state.changed.push(changed.clone());
+            // The receiver is gone only when the instance is: nothing to tell then.
+            self.sender.unbounded_send(changed.clone()).ok();
         }
         changed
     }
 
-    /// The `settings-changed` lists to deliver, oldest first.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn take_changed(&self) -> Vec<Vec<String>> {
-        std::mem::take(&mut self.state().changed)
+    /// The `settings-changed` lists not yet forwarded, oldest first (tests).
+    #[cfg(test)]
+    fn take_changed(&self) -> Vec<Vec<String>> {
+        let mut taken = Vec::new();
+        if let Some(receiver) = self
+            .receiver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            while let Ok(keys) = receiver.try_recv() {
+                taken.push(keys);
+            }
+        }
+        taken
     }
 }
 

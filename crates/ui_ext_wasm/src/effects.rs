@@ -98,6 +98,9 @@ pub enum HostEffect {
     /// workspace window. Answer it, or report it closed, with
     /// [`crate::UiExtension::answer_approval`]; `id` never repeats within an instance.
     AskApproval { id: u64, request: ApprovalRequest },
+    /// fyx:ui 0.4 `settings.open` (design.md §D.4), from an event call: show the extension's
+    /// Settings tab, scrolled to `key` (a declared one) when given.
+    OpenSettings { key: Option<String> },
 }
 
 /// The validated result of a call with the effects the guest made during it: apply `effects` in
@@ -744,6 +747,26 @@ impl ApiState {
         self.open_approvals.insert(id);
         self.effects.push(HostEffect::AskApproval { id, request });
         Ok(id)
+    }
+
+    /// `settings.open` (design.md §D.4): only while the user acts on one of the extension's
+    /// surfaces (`not-permitted` otherwise, the gesture used up), and only for a declared key.
+    pub(crate) fn open_settings(
+        &mut self,
+        settings: &crate::extension_settings::SettingsHandle,
+        key: Option<String>,
+    ) -> Result<(), v0_2::HostError> {
+        if !self.take_activation() {
+            return Err(host_error(
+                v0_2::HostErrorCode::NotPermitted,
+                "settings.open needs the user acting on one of the extension's surfaces",
+            ));
+        }
+        if let Some(key) = &key {
+            settings.get(key)?;
+        }
+        self.effects.push(HostEffect::OpenSettings { key });
+        Ok(())
     }
 
     /// An answer to card `id` is about to be delivered: frees its slot. `false` for an id that

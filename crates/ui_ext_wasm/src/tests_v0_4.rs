@@ -292,6 +292,9 @@ struct Setup {
     diagnostics: Option<Arc<dyn ui_ext::context::DiagnosticsSource>>,
     relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
     relay_binary: Option<PathBuf>,
+    /// `[[fyx_ui.settings]]`, checked, and the user's object for the extension.
+    settings: Vec<ui_ext::settings::SettingSpec>,
+    user_settings: Option<ui_ext::settings::RawValue>,
 }
 
 impl Default for Setup {
@@ -312,6 +315,8 @@ impl Default for Setup {
             diagnostics: None,
             relay_channels: Vec::new(),
             relay_binary: None,
+            settings: Vec::new(),
+            user_settings: None,
             workspace: Some(vec![WorktreeRoot {
                 id: 1,
                 root: std::env::temp_dir(),
@@ -392,6 +397,8 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
         diagnostics_source: setup.diagnostics.clone(),
         relay_channels: Some(setup.relay_channels.clone()),
         relay_binary: setup.relay_binary.clone(),
+        settings: Some(setup.settings.clone()),
+        user_settings: setup.user_settings.clone(),
         workspace: setup
             .workspace
             .clone()
@@ -923,6 +930,93 @@ async fn test_v0_4_approvals_need_the_capability(cx: &mut TestAppContext) {
         .retain(|capability| *capability != ui_ext::approvals::CAPABILITY_APPROVALS);
     let extension = load(&setup, cx).await.unwrap();
     assert_eq!(command(&extension, "ask - t once").await, "not-permitted");
+}
+
+/// Design §D.4, §D.7: `get` and `all` answer the effective values (an invalid user value gives
+/// the default), an undeclared key is `invalid-argument`, `open` needs a gesture, and a change of
+/// the user's values reaches `handle-io` as `settings-changed` with the changed keys only.
+#[gpui::test]
+async fn test_v0_4_settings(cx: &mut TestAppContext) {
+    let entries: Vec<ui_ext::settings::SettingEntry> = serde_json::from_value(serde_json::json!([
+        {"key": "block-on-diff", "title": "Wait for review", "type": "boolean", "default": true},
+        {"key": "max-open-diffs", "title": "Open diffs", "type": "integer", "default": 8,
+         "min": 1, "max": 64},
+    ]))
+    .unwrap();
+    let raw = |value: serde_json::Value| {
+        serde_json::from_value::<ui_ext::settings::RawValue>(value).unwrap()
+    };
+    let setup = Setup {
+        settings: ui_ext::settings::check_settings(&entries).unwrap(),
+        user_settings: Some(raw(serde_json::json!({"max-open-diffs": 100}))),
+        ..Setup::default()
+    };
+    let extension = load(&setup, cx).await.unwrap();
+    assert_eq!(
+        command(&extension, "settings").await,
+        "block-on-diff=true*,max-open-diffs=8*"
+    );
+    assert_eq!(command(&extension, "setting max-open-diffs").await, "8");
+    assert_eq!(
+        command(&extension, "setting nope").await,
+        "invalid-argument"
+    );
+    assert!(
+        extension
+            .effective_settings()
+            .errors
+            .contains_key("max-open-diffs")
+    );
+
+    // `open`: not-permitted without a gesture; with one, an effect for the host.
+    assert_eq!(command(&extension, "open-settings").await, "not-permitted");
+    assert_eq!(
+        click(&extension, "open-settings nope").await,
+        "invalid-argument"
+    );
+    let armed = extension
+        .handle_event_v0_2(
+            SURFACE,
+            UiEvent::InputChanged(1, "arm open-settings max-open-diffs".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report(&armed.value), "armed");
+    let reply = extension
+        .handle_event_v0_2(SURFACE, UiEvent::Click(1))
+        .await
+        .unwrap();
+    assert_eq!(report(&reply.value), "done");
+    assert_eq!(
+        reply.effects,
+        [HostEffect::OpenSettings {
+            key: Some("max-open-diffs".into())
+        }]
+    );
+
+    let mut events = extension.take_io_events().unwrap();
+    assert_eq!(
+        extension.set_user_settings(Some(&raw(serde_json::json!({"max-open-diffs": 4})))),
+        ["max-open-diffs"]
+    );
+    // Nothing changes, nothing is sent.
+    assert!(
+        extension
+            .set_user_settings(Some(&raw(serde_json::json!({"max-open-diffs": 4, "x": 1}))))
+            .is_empty()
+    );
+    assert_eq!(extension.set_user_settings(None), ["max-open-diffs"]);
+    assert_eq!(
+        pushed(&extension, &mut events, 2).await,
+        [
+            "settings-changed max-open-diffs",
+            "settings-changed max-open-diffs"
+        ]
+    );
+    assert_eq!(
+        command(&extension, "settings").await,
+        "block-on-diff=true*,max-open-diffs=8*"
+    );
 }
 
 #[test]

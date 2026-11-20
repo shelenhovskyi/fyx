@@ -73,6 +73,7 @@ pub mod journal;
 mod accounts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod editor_context;
+mod extension_marks;
 mod extension_settings;
 mod listeners;
 pub mod network;
@@ -944,6 +945,8 @@ pub struct UiState {
     review: Arc<proposals::ReviewHandle>,
     /// The 0.4 `relay` import (§B.9).
     relay: Arc<relay::RelayHandle>,
+    /// The 0.4 `settings` import (§D.4).
+    settings: Arc<extension_settings::SettingsHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -964,6 +967,7 @@ struct IoStates {
     context: Arc<editor_context::ContextHandle>,
     review: Arc<proposals::ReviewHandle>,
     relay: Arc<relay::RelayHandle>,
+    settings: Arc<extension_settings::SettingsHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -1021,6 +1025,7 @@ impl UiState {
             context,
             review,
             relay,
+            settings,
             journal,
         } = io;
         Self {
@@ -1031,6 +1036,7 @@ impl UiState {
             context,
             review,
             relay,
+            settings,
             journal,
             capability_check,
             diagnostics: diagnostics.clone(),
@@ -2136,6 +2142,7 @@ impl UiExtension {
                 let context = context.clone();
                 let review = review.clone();
                 let relay = relay.clone();
+                let settings = settings.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
@@ -2158,6 +2165,7 @@ impl UiExtension {
                         context.forward(&running);
                         review.forward(&running);
                         relay.forward(&running);
+                        settings.forward(&running);
                     }
                     let runtime = ui_runtime()?;
                     let mut wasi = WasiCtxBuilder::new();
@@ -2198,6 +2206,7 @@ impl UiExtension {
                                 context,
                                 review,
                                 relay,
+                                settings,
                                 journal,
                             },
                         ),
@@ -2448,7 +2457,7 @@ impl UiExtension {
     /// The user settings file changed: `user` is the extension's object under
     /// `fyx_extensions.<id>` in the **user** settings (never project settings, §D.2), `None`
     /// when there is none. Returns the keys whose effective value changed, in manifest order;
-    /// the 0.4 `settings-changed` event carries them once W0 stages the interface.
+    /// a running 0.4 extension gets them as `settings-changed` (§D.4).
     pub fn set_user_settings(&self, user: Option<&ui_ext::settings::RawValue>) -> Vec<String> {
         self.settings.update(user)
     }
