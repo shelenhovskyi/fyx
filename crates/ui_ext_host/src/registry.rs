@@ -127,6 +127,8 @@ pub struct UiExtensionRegistry {
     dev_paths: Vec<PathBuf>,
     /// The instance of each registered extension, for surfaces it adds later (`add-surface`).
     backends: HashMap<Arc<str>, Rc<dyn UiBackend>>,
+    /// The WASM instance of each registered extension: its settings (plan 6.1).
+    ui_extensions: HashMap<Arc<str>, UiExtension>,
     /// Per extension: the token bucket and CPU share of its surfaces' ticks (design.md, B).
     tick_budgets: HashMap<Arc<str>, ui_ext_wasm::ticks::TickBudget>,
     /// The workspace whose window was active last: where `show-surface` opens a modal.
@@ -873,6 +875,11 @@ impl UiExtensionRegistry {
     pub fn global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalRegistry>()
             .map(|global| global.0.clone())
+    }
+
+    /// The WASM instance of a registered extension.
+    pub fn ui_extension(&self, extension_id: &str) -> Option<&UiExtension> {
+        self.ui_extensions.get(extension_id)
     }
 
     pub fn surfaces(&self) -> &[LoadedSurface] {
@@ -1954,6 +1961,11 @@ Environment it may pass: {}",
         let initial_effects = extension.initial_effects().to_vec();
         let io_events = extension.take_io_events();
         self.io_instances.remove(&extension_id);
+        // Plan 6.1: a load from a dev path learns its id only now, so the user's values follow
+        // here (for the others they were in `LoadOptions` already, and nothing changes).
+        extension.set_user_settings(user_settings(&extension_id, cx).as_ref());
+        self.ui_extensions
+            .insert(extension_id.clone(), extension.clone());
         // P2.4: after consent, at every load and reload, the terminal host gets the profiles
         // and env as granted; the instance this one replaces no longer closes its terminals.
         extension.activate_terminals();
@@ -2194,6 +2206,8 @@ Environment it may pass: {}",
                         })
                         .ok();
                     let options = LoadOptions {
+                        // Plan 6.1: the user's values, from the user settings file only.
+                        user_settings: cx.update(|cx| user_settings(&found.extension_id, cx)),
                         cache: found.cache.clone(),
                         capability_check: checker,
                         allow_staged: cx.update(|cx| staged_allowed(found.is_dev, cx)),
@@ -2543,6 +2557,7 @@ Environment it may pass: {}",
         self.io_instances.remove(extension_id);
         self.sync_relay_channels(cx);
         self.backends.remove(extension_id);
+        self.ui_extensions.remove(extension_id);
         for surface in self.surfaces_of(extension_id) {
             if surface.surface_id.as_ref() != except_surface {
                 surface
@@ -3018,6 +3033,7 @@ pub fn init(cx: &mut App) {
     }
     follow_dev_paths_setting(cx);
     follow_proxy_setting(cx);
+    follow_extension_settings(cx);
     follow_private_hosts_setting(cx);
     watch_installed_extensions(cx);
 }
@@ -3074,6 +3090,40 @@ pub(crate) fn follow_proxy_setting(cx: &mut App) {
     if cx.has_global::<settings::SettingsStore>() {
         cx.observe_global::<settings::SettingsStore>(apply).detach();
     }
+}
+
+/// Plan 6.1: extension `extension_id`'s object under `fyx_extensions` in the user settings file,
+/// as the runtime reads it.
+fn user_settings(extension_id: &str, cx: &App) -> Option<ui_ext::settings::RawValue> {
+    crate::settings_model::user_object(extension_id, cx)
+        .and_then(|value| crate::settings_model::raw_value(&value))
+}
+
+/// Plan 6.1: every settings change reaches each loaded extension; the keys whose effective value
+/// changed are its `settings-changed` list, which the runtime delivers.
+pub(crate) fn follow_extension_settings(cx: &mut App) {
+    if !cx.has_global::<settings::SettingsStore>() {
+        return;
+    }
+    cx.observe_global::<settings::SettingsStore>(|cx| {
+        let Some(registry) = UiExtensionRegistry::global(cx) else {
+            return;
+        };
+        let extensions: Vec<UiExtension> =
+            registry.read(cx).ui_extensions.values().cloned().collect();
+        for extension in extensions {
+            let user = user_settings(extension.extension_id(), cx);
+            let changed = extension.set_user_settings(user.as_ref());
+            if !changed.is_empty() {
+                log::debug!(
+                    "fyx:ui {}: settings changed: {}",
+                    extension.extension_id(),
+                    changed.join(", ")
+                );
+            }
+        }
+    })
+    .detach();
 }
 
 /// The proxy cell every load gets.

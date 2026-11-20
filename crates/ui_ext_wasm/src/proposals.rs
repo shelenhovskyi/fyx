@@ -2,7 +2,8 @@
 //! `review:propose`. This side checks the capability, the paths (a worktree file, never a
 //! protected or default-private one), the sizes and the open-proposal limit, hands out ids and
 //! makes sure each proposal's outcome reaches `handle-io` at most once, never after `withdraw`
-//! or the instance's end. The bridge in `ui_ext_host` opens the reviews over `agent_review`.
+//! or the instance's end. The user's comments on the proposals (plan 7.2) arrive as
+//! `review-comments`. The bridge in `ui_ext_host` opens the reviews over `agent_review`.
 
 use std::{
     collections::BTreeSet,
@@ -20,7 +21,7 @@ use ui_ext::{
     protected::is_default_private,
     review::{
         MAX_OPEN_PROPOSALS, MAX_PROPOSAL_BYTES, MAX_PROPOSAL_LABEL_BYTES, MAX_TURN_PATHS, Proposal,
-        Proposed, ReviewHost, ReviewOutcome,
+        Proposed, ReviewComments, ReviewHost, ReviewOutcome,
     },
     v0_2::{HostError, HostErrorCode},
 };
@@ -41,8 +42,6 @@ fn error(code: HostErrorCode, message: impl Into<String>) -> HostError {
 /// Proposal ids, unique in the process: a reloaded instance never reuses one.
 static NEXT_PROPOSAL: AtomicU64 = AtomicU64::new(1);
 
-type Decided = (u64, Result<ReviewOutcome, String>);
-
 /// One instance's proposals.
 pub(crate) struct ReviewHandle {
     extension_id: Arc<str>,
@@ -50,8 +49,9 @@ pub(crate) struct ReviewHandle {
     workspace: Option<Arc<dyn Workspace>>,
     /// The undecided proposals: an outcome passes only while its id is here.
     open: Arc<Mutex<BTreeSet<u64>>>,
-    sender: mpsc::UnboundedSender<Decided>,
-    receiver: Mutex<Option<mpsc::UnboundedReceiver<Decided>>>,
+    /// Outcomes and comments, in the order they came.
+    sender: mpsc::UnboundedSender<IoEvent>,
+    receiver: Mutex<Option<mpsc::UnboundedReceiver<IoEvent>>>,
 }
 
 impl ReviewHandle {
@@ -88,7 +88,7 @@ impl ReviewHandle {
         self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Moves the outcomes onto the io channel, on the current tokio runtime. Once.
+    /// Moves the outcomes and comments onto the io channel, on the current tokio runtime. Once.
     pub(crate) fn forward(&self, running: &Arc<Running>) {
         let Some(mut receiver) = self
             .receiver
@@ -98,13 +98,24 @@ impl ReviewHandle {
         else {
             return;
         };
+        if let Some(host) = &self.host {
+            let sender = self.sender.clone();
+            host.watch_comments(
+                &self.extension_id,
+                Arc::new(move |comments: ReviewComments| {
+                    sender
+                        .unbounded_send(IoEvent::ReviewComments(comments))
+                        .ok();
+                }),
+            );
+        }
         let running = Arc::downgrade(running);
         tokio::spawn(async move {
-            while let Some((id, result)) = receiver.next().await {
+            while let Some(event) = receiver.next().await {
                 let Some(running) = running.upgrade() else {
                     return;
                 };
-                running.deliver(IoEvent::ReviewDecided(id, result)).await;
+                running.deliver(event).await;
             }
         });
     }
@@ -155,7 +166,9 @@ impl ReviewHandle {
         let sender = self.sender.clone();
         let sink = Arc::new(move |id: u64, result: Result<ReviewOutcome, String>| {
             if take(&open, id) {
-                sender.unbounded_send((id, result)).ok();
+                sender
+                    .unbounded_send(IoEvent::ReviewDecided(id, result))
+                    .ok();
             }
         });
         if let Err(why) = host.propose(&self.extension_id, id, proposal, sink) {

@@ -54,6 +54,42 @@ pub struct ReviewOutcome {
 /// reason the review ended without a decision (the file went away, the diff did not apply).
 pub type ReviewSink = Arc<dyn Fn(u64, Result<ReviewOutcome, String>) + Send + Sync>;
 
+/// `review.comment-state`: the commented hunk was accepted (the comment asks for follow-up work),
+/// rejected (it says why) or is still open (plan 7.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentState {
+    Accepted,
+    Rejected,
+    Pending,
+}
+
+/// `review.review-comment`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub path: FileRef,
+    /// Lines of the file after the change, 1-based and inclusive (`end` < `start`: lines were
+    /// removed after `start`); `None` when the review showed a fragment of the file.
+    pub lines: Option<(u32, u32)>,
+    pub state: CommentState,
+    /// The first changed line, at most 80 characters.
+    pub excerpt: String,
+    pub text: String,
+}
+
+/// `review.review-comments`: the user's comments on one tool session's proposals, sent together
+/// (`io-event::review-comments`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewComments {
+    /// The proposals' `session`.
+    pub session: String,
+    pub comments: Vec<ReviewComment>,
+    /// The comments as one prompt for the agent, with paths relative to the project.
+    pub prompt: String,
+}
+
+/// Where the bridge sends the comments the user sent on an instance's proposals.
+pub type CommentsSink = Arc<dyn Fn(ReviewComments) + Send + Sync>;
+
 /// The review side of `review` (`ui_ext_host` over `agent_review`). Ids are the runtime's, unique
 /// in the process (a reloaded instance never reuses one); the runtime has checked the capability, the path (a worktree file, not
 /// protected), the sizes and the per-extension limit.
@@ -79,4 +115,8 @@ pub trait ReviewHost: Send + Sync + 'static {
     /// instance's) close, nothing applied, and no outcome is sent. A reloaded instance's reviews
     /// are not among them.
     fn close(&self, extension_id: &str, ids: &[u64]);
+    /// From now on, the comments the user sends on this extension's proposals go to `sink`, for
+    /// as long as this host object lives (a reloaded instance gets its own). Comments sent while
+    /// no instance listens wait for the next one.
+    fn watch_comments(&self, _extension_id: &str, _sink: CommentsSink) {}
 }

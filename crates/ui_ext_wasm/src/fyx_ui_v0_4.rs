@@ -299,6 +299,39 @@ fn review_io_event(
     )))
 }
 
+/// The `review-comments` case (design wit-0.4 §B.10, plan 7.2).
+fn review_comments_io_event(comments: ui_ext::review::ReviewComments) -> Option<wit_io::IoEvent> {
+    Some(wit_io::IoEvent::ReviewComments(wit_review_comments(
+        comments,
+    )))
+}
+
+fn wit_review_comments(comments: ui_ext::review::ReviewComments) -> wit_review::ReviewComments {
+    use ui_ext::review::CommentState;
+    wit_review::ReviewComments {
+        session: comments.session,
+        comments: comments
+            .comments
+            .into_iter()
+            .map(|comment| wit_review::ReviewComment {
+                path: wit::FileRef {
+                    worktree: comment.path.worktree,
+                    path: comment.path.path,
+                },
+                lines: comment.lines,
+                state: match comment.state {
+                    CommentState::Accepted => wit_review::CommentState::Accepted,
+                    CommentState::Rejected => wit_review::CommentState::Rejected,
+                    CommentState::Pending => wit_review::CommentState::Pending,
+                },
+                excerpt: comment.excerpt,
+                text: comment.text,
+            })
+            .collect(),
+        prompt: comments.prompt,
+    }
+}
+
 /// `context` (design.md §B.11) over [`crate::editor_context::ContextHandle`]: `watch`,
 /// `to-file-ref` and `absolute-path` need `context:editor`, `open` needs `workspace:open`,
 /// `diagnostics` and `watch-diagnostics` need `workspace:diagnostics`.

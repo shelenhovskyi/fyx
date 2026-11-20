@@ -1,161 +1,31 @@
 //! Extension settings (design wit-0.4 §D, plan 6.1), the part the Settings form needs: the
-//! declarations, the checks of a user's value (§D.2), and the store the form reads and writes.
-//!
-//! **Stub.** W2c's `ui_ext::settings` (with `FyxUiTable.settings` and the user settings store
-//! under `fyx_extensions.<id>`) is not there yet. The types below mirror the reference in
-//! `fyx_ext_harness::settings` (same names and fields), so the form switches to W2c's model by
-//! replacing this module's types with re-exports and [`MemorySettingsStore`] with W2c's store,
-//! set through [`set_extension_settings_store`].
+//! declarations and checks of `ui_ext::settings`, the user's values under `fyx_extensions.<id>`
+//! in the **user** settings file (§D.2), and the store the form reads and writes.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{App, Global};
 use serde_json::{Map, Value};
+pub use ui_ext::settings::{RawValue, SettingChoice, SettingKind, SettingSpec, SettingValue};
 
-/// `settings.setting-value`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SettingValue {
-    Boolean(bool),
-    Integer(i64),
-    Number(f64),
-    Text(String),
-    /// The choice's `value`, never its title.
-    Choice(String),
-    TextList(Vec<String>),
-}
-
-impl SettingValue {
-    /// As the user settings file spells it.
-    pub fn to_json(&self) -> Value {
-        match self {
-            Self::Boolean(value) => (*value).into(),
-            Self::Integer(value) => (*value).into(),
-            Self::Number(value) => (*value).into(),
-            Self::Text(value) | Self::Choice(value) => value.clone().into(),
-            Self::TextList(items) => items.clone().into(),
-        }
-    }
-}
-
-/// One `{ value, title }` of a `choice` setting.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettingChoice {
-    pub value: String,
-    pub title: String,
-}
-
-/// A setting's `type`, with the bounds that belong to it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SettingKind {
-    Boolean,
-    Integer { min: Option<i64>, max: Option<i64> },
-    Number { min: Option<f64>, max: Option<f64> },
-    Text { max_length: usize },
-    Choice { choices: Vec<SettingChoice> },
-    TextList { max_items: usize, max_length: usize },
-}
-
-/// One `[[fyx_ui.settings]]` entry, checked by the manifest parser.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SettingSpec {
-    pub key: String,
-    pub title: String,
-    pub description: Option<String>,
-    pub kind: SettingKind,
-    pub default: SettingValue,
-}
-
-fn text_value(text: &str, max_length: usize, what: &str) -> Result<(), String> {
-    if text.len() > max_length {
-        return Err(format!("{what} is longer than {max_length} bytes"));
-    }
-    if text.chars().any(char::is_control) {
-        return Err(format!(
-            "{what} must be one line, without control characters"
-        ));
-    }
-    Ok(())
-}
-
-fn range<T: std::fmt::Display>(min: &Option<T>, max: &Option<T>) -> String {
-    match (min, max) {
-        (Some(min), Some(max)) => format!("{min} to {max}"),
-        (Some(min), None) => format!("{min} or more"),
-        (None, Some(max)) => format!("{max} or less"),
-        (None, None) => "any".to_owned(),
-    }
-}
-
-impl SettingSpec {
-    /// A user's value from the settings file, checked against this declaration (§D.2).
-    pub fn value_from_json(&self, value: &Value) -> Result<SettingValue, String> {
-        let wrong = || format!("{value} is not a valid {}", self.type_name());
-        match &self.kind {
-            SettingKind::Boolean => value.as_bool().map(SettingValue::Boolean).ok_or_else(wrong),
-            SettingKind::Integer { min, max } => {
-                let value = value.as_i64().ok_or_else(wrong)?;
-                if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
-                    return Err(format!("{value} is outside {}", range(min, max)));
-                }
-                Ok(SettingValue::Integer(value))
-            }
-            SettingKind::Number { min, max } => {
-                let value = value
-                    .as_f64()
-                    .filter(|value| value.is_finite())
-                    .ok_or_else(wrong)?;
-                if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
-                    return Err(format!("{value} is outside {}", range(min, max)));
-                }
-                Ok(SettingValue::Number(value))
-            }
-            SettingKind::Text { max_length } => {
-                let text = value.as_str().ok_or_else(wrong)?;
-                text_value(text, *max_length, "the text")?;
-                Ok(SettingValue::Text(text.to_owned()))
-            }
-            SettingKind::Choice { choices } => {
-                let chosen = value.as_str().ok_or_else(wrong)?;
-                if !choices.iter().any(|choice| choice.value == chosen) {
-                    return Err(format!("{chosen:?} is not one of the choices"));
-                }
-                Ok(SettingValue::Choice(chosen.to_owned()))
-            }
-            SettingKind::TextList {
-                max_items,
-                max_length,
-            } => {
-                let items = value.as_array().ok_or_else(wrong)?;
-                if items.len() > *max_items {
-                    return Err(format!("{} items; at most {max_items}", items.len()));
-                }
-                items
-                    .iter()
-                    .map(|item| {
-                        let text = item.as_str().ok_or_else(wrong)?;
-                        text_value(text, *max_length, "an item")?;
-                        Ok(text.to_owned())
-                    })
-                    .collect::<Result<Vec<_>, String>>()
-                    .map(SettingValue::TextList)
-            }
-        }
-    }
-
-    fn type_name(&self) -> &'static str {
-        match self.kind {
-            SettingKind::Boolean => "boolean",
-            SettingKind::Integer { .. } => "integer",
-            SettingKind::Number { .. } => "number",
-            SettingKind::Text { .. } => "text",
-            SettingKind::Choice { .. } => "choice",
-            SettingKind::TextList { .. } => "text-list",
-        }
-    }
-
+/// The JSON side of a declaration: what the settings file holds and what the form's fields give.
+pub trait SettingSpecJson {
+    /// A user's value from the settings file, checked against this declaration (§D.2) by the
+    /// same check the extension's values go through.
+    fn value_from_json(&self, value: &Value) -> Result<SettingValue, String>;
     /// What the user typed into this setting's field, as the settings file would hold it, or why
     /// it cannot be one: `Integer` and `Number` fields parse the text, `Text` takes it as it is.
-    pub fn json_from_field(&self, text: &str) -> Result<Value, String> {
+    fn json_from_field(&self, text: &str) -> Result<Value, String>;
+}
+
+impl SettingSpecJson for SettingSpec {
+    fn value_from_json(&self, value: &Value) -> Result<SettingValue, String> {
+        let raw = raw_value(value)
+            .ok_or_else(|| format!("{value} is not a valid {}", self.kind.type_name()))?;
+        self.check_value(&raw)
+    }
+
+    fn json_from_field(&self, text: &str) -> Result<Value, String> {
         let text = text.trim_end_matches(['\r', '\n']);
         match &self.kind {
             SettingKind::Integer { .. } => text
@@ -173,6 +43,12 @@ impl SettingSpec {
             _ => Ok(Value::from(text)),
         }
     }
+}
+
+/// A settings-file value as the runtime reads it; `None` for one it cannot hold (a number beyond
+/// `i64` and `f64`).
+pub fn raw_value(value: &Value) -> Option<RawValue> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 /// How a value shows in a one-line field.
@@ -282,9 +158,8 @@ impl SettingsEdit {
     }
 }
 
-/// Where the form gets the declarations and the user's values, and where it writes. W2c's store
-/// reads `fyx_extensions.<id>` from the user settings file (never project settings) and writes
-/// through Zed's settings store.
+/// Where the form gets the declarations and the user's values, and where it writes.
+/// [`UserSettingsFileStore`] is the real one; tests set a [`MemorySettingsStore`].
 pub trait ExtensionSettingsStore {
     /// The extension's `[[fyx_ui.settings]]`, in manifest order; empty when it has none.
     fn specs(&self, extension_id: &str, cx: &App) -> Vec<SettingSpec>;
@@ -297,8 +172,7 @@ struct GlobalSettingsStore(Rc<dyn ExtensionSettingsStore>);
 
 impl Global for GlobalSettingsStore {}
 
-/// Sets the store the Settings form uses. Without one, the form uses [`MemorySettingsStore`],
-/// which knows no declarations, so no extension shows a Settings section.
+/// Sets the store the Settings form uses. Without one, the form uses [`UserSettingsFileStore`].
 pub fn set_extension_settings_store(store: Rc<dyn ExtensionSettingsStore>, cx: &mut App) {
     cx.set_global(GlobalSettingsStore(store));
 }
@@ -307,12 +181,62 @@ pub(crate) fn settings_store(cx: &mut App) -> Rc<dyn ExtensionSettingsStore> {
     if let Some(store) = cx.try_global::<GlobalSettingsStore>() {
         return store.0.clone();
     }
-    let store: Rc<dyn ExtensionSettingsStore> = Rc::new(MemorySettingsStore::default());
+    let store: Rc<dyn ExtensionSettingsStore> = Rc::new(UserSettingsFileStore);
     cx.set_global(GlobalSettingsStore(store.clone()));
     store
 }
 
-/// The stand-in store until W2c's lands: declarations and values in memory, for tests.
+/// The user's values of extension `extension_id`: its object under `fyx_extensions` in the
+/// **user** settings file, as written (§D.2). Project settings never count.
+pub(crate) fn user_object(extension_id: &str, cx: &App) -> Option<Value> {
+    cx.try_global::<settings::SettingsStore>()?
+        .raw_user_settings()?
+        .fyx_extension_settings(extension_id)
+        .cloned()
+}
+
+/// The declarations of the loaded extensions (`UiExtension::setting_specs`), the user settings
+/// file's `fyx_extensions.<id>`, and writes through Zed's settings store.
+pub struct UserSettingsFileStore;
+
+impl ExtensionSettingsStore for UserSettingsFileStore {
+    fn specs(&self, extension_id: &str, cx: &App) -> Vec<SettingSpec> {
+        crate::UiExtensionRegistry::global(cx)
+            .and_then(|registry| {
+                registry
+                    .read(cx)
+                    .ui_extension(extension_id)
+                    .map(|extension| extension.setting_specs().to_vec())
+            })
+            .unwrap_or_default()
+    }
+
+    fn user_values(&self, extension_id: &str, cx: &App) -> Map<String, Value> {
+        match user_object(extension_id, cx) {
+            Some(Value::Object(values)) => values,
+            _ => Map::new(),
+        }
+    }
+
+    fn write(&self, extension_id: &str, edit: SettingsEdit, cx: &mut App) {
+        let fs = <dyn fs::Fs>::global(cx);
+        let extension_id = extension_id.to_owned();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            let extensions = settings.fyx_extensions.get_or_insert_default();
+            // A value that is not an object (a hand-written mistake) is replaced by the edit.
+            let mut values = match extensions.remove(&extension_id) {
+                Some(Value::Object(values)) => values,
+                _ => Map::new(),
+            };
+            edit.apply(&mut values);
+            if !values.is_empty() {
+                extensions.insert(extension_id, Value::Object(values));
+            }
+        });
+    }
+}
+
+/// Declarations and values in memory, for tests.
 #[derive(Default)]
 pub struct MemorySettingsStore {
     specs: RefCell<HashMap<String, Vec<SettingSpec>>>,

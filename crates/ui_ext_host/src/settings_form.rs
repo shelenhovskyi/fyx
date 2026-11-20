@@ -30,8 +30,8 @@ use ui::{
 };
 
 use crate::settings_model::{
-    SettingKind, SettingRow, SettingSpec, SettingValue, SettingsEdit, SettingsForm, field_text,
-    settings_store,
+    SettingKind, SettingRow, SettingSpec, SettingSpecJson as _, SettingValue, SettingsEdit,
+    SettingsForm, field_text, settings_store,
 };
 
 /// What a one-line field shows for a row: the user's value as the file holds it (an invalid one
