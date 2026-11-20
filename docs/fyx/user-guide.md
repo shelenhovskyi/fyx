@@ -233,7 +233,8 @@ Fyx opens one review pane per agent turn. The pane lists the files of the turn a
 at a time. Each hunk has its own **Accept** and **Reject** buttons, and a comment field. The header
 counts what you have decided and what is still waiting.
 
-These keys work while the pane has focus:
+These keys work while the pane has focus. On macOS the `alt` keys are `ctrl-alt` (`ctrl-alt-y`,
+`ctrl-alt-shift-y`, ...), because there `alt` with a letter types a character:
 
 | Keys | Action |
 |---|---|

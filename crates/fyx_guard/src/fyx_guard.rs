@@ -13,6 +13,7 @@ pub mod paths;
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use agent_client_protocol::{ErrorCode, v1::schema as acp_v1};
@@ -28,9 +29,9 @@ use util::rel_path::RelPath;
 
 use fyx_guard_core::{AccountDir, CONFIRMED_FILE, enforce, scrub};
 pub use fyx_guard_core::{
-    RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, SecurityConfig, SecurityMode,
-    env_name_matches, is_credential_url, protected_config, protected_config_rel, sanitize_for_log,
-    secret_env_names, secret_env_vars,
+    ConfirmedWriter, RepoPolicy, RepoState, SECRET_ENV_PATTERNS, SECURITY_FILE, SecurityConfig,
+    SecurityMode, env_name_matches, is_credential_url, protected_config, protected_config_rel,
+    sanitize_for_log, secret_env_names, secret_env_vars,
 };
 
 /// `fyx_security` in user settings (schema in `settings_content::FyxSecuritySettingsContent`,
@@ -486,7 +487,7 @@ struct Guard {
     declined: Option<SecuritySettings>,
     prompt_open: bool,
     /// [`CONFIRMED_FILE`]: written whenever the settings in force change, read at start.
-    confirmed_file: Option<PathBuf>,
+    confirmed_file: Option<Arc<ConfirmedWriter>>,
 }
 
 impl Global for Guard {}
@@ -524,7 +525,7 @@ fn init_with_confirmed_file(confirmed_file: Option<PathBuf>, cx: &mut App) {
         .and_then(|path| std::fs::read(path).ok())
         .map(|bytes| SecuritySettings(SecurityConfig::from_confirmed_toml(&bytes)));
     cx.set_global(Guard {
-        confirmed_file,
+        confirmed_file: confirmed_file.map(|path| Arc::new(ConfirmedWriter::new(path))),
         ..Guard::default()
     });
     if let Some(confirmed) = confirmed {
@@ -620,16 +621,18 @@ fn apply(settings: SecuritySettings, cx: &mut App) {
     let guard = cx.global_mut::<Guard>();
     let previous = guard.effective.as_ref().map(|settings| settings.mode);
     let mode = settings.mode;
-    if let Some(path) = guard.confirmed_file.clone()
+    if let Some(writer) = guard.confirmed_file.clone()
         && let Some(bytes) = settings.to_confirmed_toml()
     {
+        // Queued here, on the main thread, so the newest change is what reaches the file.
+        writer.queue(bytes);
         cx.background_executor()
             .spawn(async move {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir).ok();
-                }
-                if let Err(error) = std::fs::write(&path, bytes) {
-                    log::error!("fyx_guard: cannot save {}: {error}", path.display());
+                if let Err(error) = writer.flush() {
+                    log::error!(
+                        "fyx_guard: cannot save {}: {error}",
+                        writer.path().display()
+                    );
                 }
             })
             .detach();

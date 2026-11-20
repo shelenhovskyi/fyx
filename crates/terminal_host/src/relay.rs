@@ -160,9 +160,11 @@ impl Relay {
         terminal_for_token: fn(&str) -> Option<TerminalId>,
     ) -> std::io::Result<(Self, async_mpsc::UnboundedReceiver<RelayDelivery>)> {
         let (requests, received) = async_mpsc::unbounded();
+        let at_start = State::load(&state);
+        let mut base = at_start.clone();
         let router = Arc::new(Router {
             table: Mutex::new(Table {
-                at_start: State::load(&state),
+                at_start,
                 ..Table::default()
             }),
             requests,
@@ -175,8 +177,12 @@ impl Relay {
             .name("fyx-relay-state".into())
             .spawn(move || {
                 for state in queued {
-                    if let Err(error) = state.save(&path) {
-                        log::warn!("fyx-relay: could not save {}: {error}", path.display());
+                    // Another Fyx on the same data dir keeps its channels in the same file.
+                    match state.save_merged(&base, &path) {
+                        Ok(()) => base = state,
+                        Err(error) => {
+                            log::warn!("fyx-relay: could not save {}: {error}", path.display())
+                        }
                     }
                 }
             })?;

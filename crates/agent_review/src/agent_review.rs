@@ -85,15 +85,19 @@ pub trait RulesMemory {
 struct FileRulesMemory {
     fs: Arc<dyn Fs>,
     path: PathBuf,
+    /// Saves may finish in any order; the writer keeps the newest on disk.
+    writer: Arc<fyx_guard::ConfirmedWriter>,
 }
 
 impl FileRulesMemory {
     fn new(fs: Arc<dyn Fs>) -> Self {
+        let path = paths::data_dir()
+            .join("agent_review")
+            .join("confirmed_rules.json");
         Self {
             fs,
-            path: paths::data_dir()
-                .join("agent_review")
-                .join("confirmed_rules.json"),
+            writer: Arc::new(fyx_guard::ConfirmedWriter::new(path.clone())),
+            path,
         }
     }
 
@@ -111,18 +115,18 @@ impl FileRulesMemory {
 
 impl RulesMemory for FileRulesMemory {
     fn save(&self, records: HashMap<String, String>, cx: &App) {
-        let fs = self.fs.clone();
-        let path = self.path.clone();
-        cx.spawn(async move |_| {
-            let result = async {
-                let text = serde_json::to_string_pretty(&records)?;
-                if let Some(directory) = path.parent() {
-                    fs.create_dir(directory).await?;
-                }
-                fs.atomic_write(path, text).await
+        let text = match serde_json::to_string_pretty(&records) {
+            Ok(text) => text,
+            Err(error) => {
+                log::error!("fyx: could not remember the confirmed review rules: {error:#}");
+                return;
             }
-            .await;
-            if let Err(error) = result {
+        };
+        // Queued here, in the order the rules were confirmed, so the newest reaches the file.
+        self.writer.queue(text.into_bytes());
+        let writer = self.writer.clone();
+        cx.background_spawn(async move {
+            if let Err(error) = writer.flush() {
                 log::error!("fyx: could not remember the confirmed review rules: {error:#}");
             }
         })

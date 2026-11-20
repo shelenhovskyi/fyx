@@ -9,7 +9,9 @@ mod policy;
 
 use std::{
     cmp::Ordering,
+    io,
     path::{Path, PathBuf},
+    sync::{Mutex, PoisonError},
 };
 
 use collections::HashMap;
@@ -23,6 +25,62 @@ pub use policy::{
 /// Where the last settings the user accepted are kept, in Fyx's data dir, so a lowering they
 /// declined does not apply silently at the next start (security-2 T3).
 pub const CONFIRMED_FILE: &str = "fyx_security_confirmed.toml";
+
+/// Writes [`CONFIRMED_FILE`] (and `agent_review`'s confirmed rules) off the main thread. Each change queues its contents and spawns a
+/// [`Self::flush`]; flushes may run in any order and at the same time, so each one writes the
+/// newest contents, not its own, and through a temporary file, so neither an older value nor half
+/// a file is left behind (a stale "off" would let a later lowering through without a prompt).
+#[derive(Debug)]
+pub struct ConfirmedWriter {
+    path: PathBuf,
+    newest: Mutex<Option<Vec<u8>>>,
+    writing: Mutex<()>,
+}
+
+impl ConfirmedWriter {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            newest: Mutex::new(None),
+            writing: Mutex::new(()),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Records `contents` as the newest; call on the thread that orders the changes.
+    pub fn queue(&self, contents: Vec<u8>) {
+        *self.newest.lock().unwrap_or_else(PoisonError::into_inner) = Some(contents);
+    }
+
+    /// Writes the newest queued contents, if a flush has not written them already.
+    pub fn flush(&self) -> io::Result<()> {
+        let _writing = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(contents) = self
+            .newest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return Ok(());
+        };
+        if let Some(directory) = self.path.parent() {
+            std::fs::create_dir_all(directory)?;
+        }
+        let name = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let temporary = self
+            .path
+            .with_file_name(format!("{name}.{}.tmp", std::process::id()));
+        std::fs::write(&temporary, contents)?;
+        std::fs::rename(&temporary, &self.path)
+    }
+}
 
 /// Why a path whose name Windows rewrites is not written.
 pub const WINDOWS_ALIAS_DENIAL: &str = "its name uses a spelling Windows rewrites (a trailing dot \
@@ -360,6 +418,33 @@ mod tests {
                 SecurityMode::Shield
             );
         }
+    }
+
+    #[test]
+    fn confirmed_writer_keeps_the_newest_whatever_order_flushes_run_in() {
+        let directory =
+            std::env::temp_dir().join(format!("fyx-guard-core-writer-{}", std::process::id()));
+        let path = directory.join(CONFIRMED_FILE);
+        std::fs::remove_file(&path).ok();
+        let writer = ConfirmedWriter::new(path.clone());
+        let off = config(SecurityMode::Off, &[]).to_confirmed_toml().unwrap();
+        let shield = config(SecurityMode::Shield, &[])
+            .to_confirmed_toml()
+            .unwrap();
+        // Two changes, then their flushes: the first flush writes the newest, the second
+        // finds nothing left and must not write the older value it was spawned for.
+        writer.queue(off);
+        writer.queue(shield.clone());
+        writer.flush().unwrap();
+        writer.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), shield);
+        let leftovers: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path() != path)
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]

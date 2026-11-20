@@ -1765,6 +1765,12 @@ mod tests {
     } else {
         "ctrl"
     };
+    /// The hunk keys' modifier: on macOS alt-letter types a character, so they are ctrl-alt.
+    const HUNK: &str = if cfg!(target_os = "macos") {
+        "ctrl-alt"
+    } else {
+        "alt"
+    };
 
     /// The review bindings of this platform's default keymap, as the app loads them.
     fn bind_default_review_keys(cx: &mut App) {
@@ -1803,6 +1809,28 @@ mod tests {
         assert!(shown.contains("\\u{202e}"), "{shown}");
         assert_eq!(escape_for_display("src/main.rs"), "src/main.rs");
         assert_eq!(escape_for_display("a\nb"), "a\\u{a}b");
+    }
+
+    /// On macOS alt-letter types a character (ń, ć, ∆), so a review key there must not be one: the
+    /// comment editor sits in the `AgentReview` context too.
+    #[test]
+    fn macos_review_keys_leave_typed_characters_alone() {
+        let keymap = include_str!("../../../assets/keymaps/default-macos.json");
+        let review = &keymap[keymap
+            .find("fyx: agent review")
+            .expect("the review section")..];
+        for line in review
+            .lines()
+            .filter(|line| line.contains("agent_review::"))
+        {
+            let key = line.trim().split('"').nth(1).unwrap_or_default();
+            let parts: Vec<&str> = key.split(['-', ' ']).collect();
+            let typed_with_alt = parts.contains(&"alt")
+                && !parts.contains(&"ctrl")
+                && !parts.contains(&"cmd")
+                && parts.last().is_some_and(|last| last.len() == 1);
+            assert!(!typed_with_alt, "{key} types a character on macOS");
+        }
     }
 
     #[test]
@@ -1926,7 +1954,7 @@ mod tests {
             2
         );
 
-        cx.simulate_keystrokes("shift-alt-y");
+        cx.simulate_keystrokes(&format!("{HUNK}-shift-y"));
         cx.simulate_keystrokes(&format!("{MOD}-enter"));
         cx.run_until_parked();
         assert_eq!(
@@ -2030,14 +2058,14 @@ mod tests {
         );
 
         // Keymap bindings in the `AgentReview` context, over the editor's own.
-        cx.simulate_keystrokes("alt-y");
+        cx.simulate_keystrokes(&format!("{HUNK}-y"));
         cx.run_until_parked();
         assert_eq!(
             pane.read_with(cx, |pane, _| pane.current_hunk),
             Some(1),
             "accepting moves to the next undecided hunk"
         );
-        cx.simulate_keystrokes("alt-n");
+        cx.simulate_keystrokes(&format!("{HUNK}-n"));
         cx.run_until_parked();
         review.read_with(cx, |review, _| {
             let decisions = review.reviews()[0]

@@ -43,7 +43,8 @@ refused before review, so it never opens a review pane.
   **Open review** open it too.
 - One review pane per agent turn. It lists the turn's files and shows one diff at a time.
 - Each hunk has its own Accept and Reject buttons.
-- Keys while the pane has focus (on macOS, `cmd` instead of `ctrl`). They are keymap bindings in the
+- Keys while the pane has focus (on macOS, `cmd` instead of `ctrl`, and `ctrl-alt` instead of `alt`,
+  because there `alt` with a letter types a character). They are keymap bindings in the
   `AgentReview` context, so the keymap editor lists them and you can rebind them:
 
   | Keys | Action |
