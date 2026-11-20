@@ -1,7 +1,9 @@
 # Self-update (plan 6.2)
 
-Status: design and core only. `crates/fyx_update` holds the pure logic and its tests. Nothing is
-wired into the app yet, and no release key exists yet.
+Status: core and first host wiring. `crates/fyx_update` holds the pure logic and its tests;
+`crates/fyx_update_host` adds the setting, the check action and the notification (it becomes part
+of the app once W0 adds its workspace lines, below). No release key exists yet, so every check
+says that updates are not set up.
 
 ## Goals
 
@@ -71,7 +73,23 @@ Unknown fields are refused, so a new field means a new schema.
    - Install: remove the old previous copy, move installed to previous, move staged to installed.
    - Rollback: remove the staged copy, move installed to staged, move previous to installed.
 
-## What the host does (not wired yet)
+## What the host does
+
+Built in `crates/fyx_update_host`:
+
+- `fyx.updates.check` (default `false`): when on, a check runs a minute after start and then once
+  a day. "fyx: check for updates" checks once whatever the setting says.
+- With no key in `RELEASE_KEYS`, a check fetches nothing and the notification says "Updates are
+  not set up in this build yet". A manual check also reports "up to date" and errors; an automatic
+  one only reports a new version (errors go to the log).
+- A new version shows "Fyx X is available" with "Install" and "What's New". "Install" downloads
+  the artifact to `<data dir>/updates`, runs `check_artifact` (a file that fails is not kept), and
+  shows where the verified file is. The newest version seen is kept in
+  `<data dir>/updates/highest-seen`.
+- Tests run against a fake release server, signed with `fyx_update`'s throwaway test key
+  (seed `[7; 32]`).
+
+Still to build, as planned:
 
 - The update setting is off by default. When it is on, the host checks once a day and on
   "fyx: check for updates".
@@ -91,10 +109,12 @@ Unknown fields are refused, so a new field means a new schema.
   public half goes into `RELEASE_KEYS`; the private half goes only into the release workflow's
   secret. No key is committed.
 - A release workflow that builds, writes the manifest, signs it, and uploads all the files.
-- The host wiring above, with its setting, notification, and Windows helper.
-- Workspace lines for W0, the integrator. These were not added to the root `Cargo.toml`:
-  - in `members`: `"crates/fyx_update",`
-  - in `[workspace.dependencies]`: `fyx_update = { path = "crates/fyx_update" }`
-
-  All of the crate's dependencies are existing workspace dependencies: `base64`, `hex`, `ring`,
-  `semver`, `serde`, `serde_json`, `sha2`, and `thiserror`.
+- Unpacking into the staged path, running the install plan on restart, the Windows helper, and
+  the 60-second rollback.
+- Workspace lines for W0, the integrator, for `fyx_update_host` (all its dependencies are
+  workspace crates already):
+  - root `Cargo.toml` `members`: `"crates/fyx_update_host", # fyx`
+  - `[workspace.dependencies]`: `fyx_update_host = { path = "crates/fyx_update_host" } # fyx`
+  - `crates/zed/Cargo.toml`: `fyx_update_host.workspace = true # fyx`
+  - `crates/zed/src/main.rs`, after `terminal_host::init(cx);`:
+    `fyx_update_host::init(cx); // fyx: plan 6.2 self-update`

@@ -78,6 +78,12 @@
     "allow_env": [],
   },
   "fyx": {
+    "updates": {
+      // Check once a day for a new Fyx release (GitHub releases of shelenhovskyi/fyx). A new
+      // version is only offered: nothing is installed until you press "Install".
+      // "fyx: check for updates" checks once either way.
+      "check": false,
+    },
     "extensions": {
       // Folders of UI extensions in development, loaded on every start and reloaded when
       // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".
