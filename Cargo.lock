@@ -18401,6 +18401,8 @@ name = "terminal_host"
 version = "0.1.0"
 dependencies = [
  "acp_thread",
+ "editor",
+ "fs",
  "futures 0.3.34",
  "fyx_relay",
  "gpui",
