@@ -94,6 +94,9 @@ Linux) and is never shown again.
   reference. If you deny it, or no secret has that name, the reference stays as it is.
 - The output the agent reads back shows `secret://name` wherever the value, or its base64, hex or
   URL encoding, appears. `printenv` shows `FYX_SECRET_GITHUB=secret://github`.
+  The native agent's other tool results (a file it reads, a fetched page) get the same
+  replacement for every value used since Fyx started. ACP agents run their own tools: only the
+  terminals they open through Fyx are covered. MCP servers do not get secrets yet.
 - Each use is logged without its value, in `agent_review/secret_uses.jsonl` in Fyx's data directory.
 - Limits: a reference in single quotes is not expanded by the shell, and a value the command changes
   in another way (split, hashed, encrypted) is not recognized in the output. The terminal view in the

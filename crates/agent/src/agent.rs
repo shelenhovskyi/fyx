@@ -1,5 +1,6 @@
 mod db;
 mod fyx_models; // fyx: model lists load on first use
+mod fyx_tool_output; // fyx: secret redaction of tool results
 mod legacy_thread;
 mod native_agent_server;
 pub mod outline;

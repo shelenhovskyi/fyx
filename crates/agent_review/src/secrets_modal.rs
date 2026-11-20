@@ -178,6 +178,13 @@ impl Render for SecretsModal {
                 .size(LabelSize::Small)
                 .color(Color::Muted),
             )
+            .child(
+                Label::new(
+                    "Limit: a command can still leak a value it changes (splits, hashes, encrypts) or sends to a server. Allow only commands you trust.",
+                )
+                .size(LabelSize::Small)
+                .color(Color::Warning),
+            )
             .child(field(&self.name, cx))
             .child(field(&self.value, cx))
             .child(
