@@ -45,6 +45,8 @@ pub struct InspectorSnapshot {
     pub surfaces: Vec<String>,
     pub selected: Option<String>,
     pub phase: String,
+    /// Plan 7.7: the last and slowest recent render time, and the instance's memory.
+    pub performance: String,
     /// One line per node, indented by depth.
     pub tree: Vec<String>,
     /// Events and updates, newest first.
@@ -159,6 +161,24 @@ fn byte_size(bytes: usize) -> String {
 }
 
 /// One I/O record: when, which capability, its id, what it does, and how it ended.
+fn performance_line(
+    render_times: Option<(std::time::Duration, std::time::Duration)>,
+    memory_bytes: Option<usize>,
+) -> String {
+    let render = match render_times {
+        Some((last, slowest)) => format!(
+            "render {:.1} ms, slowest of the last frames {:.1} ms",
+            last.as_secs_f64() * 1000.0,
+            slowest.as_secs_f64() * 1000.0
+        ),
+        None => "not rendered yet".to_string(),
+    };
+    match memory_bytes {
+        Some(bytes) => format!("{render}; memory {}", byte_size(bytes)),
+        None => render,
+    }
+}
+
 fn io_line(record: &ui_ext_wasm::diagnostics::IoRecord) -> String {
     let outcome = match (&record.outcome, record.duration) {
         (Some(outcome), Some(duration)) => format!("{outcome} in {} ms", duration.as_millis()),
@@ -220,6 +240,12 @@ pub fn snapshot(
     if let Some(tree) = state.tree() {
         snapshot.tree = tree_lines(tree);
     }
+    snapshot.performance = performance_line(
+        state.render_times(),
+        state
+            .diagnostics()
+            .map(|diagnostics| diagnostics.memory_bytes),
+    );
     snapshot.history = state
         .history()
         .iter()
@@ -385,6 +411,11 @@ impl Render for ExtensionInspector {
         } else {
             v_flex()
                 .child(Label::new(snapshot.phase).size(LabelSize::Small))
+                .child(
+                    Label::new(snapshot.performance)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
                 .child(section("Tree", snapshot.tree, "no tree", cx))
                 .child(section(
                     "Events and updates",
@@ -488,13 +519,28 @@ mod tests {
 
     use ui_ext_wasm::diagnostics::IoRecord;
 
-    use super::{byte_size, io_line};
+    use super::{byte_size, io_line, performance_line};
 
     #[test]
     fn test_byte_size() {
         assert_eq!(byte_size(812), "812 B");
         assert_eq!(byte_size(4300), "4.2 KiB");
         assert_eq!(byte_size(8 << 20), "8.0 MiB");
+    }
+
+    #[test]
+    fn test_performance_line() {
+        assert_eq!(
+            performance_line(
+                Some((Duration::from_micros(2_500), Duration::from_millis(12))),
+                Some(3 * 1024 * 1024)
+            ),
+            format!(
+                "render 2.5 ms, slowest of the last frames 12.0 ms; memory {}",
+                byte_size(3 * 1024 * 1024)
+            )
+        );
+        assert_eq!(performance_line(None, None), "not rendered yet");
     }
 
     #[test]

@@ -69,6 +69,9 @@ pub struct Diagnostics {
     pub logs: VecDeque<LogRecord>,
     pub capability_checks: VecDeque<CapabilityRecord>,
     pub io: VecDeque<IoRecord>,
+    /// Bytes of linear memory the instance holds (plan 7.7): memories only grow, so this is the
+    /// most it has used.
+    pub memory_bytes: usize,
 }
 
 fn push_bounded<T>(queue: &mut VecDeque<T>, item: T) {
@@ -89,6 +92,10 @@ impl DiagnosticsBuffer {
 
     pub(crate) fn call(&self, record: CallRecord) {
         self.update(|diagnostics| push_bounded(&mut diagnostics.calls, record));
+    }
+
+    pub(crate) fn memory(&self, bytes: usize) {
+        self.update(|diagnostics| diagnostics.memory_bytes = bytes);
     }
 
     pub(crate) fn log(&self, level: log::Level, message: &str) {

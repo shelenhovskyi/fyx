@@ -416,6 +416,8 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         integration::CAPABILITY_CONTEXT_EDITOR,
         integration::CAPABILITY_WORKSPACE_OPEN,
         integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+        integration::CAPABILITY_DIAGNOSTICS_PUBLISH,
+        integration::CAPABILITY_FILE_DECORATIONS,
         integration::CAPABILITY_APPROVALS,
     ];
     if *version >= Version::new(0, 4, 0) {
@@ -1038,7 +1040,7 @@ impl UiState {
             settings,
             journal,
             capability_check,
-            diagnostics,
+            diagnostics: diagnostics.clone(),
             api,
             network,
             process,
@@ -1052,7 +1054,7 @@ impl UiState {
             pushes: Vec::new(),
             pushed_items: 0,
             lifted_text: 0,
-            limits: UiLimits::new(),
+            limits: UiLimits::reporting_to(diagnostics),
             call_started: Instant::now(),
             call_budget: UI_INIT_BUDGET,
             executed: Duration::ZERO,
@@ -1376,6 +1378,8 @@ pub fn validate_surfaces(surfaces: &[ui_ext::Surface]) -> Result<()> {
 pub(crate) struct UiLimits {
     inner: wasmtime::StoreLimits,
     memory_total: usize,
+    /// Where the Inspector reads `memory_total` from; `None` in tests of the limiter alone.
+    report: Option<diagnostics::DiagnosticsBuffer>,
 }
 
 impl UiLimits {
@@ -1383,6 +1387,14 @@ impl UiLimits {
         Self {
             inner: ui_store_limits(),
             memory_total: 0,
+            report: None,
+        }
+    }
+
+    fn reporting_to(diagnostics: diagnostics::DiagnosticsBuffer) -> Self {
+        Self {
+            report: Some(diagnostics),
+            ..Self::new()
         }
     }
 }
@@ -1405,6 +1417,9 @@ impl wasmtime::ResourceLimiter for UiLimits {
             );
         }
         self.memory_total = total;
+        if let Some(report) = &self.report {
+            report.memory(total);
+        }
         Ok(true)
     }
 
