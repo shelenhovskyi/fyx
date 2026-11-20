@@ -1222,6 +1222,9 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         index,
         indent: 0,
         nodes: tree.finish(),
+        // fyx:ui 0.4 (plan 6.7): staged; a plain row has no chevron.
+        #[cfg(feature = "fyx-ui-0-4")]
+        expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
     };
     ui_ext::Tree::from_row(
         row.nodes.iter().map(Into::into).collect(),
@@ -1620,6 +1623,8 @@ impl SurfaceTree {
             | UiEvent::ProgressCancelRequested(_) => return,
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::CanvasClick(_) => return,
+            #[cfg(feature = "fyx-ui-0-4")]
+            UiEvent::RowToggled(_) => return,
         };
         if self.pending.patches().iter().any(|patch| match patch {
             Patch::SetProps((id, _)) => *id == target,
@@ -1656,6 +1661,8 @@ impl SurfaceTree {
             | UiEvent::ProgressCancelRequested(_) => {}
             #[cfg(feature = "fyx-ui-0-3")]
             UiEvent::CanvasClick(_) => {}
+            #[cfg(feature = "fyx-ui-0-4")]
+            UiEvent::RowToggled(_) => {}
         }
     }
 
