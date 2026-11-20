@@ -1025,7 +1025,7 @@ so nothing sends LSP requests to it.
 | W0 | The WIT below; `diagnostics:publish` in the capability lists and the install-dialog text |
 | W2c | The import in `ui_ext_wasm`, the checks of §E.1, the limits |
 | W3 | The per-instance collection in `ui_ext_host`: server ids, conversion, publish, clear on stop, crash, reload, uninstall and revoke |
-| W4 | `fyx_sdk` wrapper and harness double; a linter demo (`fyx-lint-demo`: marks `TODO` lines) |
+| W5 (W4's part) | `fyx_sdk` wrapper and harness double; a linter demo (`fyx-lint-demo`: marks `TODO` lines) |
 
 ### E.3 WIT diff
 
@@ -1051,6 +1051,139 @@ In `interface context` (0.4 file, or the next world's copy), after `watch-diagno
 - A private file and a file outside the worktrees are refused and publish nothing.
 - 501 entries for one file are refused and leave the previous ones.
 - Columns: a line with a multi-byte character before the range lands on the same characters.
+
+## F. Tree views and file decorations (plan 6.7)
+
+Plan 6.7 adds two things a bookmarks, outline or test-explorer extension needs: rows that expand
+and collapse, and badges or colours on project-panel entries. The `list` node already draws
+`list-row.indent`; what is missing is the chevron, its event and the keys. Like §E, the diff fits
+0.4 or the first post-1.0 world.
+
+### F.1 Tree rows (no capability)
+
+- `list-row` gets `expansion: expansion`, an enum `leaf`, `collapsed`, `expanded`. The host draws
+  a chevron before the row's nodes (right for `collapsed`, down for `expanded`, an empty slot of
+  the same width for `leaf`, so leaves line up with their siblings), after the indentation.
+- A click on the chevron, or Right on a `collapsed` row and Left on an `expanded` one while the
+  list has keyboard focus, sends the new event `row-toggled(tuple<node-id, u32, bool>)`: the list,
+  the row index, and whether the row asks to be expanded. It is not a `row-click`, and it grants no
+  activation (§C.3 gestures): expanding is browsing.
+- The host changes nothing itself. The extension answers with the new `row-count` and an
+  `invalidate-rows` patch from the toggled row on (or a smaller range), and sets the row's
+  `expansion` in the rows it returns. Until then the old rows stay. This keeps the extension the
+  owner of the tree's shape, as with every other list state, and keeps virtualization working
+  for trees of any size.
+- Left on a `leaf` or `collapsed` row moves the selection to the nearest earlier row with a
+  smaller `indent` (its parent) and reports `row-selected`, as arrow keys do in modals today. That
+  needs no extension code.
+- Existing 0.4 extensions are unchanged: a row without the field (an older world) is a `leaf`,
+  and no chevron slot is drawn when no row of the list has ever been anything but `leaf`.
+
+### F.2 File decorations (`workspace:file-decorations`, T1)
+
+- New capability `workspace:file-decorations`, T1 ("Marks files in the project panel").
+- `context.decorate-files(list<file-decoration>)` sets or replaces this extension's decoration of
+  each listed file or directory; `context.clear-file-decorations(option<list<file-ref>>)` removes
+  some, or all with `none`.
+- `record file-decoration { path: file-ref, badge: option<string>, color: option<color-token>,
+  tooltip: option<string> }`. `badge` is at most 2 characters (graphemes), drawn after the name
+  like the git status letter; `color` tints the file name (`text-accent`, `warning`, `error`,
+  `success`, `text-muted`; the other tokens are `invalid-argument`); `tooltip` (at most 256 bytes)
+  is added to the entry's tooltip under the extension's name.
+- Worktree entries only; private paths are `not-permitted`. At most 10,000 decorated paths per
+  extension and 500 per call; more is `invalid-argument` and changes nothing.
+- Several extensions on one entry: badges are shown side by side, at most 2, in extension id
+  order; the colour of the first one with a colour wins. Git status and diagnostics colours are
+  drawn as today and win over an extension's colour.
+- A decoration is not inherited by a folder's children, and does not propagate to parents: the
+  extension decorates what it means.
+- Decorations last while the extension runs, like §E: stop, crash, reload, uninstall, disable or
+  revoke clear them.
+
+### F.3 Host side
+
+- **Tree rows (W3, `ui_ext_host`):** the chevron slot, its click handler and the Left/Right keys in
+  the list renderer; `row-toggled` routed like `row-click`.
+- **Decorations:** a new Fyx file in an upstream crate both sides already depend on,
+  `crates/project/src/fyx_file_decorations.rs` (W2c, with a `fyx:` `mod` line): a `Global` entity
+  `FileDecorations` holding, per extension, a map from `ProjectPath` to the decoration, and an
+  event when it changes. `ui_ext_host` (W3) writes it; `project_panel` reads it. No new crate
+  dependency, so no Cargo change.
+- **Project panel hook (W3, one `fyx:` block in `project_panel.rs`):** `EntryDetails` gets the
+  entry's decorations from the global when the panel builds its visible entries, and
+  `render_entry` draws the badges next to `git_indicator` and applies the colour where
+  `filename_text_color` is chosen when no git or diagnostic colour applies. The panel subscribes
+  to the global's event and calls `cx.notify()`.
+
+| Owner | Work |
+|---|---|
+| W0 | The WIT below; `workspace:file-decorations` in the capability lists and the install-dialog text |
+| W2c | `fyx_file_decorations.rs` in `project`; the imports and checks in `ui_ext_wasm` |
+| W3 | Chevrons, `row-toggled` and keys in the list renderer; the project-panel hook; clearing on stop |
+| W5 (W4's part) | `fyx_sdk` wrappers, harness doubles, a `fyx-bookmarks-demo` (a tree of bookmarks grouped by folder, bookmarked files badged `★`) |
+
+### F.4 WIT diff
+
+In `interface types`, before `record list-row`, and one field in it:
+
+```wit
+    /// Plan 6.7. A tree row's chevron. `leaf` draws an empty chevron slot.
+    enum expansion { leaf, collapsed, expanded }
+
+    record list-row {
+        index: u32,
+        indent: u8,
+        nodes: list<node>,
+        /// Plan 6.7. The chevron; Right, Left or a click on it sends `row-toggled`.
+        expansion: expansion,
+    }
+```
+
+In `variant ui-event`, after `row-selected`:
+
+```wit
+        /// Plan 6.7. The list node, the row index, and `true` when the row asks to be expanded.
+        /// The host changes no rows: the extension answers with new rows. Grants no activation.
+        row-toggled(tuple<node-id, u32, bool>),
+```
+
+In `interface context`, after the §E functions:
+
+```wit
+    /// Plan 6.7, `workspace:file-decorations`.
+    record file-decoration {
+        path: file-ref,
+        /// At most 2 characters, after the name.
+        badge: option<string>,
+        /// `text-accent`, `warning`, `error`, `success` or `text-muted`.
+        color: option<color-token>,
+        /// At most 256 bytes, under the extension's name in the entry's tooltip.
+        tooltip: option<string>,
+    }
+
+    /// Sets or replaces this extension's decoration of each path. At most 500 per call and
+    /// 10,000 per extension (`invalid-argument`, nothing changes); a private file is
+    /// `not-permitted`, one in no worktree `invalid-argument`.
+    decorate-files: func(decorations: list<file-decoration>) -> result<_, host-error>;
+    /// Removes this extension's decorations of these paths, or all of them with `none`.
+    clear-file-decorations: func(paths: option<list<file-ref>>) -> result<_, host-error>;
+```
+
+`list-row` is a record, so adding a field changes the type: in 0.4 that is fine while the world is
+staged; after it ships, the next world carries a new `list-row` and the host maps an older
+extension's rows to `leaf`.
+
+### F.5 Tests
+
+- The bookmarks demo shows a two-level tree; a click on a folder's chevron sends `row-toggled`
+  with `true`, the demo returns the children, and the panel shows them indented under it.
+- Right and Left on the focused list expand and collapse; Left on a leaf selects its parent.
+- `row-toggled` does not count as a gesture: `workspace.open` with `focus: true` in its handler is
+  `not-permitted`.
+- Bookmarked files show `★` in the project panel; removing a bookmark clears it; stopping the
+  extension clears every badge.
+- A badge of 3 characters and the colour `surface` are refused; a private file is refused.
+- Two extensions on one file show both badges in id order.
 
 ## WIT diff (for W0)
 
