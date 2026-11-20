@@ -273,8 +273,16 @@ starts from these and looks for the same faults everywhere else.
    - warnings repeat (two `CLAUDE_CODE_PLUGIN_DIRS` lines) and "It can run any program on your
      computer" says neither why nor how much;
    - every T2 box starts unticked and Enable works with none ticked, but the dialog does not say
-     what the extension can still do then (here: nearly nothing). Say so, or offer "Tick all
-     that this extension needs" with the risks listed once;
+     what the extension can still do then (here: nearly nothing), and enabling it fully takes
+     four ticks plus Enable;
+   - **required fix, owner's decision:** warn, but do not make the user click through. Add a
+     primary button **Enable with all permissions** next to **Enable without T2** (or a single
+     "Allow all" checkbox above the T2 list that ticks every box). The risks are listed once,
+     above the buttons, in one short summary ("runs programs in its terminals, listens on a
+     local port, writes a file into your Claude config, receives Claude's hooks"); the per-item
+     boxes stay below for anyone who wants to pick. Enable without T2 says what will not work.
+     The same choice appears wherever this consent appears (dev folder, install, registry,
+     approve-and-update);
    - the list scrolls inside the dialog with no sign that more is below; the hook list is cut
      off at the bottom edge.
 
