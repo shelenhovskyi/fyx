@@ -1260,6 +1260,20 @@ impl ReviewPane {
                 review.operation()?
             ))
         });
+        let secrets = self.current_review_id().and_then(|id| {
+            let review = self.review.read(cx).review(id)?;
+            let secrets = review.secrets();
+            (!secrets.is_empty()).then(|| {
+                format!(
+                    "Possible secret added: {}. Held for review: reject it, or accept only if the                      value is meant to be in this file.",
+                    secrets
+                        .iter()
+                        .map(crate::SecretFinding::describe)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })
+        });
         let can_submit = resolution.is_some_and(|resolution| !resolution.is_pending());
         let comment_sent = match (self.current_hunk, edit) {
             (Some(hunk), Some(edit)) => edit
@@ -1317,6 +1331,11 @@ impl ReviewPane {
                 Label::new(operation)
                     .size(LabelSize::Small)
                     .color(Color::Accent)
+            }))
+            .children(secrets.map(|secrets| {
+                Label::new(secrets)
+                    .size(LabelSize::Small)
+                    .color(Color::Error)
             }))
             .children(
                 error.map(|error| Label::new(error).size(LabelSize::Small).color(Color::Error)),

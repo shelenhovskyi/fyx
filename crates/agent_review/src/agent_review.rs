@@ -10,6 +10,7 @@ mod proposed_edit;
 mod review_comments;
 mod review_pane;
 mod review_rules;
+mod secret_scan;
 mod unified_diff;
 // dev-only: never compiled into release builds unless the `review-script` feature asks for it, because a
 // script can approve agent edits the user never saw.
@@ -60,6 +61,7 @@ pub use review_pane::{
 };
 use review_rules::UserAutoAccept;
 pub use review_rules::{RULES_FILE, ReviewRules, RuleKind, RuleMatch};
+pub use secret_scan::{SecretFinding, scan_added, scan_edit};
 pub use unified_diff::{PatchError, apply_unified_diff};
 
 /// What review mode covers, for the status bar and the docs.
@@ -216,6 +218,7 @@ pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
     let review = cx.new(|cx| AgentReview {
         enabled: review_mode(cx),
         fs: fs.clone(),
+        scan_secrets: true,
         ..AgentReview::default()
     });
     cx.set_global(GlobalAgentReview(review.clone()));
@@ -486,6 +489,8 @@ pub struct Review {
     error: Option<String>,
     /// For a delete, move or copy: what happens when it is accepted.
     operation: Option<String>,
+    /// Secret-looking values in the lines the edit adds (plan 7.3), shown as a warning.
+    secrets: Vec<SecretFinding>,
 }
 
 impl Review {
@@ -495,6 +500,11 @@ impl Review {
 
     pub fn session_id(&self) -> &acp_v2::SessionId {
         &self.session_id
+    }
+
+    /// Secret-looking values in the lines the edit adds.
+    pub fn secrets(&self) -> &[SecretFinding] {
+        &self.secrets
     }
 
     pub fn turn(&self) -> TurnId {
@@ -581,6 +591,9 @@ pub struct AgentReview {
     pending_proposals: HashMap<ReviewId, String>,
     /// Review comments for the agent (plan 7.2).
     comments: review_comments::Comments,
+    /// Agent edits that add a secret-looking value are held for review whatever the mode
+    /// (plan 7.3, [`secret_scan`]). On in the app; off in [`AgentReview::default`] (tests).
+    scan_secrets: bool,
 }
 
 /// What the rules make of a change, once its paths are resolved.
@@ -916,7 +929,17 @@ impl AgentReview {
     /// Whether any agent change may need review now: review mode is on, or a project restricts
     /// something. While neither holds, the gate lets everything through without looking at it.
     pub fn wants_review(&self) -> bool {
-        self.enabled || self.rules.iter().any(ReviewRules::has_restrictions)
+        self.enabled || self.scan_secrets || self.rules.iter().any(ReviewRules::has_restrictions)
+    }
+
+    /// Whether the secret scan is on and finds a secret in the lines `edit` adds.
+    fn adds_secret(&self, edit: &ProposedEdit) -> bool {
+        self.scan_secrets && !secret_scan::scan_edit(edit).is_empty()
+    }
+
+    /// Turns the secret scan of agent edits on or off (plan 7.3).
+    pub fn set_scan_secrets(&mut self, scan_secrets: bool) {
+        self.scan_secrets = scan_secrets;
     }
 
     /// Replaces the file system paths are resolved through (tests).
@@ -1363,6 +1386,14 @@ impl AgentReview {
         cx: &mut Context<Self>,
     ) {
         let turn = self.turn_for(&session_id);
+        let secrets = secret_scan::scan_edit(&edit);
+        if !secrets.is_empty() {
+            log::warn!(
+                "fyx: agent review: {} adds {} secret-looking values; held for review",
+                edit.abs_path().display(),
+                secrets.len()
+            );
+        }
         self.reviews.push(Review {
             id,
             turn,
@@ -1375,6 +1406,7 @@ impl AgentReview {
             closing: false,
             error: None,
             operation: None,
+            secrets,
         });
         cx.emit(AgentReviewEvent::Opened(id));
         cx.notify();
@@ -1420,6 +1452,8 @@ impl AgentReview {
             Some(RuleKind::AlwaysAsk) => None,
             None => self.turn_decision(turn),
         };
+        let decision = decision
+            .filter(|decision| *decision != HunkDecision::Accepted || !self.adds_secret(&edit));
         if let Some(decision) = decision {
             let mut edit = edit;
             edit.decide_pending(decision);
@@ -1484,10 +1518,27 @@ impl AgentReview {
             } = write;
             let rule = match verdict.await? {
                 RulesVerdict::PassThrough => {
-                    return Ok(AgentWriteOutcome {
-                        content: Some(new_text),
-                        feedback: None,
-                    });
+                    let scan = this.read_with(cx, |this, _| this.scan_secrets)?;
+                    // Review mode is off: only an edit that adds a secret stops for review.
+                    let (old_text, new_text, secret) = cx
+                        .background_spawn(async move {
+                            let secret =
+                                scan && !secret_scan::scan_added(&old_text, &new_text).is_empty();
+                            (old_text, new_text, secret)
+                        })
+                        .await;
+                    if !secret {
+                        return Ok(AgentWriteOutcome {
+                            content: Some(new_text),
+                            feedback: None,
+                        });
+                    }
+                    let edit = ProposedEdit::new(abs_path, old_text, new_text);
+                    return this
+                        .update(cx, |this, cx| {
+                            this.decide_write(session_id, edit, None, Vec::new(), cx)
+                        })?
+                        .await;
                 }
                 RulesVerdict::Review(rule) => rule,
             };
@@ -1560,6 +1611,9 @@ impl AgentReview {
             Some(RuleKind::AlwaysAsk) => None,
             _ => self.turn_decision(turn),
         };
+        // An edit that adds a secret is never accepted without the user (plan 7.3).
+        let decision = decision
+            .filter(|decision| *decision != HunkDecision::Accepted || !self.adds_secret(&edit));
         if let Some(decision) = decision {
             edit.decide_pending(decision);
         }
@@ -4066,7 +4120,8 @@ mod tests {
         let real = PathBuf::from(util::path!("/p/a.txt"));
         let dotted = PathBuf::from(util::path!("/p/src/../a.txt"));
 
-        // Review off: exactly as upstream, whatever the spelling.
+        // Review and the secret scan off: exactly as upstream, whatever the spelling.
+        review.update(cx, |review, _| review.set_scan_secrets(false));
         assert!(!review.read_with(cx, |review, _| review.wants_review()));
         thread
             .update(cx, |thread, cx| {
@@ -4629,6 +4684,83 @@ mod tests {
                 sent: 3
             }
         );
+    }
+
+    const WITH_KEY: &str = "one\ntwo\nthree\nfour\naws_access_key_id = AKIAQ3EGRV7XKD2MBS5T\n";
+
+    fn write_adding_a_key(path: &str, cx: &mut TestAppContext) -> AgentWrite {
+        let mut write = agent_write(path, cx);
+        write.new_text = WITH_KEY.into();
+        write
+    }
+
+    #[gpui::test]
+    async fn a_secret_is_held_for_review_with_review_mode_off(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, _| review.set_scan_secrets(true));
+        assert!(review.read_with(cx, |review, _| review.wants_review()));
+
+        // A clean edit passes as with review mode off.
+        let clean = gate_write(&review, agent_write("/p/a.txt", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(clean.content.as_deref(), Some(NEW));
+        assert!(review.read_with(cx, |review, _| review.reviews().is_empty()));
+
+        let held = gate_write(&review, write_adding_a_key("/p/b.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        review.read_with(cx, |review, _| {
+            let secrets = review.review(id).unwrap().secrets();
+            assert_eq!(secrets.len(), 1);
+            assert_eq!(secrets[0].kind, "AWS access key");
+            assert_eq!(secrets[0].line, 5);
+            assert_eq!(secrets[0].masked, "AKIA…BS5T");
+        });
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+        });
+        assert_eq!(held.await.unwrap().content, None);
+    }
+
+    #[gpui::test]
+    async fn accept_all_in_turn_does_not_accept_a_secret(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        review.update(cx, |review, cx| {
+            review.set_enabled(true, cx);
+            review.set_scan_secrets(true);
+        });
+        let first = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        let turn = review.read_with(cx, |review, _| review.review(id).unwrap().turn());
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Accepted, cx)
+                .unwrap()
+        });
+        assert_eq!(first.await.unwrap().content.as_deref(), Some(NEW));
+
+        // The turn accepts a later clean edit, but not one that adds a key.
+        let clean = gate_write(&review, agent_write("/p/b.txt", cx), cx)
+            .await
+            .unwrap();
+        assert_eq!(clean.content.as_deref(), Some(NEW));
+        let _held = gate_write(&review, write_adding_a_key("/p/c.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        review.read_with(cx, |review, _| {
+            let held = review.review(id).unwrap();
+            assert!(held.edit().resolution().is_pending());
+            assert_eq!(held.secrets().len(), 1);
+        });
+
+        // "Reject all in turn" still rejects one.
+        review.update(cx, |review, cx| {
+            review
+                .decide_turn(turn, HunkDecision::Rejected, cx)
+                .unwrap()
+        });
+        let rejected = gate_write(&review, write_adding_a_key("/p/d.txt", cx), cx);
+        assert_eq!(rejected.await.unwrap().content, None);
     }
 
     #[gpui::test]
