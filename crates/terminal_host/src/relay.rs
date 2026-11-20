@@ -447,5 +447,10 @@ mod tests {
         let env = relay.env();
         assert_eq!(env[0], (fyx_relay::RELAY_ENV.to_owned(), String::new()));
         assert_eq!(env[1].1, relay.endpoint.port().to_string());
+        let names = env
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, terminal_ext::env_hook::HOOK_HOST_NAMES);
     }
 }

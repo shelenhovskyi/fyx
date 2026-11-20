@@ -79,7 +79,7 @@ pub(crate) fn init(cx: &mut App) {
                     let this = cx.entity();
                     let window_active = window.is_window_active();
                     sessions.update(cx, |sessions, cx| {
-                        sessions.status_maybe_changed(&this, status, window_active, cx)
+                        sessions.status_maybe_changed(&this, terminal, status, window_active, cx)
                     });
                 }
             },
