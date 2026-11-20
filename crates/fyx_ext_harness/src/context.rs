@@ -1,4 +1,4 @@
-//! A fake editor for the staged `fyx:ui` 0.4 `context` (design.md B.11), with the host's path
+//! A fake editor for the `fyx:ui` 0.4 `context` (design.md B.11), with the host's path
 //! rules from `ui_ext::context` (W2c's 5.13), so an extension's path mapping, opening and
 //! selection feed run headless.
 //!

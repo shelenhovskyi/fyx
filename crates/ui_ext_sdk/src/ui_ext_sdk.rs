@@ -2,7 +2,7 @@
 //!
 //! Apache-2.0 so that extension authors, proprietary ones included, stay outside the GPL.
 //!
-//! The API is that of `fyx:ui@0.3.0`, which is staged: Dev and Nightly builds of Fyx run it. An
+//! The API is that of `fyx:ui@0.3.0`, which releases of Fyx run (0.1 to 0.4 are frozen). An
 //! extension implements [`Extension`] and exports it with [`register_extension!`]:
 //! `register_extension!(T)` exports 0.3, `register_extension!(T, v0_2)` exports 0.2 and
 //! `register_extension!(T, v0_1)` exports 0.1, all from the same code. Trees are
@@ -82,7 +82,7 @@ mod v0_2;
 pub use canvas::*;
 pub use host::*;
 
-/// The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the
+/// The bindings of the SDK's world: `fyx:ui@0.2.0`, or `fyx:ui@0.3.0` with the
 /// `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2
 /// component would list 0.3 interfaces.
 #[cfg(not(feature = "fyx-ui-0-3"))]
@@ -113,7 +113,7 @@ pub mod bindings {
     });
 }
 
-/// The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
+/// `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus [`terminals`],
 /// [`listeners`], [`context`], [`review`] and [`relay`].
 #[cfg(feature = "fyx-ui-0-4")]
 pub mod bindings {
@@ -168,7 +168,7 @@ pub use bindings::fyx::ui::workspace_edit::{EditError, FileEdit, TextEdit, Works
 pub use ui_ext::TreeLimits;
 
 /// The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor,
-/// patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature.
+/// patch): 0.2, or 0.3 with the `fyx-ui-0-3` feature.
 #[cfg(feature = "fyx-ui-0-4")]
 pub const API_VERSION: (u16, u16, u16) = (0, 4, 0);
 #[cfg(all(feature = "fyx-ui-0-3", not(feature = "fyx-ui-0-4")))]
@@ -1289,7 +1289,7 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
         index,
         indent: 0,
         nodes: tree.finish(),
-        // fyx:ui 0.4 (plan 6.7): staged; a plain row has no chevron.
+        // fyx:ui 0.4 (plan 6.7): a plain row has no chevron.
         #[cfg(feature = "fyx-ui-0-4")]
         expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
     };

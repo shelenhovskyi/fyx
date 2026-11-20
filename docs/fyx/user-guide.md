@@ -441,8 +441,8 @@ optional assets.
 ## Terminals and command-line tools (`fyx:ui` 0.4)
 
 This section describes `integration` at d8d8bd3c53 (2026-11-20), built from
-[the 0.4 design](wit-0.4/design.md). `fyx:ui` 0.4 is not frozen yet, so it loads only in Dev
-builds, and 0.4 extensions install from a folder (**Install Dev Extension…**), not from the
+[the 0.4 design](wit-0.4/design.md). `fyx:ui` 0.4 is frozen since 2026-11-20, so every build
+loads it. 0.4 extensions install from a folder (**Install Dev Extension…**) for now, not from the
 registry. Not built yet: Fyx profiles (below), and shell integration in zsh, fish and SSH
 terminals.
 

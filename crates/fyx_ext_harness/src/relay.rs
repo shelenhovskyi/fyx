@@ -1,4 +1,4 @@
-//! A fake relay endpoint for the staged `fyx:ui` 0.4 `relay` (design.md B.9), with the checks of
+//! A fake relay endpoint for the `fyx:ui` 0.4 `relay` (design.md B.9), with the checks of
 //! the host's (`ui_ext_wasm`'s relay requests, W1's `fyx_relay`): the channel is one of the
 //! manifest's `[[fyx_ui.relay_channels]]`, the extension declares `relay:hooks`, stdin and argv
 //! are at most [`MAX_RELAY_INPUT_BYTES`], at most [`MAX_RELAY_IN_FLIGHT`] requests wait, and each

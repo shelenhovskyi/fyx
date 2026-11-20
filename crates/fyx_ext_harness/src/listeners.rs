@@ -1,4 +1,4 @@
-//! Fake listeners for the staged `fyx:ui` 0.4 `network:listen` (design.md B.7), with the host's
+//! Fake listeners for the `fyx:ui` 0.4 `network:listen` (design.md B.7), with the host's
 //! checks (`ui_ext_wasm::listeners`, plan 5.11), so an extension's MCP or websocket server runs
 //! headless.
 //!
