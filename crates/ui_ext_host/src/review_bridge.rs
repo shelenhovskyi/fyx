@@ -15,29 +15,44 @@
 //! closes the review and returns its text with the hunks accepted so far; `close` drops the
 //! outcomes of the given reviews, which closes them. Neither sends an outcome.
 //!
+//! The comments the user sends on an extension's proposals (plan 7.2) wait in `agent_review`
+//! for the extension: on [`AgentReviewEvent::CommentsChanged`] the [`CommentsRouter`] takes them
+//! for each extension with a live instance and sends each batch, as `review-comments`, to the
+//! instance whose tool session it belongs to. Batches for an extension that is not running stay
+//! in `agent_review` until an instance watches.
+//!
 //! Each load has its own host object; ids are unique in the process.
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
 use acp_thread::fyx_review::AgentWrite;
-use agent_review::{AgentReview, ExtensionProposal, ProposalDecision, ReviewId};
+use agent_review::{
+    AgentReview, AgentReviewEvent, CommentBatch, ExtensionProposal, HunkDecision, ProposalDecision,
+    ReviewId,
+};
 use futures::{
     FutureExt as _,
     channel::oneshot,
     future::{Either, select},
 };
-use gpui::{App, AppContext as _, AsyncApp, Entity};
+use gpui::{App, AppContext as _, AsyncApp, Entity, Global, Subscription};
 use language::Buffer;
 use ui_ext::{
     process::FileRef,
-    review::{Decision, Proposal, Proposed, ReviewHost, ReviewOutcome, ReviewSink},
+    review::{
+        CommentState, CommentsSink, Decision, Proposal, Proposed, ReviewComment, ReviewComments,
+        ReviewHost, ReviewOutcome, ReviewSink,
+    },
 };
 
-use crate::main_thread::MainThread;
+use crate::{main_thread::MainThread, worktrees::OpenWorktrees};
 
 /// How long an extension thread waits for a review to open (the file may have to load).
 const PROPOSE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -67,13 +82,40 @@ pub fn for_extension(key: &str, cx: &mut App) -> Arc<dyn ReviewHost> {
         key: key.into(),
         main: MainThread::global(cx),
         open: OpenReviews::default(),
+        watch: NEXT_WATCH.fetch_add(1, Ordering::Relaxed),
+        watching: Mutex::new(false),
     })
 }
+
+/// Comment watches, one per host object.
+static NEXT_WATCH: AtomicU64 = AtomicU64::new(1);
 
 struct ExtensionReviews {
     key: Arc<str>,
     main: MainThread,
     open: OpenReviews,
+    /// This load's comment watch.
+    watch: u64,
+    /// Whether it watches comments.
+    watching: Mutex<bool>,
+}
+
+impl Drop for ExtensionReviews {
+    fn drop(&mut self) {
+        if !*self
+            .watching
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            return;
+        }
+        let watch = self.watch;
+        self.main.post(move |cx| {
+            if let Some(router) = cx.try_global::<CommentsRouter>() {
+                router.watchers().retain(|watcher| watcher.watch != watch);
+            }
+        });
+    }
 }
 
 impl ReviewHost for ExtensionReviews {
@@ -143,6 +185,17 @@ impl ReviewHost for ExtensionReviews {
                 review.end_turn(&session, cx);
             });
         });
+    }
+
+    fn watch_comments(&self, extension_id: &str, sink: CommentsSink) {
+        *self.watching.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        let watcher = CommentsWatcher {
+            extension_id: extension_id.into(),
+            key: self.key.clone(),
+            watch: self.watch,
+            sink,
+        };
+        self.main.post(move |cx| CommentsRouter::watch(watcher, cx));
     }
 
     fn close(&self, _extension_id: &str, ids: &[u64]) {
@@ -256,6 +309,143 @@ async fn open_review(
     })
     .detach();
     Ok(())
+}
+
+/// One instance that takes the comments on its extension's proposals.
+struct CommentsWatcher {
+    extension_id: Arc<str>,
+    /// What the instance's worktree ids are keyed by.
+    key: Arc<str>,
+    watch: u64,
+    sink: CommentsSink,
+}
+
+/// The instances watching comments, and the subscription to agent review. Main thread only.
+#[derive(Default)]
+pub(crate) struct CommentsRouter {
+    watchers: Mutex<Vec<CommentsWatcher>>,
+    subscription: Mutex<Option<Subscription>>,
+}
+
+impl Global for CommentsRouter {}
+
+impl CommentsRouter {
+    fn watchers(&self) -> std::sync::MutexGuard<'_, Vec<CommentsWatcher>> {
+        self.watchers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Adds the instance (in place of an earlier watch of the same load) and sends it what waits.
+    fn watch(watcher: CommentsWatcher, cx: &mut App) {
+        {
+            let mut watchers = cx.default_global::<Self>().watchers();
+            watchers.retain(|kept| kept.watch != watcher.watch);
+            watchers.push(watcher);
+        }
+        let Some(review) = AgentReview::global(cx) else {
+            return;
+        };
+        let subscribed = cx
+            .global::<Self>()
+            .subscription
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        if !subscribed {
+            let subscription = cx.subscribe(&review, |review, event, cx| {
+                if *event == AgentReviewEvent::CommentsChanged {
+                    Self::deliver(&review, cx);
+                }
+            });
+            *cx.global::<Self>()
+                .subscription
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(subscription);
+        }
+        Self::deliver(&review, cx);
+    }
+
+    /// Takes the batches of every watched extension and sends each to the instance of its tool
+    /// session's extension (the newest, after a reload).
+    fn deliver(review: &Entity<AgentReview>, cx: &mut App) {
+        let Some(router) = cx.try_global::<Self>() else {
+            return;
+        };
+        let extension_ids = router
+            .watchers()
+            .iter()
+            .map(|watcher| watcher.extension_id.clone())
+            .collect::<Vec<_>>();
+        let mut names = Vec::new();
+        for extension_id in extension_ids {
+            let name = crate::UiExtensionRegistry::global(cx)
+                .map(|registry| registry.read(cx).provenance_name(&extension_id))
+                .unwrap_or_else(|| extension_id.to_string().into());
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let batches = review.update(cx, |review, _| {
+            names
+                .iter()
+                .flat_map(|name| review.take_extension_comments(name))
+                .collect::<Vec<_>>()
+        });
+        if batches.is_empty() {
+            return;
+        }
+        let open = OpenWorktrees::global(cx);
+        let Some(router) = cx.try_global::<Self>() else {
+            return;
+        };
+        let watchers = router.watchers();
+        for batch in batches {
+            let session_id = batch.session_id.to_string();
+            let target = watchers.iter().rev().find_map(|watcher| {
+                session_id
+                    .strip_prefix(&session_key(&watcher.extension_id, ""))
+                    .map(|session| (watcher, session.to_string()))
+            });
+            match target {
+                Some((watcher, session)) => {
+                    (watcher.sink)(review_comments(batch, session, &watcher.key, &open));
+                }
+                None => log::warn!(
+                    "fyx: review comments for {session_id} have no running extension; dropped"
+                ),
+            }
+        }
+    }
+}
+
+/// A batch as the extension reads it: its own `file-ref`s and 1-based lines. A comment on a file
+/// in none of its worktrees is left out (the prompt still has it).
+fn review_comments(
+    batch: CommentBatch,
+    session: String,
+    key: &str,
+    open: &OpenWorktrees,
+) -> ReviewComments {
+    ReviewComments {
+        session,
+        comments: batch
+            .comments
+            .into_iter()
+            .filter_map(|comment| {
+                Some(ReviewComment {
+                    path: open.file_ref(key, &comment.path)?,
+                    lines: comment.rows.map(|rows| (rows.start + 1, rows.end)),
+                    state: match comment.decision {
+                        HunkDecision::Accepted => CommentState::Accepted,
+                        HunkDecision::Rejected => CommentState::Rejected,
+                        HunkDecision::Pending => CommentState::Pending,
+                    },
+                    excerpt: comment.excerpt,
+                    text: comment.text,
+                })
+            })
+            .collect(),
+        prompt: batch.prompt,
+    }
 }
 
 /// `withdraw` on the main thread: the review closes and its text so far comes back; an id that

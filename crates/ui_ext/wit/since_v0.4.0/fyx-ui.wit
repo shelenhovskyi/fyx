@@ -1,7 +1,9 @@
-// STAGED: fyx:ui 0.4.0 (platform plan P5, task 5.5). Draft by W2c from docs/fyx/wit-0.4/design.md
-// "WIT diff"; W0 stages it as crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit. Not frozen: any part may
-// change until the 0.4 freeze. Plan 4.2-4.4 (decoration extras, picker, code lens, hover, virtual
-// documents, commands; wit-0.3/design.md sections 1-6) join this world in a later step.
+// FROZEN: fyx:ui 0.4.0, frozen after the P5 security review (platform plan 5.19,
+// tasks/reviews/p5-security-0.4.md) with settings (plan 6.1), review comments (7.2), published
+// diagnostics (6.6) and tree rows with file decorations (6.7). Only the integrator (W0) edits this
+// file, and only comments; any other change goes into the next version. Design:
+// docs/fyx/wit-0.4/design.md. Plan 4.2-4.4 (decoration extras, picker, code lens, hover, virtual
+// documents, commands; wit-0.3/design.md sections 1-6) join a later world.
 //
 // Everything of 0.3 is copied forward from ../since_v0.3.0/fyx-ui.wit, byte for byte except where a
 // comment says "0.4".

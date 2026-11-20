@@ -16,6 +16,7 @@ use util::path;
 
 use super::*;
 use crate::worktrees::{OpenWorktree, OpenWorktrees};
+use ui_ext::review::{CommentState, ReviewComments};
 
 const WORKSPACE: u64 = 1;
 
@@ -87,6 +88,16 @@ async fn propose(
         .await;
     cx.run_until_parked();
     result
+}
+
+fn host(cx: &mut TestAppContext) -> ExtensionReviews {
+    ExtensionReviews {
+        key: "ext".into(),
+        main: cx.update(MainThread::global),
+        open: OpenReviews::default(),
+        watch: NEXT_WATCH.fetch_add(1, Ordering::Relaxed),
+        watching: Mutex::new(false),
+    }
 }
 
 fn review(cx: &mut TestAppContext) -> Entity<AgentReview> {
@@ -195,11 +206,7 @@ async fn test_rejected_and_unapplied(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn test_withdraw_and_close(cx: &mut TestAppContext) {
     let (_, _project) = setup(true, cx).await;
-    let host = ExtensionReviews {
-        key: "ext".into(),
-        main: cx.update(MainThread::global),
-        open: OpenReviews::default(),
-    };
+    let host = host(cx);
     let outcomes = Outcomes::default();
     let new = Proposed::NewContent("1\n".into());
     propose(
@@ -241,6 +248,72 @@ async fn test_withdraw_and_close(cx: &mut TestAppContext) {
         0
     );
     assert!(outcomes.lock().unwrap().is_empty(), "no outcome for either");
+}
+
+/// Comments sent on an extension's proposals reach its instance as `review-comments`: those sent
+/// before it watches when it starts, later ones on `CommentsChanged`; a gone instance stops.
+#[gpui::test]
+async fn test_review_comments_reach_the_instance(cx: &mut TestAppContext) {
+    let (_, _project) = setup(true, cx).await;
+    let host = host(cx);
+    let outcomes = Outcomes::default();
+
+    let comment = |index: usize, text: &str, cx: &mut TestAppContext| {
+        review(cx).update(cx, |review, cx| {
+            let id = review.reviews()[index].id();
+            review.set_comment(id, 0, Some(text.into()), cx).unwrap();
+            review
+                .send_comments(&session_key("ext", "s1").into(), cx)
+                .unwrap();
+        });
+        cx.run_until_parked();
+    };
+    let new = Proposed::NewContent("1\ntwo\nthree\n".into());
+    propose(
+        1,
+        proposal("a.txt", new.clone(), false),
+        &outcomes,
+        &host.open,
+        cx,
+    )
+    .await
+    .unwrap();
+    comment(0, "why a digit?", cx);
+
+    let received = Arc::new(Mutex::new(Vec::<ReviewComments>::new()));
+    let sink = received.clone();
+    host.watch_comments(
+        "ext",
+        Arc::new(move |comments| sink.lock().unwrap().push(comments)),
+    );
+    cx.run_until_parked();
+    {
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1, "the waiting batch, at once");
+        assert_eq!(received[0].session, "s1");
+        let [comment] = received[0].comments.as_slice() else {
+            panic!("one comment: {:?}", received[0].comments);
+        };
+        assert_eq!(comment.path.path, "a.txt");
+        assert!(comment.path.worktree.is_some(), "the extension's own id");
+        assert_eq!(comment.lines, Some((1, 1)));
+        assert_eq!(comment.state, CommentState::Pending);
+        assert_eq!(comment.text, "why a digit?");
+        assert!(received[0].prompt.contains("why a digit?"));
+    }
+
+    propose(2, proposal("a.txt", new, false), &outcomes, &host.open, cx)
+        .await
+        .unwrap();
+    comment(1, "and here?", cx);
+    assert_eq!(received.lock().unwrap().len(), 2, "on CommentsChanged");
+
+    drop(host);
+    cx.run_until_parked();
+    assert!(
+        cx.update(|cx| cx.global::<CommentsRouter>().watchers().is_empty()),
+        "a dropped load stops watching"
+    );
 }
 
 /// Always reviewed: with review mode off, and with `auto_accept` matching every file (W5's

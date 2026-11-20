@@ -106,6 +106,11 @@ fn review_io_event(
     None
 }
 
+/// 0.3 has no proposed edits, so no comments on them.
+fn review_comments_io_event(_: ui_ext::review::ReviewComments) -> Option<wit_io::IoEvent> {
+    None
+}
+
 /// 0.3 has no approval cards.
 fn approval_io_event(
     _: u64,

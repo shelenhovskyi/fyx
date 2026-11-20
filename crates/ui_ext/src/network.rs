@@ -139,6 +139,9 @@ pub enum IoEvent {
     /// fyx:ui 0.4 `review:propose`: proposal `id` was decided, or its review ended without a
     /// decision (§B.10).
     ReviewDecided(u64, Result<crate::review::ReviewOutcome, String>),
+    /// fyx:ui 0.4 `review:propose`: the user sent comments on the extension's proposals of one
+    /// tool session (§B.10, plan 7.2).
+    ReviewComments(crate::review::ReviewComments),
     /// fyx:ui 0.4 `relay:hooks`: a hook ran `fyx-relay` on a declared channel (§B.9).
     RelayRequest(crate::integration::RelayRequest),
     /// fyx:ui 0.4 `settings` (design wit-0.4 §D.4): the keys whose effective value changed, in
