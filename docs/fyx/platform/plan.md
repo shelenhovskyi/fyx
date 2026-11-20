@@ -322,6 +322,25 @@ starts from these and looks for the same faults everywhere else.
      the same name;
    - "Default (no profile)" becomes "The tool's default account (~/.claude)", naming the dir.
 
+### Day-3 Mac check (2026-11-20)
+
+The owner's verdicts from the day-3 check on the Mac build (notes in
+`D:\fyx\user-check\day3-mac-RESULTS.md` on the dev box). No crashes. They add to 7.12 and 7.14:
+
+- **UX-1, Extensions page (7.12 case 4, W3):** each extension card fills the screen with text of
+  one weight, so almost nothing reads. Cards are collapsed by default (name, one-line summary,
+  enable switch, an "Adds" line); expanding shows the grants grouped by tier, T0/T1 folded into
+  one line, T2 rows expandable with the warning style; the Usage log behind its own disclosure.
+  Done when two installed extensions fit on one screen collapsed.
+- **UX-2, terminal tab status (7.14 (c), W1 + W3):** the status icon, spinner, red dot, account
+  name ("Work") and title read as a row of statuses, and two Claude tabs look the same. One
+  compact indicator (one icon that changes: running, waiting for you, done, error) and the
+  session's own title, so two Claude tabs differ by what they are working on.
+- **UX-4, account badge (5.20, W1):** the owner did not recognise the account badge. Give it a
+  tooltip that says what it is ("Claude account: Work, from fyx.accounts"), or fold it into the
+  tab's colour edge from UX-2; same in the agent panel.
+- Agent Sessions noise and the "+" accounts menu (7.12 case 5) are handled in their own threads.
+
 ### 7.15 Agent-written mods
 
 Decided by the owner on 2026-11-20. The user asks the agent to change Fyx itself ("show the
