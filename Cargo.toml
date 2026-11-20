@@ -95,6 +95,7 @@ members = [
     "crates/fyx_guard_core", # fyx
     "crates/fyx_registry", # fyx
     "crates/fyx_relay", # fyx
+    "crates/fyx_history", # fyx
     "crates/fyx_update", # fyx
     "crates/fyx_update_host", # fyx
     "crates/git",
@@ -403,6 +404,7 @@ fyx_guard = { path = "crates/fyx_guard" } # fyx
 fyx_guard_core = { path = "crates/fyx_guard_core" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 fyx_relay = { path = "crates/fyx_relay" } # fyx
+fyx_history = { path = "crates/fyx_history" } # fyx
 fyx_update = { path = "crates/fyx_update" } # fyx
 fyx_update_host = { path = "crates/fyx_update_host" } # fyx
 git = { path = "crates/git" }
