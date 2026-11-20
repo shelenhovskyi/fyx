@@ -25,7 +25,7 @@ pub const SUPPORTED_API_VERSIONS: &[Version] = &[
 /// The newest frozen version, the host's `MAX_FROZEN_VERSION`. Newer ones are staged: dev builds
 /// of Fyx load them (debug builds, or a process started with `FYX_UI_DEV_EXTENSIONS`), releases
 /// refuse them until they are frozen.
-pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 3, 0);
+pub const MAX_FROZEN_API_VERSION: Version = Version::new(0, 4, 0);
 
 /// `[fyx_ui.network] domains` entries per manifest, the host's `network::MAX_DOMAINS`.
 pub const MAX_NETWORK_DOMAINS: usize = 64;
@@ -656,7 +656,7 @@ fn check_settings(table: &FyxUiTable, report: &mut Report) {
         table.settings.clone(),
     )) {
         Ok(specs) => report.note(format!(
-            "[[fyx_ui.settings]]: {} settings; the staged 0.4 host reads them once              design.md §D is built",
+            "[[fyx_ui.settings]]: {} settings (design.md §D)",
             specs.len()
         )),
         Err(why) => report.error(why),
@@ -1108,8 +1108,8 @@ choices = [{ value = "error", title = "Error" }, { value = "warning", title = "W
 
         let (_, report) = check(&manifest("0.4.0", capabilities, &tables));
         assert!(report.errors.is_empty(), "{report:?}");
-        assert_eq!(report.warnings.len(), 1, "{report:?}");
-        assert!(report.warnings[0].contains("0.4.0 is staged"), "{report:?}");
+        // 0.4 is frozen (plan 5.19): no staged warning.
+        assert!(report.warnings.is_empty(), "{report:?}");
 
         // Below 0.4 the tables and their capabilities are refused.
         let (_, report) = check(&manifest("0.3.0", capabilities, &tables));
