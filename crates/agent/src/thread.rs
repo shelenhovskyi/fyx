@@ -3546,6 +3546,9 @@ impl Thread {
         owning_message_ix: usize,
         tool_result: LanguageModelToolResult,
     ) -> Result<(), anyhow::Error> {
+        // fyx: the agent, the thread and the provider see secret references, not values.
+        let tool_result =
+            cx.update(|cx| crate::fyx_tool_output::redact_tool_result(tool_result, cx));
         log::debug!("Tool finished {:?}", tool_result);
 
         event_stream.update_tool_call_fields(

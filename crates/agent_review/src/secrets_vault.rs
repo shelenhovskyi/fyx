@@ -117,7 +117,8 @@ impl SecretApprover for WindowApprover {
         }
         let detail = format!(
             "Only this command gets the values, in its environment. The agent sees only the \
-             references, also in the command's output.\n\n{command}"
+             references, also in the command's output. A command that changes the value or \
+             sends it to a server can still leak it.\n\n{command}"
         );
         let answer = window.update(cx, |_, window, cx| {
             window.prompt(
