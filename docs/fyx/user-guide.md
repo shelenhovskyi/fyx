@@ -278,7 +278,7 @@ style, with your theme. Each extension runs in its own sandbox:
 - no network: every connection attempt fails with "access denied";
 - at most 256 MiB of memory;
 - a time limit on every call. An extension that runs too long or crashes is disabled until you
-  you restart it (see [Failures and restarts](#failures-and-restarts)).
+  restart it (see [Failures and restarts](#failures-and-restarts)).
 
 Links in an extension's markdown open only if they are `http(s)://` addresses, and only after you
 confirm the address.
