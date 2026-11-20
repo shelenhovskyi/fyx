@@ -191,11 +191,11 @@ impl Render for AgentSessionsPanel {
                     .py_1()
                     .border_t_1()
                     .border_color(cx.theme().colors().border_variant)
-                    .child(
-                        Label::new(line)
-                            .size(LabelSize::Small)
-                            .color(if reached { Color::Warning } else { Color::Muted }),
-                    )
+                    .child(Label::new(line).size(LabelSize::Small).color(if reached {
+                        Color::Warning
+                    } else {
+                        Color::Muted
+                    }))
             }))
     }
 }

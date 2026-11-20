@@ -437,10 +437,26 @@ mod tests {
             Some(("Agents today: $1.50".into(), false))
         );
         assert_eq!(
-            today_line(&[], CapState::Under { spent: 0.0, cap: 5.0 }),
+            today_line(
+                &[],
+                CapState::Under {
+                    spent: 0.0,
+                    cap: 5.0
+                }
+            ),
             Some(("Agents today: $0.00 of the $5.00 cap".into(), false))
         );
-        assert!(today_line(&[usd(6.0)], CapState::Reached { spent: 6.0, cap: 5.0 }).unwrap().1);
+        assert!(
+            today_line(
+                &[usd(6.0)],
+                CapState::Reached {
+                    spent: 6.0,
+                    cap: 5.0
+                }
+            )
+            .unwrap()
+            .1
+        );
     }
 
     #[test]
