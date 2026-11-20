@@ -121,8 +121,16 @@ impl TerminalDecorations for TabStatus {
         if accounts.is_empty() {
             return status;
         }
-        // The account is always visible on the tab (design §C.6).
-        let tooltip = crate::accounts::describe(&accounts, cx).unwrap_or_default();
+        // The account is always visible on the tab (design §C.6): UX-2 and UX-4 make it a dot in
+        // the account's colour, named in its tooltip, so the tab reads as status, then title.
+        let tooltip = crate::accounts::describe(&accounts, cx)
+            .map(|accounts| {
+                format!(
+                    "{accounts}
+Accounts come from fyx.accounts; pick another in the terminal                      panel's + menu."
+                )
+            })
+            .unwrap_or_default();
         Some(
             h_flex()
                 .gap_1()
@@ -134,7 +142,7 @@ impl TerminalDecorations for TabStatus {
                         .children(
                             accounts
                                 .iter()
-                                .map(|account| crate::accounts::badge(account, cx)),
+                                .map(|account| crate::accounts::badge_dot(account, cx)),
                         )
                         .tooltip(Tooltip::text(tooltip)),
                 )
@@ -237,9 +245,11 @@ fn status_indicator(terminal: &TerminalExt) -> Option<AnyElement> {
             .gap_0p5()
             .children(started_by)
             .child(icon)
-            .when(status.attention, |this| {
-                this.child(Indicator::dot().color(Color::Accent))
-            })
+            // UX-2: one icon; the attention dot only where the icon does not already ask.
+            .when(
+                status.attention && status.state != StatusState::Blocked,
+                |this| this.child(Indicator::dot().color(Color::Accent)),
+            )
             .tooltip(move |_window, cx| Tooltip::with_meta(title.clone(), None, meta.clone(), cx))
             .into_any_element(),
     )

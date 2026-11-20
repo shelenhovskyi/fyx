@@ -160,17 +160,10 @@ fn theme_color(name: &str, cx: &App) -> Hsla {
     }
 }
 
-/// The account's name with a dot in its colour, for a tab or a sessions row.
-pub(crate) fn badge(badge: &AccountBadge, cx: &App) -> AnyElement {
-    h_flex()
-        .gap_0p5()
-        .child(Indicator::dot().color(Color::Custom(theme_color(&badge.color, cx))))
-        .child(
-            Label::new(badge.name.clone())
-                .size(LabelSize::XSmall)
-                .color(Color::Muted)
-                .single_line(),
-        )
+/// UX-2/UX-4: the tab's account mark, a dot in the account's colour; its name is in the tooltip.
+pub(crate) fn badge_dot(badge: &AccountBadge, cx: &App) -> AnyElement {
+    Indicator::dot()
+        .color(Color::Custom(theme_color(&badge.color, cx)))
         .into_any_element()
 }
 
@@ -250,7 +243,10 @@ pub(crate) fn menu_entries(window: &Window, cx: &App) -> Vec<MenuEntry> {
 enum MenuItem {
     Separator,
     /// "Default <Tool> account: <current>", with a choice per account.
-    Submenu { label: String, choices: Vec<Choice> },
+    Submenu {
+        label: String,
+        choices: Vec<Choice>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]

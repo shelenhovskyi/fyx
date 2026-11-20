@@ -171,6 +171,8 @@ pub(crate) struct Shared {
     pub(crate) status: Mutex<StatusModel>,
     pub(crate) origin: Mutex<Option<ExtensionOrigin>>,
     pub(crate) accounts: Mutex<Vec<AccountBadge>>,
+    /// Plan 7.14 (b): the tab's title until the program sets its own (OSC 0/2).
+    pub(crate) fallback_title: Mutex<Option<String>>,
     pub(crate) raw_tap: Option<Tap>,
 }
 
@@ -328,6 +330,7 @@ impl TerminalExt {
                 status: Mutex::default(),
                 origin: Mutex::default(),
                 accounts: Mutex::default(),
+                fallback_title: Mutex::default(),
                 raw_tap,
             }),
             pseudo: None,
@@ -366,6 +369,27 @@ impl TerminalExt {
             id: self.id,
             shared: self.shared.clone(),
         }
+    }
+
+    /// Plan 7.14 (b): a profile terminal's tab reads the program's own title (OSC 0/2, which
+    /// Claude Code sets to the session's topic) and this until it sets one.
+    pub fn fallback_title(&self) -> Option<String> {
+        lock(&self.shared.fallback_title).clone()
+    }
+
+    pub fn set_fallback_title(&self, title: Option<String>) {
+        *lock(&self.shared.fallback_title) = title;
+    }
+
+    /// The tab title for a terminal with a fallback title: the program's title when it set one.
+    pub fn tab_title(&self, program_title: &str) -> Option<String> {
+        let fallback = self.fallback_title()?;
+        let program_title = program_title.trim();
+        Some(if program_title.is_empty() {
+            fallback
+        } else {
+            program_title.to_owned()
+        })
     }
 
     /// The account profiles the terminal was started with (design §C.6), for its tab.
@@ -434,6 +458,16 @@ impl Drop for TerminalExt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plan 7.14 (b): a profile tab shows the program's own title once it sets one.
+    #[test]
+    fn a_profile_tab_reads_the_program_title_then_the_fallback() {
+        let ext = TerminalExt::new();
+        assert_eq!(ext.tab_title("Fix login bug"), None, "no fallback: upstream's title");
+        ext.set_fallback_title(Some("Claude Code".into()));
+        assert_eq!(ext.tab_title("  "), Some("Claude Code".into()));
+        assert_eq!(ext.tab_title("Fix login bug"), Some("Fix login bug".into()));
+    }
 
     #[test]
     fn insert_env_sets_id_and_token_and_registers_the_token() {

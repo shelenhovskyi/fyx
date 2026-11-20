@@ -1341,7 +1341,10 @@ fn subscribe_for_terminal_events(
                         cx,
                     ),
                 },
-                Event::BreadcrumbsChanged => cx.emit(ItemEvent::UpdateBreadcrumbs),
+                Event::BreadcrumbsChanged => {
+                    cx.emit(ItemEvent::UpdateBreadcrumbs);
+                    cx.emit(ItemEvent::UpdateTab); // fyx: plan 7.14, the tab shows OSC titles
+                }
                 Event::CloseTerminal => cx.emit(ItemEvent::CloseItem),
                 Event::SelectionsChanged => {
                     window.invalidate_character_coordinates();
@@ -1721,6 +1724,9 @@ impl Item for TerminalView {
             return custom_title.clone().into();
         }
         let terminal = self.terminal().read(cx);
+        if let Some(title) = terminal.fyx.tab_title(&terminal.breadcrumb_text) {
+            return title.into(); // fyx: plan 7.14, a profile terminal's own title
+        }
         terminal.title(detail == 0).into()
     }
 
