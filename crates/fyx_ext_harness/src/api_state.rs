@@ -85,6 +85,9 @@ pub enum HostEffect {
     },
     /// `progress-end` of a running progress, with no event.
     ProgressEnd { id: u64 },
+    /// 0.4 `settings.open` (design.md §D.4), from an event call: show the extension's Settings
+    /// tab, scrolled to `key` (a declared one) when given.
+    OpenSettings { key: Option<String> },
 }
 
 /// A transient activation (design.md, C): granted by `handle-event` for a click or Enter, it lasts
@@ -101,6 +104,14 @@ fn host_error(code: model::HostErrorCode, message: impl Into<String>) -> model::
         code,
         message: message.into(),
     }
+}
+
+/// `settings.get` or `open` of a key `[[fyx_ui.settings]]` does not declare.
+pub(crate) fn undeclared_setting(key: &str) -> model::HostError {
+    host_error(
+        model::HostErrorCode::InvalidArgument,
+        format!("no setting {key:?} is declared in [[fyx_ui.settings]]"),
+    )
 }
 
 fn api_error(error: ApiError) -> model::HostError {
@@ -1174,6 +1185,28 @@ impl ApiState {
     /// The prompts the call that just finished asked for.
     pub(crate) fn take_permission_requests(&mut self) -> Vec<&'static str> {
         std::mem::take(&mut self.permission_requests)
+    }
+
+    /// 0.4 `settings.open`: only while the user acts on one of the extension's surfaces
+    /// (`not-permitted` otherwise), and only for a declared key (`invalid-argument`).
+    pub(crate) fn open_settings(
+        &mut self,
+        settings: &crate::settings::FakeSettings,
+        key: Option<String>,
+    ) -> Result<(), model::HostError> {
+        if !self.take_activation() {
+            return Err(host_error(
+                model::HostErrorCode::NotPermitted,
+                "settings.open needs the user acting on one of the extension's surfaces",
+            ));
+        }
+        if let Some(key) = &key
+            && settings.get(key).is_none()
+        {
+            return Err(undeclared_setting(key));
+        }
+        self.effects.push(HostEffect::OpenSettings { key });
+        Ok(())
     }
 
     fn take_activation(&mut self) -> bool {

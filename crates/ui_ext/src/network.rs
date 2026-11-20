@@ -141,6 +141,9 @@ pub enum IoEvent {
     ReviewDecided(u64, Result<crate::review::ReviewOutcome, String>),
     /// fyx:ui 0.4 `relay:hooks`: a hook ran `fyx-relay` on a declared channel (§B.9).
     RelayRequest(crate::integration::RelayRequest),
+    /// fyx:ui 0.4 `settings` (design wit-0.4 §D.4): the keys whose effective value changed, in
+    /// manifest order.
+    SettingsChanged(Vec<String>),
 }
 
 /// The state of a T2 capability for one extension: the WIT `permission-state` (design.md §7).

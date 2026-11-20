@@ -28,8 +28,8 @@ use bindings::fyx::ui::{
     agent_observe as wit_observe, context as wit_context, decorations as wit_decorations,
     host as wit_host, images as wit_images, io as wit_io, listeners as wit_listeners,
     network as wit_network, notifications as wit_notifications, permissions as wit_permissions,
-    process as wit_process, relay as wit_relay, review as wit_review, terminals as wit_terminals,
-    types as wit, workspace_edit as wit_edit,
+    process as wit_process, relay as wit_relay, review as wit_review, settings as wit_settings,
+    terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
 };
 
 fn result(
@@ -64,6 +64,7 @@ pub(crate) fn add_to_linker(
     wit_context::add_to_linker::<_, State>(linker, |state| state)?;
     wit_review::add_to_linker::<_, State>(linker, |state| state)?;
     wit_relay::add_to_linker::<_, State>(linker, |state| state)?;
+    wit_settings::add_to_linker::<_, State>(linker, |state| state)?;
     Ok(())
 }
 
@@ -425,6 +426,7 @@ pub(crate) fn io_event(event: ui_ext::network::IoEvent) -> Option<wit_io::IoEven
             request.argv,
             request.stdin,
         ))),
+        net::IoEvent::SettingsChanged(keys) => Some(wit_io::IoEvent::SettingsChanged(keys)),
     }
 }
 
@@ -528,9 +530,10 @@ fn agent_event(event: ui_ext::observe::AgentEvent) -> wit_observe::AgentEvent {
 }
 
 /// The `fyx:ui` 0.4 interfaces [`add_to_linker`] links.
-const LINKED_INTERFACES: [&str; 15] = [
+const LINKED_INTERFACES: [&str; 16] = [
     "terminals",
     "relay",
+    "settings",
     "listeners",
     "context",
     "review",
@@ -1598,6 +1601,53 @@ fn wit_review_outcome(outcome: ui_ext::review::ReviewOutcome) -> wit_review::Rev
             Decision::Rejected => wit_review::Decision::Rejected,
         },
         final_content: outcome.final_content,
+    }
+}
+
+/// `settings`, on [`crate::settings::FakeSettings`] (design.md §D.4): no capability.
+impl wit_settings::Host for State {
+    fn get(
+        &mut self,
+        key: String,
+    ) -> wasmtime::Result<Result<wit_settings::SettingValue, wit_host::HostError>> {
+        self.count_lifted_text(key.len())?;
+        Ok(match self.settings.get(&key) {
+            Some(setting) => Ok(wit_setting_value(setting.value.clone())),
+            None => Err(crate::api_state::undeclared_setting(&key).into()),
+        })
+    }
+
+    fn all(&mut self) -> wasmtime::Result<Vec<wit_settings::Setting>> {
+        Ok(self
+            .settings
+            .effective()
+            .iter()
+            .map(|setting| wit_settings::Setting {
+                key: setting.key.clone(),
+                value: wit_setting_value(setting.value.clone()),
+                is_default: setting.is_default,
+            })
+            .collect())
+    }
+
+    fn open(&mut self, key: Option<String>) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(key.as_ref().map_or(0, String::len))?;
+        Ok(self
+            .api
+            .open_settings(&self.settings, key)
+            .map_err(Into::into))
+    }
+}
+
+fn wit_setting_value(value: crate::settings::SettingValue) -> wit_settings::SettingValue {
+    use crate::settings::SettingValue as Value;
+    match value {
+        Value::Boolean(value) => wit_settings::SettingValue::Boolean(value),
+        Value::Integer(value) => wit_settings::SettingValue::Integer(value),
+        Value::Number(value) => wit_settings::SettingValue::Number(value),
+        Value::Text(value) => wit_settings::SettingValue::Text(value),
+        Value::Choice(value) => wit_settings::SettingValue::Choice(value),
+        Value::TextList(value) => wit_settings::SettingValue::TextList(value),
     }
 }
 
