@@ -28,9 +28,9 @@
 
 pub mod hooks;
 pub mod ide;
-pub mod zsh;
 #[cfg(feature = "fyx-ui-0-4")]
 mod wired;
+pub mod zsh;
 
 #[cfg(feature = "fyx-ui-0-4")]
 use std::collections::BTreeMap;

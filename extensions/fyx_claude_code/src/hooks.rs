@@ -468,10 +468,15 @@ mod tests {
             )
         };
         let argv = |claude_code_shell: &str, shell: &str| {
-            ["--shell", claude_code_shell, shell].map(str::to_owned).to_vec()
+            ["--shell", claude_code_shell, shell]
+                .map(str::to_owned)
+                .to_vec()
         };
         let pushed = bash(r#"git push origin "$M:refs/heads/dev""#);
-        assert_eq!(pushed.command.as_deref(), Some(r#"git push origin "$M:refs/heads/dev""#));
+        assert_eq!(
+            pushed.command.as_deref(),
+            Some(r#"git push origin "$M:refs/heads/dev""#)
+        );
 
         let (exit, stdout, stderr) = answer(Some(&pushed), &argv("", "/bin/zsh"));
         assert_eq!((exit, stderr.as_str()), (0, ""));
@@ -479,7 +484,10 @@ mod tests {
         assert_eq!(stdout["hookSpecificOutput"]["permissionDecision"], "deny");
 
         let reported = (0, String::new(), String::new());
-        assert_eq!(answer(Some(&pushed), &argv("/bin/bash", "/bin/zsh")), reported);
+        assert_eq!(
+            answer(Some(&pushed), &argv("/bin/bash", "/bin/zsh")),
+            reported
+        );
         assert_eq!(answer(Some(&pushed), &argv("", "")), reported);
         assert_eq!(answer(Some(&pushed), &[]), reported);
         assert_eq!(answer(None, &argv("", "/bin/zsh")), reported);
