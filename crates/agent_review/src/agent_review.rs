@@ -39,7 +39,6 @@ use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::{Context as _, Result, anyhow};
 use fs::Fs;
 use futures::channel::oneshot;
-use gpui::Action as _;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
     Task, WeakEntity, Window,
@@ -47,7 +46,7 @@ use gpui::{
 use language::BufferEditSource;
 use project::{PathChange, Project};
 use settings::{RegisterSetting, Settings, SettingsStore};
-use ui::{ContextMenu, IconPosition};
+use ui::{ContextMenu, Switch, ToggleState, prelude::*};
 use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 
 use fyx_guard::paths::ResolvedPath;
@@ -202,17 +201,36 @@ pub fn set_review_mode_setting(enabled: bool, cx: &App) {
     });
 }
 
-/// The agent panel's options-menu toggle for review mode.
+/// The agent panel's options-menu toggle for review mode (plan 7.11): the label with a switch at
+/// the end, since a check-mark entry leaves an empty indent while off. While
+/// [`REVIEW_MODE_VAR`] overrides the setting, the row cannot be selected and its switch is
+/// disabled.
 pub fn review_mode_menu_entry(menu: ContextMenu, cx: &App) -> ContextMenu {
     let enabled = review_mode(cx);
-    menu.toggleable_entry_disabled_when(
-        "Review Agent Edits",
-        enabled,
-        review_mode_override(cx).is_some(),
-        IconPosition::Start,
-        Some(ToggleReviewMode.boxed_clone()),
-        move |_, cx| set_review_mode_setting(!enabled, cx),
-    )
+    let render = move |disabled: bool| {
+        move |_: &mut Window, _: &mut App| {
+            h_flex()
+                .w_full()
+                .gap_2()
+                .justify_between()
+                .child(
+                    Label::new("Review Agent Edits")
+                        .when(disabled, |label| label.color(Color::Disabled)),
+                )
+                .child(
+                    Switch::new("fyx-review-agent-edits", ToggleState::from(enabled))
+                        .disabled(disabled),
+                )
+                .into_any_element()
+        }
+    };
+    if review_mode_override(cx).is_some() {
+        menu.custom_row(render(true))
+    } else {
+        menu.custom_entry(render(false), move |_, cx| {
+            set_review_mode_setting(!enabled, cx)
+        })
+    }
 }
 
 /// `fs` is the app's file system, where confirmed review rules are remembered across restarts.
