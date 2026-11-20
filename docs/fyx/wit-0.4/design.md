@@ -971,6 +971,87 @@ The checks are written once, in the harness, as the reference. W2c ports them in
 - `open` outside an event call is `not-permitted`.
 - The harness and the host agree on every check (`harness_conformance`).
 
+## E. Diagnostics from extensions (plan 6.6)
+
+Plan 6.6 lets an extension report problems in files (a linter, a spell checker, a policy check) the
+way a language server does: squiggles in the editor, entries in the diagnostics panel and the
+status-bar counts, with the extension as the source. It is planned for "0.4 or the first post-1.0
+WIT"; the diff below fits either, and reuses the 0.4 `context` types of §B.11.
+
+### E.1 What the extension sees (`diagnostics:publish`, T1)
+
+- New capability `diagnostics:publish`, T1 ("Shows problems in your files"). It is independent of
+  `workspace:diagnostics` (reading what language servers report): a linter that only publishes
+  needs no read.
+- `context.publish-diagnostics(path, list<diagnostic>)` replaces this extension's diagnostics of
+  one file; an empty list clears them. `context.clear-diagnostics(none)` clears every file.
+- The `diagnostic` record of §B.11 is reused: `range` 0-based with UTF-8 byte columns, `severity`,
+  `message` (cut at 2 KiB), `code`. **`source` is ignored**: the host sets it to the extension's
+  display name, so an extension cannot pose as `rust-analyzer`.
+- Worktree files only: a `file-ref` in no worktree is `invalid-argument`, a private file
+  (`is_private_path`) is `not-permitted`.
+- Limits: 500 entries per file and 5,000 per extension (more is `invalid-argument` and changes
+  nothing); 20 publishes per second per extension (more is `unavailable`, retry later). A range
+  past the end of the file is clamped to it.
+- An extension's diagnostics last while it runs: stopping, crashing, uninstalling, disabling or
+  revoking the capability clears them all. A hot reload (1.3) clears them too; the new instance
+  publishes again.
+
+### E.2 Host side (W2c, W3)
+
+The project already shows diagnostics from any source through `LspStore::merge_diagnostic_entries`
+(public). Each running extension instance gets its own `LanguageServerId` from
+`project.languages().next_language_server_id()` per project; it is never registered as a server,
+so nothing sends LSP requests to it.
+
+- `publish-diagnostics` resolves the `file-ref` to an absolute path, converts each range to
+  `Unclipped<PointUtf16>` against the file's text (the open buffer's snapshot, or the file loaded
+  through the project's `Fs` when it is not open; columns are UTF-8 bytes in the WIT), and calls
+  `merge_diagnostic_entries` with one `DocumentDiagnosticsUpdate { server_id, diagnostics:
+  DocumentDiagnostics { document_abs_path, version: None, diagnostics }, result_id: None,
+  registration_id: None, disk_based_sources: &[] }` and a merge that keeps nothing old of that
+  server (`|_, _, _| false`).
+- Each entry is a `DiagnosticEntry` with `Diagnostic { source: Some(<display name>), severity,
+  message, code, source_kind: DiagnosticSourceKind::Other, is_primary: true, group_id: <unique per
+  entry>, .. }`.
+- Clearing is the same call with an empty list for each file the extension published; the host
+  keeps that set per instance.
+- The diagnostics panel, the editor and the status bar need no change: they follow
+  `Event::DiagnosticsUpdated` for any server id. Remote projects: local projects only in the first
+  version (a remote host has its own `LspStore`; the update would have to be forwarded).
+
+| Owner | Work |
+|---|---|
+| W0 | The WIT below; `diagnostics:publish` in the capability lists and the install-dialog text |
+| W2c | The import in `ui_ext_wasm`, the checks of §E.1, the limits |
+| W3 | The per-instance collection in `ui_ext_host`: server ids, conversion, publish, clear on stop, crash, reload, uninstall and revoke |
+| W4 | `fyx_sdk` wrapper and harness double; a linter demo (`fyx-lint-demo`: marks `TODO` lines) |
+
+### E.3 WIT diff
+
+In `interface context` (0.4 file, or the next world's copy), after `watch-diagnostics`:
+
+```wit
+    /// Plan 6.6, `diagnostics:publish`: replaces this extension's diagnostics of `path` (an empty
+    /// list clears them). `source` is ignored: the host names the extension. In no worktree is
+    /// `invalid-argument`, a private file `not-permitted`; over 500 entries per file or 5,000 per
+    /// extension is `invalid-argument`; over 20 calls a second is `unavailable`.
+    publish-diagnostics: func(path: file-ref, diagnostics: list<diagnostic>) -> result<_, host-error>;
+    /// `diagnostics:publish`: clears this extension's diagnostics of one file, or of every file
+    /// with `none`.
+    clear-diagnostics: func(path: option<file-ref>) -> result<_, host-error>;
+```
+
+### E.4 Tests
+
+- The linter demo publishes two entries in a worktree file: the editor shows them, the panel
+  lists them with the extension's name as source, and the status bar counts them.
+- `source: some("rust-analyzer")` is shown as the extension's name.
+- Publishing an empty list clears the file; stopping the extension clears every file.
+- A private file and a file outside the worktrees are refused and publish nothing.
+- 501 entries for one file are refused and leave the previous ones.
+- Columns: a line with a multi-byte character before the range lands on the same characters.
+
 ## WIT diff (for W0)
 
 Copy-forward rule: `types`, `host` and every 0.3 interface are copied byte for byte except where
