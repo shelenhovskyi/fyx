@@ -4,11 +4,15 @@
 //! and every check goes through `fyx_update`'s signature, channel, freshness and downgrade checks.
 //!
 //! Without a release key (`fyx_update::RELEASE_KEYS` is empty until the owner makes one), a check
-//! fetches nothing and says that updates are not set up in this build. Swapping the downloaded
-//! build in on restart (the install plan and the Windows helper) is the next step; until then
-//! "Install" downloads and verifies the build and shows where it is.
+//! fetches nothing and says that updates are not set up in this build.
+//!
+//! "Install" downloads and verifies the build and unpacks it beside the installed app; "Restart to
+//! Update" swaps it in with `fyx_update`'s rename plan (on Windows a helper does it after Fyx
+//! exits) and restarts. A new version that twice fails to stay up for a minute is rolled back
+//! on the next start; "fyx: roll back update" does it on request. Dev builds never swap anything.
 
 mod check;
+mod install;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,13 +32,17 @@ actions!(
     fyx,
     [
         /// Checks once whether a new Fyx release is out, even when `fyx.updates.check` is off.
-        CheckForUpdates
+        CheckForUpdates,
+        /// Restores the version Fyx had before its last update.
+        RollBackUpdate
     ]
 );
 
 /// How long after start the first automatic check runs, and how often after that.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long a new version must stay up to count as started.
+const STARTED_AFTER: Duration = Duration::from_secs(60);
 
 /// `fyx.updates` in settings (schema in `settings_content::FyxUpdatesSettingsContent`).
 #[derive(Clone, Debug, RegisterSetting)]
@@ -63,6 +71,8 @@ pub fn automatic_checks_enabled(cx: &App) -> bool {
 /// Registers the action and starts the daily check, which runs only while the setting is on.
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &CheckForUpdates, cx| run_check(true, cx));
+    cx.on_action(|_: &RollBackUpdate, cx| roll_back(cx));
+    watch_start(cx);
     cx.spawn(async move |cx| {
         cx.background_executor().timer(FIRST_CHECK_DELAY).await;
         loop {
@@ -173,42 +183,211 @@ fn notify_update(version: Version, artifact: Artifact, notes_url: String, cx: &m
     );
 }
 
-/// Downloads the build and checks it against the signed manifest. Swapping it in on restart is
-/// not wired up yet, so this says where the verified file is.
+/// Downloads the build, checks it against the signed manifest and unpacks it beside the
+/// installed app; then offers "Restart to Update".
 fn install(version: Version, artifact: Artifact, cx: &mut App) {
+    let layout = match current_layout(cx) {
+        Ok(layout) => layout,
+        Err(error) => {
+            notify(
+                format!("Fyx {version} cannot be installed here: {error:#}"),
+                cx,
+            );
+            return;
+        }
+    };
     let http = cx.http_client();
+    let staging = layout.clone();
     let task = cx.background_spawn(async move {
-        check::download(http.as_ref(), &artifact, &updates_dir()).await
+        let path = check::download(http.as_ref(), &artifact, &updates_dir()).await?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| anyhow::anyhow!("reading {}: {error}", path.display()))?;
+        install::stage(bytes, artifact.kind, &staging).await?;
+        std::fs::remove_file(&path)
+            .map_err(|error| anyhow::anyhow!("removing {}: {error}", path.display()))
     });
     cx.spawn(async move |cx| {
-        let downloaded = task.await;
-        cx.update(|cx| match downloaded {
-            Ok(path) => {
+        let staged = task.await;
+        cx.update(|cx| match staged {
+            Ok(()) => {
                 show_app_notification(NotificationId::unique::<UpdateNotification>(), cx, {
                     move |cx| {
-                        let path = path.clone();
+                        let version = version.clone();
+                        let layout = layout.clone();
                         cx.new(|cx| {
                             MessageNotification::new(
                                 format!(
-                                    "Fyx {version} is downloaded and matches the signed release. \
-                                     Installing it on restart is not built yet: install it from \
-                                     {}.",
-                                    path.display()
+                                    "Fyx {version} is downloaded and matches the signed release."
                                 ),
                                 cx,
                             )
-                            .primary_message("Show File")
-                            .primary_on_click(move |_, cx| cx.reveal_path(&path))
+                            .primary_message("Restart to Update")
+                            .primary_on_click(move |_, cx| {
+                                restart_into(Swap::Install(version.clone()), &layout, cx)
+                            })
                         })
                     }
                 });
             }
-            Err(error) => notify(format!("Could not download Fyx {version}: {error:#}"), cx),
+            Err(error) => notify(format!("Could not install Fyx {version}: {error:#}"), cx),
         });
     })
     .detach();
 }
 
+/// The installed app this Fyx runs from, with its staged and previous folders. Refused for dev
+/// builds, which run from a build folder.
+fn current_layout(cx: &App) -> anyhow::Result<fyx_update::Layout> {
+    if ReleaseChannel::global(cx) == ReleaseChannel::Dev {
+        anyhow::bail!("dev builds are never replaced by an update");
+    }
+    let exe = std::env::current_exe()?;
+    let installed = install::installed_location(&exe, std::env::consts::OS)
+        .ok_or_else(|| anyhow::anyhow!("{} is not inside an installed Fyx", exe.display()))?;
+    Ok(fyx_update::Layout::beside(&installed))
+}
+
+enum Swap {
+    Install(Version),
+    RollBack,
+}
+
+/// Swaps the staged (install) or previous (rollback) version in and restarts into it. On Windows
+/// the running exe cannot be moved, so a helper does the renames after Fyx exits.
+fn restart_into(swap: Swap, layout: &fyx_update::Layout, cx: &mut App) {
+    let (steps, staged_needed) = match &swap {
+        Swap::Install(_) => (fyx_update::install_plan(layout), true),
+        Swap::RollBack => (fyx_update::rollback_plan(layout), false),
+    };
+    let prepared = install::check_ready(layout, staged_needed).and_then(|()| match &swap {
+        Swap::Install(version) => install::write_pending(
+            &updates_dir(),
+            &install::Pending {
+                version: version.clone(),
+                installed: layout.installed.clone(),
+                failed_starts: 0,
+            },
+        ),
+        Swap::RollBack => install::mark_started(&updates_dir()),
+    });
+    if let Err(error) = prepared {
+        notify(format!("Could not update Fyx: {error:#}"), cx);
+        return;
+    }
+    if cfg!(windows) {
+        match spawn_windows_helper(&steps, layout) {
+            Ok(()) => cx.quit(),
+            Err(error) => {
+                forget_pending();
+                notify(format!("Could not start the update helper: {error:#}"), cx);
+            }
+        }
+        return;
+    }
+    match install::run_steps(&steps) {
+        Ok(()) => cx.restart(),
+        Err(error) => {
+            forget_pending();
+            notify(
+                format!("Could not update Fyx, nothing changed: {error:#}"),
+                cx,
+            );
+        }
+    }
+}
+
+fn forget_pending() {
+    if let Err(error) = install::mark_started(&updates_dir()) {
+        log::error!("fyx update: {error:#}");
+    }
+}
+
+/// Writes the helper script into the updates folder and starts it, detached, with this process's
+/// id, so it waits for Fyx to exit, runs `steps` and starts Fyx again.
+fn spawn_windows_helper(
+    steps: &[fyx_update::Step],
+    layout: &fyx_update::Layout,
+) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let relaunch = layout.installed.join(exe.strip_prefix(&layout.installed)?);
+    let dir = updates_dir();
+    std::fs::create_dir_all(&dir)?;
+    let script = install::windows_helper_script(
+        std::process::id(),
+        steps,
+        Some(&relaunch),
+        &dir.join("helper.log"),
+    );
+    let script_path = dir.join("helper.ps1");
+    std::fs::write(&script_path, script)?;
+    util::command::new_command("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&script_path)
+        .spawn()?;
+    Ok(())
+}
+
+/// At start: counts a start of a just-installed version, rolls back one that failed to start too
+/// often, and clears the record once the new version has been up for [`STARTED_AFTER`].
+fn watch_start(cx: &mut App) {
+    let running = AppVersion::global(cx);
+    let decision = match install::on_start(&updates_dir(), &running) {
+        Ok(decision) => decision,
+        Err(error) => {
+            log::error!("fyx update: {error:#}");
+            return;
+        }
+    };
+    match decision {
+        install::StartDecision::Nothing => {}
+        install::StartDecision::Watch(pending) => {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(STARTED_AFTER).await;
+                forget_pending();
+                cx.update(|cx| notify(format!("Fyx is updated to {}.", pending.version), cx));
+            })
+            .detach();
+        }
+        install::StartDecision::RollBack(pending) => {
+            let layout = fyx_update::Layout::beside(&pending.installed);
+            notify(
+                format!(
+                    "Fyx {} did not start properly twice, so the previous version is restored.",
+                    pending.version
+                ),
+                cx,
+            );
+            restart_into(Swap::RollBack, &layout, cx);
+        }
+        install::StartDecision::NotInstalled(pending) => notify(
+            format!(
+                "Fyx {} was not installed; this is still {running}. See {} for details.",
+                pending.version,
+                updates_dir().join("helper.log").display()
+            ),
+            cx,
+        ),
+    }
+}
+
+/// "fyx: roll back update": restores the previous version if one is kept.
+fn roll_back(cx: &mut App) {
+    match current_layout(cx) {
+        Ok(layout) if layout.previous.is_dir() => restart_into(Swap::RollBack, &layout, cx),
+        Ok(_) => notify(
+            "There is no previous version of Fyx to go back to.".to_owned(),
+            cx,
+        ),
+        Err(error) => notify(format!("Cannot roll back here: {error:#}"), cx),
+    }
+}
 #[cfg(test)]
 mod tests {
     use gpui::UpdateGlobal as _;

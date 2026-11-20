@@ -83,25 +83,28 @@ Built in `crates/fyx_update_host`:
   not set up in this build yet". A manual check also reports "up to date" and errors; an automatic
   one only reports a new version (errors go to the log).
 - A new version shows "Fyx X is available" with "Install" and "What's New". "Install" downloads
-  the artifact to `<data dir>/updates`, runs `check_artifact` (a file that fails is not kept), and
-  shows where the verified file is. The newest version seen is kept in
-  `<data dir>/updates/highest-seen`.
-- Tests run against a fake release server, signed with `fyx_update`'s throwaway test key
-  (seed `[7; 32]`).
-
-Still to build, as planned:
-
-- The update setting is off by default. When it is on, the host checks once a day and on
-  "fyx: check for updates".
-- The host downloads to `<data dir>/updates`, runs `check_artifact`, and unpacks into the staged
-  path.
-- macOS: the unpacked `.app` is ad-hoc signed, like local builds (see `docs/fyx/mac-build.md`).
-  Gatekeeper's quarantine attribute is not set by Fyx's own download, so the app opens without the
-  first-run prompt. This is a trade-off the owner accepted in 7.1.
-- Windows: a running exe cannot be renamed while Fyx is open. A small helper waits for Fyx to exit,
-  runs the plan, and starts the new version.
-- If the new version does not reach "started" within 60 seconds, two times in a row, the host
-  rolls back and tells the user. "fyx: roll back update" does the same on request.
+  the artifact to `<data dir>/updates`, runs `check_artifact` (a file that fails is not kept),
+  and unpacks it into the staged folder beside the installed app (`install::stage`: an archive
+  whose only entry is a folder stages that folder; zip entries that would leave it are skipped,
+  tar refuses them). The newest version seen is kept in `<data dir>/updates/highest-seen`.
+- "Restart to Update" writes `<data dir>/updates/pending.json` and runs the install plan.
+  `install::run_steps` undoes the renames already done when one fails, so the installed app is
+  never left missing. macOS and Linux run it at once and restart. On Windows a running exe cannot
+  be moved, so Fyx writes `<data dir>/updates/helper.ps1` and starts it hidden with its process id;
+  the helper waits for Fyx to exit, retries each rename for up to 10 seconds while Windows still
+  holds the files, undoes on failure, writes `ok` or the error to `helper.log`, and starts Fyx.
+- On each start with `pending.json` present: if another version runs than the one swapped in, the
+  swap did not happen and Fyx says so (pointing at `helper.log`). Otherwise the start is counted,
+  and after 60 seconds up the record is removed ("Fyx is updated to X"). A start that finds two
+  counted starts rolls back with the rollback plan and says why. "fyx: roll back update" does the
+  same on request while a previous version is kept.
+- Dev builds never swap anything: they run from a build folder.
+- macOS: the unpacked `.app` keeps the ad-hoc signature of its build (see
+  `docs/fyx/mac-build.md`); Fyx's own download sets no quarantine attribute, a trade-off the owner
+  accepted in 7.1.
+- Tests use temporary folders only: a fake release server signed with `fyx_update`'s throwaway
+  test key (seed `[7; 32]`), install and rollback with undo, the start record, zip staging, and on
+  Windows the helper script against a stand-in process.
 
 ## Open items
 
@@ -109,8 +112,7 @@ Still to build, as planned:
   public half goes into `RELEASE_KEYS`; the private half goes only into the release workflow's
   secret. No key is committed.
 - A release workflow that builds, writes the manifest, signs it, and uploads all the files.
-- Unpacking into the staged path, running the install plan on restart, the Windows helper, and
-  the 60-second rollback.
+- A check of the whole flow on a real release once the key and workflow exist.
 - Workspace lines for W0, the integrator, for `fyx_update_host` (all its dependencies are
   workspace crates already):
   - root `Cargo.toml` `members`: `"crates/fyx_update_host", # fyx`

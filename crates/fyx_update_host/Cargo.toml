@@ -15,6 +15,8 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
+async-tar.workspace = true
 futures.workspace = true
 fyx_update.workspace = true
 gpui.workspace = true
@@ -23,17 +25,21 @@ log.workspace = true
 paths.workspace = true
 release_channel.workspace = true
 semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 settings.workspace = true
+smol.workspace = true
 ui.workspace = true
+util.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+async_zip.workspace = true
 base64.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 hex.workspace = true
 http_client = { workspace = true, features = ["test-support"] }
 ring.workspace = true
-serde_json.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 sha2.workspace = true
 tempfile.workspace = true
