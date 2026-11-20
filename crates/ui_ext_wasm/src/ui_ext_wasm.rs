@@ -73,6 +73,7 @@ pub mod journal;
 mod accounts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod editor_context;
+mod extension_settings;
 mod listeners;
 pub mod network;
 pub mod observe;
@@ -347,6 +348,10 @@ pub struct UiManifest {
     /// 0.4: `[[fyx_ui.relay_channels]]`, for `relay:hooks` (§B.9).
     #[serde(default)]
     pub relay_channels: Vec<ui_ext::integration::RelayChannelSpec>,
+    /// 0.4: `[[fyx_ui.settings]]`, the extension's settings (design §D.1, plan 6.1); no
+    /// capability. Checked by [`UiManifest::settings_specs`].
+    #[serde(default)]
+    pub settings: Vec<ui_ext::settings::SettingEntry>,
 }
 
 /// What each world's manifest may declare (wit-0.3/migration.md §2): a capability a world cannot
@@ -556,6 +561,7 @@ impl UiManifest {
                     "[[fyx_ui.discovery_files]]",
                 ),
                 (!self.relay_channels.is_empty(), "[[fyx_ui.relay_channels]]"),
+                (!self.settings.is_empty(), "[[fyx_ui.settings]]"),
             ] {
                 anyhow::ensure!(
                     !present,
@@ -609,6 +615,12 @@ impl UiManifest {
         };
         let env = self.terminal_env.clone()?;
         terminal::check_terminal_env(env, &|name| integration.listener(name)).ok()
+    }
+
+    /// `[[fyx_ui.settings]]`, checked (design §D.1): the declarations the host computes the
+    /// effective values from. Empty without the table.
+    pub fn settings_specs(&self) -> Result<Vec<ui_ext::settings::SettingSpec>> {
+        ui_ext::settings::check_settings(&self.settings).map_err(anyhow::Error::msg)
     }
 
     /// The 0.4 terminal and integration tables (design §B, plan 5.5): each goes with its
@@ -838,6 +850,9 @@ impl UiManifest {
             .with_context(|| format!("extension {id}, in {path:?}"))?;
         manifest
             .check_terminals()
+            .with_context(|| format!("extension {id}, in {path:?}"))?;
+        manifest
+            .settings_specs()
             .with_context(|| format!("extension {id}, in {path:?}"))?;
         anyhow::ensure!(
             !manifest.component.is_empty()
@@ -1644,6 +1659,8 @@ pub struct UiExtension {
     review: Arc<proposals::ReviewHandle>,
     /// The 0.4 relay channels; unanswered requests fail open when the instance goes.
     relay: Arc<relay::RelayHandle>,
+    /// The 0.4 extension settings (design §D): declarations and effective values.
+    settings: Arc<extension_settings::SettingsHandle>,
 }
 
 /// Where a precompiled component (`.cwasm`) is kept: `<dir>/<stem>-<key>.cwasm`, where the key
@@ -1817,6 +1834,12 @@ pub struct LoadOptions {
     /// The `fyx-relay` binary, for `${relay}` in `terminal:env` values (§B.9); W1's glue fills
     /// it from `terminal_host::relay_binary`. Without it such a value is left out.
     pub relay_binary: Option<PathBuf>,
+    /// `[[fyx_ui.settings]]`, checked; set by [`UiExtension::load_checked`]. Applies only to a
+    /// 0.4 component (design §D).
+    pub settings: Option<Vec<ui_ext::settings::SettingSpec>>,
+    /// The extension's object under `fyx_extensions.<id>` in the **user** settings file at load,
+    /// never project settings (§D.2). Later changes go to [`UiExtension::set_user_settings`].
+    pub user_settings: Option<ui_ext::settings::RawValue>,
 }
 
 impl UiExtension {
@@ -1890,6 +1913,8 @@ impl UiExtension {
             diagnostics_source,
             relay_channels,
             relay_binary,
+            settings: setting_specs,
+            user_settings,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -2079,6 +2104,11 @@ impl UiExtension {
                     .unwrap_or_default(),
                 capability_check.clone(),
             ));
+            // 0.4 settings (§D): the declarations and the user's values at load.
+            let settings = Arc::new(extension_settings::SettingsHandle::new(
+                setting_specs.filter(|_| is_v0_4).unwrap_or_default(),
+                user_settings.as_ref(),
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -2250,6 +2280,7 @@ impl UiExtension {
                     context,
                     review,
                     relay,
+                    settings,
                 },
                 pushed_rx,
             ))
@@ -2315,6 +2346,7 @@ impl UiExtension {
             listeners: Some(manifest.listeners.clone()),
             discovery_files: Some(manifest.discovery_files.clone()),
             relay_channels: Some(manifest.relay_channels.clone()),
+            settings: manifest.settings_specs().ok(),
             ..options
         };
         let (mut extension, pushed) =
@@ -2386,6 +2418,26 @@ impl UiExtension {
     /// granted or not: their `timeout_ms` and `on_failure` apply to refused requests too.
     pub fn relay_channels(&self) -> &[ui_ext::integration::RelayChannelSpec] {
         self.relay.channels()
+    }
+
+    /// The checked `[[fyx_ui.settings]]` of a 0.4 extension, in manifest order, for the Settings
+    /// tab (design §D.3); empty without the table or below 0.4.
+    pub fn setting_specs(&self) -> &[ui_ext::settings::SettingSpec] {
+        self.settings.specs()
+    }
+
+    /// The effective values the extension gets now, with the user's invalid values' errors and
+    /// the unknown keys, for the Settings tab (§D.2, §D.3).
+    pub fn effective_settings(&self) -> ui_ext::settings::EffectiveSettings {
+        self.settings.effective()
+    }
+
+    /// The user settings file changed: `user` is the extension's object under
+    /// `fyx_extensions.<id>` in the **user** settings (never project settings, §D.2), `None`
+    /// when there is none. Returns the keys whose effective value changed, in manifest order;
+    /// the 0.4 `settings-changed` event carries them once W0 stages the interface.
+    pub fn set_user_settings(&self, user: Option<&ui_ext::settings::RawValue>) -> Vec<String> {
+        self.settings.update(user)
     }
 
     /// Whether `relay:hooks` is declared, with channels, and granted now.

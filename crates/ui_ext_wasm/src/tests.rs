@@ -1070,3 +1070,54 @@ fn world_manifest(text: &str, world: u64) -> String {
     }
     out
 }
+
+/// Plan 6.1, design §D.1, §D.7: `[[fyx_ui.settings]]` is read and checked with the manifest,
+/// and refused below 0.4 and when a declaration is invalid.
+#[gpui::test]
+async fn test_settings_table_is_read_and_checked(cx: &mut TestAppContext) {
+    let fs = fs::FakeFs::new(cx.executor());
+    let manifest = |api: &str, settings: &str| {
+        format!(
+            "id = \"s\"\nname = \"S\"\nversion = \"0.1.0\"\nschema_version = 1\n[fyx_ui]\n\
+             api_version = \"{api}\"\ncomponent = \"fyx_ui.wasm\"\ncapabilities = [\"ui:panel\"]\n\
+             {settings}"
+        )
+    };
+    let good = "[[fyx_ui.settings]]\nkey = \"block-on-diff\"\ntitle = \"Wait for review\"\n\
+                type = \"boolean\"\ndefault = true\n\
+                [[fyx_ui.settings]]\nkey = \"ratio\"\ntitle = \"Ratio\"\ntype = \"number\"\n\
+                default = 0.5\nmin = 0\nmax = 1\n";
+    let read = |dir: &'static str, text: String| {
+        let fs = fs.clone();
+        async move {
+            fs.create_dir(Path::new(dir)).await.expect("dir");
+            fs.insert_file(format!("{dir}/extension.toml"), text.into_bytes())
+                .await;
+            UiManifest::read(fs.as_ref(), Path::new(dir)).await
+        }
+    };
+    let (_, manifest_v0_4) = read("/ext/good", manifest("0.4.0", good))
+        .await
+        .expect("read")
+        .expect("fyx_ui");
+    let specs = manifest_v0_4.settings_specs().expect("specs");
+    let keys: Vec<_> = specs.iter().map(|spec| spec.key.as_str()).collect();
+    assert_eq!(keys, ["block-on-diff", "ratio"]);
+
+    let error = read("/ext/old", manifest("0.3.0", good))
+        .await
+        .err()
+        .expect("refused below 0.4");
+    assert!(
+        format!("{error:#}").contains("needs fyx:ui 0.4"),
+        "{error:#}"
+    );
+
+    let secret = "[[fyx_ui.settings]]\nkey = \"api-token\"\ntitle = \"Token\"\ntype = \"text\"\n\
+                  default = \"\"\n";
+    let error = read("/ext/secret", manifest("0.4.0", secret))
+        .await
+        .err()
+        .expect("refused");
+    assert!(format!("{error:#}").contains("credentials"), "{error:#}");
+}
