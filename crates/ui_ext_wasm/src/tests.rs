@@ -966,3 +966,107 @@ fn test_memory_budget_covers_every_memory() {
     table.set_max_capacity(UI_RESOURCE_TABLE_LIMIT);
     assert_eq!(table.max_capacity(), UI_RESOURCE_TABLE_LIMIT);
 }
+
+/// Every `extensions/*/extension.toml` with a `[fyx_ui]` table reads, `check_world` included, in
+/// the world it names and in each newer world `script/fyx-build-demos` builds it for (its
+/// `# fyx-ui-0-N:` lines applied the way that script applies them). `world_capabilities` once
+/// lacked `workspace:diagnostics` in 0.4 and refused fyx_claude_code; unit tests that grant
+/// capabilities directly did not catch it.
+#[gpui::test]
+async fn test_shipped_manifests_pass_their_worlds(cx: &mut TestAppContext) {
+    let extensions = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+    let mut entries = std::fs::read_dir(&extensions)
+        .expect("extensions dir")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| path.join("extension.toml").is_file())
+        .collect::<Vec<_>>();
+    entries.sort();
+    let fs = fs::FakeFs::new(cx.executor());
+    let mut checked = Vec::new();
+    for path in entries {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("name")
+            .to_owned();
+        let text = std::fs::read_to_string(path.join("extension.toml")).expect("manifest");
+        let Some(declared) = declared_api_minor(&text) else {
+            continue;
+        };
+        for world in declared..=4 {
+            let copy = world_manifest(&text, world);
+            let dir = format!("/ext/{name}-0-{world}");
+            fs.create_dir(Path::new(&dir)).await.expect("dir");
+            fs.insert_file(format!("{dir}/extension.toml"), copy.into_bytes())
+                .await;
+            let result = UiManifest::read(fs.as_ref(), Path::new(&dir)).await;
+            match result {
+                Ok(Some((_, manifest))) => {
+                    assert_eq!(manifest.api_version, Version::new(0, world, 0), "{name}");
+                }
+                Ok(None) => panic!("{name}: no [fyx_ui] in the 0.{world} copy"),
+                Err(error) => panic!("{name} in fyx:ui 0.{world}: {error:#}"),
+            }
+            checked.push(format!("{name}@0.{world}"));
+        }
+    }
+    for expected in [
+        "fyx_claude_code@0.4",
+        "fyx_gemini_cli@0.4",
+        "fyx_demo_counter@0.1",
+    ] {
+        assert!(
+            checked.iter().any(|checked| checked == expected),
+            "{expected} not checked: {checked:?}"
+        );
+    }
+}
+
+/// The minor of `api_version` in a manifest's `[fyx_ui]` table, `None` without one.
+fn declared_api_minor(text: &str) -> Option<u64> {
+    let toml: toml::Value = toml::from_str(text).expect("toml");
+    let version = toml.get("fyx_ui")?.get("api_version")?.as_str()?;
+    Some(Version::parse(version).expect("api_version").minor)
+}
+
+/// The manifest `script/fyx-build-demos` writes for fyx:ui 0.`world` (its `world_manifest` and
+/// the `api_version` rewrite).
+fn world_manifest(text: &str, world: u64) -> String {
+    let markers = (2..=world)
+        .rev()
+        .map(|minor| format!("# fyx-ui-0-{minor}: "));
+    let capabilities = markers
+        .filter_map(|marker| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(marker.as_str()))
+                .filter(|rest| rest.starts_with("capabilities = "))
+                .map(str::to_owned)
+        })
+        .next();
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = if line.starts_with("capabilities = ")
+            && let Some(capabilities) = &capabilities
+        {
+            capabilities.clone()
+        } else if let Some(rest) = line.strip_prefix("# fyx-ui-0-") {
+            let Some((minor, body)) = rest.split_once(": ") else {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            };
+            let minor = minor.parse::<u64>().expect("marker minor");
+            if body.starts_with("capabilities = ") || minor > world {
+                continue;
+            }
+            body.to_owned()
+        } else if line.starts_with("api_version = \"0.") {
+            format!("api_version = \"0.{world}.0\"")
+        } else {
+            line.to_owned()
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}

@@ -410,6 +410,7 @@ fn world_capabilities(version: &Version) -> &'static [&'static str] {
         integration::CAPABILITY_REVIEW_PROPOSE,
         integration::CAPABILITY_CONTEXT_EDITOR,
         integration::CAPABILITY_WORKSPACE_OPEN,
+        integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
         integration::CAPABILITY_APPROVALS,
     ];
     if *version >= Version::new(0, 4, 0) {

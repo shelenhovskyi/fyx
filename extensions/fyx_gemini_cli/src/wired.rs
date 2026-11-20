@@ -1,16 +1,18 @@
 //! The companion on the SDK's 0.4 `listeners`, `context` and `review` (plan 5.16): Gemini's
 //! absolute paths map to worktree files through `context.to-file-ref` and
 //! `context.absolute-path`, the editor feed becomes `ide/contextUpdate`, and `openDiff` is a
-//! proposal in agent review, withdrawn (with its current text) by `closeDiff`.
+//! proposal in agent review, withdrawn (with its current text) by `closeDiff`. The hooks'
+//! effects ([`run_hook_effects`]) are agent turns and the terminal's status.
 
-use ui_ext_sdk::{LogLevel, context, listeners, log, review};
+use ui_ext_sdk::{LogLevel, context, listeners, log, review, terminals};
 
 use crate::companion::{
     self, CompanionHost, FileRef, McpError, Notify, OpenFile, ReviewDecision, Roots, Selection,
 };
+use crate::hooks;
 
-/// The tool session agent review names `openDiff`'s proposals by, until the hooks (through the
-/// relay) name Gemini's own sessions.
+/// The tool session agent review names an `openDiff`'s proposal by when the hooks name no one
+/// Gemini session in a turn (no hooks, or several sessions at once).
 pub(crate) const SESSION: &str = "Gemini CLI";
 
 /// A review title: "Gemini CLI: <file name>", at most 256 bytes.
@@ -119,8 +121,74 @@ impl Roots for ContextRoots {
     }
 }
 
+/// A Gemini path as a worktree file, for the hooks; `None` outside every worktree.
+pub(crate) fn to_ref(absolute: &str) -> Option<FileRef> {
+    ContextRoots.to_ref(absolute)
+}
+
+fn status_state(state: hooks::StatusState) -> terminals::StatusState {
+    match state {
+        hooks::StatusState::Idle => terminals::StatusState::Idle,
+        hooks::StatusState::Working => terminals::StatusState::Working,
+        hooks::StatusState::Blocked => terminals::StatusState::Blocked,
+        hooks::StatusState::Done => terminals::StatusState::Done,
+    }
+}
+
+/// Performs a hook's effects: agent turns, and the status on `terminal` (none without one).
+pub(crate) fn run_hook_effects(
+    terminal: Option<terminals::TerminalHandle>,
+    effects: &[hooks::Effect],
+) {
+    for effect in effects {
+        let outcome = match effect {
+            hooks::Effect::BeginTurn { session } => review::begin_turn(session),
+            hooks::Effect::EndTurn { session, changed } => {
+                let changed: Vec<ui_ext_sdk::FileRef> = changed.iter().map(sdk_file_ref).collect();
+                review::end_turn(session, &changed)
+            }
+            hooks::Effect::Status(status) => {
+                let Some(terminal) = terminal else {
+                    continue;
+                };
+                let status = status.as_ref().map(|status| {
+                    let mut sdk = terminals::TerminalStatus::new(
+                        status_state(status.state),
+                        status.label.clone(),
+                    );
+                    if let Some(detail) = &status.detail {
+                        sdk = sdk.detail(detail.clone());
+                    }
+                    if status.attention {
+                        sdk = sdk.needs_attention();
+                    }
+                    sdk
+                });
+                terminals::set_status(terminal, status.as_ref())
+            }
+        };
+        if let Err(error) = outcome {
+            warn(format!(
+                "a Gemini hook's effect was refused: {}",
+                error.message
+            ));
+        }
+    }
+}
+
 /// The host, through the SDK.
-pub(crate) struct SdkHost;
+pub(crate) struct SdkHost {
+    /// The Gemini session proposals are named by.
+    session: String,
+}
+
+impl SdkHost {
+    pub(crate) fn new(session: Option<&str>) -> Self {
+        Self {
+            session: session.unwrap_or(SESSION).to_owned(),
+        }
+    }
+}
 
 impl CompanionHost for SdkHost {
     fn roots(&self) -> &dyn Roots {
@@ -161,8 +229,12 @@ impl CompanionHost for SdkHost {
     }
 
     fn propose(&mut self, file: &FileRef, new_content: &str) -> Result<u64, String> {
-        let proposal =
-            review::Proposal::new_content(sdk_file_ref(file), new_content, title(file), SESSION);
+        let proposal = review::Proposal::new_content(
+            sdk_file_ref(file),
+            new_content,
+            title(file),
+            &self.session,
+        );
         review::propose(&proposal).map_err(|error| {
             warn(format!(
                 "openDiff of {:?} is not in review: {}",
@@ -422,6 +494,147 @@ mod tests {
             .handle_io(IoEvent::ContextChanged(editor))
             .unwrap();
         assert!(sent(take_host_effects()).is_empty());
+        set_worktree_roots(&[]);
+    }
+
+    fn hook(id: u64, channel: &str, event: &str, extra: serde_json::Value) -> IoEvent {
+        let mut input = serde_json::json!({
+            "hook_event_name": event,
+            "session_id": "g1",
+            "cwd": "/work/app",
+        });
+        if let (Some(input), Some(extra)) = (input.as_object_mut(), extra.as_object()) {
+            input.extend(extra.clone());
+        }
+        IoEvent::RelayRequest((
+            id,
+            channel.into(),
+            Some(9),
+            vec!["--channel".into(), format!("fyx-gemini-cli/{channel}")],
+            input.to_string(),
+        ))
+    }
+
+    /// The hooks through the relay: every one is answered at once with exit 0, a prompt begins
+    /// a turn named by Gemini's session, that turn's openDiff carries the session, and the end
+    /// of the agent ends the turn with the files Gemini wrote.
+    #[test]
+    fn hooks_through_the_relay_are_turns_and_status() {
+        use ui_ext_sdk::relay::RelayEffect;
+        use ui_ext_sdk::terminals::{StatusState, TerminalEffect};
+        set_worktree_roots(&[(1, "/work/app")]);
+        let mut extension = GeminiCli::new();
+        take_host_effects();
+        let answered = |effects: &[HostEffect], id: u64| {
+            effects.contains(&HostEffect::Relay(RelayEffect {
+                id,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }))
+        };
+        let status = |effects: &[HostEffect]| {
+            effects.iter().find_map(|effect| match effect {
+                HostEffect::Terminal(TerminalEffect::SetStatus { handle: 9, status }) => {
+                    Some(status.clone())
+                }
+                _ => None,
+            })
+        };
+
+        extension
+            .handle_io(hook(
+                1,
+                "before-agent",
+                "BeforeAgent",
+                serde_json::json!({ "prompt": "fix" }),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert!(effects.contains(&HostEffect::Review(ReviewEffect::BeginTurn("g1".into()))));
+        assert_eq!(
+            status(&effects).flatten().map(|status| status.state),
+            Some(StatusState::Working)
+        );
+        assert!(answered(&effects, 1), "{effects:?}");
+
+        extension
+            .handle_io(call(
+                2,
+                7,
+                "openDiff",
+                serde_json::json!({ "filePath": "/work/app/a.py", "newContent": "new\n" }),
+            ))
+            .unwrap();
+        let session = take_host_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                HostEffect::Review(ReviewEffect::Propose { proposal, .. }) => {
+                    Some(proposal.session)
+                }
+                _ => None,
+            })
+            .expect("a proposal");
+        assert_eq!(session, "g1", "named by the turn's session");
+
+        extension
+            .handle_io(hook(
+                3,
+                "after-tool",
+                "AfterTool",
+                serde_json::json!({
+                    "tool_name": "replace",
+                    "tool_input": { "file_path": "a.py" },
+                    "tool_response": {},
+                }),
+            ))
+            .unwrap();
+        assert!(answered(&take_host_effects(), 3));
+
+        extension
+            .handle_io(hook(
+                4,
+                "after-agent",
+                "AfterAgent",
+                serde_json::json!({ "prompt": "fix", "prompt_response": "done" }),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert!(
+            effects.contains(&HostEffect::Review(ReviewEffect::EndTurn {
+                session: "g1".into(),
+                changed: vec![ui_ext_sdk::FileRef {
+                    worktree: Some(1),
+                    path: "a.py".into(),
+                }],
+            })),
+            "{effects:?}"
+        );
+        assert_eq!(
+            status(&effects).flatten().map(|status| status.state),
+            Some(StatusState::Done)
+        );
+        assert!(answered(&effects, 4));
+
+        // An unreadable hook is still answered, so Gemini goes on.
+        extension
+            .handle_io(hook(5, "after-agent", "BeforeAgent", serde_json::json!({})))
+            .unwrap();
+        let effects = take_host_effects();
+        assert!(answered(&effects, 5), "{effects:?}");
+        assert_eq!(status(&effects), None);
+
+        extension
+            .handle_io(hook(
+                6,
+                "session-end",
+                "SessionEnd",
+                serde_json::json!({ "reason": "exit" }),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert_eq!(status(&effects), Some(None));
+        assert!(answered(&effects, 6));
         set_worktree_roots(&[]);
     }
 }

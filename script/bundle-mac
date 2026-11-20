@@ -12,6 +12,8 @@ local_install=false
 can_code_sign=false
 
 # This must match the team in the provisioning profile.
+# fyx: without an identity the bundle gets an ad-hoc signature (no Apple account, plan 7.1):
+# Gatekeeper asks once on first launch, see docs/fyx/mac-build.md.
 # fyx: no identity in the script; signing is off unless both are set (no public releases before 1.0).
 IDENTITY="${FYX_MACOS_SIGNING_IDENTITY:-}"
 APPLE_NOTARIZATION_TEAM="${FYX_APPLE_NOTARIZATION_TEAM:-}"
@@ -220,31 +222,25 @@ function sign_app_binaries() {
     echo "Downloading git binary"
     download_git "${target_triple}" "${app_path}/Contents/MacOS/git"
 
-    # Note: The app identifier for our development builds is the same as the app identifier for nightly.
-    cp crates/zed/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
+    # fyx: crates/zed/contents/*/embedded.provisionprofile are Zed's (team MQ55VZLNZQ, dev.zed.*
+    # ids); Fyx embeds a profile only when one is given for its own signing identity.
+    if [[ -n "${FYX_MACOS_PROVISIONING_PROFILE:-}" ]]; then
+        cp "${FYX_MACOS_PROVISIONING_PROFILE}" "${app_path}/Contents/embedded.provisionprofile"
+    fi
 
     if [[ $can_code_sign = true ]]; then
         echo "Code signing binaries"
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/fyx" -v # fyx: binary renamed
-        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/fyx.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/fyx" -v # fyx: binary renamed
+        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/fyx.entitlements --sign "$IDENTITY" "${app_path}" -v
     else
-        echo "One or more of the following variables are missing: MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID, APPLE_NOTARIZATION_ISSUER_ID"
-
-        echo "====== WARNING ======"
-        echo "This bundle is being signed without all entitlements, some features (e.g. universal links) will not work"
-        echo "====== WARNING ======"
-
-        # NOTE: if you need to test universal links you have a few paths forward:
-        # - create a PR and tag it with the `run-bundling` label, and download the .dmg file from there.
-        # - get a signing key for the MQ55VZLNZQ team from Nathan.
-        # - create your own signing key, and update references to MQ55VZLNZQ to your own team ID
-        # then comment out this line.
-        cat crates/zed/resources/zed.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/zed.entitlements"
-
-        codesign --force --deep --entitlements "${app_path}/Contents/Resources/zed.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
+        # fyx: no Apple account: an ad-hoc signature (`-`), or MACOS_SIGNING_KEY for a local
+        # self-signed identity. No hardened runtime, so it runs unnotarized; the entitlements are
+        # recorded for when it gets one.
+        echo "Signing ad-hoc (no Apple Developer identity); see docs/fyx/mac-build.md for the first launch"
+        codesign --force --deep --entitlements crates/zed/resources/fyx.entitlements --sign "${MACOS_SIGNING_KEY:--}" "${app_path}" -v
     fi
 
     bundle_name=$(basename "$app_path")
@@ -270,7 +266,7 @@ function sign_app_binaries() {
     else
         dmg_target_directory="target/${target_triple}/${target_dir}"
         dmg_source_directory="${dmg_target_directory}/dmg"
-        dmg_file_path="${dmg_target_directory}/Zed-${arch_suffix}.dmg"
+        dmg_file_path="${dmg_target_directory}/Fyx-${arch_suffix}.dmg" # fyx: DMG name"
         xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
 
         rm -rf ${dmg_source_directory}
@@ -314,7 +310,7 @@ function sign_binary() {
 
     if [[ $can_code_sign = true ]]; then
         echo "Code signing executable $binary_path"
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${binary_path}" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/fyx.entitlements --sign "$IDENTITY" "${binary_path}" -v
     fi
 }
 
@@ -339,13 +335,16 @@ function extract_debug_symbols() {
 function upload_debug_symbols() {
     if [ "$local_install" = true ]; then
         echo "local install; skipping sentry upload."
+    elif [[ -z "${FYX_SENTRY_ORG:-}" || -z "${FYX_SENTRY_PROJECT:-}" ]]; then
+        # fyx: never Zed's Sentry project; uploads need Fyx's own org and project.
+        echo "FYX_SENTRY_ORG or FYX_SENTRY_PROJECT unset. skipping sentry upload."
     elif [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
-        echo "Uploading zed debug symbols to sentry..."
+        echo "Uploading fyx debug symbols to sentry..."
         extract_debug_symbols
         # Try uploading up to 3 times
         for attempt in 1 2 3; do
             echo "Sentry upload attempt $attempt..."
-            if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
+            if sentry-cli debug-files upload --include-sources --wait -p "$FYX_SENTRY_PROJECT" -o "$FYX_SENTRY_ORG" \
                 "target/${target_triple}/${target_dir}/fyx.dwarf" \
                 "target/${target_triple}/${target_dir}/remote-server.dwarf"; then
                 break
@@ -378,5 +377,6 @@ cp target/${target_triple}/${target_dir}/fyx "${app_path}/Contents/MacOS/fyx" # 
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
 sign_app_binaries
 
-sign_binary "target/$target_triple/release/remote-server"
-gzip -f --stdout --best target/$target_triple/release/remote-server > target/zed-remote-server-macos-$arch_suffix.gz
+# fyx: ${target_dir}, so -d (debug) does not fail on a missing release remote-server
+sign_binary "target/$target_triple/${target_dir}/remote-server"
+gzip -f --stdout --best "target/$target_triple/${target_dir}/remote-server" > target/zed-remote-server-macos-$arch_suffix.gz
