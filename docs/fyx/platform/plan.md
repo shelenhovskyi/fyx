@@ -207,6 +207,7 @@ Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
 | 7.7 | W3 | **Fast extension UI [D15]**: fix the full-tree re-render (perf-1 finding 1) so a caret blink or a one-node reply does not re-render the whole surface; a per-extension memory and frame-time line in the Inspector | M | 1.1 (`.cwasm` cache) for load times | the 4096-text panel stays under 8 ms per frame while typing in its input |
 | 7.8 | W1 (Dock, menu bar) + W3 (meters) | **Cost and context meters with an attention badge [D3 + M4]**: tokens, money and context use per session and per day from ACP usage and relay data, a soft daily cap that pauses agents; on the Mac a Dock badge with the number of agents waiting and a menu-bar item listing sessions | S–M | 5.4 | two sessions show their cost; the Dock badge counts a blocked agent; the cap pauses an agent with a notice |
 | 7.9 | W3 | **Agent sessions board [D2]**: every agent (ACP threads, CLI agents in terminals via OSC 7501 and the relay), its worktree, state, diff size and cost, "needs you" first, click to focus. Kept to the narrow layer of [worktrees research §8](../../research/worktrees-and-parallel-agents.md): no worktree manager | M | 5.4, 5.12, 7.8 | a Claude Code CLI session and an ACP thread show side by side with live state |
+| 7.10 | W3 (page) + W1 (`extension_host` hook, setting) | **One Extensions page with Fyx and Zed tabs, Zed's registry opt-in**: see [7.10 below](#710-extensions-page-fyx-and-zed-tabs) | S–M | 3.5 | the page opens on the Fyx tab; the Zed tab shows installed Zed extensions with no error banner until the user turns the registry on, then searches and installs from it; nothing but extension requests reaches zed.dev |
 
 **Order.** 7.1 first: it gives the owner a Mac build and a Mac check for everything after it.
 Then the agent-review lane in order 7.2 → 7.3 → 7.4. 7.5 follows 4.7 and pairs with 7.4. 7.7 is
@@ -217,6 +218,39 @@ after P5 phase 3 (5.12). The owner's limit of 2 compiling streams plus the gatek
 (then 7.1 gets a CI job and 6.2 checks the Apple signature), the MCP manager [D5], worktree review
 and merge [D4], Finder and Shortcuts integration [M5], the verified build badge [D11], terminal
 "fix with agent" [D19], plan mode [D7], review bundles [D13], local automations [D8].
+
+### 7.10 Extensions page: Fyx and Zed tabs
+
+Decided by the owner on 2026-11-20 after the first Mac build. **Problem:** Fyx sets
+`server_url` to `http://127.0.0.1:0`, so Zed's Extensions page always shows "Failed to load
+extensions" and its "Not Installed" filter is always empty, while the Fyx registry (3.5) hides
+behind a "Fyx Extensions" button that opens a separate page. Plan 3.5 asked for a tab.
+
+- **Tabs** in the Extensions page header: `Fyx` (default) and `Zed`. The Fyx tab renders the body
+  of today's `fyx_extensions_page` (search, install with permission confirmation, pin, roll back,
+  held updates). `fyx_ui: open fyx extensions` opens the page on the Fyx tab. The "Fyx
+  Extensions" button goes.
+- **Zed tab, registry off (default):** installed Zed extensions only; no request to the registry,
+  no error banner, no All / Installed / Not Installed filter. A banner instead: Zed extensions come
+  from Zed's registry, which Fyx neither verifies nor signs; language servers and debug adapters
+  can download and run binaries with full access; requests go to api.zed.dev. Button **Turn on
+  Zed's registry** sets the new setting `fyx.zed_extensions_registry: true`.
+- **Zed tab, registry on:** search, Not Installed and install work as in Zed, and installed Zed
+  extensions get updates again. A slim reminder banner stays, and each card from Zed's registry
+  has a "Zed registry" chip.
+- **Only extension traffic goes to Zed:** one `fyx:` hook in `extension_host` sends its three
+  `build_zed_api_url` calls to `https://api.zed.dev` when the setting is on. `server_url` stays
+  `127.0.0.1:0`, so sign-in, telemetry, collab and file-type extension suggestions stay off.
+- **Install Dev Extension** becomes a menu: "Zed extension…" (today's action) and "UI extension…"
+  (`fyx_ui: install dev UI extension`).
+- **Not merged into one list:** the two registries install differently (permission confirmation,
+  signed hash, pin and rollback against a plain download), and one list would mean rewriting
+  upstream `extensions_ui`. The tabs need about three `fyx:` hooks there (tab switch, skipping the
+  registry fetch while off, the dev-install menu); the logic stays in `ui_ext_host`.
+- **Docs:** the user guide's "No Zed extension registry" becomes "Zed's extension registry is off
+  until you turn it on in Extensions → Zed".
+- **Tests:** with the setting off, no request leaves for any host; with it on, extension requests
+  go to api.zed.dev and nothing else does; the Fyx tab opens by default and from the action.
 
 ## Deferred after 1.0
 
