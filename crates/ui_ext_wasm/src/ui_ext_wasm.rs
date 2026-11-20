@@ -81,6 +81,7 @@ pub mod observe;
 pub mod process;
 mod proposals;
 mod relay;
+mod spawn_sandbox;
 pub use accounts::set_account_dirs;
 mod stderr;
 mod terminals;
@@ -2056,6 +2057,7 @@ impl UiExtension {
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
                 journal.clone(),
+                domains.clone(),
             ));
             let is_v0_3 = has_io;
             let edit_set = Arc::new(edit::EditSet::default());

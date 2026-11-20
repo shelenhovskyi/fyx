@@ -442,6 +442,9 @@ struct Entry {
     queued: Arc<AtomicUsize>,
     killer: Option<Arc<Killer>>,
     killed: Arc<AtomicBool>,
+    /// Plan 7.5 (macOS): it reaches the network through the proxy, so revoking
+    /// `network:fetch` kills it.
+    networked: bool,
 }
 
 /// The live processes of one instance, by id, from the import until they exit.
@@ -479,6 +482,19 @@ impl ProcessSet {
     pub(crate) fn kill_program(&self, program: &str) {
         for entry in self.lock().values() {
             if entry.program.as_deref() == Some(program) {
+                entry.killed.store(true, Ordering::SeqCst);
+                if let Some(killer) = &entry.killer {
+                    killer.kill();
+                }
+            }
+        }
+    }
+
+    /// `network:fetch` was revoked: the programs that reach the network through the proxy
+    /// (plan 7.5, macOS) are killed.
+    pub(crate) fn kill_networked(&self) {
+        for entry in self.lock().values() {
+            if entry.networked {
                 entry.killed.store(true, Ordering::SeqCst);
                 if let Some(killer) = &entry.killer {
                     killer.kill();
@@ -616,6 +632,7 @@ impl ProcessState {
                 queued: Arc::new(AtomicUsize::new(0)),
                 killer: None,
                 killed: Arc::new(AtomicBool::new(false)),
+                networked: false,
             },
         );
         self.pending.push(PendingSpawn {
@@ -678,6 +695,8 @@ pub(crate) struct ProcessHandle {
     declared_env: Arc<BTreeSet<String>>,
     running: Arc<Running>,
     journal: Option<Arc<dyn crate::journal::Journal>>,
+    /// The declared `[fyx_ui.network] domains`: a sandboxed program's proxy allows them (plan 7.5).
+    domains: Arc<ui_ext::network::DomainList>,
 }
 
 impl ProcessHandle {
@@ -690,9 +709,11 @@ impl ProcessHandle {
         declared_env: Arc<BTreeSet<String>>,
         running: Arc<Running>,
         journal: Option<Arc<dyn crate::journal::Journal>>,
+        domains: Arc<ui_ext::network::DomainList>,
     ) -> Self {
         Self {
             journal,
+            domains,
             extension_id,
             set,
             broker,
@@ -728,6 +749,7 @@ impl ProcessHandle {
                 declared_env: self.declared_env.clone(),
                 running: self.running.clone(),
                 journal: self.journal.clone(),
+                domains: self.domains.clone(),
             };
             tokio::spawn(run(spawn, context));
         }
@@ -749,6 +771,8 @@ struct SpawnContext {
     declared_env: Arc<BTreeSet<String>>,
     running: Arc<Running>,
     journal: Option<Arc<dyn crate::journal::Journal>>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    domains: Arc<ui_ext::network::DomainList>,
 }
 
 /// The broker when the spawn is applied: granted runs, `ask` waits for the prompt.
@@ -860,6 +884,35 @@ async fn start(
             })
             .collect::<Vec<_>>();
 
+    // Plan 7.5: on macOS the program runs under Seatbelt; `sandboxed` lives until it exits.
+    #[cfg(target_os = "macos")]
+    let sandboxed = {
+        let network_granted = context.broker.as_ref().is_some_and(|broker| {
+            broker.state(&context.extension_id, crate::network::CAPABILITY_NETWORK)
+                == PermissionState::Granted
+        });
+        let hosts = if network_granted {
+            crate::spawn_sandbox::proxy_hosts(&context.domains)
+        } else {
+            Vec::new()
+        };
+        crate::spawn_sandbox::sandboxed(
+            &context.extension_id,
+            id,
+            &program,
+            &worktree.root,
+            hosts,
+            &environment,
+        )
+        .map_err(SpawnError::Io)?
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = tokio::process::Command::new(&sandboxed.program);
+        command.args(&sandboxed.args);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut command = tokio::process::Command::new(&program);
     command
         .args(&spawn.request.args)
@@ -874,6 +927,8 @@ async fn start(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    command.envs(sandboxed.env.iter().cloned());
     #[cfg(windows)]
     command.creation_flags(job::CREATE_SUSPENDED | job::CREATE_NO_WINDOW);
     #[cfg(unix)]
@@ -906,7 +961,13 @@ async fn start(
     {
         let mut entries = context.set.lock();
         match entries.get_mut(&id) {
-            Some(entry) => entry.killer = Some(killer.clone()),
+            Some(entry) => {
+                entry.killer = Some(killer.clone());
+                #[cfg(target_os = "macos")]
+                {
+                    entry.networked = sandboxed.networked;
+                }
+            }
             // The instance went away while it started: the killer's drop ends it.
             None => return Ok(()),
         }
@@ -1023,6 +1084,7 @@ mod tests {
                     queued: Arc::new(AtomicUsize::new(0)),
                     killer: None,
                     killed: Arc::new(AtomicBool::new(false)),
+                    networked: false,
                 },
             );
         }

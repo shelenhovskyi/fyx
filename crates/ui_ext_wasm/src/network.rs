@@ -1025,6 +1025,10 @@ impl NetworkHandle {
                 }
                 if capability == CAPABILITY_NETWORK && state != PermissionState::Granted {
                     running.revoke_all();
+                    // Plan 7.5: a sandboxed program's proxy allowed the declared domains.
+                    if let Some(processes) = revocable.processes.upgrade() {
+                        processes.kill_networked();
+                    }
                 }
                 if state != PermissionState::Granted {
                     match capability.as_str() {
