@@ -18,33 +18,23 @@ Older history: `archive/W2c.md`.
     one.
   - `ui_ext::terminal::in_account_dirs(path, dirs)` compares paths as written and as resolved.
 
-## Handoff (2026-11-20, final before the move to a Claude Project)
+## Handoff (2026-11-20, project thread)
 
-- **Branch** claude/fyx-w2c-host-0-2-cbde2c. Last ready 9d0e1e6365 (contains 768aa26cdd),
-  sent to W0; it merges integration 1a730599fa.
-- **Done:**
-  - 5.12 relay, extension side (§B.9, 38a8d578db): `ui_ext_wasm/src/relay.rs` RelayHandle;
-    `UiExtension::relay_request / relay_channels / relay_granted`; `LoadOptions`
-    `relay_channels`, `relay_binary` (`${relay}`). A dropped reply means on_failure.
-  - Gap 8 (f847ec1f86, 9d0e1e6365): `ListenerEvent::McpInitialized(McpSession)` once per
-    connection after `notifications/initialized`; WIT and mapping staged by W0; probe report
-    `mcp-initialized <listener> <connection> <name> <version>` in `test_v0_4_listeners`.
-  - 5.20 extension side (768aa26cdd): see the API note; test `test_v0_4_account_profiles`
-    (temp dirs only). The model, presets, resolver, ACP hook and rule-5 lists are W1's
-    4637d43836.
-- **Open (others' crates):**
-  - Host glue for `set_account_dirs` (W1/W3, ~20 lines). Recipe in the notes folder,
-    `W2c-account-dirs-glue.md`. Until it lands, account-dir protection and `${account.*}`
-    are inactive.
-  - W3's workspace-edit host should also refuse files in account dirs (edits apply
-    host-side; `in_account_dirs` or fyx_guard's `account_dir` rule).
-  - Relay host glue (W3) against W1's `terminal_host` relay API (9a28af71e0).
-  - fyx_guard_core (7aa8211636): root `Cargo.toml` member and `Cargo.lock` need W0.
-- **Next steps:** none assigned. Take new items from the Coordinator. After a WIT change,
-  check `fyx_ui_v0_4.rs` mappings, the probe fixture and `LINKED_INTERFACES`.
-- **Gotchas:** prefix every cargo command with `CARGO_TARGET_DIR=D:/fyx-targets/w2c`. Bash
-  heredocs break here: write Python scripts with the Write tool. `cargo fmt` skips
-  `t2_shared.rs` and the probe fixture (use `rustfmt --edition 2024`). Close listeners in spec
-  order. T1 calls go through the broker's `check`. io tests: permission changes arrive on the
-  io channel too. Loading the same id shuts the old instance down.
-  `test_reload_kills_the_process_tree` (0.3) flakes under full-crate load and passes alone.
+- **Branch** claude/fyx-w2c-host-0-2-cbde2c. Ready 9949aa4679 (FAST green): §E/§F runtime
+  (publish-diagnostics, decorate-files, LoadOptions.diagnostics_publisher/file_decorations,
+  MarksHandle, revoke) and §F.1 tree rows; W5's harness merged, limits only in ui_ext.
+- **7.5 Seatbelt (in progress, after 9949aa4679):** `ui_ext::seatbelt` (deny-default profile,
+  pure, tested on every OS) and `ui_ext_wasm/src/spawn_sandbox.rs`: on macOS process:spawn
+  children run under `sandbox-exec -p`; read system + toolchain + worktree, write worktree
+  (not `.git/hooks`, `.zed`, ...) + own TMPDIR; network only via an http_proxy for the
+  declared `[fyx_ui.network] domains` while network:fetch is granted (revoke kills). Real
+  sandbox tests are `cfg(target_os = "macos")`: the owner runs them on the Mac. Mac code was
+  type-checked on Windows by temporarily swapping the cfg.
+- **Open for 7.5:** MCP servers and the agent terminal tool (upstream `crates/agent`
+  sandboxing, read restriction) and the per-secret host list (needs 7.4) are not done;
+  per-project egress list (user setting) not done.
+- **Open (others' crates):** set_account_dirs host glue (W1/W3), relay host glue (W3),
+  fyx_guard_core Cargo lines (W0), W3's renderer for row chevrons and OpenSettings.
+- **Gotchas:** Bash heredocs mangle backslashes: use Write/Edit or a script file. `cargo fmt`
+  skips `t2_shared.rs` and the probe fixture. `test_reload_kills_the_process_tree` flakes
+  under load.

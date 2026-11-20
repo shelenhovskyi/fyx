@@ -15,7 +15,7 @@ use crate::{
     v0_2::{HostError, HostErrorCode},
 };
 
-pub const CAPABILITY_WORKSPACE_FILE_DECORATIONS: &str = "workspace:file-decorations";
+pub use crate::integration::CAPABILITY_FILE_DECORATIONS;
 /// §F.2: decorations one `decorate-files` sets at most.
 pub const MAX_DECORATIONS_PER_CALL: usize = 500;
 /// §F.2: paths one extension decorates at most.

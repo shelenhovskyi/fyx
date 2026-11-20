@@ -81,6 +81,7 @@ pub mod observe;
 pub mod process;
 mod proposals;
 mod relay;
+mod spawn_sandbox;
 pub use accounts::set_account_dirs;
 mod stderr;
 mod terminals;
@@ -949,6 +950,8 @@ pub struct UiState {
     relay: Arc<relay::RelayHandle>,
     /// The 0.4 `settings` import (§D.4).
     settings: Arc<extension_settings::SettingsHandle>,
+    /// The 0.4 `context` marks: published diagnostics and file decorations (§E, §F.2).
+    marks: Arc<extension_marks::MarksHandle>,
     /// 0.4 (§C.4): where programs started and T3 use are recorded.
     journal: Option<Arc<dyn journal::Journal>>,
     /// 0.3 `permissions.query`: each T2 state as of the call's first query of it, so one call
@@ -970,6 +973,7 @@ struct IoStates {
     review: Arc<proposals::ReviewHandle>,
     relay: Arc<relay::RelayHandle>,
     settings: Arc<extension_settings::SettingsHandle>,
+    marks: Arc<extension_marks::MarksHandle>,
     journal: Option<Arc<dyn journal::Journal>>,
 }
 
@@ -1028,6 +1032,7 @@ impl UiState {
             review,
             relay,
             settings,
+            marks,
             journal,
         } = io;
         Self {
@@ -1039,6 +1044,7 @@ impl UiState {
             review,
             relay,
             settings,
+            marks,
             journal,
             capability_check,
             diagnostics: diagnostics.clone(),
@@ -1861,6 +1867,12 @@ pub struct LoadOptions {
     /// The extension's object under `fyx_extensions.<id>` in the **user** settings file at load,
     /// never project settings (§D.2). Later changes go to [`UiExtension::set_user_settings`].
     pub user_settings: Option<ui_ext::settings::RawValue>,
+    /// 0.4 `diagnostics:publish` (§E): where published diagnostics go. Without it the calls
+    /// are `unavailable`.
+    pub diagnostics_publisher: Option<Arc<dyn ui_ext::published_diagnostics::DiagnosticsPublisher>>,
+    /// 0.4 `workspace:file-decorations` (§F.2): the project panel's decorations. Without it the
+    /// calls are `unavailable`.
+    pub file_decorations: Option<Arc<dyn ui_ext::file_decorations::FileDecorationsHost>>,
 }
 
 impl UiExtension {
@@ -1936,6 +1948,8 @@ impl UiExtension {
             relay_binary,
             settings: setting_specs,
             user_settings,
+            diagnostics_publisher,
+            file_decorations,
         } = options;
         let allow_staged = allow_staged.unwrap_or_else(staged_api_allowed_by_default);
         let capabilities: Arc<[String]> = match capabilities {
@@ -2019,7 +2033,13 @@ impl UiExtension {
             } else {
                 network::DomainList::default()
             });
-            let running = Arc::new(network::Running::new(diagnostics.clone()));
+            let running = Arc::new(
+                network::Running::new(diagnostics.clone()).with_usage(
+                    journal
+                        .clone()
+                        .map(|journal| journal::UsageJournal::new(extension_id.clone(), journal)),
+                ),
+            );
             let network = Arc::new(network::NetworkHandle::new(
                 extension_id.clone(),
                 domains.clone(),
@@ -2043,6 +2063,7 @@ impl UiExtension {
                 Arc::new(process_policy.env.clone()),
                 running.clone(),
                 journal.clone(),
+                domains.clone(),
             ));
             let is_v0_3 = has_io;
             let edit_set = Arc::new(edit::EditSet::default());
@@ -2130,6 +2151,13 @@ impl UiExtension {
                 setting_specs.filter(|_| is_v0_4).unwrap_or_default(),
                 user_settings.as_ref(),
             ));
+            // 0.4 marks (§E, §F.2): what the instance publishes goes with it.
+            let marks = Arc::new(extension_marks::MarksHandle::new(
+                extension_id.clone(),
+                workspace.clone(),
+                diagnostics_publisher.filter(|_| is_v0_4),
+                file_decorations.filter(|_| is_v0_4),
+            ));
             let edits_available = edits.available();
             let reviews_available = observer.available();
 
@@ -2145,6 +2173,7 @@ impl UiExtension {
                 let review = review.clone();
                 let relay = relay.clone();
                 let settings = settings.clone();
+                let marks = marks.clone();
                 let workspace_for_terminals = workspace.clone();
                 let revocable = network::Revocable {
                     processes: Arc::downgrade(&process_set),
@@ -2155,6 +2184,7 @@ impl UiExtension {
                     context: Arc::downgrade(&context),
                     review: Arc::downgrade(&review),
                     relay: Arc::downgrade(&relay),
+                    marks: Arc::downgrade(&marks),
                 };
                 async move {
                     // On tokio: revocations reach in-flight requests, processes and `handle-io`.
@@ -2209,6 +2239,7 @@ impl UiExtension {
                                 review,
                                 relay,
                                 settings,
+                                marks,
                                 journal,
                             },
                         ),

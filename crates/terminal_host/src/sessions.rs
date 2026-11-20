@@ -9,6 +9,7 @@ use gpui::{
     WindowHandle,
 };
 use terminal_ext::osc::StatusState;
+use terminal::Terminal;
 use terminal_ext::{TerminalId, TerminalStatus};
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::TerminalPanel;
@@ -81,9 +82,12 @@ impl Sessions {
 
     /// Called on a terminal's `Wakeup`. Notifies the list when the status changed, and pops up when
     /// the terminal became blocked or done while its window is not active.
+    /// `view` is being updated (this runs from its terminal's subscription), so its title comes
+    /// from `terminal` and `view` is never read.
     pub(crate) fn status_maybe_changed(
         &mut self,
         view: &Entity<TerminalView>,
+        terminal: &Entity<Terminal>,
         status: Option<TerminalStatus>,
         window_active: bool,
         cx: &mut Context<Self>,
@@ -123,7 +127,7 @@ impl Sessions {
             return;
         }
         self.last_popup.insert(view.entity_id(), now);
-        let terminal_title = view.read(cx).terminal().read(cx).title(true);
+        let terminal_title = terminal.read(cx).title(true);
         self.pop_up(&status, terminal_title, view.downgrade(), main_window, cx);
     }
 

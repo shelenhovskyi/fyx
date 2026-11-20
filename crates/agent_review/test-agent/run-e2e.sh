@@ -4,7 +4,7 @@
 # Usage (Git Bash, from the repository root, after `cargo build -p zed`):
 #   crates/agent_review/test-agent/run-e2e.sh [FYX_EXE] [SCRATCH_DIR]
 #
-# It creates a scratch profile and project under SCRATCH_DIR (default D:/scratch/fyx-w5-e2e), starts the
+# It creates a scratch profile and project under SCRATCH_DIR (default D:/fyx/scratch/fyx-w5-e2e), starts the
 # app with the review script `e2e-full.script` and the scripted agent `review_stub_agent.js`
 # (REVIEW_STUB_SCENARIO=full), waits for it to quit (at most 4 minutes), then prints the agent's log,
 # the review log lines and the files, and fails if anything under %LOCALAPPDATA%\Fyx or %APPDATA%\Fyx
@@ -14,7 +14,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 exe="${1:-${CARGO_TARGET_DIR:-target}/debug/fyx.exe}"
-scratch="${2:-D:/scratch/fyx-w5-e2e}"
+scratch="${2:-D:/fyx/scratch/fyx-w5-e2e}"
 data="$scratch/data"
 project="$scratch/project"
 stub_log="$scratch/stub.log"

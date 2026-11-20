@@ -1,0 +1,16 @@
+id = "fyx-demo-lint"
+name = "TODO lint demo"
+description = "Fyx UI demo: marks every TODO in the selected text as a warning in the editor, the diagnostics panel and the status bar (fyx:ui 0.4 only)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Read by Fyx's extension host (`fyx_ui::UiManifest`); upstream ignores the table.
+# This demo exists only for the staged fyx:ui 0.4: `script/fyx-build-demos --fyx-ui-0-4` builds it
+# into <target>/fyx-demos-v0_4/fyx_demo_lint/, and the older modes leave it out.
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+# context:editor (T1) reads the selection, diagnostics:publish (T1) shows the TODOs as problems,
+# workspace:open (T1) opens a file at a listed TODO.
+capabilities = ["ui:panel", "context:editor", "diagnostics:publish", "workspace:open"]

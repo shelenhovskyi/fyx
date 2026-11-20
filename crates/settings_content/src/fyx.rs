@@ -84,6 +84,48 @@ pub struct FyxSettingsContent {
     pub terminal: Option<FyxTerminalSettingsContent>,
     /// Account profiles for CLI tools and agents (`crates/terminal_host`, design §C.6).
     pub accounts: Option<FyxAccountsSettingsContent>,
+    /// Fyx's own updates (`crates/fyx_update_host`, `docs/fyx/platform/self-update.md`).
+    pub updates: Option<FyxUpdatesSettingsContent>,
+    /// Local history of files and agent turns (`crates/fyx_history_host`,
+    /// `docs/fyx/platform/local-history.md`).
+    pub history: Option<FyxHistorySettingsContent>,
+}
+
+/// `fyx.history`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxHistorySettingsContent {
+    /// Keep a snapshot of a file on every save and of every file an agent turn changed, on this
+    /// machine only, so a file or a whole agent turn can be restored ("fyx: local history").
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// The most disk space the history of one worktree may use, in megabytes; the oldest
+    /// snapshots go first.
+    ///
+    /// Default: 256
+    pub max_total_mb: Option<u64>,
+    /// Snapshots older than this many days are deleted.
+    ///
+    /// Default: 30
+    pub max_age_days: Option<u64>,
+    /// Files larger than this many megabytes are not kept (their changes are still listed).
+    ///
+    /// Default: 8
+    pub max_file_mb: Option<u64>,
+}
+
+/// `fyx.updates`.
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct FyxUpdatesSettingsContent {
+    /// Check once a day whether a new Fyx release is out, from the releases of
+    /// `shelenhovskyi/fyx` on GitHub (two small requests, no identifiers). A new version is only
+    /// offered; nothing is downloaded or installed until you press "Install". "fyx: check for
+    /// updates" checks once, whatever this says.
+    ///
+    /// Default: false
+    pub check: Option<bool>,
 }
 
 /// `fyx.terminal`.
@@ -102,6 +144,12 @@ pub struct FyxTerminalSettingsContent {
     ///
     /// Default: true
     pub shell_integration: Option<bool>,
+    /// A soft daily cap on agents' cost in US dollars, from the cost they report (plan 7.8).
+    /// Reaching it stops the running agent turns with a notice; "Continue today" lifts it until
+    /// the next day. 0 means no cap.
+    ///
+    /// Default: 0
+    pub daily_cost_cap: Option<f32>,
 }
 
 /// `fyx.extensions`.
@@ -131,6 +179,14 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: ""
     pub registry_url: Option<String>,
+    /// Zed's extension registry (themes, languages, language servers): an `http(s)://` base URL.
+    /// Only the Extensions page, installs and update checks of installed Zed extensions use it;
+    /// sign-in, telemetry and the rest of Zed's cloud stay off with `server_url`. Zed's terms
+    /// apply to the registry. Empty builds the address from `server_url`, which in Fyx points
+    /// nowhere, so the registry is off.
+    ///
+    /// Default: "https://api.zed.dev"
+    pub zed_registry_url: Option<String>,
     /// What UI extensions may reach over the network.
     pub network: Option<FyxExtensionsNetworkSettingsContent>,
 }

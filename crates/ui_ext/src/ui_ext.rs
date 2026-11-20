@@ -32,6 +32,9 @@ pub mod protected;
 pub mod published_diagnostics;
 #[cfg(feature = "t2")]
 pub mod review;
+/// Plan 7.5: the macOS Seatbelt profile of a `process:spawn` child (pure text, every OS).
+#[cfg(feature = "process")]
+pub mod seatbelt;
 /// fyx:ui 0.4 extension settings (plan 6.1, design §D): no capability, no format crate.
 pub mod settings;
 /// fyx:ui 0.4 terminals (plan 5.5); behind `t2` until W0 adds a `terminal` feature alias.

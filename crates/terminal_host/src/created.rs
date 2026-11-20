@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
-use gpui::{App, AppContext as _, BackgroundExecutor, Global};
+use gpui::{App, AppContext as _, BackgroundExecutor, Global, Window};
 use project::trusted_worktrees::TrustedWorktrees;
 use settings::Settings as _;
 use terminal::terminal_settings::TerminalSettings;
@@ -233,7 +233,7 @@ pub(crate) fn open(open: CreatedOpen, cx: &mut App) {
         cx.background_executor().clone(),
     ))
     .detach();
-    if !in_trusted_worktree(&command.cwd, cx) {
+    if !in_trusted_worktree(&command.cwd, None, cx) {
         log::warn!("fyx: refused to start a created terminal outside a trusted worktree");
         refuse(id, &tap, cx);
         return;
@@ -393,26 +393,33 @@ pub(crate) fn cancel(id: TerminalId, cx: &mut App) -> bool {
 
 /// Whether `cwd` is inside a visible worktree of an open project that the trust store trusts.
 /// Without a trust store (tests, a headless app) nothing is.
-pub(crate) fn in_trusted_worktree(cwd: &Path, cx: &mut App) -> bool {
+///
+/// `window` is the window being updated when the caller runs inside one (a menu click): gpui
+/// takes that window out of its table for the update, and reading it through its handle panics
+/// instead of failing, so it is read through `window` and skipped among the handles.
+pub(crate) fn in_trusted_worktree(cwd: &Path, window: Option<&Window>, cx: &mut App) -> bool {
     let Some(trust) = TrustedWorktrees::try_get_global(cx) else {
         return false;
     };
-    let projects: Vec<_> = cx
-        .windows()
-        .into_iter()
-        .filter_map(|window| window.downcast::<MultiWorkspace>())
-        .filter_map(|window| {
-            window
-                .read_with(cx, |multi_workspace, cx| {
-                    multi_workspace
-                        .workspaces()
-                        .map(|workspace| workspace.read(cx).project().clone())
-                        .collect::<Vec<_>>()
-                })
-                .ok()
-        })
-        .flatten()
-        .collect();
+    let projects_of = |multi_workspace: &MultiWorkspace, cx: &App| {
+        multi_workspace
+            .workspaces()
+            .map(|workspace| workspace.read(cx).project().clone())
+            .collect::<Vec<_>>()
+    };
+    let current = window.map(|window| window.window_handle().window_id());
+    let mut projects: Vec<_> = window
+        .and_then(|window| window.root::<MultiWorkspace>().flatten())
+        .map(|multi_workspace| projects_of(multi_workspace.read(cx), cx))
+        .unwrap_or_default();
+    projects.extend(
+        cx.windows()
+            .into_iter()
+            .filter(|handle| Some(handle.window_id()) != current)
+            .filter_map(|handle| handle.downcast::<MultiWorkspace>())
+            .filter_map(|handle| handle.read_with(cx, projects_of).ok())
+            .flatten(),
+    );
     for project in projects {
         let (store, worktrees): (_, Vec<_>) = {
             let project = project.read(cx);

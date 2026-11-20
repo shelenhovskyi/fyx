@@ -1787,8 +1787,13 @@ proptest! {
         index in any::<u32>(),
         indent in any::<u8>(),
         nodes in prop::collection::vec(arb_v0_2_node(), 0..6),
+        expansion in prop_oneof![
+            Just(v0_2::Expansion::Leaf),
+            Just(v0_2::Expansion::Collapsed),
+            Just(v0_2::Expansion::Expanded),
+        ],
     ) {
-        json_round_trip(&v0_2::ListRow { index, indent, nodes })?;
+        json_round_trip(&v0_2::ListRow { expansion, index, indent, nodes })?;
     }
 
     #[test]
@@ -1946,7 +1951,7 @@ proptest! {
 
     #[test]
     fn indent_is_clamped_to_the_drawn_maximum(index in any::<u32>(), indent in any::<u8>()) {
-        let row = v0_2::ListRow { index, indent, nodes: Vec::new() };
+        let row = v0_2::ListRow { expansion: v0_2::Expansion::Leaf, index, indent, nodes: Vec::new() };
         prop_assert_eq!(row.indent_levels(), indent.min(MAX_INDENT_LEVELS));
         prop_assert!(row.indent_levels() <= 32);
     }

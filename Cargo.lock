@@ -6892,6 +6892,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_demo_bookmarks"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
 name = "fyx_demo_charts"
 version = "0.1.0"
 dependencies = [
@@ -6939,6 +6946,13 @@ dependencies = [
 
 [[package]]
 name = "fyx_demo_images"
+version = "0.1.0"
+dependencies = [
+ "ui_ext_sdk",
+]
+
+[[package]]
+name = "fyx_demo_lint"
 version = "0.1.0"
 dependencies = [
  "ui_ext_sdk",
@@ -7059,6 +7073,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "fyx_history"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "fyx_history_host"
+version = "0.1.0"
+dependencies = [
+ "agent_review",
+ "anyhow",
+ "fyx_history",
+ "gpui",
+ "language",
+ "log",
+ "paths",
+ "project",
+ "settings",
+ "tempfile",
+ "ui",
+ "workspace",
+]
+
+[[package]]
 name = "fyx_registry"
 version = "0.1.0"
 dependencies = [
@@ -7101,6 +7145,36 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "fyx_update_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-tar",
+ "async_zip",
+ "base64 0.22.1",
+ "futures 0.3.34",
+ "fyx_update",
+ "gpui",
+ "hex",
+ "http_client",
+ "log",
+ "paths",
+ "release_channel",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "smol",
+ "tempfile",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -18326,6 +18400,9 @@ dependencies = [
 name = "terminal_host"
 version = "0.1.0"
 dependencies = [
+ "acp_thread",
+ "editor",
+ "fs",
  "futures 0.3.34",
  "fyx_relay",
  "gpui",
@@ -18342,6 +18419,7 @@ dependencies = [
  "terminal",
  "terminal_ext",
  "terminal_view",
+ "theme",
  "theme_settings",
  "ui",
  "ui_ext",
@@ -22943,6 +23021,8 @@ dependencies = [
  "fs",
  "futures 0.3.34",
  "fyx_guard",
+ "fyx_history_host",
+ "fyx_update_host",
  "git",
  "git_hosting_providers",
  "git_ui",

@@ -95,7 +95,10 @@ members = [
     "crates/fyx_guard_core", # fyx
     "crates/fyx_registry", # fyx
     "crates/fyx_relay", # fyx
+    "crates/fyx_history", # fyx
+    "crates/fyx_history_host", # fyx
     "crates/fyx_update", # fyx
+    "crates/fyx_update_host", # fyx
     "crates/git",
     "crates/git_hosting_providers",
     "crates/git_ui",
@@ -288,6 +291,8 @@ members = [
     "extensions/fyx_demo_t2", # fyx
     "extensions/fyx_demo_pseudo_terminal", # fyx
     "extensions/fyx_demo_terminal_profiles", # fyx
+    "extensions/fyx_demo_lint", # fyx
+    "extensions/fyx_demo_bookmarks", # fyx
     "extensions/fyx_claude_code", # fyx
     "extensions/fyx_gemini_cli", # fyx
     "extensions/glsl",
@@ -400,7 +405,10 @@ fyx_guard = { path = "crates/fyx_guard" } # fyx
 fyx_guard_core = { path = "crates/fyx_guard_core" } # fyx
 fyx_registry = { path = "crates/fyx_registry" } # fyx
 fyx_relay = { path = "crates/fyx_relay" } # fyx
+fyx_history = { path = "crates/fyx_history" } # fyx
+fyx_history_host = { path = "crates/fyx_history_host" } # fyx
 fyx_update = { path = "crates/fyx_update" } # fyx
+fyx_update_host = { path = "crates/fyx_update_host" } # fyx
 git = { path = "crates/git" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }

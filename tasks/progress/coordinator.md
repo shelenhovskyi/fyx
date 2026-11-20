@@ -7,14 +7,17 @@ cloud sandboxes. Each worker's Handoff is at the top of `tasks/progress/W<n>.md`
 ## Starting a local thread
 
 - **Folder:** start each worker thread in its **existing** folder, **without** the Worktree
-  option. `.claude/hooks/session-env.sh` sets `CARGO_TARGET_DIR` by folder name
-  (`.claude/fyx-targets.json`). A new worktree means a cold ~30 GB build in `./target`.
+  option. `.claude/hooks/session-env.sh` sets `CARGO_TARGET_DIR` to the one shared target
+  `D:/fyx-targets/shared` for every folder (2026-11-20: one build at a time on this PC).
+- **Paths (2026-11-20):** everything Fyx lives under `D:\fyx\`: `fyx` (repo + `.claude\worktrees`),
+  `fyx-extensions`, `builds`, `user-check`, `scratch`. `D:\projects\fyx` and the other old paths
+  are junctions to them. Target dirs stay at `D:\fyx-targets` (junction to `E:\fyx-targets`).
 - **One thread per folder.**
 - **First message:** "You are W<n> in the Fyx swarm. Read only the Handoff at the top of
   `tasks/progress/W<n>.md` and the Efficiency section of `.claude/CLAUDE.md`, then continue."
 - **Do not delete** `.claude/worktrees/*` until the owner says so.
 
-| Role | Owns | Folder (under D:\projects\fyx) | Branch |
+| Role | Owns | Folder (under D:\fyx\fyx) | Branch |
 | --- | --- | --- | --- |
 | W0 gatekeeper | merges, `script/gate.sh`, pushes `integration` and `fyx/main` | `.` | integration |
 | W1 | terminal_host, terminal_ext, fyx_relay, SSH, main.rs hooks, settings_content fyx.rs | `.claude/worktrees/fyx-w1-rebrand-904c67` | claude/fyx-w1-rebrand-904c67 |

@@ -1,4 +1,4 @@
-//! `fyx:ui` 0.4, staged: proposed edits through agent review (design.md B.10), with the
+//! `fyx:ui` 0.4: proposed edits through agent review (design.md B.10), with the
 //! `fyx-ui-0-4` feature and the `review:propose` capability.
 //!
 //! - [`propose`] opens a review of one worktree file and returns its id. The user decides in

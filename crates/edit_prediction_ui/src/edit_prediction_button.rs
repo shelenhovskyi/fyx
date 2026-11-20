@@ -1619,6 +1619,7 @@ pub fn get_available_providers(cx: &mut App) -> Vec<EditPredictionProvider> {
         providers.push(EditPredictionProvider::Mercury);
     }
 
+    crate::fyx_providers::retain_reachable(&mut providers, cx); // fyx: no Zed AI cloud-off
     providers
 }
 

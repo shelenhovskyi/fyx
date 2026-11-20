@@ -77,7 +77,27 @@ const MAX_JOURNAL: usize = 512;
 struct CredentialsStore;
 
 fn credentials_url(name: &str) -> String {
-    format!("fyx-secret://{name}")
+    match paths::custom_data_dir() {
+        Some(dir) => profile_credentials_url(&dir.to_string_lossy(), name),
+        None => format!("fyx-secret://{name}"),
+    }
+}
+
+/// The store entry of `name` for a `--user-data-dir` profile: the credential store is one per OS
+/// user, so each profile gets its own namespace and a test profile never reads, lists or
+/// overwrites the default profile's secrets.
+fn profile_credentials_url(data_dir: &str, name: &str) -> String {
+    format!(
+        "fyx-secret://profile-{:016x}/{name}",
+        fnv1a(data_dir.as_bytes())
+    )
+}
+
+/// FNV-1a, 64-bit: stable across builds and Rust versions, unlike `DefaultHasher`.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 impl SecretStore for CredentialsStore {
@@ -640,6 +660,18 @@ mod tests {
             self.0.borrow_mut().remove(name);
             Task::ready(Ok(()))
         }
+    }
+
+    #[test]
+    fn profiles_get_their_own_store_entries() {
+        let first = profile_credentials_url(r"D:\scratch\profile-a", "github");
+        let second = profile_credentials_url(r"D:\scratch\profile-b", "github");
+        assert_ne!(first, second);
+        assert_ne!(first, "fyx-secret://github");
+        assert!(first.starts_with("fyx-secret://profile-"));
+        assert!(first.ends_with("/github"));
+        // Stable: the same profile finds its secrets after a rebuild.
+        assert_eq!(fnv1a(b"fyx"), 0xdc67_7e18_fe99_f948);
     }
 
     struct FakeApprover {

@@ -9,8 +9,6 @@
 //! ([`MarksHandle::revoke_diagnostics`], [`MarksHandle::revoke_decorations`]), clear it at the
 //! host.
 
-#![cfg_attr(not(test), allow(dead_code))] // Linked by the `context` import once W0 stages §E/§F.
-
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard, PoisonError},

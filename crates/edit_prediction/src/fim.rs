@@ -186,9 +186,8 @@ pub fn infer_prompt_format(model: &str) -> Option<EditPredictionPromptFormat> {
         "codegemma" => EditPredictionPromptFormat::CodeGemma,
         "codestral" | "mistral" => EditPredictionPromptFormat::Codestral,
         "glm" | "glm-4" | "glm-4.5" => EditPredictionPromptFormat::Glm,
-        _ => {
-            return None;
-        }
+        // fyx: llama.cpp file names and Ollama tags by family (plan 6.5).
+        _ => return crate::fyx_prompt_format::infer_by_family(model),
     })
 }
 

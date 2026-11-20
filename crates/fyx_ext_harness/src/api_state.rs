@@ -309,6 +309,8 @@ impl ApiState {
             }
             model::UiEvent::InputChanged(..)
             | model::UiEvent::RowSelected(..)
+            // A chevron toggle is no gesture (§F.4).
+            | model::UiEvent::RowToggled(..)
             | model::UiEvent::ProgressCancelRequested(_) => {}
         }
     }

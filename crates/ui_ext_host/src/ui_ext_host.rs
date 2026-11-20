@@ -27,6 +27,7 @@ mod consent_ui_tests;
 mod context_host;
 mod decorations;
 mod diagnostics_host;
+pub mod extension_marks;
 pub mod fyx_extensions_page;
 mod icons;
 pub mod images;
@@ -40,6 +41,7 @@ mod main_thread;
 mod modal;
 pub mod notifications;
 mod panel;
+pub mod privacy_report;
 pub mod progress;
 mod registry;
 pub mod registry_service;
@@ -91,6 +93,7 @@ pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
 };
+pub use privacy_report::OpenPrivacyReport;
 pub use registry::{
     DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver,
     T3ShareTarget, UiExtensionRegistry,

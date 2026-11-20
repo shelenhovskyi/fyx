@@ -7,6 +7,11 @@
 # (superseded test and bin hashes). Then it prints the free space on D: and E:, with a WARN line
 # when D: is under 150 GB or E: under 40 GB.
 #
+# Hard ceiling: since 2026-11-20 every Fyx folder builds into the one shared target
+# D:/fyx-targets/shared (a junction into E:). If E: still has less than FYX_DISK_GUARD_MIN_E_GB
+# (default 40) free after the sweep, the idle shared target's debug/ dir is deleted whole; the
+# next build is cold (~40 min) but the disk cannot fill up.
+#
 # Usage: script/fyx-disk-guard [TARGET_DIR]...
 # With no arguments it takes the Windows dev box's targets (tasks/W0-integrator.md). A missing
 # dir is skipped. "In use" is fyx-prune-target's check: a busy dir is reported and left alone.
@@ -17,14 +22,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 targets=("$@")
 if [[ ${#targets[@]} -eq 0 ]]; then
-    targets=(
-        /d/fyx-targets-cold/main
-        /d/fyx-targets-cold/w1
-        /d/fyx-targets-cold/w3
-        /d/fyx-targets-cold/w4
-        /e/fyx-targets/w2c
-        /e/fyx-targets/w2c-light
-    )
+    targets=(/d/fyx-targets/shared)
 fi
 
 have_sweep=0
@@ -57,6 +55,18 @@ done
 free_gb() {
     powershell -NoProfile -Command "[math]::Round((Get-Volume $1 -ErrorAction SilentlyContinue).SizeRemaining/1GB,1)" 2>/dev/null | tr -d '\r'
 }
+min_e_gb="${FYX_DISK_GUARD_MIN_E_GB:-40}"
+e_free="$(free_gb E)"
+shared=/d/fyx-targets/shared
+if [[ -n "$e_free" && -d "$shared/debug" ]] && awk "BEGIN { exit !($e_free < $min_e_gb) }"; then
+    if script/fyx-prune-target --dry-run "$shared" >/dev/null 2>&1; then
+        echo "disk-guard: E: has ${e_free} GB free (under ${min_e_gb} GB): deleting $shared/debug"
+        rm -rf "$shared/debug"
+    else
+        echo "disk-guard: E: has ${e_free} GB free (under ${min_e_gb} GB), but $shared is in use: not deleted"
+    fi
+fi
+
 d_free="$(free_gb D)"
 e_free="$(free_gb E)"
 echo "disk-guard: free D: ${d_free:-?} GB, E: ${e_free:-?} GB"

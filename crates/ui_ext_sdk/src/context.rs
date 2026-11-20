@@ -1,4 +1,4 @@
-//! `fyx:ui` 0.4, staged: editor context and opening files (design.md B.11), with the
+//! `fyx:ui` 0.4: editor context and opening files (design.md B.11), with the
 //! `fyx-ui-0-4` feature.
 //!
 //! - [`watch`] (`context:editor`) starts the editor feed: `IoEvent::ContextChanged` arrives at
@@ -13,13 +13,21 @@
 //!   [`watch_diagnostics`] sends `IoEvent::DiagnosticsChanged` with the files that changed
 //!   (debounced 300 ms; empty when more than 200 did), with no entries: read them again.
 //!
+//! - [`publish_diagnostics`] and [`clear_diagnostics`] (`diagnostics:publish`, plan 6.6) show the
+//!   extension's own problems in a file, like a language server's; the host names the extension
+//!   as their source. They last while the extension runs.
+//! - [`decorate_files`] and [`clear_file_decorations`] (`workspace:file-decorations`, plan 6.7)
+//!   put a badge, a colour or a tooltip line on project-panel entries.
+//!
 //! Exported as 0.2 or 0.1, every function here fails with `unavailable`. Off WASM, [`watch`],
 //! [`open`] and [`watch_diagnostics`] record a [`HostEffect::Context`](crate::HostEffect::Context),
 //! the path mapping uses the roots [`set_worktree_roots`] gave (none: everything is outside), and
-//! [`diagnostics`] answers from [`set_diagnostics`].
+//! [`diagnostics`] answers from [`set_diagnostics`]. The publishing and decorating calls record
+//! their arguments as they are; the checks (limits, worktree, private files) are the host's and
+//! the harness's.
 
 pub use crate::bindings::fyx::ui::context::{
-    Diagnostic, DiagnosticsSnapshot, EditorContext, FileDiagnostics, Severity,
+    Diagnostic, DiagnosticsSnapshot, EditorContext, FileDecoration, FileDiagnostics, Severity,
 };
 use crate::{FileRef, HostError, TextRange};
 
@@ -37,6 +45,17 @@ unsafe extern "Rust" {
         path: Option<&FileRef>,
     ) -> Result<DiagnosticsSnapshot, HostError>;
     safe fn __fyx_ui_context_watch_diagnostics(on: bool) -> Result<(), HostError>;
+    safe fn __fyx_ui_context_publish_diagnostics(
+        path: &FileRef,
+        diagnostics: &[Diagnostic],
+    ) -> Result<(), HostError>;
+    safe fn __fyx_ui_context_clear_diagnostics(path: Option<&FileRef>) -> Result<(), HostError>;
+    safe fn __fyx_ui_context_decorate_files(
+        decorations: &[FileDecoration],
+    ) -> Result<(), HostError>;
+    safe fn __fyx_ui_context_clear_file_decorations(
+        paths: Option<&[FileRef]>,
+    ) -> Result<(), HostError>;
 }
 
 /// What a context function did, recorded off WASM in
@@ -50,6 +69,15 @@ pub enum ContextEffect {
         focus: bool,
     },
     WatchDiagnostics(bool),
+    PublishDiagnostics {
+        path: FileRef,
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// `None` clears every file.
+    ClearDiagnostics(Option<FileRef>),
+    DecorateFiles(Vec<FileDecoration>),
+    /// `None` clears every decoration.
+    ClearFileDecorations(Option<Vec<FileRef>>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -204,6 +232,73 @@ pub fn watch_diagnostics(on: bool) -> Result<(), HostError> {
     )))
 }
 
+/// `diagnostics:publish`: replaces this extension's diagnostics of `path`; an empty list clears
+/// them. `source` is ignored: the host names the extension. Ranges are 0-based, columns in UTF-8
+/// bytes. At most 500 per file and 5,000 in all (`invalid-argument`); over 20 calls a second is
+/// `unavailable`.
+pub fn publish_diagnostics(path: &FileRef, diagnostics: &[Diagnostic]) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_publish_diagnostics(path, diagnostics);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(
+        ContextEffect::PublishDiagnostics {
+            path: path.clone(),
+            diagnostics: diagnostics.to_vec(),
+        },
+    ))
+}
+
+/// `diagnostics:publish`: clears this extension's diagnostics of `path`, or of every file.
+pub fn clear_diagnostics(path: Option<&FileRef>) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_clear_diagnostics(path);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(ContextEffect::ClearDiagnostics(
+        path.cloned(),
+    )))
+}
+
+/// A diagnostic for [`publish_diagnostics`] on one 0-based line, over `columns` (UTF-8 bytes).
+pub fn line_diagnostic(
+    line: u32,
+    columns: std::ops::Range<u32>,
+    severity: Severity,
+    message: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic {
+        range: TextRange::new(
+            crate::Position::new(line, columns.start),
+            crate::Position::new(line, columns.end),
+        ),
+        severity,
+        message: message.into(),
+        source: None,
+        code: None,
+    }
+}
+
+/// `workspace:file-decorations`: sets or replaces this extension's decoration of each path. A
+/// badge has at most 2 characters; the colour is `text-accent`, `warning`, `error`, `success` or
+/// `text-muted`; a tooltip at most 256 bytes. At most 500 per call and 10,000 in all.
+pub fn decorate_files(decorations: &[FileDecoration]) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_decorate_files(decorations);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(ContextEffect::DecorateFiles(
+        decorations.to_vec(),
+    )))
+}
+
+/// `workspace:file-decorations`: removes this extension's decorations of `paths`, or all.
+pub fn clear_file_decorations(paths: Option<&[FileRef]>) -> Result<(), HostError> {
+    #[cfg(target_arch = "wasm32")]
+    return __fyx_ui_context_clear_file_decorations(paths);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::host::record(crate::HostEffect::Context(
+        ContextEffect::ClearFileDecorations(paths.map(<[FileRef]>::to_vec)),
+    ))
+}
+
 /// What `register_extension!`'s context shims call, per exported world.
 #[doc(hidden)]
 pub mod glue {
@@ -238,6 +333,25 @@ pub mod glue {
 
         pub fn watch_diagnostics(on: bool) -> Result<(), HostError> {
             wit::watch_diagnostics(on)
+        }
+
+        pub fn publish_diagnostics(
+            path: &FileRef,
+            diagnostics: &[wit::Diagnostic],
+        ) -> Result<(), HostError> {
+            wit::publish_diagnostics(path, diagnostics)
+        }
+
+        pub fn clear_diagnostics(path: Option<&FileRef>) -> Result<(), HostError> {
+            wit::clear_diagnostics(path)
+        }
+
+        pub fn decorate_files(decorations: &[wit::FileDecoration]) -> Result<(), HostError> {
+            wit::decorate_files(decorations)
+        }
+
+        pub fn clear_file_decorations(paths: Option<&[FileRef]>) -> Result<(), HostError> {
+            wit::clear_file_decorations(paths)
         }
     }
 
@@ -285,6 +399,27 @@ pub mod glue {
 
                 pub fn watch_diagnostics(_on: bool) -> Result<(), HostError> {
                     Err(unavailable("watch_diagnostics"))
+                }
+
+                pub fn publish_diagnostics(
+                    _path: &FileRef,
+                    _diagnostics: &[super::super::Diagnostic],
+                ) -> Result<(), HostError> {
+                    Err(unavailable("publish_diagnostics"))
+                }
+
+                pub fn clear_diagnostics(_path: Option<&FileRef>) -> Result<(), HostError> {
+                    Err(unavailable("clear_diagnostics"))
+                }
+
+                pub fn decorate_files(
+                    _decorations: &[super::super::FileDecoration],
+                ) -> Result<(), HostError> {
+                    Err(unavailable("decorate_files"))
+                }
+
+                pub fn clear_file_decorations(_paths: Option<&[FileRef]>) -> Result<(), HostError> {
+                    Err(unavailable("clear_file_decorations"))
                 }
             }
         };
@@ -375,5 +510,54 @@ mod tests {
             "{error:?}"
         );
         assert!(glue::v0_1::to_file_ref("/a").is_err());
+    }
+
+    #[test]
+    fn publishing_and_decorating_are_recorded_off_wasm() {
+        take_host_effects();
+        let file = FileRef {
+            worktree: Some(1),
+            path: "notes.md".into(),
+        };
+        let todo = line_diagnostic(3, 0..4, Severity::Information, "TODO");
+        assert_eq!(todo.range.start.line, 3);
+        assert_eq!(todo.range.end.column, 4);
+        publish_diagnostics(&file, std::slice::from_ref(&todo)).unwrap();
+        clear_diagnostics(None).unwrap();
+        let star = FileDecoration {
+            path: file.clone(),
+            badge: Some("★".into()),
+            color: None,
+            tooltip: Some("Bookmarked".into()),
+        };
+        decorate_files(std::slice::from_ref(&star)).unwrap();
+        clear_file_decorations(Some(std::slice::from_ref(&file))).unwrap();
+        assert_eq!(
+            take_host_effects(),
+            vec![
+                HostEffect::Context(ContextEffect::PublishDiagnostics {
+                    path: file.clone(),
+                    diagnostics: vec![todo],
+                }),
+                HostEffect::Context(ContextEffect::ClearDiagnostics(None)),
+                HostEffect::Context(ContextEffect::DecorateFiles(vec![star])),
+                HostEffect::Context(ContextEffect::ClearFileDecorations(Some(vec![file]))),
+            ]
+        );
+    }
+
+    #[test]
+    fn older_worlds_cannot_publish_or_decorate() {
+        let file = FileRef {
+            worktree: None,
+            path: "a".into(),
+        };
+        let unavailable = |result: Result<(), HostError>| {
+            assert_eq!(result.unwrap_err().code, crate::HostErrorCode::Unavailable);
+        };
+        unavailable(glue::v0_2::publish_diagnostics(&file, &[]));
+        unavailable(glue::v0_1::clear_diagnostics(None));
+        unavailable(glue::v0_2::decorate_files(&[]));
+        unavailable(glue::v0_1::clear_file_decorations(None));
     }
 }

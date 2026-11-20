@@ -132,9 +132,15 @@ fn add<S: BuildHasher>(env: &mut HashMap<String, String, S>, additions: EnvAddit
     }
 }
 
+/// The relay's variables (`fyx_relay::{RELAY_ENV, PORT_ENV, STATE_ENV}`, checked in
+/// `terminal_host`'s tests). The hook sets them for every local terminal, after the extensions'
+/// variables and with any of theirs of the same name dropped, so no extension can set them.
+pub const HOOK_HOST_NAMES: [&str; 3] = ["FYX_RELAY", "FYX_RELAY_PORT", "FYX_RELAY_STATE"];
+
 fn is_host_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    upper.starts_with("FYX_") || upper.starts_with("ZED_")
+    (upper.starts_with("FYX_") || upper.starts_with("ZED_"))
+        && !HOOK_HOST_NAMES.contains(&upper.as_str())
 }
 
 const FIELD: char = '\u{1f}';
@@ -181,6 +187,7 @@ mod tests {
                 ("CLAUDE_CONFIG_DIR".into(), "/w".into()),
                 ("FYX_TERMINAL_TOKEN".into(), "forged".into()),
                 ("zed_x".into(), "forged".into()),
+                ("FYX_RELAY_PORT".into(), "4242".into()),
             ],
             accounts: vec![AccountBadge {
                 tool: "claude".into(),
@@ -208,6 +215,7 @@ mod tests {
         add(&mut env, work("Personal"));
         assert_eq!(env["CLAUDE_CONFIG_DIR"], "/w");
         assert!(!env.contains_key("zed_x"));
+        assert_eq!(env["FYX_RELAY_PORT"], "4242");
 
         let ext = TerminalExt::insert_env(&mut env);
         assert_ne!(env["FYX_TERMINAL_TOKEN"], "forged");

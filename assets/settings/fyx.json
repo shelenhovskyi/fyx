@@ -78,6 +78,21 @@
     "allow_env": [],
   },
   "fyx": {
+    "updates": {
+      // Check once a day for a new Fyx release (GitHub releases of shelenhovskyi/fyx). A new
+      // version is only offered: nothing is installed until you press "Install".
+      // "fyx: check for updates" checks once either way.
+      "check": false,
+    },
+    "history": {
+      // Snapshots of files on every save and of every file an agent turn changed, kept on
+      // this machine only ("fyx: local history" restores a file or undoes a whole turn).
+      "enabled": true,
+      // Disk space per worktree in MB, age in days, and the largest file kept in MB.
+      "max_total_mb": 256,
+      "max_age_days": 30,
+      "max_file_mb": 8,
+    },
     "extensions": {
       // Folders of UI extensions in development, loaded on every start and reloaded when
       // rebuilt ("fyx_ui: install dev UI extension" adds to it). Each needs one "Enable".
@@ -89,6 +104,10 @@
       "hidden_status_items": [],
       // The Fyx extension registry (https://, http://localhost or file://). Empty: off.
       "registry_url": "",
+      // Zed's extension registry (themes, languages, language servers) on the Extensions page.
+      // Only that page, installs and update checks of installed Zed extensions use it; the rest
+      // of Zed's cloud stays off with `server_url`. Zed's terms apply. Empty: off.
+      "zed_registry_url": "https://api.zed.dev",
       "network": {
         // Host names UI extensions may reach on your private network (10/8, 172.16/12,
         // 192.168/16, 100.64/10, fc00::/7) when they also declare them; "*.corp.example"
@@ -103,6 +122,9 @@
       // Load Fyx's shell integration (command blocks, prompt marks) into zsh, bash, fish and
       // PowerShell. Your own startup files are sourced first and never changed.
       "shell_integration": true,
+      // A soft daily cap on agents' cost in US dollars: reaching it stops the running agent
+      // turns with a notice. 0 means no cap.
+      "daily_cost_cap": 0,
     },
     // Several accounts of one tool, each in its own config dir. Fyx only sets the tool's
     // config-dir variable in a terminal or an agent; sign in with the tool's own command.

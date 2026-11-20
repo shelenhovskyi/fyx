@@ -303,6 +303,21 @@ pub struct DocumentDiagnostics {
     version: Option<i32>,
 }
 
+impl DocumentDiagnostics {
+    /// fyx: one document's diagnostics from a source that is no language server (an extension,
+    /// design wit-0.4 §E.2), for `merge_diagnostic_entries`.
+    pub fn fyx_new(
+        document_abs_path: PathBuf,
+        diagnostics: Vec<DiagnosticEntry<Unclipped<PointUtf16>>>,
+    ) -> Self {
+        Self {
+            diagnostics,
+            document_abs_path,
+            version: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DocumentSelectorContext {
     /// `None` for documents without a language, which no `language` filter matches.

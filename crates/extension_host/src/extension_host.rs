@@ -1,5 +1,6 @@
 mod capability_granter;
 pub mod extension_settings;
+mod fyx_zed_registry; // fyx: Zed's extension registry while the rest of Zed's cloud is off
 pub mod headless_host;
 pub mod wasm_host;
 
@@ -699,6 +700,10 @@ impl ExtensionStore {
             .map(|(id, _)| id.as_ref())
             .collect::<Vec<_>>()
             .join(",");
+        // fyx: nothing to update, so no request at startup on a profile without registry extensions
+        if extension_ids.is_empty() {
+            return Task::ready(Ok(Vec::new()));
+        }
         let task = self.fetch_extensions_from_api(
             "/extensions/updates",
             &[
@@ -810,13 +815,22 @@ impl ExtensionStore {
         anyhow::Ok(())
     }
 
+    /// fyx: a Zed registry URL from `fyx.extensions.zed_registry_url`, else from `server_url`.
+    fn zed_registry_api_url(&self, path: &str, query: &[(&str, &str)], cx: &App) -> Result<Url> {
+        let base_url = ExtensionSettings::get_global(cx)
+            .zed_registry_url
+            .as_deref();
+        fyx_zed_registry::registry_url(base_url, path, query)
+            .unwrap_or_else(|| self.http_client.build_zed_api_url(path, query))
+    }
+
     fn fetch_extensions_from_api(
         &self,
         path: &str,
         query: &[(&str, &str)],
         cx: &mut Context<ExtensionStore>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
-        let url = self.http_client.build_zed_api_url(path, query);
+        let url = self.zed_registry_api_url(path, query, cx); // fyx: own registry URL
         let http_client = self.http_client.clone();
         cx.spawn(async move |_, _| {
             let mut response = http_client
@@ -979,8 +993,8 @@ impl ExtensionStore {
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
 
         let Some(url) = self
-            .http_client
-            .build_zed_api_url(
+            .zed_registry_api_url(
+                // fyx: own registry URL
                 &format!("/extensions/{extension_id}/download"),
                 &[
                     ("min_schema_version", &schema_versions.start().to_string()),
@@ -991,6 +1005,7 @@ impl ExtensionStore {
                     ),
                     ("max_wasm_api_version", &wasm_api_versions.end().to_string()),
                 ],
+                cx,
             )
             .log_err()
         else {
@@ -1024,10 +1039,11 @@ impl ExtensionStore {
     ) -> Task<Result<()>> {
         log::info!("installing extension {extension_id} {version}");
         let Some(url) = self
-            .http_client
-            .build_zed_api_url(
+            .zed_registry_api_url(
+                // fyx: own registry URL
                 &format!("/extensions/{extension_id}/{version}/download"),
                 &[],
+                cx,
             )
             .log_err()
         else {

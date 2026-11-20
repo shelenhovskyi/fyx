@@ -131,6 +131,11 @@ fn edit_prediction_provider_config_for_settings(cx: &App) -> Option<EditPredicti
                     format = inferred_format;
                 } else {
                     // todo: notify user that prompt format inference failed
+                    // fyx: at least say why predictions are off (plan 6.5).
+                    log::warn!(
+                        "edit predictions are off: no prompt format is known for model {:?};                          set `prompt_format` in its `edit_predictions` settings",
+                        custom_settings.model
+                    );
                     return None;
                 }
             }

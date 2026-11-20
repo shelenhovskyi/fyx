@@ -953,6 +953,8 @@ impl Render for SurfaceView {
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::select_page_up))
             .on_action(cx.listener(Self::select_page_down))
+            .on_action(cx.listener(Self::expand_row))
+            .on_action(cx.listener(Self::collapse_row))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::cancel_input))
             .child(body)
@@ -1375,6 +1377,11 @@ impl Renderer<'_, '_> {
             extension_selected == Some(index) || self.view.selection.get(&list) == Some(&index);
         // Design J: nesting depth, clamped by the host; 0 for 0.1 rows.
         let indent = self.state.row_indent(list, index);
+        // §F.1: a chevron slot on every row of a tree list, so leaves line up with siblings.
+        let chevron = self
+            .state
+            .list_is_tree(list)
+            .then(|| self.chevron(list, index));
         let row = div()
             .id(ElementId::NamedInteger("fyx-row".into(), index as u64))
             // Tests find rows by `fyx-row-<list>-<index>`; a no-op outside test builds.
@@ -1400,6 +1407,7 @@ impl Renderer<'_, '_> {
                 }
                 this.dispatch(UiEvent::RowClick(list, index), cx)
             }));
+        let row = row.children(chevron);
         let Some(tree) = self.state.row(list, index) else {
             // Not fetched yet: an empty row of the right height.
             return row.into_any_element();
@@ -1421,6 +1429,42 @@ impl Renderer<'_, '_> {
             }
             _ => row.child(self.node(tree, root, scope)).into_any_element(),
         }
+    }
+
+    /// A tree row's chevron (§F.1): a click asks the extension to expand or collapse the row,
+    /// without selecting it. A `leaf` keeps the slot empty.
+    fn chevron(&self, list: NodeId, index: u32) -> AnyElement {
+        use ui_ext::v0_2::Expansion;
+        let slot = div()
+            .id(ElementId::NamedInteger(
+                "fyx-row-chevron".into(),
+                index as u64,
+            ))
+            .debug_selector(|| format!("fyx-row-chevron-{list}-{index}"))
+            .flex_none()
+            .w(px(16.))
+            .flex()
+            .items_center()
+            .justify_center();
+        let expand = match self.state.row_expansion(list, index) {
+            Expansion::Leaf => return slot.into_any_element(),
+            Expansion::Collapsed => true,
+            Expansion::Expanded => false,
+        };
+        slot.child(
+            ui::Icon::new(if expand {
+                ui::IconName::ChevronRight
+            } else {
+                ui::IconName::ChevronDown
+            })
+            .size(ui::IconSize::Small)
+            .color(ui::Color::Muted),
+        )
+        .on_click(self.cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.dispatch(UiEvent::RowToggled(list, index, expand), cx)
+        }))
+        .into_any_element()
     }
 
     /// A 0.3 `image` node as the muted box with its alt text that design.md §12 draws

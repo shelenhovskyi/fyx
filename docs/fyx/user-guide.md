@@ -43,9 +43,12 @@ Things that differ from Zed:
   - The agent's default model is Anthropic's `claude-sonnet-5-5` with your own API key. Pick any
     other provider you have configured.
   - Edit predictions are off (`"provider": "none"`), because Zed's provider needs an account.
-    Bring your own provider.
-- **No Zed extension registry.** Fyx does not install extensions from Zed's registry or suggest
-  them. Zed extensions you install as dev extensions still work.
+    Bring your own provider, such as a local llama.cpp server: see
+    [Edit predictions without zed.dev](#edit-predictions-without-zeddev).
+- **Zed's extension registry, without the rest of Zed's cloud.** The Extensions page lists and
+  installs Zed extensions (themes, languages, language servers) from `api.zed.dev`, as Zed does.
+  It is the only zed.dev service Fyx uses, and Zed's terms apply to it. Fyx does not suggest or
+  auto-install Zed extensions. See [Zed's extension registry](#zeds-extension-registry).
 - **Dev builds only.** Fyx is a prototype, built and tested on Windows 11 only. There are no
   releases, installers or signed binaries yet. To build it, see the [README](../../README.md).
 
@@ -58,7 +61,8 @@ override any of them in your settings.
 
 | What | Fyx default | Effect |
 |---|---|---|
-| `server_url` | `"http://127.0.0.1:0"` | Every zed.dev address (sign-in, collaboration, extension registry, telemetry upload, update checks) is built from this value. It points nowhere, so these requests fail before anything is sent. |
+| `server_url` | `"http://127.0.0.1:0"` | Every zed.dev address (sign-in, collaboration, telemetry upload, update checks) is built from this value. It points nowhere, so these requests fail before anything is sent. |
+| `fyx.extensions.zed_registry_url` | `"https://api.zed.dev"` | Zed's extension registry, the one exception. See [Zed's extension registry](#zeds-extension-registry). |
 | `telemetry.diagnostics`, `telemetry.metrics` | `false` | No telemetry and no crash reports. |
 | `auto_update` | `false` | No update checks. Fyx has no update feed. |
 | `edit_predictions.provider` | `"none"` | No edit prediction requests. |
@@ -69,6 +73,23 @@ override any of them in your settings.
 To use Zed's services anyway, set `"server_url": "https://zed.dev"` in your settings. Zed's terms
 then apply. The `ZED_SERVER_URL` environment variable also overrides the setting.
 
+### Zed's extension registry
+
+The Extensions page (`zed: extensions`) lists, installs and updates Zed extensions from Zed's
+registry at `https://api.zed.dev`, the address in `fyx.extensions.zed_registry_url`. Only these
+requests use it: the rest of Zed's cloud stays off through `server_url`. Zed's terms apply to the
+registry.
+
+- **When Fyx connects.** When you open the Extensions page or search it, when you install an
+  extension, and at startup when Zed extensions from the registry are installed, to check them
+  for updates. With none installed, nothing is sent at startup.
+- **Turning it off.** Set `"fyx": { "extensions": { "zed_registry_url": "" } }` in your settings.
+  The registry address then comes from `server_url` again, which points nowhere. Installed
+  extensions keep working, and dev extensions install from a folder either way.
+- **Fyx's own folders.** Fyx does not see extensions installed in Zed: install them again in Fyx.
+
+<!-- crates/extension_host/src/fyx_zed_registry.rs; crates/extension_host/src/extension_host.rs (fyx:); assets/settings/fyx.json -->
+
 ### Network at startup
 
 On a fresh profile, with no folder open and no AI keys set, Fyx makes no connection outside your
@@ -78,7 +99,11 @@ registry agent.
 
 <!-- tasks/progress/W1.md "Verification"; crates/project/src/agent_registry_store.rs (fyx:) -->
 
-Fyx still connects in these cases. None of them goes to zed.dev.
+Fyx still connects in these cases. Only the first goes to zed.dev.
+
+- **Zed's extension registry**, at startup only while Zed extensions from the registry are
+  installed (an update check), and when you use the Extensions page. See
+  [Zed's extension registry](#zeds-extension-registry).
 
 - **AI providers, on first use.** With an AI key in the environment or the keychain, providers
   start when you first open the model picker or send a prompt, not at startup. Some then download
@@ -96,6 +121,64 @@ Fyx still connects in these cases. None of them goes to zed.dev.
 <!-- tasks/reviews/network-audit-1.md "Verdict" and "Still phones home"; W1 4b83f766d2 -->
 
 To turn off every AI feature, including these requests, set `"disable_ai": true`.
+
+## Edit predictions without zed.dev
+
+Edit predictions are the grey suggestions that appear as you type; Tab accepts one. Zed's own
+provider needs a zed.dev account, so Fyx starts with them off and leaves "Zed AI" out of the
+provider menu. Pick one of the providers below with `edit_predictions.provider` in your settings
+(or **Settings → Edit Predictions → Providers**). Each one sends the text around your cursor to
+the address shown, and nowhere else.
+
+| Provider | `provider` | Sends to | Needs |
+|---|---|---|---|
+| A local llama.cpp server, or any OpenAI-compatible completions API | `"open_ai_compatible_api"` | your `api_url` | a model; a key only if the server asks |
+| Ollama | `"ollama"` | your `api_url` (default `http://localhost:11434`) | a pulled model |
+| GitHub Copilot | `"copilot"` | GitHub | a Copilot subscription and sign-in |
+| Codestral | `"codestral"` | Mistral | a Mistral API key |
+| Mercury | `"mercury"` | Inception Labs | an Inception API key |
+
+### A local model with llama.cpp
+
+Nothing leaves your computer. Fyx ships no model: download a code model with fill-in-the-middle
+support in GGUF format (Qwen2.5-Coder 1.5B or 7B, DeepSeek-Coder, StarCoder2, CodeGemma), then
+start the server:
+
+```sh
+llama-server -m qwen2.5-coder-1.5b-q8_0.gguf --port 8080 -ngl 99
+```
+
+and add to your settings:
+
+```json
+"edit_predictions": {
+  "provider": "open_ai_compatible_api",
+  "open_ai_compatible_api": {
+    "api_url": "http://127.0.0.1:8080/v1/completions",
+    "model": "qwen2.5-coder-1.5b",
+    "prompt_format": "infer",
+    "max_output_tokens": 64
+  }
+}
+```
+
+`api_url` is the full completions address. `prompt_format: "infer"` picks the model's
+fill-in-the-middle tokens from its name, including llama.cpp file names such as
+`qwen2.5-coder-1.5b-instruct-q8_0.gguf`. If the name says nothing about the family, set the
+format yourself: `qwen`, `deepseek_coder`, `star_coder`, `code_llama`, `code_gemma`, `codestral`
+or `glm`. Without a format the predictions stay off, and the log says so ("no prompt format is
+known for model").
+
+### Ollama
+
+```json
+"edit_predictions": {
+  "provider": "ollama",
+  "ollama": { "model": "qwen2.5-coder:7b-base" }
+}
+```
+
+Run `ollama pull qwen2.5-coder:7b-base` first. Base models suggest better than instruct ones.
 
 ## Reviewing agent changes
 
@@ -441,8 +524,8 @@ optional assets.
 ## Terminals and command-line tools (`fyx:ui` 0.4)
 
 This section describes `integration` at d8d8bd3c53 (2026-11-20), built from
-[the 0.4 design](wit-0.4/design.md). `fyx:ui` 0.4 is not frozen yet, so it loads only in Dev
-builds, and 0.4 extensions install from a folder (**Install Dev Extension…**), not from the
+[the 0.4 design](wit-0.4/design.md). `fyx:ui` 0.4 is frozen since 2026-11-20, so every build
+loads it. 0.4 extensions install from a folder (**Install Dev Extension…**) for now, not from the
 registry. Not built yet: Fyx profiles (below), and shell integration in zsh, fish and SSH
 terminals.
 

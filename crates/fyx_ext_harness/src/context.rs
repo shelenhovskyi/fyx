@@ -1,4 +1,4 @@
-//! A fake editor for the staged `fyx:ui` 0.4 `context` (design.md B.11), with the host's path
+//! A fake editor for the `fyx:ui` 0.4 `context` (design.md B.11), with the host's path
 //! rules from `ui_ext::context` (W2c's 5.13), so an extension's path mapping, opening and
 //! selection feed run headless.
 //!
@@ -182,6 +182,28 @@ impl FakeContext {
             .cloned()
             .collect();
         Ok(model::diagnostics_snapshot(files))
+    }
+
+    /// `file` with its worktree named, for the calls that show things in the editor: in no
+    /// worktree `invalid-argument`, private `not-permitted`. An empty path is the root.
+    pub(crate) fn resolve_entry(&self, file: &FileRef) -> Result<FileRef, HostError> {
+        self.root(file)?;
+        let worktree = match file.worktree {
+            Some(id) => id,
+            None => self
+                .roots
+                .first()
+                .map(|(id, _)| *id)
+                .ok_or_else(|| error(HostErrorCode::InvalidArgument, "no open worktree"))?,
+        };
+        let resolved = FileRef {
+            worktree: Some(worktree),
+            path: file.path.clone(),
+        };
+        if self.is_private(&resolved) {
+            return Err(error(HostErrorCode::NotPermitted, "a private file"));
+        }
+        Ok(resolved)
     }
 
     /// The worktree of `file`: its own, or the only one when it names none.

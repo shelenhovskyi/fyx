@@ -405,7 +405,7 @@ fn launch(
     let roots = local_roots(workspace.read(cx), cx);
     let trusted_root = roots
         .first()
-        .filter(|root| crate::created::in_trusted_worktree(root, cx))
+        .filter(|root| crate::created::in_trusted_worktree(root, Some(window), cx))
         .cloned();
     let relay = crate::relay::relay_binary(cx);
     let start = match plan(

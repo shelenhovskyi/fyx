@@ -1,0 +1,24 @@
+[package]
+name = "fyx_history"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Fyx local history core (plan 6.3): file snapshots per save and per agent turn, timelines, restoring a file or a whole agent turn, size cap and pruning"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_history.rs"
+doctest = false
+
+[dependencies]
+hex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

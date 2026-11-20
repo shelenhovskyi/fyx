@@ -1,0 +1,16 @@
+id = "fyx-demo-bookmarks"
+name = "Bookmarks demo"
+description = "Fyx UI demo: bookmarks in a tree grouped by folder, with a star badge on each bookmarked file in the project panel (fyx:ui 0.4 only)."
+version = "0.1.0"
+schema_version = 1
+authors = ["Fyx"]
+
+# Read by Fyx's extension host (`fyx_ui::UiManifest`); upstream ignores the table.
+# This demo exists only for the staged fyx:ui 0.4: `script/fyx-build-demos --fyx-ui-0-4` builds it
+# into <target>/fyx-demos-v0_4/fyx_demo_bookmarks/, and the older modes leave it out.
+[fyx_ui]
+api_version = "0.4.0"
+component = "fyx_ui.wasm"
+# context:editor (T1) names the active file, workspace:open (T1) opens a bookmark,
+# workspace:file-decorations (T1) badges bookmarked files in the project panel.
+capabilities = ["ui:panel", "context:editor", "workspace:open", "workspace:file-decorations"]
