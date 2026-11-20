@@ -892,7 +892,10 @@ async fn start(
                 == PermissionState::Granted
         });
         let hosts = if network_granted {
-            crate::spawn_sandbox::proxy_hosts(&context.domains)
+            crate::spawn_sandbox::narrowed(
+                crate::spawn_sandbox::proxy_hosts(&context.domains),
+                crate::spawn_sandbox::project_egress(&worktree.root),
+            )
         } else {
             Vec::new()
         };

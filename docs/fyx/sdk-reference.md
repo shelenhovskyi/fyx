@@ -657,6 +657,9 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - It has no network, unless the extension declares `[fyx_ui.network] domains` and holds
     `network:fetch`. Then `HTTPS_PROXY` points at a Fyx proxy that allows those hosts (ports
     and loopback are not passed on), and revoking `network:fetch` kills the program.
+  - A project can narrow that with `.fyx/egress.json` in the worktree root,
+    `{"hosts": ["api.github.com", "*.crates.io"]}`. Only declared hosts the list covers stay.
+    A file that does not parse allows nothing.
   - Windows keeps the job object and Linux the process group for now.
 - **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
 

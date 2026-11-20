@@ -76,6 +76,54 @@ pub(crate) fn proxy_hosts(domains: &DomainList) -> Vec<String> {
     hosts
 }
 
+/// The project's egress list (W5's audit §3.3): `.fyx/egress.json` in the worktree root,
+/// `{"hosts": ["api.github.com", "*.crates.io"]}`. `None` without the file: no project list. A
+/// file that does not parse is an empty list, so nothing is allowed (fail closed). Sandboxed
+/// programs cannot write `.fyx`.
+pub(crate) fn project_egress(worktree_root: &Path) -> Option<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Egress {
+        hosts: Vec<String>,
+    }
+    let path = worktree_root.join(".fyx").join("egress.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<Egress>(&text) {
+        Ok(egress) => Some(egress.hosts),
+        Err(error) => {
+            log::warn!("{}: {error}; no host is allowed", path.display());
+            Some(Vec::new())
+        }
+    }
+}
+
+/// `hosts` narrowed to the project's list: a declared host stays when a project entry covers it,
+/// and a project entry stays when a declared wildcard covers it. No project list: `hosts`.
+pub(crate) fn narrowed(hosts: Vec<String>, project: Option<Vec<String>>) -> Vec<String> {
+    let Some(project) = project else {
+        return hosts;
+    };
+    let parse = |text: &String| {
+        http_proxy::HostPattern::parse(text)
+            .ok()
+            .map(|pattern| (text.clone(), pattern))
+    };
+    let declared: Vec<_> = hosts.iter().filter_map(parse).collect();
+    let listed: Vec<_> = project.iter().filter_map(parse).collect();
+    let mut kept = Vec::new();
+    for (declared_text, declared_pattern) in &declared {
+        for (listed_text, listed_pattern) in &listed {
+            if listed_pattern.covers(declared_pattern) {
+                kept.push(declared_text.clone());
+            } else if declared_pattern.covers(listed_pattern) {
+                kept.push(listed_text.clone());
+            }
+        }
+    }
+    kept.sort();
+    kept.dedup();
+    kept
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) use macos::sandboxed;
 
@@ -240,6 +288,36 @@ mod tests {
             ["*.example.org", "api.github.com", "example.com"]
         );
         assert!(proxy_hosts(&DomainList::default()).is_empty());
+    }
+
+    #[test]
+    fn the_project_list_narrows_the_declared_hosts() {
+        let strings = |list: &[&str]| list.iter().map(|host| host.to_string()).collect();
+        let declared: Vec<String> = strings(&["*.github.com", "crates.io", "example.com"]);
+        assert_eq!(narrowed(declared.clone(), None), declared);
+        assert_eq!(
+            narrowed(
+                declared.clone(),
+                Some(strings(&["api.github.com", "*.crates.io", "crates.io"]))
+            ),
+            ["api.github.com", "crates.io"]
+        );
+        assert!(narrowed(declared, Some(Vec::new())).is_empty());
+    }
+
+    #[test]
+    fn the_project_list_is_read_from_the_worktree() {
+        let root = tempfile::tempdir().expect("root");
+        assert_eq!(project_egress(root.path()), None);
+        std::fs::create_dir_all(root.path().join(".fyx")).expect(".fyx");
+        let file = root.path().join(".fyx/egress.json");
+        std::fs::write(&file, r#"{"hosts": ["api.github.com"]}"#).expect("write");
+        assert_eq!(
+            project_egress(root.path()),
+            Some(vec!["api.github.com".to_string()])
+        );
+        std::fs::write(&file, "not json").expect("write");
+        assert_eq!(project_egress(root.path()), Some(Vec::new()));
     }
 }
 
