@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SessionStart hook: writes environment for every later Bash tool call into $CLAUDE_ENV_FILE.
 # - PATH additions that exist on this machine (~/.cargo/bin, CMake, WinGet Links; rustup on macOS);
-# - CARGO_TARGET_DIR from .claude/fyx-targets.json, keyed by the worktree dir name (unknown
-#   worktree or missing dir -> not set);
-# - CARGO_BUILD_JOBS (the swarm's value) on Windows only.
+# - CARGO_TARGET_DIR from .claude/fyx-targets.json, keyed by the worktree dir name, else its "*"
+#   entry (missing dir -> not set);
+# - CARGO_BUILD_JOBS (all cores: one build at a time) on Windows only.
 # Never fails a session: any error exits 0 silently. Pure bash, no subprocesses (they cost
 # ~30-50 ms each on Windows). PowerShell tool calls ignore this file's PATH/dir values.
 trap 'exit 0' ERR
@@ -50,20 +50,25 @@ fi
 # Worktree dir name: the path segment after /.claude/worktrees/.
 name=""
 if [[ "$cwd" =~ /\.claude/worktrees/([^/]+) ]]; then name="${BASH_REMATCH[1]}"; fi
-if [[ -n "$name" && -z "${CARGO_TARGET_DIR:-}" ]]; then
+# A worktree's own entry wins; "*" covers every other folder, the main checkout included.
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
     src="${BASH_SOURCE[0]//\\//}"
     map="${src%/*}/../fyx-targets.json"
     if [[ -f "$map" ]]; then
         json="$(<"$map")"
-        if [[ "$json" =~ \"$name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+        target=""
+        if [[ -n "$name" && "$json" =~ \"$name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
             target="${BASH_REMATCH[1]}"
-            [[ -d "$(to_unix "$target")" ]] && out+="export CARGO_TARGET_DIR='$target'"$'\n'
+        elif [[ "$json" =~ \"\*\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+            target="${BASH_REMATCH[1]}"
         fi
+        [[ -n "$target" && -d "$(to_unix "$target")" ]] && out+="export CARGO_TARGET_DIR='$target'"$'\n'
     fi
 fi
 
+# One build at a time (shared target dir), so it may use every core.
 if [[ -n "$windows" && -z "${CARGO_BUILD_JOBS:-}" ]]; then
-    out+="export CARGO_BUILD_JOBS=6"$'\n'
+    out+="export CARGO_BUILD_JOBS=${NUMBER_OF_PROCESSORS:-12}"$'\n'
 fi
 
 [[ -n "$out" ]] && { printf '%s' "$out" >> "$CLAUDE_ENV_FILE"; } 2>/dev/null
