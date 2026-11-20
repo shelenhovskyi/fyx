@@ -646,11 +646,19 @@ fn test_chunk_plan(_: &mut TestAppContext) {
             PlannedSegment::Node(_) => None,
         })
         .collect();
-    assert_eq!(chunks.len(), plans[0].segments.len(), "every child is chunked");
+    assert_eq!(
+        chunks.len(),
+        plans[0].segments.len(),
+        "every child is chunked"
+    );
     assert_eq!(chunks[0], &vec![input], "an input gets a chunk of its own");
     let members: usize = chunks.iter().map(|members| members.len()).sum();
     assert_eq!(members, 65, "the input and the 64 rows, each once");
-    assert!(chunks.iter().all(|members| members.len() * 64 <= CHUNK_NODES + 64));
+    assert!(
+        chunks
+            .iter()
+            .all(|members| members.len() * 64 <= CHUNK_NODES + 64)
+    );
 
     let column = |align, grow| {
         Props::Flex(FlexProps {
@@ -666,7 +674,11 @@ fn test_chunk_plan(_: &mut TestAppContext) {
     });
     // ROOT holds 150 texts, a list, 150 texts, a growing column of 300 texts and a column aligned
     // to the start holding two columns of 300 texts.
-    let mut nodes = vec![node(ROOT, None, column(ui_ext::v0_2::Align::Stretch, false))];
+    let mut nodes = vec![node(
+        ROOT,
+        None,
+        column(ui_ext::v0_2::Align::Stretch, false),
+    )];
     let mut next = 2;
     let texts = |parent: NodeId, count: usize, nodes: &mut Vec<Node>, next: &mut NodeId| {
         for i in 0..count {
@@ -680,15 +692,27 @@ fn test_chunk_plan(_: &mut TestAppContext) {
     next += 1;
     texts(ROOT, 150, &mut nodes, &mut next);
     let grow_id = next;
-    nodes.push(node(grow_id, Some(ROOT), column(ui_ext::v0_2::Align::Stretch, true)));
+    nodes.push(node(
+        grow_id,
+        Some(ROOT),
+        column(ui_ext::v0_2::Align::Stretch, true),
+    ));
     next += 1;
     texts(grow_id, 300, &mut nodes, &mut next);
     let start_id = next;
-    nodes.push(node(start_id, Some(ROOT), column(ui_ext::v0_2::Align::Start, false)));
+    nodes.push(node(
+        start_id,
+        Some(ROOT),
+        column(ui_ext::v0_2::Align::Start, false),
+    ));
     next += 1;
     for _ in 0..2 {
         let inner = next;
-        nodes.push(node(inner, Some(start_id), column(ui_ext::v0_2::Align::Stretch, false)));
+        nodes.push(node(
+            inner,
+            Some(start_id),
+            column(ui_ext::v0_2::Align::Stretch, false),
+        ));
         next += 1;
         texts(inner, 300, &mut nodes, &mut next);
     }
@@ -769,7 +793,10 @@ async fn test_large_surface_draws_in_cached_chunks(cx: &mut TestAppContext) {
                 .zip(&after)
                 .filter(|(before, after)| before != after)
                 .count();
-            assert_eq!(rendered, 1, "only the input's chunk renders: {before:?} {after:?}");
+            assert_eq!(
+                rendered, 1,
+                "only the input's chunk renders: {before:?} {after:?}"
+            );
         }
         positions.push((
             bounds(format!("fyx-node-{input}"), vcx),
