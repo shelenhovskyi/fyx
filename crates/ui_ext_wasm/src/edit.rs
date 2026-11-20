@@ -193,16 +193,33 @@ impl EditHandle {
             let broker = self.broker.clone();
             let edits = self.edits.clone();
             let extension_id = self.extension_id.clone();
+            let usage = running.usage.clone();
             tokio::spawn(async move {
                 let work = async move {
                     check_targets(&edit)?;
                     if !consent(broker.as_ref(), &extension_id, CAPABILITY_EDIT).await {
                         return Err(EditError::Denied);
                     }
-                    match edits {
+                    let files = edit
+                        .files
+                        .iter()
+                        .filter_map(|file| match &file.target {
+                            EditTarget::File(file) => Some(file.path.to_string()),
+                            EditTarget::Document(_) => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let applied = match edits {
                         Some(edits) => edits.apply(&extension_id, edit).await,
                         None => Err(EditError::Cancelled),
+                    };
+                    if applied.is_ok()
+                        && let Some(usage) = &usage
+                    {
+                        for file in &files {
+                            usage.edited(file);
+                        }
                     }
+                    applied
                 };
                 let result = match Abortable::new(work, registration).await {
                     Ok(result) => result,

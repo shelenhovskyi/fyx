@@ -41,6 +41,7 @@ mod main_thread;
 mod modal;
 pub mod notifications;
 mod panel;
+pub mod privacy_report;
 pub mod progress;
 mod registry;
 pub mod registry_service;
@@ -88,6 +89,7 @@ pub use install::{
     describe_capabilities,
 };
 pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
+pub use privacy_report::OpenPrivacyReport;
 pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
