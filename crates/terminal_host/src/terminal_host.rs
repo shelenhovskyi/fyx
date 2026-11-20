@@ -14,6 +14,7 @@ mod sessions_panel;
 mod settings;
 mod t3;
 mod tab_status;
+pub mod usage_meters;
 
 use gpui::App;
 use workspace::Workspace;
