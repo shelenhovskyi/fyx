@@ -1123,6 +1123,20 @@ choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerS
     assert_eq!(changed, ["scrollback", "shell"]);
     assert!(!harness.deliver_io().expect("delivers").is_empty());
     assert!(harness.take_settings_changed().is_empty());
+    // The demo read each changed key back through the SDK's `settings::get`.
+    let logged: Vec<&str> = harness
+        .logs()
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.starts_with("setting "))
+        .collect();
+    assert_eq!(
+        logged,
+        [
+            "setting scrollback = Integer(500)",
+            "setting shell = Choice(\"bash\")"
+        ]
+    );
 
     // A broken declaration refuses the package.
     std::fs::write(&manifest, text.replace("default = 1000", "default = 5")).unwrap();
