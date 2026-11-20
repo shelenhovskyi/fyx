@@ -526,6 +526,254 @@ async fn bench_redraw_of_a_large_tree(cx: &mut TestAppContext) {
     }
 }
 
+/// A surface of about 4096 texts in rows under a column, with one input first.
+fn large_tree_with_input() -> (Tree, NodeId) {
+    let flex = |direction| {
+        Props::Flex(FlexProps {
+            direction,
+            ..FlexProps::default()
+        })
+    };
+    let input = 2;
+    let mut nodes = vec![
+        node(ROOT, None, flex(FlexDirection::Column)),
+        node(
+            input,
+            Some(ROOT),
+            Props::Input(InputProps {
+                value: String::new(),
+                placeholder: "Filter".into(),
+                secret: false,
+                label: None,
+            }),
+        ),
+    ];
+    let mut next = 3;
+    for _ in 0..64 {
+        let group = next;
+        next += 1;
+        nodes.push(node(group, Some(ROOT), flex(FlexDirection::Row)));
+        for i in 0..63 {
+            nodes.push(node(next, Some(group), text(format!("cell {i}"))));
+            next += 1;
+        }
+    }
+    let tree = Tree::from_nodes(nodes, TreeLimits::default()).expect("valid tree");
+    (tree, input)
+}
+
+fn static_panel_surface() -> ui_ext::v0_2::Surface {
+    ui_ext::v0_2::Surface {
+        id: "static".into(),
+        title: "Static".into(),
+        kind: ui_ext::v0_2::SurfaceKind::Panel(ui_ext::v0_2::PanelDescriptor {
+            position: ui_ext::v0_2::DockPosition::Right,
+            icon: ui_ext::v0_2::IconRef::Upstream("hash".into()),
+            default_size: 320,
+        }),
+    }
+}
+
+/// Plan 7.7 (perf-1 finding 1): how long a frame takes when only an input's editor changed (a
+/// keystroke, a caret move), in a surface of about 4096 nodes. Prints the timing; run with
+/// `--ignored`, in release for the real number (target: under 8 ms).
+#[gpui::test]
+#[ignore]
+async fn bench_input_edit_in_a_large_tree(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    for disabled in [true, false] {
+        crate::subtree::DISABLED.set(disabled);
+        let (tree, input) = large_tree_with_input();
+        let count = tree.len();
+        let backend: Rc<dyn UiBackend> = Rc::new(StaticBackend::default());
+        let state =
+            cx.new(|cx| SurfaceState::with_tree(backend, static_panel_surface(), None, tree, cx));
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| SurfaceView::new(state, false, window, cx));
+        vcx.run_until_parked();
+        let editor = view.read_with(vcx, |view, _| view.inputs[&input].editor.clone());
+        let mode = if disabled {
+            "without chunks"
+        } else {
+            "with chunks"
+        };
+        for round in 0..6 {
+            let started = std::time::Instant::now();
+            editor.update(vcx, |_, cx| cx.notify());
+            vcx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            eprintln!(
+                "input frame {round} of {count} nodes {mode}: {:?}",
+                started.elapsed()
+            );
+            vcx.run_until_parked();
+        }
+    }
+    crate::subtree::DISABLED.set(false);
+}
+
+/// Plan 7.7: chunk plans follow the tree. A small tree has none; a list or a `grow` flex breaks a
+/// run; a column aligned to a side (as wide as its content) has no chunked columns inside.
+#[gpui::test]
+fn test_chunk_plan(_: &mut TestAppContext) {
+    use crate::subtree::{CHUNK_NODES, PlannedSegment, plan};
+    let small = Tree::from_nodes(
+        vec![
+            node(ROOT, None, Props::Flex(FlexProps::default())),
+            node(2, Some(ROOT), text("one")),
+        ],
+        TreeLimits::default(),
+    )
+    .expect("valid tree");
+    assert!(plan(&small).is_empty());
+
+    let (tree, input) = large_tree_with_input();
+    let plans = plan(&tree);
+    assert_eq!(plans.len(), 1, "{plans:?}");
+    assert_eq!(plans[0].column, Some(ROOT));
+    let chunks: Vec<&Vec<NodeId>> = plans[0]
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            PlannedSegment::Chunk(members) => Some(members),
+            PlannedSegment::Node(_) => None,
+        })
+        .collect();
+    assert_eq!(chunks.len(), plans[0].segments.len(), "every child is chunked");
+    assert_eq!(chunks[0][0], input);
+    let members: usize = chunks.iter().map(|members| members.len()).sum();
+    assert_eq!(members, 65, "the input and the 64 rows, each once");
+    assert!(chunks.iter().all(|members| members.len() * 64 <= CHUNK_NODES + 64));
+
+    let column = |align, grow| {
+        Props::Flex(FlexProps {
+            direction: FlexDirection::Column,
+            align,
+            grow,
+            ..FlexProps::default()
+        })
+    };
+    let list = Props::List(ui_ext::v0_2::ListProps {
+        row_count: 10,
+        ..Default::default()
+    });
+    // ROOT holds 150 texts, a list, 150 texts, a growing column of 300 texts and a column aligned
+    // to the start holding two columns of 300 texts.
+    let mut nodes = vec![node(ROOT, None, column(ui_ext::v0_2::Align::Stretch, false))];
+    let mut next = 2;
+    let texts = |parent: NodeId, count: usize, nodes: &mut Vec<Node>, next: &mut NodeId| {
+        for i in 0..count {
+            nodes.push(node(*next, Some(parent), text(format!("t{i}"))));
+            *next += 1;
+        }
+    };
+    texts(ROOT, 150, &mut nodes, &mut next);
+    let list_id = next;
+    nodes.push(node(list_id, Some(ROOT), list));
+    next += 1;
+    texts(ROOT, 150, &mut nodes, &mut next);
+    let grow_id = next;
+    nodes.push(node(grow_id, Some(ROOT), column(ui_ext::v0_2::Align::Stretch, true)));
+    next += 1;
+    texts(grow_id, 300, &mut nodes, &mut next);
+    let start_id = next;
+    nodes.push(node(start_id, Some(ROOT), column(ui_ext::v0_2::Align::Start, false)));
+    next += 1;
+    for _ in 0..2 {
+        let inner = next;
+        nodes.push(node(inner, Some(start_id), column(ui_ext::v0_2::Align::Stretch, false)));
+        next += 1;
+        texts(inner, 300, &mut nodes, &mut next);
+    }
+    let tree = Tree::from_nodes(nodes, TreeLimits::default()).expect("valid tree");
+    let plans = plan(&tree);
+    let root = plans
+        .iter()
+        .find(|plan| plan.column == Some(ROOT))
+        .expect("the root column is chunked");
+    let singles: Vec<NodeId> = root
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            PlannedSegment::Node(id) => Some(*id),
+            PlannedSegment::Chunk(_) => None,
+        })
+        .collect();
+    assert_eq!(singles, vec![list_id, grow_id, start_id]);
+    assert!(
+        plans.iter().any(|plan| plan.column == Some(grow_id)),
+        "a growing column is still as wide as its parent: {plans:?}"
+    );
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.column.is_some_and(|column| column < start_id)),
+        "columns in a start-aligned column are as wide as their content, so not chunked:          {plans:?}"
+    );
+}
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+}
+
+/// Plan 7.7: a large surface is drawn in cached chunks, each node where it is drawn without
+/// chunks, and a change in one input's editor renders that input's chunk only.
+#[gpui::test]
+async fn test_large_surface_draws_in_cached_chunks(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let last_text: NodeId = 3 + 64 * 64 - 1;
+    let mut positions = Vec::new();
+    for disabled in [true, false] {
+        crate::subtree::DISABLED.set(disabled);
+        let (tree, input) = large_tree_with_input();
+        let backend: Rc<dyn UiBackend> = Rc::new(StaticBackend::default());
+        let state =
+            cx.new(|cx| SurfaceState::with_tree(backend, static_panel_surface(), None, tree, cx));
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| SurfaceView::new(state, false, window, cx));
+        vcx.run_until_parked();
+        draw(vcx);
+        draw(vcx);
+        let chunks: Vec<Entity<crate::subtree::SubtreeView>> =
+            view.read_with(vcx, |view, _| view.chunks().cloned().collect());
+        assert_eq!(chunks.is_empty(), disabled);
+        for chunk in &chunks {
+            assert!(
+                chunk.read_with(vcx, |chunk, _| chunk.measured()).is_some(),
+                "every chunk measured itself"
+            );
+        }
+        let renders = |vcx: &mut VisualTestContext| -> Vec<usize> {
+            chunks
+                .iter()
+                .map(|chunk| chunk.read_with(vcx, |chunk, _| chunk.renders))
+                .collect()
+        };
+        let before = renders(vcx);
+        let editor = view.read_with(vcx, |view, _| view.inputs[&input].editor.clone());
+        editor.update(vcx, |_, cx| cx.notify());
+        draw(vcx);
+        let after = renders(vcx);
+        if !disabled {
+            let rendered = before
+                .iter()
+                .zip(&after)
+                .filter(|(before, after)| before != after)
+                .count();
+            assert_eq!(rendered, 1, "only the input's chunk renders: {before:?} {after:?}");
+        }
+        positions.push((
+            bounds(format!("fyx-node-{input}"), vcx),
+            bounds(format!("fyx-node-{last_text}"), vcx),
+        ));
+    }
+    crate::subtree::DISABLED.set(false);
+    assert_eq!(positions[0], positions[1], "chunks keep the layout");
+}
+
 /// A panel with two `terminal` nodes: handle 3 is one of the extension's in-panel terminals,
 /// handle 4 is not.
 struct TerminalBackend;
