@@ -367,6 +367,7 @@ impl Writer {
             |tool| self.context.accounts.get(tool).cloned().unwrap_or_default(),
             self.home.as_deref(),
             &self.tmp,
+            uid(),
         )?;
         let mut contents = serde_json::to_vec_pretty(&content).map_err(|e| e.to_string())?;
         contents.push(b'\n');
