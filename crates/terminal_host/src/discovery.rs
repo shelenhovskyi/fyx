@@ -349,8 +349,17 @@ impl Writer {
     fn write(&mut self, key: &Key) {
         let mut now = Vec::new();
         if let Some(listener) = self.open.get(key) {
+            // Another listener's files, maybe another extension's: a template that names only
+            // `${pid}` gives every listener in this run the same name, and writing or removing it
+            // here would take the other listener's file.
+            let taken: BTreeSet<&Path> = self
+                .written
+                .iter()
+                .filter(|(other, _)| *other != key)
+                .flat_map(|(_, paths)| paths.iter().map(PathBuf::as_path))
+                .collect();
             for file in &listener.files {
-                match self.write_file(listener, file) {
+                match self.write_file(listener, file, &taken) {
                     Ok(paths) => now.extend(paths),
                     Err(error) => log::warn!(
                         "fyx: discovery file {:?} of {}/{}: {error}",
@@ -379,6 +388,7 @@ impl Writer {
         &self,
         listener: &OpenListener,
         file: &DiscoveryFile,
+        taken: &BTreeSet<&Path>,
     ) -> Result<Vec<PathBuf>, String> {
         let vars = Vars {
             port: listener.port,
@@ -403,8 +413,15 @@ impl Writer {
         contents.push(b'\n');
         let mut paths = Vec::new();
         for target in targets {
-            let written = safe_fs::prepare_dir(&target)
-                .and_then(|dir| safe_fs::write_file(&dir, &name, &contents));
+            let written = safe_fs::prepare_dir(&target).and_then(|dir| {
+                if taken.contains(dir.join(&name).as_path()) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "another listener's discovery file has this name",
+                    ));
+                }
+                safe_fs::write_file(&dir, &name, &contents)
+            });
             match written {
                 Ok(path) => paths.push(path),
                 // One account's folder failing does not stop the others.
@@ -781,6 +798,43 @@ mod tests {
         let recorded: Registry =
             serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
         assert!(recorded.files.is_empty());
+    }
+
+    #[test]
+    fn a_name_two_listeners_share_stays_with_the_first() {
+        let root = tempfile::tempdir().unwrap();
+        let (home, tmp) = (root.path().join("home"), root.path().join("tmp"));
+        for dir in [&home, &tmp] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let registry = root.path().join("data/extensions/fyx/discovery.json");
+        let discovery = DiscoveryWriter::start_with(writer(&home, &tmp, &registry));
+        let shared = |port, token: &str| OpenListener {
+            name: "ide".into(),
+            port,
+            token: token.into(),
+            files: vec![DiscoveryFile {
+                dir: "${tmp}/ide".into(),
+                default_dir: None,
+                name: "ide-${pid}.json".into(),
+                content: json!({ "port": "${port}" }),
+            }],
+        };
+        let path = tmp.join(format!("ide/ide-{}.json", std::process::id()));
+
+        discovery.opened("first", shared(4100, "a"));
+        discovery.opened("second", shared(4200, "b"));
+        discovery.flush();
+        assert_eq!(read(&path)["port"], json!(4100), "not overwritten");
+
+        // Closing the second listener leaves the first one's file.
+        discovery.closed("second", "ide");
+        discovery.flush();
+        assert_eq!(read(&path)["port"], json!(4100));
+
+        discovery.closed("first", "ide");
+        discovery.flush();
+        assert!(!path.exists());
     }
 
     #[test]
