@@ -7,6 +7,7 @@
 
 pub mod observe;
 mod proposed_edit;
+mod review_comments;
 mod review_pane;
 mod review_rules;
 mod unified_diff;
@@ -48,10 +49,13 @@ use workspace::{MultiWorkspace, Toast, notifications::NotificationId};
 
 use fyx_guard::paths::ResolvedPath;
 pub use proposed_edit::{Hunk, HunkDecision, ProposedEdit, Resolution};
+pub use review_comments::{
+    CommentBatch, CommentRecipient, CommentsStatus, ReviewComment, comments_prompt,
+};
 pub use review_pane::{
     AcceptAllHunks, AcceptHunk, AcceptTurn, AgentReviewEditor, ApplyReviewRules, ClearTurnDecision,
     CommentHunk, NextHunk, OpenReviews, PreviousHunk, RejectAllHunks, RejectAndClose, RejectHunk,
-    RejectTurn, ReviewPane, ShowReviewRules, SubmitReview, ToggleReviewMode,
+    RejectTurn, ReviewPane, SendComments, ShowReviewRules, SubmitReview, ToggleReviewMode,
     permission_card_notice,
 };
 use review_rules::UserAutoAccept;
@@ -263,9 +267,11 @@ pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
             let session_id = thread.session_id().clone();
             let thread_id = cx.entity_id();
             let fs = Some(thread.project().read(cx).fs().clone());
+            let project = thread.project().downgrade();
             let thread = cx.weak_entity();
             review.update(cx, |review, _| {
                 review.thread_opened(session_id.clone(), thread_id);
+                review.comments.thread_opened(session_id.clone(), project);
                 review.threads.insert(session_id, thread);
                 if review.fs.is_none() {
                     review.fs = fs;
@@ -284,6 +290,7 @@ pub fn init(fs: Option<Arc<dyn Fs>>, cx: &mut App) {
                     // session's reviews belong to the new one then.
                     if review.thread_released(&session_id, thread_id) {
                         review.close_session(&session_id, cx);
+                        review.comments.session_closed(&session_id);
                     }
                 });
             }
@@ -446,6 +453,9 @@ pub enum AgentReviewEvent {
     },
     /// Review mode was turned on or off ([`AgentReview::is_enabled`]).
     ModeChanged(bool),
+    /// Review comments were kept, sent or queued ([`AgentReview::comments_status`]); batches for
+    /// extensions wait in [`AgentReview::take_extension_comments`].
+    CommentsChanged,
 }
 
 /// Answers a permission request. For [`PermissionVerdict::ApplyAcceptedAndDeny`] it first writes the
@@ -569,6 +579,8 @@ pub struct AgentReview {
     /// Proposals whose id is handed out but whose review is not open yet (paths resolving, diff
     /// running), with their old text. Withdrawing one removes it, and it never opens.
     pending_proposals: HashMap<ReviewId, String>,
+    /// Review comments for the agent (plan 7.2).
+    comments: review_comments::Comments,
 }
 
 /// What the rules make of a change, once its paths are resolved.
@@ -744,13 +756,28 @@ impl AgentReview {
     }
 
     /// Takes the session's notes for the agent, as one block for the front of the next prompt.
-    pub fn take_prompt_notes(&mut self, session_id: &acp_v2::SessionId) -> Option<String> {
-        let notes = self.prompt_notes.remove(session_id)?;
-        Some(format!(
+    /// The session's open review comments for the agent follow them (plan 7.2).
+    pub fn take_prompt_notes(
+        &mut self,
+        session_id: &acp_v2::SessionId,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let comments = self.take_open_agent_comments(session_id, cx);
+        if comments.is_some() {
+            cx.emit(AgentReviewEvent::CommentsChanged);
+        }
+        let Some(notes) = self.prompt_notes.remove(session_id) else {
+            return comments;
+        };
+        let notes = format!(
             "[Fyx review: notes from the review of your earlier edits]\n{}\n[End of the review \
              notes; the user's message follows.]",
             notes.join("\n")
-        ))
+        );
+        Some(match comments {
+            Some(comments) => format!("{comments}\n\n{notes}"),
+            None => notes,
+        })
     }
 
     pub(crate) fn pane_opened(&mut self, turn: TurnId) {
@@ -1141,8 +1168,10 @@ impl AgentReview {
                     return Err(anyhow!("review was already submitted"));
                 };
                 let (turn, rule) = (review.turn, review.rule.clone());
+                let (session_id, source) = (review.session_id.clone(), review.source.clone());
                 if sender.send(edit.clone()).is_ok() {
                     self.record(turn, &edit, rule, cx);
+                    self.keep_comments(&session_id, &source, &edit, cx);
                 } else {
                     log::info!(
                         "fyx: agent review: the write was dropped before its review was submitted"
@@ -1203,6 +1232,11 @@ impl AgentReview {
         let (turn, edit, rule) = (review.turn, review.edit.clone(), review.rule.clone());
         let session_id = review.session_id.clone();
         self.record(turn, &edit, rule, cx);
+        // An allowed preview's comments reach the agent's write, which adopts them.
+        if verdict == PermissionVerdict::ApplyAcceptedAndDeny {
+            let source = review_source_of(&self.reviews, id);
+            self.keep_comments(&session_id, &source, &edit, cx);
+        }
         if let Some(note) = permission_note(&edit, verdict) {
             self.prompt_notes.entry(session_id).or_default().push(note);
         }
@@ -1535,6 +1569,7 @@ impl AgentReview {
             } else {
                 self.record(turn, &edit, rule, cx);
             }
+            self.keep_comments(&session_id, &ReviewSource::Write, &edit, cx);
             cx.notify();
             return Task::ready(write_outcome(&edit));
         }
@@ -1865,6 +1900,13 @@ fn permission_note(edit: &ProposedEdit, verdict: PermissionVerdict) -> Option<St
     }
 }
 
+fn review_source_of(reviews: &[Review], id: ReviewId) -> ReviewSource {
+    reviews
+        .iter()
+        .find(|review| review.id == id)
+        .map_or(ReviewSource::Write, |review| review.source.clone())
+}
+
 fn permission_verdict(resolution: Resolution) -> PermissionVerdict {
     match resolution {
         Resolution::Unchanged | Resolution::AcceptedAll => PermissionVerdict::Allow,
@@ -1907,7 +1949,7 @@ impl AgentWriteGate for WriteGate {
 
     fn take_prompt_notes(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Option<String> {
         let review = self.0.upgrade()?;
-        review.update(cx, |review, _| review.take_prompt_notes(session_id))
+        review.update(cx, |review, cx| review.take_prompt_notes(session_id, cx))
     }
 
     fn review_operation(
@@ -2038,7 +2080,36 @@ fn on_thread_event(thread: &mut AcpThread, event: &AcpThreadEvent, cx: &mut Cont
             // Held writes fail ("the file is unchanged") and allowed previews expire: the agent
             // stopped waiting for them.
             let session_id = thread.session_id().clone();
-            review.update(cx, |review, cx| review.close_session(&session_id, cx));
+            let stopped = matches!(event, AcpThreadEvent::Stopped { .. });
+            let comments = review.update(cx, |review, cx| {
+                review.close_session(&session_id, cx);
+                if stopped {
+                    review.take_queued_comments(&session_id, cx)
+                } else {
+                    review.requeue_comments(&session_id, cx);
+                    None
+                }
+            });
+            // Comments sent while the agent was busy are its next turn, once this one has stopped.
+            if let Some(comments) = comments {
+                cx.spawn(async move |thread, cx| {
+                    let sent = match thread.update(cx, |thread, cx| {
+                        thread.send(
+                            vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
+                                comments,
+                            ))],
+                            cx,
+                        )
+                    }) {
+                        Ok(submission) => submission.await.map(|_| ()),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = sent {
+                        log::error!("fyx: agent review: sending review comments failed: {error:#}");
+                    }
+                })
+                .detach();
+            }
         }
         _ => {}
     }
@@ -4351,9 +4422,212 @@ mod tests {
             cx.run_until_parked();
         }
         assert_eq!(
-            review.update(cx, |review, _| review.take_prompt_notes(&session())),
+            review.update(cx, |review, cx| review.take_prompt_notes(&session(), cx)),
             None,
             "an allow or a reject without comments says it all"
+        );
+    }
+
+    /// Accepts every hunk of `id`, comments on `comments` (hunk, text) and submits.
+    fn accept_with_comments(
+        review: &Entity<AgentReview>,
+        id: ReviewId,
+        comments: &[(usize, &str)],
+        cx: &mut TestAppContext,
+    ) {
+        review.update(cx, |review, cx| {
+            review.decide_all(id, HunkDecision::Accepted, cx).unwrap();
+            for (hunk, text) in comments {
+                review
+                    .set_comment(id, *hunk, Some((*text).into()), cx)
+                    .unwrap();
+            }
+            review.submit(id, cx).unwrap();
+        });
+    }
+
+    #[gpui::test]
+    async fn comments_on_accepted_hunks_wait_for_the_next_prompt(cx: &mut TestAppContext) {
+        let (review, events) = setup(cx);
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let first = gate_write(&review, agent_write("/p/a.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        accept_with_comments(&review, id, &[(0, "rename it"), (1, "add a test")], cx);
+        let second = gate_write(&review, agent_write("/p/b.txt", cx), cx);
+        let id = only_review_id(&review, cx);
+        accept_with_comments(&review, id, &[(1, "too clever")], cx);
+        // The comments ask for more work: the writes themselves landed without feedback.
+        assert_eq!(first.await.unwrap().feedback, None);
+        assert_eq!(second.await.unwrap().feedback, None);
+        assert!(events.borrow().contains(&AgentReviewEvent::CommentsChanged));
+
+        let status = review.read_with(cx, |review, _| review.comments_status(&session()));
+        assert_eq!(
+            status,
+            CommentsStatus {
+                open: 3,
+                queued: 0,
+                sent: 0
+            }
+        );
+        let error = review
+            .update(cx, |review, cx| review.send_comments(&session(), cx))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("thread is closed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            review.read_with(cx, |review, _| review.comments_status(&session()).open),
+            3,
+            "nothing is lost"
+        );
+
+        let notes = review
+            .update(cx, |review, cx| review.take_prompt_notes(&session(), cx))
+            .unwrap();
+        assert!(
+            notes.contains("1. /p/a.txt:1 (accepted change: `ONE`)\nrename it"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains("2. /p/a.txt:5 (accepted change: `FIVE`)\nadd a test"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains("3. /p/b.txt:5 (accepted change: `FIVE`)\ntoo clever"),
+            "{notes}"
+        );
+        assert_eq!(
+            review.read_with(cx, |review, _| review.comments_status(&session())),
+            CommentsStatus {
+                open: 0,
+                queued: 0,
+                sent: 3
+            }
+        );
+        assert_eq!(
+            review.update(cx, |review, cx| review.take_prompt_notes(&session(), cx)),
+            None
+        );
+    }
+
+    #[gpui::test]
+    async fn comments_sent_from_an_open_review_leave_its_feedback(cx: &mut TestAppContext) {
+        let (review, _) = setup(cx);
+        let proposal = propose(&review, "/p/a.txt", cx);
+        let id = proposal.id;
+        let session = acp_v2::SessionId::new("fyx-ext:demo:tool");
+        review.update(cx, |review, cx| {
+            review
+                .set_comment(id, 1, Some("why upper case?".into()), cx)
+                .unwrap();
+            assert_eq!(review.comments_status(&session).open, 1);
+            assert_eq!(review.send_comments(&session, cx).unwrap(), 1);
+            assert!(review.review(id).unwrap().edit().hunks()[1].comment_sent);
+            assert!(review.take_extension_comments("Other").is_empty());
+            let batches = review.take_extension_comments("Demo");
+            assert_eq!(batches.len(), 1);
+            assert_eq!(
+                batches[0].recipient,
+                CommentRecipient::Extension("Demo".into())
+            );
+            assert!(
+                batches[0]
+                    .prompt
+                    .contains("/p/a.txt:5 (change still under review: `FIVE`)\nwhy upper case?"),
+                "{}",
+                batches[0].prompt
+            );
+            assert!(
+                review.take_extension_comments("Demo").is_empty(),
+                "taken once"
+            );
+            review.decide_all(id, HunkDecision::Rejected, cx).unwrap();
+            review.submit(id, cx).unwrap();
+            assert_eq!(review.comments_status(&session).sent, 1);
+        });
+        let feedback = proposal.outcome.await.unwrap().feedback.unwrap();
+        assert!(feedback.contains("Hunk 2 (line 5) rejected"), "{feedback}");
+        assert!(
+            !feedback.contains("why upper case"),
+            "sent once: {feedback}"
+        );
+    }
+
+    #[gpui::test]
+    async fn comments_on_two_files_reach_the_agent_thread_as_one_prompt(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            crate::init(None, cx);
+        });
+        let review = cx.update(|cx| AgentReview::global(cx)).unwrap();
+        review.update(cx, |review, cx| review.set_enabled(true, cx));
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            util::path!("/p"),
+            serde_json::json!({ "a.txt": OLD, "b.txt": OLD }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [util::path!("/p").as_ref()], cx).await;
+        let connection = Rc::new(acp_thread::StubAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::new_session(
+                    connection.clone(),
+                    project.clone(),
+                    workspace::PathList::new(&[Path::new(util::path!("/p"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let files: [(&str, &[(usize, &str)]); 2] = [
+            (
+                util::path!("/p/a.txt"),
+                &[(0, "rename it"), (1, "add a test")],
+            ),
+            (util::path!("/p/b.txt"), &[(1, "too clever")]),
+        ];
+        for (path, comments) in files {
+            let mut write = agent_write(path, cx);
+            write.session_id = session_id.clone();
+            let held = gate_write(&review, write, cx);
+            let id = only_review_id(&review, cx);
+            accept_with_comments(&review, id, comments, cx);
+            held.await.unwrap();
+        }
+
+        let sent = review
+            .update(cx, |review, cx| review.send_comments(&session_id, cx))
+            .unwrap();
+        assert_eq!(sent, 3);
+        cx.run_until_parked();
+        let markdown = thread.read_with(cx, |thread, cx| thread.to_markdown(cx));
+        assert_eq!(
+            markdown.matches("[Fyx review: comments").count(),
+            1,
+            "one prompt: {markdown}"
+        );
+        for expected in [
+            "a.txt:1 (accepted change: `ONE`)",
+            "rename it",
+            "a.txt:5 (accepted change: `FIVE`)",
+            "add a test",
+            "b.txt:5 (accepted change: `FIVE`)",
+            "too clever",
+        ] {
+            assert!(markdown.contains(expected), "{expected} in {markdown}");
+        }
+        assert_eq!(
+            review.read_with(cx, |review, _| review.comments_status(&session_id)),
+            CommentsStatus {
+                open: 0,
+                queued: 0,
+                sent: 3
+            }
         );
     }
 

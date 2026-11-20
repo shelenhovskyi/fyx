@@ -29,6 +29,7 @@ use workspace::{
 };
 
 use acp_thread::PermissionRequestId;
+use agent_client_protocol::v2::schema as acp_v2;
 
 use crate::{
     AgentReview, AgentReviewEvent, HunkDecision, ProposedEdit, Resolution, ReviewId, ReviewSource,
@@ -72,6 +73,9 @@ actions!(
         FocusPreviousControl,
         /// Sends the decisions; every hunk must be decided.
         SubmitReview,
+        /// Sends the turn's open review comments to the agent as one prompt, with file and line
+        /// references.
+        SendComments,
         /// Opens the review panes of every open review in this workspace.
         OpenReviews,
         /// Turns review of agent edits on or off.
@@ -482,6 +486,8 @@ pub struct ReviewPane {
     current: Option<CurrentReview>,
     comment_editor: Option<Entity<Editor>>,
     current_hunk: Option<usize>,
+    /// The agent session of the turn, known once the pane showed one of its reviews.
+    session: Option<acp_v2::SessionId>,
     /// Why the last action did nothing, shown in the file header until the next action.
     notice: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -509,6 +515,7 @@ impl ReviewPane {
             current: None,
             comment_editor: None,
             current_hunk: None,
+            session: None,
             notice: None,
             _subscriptions: Vec::new(),
         }
@@ -558,7 +565,11 @@ impl ReviewPane {
                             // A turn with unreviewed changes stays on screen so the user sees them.
                             let unreviewed =
                                 review.read(cx).unreviewed_changes(turn).next().is_some();
-                            if this.current.is_none() && !unreviewed {
+                            // Open comments keep the pane, so the user can still send them.
+                            let comments = this.session.as_ref().is_some_and(|session| {
+                                review.read(cx).comments_status(session).open > 0
+                            });
+                            if this.current.is_none() && !unreviewed && !comments {
                                 cx.emit(ReviewPaneEvent::Close);
                             }
                         }
@@ -612,14 +623,15 @@ impl ReviewPane {
         self.subscribe(window, cx);
         // The next file takes the keyboard only from this pane, never from where the user types.
         let had_focus = self.focus_handle.contains_focused(window, cx);
-        let Some(edit) = self
+        let Some((edit, session)) = self
             .review
             .read(cx)
             .review(id)
-            .map(|review| review.edit().clone())
+            .map(|review| (review.edit().clone(), review.session_id().clone()))
         else {
             return;
         };
+        self.session = Some(session);
         let language_registry = self.project.read(cx).languages().clone();
         let diff = cx.new(|_| {
             Diff::finalized(
@@ -993,6 +1005,58 @@ impl ReviewPane {
         }
     }
 
+    fn send_comments(&mut self, _: &SendComments, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return self.report(Err(anyhow::anyhow!("There are no comments to send")), cx);
+        };
+        let result = self
+            .review
+            .update(cx, |review, cx| review.send_comments(&session, cx))
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("Not sent: {error:#}"));
+        self.report(result, cx);
+    }
+
+    fn render_comments(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let session = self.session.as_ref()?;
+        let status = self.review.read(cx).comments_status(session);
+        if status == Default::default() {
+            return None;
+        }
+        let plural = |count: usize| if count == 1 { "comment" } else { "comments" };
+        let mut parts = Vec::new();
+        if status.open > 0 {
+            parts.push(format!("{} open {}", status.open, plural(status.open)));
+        }
+        if status.queued > 0 {
+            parts.push(format!(
+                "{} queued: they go to the agent when its turn stops",
+                status.queued
+            ));
+        }
+        if status.sent > 0 {
+            parts.push(format!("{} sent to the agent", status.sent));
+        }
+        Some(
+            h_flex()
+                .gap_2()
+                .child(
+                    Label::new(parts.join(" · "))
+                        .size(LabelSize::Small)
+                        .color(Color::Accent),
+                )
+                .child(div().flex_1())
+                .when(status.open > 0, |row| {
+                    row.child(self.action_button(
+                        "send-comments",
+                        "Send comments to agent",
+                        &SendComments,
+                        cx,
+                    ))
+                }),
+        )
+    }
+
     fn focus_diff(&mut self, _: &FocusDiff, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.diff_focus_handle(cx), cx);
     }
@@ -1146,6 +1210,7 @@ impl ReviewPane {
                     )),
             )
             .child(files)
+            .children(self.render_comments(cx))
             .children(unreviewed_section)
             .child(
                 Label::new(crate::NOT_REVIEWED)
@@ -1196,6 +1261,13 @@ impl ReviewPane {
             ))
         });
         let can_submit = resolution.is_some_and(|resolution| !resolution.is_pending());
+        let comment_sent = match (self.current_hunk, edit) {
+            (Some(hunk), Some(edit)) => edit
+                .hunks()
+                .get(hunk)
+                .is_some_and(|hunk| hunk.comment.is_some() && hunk.comment_sent),
+            _ => false,
+        };
         let error = self.current_review_id().and_then(|id| {
             let review = self.review.read(cx).review(id)?;
             Some(format!(
@@ -1263,6 +1335,13 @@ impl ReviewPane {
                             .color(Color::Muted),
                     )
                     .child(div().flex_1().child(comment_editor))
+                    .when(comment_sent, |row| {
+                        row.child(
+                            Label::new("Sent to the agent")
+                                .size(LabelSize::Small)
+                                .color(Color::Success),
+                        )
+                    })
             }))
     }
 
@@ -1360,6 +1439,7 @@ impl Render for ReviewPane {
             .on_action(cx.listener(Self::next_file))
             .on_action(cx.listener(Self::previous_file))
             .on_action(cx.listener(Self::comment_hunk))
+            .on_action(cx.listener(Self::send_comments))
             .on_action(cx.listener(Self::focus_diff))
             .on_action(cx.listener(Self::submit))
             .child(self.render_turn(cx))
@@ -1718,7 +1798,15 @@ mod tests {
             ),
         ] {
             settings::KeymapFile::parse(keymap).expect("every default keymap parses");
-            for key in ["k y", "k shift-y", "k shift-n", "k shift-x", "k j", "k k"] {
+            for key in [
+                "k y",
+                "k shift-y",
+                "k shift-n",
+                "k shift-x",
+                "k shift-c",
+                "k j",
+                "k k",
+            ] {
                 let binding = format!("\"{modifier}-{key}\"");
                 // Once in `Workspace` (`k y`) or twice (the pane and its editors), nothing else.
                 let expected = if key == "k y" { 1 } else { 2 };
