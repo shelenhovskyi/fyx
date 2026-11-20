@@ -1,0 +1,747 @@
+<title>Fyx Agent Cockpit</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a Fyx window (Zed One Dark look). Title bar on top; center = editor / agent cards / merge queue tabs;
+   bottom panel = terminal + Agent Sessions tree; right = coordinator chat. Prototype controls sit above the window. */
+:root {
+  color-scheme: dark;
+  --desk: #16181d;
+  --bg: #282c33;
+  --panel: #2f343e;
+  --elevated: #3b414d;
+  --border: #464b57;
+  --fg: #dce0e5;
+  --muted: #a9afbc;
+  --dim: #7a808d;
+  --accent: #74ade8;
+  --ok: #a1c181;
+  --warn: #dec184;
+  --bad: #d07277;
+  --violet: #b477cf;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+}
+html, body { height: 100%; }
+body {
+  background: var(--desk); color: var(--fg); font: 13px/1.45 var(--sans);
+  display: flex; flex-direction: column; gap: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 12px; box-sizing: border-box;
+}
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mono { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* prototype controls */
+.proto { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.proto strong { color: var(--fg); font-weight: 600; letter-spacing: .02em; }
+.pbtn { background: transparent; border: 1px dashed var(--dim); border-radius: 4px; padding: 3px 10px; color: var(--fg); }
+.pbtn:hover { border-color: var(--accent); }
+.pbtn.on { border-style: solid; border-color: var(--warn); color: var(--warn); }
+.proto .hint { flex: 1 1 260px; min-width: 0; }
+
+/* window */
+.win { flex: 1; min-height: 0; display: grid; grid-template-rows: 34px 1fr; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.titlebar { display: flex; align-items: center; gap: 14px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--border); white-space: nowrap; overflow-x: auto; }
+.tb-proj { font-weight: 600; } .tb-branch { color: var(--muted); }
+.tb-sp { flex: 1; }
+.meter { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.bar { width: 90px; height: 6px; background: var(--elevated); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+.bar.warn > i { background: var(--warn); } .bar.bad > i { background: var(--bad); }
+.tbtn { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px 8px; display: flex; align-items: center; gap: 6px; }
+.tbtn:hover { background: var(--elevated); }
+.badge { min-width: 18px; height: 18px; border-radius: 9px; background: var(--bad); color: #1b1d22; font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; padding: 0 5px; }
+.badge.zero { background: var(--elevated); color: var(--muted); }
+.stopall { border: 1px solid var(--bad); color: var(--bad); border-radius: 4px; padding: 3px 10px; background: transparent; }
+.stopall:hover { background: rgba(208,114,119,.12); }
+.stopconfirm { display: flex; gap: 6px; align-items: center; color: var(--bad); }
+.stopconfirm button { border-radius: 4px; padding: 2px 8px; border: 1px solid var(--border); background: var(--elevated); }
+.stopconfirm .danger { background: var(--bad); color: #1b1d22; border-color: var(--bad); font-weight: 600; }
+
+.body { display: grid; grid-template-columns: minmax(0,1fr) 340px; min-height: 0; }
+.main { display: grid; grid-template-rows: minmax(0,1fr) minmax(220px, 44%); min-height: 0; border-right: 1px solid var(--border); }
+
+/* center tabs */
+.center { display: grid; grid-template-rows: 30px 1fr; min-height: 0; }
+.tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tab { border: 0; border-right: 1px solid var(--border); background: transparent; padding: 0 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tab.active { background: var(--bg); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab .x { opacity: .5; padding: 0 2px; } .tab .x:hover { opacity: 1; }
+.pane { overflow: auto; min-height: 0; }
+.code { font: 12.5px/1.6 var(--mono); padding: 10px 0; color: var(--fg); }
+.code div { padding: 0 14px; white-space: pre; }
+.code .ln { display: inline-block; width: 34px; color: var(--dim); text-align: right; margin-right: 14px; user-select: none; }
+.k { color: var(--violet); } .s { color: var(--ok); } .c { color: var(--dim); } .t { color: var(--warn); } .f { color: var(--accent); }
+
+/* agent card */
+.card { padding: 16px 20px; display: grid; gap: 14px; max-width: 900px; }
+.card h2 { margin: 0; font-size: 17px; font-weight: 600; text-wrap: balance; }
+.card-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.metarow { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 12px; }
+.metarow b { color: var(--fg); font-weight: 500; }
+.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin-bottom: 6px; }
+.check { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.check li { display: flex; gap: 8px; }
+.check .m { width: 14px; color: var(--dim); } .check .done .m { color: var(--ok); } .check .doing .m { color: var(--accent); }
+.check .done span:last-child { color: var(--muted); }
+.lastmsg { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn { border: 1px solid var(--border); background: var(--elevated); border-radius: 5px; padding: 5px 12px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #1b1d22; font-weight: 600; }
+.btn.danger { color: var(--bad); }
+.btn[disabled] { opacity: .45; cursor: default; }
+.hunk { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.hunk-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: var(--panel); padding: 5px 10px; font: 12px var(--mono); color: var(--muted); }
+.hunk-h button { font-family: var(--sans); font-size: 12px; background: transparent; border: 1px solid var(--border); border-radius: 4px; padding: 1px 8px; }
+.hunk pre { margin: 0; font: 12px/1.55 var(--mono); overflow-x: auto; padding: 6px 0; }
+.hunk pre span { display: block; padding: 0 10px; white-space: pre; }
+.add { background: rgba(161,193,129,.12); color: #c5dcb0; } .del { background: rgba(208,114,119,.12); color: #e8a9ad; }
+.conf { background: rgba(222,193,132,.12); color: var(--warn); }
+.comment { display: grid; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); }
+.comment textarea { width: 100%; min-height: 54px; resize: vertical; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font: inherit; }
+.sent-c { padding: 6px 10px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+
+/* chips */
+.chip { display: inline-flex; align-items: center; gap: 5px; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 500; white-space: nowrap; border: 1px solid transparent; }
+.chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.st-working { color: var(--accent); background: rgba(116,173,232,.12); }
+.st-needs { color: #1b1d22; background: var(--warn); }
+.st-review { color: var(--ok); background: rgba(161,193,129,.14); border-color: rgba(161,193,129,.5); }
+.st-queued, .st-merging { color: var(--violet); background: rgba(180,119,207,.13); }
+.st-merged, .st-done { color: var(--muted); background: var(--elevated); }
+.st-failed { color: var(--bad); background: rgba(208,114,119,.13); }
+.st-stopped, .st-paused { color: var(--dim); background: transparent; border-color: var(--border); }
+.st-idle, .st-external { color: var(--muted); background: transparent; border-color: var(--border); border-style: dashed; }
+.st-working::before { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .st-working::before { animation: none; } }
+
+/* bottom panel */
+.bottom { display: grid; grid-template-columns: minmax(0,1fr) minmax(300px, 420px); min-height: 0; border-top: 1px solid var(--border); }
+.term { display: grid; grid-template-rows: 28px 1fr; min-height: 0; border-right: 1px solid var(--border); }
+.ptitle { display: flex; align-items: center; gap: 10px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.ptitle b { color: var(--fg); font-weight: 500; }
+.ptitle .seg { display: flex; gap: 2px; margin-left: auto; }
+.ptitle .seg button { border: 0; background: transparent; padding: 2px 8px; border-radius: 4px; color: var(--muted); }
+.ptitle .seg button.on { background: var(--elevated); color: var(--fg); }
+.termlog { font: 12px/1.55 var(--mono); padding: 6px 10px; overflow: auto; color: var(--muted); }
+.termlog .ok { color: var(--ok); } .termlog .bad { color: var(--bad); } .termlog .wn { color: var(--warn); } .termlog .me { color: var(--fg); }
+
+.tree { display: grid; grid-template-rows: 28px 1fr 30px; min-height: 0; }
+.rows { overflow: auto; padding: 4px 0; }
+.row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 4px 10px; cursor: pointer; border-left: 2px solid transparent; }
+.row:hover { background: var(--panel); }
+.row.sel { background: var(--elevated); border-left-color: var(--accent); }
+.row .ind { color: var(--dim); font-family: var(--mono); white-space: pre; }
+.row .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .sub { display: block; color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .rt { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.row.needs-row { background: rgba(222,193,132,.07); }
+.grouplbl { padding: 8px 10px 2px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+.treefoot { display: flex; align-items: center; gap: 10px; padding: 0 10px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+
+/* chat */
+.chat { display: grid; grid-template-rows: 30px 1fr auto; min-height: 0; background: var(--bg); }
+.msgs { overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 100%; }
+.msg .who { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.msg .txt { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
+.msg.me { align-self: flex-end; max-width: 88%; }
+.msg.me .txt { background: rgba(116,173,232,.15); border-color: rgba(116,173,232,.4); }
+.msg.sys .txt { background: transparent; border-style: dashed; color: var(--muted); font-size: 12px; }
+.msg a, .linkish { color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; background: none; border: 0; padding: 0; }
+.decision { border: 1px solid var(--warn); border-radius: 8px; padding: 10px; display: grid; gap: 8px; background: rgba(222,193,132,.06); }
+.decision .q { font-weight: 500; }
+.decision .from { font-size: 11px; color: var(--muted); }
+.decision .opts { display: grid; gap: 6px; }
+.decision .opts button { text-align: left; border: 1px solid var(--border); background: var(--elevated); border-radius: 5px; padding: 6px 10px; }
+.decision .opts button.rec { border-color: var(--warn); }
+.decision .opts button:hover { border-color: var(--accent); }
+.decision .opts small { color: var(--warn); margin-left: 6px; }
+.decision.answered { border-color: var(--border); background: transparent; }
+.decision.answered .ans { color: var(--muted); font-size: 12px; }
+.digest { border: 1px solid var(--accent); border-radius: 8px; padding: 10px; display: grid; gap: 4px; background: rgba(116,173,232,.07); }
+.digest b { font-weight: 600; }
+.composer { border-top: 1px solid var(--border); padding: 8px; display: grid; gap: 6px; }
+.composer textarea { width: 100%; min-height: 56px; resize: none; background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: inherit; }
+.composer .row2 { display: flex; justify-content: space-between; align-items: center; color: var(--dim); font-size: 11px; gap: 8px; }
+
+/* inbox popover + toasts */
+.inbox { position: absolute; right: 16px; top: 82px; width: min(380px, calc(100% - 32px)); max-height: 70%; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 30px rgba(0,0,0,.45); padding: 10px; display: grid; gap: 10px; z-index: 20; }
+.inbox h3 { margin: 0; font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; }
+.empty { color: var(--muted); font-size: 12px; padding: 6px 2px; }
+.toasts { position: fixed; right: max(24px, env(safe-area-inset-right, 0px)); bottom: max(24px, env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 30; width: min(340px, calc(100% - 48px)); }
+.toast { background: var(--elevated); border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px; box-shadow: 0 10px 24px rgba(0,0,0,.5); display: grid; gap: 4px; }
+.toast .tt { font-weight: 600; } .toast .tb { color: var(--muted); font-size: 12px; }
+.toast .act { display: flex; gap: 8px; margin-top: 4px; }
+
+/* merge queue view */
+.queue { padding: 16px 20px; display: grid; gap: 12px; max-width: 900px; }
+.qhead { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 12px; }
+.qitem { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; display: grid; gap: 8px; background: var(--panel); }
+.qtop { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.step { font-size: 11.5px; border: 1px solid var(--border); border-radius: 4px; padding: 1px 8px; color: var(--dim); }
+.step.doing { color: var(--accent); border-color: var(--accent); }
+.step.okd { color: var(--ok); border-color: rgba(161,193,129,.5); }
+.step.badd { color: var(--bad); border-color: var(--bad); }
+.qnote { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 900px) {
+  html, body { height: auto; }
+  .win { grid-template-rows: auto auto; }
+  .titlebar { flex-wrap: wrap; padding: 6px 10px; white-space: normal; }
+  .body { grid-template-columns: 1fr; }
+  .main { grid-template-rows: auto auto; border-right: 0; }
+  .center { grid-template-rows: 30px minmax(320px, auto); }
+  .bottom { grid-template-columns: 1fr; }
+  .term { min-height: 180px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .tree { min-height: 360px; }
+  .chat { min-height: 480px; border-top: 1px solid var(--border); }
+  .inbox { position: fixed; top: 60px; }
+}
+</style>
+
+<div class="proto" role="region" aria-label="Prototype controls">
+  <strong>PROTOTYPE</strong>
+  <button class="pbtn" id="p-play">▶ Play events</button>
+  <button class="pbtn" id="p-step">Next event</button>
+  <button class="pbtn" id="p-away">Simulate: I'm away</button>
+  <button class="pbtn" id="p-reset">Reset</button>
+  <span class="hint" id="p-hint">Fake data. Press Play, or click around: agent rows, Inbox, Merge queue, chat.</span>
+</div>
+
+<div class="win" id="win">
+  <div class="titlebar" id="titlebar"></div>
+  <div class="body">
+    <div class="main">
+      <div class="center">
+        <div class="tabs" id="tabs"></div>
+        <div class="pane" id="pane"></div>
+      </div>
+      <div class="bottom">
+        <div class="term">
+          <div class="ptitle"><b>Terminal</b><span>host services · fyx-cargo · gate</span></div>
+          <div class="termlog" id="termlog" aria-live="polite"></div>
+        </div>
+        <div class="tree">
+          <div class="ptitle"><b>Agent Sessions</b><span id="tree-sum"></span>
+            <span class="seg"><button id="seg-tree" class="on">Tree</button><button id="seg-queue">Merge queue</button></span>
+          </div>
+          <div class="rows" id="rows"></div>
+          <div class="treefoot" id="treefoot"></div>
+        </div>
+      </div>
+    </div>
+    <div class="chat">
+      <div class="ptitle"><b>Coordinator</b><span>Claude Code · tools: fyx-cockpit</span></div>
+      <div class="msgs" id="msgs"></div>
+      <div class="composer">
+        <label for="goal" class="section-label" style="margin:0">Give the coordinator a goal</label>
+        <textarea id="goal" placeholder="e.g. Add a cost column to the agent tree and a weekly report"></textarea>
+        <div class="row2"><span>Enter to send · Shift+Enter for a new line</span><button class="btn primary" id="send">Send</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="inbox-wrap"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  function h(s) { return String(s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+
+  var LABEL = { working: "working", needs: "needs you", review: "ready for review", queued: "in merge queue", merging: "merging", merged: "merged", failed: "gate red", stopped: "stopped", paused: "paused", idle: "idle", done: "done", external: "outside Fyx" };
+
+  var S, timers = [];
+  function later(fn, ms) { var t = setTimeout(fn, ms); timers.push(t); return t; }
+
+  function fresh() {
+    return {
+      base: 6.20, cap: 15, stopped: false, pausedNew: false, away: false, awayLog: [],
+      sel: "w3", tabs: ["editor", "queue"], tab: "editor", view: "tree", inboxOpen: false, stopConfirm: false,
+      nextEvent: 0, playing: false, seq: 0,
+      agents: [
+        { id: "c1", kind: "coordinator", parent: null, title: "Coordinator · Plan 7.9 cockpit", state: "working", branch: "integration", wt: "D:\\fyx\\fyx", cost: 0.62, target: "—", add: 0, del: 0,
+          check: [[1, "Split plan rows 7.8 and 7.9 into five workers"], [1, "Start workers in their own worktrees"], [2, "Watch reviews and the merge queue"], [0, "Write the Handoff"]],
+          last: "Five workers are running. I'll ping you only for decisions and reviews." },
+        { id: "w1", kind: "worker", parent: "c1", title: "Renderer: clip rects", state: "working", branch: "fyx/w-renderer-clip", wt: "D:\\fyx\\wt\\renderer-clip", cost: 1.12, target: "9.8 GB", add: 214, del: 31,
+          check: [[1, "Find callers of paint_quad"], [1, "Clip child rects to the parent bounds"], [2, "Tests for nested scroll views"], [0, "Run the gate in the worktree"]],
+          last: "Two subagents are on it: one maps callers, one writes the tests.",
+          hunks: [{ file: "crates/ui_ext_host/src/render.rs", at: "@@ -212,6 +212,11 @@", lines: [[" ", "    let bounds = element.bounds(cx);"], ["+", "    let clipped = bounds.intersect(&parent_clip);"], ["+", "    if clipped.is_empty() {"], ["+", "        return Ok(());"], ["+", "    }"], [" ", "    paint_quad(window, clipped, style)?;"]] }] },
+        { id: "s1", kind: "subagent", parent: "w1", title: "Explore: callers of paint_quad", state: "done", cost: 0.08, target: "—", add: 0, del: 0, check: [[1, "Searched 41 files, found 6 callers"]], last: "6 callers, all in ui_ext_host." },
+        { id: "s2", kind: "subagent", parent: "w1", title: "Test writer", state: "working", cost: 0.15, target: "—", add: 96, del: 0, check: [[2, "Nested scroll view clip tests"]], last: "Writing 4 tests." },
+        { id: "w2", kind: "worker", parent: "c1", title: "Review comments for agents outside Fyx", state: "working", branch: "fyx/w-review-comments", wt: "D:\\fyx\\wt\\review-comments", cost: 0.74, target: "6.1 GB", add: 132, del: 8,
+          check: [[1, "Comment model in agent_review"], [2, "Delivery to external agents"], [0, "Tests"]],
+          last: "Comment model done. Now choosing how comments reach Claude Code sessions that run outside Fyx.",
+          hunks: [{ file: "crates/agent_review/src/comments.rs", at: "@@ -40,4 +40,9 @@", lines: [[" ", "pub struct ReviewComment {"], ["+", "    pub hunk: HunkId,"], ["+", "    pub body: SharedString,"], ["+", "    pub delivery: Delivery,"], [" ", "}"]] }] },
+        { id: "w3", kind: "worker", parent: "c1", title: "Registry: signed index", state: "working", branch: "fyx/w-registry-sign", wt: "D:\\fyx\\wt\\registry-sign", cost: 0.51, target: "0.4 GB", add: 88, del: 12,
+          check: [[1, "Sign index.json with the registry key"], [1, "Verify the signature in fyx-ext"], [2, "unittest and dry-run"]],
+          last: "Running python -I -m unittest in scripts/.",
+          hunks: [{ file: "scripts/build_index.py", at: "@@ -71,7 +71,12 @@", lines: [[" ", "    index = render_index(entries)"], ["-", "    write(out / \"index.json\", index)"], ["+", "    payload = canonical_json(index)"], ["+", "    signature = sign(payload, key_path)"], ["+", "    write(out / \"index.json\", payload)"], ["+", "    write(out / \"index.json.sig\", signature)"]] },
+                  { file: "tools/fyx-ext/src/verify.rs", at: "@@ -12,3 +12,8 @@", lines: [["+", "pub fn verify_index(payload: &[u8], signature: &Signature) -> Result<()> {"], ["+", "    let key = trusted_key()?;"], ["+", "    key.verify(payload, signature).context(\"index signature does not match\")"], ["+", "}"]] }] },
+        { id: "w4", kind: "worker", parent: "c1", title: "zsh trap guard", state: "queued", branch: "fyx/w-zsh-traps", wt: "D:\\fyx\\wt\\zsh-traps", cost: 0.33, target: "2.2 GB", add: 41, del: 3,
+          check: [[1, "Detect TRAPZERR in the agent shell"], [1, "Tests"], [1, "Reviewed by you at 13:40"]], last: "Waiting in the merge queue." },
+        { id: "w5", kind: "worker", parent: "c1", title: "Disk guard thresholds", state: "working", branch: "fyx/w-disk-guard", wt: "D:\\fyx\\wt\\disk-guard", cost: 0.29, target: "3.0 GB", add: 27, del: 9,
+          check: [[1, "Read free space on E:"], [2, "Sweep target slots above 12 GB"]], last: "Tuning the sweep threshold." },
+        { id: "x1", kind: "external", parent: null, title: "Claude Code · fyx-w2c", state: "idle", branch: "fyx/w2c", wt: "D:\\fyx\\wt\\w2c", cost: 0.00, target: "15 GB", add: 0, del: 0,
+          check: [], last: "Started outside Fyx. Fyx reads its session file and hooks; it cannot be steered from here." }
+      ],
+      inbox: [],
+      queue: [{ id: "w4", status: "waiting", step: 0 }],
+      merged: [],
+      chat: [
+        { from: "me", text: "Build the cockpit from plan rows 7.8 and 7.9. Keep upstream hooks minimal." },
+        { from: "coord", text: "Started 5 workers, each in its own worktree with its own build slot. I'll only ping you for decisions and reviews; everything else updates the cards." }
+      ],
+      log: [["me", "$ script/fyx-cargo check -p agent_review   # w2"], ["", "waiting for the shared target lock (held by w1)…"], ["ok", "lock acquired · building agent_review"]],
+      toasts: []
+    };
+  }
+
+  function A(id) { for (var i = 0; i < S.agents.length; i++) if (S.agents[i].id === id) return S.agents[i]; return null; }
+  function spent() { var s = S.base; S.agents.forEach(function (a) { s += a.cost; }); return s; }
+  function running() { return S.agents.filter(function (a) { return a.kind !== "external" && a.kind !== "subagent" && /working|needs/.test(a.state); }).length; }
+  function log(cls, t) { S.log.push([cls, t]); if (S.log.length > 80) S.log.shift(); }
+  function say(from, text, extra) { var m = { from: from, text: text }; if (extra) for (var k in extra) m[k] = extra[k]; S.chat.push(m); }
+
+  /* notifications: only when the person is needed; batched while away */
+  function notify(title, body, agentId, silent) {
+    if (S.away) { S.awayLog.push({ title: title, needs: !silent }); return; }
+    if (silent) return;
+    var t = { id: ++S.seq, title: title, body: body, agent: agentId };
+    S.toasts.push(t);
+    later(function () { S.toasts = S.toasts.filter(function (x) { return x.id !== t.id; }); render(); }, 7000);
+  }
+  function quiet(title) { if (S.away) S.awayLog.push({ title: title, needs: false }); }
+
+  function ask(agentId, q, opts) {
+    var d = { id: "d" + (++S.seq), agent: agentId, q: q, opts: opts, answered: null };
+    S.inbox.push(d);
+    say("decision", "", { decision: d.id });
+    return d;
+  }
+  function D(id) { for (var i = 0; i < S.inbox.length; i++) if (S.inbox[i].id === id) return S.inbox[i]; return null; }
+  function openNeeds() { return S.inbox.filter(function (d) { return !d.answered; }); }
+
+  function setState(id, st) { var a = A(id); if (a) a.state = st; }
+  function finishLater(id, ms, msg) {
+    later(function () {
+      var a = A(id); if (!a || S.stopped || a.state !== "working") return;
+      a.state = "review"; a.check.forEach(function (c) { c[0] = 1; });
+      a.last = msg || "Done. The gate is green in my worktree. Ready for your review.";
+      say("coord", a.title + " is ready for your review (+" + a.add + " −" + a.del + ").", { link: id });
+      notify("Ready for review", a.title, id);
+      render();
+    }, ms);
+  }
+
+  /* scripted events */
+  var EVENTS = [
+    function () { var a = A("w3"); a.state = "review"; a.check[2][0] = 1; a.last = "unittest and dry-run are green. Ready for your review.";
+      say("coord", "Registry: signed index is ready for your review (+88 −12). unittest and dry-run are green.", { link: "w3" });
+      notify("Ready for review", "Registry: signed index", "w3"); },
+    function () { setState("w2", "needs"); A("w2").last = "Waiting for your choice on comment delivery.";
+      ask("w2", "How should review comments reach Claude Code sessions that run outside Fyx?", [
+        { label: "Write them to .fyx/review-comments.md in the worktree", rec: true, val: "file" },
+        { label: "Copy them to the clipboard", val: "clip" },
+        { label: "Both", val: "both" }]);
+      notify("Review comments for agents outside Fyx needs you", "One question, three options. The recommended one is first.", "w2"); },
+    function () { log("me", "merge queue: start (target integration, one at a time)"); runQueue(); },
+    function () { var a = A("w5"); a.state = "queued"; a.last = "Called enqueue_merge."; S.queue.push({ id: "w5", status: "waiting", step: 0, failOnce: true });
+      say("sys", "Disk guard thresholds asked to merge."); runQueue(); },
+    function () { var a = A("w1"); a.state = "queued"; a.check[2][0] = 1; a.check[3][0] = 1; setState("s2", "done"); a.last = "Called enqueue_merge.";
+      S.queue.push({ id: "w1", status: "waiting", step: 0, conflict: true }); say("sys", "Renderer: clip rects asked to merge."); runQueue(); },
+    function () { S.base += Math.max(0, 12.3 - spent());
+      ask(null, "The Plan 7.9 tree used $12.30 of today's $15 cap (82%). What now?", [
+        { label: "Pause new workers, let running ones finish", rec: true, val: "pause" },
+        { label: "Raise today's cap to $20", val: "raise" },
+        { label: "Stop the whole tree", val: "stop" }]);
+      notify("Budget at 82%", "Plan 7.9 tree: $12.30 of $15 today.", null); },
+    function () { var x = A("x1"); x.state = "external"; x.last = "Active 10 s ago · edited crates/ui_ext_wasm/src/limits.rs (read from its session file)."; x.add = 17; x.del = 4;
+      say("sys", "Fyx noticed Claude Code working outside Fyx in fyx-w2c. It shows up read-only in the tree."); quiet("Outside agent active in fyx-w2c"); }
+  ];
+  function step() {
+    if (S.nextEvent >= EVENTS.length) { $("p-hint").textContent = "All scripted events played. Reset to start again."; S.playing = false; render(); return; }
+    EVENTS[S.nextEvent++](); render();
+  }
+  function play() {
+    if (S.playing) { S.playing = false; render(); return; }
+    S.playing = true; render();
+    (function tick() { if (!S.playing) return; step(); if (S.nextEvent < EVENTS.length) later(tick, 4200); else { S.playing = false; render(); } })();
+  }
+
+  /* merge queue: rebase, gate, fast-forward; one at a time */
+  function runQueue() {
+    if (S.stopped) return;
+    if (S.queue.some(function (q) { return /rebasing|gate/.test(q.status); })) return;
+    var q = S.queue.filter(function (q) { return q.status === "waiting"; })[0];
+    if (!q) return;
+    var a = A(q.id);
+    q.status = "rebasing"; q.step = 1; a.state = "merging"; log("me", "$ git rebase integration   # " + a.branch); render();
+    later(function () {
+      if (q.conflict) {
+        q.status = "conflict"; a.state = "needs"; log("bad", "CONFLICT crates/ui_ext_host/src/render.rs (2 hunks)");
+        a.last = "The rebase onto integration hit a conflict.";
+        a.hunks = [{ file: "crates/ui_ext_host/src/render.rs", at: "conflict · integration vs " + a.branch, conflict: true, lines: [["c", "<<<<<<< integration"], [" ", "    let bounds = element.bounds_in_window(window, cx);"], ["c", "======="], [" ", "    let bounds = element.bounds(cx);"], [" ", "    let clipped = bounds.intersect(&parent_clip);"], ["c", ">>>>>>> " + a.branch]] }];
+        ask("w1", "Renderer: clip rects conflicts with integration in render.rs (2 hunks). Someone renamed bounds() to bounds_in_window().", [
+          { label: "Send it back to its agent to rebase and fix", rec: true, val: "back" },
+          { label: "Open the conflict myself", val: "open" },
+          { label: "Skip it for now, merge the rest", val: "skip" }]);
+        notify("Merge conflict needs you", "Renderer: clip rects · render.rs", "w1");
+        render(); runQueue(); return;
+      }
+      q.status = "gate"; q.step = 2; log("", "$ FAST=1 script/gate.sh"); log("", "waiting for the shared target lock…"); render();
+      later(function () {
+        if (q.failOnce) {
+          q.failOnce = false; q.status = "failed"; q.step = 2; a.state = "working"; a.check[1][0] = 2;
+          log("bad", "gate: 1 test failed · disk_guard::sweeps_only_stale_slots");
+          a.last = "The gate failed (1 test). Fixing it, then I'll queue again.";
+          say("sys", "Disk guard thresholds failed the gate (1 test) and went back to its agent. Nothing for you to do.");
+          quiet("Disk guard thresholds: gate red, sent back to its agent");
+          S.queue = S.queue.filter(function (x) { return x !== q; });
+          later(function () { if (S.stopped) return; a.state = "queued"; a.check[1][0] = 1; S.queue.push({ id: a.id, status: "waiting", step: 0 }); log("", "w5 fixed the test and queued again"); render(); runQueue(); }, 9000);
+          render(); runQueue(); return;
+        }
+        log("ok", "gate green · fast-forward integration ← " + a.branch);
+        q.status = "merged"; q.step = 3; a.state = "merged"; a.last = "Merged into integration. Worktree archived, its target slot swept (" + a.target + " freed).";
+        S.merged.push({ id: a.id, at: clock() });
+        S.queue = S.queue.filter(function (x) { return x !== q; });
+        say("sys", a.title + " merged into integration. " + a.target + " freed.");
+        quiet(a.title + " merged");
+        render(); runQueue();
+      }, 3400);
+    }, 1500);
+  }
+  function clock() { var d = new Date(); return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
+
+  /* answers */
+  function answer(did, idx) {
+    var d = D(did); if (!d || d.answered) return;
+    var o = d.opts[idx]; d.answered = o.label;
+    say("me", o.label);
+    if (d.agent === "w2") {
+      var a = A("w2"); a.state = "working"; a.check[1][0] = 1; a.check[2][0] = 2; a.last = "Using your choice: " + o.label.toLowerCase() + ". Writing tests.";
+      say("coord", "Passed to Review comments for agents outside Fyx. It continues.");
+      finishLater("w2", 6000);
+    } else if (d.agent === "w1") {
+      var w = A("w1"); var q = S.queue.filter(function (x) { return x.id === "w1"; })[0];
+      if (o.val === "back") {
+        S.queue = S.queue.filter(function (x) { return x !== q; }); w.state = "working"; w.last = "Rebasing onto integration and adopting bounds_in_window().";
+        say("coord", "Sent back to Renderer: clip rects. It will rebase and queue again on its own.");
+        later(function () { if (S.stopped) return; w.state = "queued"; w.hunks = w.hunks.filter(function (x) { return !x.conflict; }); S.queue.push({ id: "w1", status: "waiting", step: 0 }); log("", "w1 rebased cleanly and queued again"); render(); runQueue(); }, 7000);
+      } else if (o.val === "open") {
+        openCard("w1"); say("coord", "Opened the conflict in the Renderer card. Press Resolve when you're done, or send it back.");
+        if (q) q.status = "parked";
+      } else { if (q) q.status = "parked"; w.state = "paused"; w.last = "Parked in the merge queue."; say("coord", "Parked Renderer: clip rects. The rest of the queue keeps going."); }
+    } else {
+      if (o.val === "pause") { S.pausedNew = true; say("coord", "New workers are paused. The running ones finish and merge as usual."); }
+      else if (o.val === "raise") { S.cap = 20; say("coord", "Today's cap is now $20."); }
+      else { stopAll(); }
+    }
+    render(); runQueue();
+  }
+
+  function stopAll() {
+    S.stopped = true; S.stopConfirm = false; S.playing = false;
+    S.agents.forEach(function (a) { if (/working|needs|queued|merging/.test(a.state) && a.kind !== "external") { a._prev = a.state; a.state = "stopped"; } });
+    S.queue.forEach(function (q) { if (/rebasing|gate/.test(q.status)) q.status = "waiting"; });
+    log("bad", "Stop all: sent stop to every agent in this tree, merge queue paused");
+    say("sys", "Stopped every agent in this tree and paused the merge queue. Nothing was deleted; worktrees stay as they are.");
+  }
+  function resumeAll() {
+    S.stopped = false;
+    S.agents.forEach(function (a) { if (a.state === "stopped") { a.state = a._prev === "merging" ? "queued" : a._prev || "working"; } });
+    log("ok", "Resume all"); say("sys", "Resumed. The merge queue continues."); runQueue();
+  }
+
+  function openCard(id) { var key = "card:" + id; if (S.tabs.indexOf(key) < 0) S.tabs.push(key); S.tab = key; S.sel = id; }
+  function enqueue(id) {
+    var a = A(id); if (!a || a.state !== "review") return;
+    a.state = "queued"; a.last = "In the merge queue."; S.queue.push({ id: id, status: "waiting", step: 0 });
+    say("me", "Send " + a.title + " to the merge queue."); runQueue();
+  }
+
+  function sendGoal() {
+    var ta = $("goal"); var text = ta.value.trim(); if (!text) return; ta.value = "";
+    say("me", text); render();
+    later(function () {
+      if (S.pausedNew || S.stopped) { say("coord", "New workers are paused (budget or Stop all). I'll start them when you resume or raise the cap."); render(); return; }
+      var n1 = "w" + (++S.seq), n2 = "w" + (++S.seq);
+      var short = text.length > 34 ? text.slice(0, 34) + "…" : text;
+      [[n1, "Part 1: " + short], [n2, "Part 2: tests and docs"]].forEach(function (p) {
+        S.agents.splice(S.agents.length - 1, 0, { id: p[0], kind: "worker", parent: "c1", title: p[1], state: "working", branch: "fyx/" + p[0], wt: "D:\\fyx\\wt\\" + p[0], cost: 0.01, target: "0.0 GB", add: 0, del: 0,
+          check: [[2, "Read the brief and the code"], [0, "Change"], [0, "Gate in the worktree"]], last: "Starting in a fresh worktree." });
+        log("", "start_worker " + p[0] + " → worktree D:\\fyx\\wt\\" + p[0] + ", build slot queued");
+      });
+      say("coord", "Got it. I split this into 2 workers, each in its own worktree. You'll hear from me when one needs a decision or a review.");
+      finishLater(n1, 9000); finishLater(n2, 12000);
+      A(n1).add = 63; A(n1).del = 5; A(n2).add = 120; A(n2).del = 0;
+      render();
+    }, 900);
+  }
+
+  /* cost ticks */
+  setInterval(function () {
+    if (S.stopped) return;
+    S.agents.forEach(function (a) { if (a.state === "working" && a.kind !== "external") a.cost += 0.01 + Math.random() * 0.015; });
+    renderTitle(); renderFoot();
+  }, 2000);
+
+  /* away / digest */
+  function toggleAway() {
+    if (!S.away) { S.away = true; S.awayLog = []; S.awayAt = clock(); render(); return; }
+    S.away = false;
+    var needs = openNeeds().length, items = S.awayLog;
+    var merged = items.filter(function (i) { return / merged$/.test(i.title); }).length;
+    var reviews = S.agents.filter(function (a) { return a.state === "review"; }).length;
+    var sentBack = items.filter(function (i) { return /sent back/.test(i.title); }).length;
+    say("digest", "", { digest: { since: S.awayAt, merged: merged, needs: needs, reviews: reviews, sentBack: sentBack, other: items.length } });
+    render();
+  }
+
+  /* rendering */
+  function chip(st) { return '<span class="chip st-' + st + '">' + h(LABEL[st] || st) + "</span>"; }
+
+  function renderTitle() {
+    var sp = spent(), pct = Math.min(100, sp / S.cap * 100), cls = pct >= 90 ? "bad" : pct >= 75 ? "warn" : "";
+    var needs = openNeeds().length;
+    var stop = S.stopConfirm
+      ? '<span class="stopconfirm">Stop ' + running() + ' agents and pause the merge queue? <button class="danger" data-act="stop-yes">Stop</button><button data-act="stop-no">Cancel</button></span>'
+      : S.stopped ? '<button class="btn" data-act="resume">Resume all</button>' : '<button class="stopall" data-act="stop">Stop all</button>';
+    $("titlebar").innerHTML =
+      '<span class="tb-proj">fyx</span><span class="tb-branch mono">integration</span><span class="tb-sp"></span>' +
+      '<span class="meter num" title="Today\'s spend for this agent tree">Budget <span class="bar ' + cls + '"><i style="width:' + pct.toFixed(0) + '%"></i></span> $' + sp.toFixed(2) + " / $" + S.cap + (S.pausedNew ? " · new paused" : "") + "</span>" +
+      '<span class="meter num">Agents ' + running() + " / 6</span>" +
+      '<span class="meter num">Build slot ' + (S.queue.some(function (q) { return q.status === "gate"; }) || running() ? "1/1 busy" : "0/1") + "</span>" +
+      '<button class="tbtn" data-act="inbox" aria-label="Inbox">Inbox <span class="badge ' + (needs ? "" : "zero") + '">' + needs + "</span></button>" + stop;
+  }
+
+  function renderTabs() {
+    $("tabs").innerHTML = S.tabs.map(function (k) {
+      var name = k === "editor" ? "cockpit.rs" : k === "queue" ? "Merge queue (" + S.queue.length + ")" : (A(k.slice(5)) || {}).title;
+      var close = k === "editor" || k === "queue" ? "" : '<span class="x" data-act="close" data-k="' + h(k) + '" aria-label="Close">×</span>';
+      return '<button class="tab' + (S.tab === k ? " active" : "") + '" data-act="tab" data-k="' + h(k) + '">' + h(name) + close + "</button>";
+    }).join("");
+  }
+
+  var CODE = [
+    '<span class="c">// crates/fyx_cockpit/src/cockpit.rs (prototype view)</span>',
+    '<span class="k">pub struct</span> <span class="t">Cockpit</span> {',
+    '    tree: <span class="t">AgentTree</span>,',
+    '    inbox: <span class="t">Vec</span>&lt;<span class="t">Decision</span>&gt;,',
+    '    merge_queue: <span class="t">MergeQueue</span>,',
+    '    budget: <span class="t">Budget</span>,',
+    '}',
+    '',
+    '<span class="k">impl</span> <span class="t">Cockpit</span> {',
+    '    <span class="c">/// Notify only when the person is needed: a decision, a review, a failure, a limit.</span>',
+    '    <span class="k">fn</span> <span class="f">should_notify</span>(&amp;<span class="k">self</span>, event: &amp;<span class="t">AgentEvent</span>) -&gt; <span class="t">bool</span> {',
+    '        <span class="k">matches!</span>(event, <span class="t">AgentEvent</span>::NeedsDecision(_) | <span class="t">AgentEvent</span>::ReadyForReview(_)',
+    '            | <span class="t">AgentEvent</span>::Failed(_) | <span class="t">AgentEvent</span>::LimitReached(_))',
+    '    }',
+    '}',
+    '',
+    '<span class="c">// Click a row in Agent Sessions (bottom right) to open its card here.</span>'
+  ];
+
+  function renderPane() {
+    var p = $("pane");
+    if (S.tab === "editor") { p.innerHTML = '<div class="code">' + CODE.map(function (l, i) { return '<div><span class="ln">' + (i + 1) + "</span>" + l + "</div>"; }).join("") + "</div>"; return; }
+    if (S.tab === "queue") { p.innerHTML = queueHtml(); return; }
+    var a = A(S.tab.slice(5)); if (!a) { S.tab = "editor"; renderPane(); return; }
+    var parent = a.parent ? A(a.parent) : null;
+    var acts = [];
+    if (a.state === "review") acts.push('<button class="btn primary" data-act="enqueue" data-id="' + a.id + '">Send to merge queue</button>');
+    if (a.state === "needs") acts.push('<button class="btn primary" data-act="inbox">Answer in Inbox</button>');
+    if (a.kind !== "external") {
+      if (a.state === "working") acts.push('<button class="btn" data-act="pause" data-id="' + a.id + '">Pause</button>');
+      if (a.state === "paused") acts.push('<button class="btn" data-act="unpause" data-id="' + a.id + '">Resume</button>');
+      if (!/merged|stopped|done/.test(a.state)) acts.push('<button class="btn danger" data-act="stop1" data-id="' + a.id + '">Stop</button>');
+    }
+    acts.push('<button class="btn" data-act="toast" data-msg="Opens ' + h(a.wt || "") + ' in a new Fyx window.">Open worktree</button>');
+    acts.push('<button class="btn" data-act="toast" data-msg="Opens a terminal in ' + h(a.wt || "") + '.">Open terminal</button>');
+    var hunks = (a.hunks || []).map(function (hk, i) {
+      var body = hk.lines.map(function (l) { var c = l[0] === "+" ? "add" : l[0] === "-" ? "del" : l[0] === "c" ? "conf" : ""; return '<span class="' + c + '">' + h((l[0] === "c" ? "" : l[0]) + l[1]) + "</span>"; }).join("");
+      var extra = hk.comment === "open" ? '<div class="comment"><label class="section-label" for="cm-' + a.id + i + '" style="margin:0">Comment for the agent</label><textarea id="cm-' + a.id + i + '" placeholder="e.g. Use the parent clip from the layout pass instead."></textarea><div class="actions"><button class="btn primary" data-act="cm-send" data-id="' + a.id + '" data-i="' + i + '">Send to agent</button><button class="btn" data-act="cm-cancel" data-id="' + a.id + '" data-i="' + i + '">Cancel</button></div></div>'
+        : hk.comment ? '<div class="sent-c">You: ' + h(hk.comment) + " · sent to the agent</div>" : "";
+      var btn = hk.conflict ? '<button data-act="resolve" data-id="' + a.id + '">Mark resolved</button>' : a.kind === "external" ? "" : '<button data-act="cm-open" data-id="' + a.id + '" data-i="' + i + '">Comment</button>';
+      return '<div class="hunk"><div class="hunk-h"><span>' + h(hk.file) + " " + h(hk.at) + "</span>" + btn + "</div><pre>" + body + "</pre>" + extra + "</div>";
+    }).join("");
+    p.innerHTML = '<div class="card">' +
+      '<div class="card-head"><h2>' + h(a.title) + "</h2>" + chip(a.state) + "</div>" +
+      '<div class="metarow num">' + (a.branch ? "<span>branch <b class='mono'>" + h(a.branch) + "</b></span>" : "") + (a.wt ? "<span>worktree <b class='mono'>" + h(a.wt) + "</b></span>" : "") +
+      "<span>cost <b>$" + a.cost.toFixed(2) + "</b></span><span>target <b>" + h(a.target) + "</b></span><span>diff <b>+" + a.add + " −" + a.del + "</b></span>" + (parent ? "<span>started by <b>" + h(parent.title) + "</b></span>" : "") + "</div>" +
+      (a.check.length ? '<div><div class="section-label">Checklist (reported by the agent)</div><ul class="check">' + a.check.map(function (c) { return '<li class="' + (c[0] === 1 ? "done" : c[0] === 2 ? "doing" : "") + '"><span class="m">' + (c[0] === 1 ? "✓" : c[0] === 2 ? "◐" : "○") + "</span><span>" + h(c[1]) + "</span></li>"; }).join("") + "</ul></div>" : "") +
+      '<div><div class="section-label">Last message</div><div class="lastmsg">' + h(a.last) + "</div></div>" +
+      '<div class="actions">' + acts.join("") + "</div>" +
+      (hunks ? '<div style="display:grid;gap:10px"><div class="section-label" style="margin:0">Changes (comments go back to the agent)</div>' + hunks + "</div>" : "") +
+      "</div>";
+  }
+
+  function queueHtml() {
+    var stepNames = ["Rebase onto integration", "Gate: FAST=1 script/gate.sh", "Fast-forward"];
+    var items = S.queue.map(function (q, n) {
+      var a = A(q.id);
+      var steps = stepNames.map(function (s, i) {
+        var cls = "";
+        if (q.status === "conflict" && i === 0) cls = "badd";
+        else if (q.status === "failed" && i === 1) cls = "badd";
+        else if (i < q.step - 1) cls = "okd";
+        else if (i === q.step - 1 && /rebasing|gate/.test(q.status)) cls = "doing";
+        return '<span class="step ' + cls + '">' + (i + 1) + ". " + s + "</span>";
+      }).join("");
+      var note = q.status === "waiting" ? (S.stopped ? "Paused by Stop all." : "Waiting. Exactly one branch merges at a time.") : q.status === "conflict" ? "Conflict. A decision card is in your Inbox." : q.status === "parked" ? "Parked. The rest of the queue keeps going." : q.status === "rebasing" ? "Rebasing…" : "Gate running. It waits for the shared target lock first.";
+      return '<div class="qitem"><div class="qtop"><span><b>' + (n + 1) + ". " + h(a.title) + '</b> <span class="mono" style="color:var(--dim)">' + h(a.branch) + "</span></span>" + chip(a.state) + '</div><div class="steps">' + steps + '</div><div class="qnote">' + note + "</div></div>";
+    }).join("") || '<div class="empty">The queue is empty. Cards marked "ready for review" have a Send to merge queue button.</div>';
+    var done = S.merged.length ? '<div class="section-label" style="margin-top:6px">Merged today</div>' + S.merged.map(function (m) { var a = A(m.id); return '<div class="qnote">' + h(m.at) + " · " + h(a.title) + " · " + h(a.target) + " freed</div>"; }).join("") : "";
+    return '<div class="queue"><div class="card-head"><h2 style="margin:0;font-size:17px;font-weight:600">Merge queue</h2></div>' +
+      '<div class="qhead"><span>target <b class="mono">integration</b></span><span>gate <b class="mono">FAST=1 script/gate.sh</b></span><span>one at a time</span><span>red gate → back to its agent, no ping</span><span>conflict → a decision for you</span></div>' + items + done + "</div>";
+  }
+
+  function rowHtml(a, depth) {
+    var ind = depth === 0 ? "" : (depth === 1 ? "├ " : "  └ ");
+    var right = a.kind === "external" ? '<span class="num">' + h(a.target) + "</span>" : '<span class="num">$' + a.cost.toFixed(2) + "</span>" + (a.target !== "—" ? '<span class="num">' + h(a.target) + "</span>" : "");
+    var ans = a.state === "needs" ? '<button class="btn" style="padding:1px 8px;font-size:11px" data-act="inbox">Answer</button>' : "";
+    var sub = a.kind === "external" ? "read-only · " + a.branch : a.branch ? a.branch + " · +" + a.add + " −" + a.del : a.last;
+    return '<div class="row' + (S.sel === a.id ? " sel" : "") + (a.state === "needs" ? " needs-row" : "") + '" data-act="row" data-id="' + a.id + '" tabindex="0" role="button">' +
+      '<span class="ind">' + ind + "</span>" +
+      '<span class="nm">' + h(a.title) + '<span class="sub mono">' + h(sub) + "</span></span>" +
+      '<span class="rt">' + ans + chip(a.state) + right + "</span></div>";
+  }
+
+  function renderTree() {
+    var r = $("rows");
+    if (S.view === "queue") { r.innerHTML = '<div style="padding:8px 10px" class="qnote">The full queue is open in the center. Showing a summary here.</div>' + S.queue.map(function (q, n) { return rowHtml(A(q.id), 0); }).join(""); }
+    else {
+      var needs = S.agents.filter(function (a) { return a.state === "needs"; });
+      var html = "";
+      if (needs.length) html += '<div class="grouplbl">Needs you (' + needs.length + ")</div>" + needs.map(function (a) { return rowHtml(a, 0); }).join("");
+      html += '<div class="grouplbl">Plan 7.9 cockpit</div>';
+      var c = A("c1"); html += rowHtml(c, 0);
+      var order = { needs: 0, review: 1, working: 2, failed: 2, queued: 3, merging: 3, paused: 4, stopped: 4, merged: 5, done: 5 };
+      S.agents.filter(function (a) { return a.parent === "c1"; }).sort(function (x, y) { return (order[x.state] || 9) - (order[y.state] || 9); }).forEach(function (w) {
+        html += rowHtml(w, 1);
+        S.agents.filter(function (s) { return s.parent === w.id; }).forEach(function (s) { html += rowHtml(s, 2); });
+      });
+      html += '<div class="grouplbl">Outside Fyx</div>' + S.agents.filter(function (a) { return a.kind === "external"; }).map(function (a) { return rowHtml(a, 0); }).join("");
+      r.innerHTML = html;
+    }
+    $("seg-tree").className = S.view === "tree" ? "on" : ""; $("seg-queue").className = S.view === "queue" ? "on" : "";
+    $("tree-sum").textContent = openNeeds().length ? openNeeds().length + " need you" : "nobody waits on you";
+  }
+
+  function renderFoot() {
+    var disk = 0; S.agents.forEach(function (a) { var m = /([\d.]+) GB/.exec(a.target); if (m && a.state !== "merged") disk += parseFloat(m[1]); });
+    $("treefoot").innerHTML = '<span class="num">Tree $' + spent().toFixed(2) + "</span><span>·</span><span class='num'>targets " + disk.toFixed(1) + " GB on E:</span><span>·</span><span>depth 2</span><span>·</span><span>" + (S.stopped ? "stopped" : S.pausedNew ? "new workers paused" : "queue " + S.queue.length) + "</span>";
+  }
+
+  function decisionHtml(d, compact) {
+    var who = d.agent ? (A(d.agent) || {}).title : "Budget";
+    if (d.answered) return '<div class="decision answered"><div class="from">' + h(who) + '</div><div class="q">' + h(d.q) + '</div><div class="ans">Answered: ' + h(d.answered) + "</div></div>";
+    return '<div class="decision"><div class="from">' + h(who) + " asks</div><div class=\"q\">" + h(d.q) + '</div><div class="opts">' +
+      d.opts.map(function (o, i) { return '<button class="' + (o.rec ? "rec" : "") + '" data-act="answer" data-d="' + d.id + '" data-i="' + i + '">' + h(o.label) + (o.rec ? "<small>recommended</small>" : "") + "</button>"; }).join("") +
+      '</div><div class="from">The agent keeps going on the recommended option only if the step can be undone.' + (compact ? "" : ' <button class="linkish" data-act="reply">Reply instead</button>') + "</div></div>";
+  }
+
+  function renderChat() {
+    var m = $("msgs"); var atBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 40;
+    m.innerHTML = S.chat.map(function (c) {
+      if (c.from === "decision") return decisionHtml(D(c.decision));
+      if (c.from === "digest") { var g = c.digest; return '<div class="digest"><b>While you were away (since ' + h(g.since) + ")</b><span>" + g.merged + " merged · " + g.sentBack + " failed the gate and went back to their agents · " + g.reviews + " ready for review · " + g.needs + " need you</span><span style='color:var(--muted);font-size:12px'>You got no notifications during this time. " + g.other + " updates were batched here.</span>" + (g.needs ? '<span><button class="linkish" data-act="inbox">Open the Inbox</button></span>' : "") + "</div>"; }
+      var who = c.from === "me" ? "You" : c.from === "coord" ? "Coordinator" : "Fyx";
+      var link = c.link ? ' <button class="linkish" data-act="row" data-id="' + c.link + '">Open card</button>' : "";
+      return '<div class="msg ' + (c.from === "me" ? "me" : c.from === "sys" ? "sys" : "") + '"><div class="who">' + who + '</div><div class="txt">' + h(c.text) + link + "</div></div>";
+    }).join("");
+    if (atBottom || true) m.scrollTop = m.scrollHeight;
+  }
+
+  function renderInbox() {
+    var w = $("inbox-wrap");
+    if (!S.inboxOpen) { w.innerHTML = ""; return; }
+    var open = openNeeds();
+    w.innerHTML = '<div class="inbox" role="dialog" aria-label="Inbox"><h3><span>Inbox · ' + open.length + ' need you</span><button class="linkish" data-act="inbox">Close</button></h3>' +
+      (open.length ? open.map(function (d) { return decisionHtml(d, true); }).join("") : '<div class="empty">Nothing needs you. Agents keep working; you will get a notification when one needs a decision or a review.</div>') + "</div>";
+  }
+
+  function renderToasts() {
+    $("toasts").innerHTML = S.toasts.map(function (t) {
+      return '<div class="toast"><div class="tt">' + h(t.title) + '</div><div class="tb">' + h(t.body) + '</div><div class="act">' +
+        (t.agent ? '<button class="btn" data-act="row" data-id="' + t.agent + '">Open</button>' : "") + '<button class="btn" data-act="inbox">Inbox</button><button class="btn" data-act="dismiss" data-t="' + t.id + '">Dismiss</button></div></div>';
+    }).join("");
+  }
+
+  function renderTerm() { var t = $("termlog"); t.innerHTML = S.log.map(function (l) { return '<div class="' + l[0] + '">' + h(l[1]) + "</div>"; }).join(""); t.scrollTop = t.scrollHeight; }
+
+  function renderProto() {
+    $("p-play").textContent = S.playing ? "❚❚ Pause events" : "▶ Play events";
+    $("p-play").classList.toggle("on", S.playing);
+    $("p-away").textContent = S.away ? "I'm back (show digest)" : "Simulate: I'm away";
+    $("p-away").classList.toggle("on", S.away);
+    $("p-step").textContent = "Next event (" + S.nextEvent + "/" + EVENTS.length + ")";
+  }
+
+  function render() { renderProto(); renderTitle(); renderTabs(); renderPane(); renderTree(); renderFoot(); renderChat(); renderInbox(); renderToasts(); renderTerm(); }
+
+  /* events */
+  document.addEventListener("click", function (e) {
+    var el = e.target.closest("[data-act]"); if (!el) return;
+    var act = el.getAttribute("data-act"), id = el.getAttribute("data-id");
+    if (act === "close") { e.stopPropagation(); var k = el.getAttribute("data-k"); S.tabs = S.tabs.filter(function (x) { return x !== k; }); if (S.tab === k) S.tab = "editor"; }
+    else if (act === "tab") { S.tab = el.getAttribute("data-k"); if (S.tab.indexOf("card:") === 0) S.sel = S.tab.slice(5); }
+    else if (act === "row") { openCard(id); S.inboxOpen = false; }
+    else if (act === "inbox") { S.inboxOpen = !S.inboxOpen; }
+    else if (act === "answer") { answer(el.getAttribute("data-d"), +el.getAttribute("data-i")); return; }
+    else if (act === "reply") { $("goal").focus(); $("goal").placeholder = "Type your own answer for the agent…"; return; }
+    else if (act === "enqueue") { enqueue(id); }
+    else if (act === "pause") { setState(id, "paused"); A(id).last = "Paused by you."; }
+    else if (act === "unpause") { setState(id, "working"); A(id).last = "Resumed."; finishLater(id, 8000); }
+    else if (act === "stop1") { setState(id, "stopped"); A(id).last = "Stopped by you. The worktree stays."; }
+    else if (act === "stop") { S.stopConfirm = true; }
+    else if (act === "stop-no") { S.stopConfirm = false; }
+    else if (act === "stop-yes") { stopAll(); }
+    else if (act === "resume") { resumeAll(); }
+    else if (act === "dismiss") { var tid = +el.getAttribute("data-t"); S.toasts = S.toasts.filter(function (x) { return x.id !== tid; }); }
+    else if (act === "toast") { S.toasts.push({ id: ++S.seq, title: "Prototype", body: el.getAttribute("data-msg") }); var sid = S.seq; later(function () { S.toasts = S.toasts.filter(function (x) { return x.id !== sid; }); render(); }, 3000); }
+    else if (act === "cm-open") { A(id).hunks[+el.getAttribute("data-i")].comment = "open"; render(); var ta = document.getElementById("cm-" + id + el.getAttribute("data-i")); if (ta) ta.focus(); return; }
+    else if (act === "cm-cancel") { A(id).hunks[+el.getAttribute("data-i")].comment = null; }
+    else if (act === "cm-send") {
+      var i = +el.getAttribute("data-i"), box = document.getElementById("cm-" + id + i), txt = box ? box.value.trim() : "";
+      if (!txt) { box && box.focus(); return; }
+      var a = A(id); a.hunks[i].comment = txt; say("sys", "Comment sent to " + a.title + ". It works on it; the card comes back as ready for review.");
+      if (a.state === "review") { a.state = "working"; a.last = "Addressing your comment: " + txt; finishLater(id, 6000, "Addressed your comment. Ready for review again."); }
+    }
+    else if (act === "resolve") {
+      var w = A(id); w.hunks = w.hunks.filter(function (x) { return !x.conflict; }); w.state = "queued";
+      var q = S.queue.filter(function (x) { return x.id === id; })[0]; if (q) { q.status = "waiting"; q.conflict = false; } else S.queue.push({ id: id, status: "waiting", step: 0 });
+      S.inbox.forEach(function (d) { if (d.agent === id && !d.answered) d.answered = "Resolved by you"; });
+      say("me", "Resolved the conflict in render.rs."); runQueue();
+    }
+    render();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.target.id === "goal" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendGoal(); }
+    else if (e.key === "Enter" && e.target.classList && e.target.classList.contains("row")) { openCard(e.target.getAttribute("data-id")); render(); }
+    else if (e.key === "Escape" && S.inboxOpen) { S.inboxOpen = false; render(); }
+  });
+  $("send").addEventListener("click", sendGoal);
+  $("p-play").addEventListener("click", play);
+  $("p-step").addEventListener("click", function () { S.playing = false; step(); });
+  $("p-away").addEventListener("click", toggleAway);
+  $("p-reset").addEventListener("click", function () { timers.forEach(clearTimeout); timers = []; S = fresh(); openCard("w3"); S.tab = "editor"; $("p-hint").textContent = "Reset. Press Play, or click around."; render(); });
+  $("seg-tree").addEventListener("click", function () { S.view = "tree"; render(); });
+  $("seg-queue").addEventListener("click", function () { S.view = "queue"; S.tab = "queue"; render(); });
+
+  S = fresh();
+  render();
+})();
+</script>
