@@ -1,0 +1,26 @@
+[package]
+name = "fyx_demo_lint"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_demo_lint.rs"
+crate-type = ["cdylib"]
+test = true
+doctest = false
+
+[features]
+# The linter needs the fyx:ui 0.4 `context` imports, so the demo is built for 0.4
+# (`script/fyx-build-demos --fyx-ui-0-4`). The other worlds build an extension with no surface.
+# The newest world wins when several are on.
+fyx-ui-0-2 = []
+fyx-ui-0-3 = ["ui_ext_sdk/fyx-ui-0-3"]
+fyx-ui-0-4 = ["fyx-ui-0-3", "ui_ext_sdk/fyx-ui-0-4"]
+
+[dependencies]
+ui_ext_sdk.workspace = true
