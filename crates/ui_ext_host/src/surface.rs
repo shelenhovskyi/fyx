@@ -220,14 +220,20 @@ pub enum HistoryEntry {
     },
 }
 
+/// Patches a summary names one by one; the rest are counted. Every update is summarized, on the
+/// main thread, and the history keeps [`HISTORY_CAPACITY`] of them: naming all 2048 patches of a
+/// big update cost thousands of `format!`s and kept ~40 KB per entry, with no inspector open.
+const SUMMARIZED_PATCHES: usize = 16;
+
 /// `replace 12 nodes`, `patches: set-props 3, insert 10, remove 4`, `unchanged`.
 pub fn summarize_update(update: &Update) -> String {
     match update {
         Update::Unchanged => "unchanged".into(),
         Update::Replace(nodes) => format!("replace {} nodes", nodes.len()),
         Update::Patches(patches) => {
-            let parts: Vec<String> = patches
+            let mut parts: Vec<String> = patches
                 .iter()
+                .take(SUMMARIZED_PATCHES)
                 .map(|patch| match patch {
                     Patch::SetProps(id, props) => {
                         format!("set-props {id} ({})", props.kind_name())
@@ -249,6 +255,10 @@ pub fn summarize_update(update: &Update) -> String {
                     },
                 })
                 .collect();
+            let rest = patches.len().saturating_sub(SUMMARIZED_PATCHES);
+            if rest > 0 {
+                parts.push(format!("{rest} more"));
+            }
             format!("patches: {}", parts.join(", "))
         }
     }
@@ -1470,4 +1480,19 @@ pub(crate) fn fetch_range(visible: Range<usize>, row_count: u32) -> Range<u32> {
         .saturating_add(ROW_OVERSCAN)
         .min(row_count);
     start.min(end)..end
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn a_big_update_is_summarized_by_count() {
+        let patches = (0..2048).map(Patch::Remove).collect::<Vec<_>>();
+        let summary = summarize_update(&Update::Patches(patches));
+        assert!(summary.starts_with("patches: remove 0, remove 1, "));
+        assert!(summary.ends_with("remove 15, 2032 more"), "{summary}");
+        let small = summarize_update(&Update::Patches(vec![Patch::Remove(4)]));
+        assert_eq!(small, "patches: remove 4");
+    }
 }

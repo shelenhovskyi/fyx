@@ -357,7 +357,7 @@ impl UiExtension {
     /// The whole tree of a surface or decoration, validated as a tree (at most 16384 nodes,
     /// parents first, children only under `flex`).
     pub async fn mount_v0_2(&self, surface_id: &str) -> Result<EffectReply<Vec<model::Node>>> {
-        let (nodes, _tree, effects) = self.mount_checked(surface_id).await?;
+        let (nodes, effects) = self.mount_checked(surface_id).await?;
         Ok(EffectReply {
             effects,
             value: nodes,
@@ -414,7 +414,7 @@ impl UiExtension {
             .await?;
         Ok(EffectReply {
             effects,
-            value: rows.into_iter().map(|(row, _tree)| row).collect(),
+            value: rows,
         })
     }
 
@@ -563,7 +563,7 @@ impl UiExtension {
     async fn mount_checked(
         &self,
         surface_id: &str,
-    ) -> Result<(Vec<model::Node>, Tree, Vec<HostEffect>)> {
+    ) -> Result<(Vec<model::Node>, Vec<HostEffect>)> {
         let (result, effects) = self
             .call(
                 "mount",
@@ -578,18 +578,12 @@ impl UiExtension {
             )
             .await?;
         let nodes = self.guest_result(result, &effects)?;
-        // Validated as a 0.2 tree; the 0.1 copy is for the 0.1 shims, until plan 2.3 drops them.
-        let tree = model::tree::Tree::from_nodes(nodes.clone(), self.limits)
-            .map_err(anyhow::Error::from)
-            .and_then(|_| {
-                Ok(Tree::from_nodes(
-                    nodes.iter().map(shim::node).collect(),
-                    self.limits,
-                )?)
-            })
-            .with_context(|| format!("invalid tree from mount({surface_id:?})"));
-        match tree {
-            Ok(tree) => Ok((nodes, tree, effects)),
+        // Validated as a 0.2 tree. Only the 0.1 API builds the 0.1 copy: on the 0.2 path it was
+        // a second tree, built on the main thread and dropped, on every mount.
+        match model::tree::Tree::from_nodes(nodes.clone(), self.limits)
+            .with_context(|| format!("invalid tree from mount({surface_id:?})"))
+        {
+            Ok(_) => Ok((nodes, effects)),
             Err(error) => Err(self.rejected(error, effects)),
         }
     }
@@ -600,7 +594,7 @@ impl UiExtension {
         list_node: model::NodeId,
         start: u32,
         count: u32,
-    ) -> Result<(Vec<(model::ListRow, Tree)>, Vec<HostEffect>)> {
+    ) -> Result<(Vec<model::ListRow>, Vec<HostEffect>)> {
         let (rows, effects) = self
             .call("list-rows", surface_id, CallBudget::Regular, {
                 let surface_id = surface_id.to_string();
@@ -616,32 +610,24 @@ impl UiExtension {
             .await?;
         let rows = self.guest_result(rows, &effects)?;
         let requested = start..start.saturating_add(count);
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                anyhow::ensure!(
-                    requested.contains(&row.index),
-                    "list-rows({surface_id:?}, {list_node}) returned row {} outside {requested:?}",
-                    row.index,
-                );
-                model::tree::Tree::from_row(row.nodes.clone(), self.limits).with_context(|| {
-                    format!(
-                        "invalid row {} from list-rows({surface_id:?}, {list_node})",
-                        row.index
-                    )
-                })?;
-                let tree = Tree::from_row(row.nodes.iter().map(shim::node).collect(), self.limits)
-                    .with_context(|| {
-                        format!(
-                            "invalid row {} from list-rows({surface_id:?}, {list_node})",
-                            row.index
-                        )
-                    })?;
-                Ok((row, tree))
-            })
-            .collect::<Result<Vec<_>>>();
-        match rows {
-            Ok(rows) => Ok((rows, effects)),
+        // Each row validated as a 0.2 tree; the 0.1 copies are built by the 0.1 API only, not
+        // for every visible row on every scroll.
+        let checked = rows.iter().try_for_each(|row| {
+            anyhow::ensure!(
+                requested.contains(&row.index),
+                "list-rows({surface_id:?}, {list_node}) returned row {} outside {requested:?}",
+                row.index,
+            );
+            model::tree::Tree::from_row(row.nodes.clone(), self.limits).with_context(|| {
+                format!(
+                    "invalid row {} from list-rows({surface_id:?}, {list_node})",
+                    row.index
+                )
+            })?;
+            Ok(())
+        });
+        match checked {
+            Ok(()) => Ok((rows, effects)),
             Err(error) => Err(self.rejected(error, effects)),
         }
     }
@@ -668,11 +654,16 @@ impl UiExtension {
 
     /// The initial tree of a surface, validated (0.1 model).
     pub async fn mount(&self, surface_id: &str) -> Result<Reply<Tree>> {
-        let (_nodes, tree, effects) = self.mount_checked(surface_id).await.map_err(shim::error)?;
-        Ok(Reply {
-            pushed: shim::pushes(effects),
-            value: tree,
-        })
+        let (nodes, effects) = self.mount_checked(surface_id).await.map_err(shim::error)?;
+        let tree = Tree::from_nodes(nodes.iter().map(shim::node).collect(), self.limits)
+            .with_context(|| format!("invalid tree from mount({surface_id:?})"));
+        match tree {
+            Ok(tree) => Ok(Reply {
+                pushed: shim::pushes(effects),
+                value: tree,
+            }),
+            Err(error) => Err(shim::error(self.rejected(error, effects))),
+        }
     }
 
     /// The extension's reply to one input event (0.1 model). The caller applies it to its tree,
@@ -705,13 +696,26 @@ impl UiExtension {
             .list_rows_checked(surface_id, list_node, start, count)
             .await
             .map_err(shim::error)?;
-        Ok(Reply {
-            pushed: shim::pushes(effects),
-            value: rows
-                .into_iter()
-                .map(|(row, tree)| (row.index, tree))
-                .collect(),
-        })
+        let trees = rows
+            .iter()
+            .map(|row| {
+                Tree::from_row(row.nodes.iter().map(shim::node).collect(), self.limits)
+                    .map(|tree| (row.index, tree))
+                    .with_context(|| {
+                        format!(
+                            "invalid row {} from list-rows({surface_id:?}, {list_node})",
+                            row.index
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>();
+        match trees {
+            Ok(trees) => Ok(Reply {
+                pushed: shim::pushes(effects),
+                value: trees,
+            }),
+            Err(error) => Err(shim::error(self.rejected(error, effects))),
+        }
     }
 }
 
