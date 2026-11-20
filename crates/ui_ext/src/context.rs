@@ -190,7 +190,7 @@ pub fn cap_selection(text: &mut String) {
 }
 
 /// Cuts `text` to at most `max` bytes at a character boundary.
-fn cut_to(text: &mut String, max: usize) {
+pub(crate) fn cut_to(text: &mut String, max: usize) {
     if text.len() > max {
         let mut end = max;
         while !text.is_char_boundary(end) {
