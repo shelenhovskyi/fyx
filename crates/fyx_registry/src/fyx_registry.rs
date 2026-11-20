@@ -217,6 +217,8 @@ impl Tier {
         ("workspace:read-buffers", Tier::T1),
         ("workspace:read-files", Tier::T1),
         ("workspace:diagnostics", Tier::T1),
+        ("diagnostics:publish", Tier::T1),
+        ("workspace:file-decorations", Tier::T1),
         // fyx:ui 0.4.
         ("context:editor", Tier::T1),
         ("workspace:open", Tier::T1),

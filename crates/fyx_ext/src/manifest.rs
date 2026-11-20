@@ -94,6 +94,8 @@ fn world_capabilities(version: &Version) -> Option<&'static [&'static str]> {
         integration::CAPABILITY_WORKSPACE_OPEN,
         integration::CAPABILITY_APPROVALS,
         integration::CAPABILITY_WORKSPACE_DIAGNOSTICS,
+        integration::CAPABILITY_DIAGNOSTICS_PUBLISH,
+        integration::CAPABILITY_FILE_DECORATIONS,
     ];
     if *version >= Version::new(0, 4, 0) {
         Some(V0_4)
@@ -171,6 +173,8 @@ pub const KNOWN_CAPABILITIES: &[(&str, CapabilityStatus)] = &[
     (integration::CAPABILITY_WORKSPACE_OPEN, SINCE_V0_4),
     (integration::CAPABILITY_APPROVALS, SINCE_V0_4),
     (integration::CAPABILITY_WORKSPACE_DIAGNOSTICS, SINCE_V0_4),
+    (integration::CAPABILITY_DIAGNOSTICS_PUBLISH, SINCE_V0_4),
+    (integration::CAPABILITY_FILE_DECORATIONS, SINCE_V0_4),
 ];
 
 const SINCE_V0_4: CapabilityStatus = CapabilityStatus::Since(Version::new(0, 4, 0));

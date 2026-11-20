@@ -971,6 +971,220 @@ The checks are written once, in the harness, as the reference. W2c ports them in
 - `open` outside an event call is `not-permitted`.
 - The harness and the host agree on every check (`harness_conformance`).
 
+## E. Diagnostics from extensions (plan 6.6)
+
+Plan 6.6 lets an extension report problems in files (a linter, a spell checker, a policy check) the
+way a language server does: squiggles in the editor, entries in the diagnostics panel and the
+status-bar counts, with the extension as the source. It is planned for "0.4 or the first post-1.0
+WIT"; the diff below fits either, and reuses the 0.4 `context` types of §B.11.
+
+### E.1 What the extension sees (`diagnostics:publish`, T1)
+
+- New capability `diagnostics:publish`, T1 ("Shows problems in your files"). It is independent of
+  `workspace:diagnostics` (reading what language servers report): a linter that only publishes
+  needs no read.
+- `context.publish-diagnostics(path, list<diagnostic>)` replaces this extension's diagnostics of
+  one file; an empty list clears them. `context.clear-diagnostics(none)` clears every file.
+- The `diagnostic` record of §B.11 is reused: `range` 0-based with UTF-8 byte columns, `severity`,
+  `message` (cut at 2 KiB), `code`. **`source` is ignored**: the host sets it to the extension's
+  display name, so an extension cannot pose as `rust-analyzer`.
+- Worktree files only: a `file-ref` in no worktree is `invalid-argument`, a private file
+  (`is_private_path`) is `not-permitted`.
+- Limits: 500 entries per file and 5,000 per extension (more is `invalid-argument` and changes
+  nothing); 20 publishes per second per extension (more is `unavailable`, retry later). A range
+  past the end of the file is clamped to it.
+- An extension's diagnostics last while it runs: stopping, crashing, uninstalling, disabling or
+  revoking the capability clears them all. A hot reload (1.3) clears them too; the new instance
+  publishes again.
+
+### E.2 Host side (W2c, W3)
+
+The project already shows diagnostics from any source through `LspStore::merge_diagnostic_entries`
+(public). Each running extension instance gets its own `LanguageServerId` from
+`project.languages().next_language_server_id()` per project; it is never registered as a server,
+so nothing sends LSP requests to it.
+
+- `publish-diagnostics` resolves the `file-ref` to an absolute path, converts each range to
+  `Unclipped<PointUtf16>` against the file's text (the open buffer's snapshot, or the file loaded
+  through the project's `Fs` when it is not open; columns are UTF-8 bytes in the WIT), and calls
+  `merge_diagnostic_entries` with one `DocumentDiagnosticsUpdate { server_id, diagnostics:
+  DocumentDiagnostics { document_abs_path, version: None, diagnostics }, result_id: None,
+  registration_id: None, disk_based_sources: &[] }` and a merge that keeps nothing old of that
+  server (`|_, _, _| false`).
+- Each entry is a `DiagnosticEntry` with `Diagnostic { source: Some(<display name>), severity,
+  message, code, source_kind: DiagnosticSourceKind::Other, is_primary: true, group_id: <unique per
+  entry>, .. }`.
+- Clearing is the same call with an empty list for each file the extension published; the host
+  keeps that set per instance.
+- The diagnostics panel, the editor and the status bar need no change: they follow
+  `Event::DiagnosticsUpdated` for any server id. Remote projects: local projects only in the first
+  version (a remote host has its own `LspStore`; the update would have to be forwarded).
+
+| Owner | Work |
+|---|---|
+| W0 | The WIT below; `diagnostics:publish` in the capability lists and the install-dialog text |
+| W2c | The import in `ui_ext_wasm`, the checks of §E.1, the limits |
+| W3 | The per-instance collection in `ui_ext_host`: server ids, conversion, publish, clear on stop, crash, reload, uninstall and revoke |
+| W5 (W4's part) | `fyx_sdk` wrapper and harness double; a linter demo (`fyx-lint-demo`: marks `TODO` lines) |
+
+### E.3 WIT diff
+
+In `interface context` (0.4 file, or the next world's copy), after `watch-diagnostics`:
+
+```wit
+    /// Plan 6.6, `diagnostics:publish`: replaces this extension's diagnostics of `path` (an empty
+    /// list clears them). `source` is ignored: the host names the extension. In no worktree is
+    /// `invalid-argument`, a private file `not-permitted`; over 500 entries per file or 5,000 per
+    /// extension is `invalid-argument`; over 20 calls a second is `unavailable`.
+    publish-diagnostics: func(path: file-ref, diagnostics: list<diagnostic>) -> result<_, host-error>;
+    /// `diagnostics:publish`: clears this extension's diagnostics of one file, or of every file
+    /// with `none`.
+    clear-diagnostics: func(path: option<file-ref>) -> result<_, host-error>;
+```
+
+### E.4 Tests
+
+- The linter demo publishes two entries in a worktree file: the editor shows them, the panel
+  lists them with the extension's name as source, and the status bar counts them.
+- `source: some("rust-analyzer")` is shown as the extension's name.
+- Publishing an empty list clears the file; stopping the extension clears every file.
+- A private file and a file outside the worktrees are refused and publish nothing.
+- 501 entries for one file are refused and leave the previous ones.
+- Columns: a line with a multi-byte character before the range lands on the same characters.
+
+## F. Tree views and file decorations (plan 6.7)
+
+Plan 6.7 adds two things a bookmarks, outline or test-explorer extension needs: rows that expand
+and collapse, and badges or colours on project-panel entries. The `list` node already draws
+`list-row.indent`; what is missing is the chevron, its event and the keys. Like §E, the diff fits
+0.4 or the first post-1.0 world.
+
+### F.1 Tree rows (no capability)
+
+- `list-row` gets `expansion: expansion`, an enum `leaf`, `collapsed`, `expanded`. The host draws
+  a chevron before the row's nodes (right for `collapsed`, down for `expanded`, an empty slot of
+  the same width for `leaf`, so leaves line up with their siblings), after the indentation.
+- A click on the chevron, or Right on a `collapsed` row and Left on an `expanded` one while the
+  list has keyboard focus, sends the new event `row-toggled(tuple<node-id, u32, bool>)`: the list,
+  the row index, and whether the row asks to be expanded. It is not a `row-click`, and it grants no
+  activation (§C.3 gestures): expanding is browsing.
+- The host changes nothing itself. The extension answers with the new `row-count` and an
+  `invalidate-rows` patch from the toggled row on (or a smaller range), and sets the row's
+  `expansion` in the rows it returns. Until then the old rows stay. This keeps the extension the
+  owner of the tree's shape, as with every other list state, and keeps virtualization working
+  for trees of any size.
+- Left on a `leaf` or `collapsed` row moves the selection to the nearest earlier row with a
+  smaller `indent` (its parent) and reports `row-selected`, as arrow keys do in modals today. That
+  needs no extension code.
+- Existing 0.4 extensions are unchanged: a row without the field (an older world) is a `leaf`,
+  and no chevron slot is drawn when no row of the list has ever been anything but `leaf`.
+
+### F.2 File decorations (`workspace:file-decorations`, T1)
+
+- New capability `workspace:file-decorations`, T1 ("Marks files in the project panel").
+- `context.decorate-files(list<file-decoration>)` sets or replaces this extension's decoration of
+  each listed file or directory; `context.clear-file-decorations(option<list<file-ref>>)` removes
+  some, or all with `none`.
+- `record file-decoration { path: file-ref, badge: option<string>, color: option<color-token>,
+  tooltip: option<string> }`. `badge` is at most 2 characters (graphemes), drawn after the name
+  like the git status letter; `color` tints the file name (`text-accent`, `warning`, `error`,
+  `success`, `text-muted`; the other tokens are `invalid-argument`); `tooltip` (at most 256 bytes)
+  is added to the entry's tooltip under the extension's name.
+- Worktree entries only; private paths are `not-permitted`. At most 10,000 decorated paths per
+  extension and 500 per call; more is `invalid-argument` and changes nothing.
+- Several extensions on one entry: badges are shown side by side, at most 2, in extension id
+  order; the colour of the first one with a colour wins. Git status and diagnostics colours are
+  drawn as today and win over an extension's colour.
+- A decoration is not inherited by a folder's children, and does not propagate to parents: the
+  extension decorates what it means.
+- Decorations last while the extension runs, like §E: stop, crash, reload, uninstall, disable or
+  revoke clear them.
+
+### F.3 Host side
+
+- **Tree rows (W3, `ui_ext_host`):** the chevron slot, its click handler and the Left/Right keys in
+  the list renderer; `row-toggled` routed like `row-click`.
+- **Decorations:** a new Fyx file in an upstream crate both sides already depend on,
+  `crates/project/src/fyx_file_decorations.rs` (W2c, with a `fyx:` `mod` line): a `Global` entity
+  `FileDecorations` holding, per extension, a map from `ProjectPath` to the decoration, and an
+  event when it changes. `ui_ext_host` (W3) writes it; `project_panel` reads it. No new crate
+  dependency, so no Cargo change.
+- **Project panel hook (W3, one `fyx:` block in `project_panel.rs`):** `EntryDetails` gets the
+  entry's decorations from the global when the panel builds its visible entries, and
+  `render_entry` draws the badges next to `git_indicator` and applies the colour where
+  `filename_text_color` is chosen when no git or diagnostic colour applies. The panel subscribes
+  to the global's event and calls `cx.notify()`.
+
+| Owner | Work |
+|---|---|
+| W0 | The WIT below; `workspace:file-decorations` in the capability lists and the install-dialog text |
+| W2c | `fyx_file_decorations.rs` in `project`; the imports and checks in `ui_ext_wasm` |
+| W3 | Chevrons, `row-toggled` and keys in the list renderer; the project-panel hook; clearing on stop |
+| W5 (W4's part) | `fyx_sdk` wrappers, harness doubles, a `fyx-bookmarks-demo` (a tree of bookmarks grouped by folder, bookmarked files badged `★`) |
+
+### F.4 WIT diff
+
+In `interface types`, before `record list-row`, and one field in it:
+
+```wit
+    /// Plan 6.7. A tree row's chevron. `leaf` draws an empty chevron slot.
+    enum expansion { leaf, collapsed, expanded }
+
+    record list-row {
+        index: u32,
+        indent: u8,
+        nodes: list<node>,
+        /// Plan 6.7. The chevron; Right, Left or a click on it sends `row-toggled`.
+        expansion: expansion,
+    }
+```
+
+In `variant ui-event`, after `row-selected`:
+
+```wit
+        /// Plan 6.7. The list node, the row index, and `true` when the row asks to be expanded.
+        /// The host changes no rows: the extension answers with new rows. Grants no activation.
+        row-toggled(tuple<node-id, u32, bool>),
+```
+
+In `interface context`, after the §E functions:
+
+```wit
+    /// Plan 6.7, `workspace:file-decorations`.
+    record file-decoration {
+        path: file-ref,
+        /// At most 2 characters, after the name.
+        badge: option<string>,
+        /// `text-accent`, `warning`, `error`, `success` or `text-muted`.
+        color: option<color-token>,
+        /// At most 256 bytes, under the extension's name in the entry's tooltip.
+        tooltip: option<string>,
+    }
+
+    /// Sets or replaces this extension's decoration of each path. At most 500 per call and
+    /// 10,000 per extension (`invalid-argument`, nothing changes); a private file is
+    /// `not-permitted`, one in no worktree `invalid-argument`.
+    decorate-files: func(decorations: list<file-decoration>) -> result<_, host-error>;
+    /// Removes this extension's decorations of these paths, or all of them with `none`.
+    clear-file-decorations: func(paths: option<list<file-ref>>) -> result<_, host-error>;
+```
+
+`list-row` is a record, so adding a field changes the type: in 0.4 that is fine while the world is
+staged; after it ships, the next world carries a new `list-row` and the host maps an older
+extension's rows to `leaf`.
+
+### F.5 Tests
+
+- The bookmarks demo shows a two-level tree; a click on a folder's chevron sends `row-toggled`
+  with `true`, the demo returns the children, and the panel shows them indented under it.
+- Right and Left on the focused list expand and collapse; Left on a leaf selects its parent.
+- `row-toggled` does not count as a gesture: `workspace.open` with `focus: true` in its handler is
+  `not-permitted`.
+- Bookmarked files show `★` in the project panel; removing a bookmark clears it; stopping the
+  extension clears every badge.
+- A badge of 3 characters and the colour `surface` are refused; a private file is refused.
+- Two extensions on one file show both badges in id order.
+
 ## WIT diff (for W0)
 
 Copy-forward rule: `types`, `host` and every 0.3 interface are copied byte for byte except where

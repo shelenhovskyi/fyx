@@ -93,10 +93,14 @@ pub(crate) async fn resolve_agent_secrets(
 }
 
 /// Output on its way to the agent, with secret values replaced by their references.
-pub(crate) fn redact_agent_secrets(text: String, cx: &App) -> String {
-    cx.try_global::<GlobalAgentSecrets>()
-        .and_then(|hook| hook.0.redact(&text, cx))
-        .unwrap_or(text)
+pub fn redact_agent_secrets(text: String, cx: &App) -> String {
+    redact_agent_text(&text, cx).unwrap_or(text)
+}
+
+/// `text` with secret values replaced by their references, or `None` when it holds none (or no
+/// host hook is installed).
+pub fn redact_agent_text(text: &str, cx: &App) -> Option<String> {
+    cx.try_global::<GlobalAgentSecrets>()?.0.redact(text, cx)
 }
 
 #[cfg(test)]

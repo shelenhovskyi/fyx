@@ -140,6 +140,8 @@ pub fn title_of(capability: &str) -> String {
         "workspace:read-buffers" => "Reads your open files",
         "workspace:read-files" => "Reads files in your worktrees",
         "workspace:diagnostics" => "Reads diagnostics",
+        "diagnostics:publish" => "Shows problems in your files",
+        "workspace:file-decorations" => "Marks files in the project panel",
         "context:editor" => "Sees the active file and selection",
         "workspace:open" => "Opens files",
         "terminal:profiles" => "Adds terminal profiles",
