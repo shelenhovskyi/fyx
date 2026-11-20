@@ -11,12 +11,17 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `API_VERSION_SECTION` | const | The section `register_extension!` writes: three big-endian `u16`s. |
 | `CALL_BUDGET` | const | Every later call. |
 | `COMPONENT_VARIABLE` | const | `fyx-ext test` sets it to the built component; `Harness::from_env` reads it. |
+| `DECORATION_COLORS` | re-export | `published::DECORATION_COLORS` |
 | `EPOCH_INTERVAL` | const |  |
 | `EditAnswer` | type | What the editor answers an edit the user allowed: `Ok` applies it (all or nothing), or an error such as a conflict. |
 | `EventOutcome` | struct | What one event did, in the 0.1 model. |
 | `EventOutcome::pushed` | field | Pushed during the call, applied first, in order. |
 | `EventOutcome::touched` | field | Node ids the reply touched in the event's surface (see `ui_ext::Tree::apply_update`). |
 | `EventOutcome::update` | field | The call's own reply, applied to the event's surface after the pushes. |
+| `Expansion` | enum | A row's chevron (0.4 `expansion`, plan 6.7). |
+| `Expansion::Collapsed` | variant |  |
+| `Expansion::Expanded` | variant |  |
+| `Expansion::Leaf` | variant | No chevron, an empty slot of its width. |
 | `FakeProgram` | type | What a fake program does when it runs: it sees the request and everything written to its stdin, and returns its output and exit code. |
 | `FakeRun` | struct | The run of a fake program: its whole stdout and stderr, and its exit code. |
 | `FakeRun::code` | field | `None` as for a program ended by a signal. |
@@ -26,6 +31,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `FakeRun::stdout` | field |  |
 | `FakeTerminal` | re-export | `terminals::FakeTerminal` |
 | `FetchResponder` | type | What a test broker answers for one request it lets through. |
+| `FileDecoration` | re-export | `published::FileDecoration` |
 | `Harness` | struct | One loaded extension and the trees of its mounted surfaces and decorations. |
 | `Harness::accessible_name` | method | The name a screen reader announces for a button node, by the renderer's rule: its `accessible-label` (at most 256 bytes), else a non-empty label, else the tooltip, else the icon's name. `None` for a node that is not a button. |
 | `Harness::agent_event` | method | Queues an event of the host's agent review, with the host's ids, for `Harness::deliver_io`. Only a running feed delivers it; otherwise it is dropped. |
@@ -56,6 +62,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::exit_terminal` | method | Ends a created terminal's program; `Harness::deliver_io` delivers `terminal-exited`. |
 | `Harness::fail_review` | method | Proposal `id`'s review ends undecided (its file went away): `review-decided` with `Err`. |
 | `Harness::fake_program` | method | Runs `program` for spawns of `name` instead of a real program. A declared program with no fake ends `spawn-failed(not-found)`. |
+| `Harness::file_decorations` | method | The extension's project-panel decorations (0.4 `decorate-files`, plan 6.7), in the order first set. |
 | `Harness::find` | method | The first node in tree order whose props match. |
 | `Harness::find_button` | method |  |
 | `Harness::find_text` | method |  |
@@ -93,6 +100,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::progresses` | method | The running progresses (M.2), by id, with their last value and message. |
 | `Harness::proposals` | method | The undecided `review` proposals (0.4), by id. Their paths need `Harness::set_worktrees`. |
 | `Harness::props` | method | The props of one node of a mounted surface or decoration. |
+| `Harness::published_diagnostics` | method | What the extension published with 0.4 `publish-diagnostics` (plan 6.6), by file in the order first published; each `FileRef` names its worktree, `source` is `None` (the host names the extension) and texts are cut as the host cuts them. |
 | `Harness::pushed_v0_1` | method | Every update pushed so far, in order, in the 0.1 model; `Harness::effects` holds them in the newest one. |
 | `Harness::registered_tools` | method | The tools the extension registered on listener `name` (0.4), in its order. |
 | `Harness::relay_answer` | method | The extension's `relay.respond` to request `id`, once. |
@@ -128,6 +136,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `Harness::terminals` | method | The extension's open 0.4 terminals, by handle. |
 | `Harness::text` | method | The content of a text node. |
 | `Harness::tick` | method | Runs the surface's pending tick, as the host does when it falls due, and applies its effects, then its reply. It fails without a call when no tick is pending, when the surface is not mounted, or after `MAX_CONSECUTIVE_TICK_ERRORS` failed ticks in a row until the next event on the surface. |
+| `Harness::toggle_row` | method | A click on the chevron of row `index` of `list`, or Right (`expand`) or Left on it: sends 0.4 `row-toggled` and applies the effects and the reply, as `Harness::event`. It grants no activation. The host changes no rows itself; read them again with `Harness::tree_rows`. |
+| `Harness::tree_rows` | method | `Harness::rows` with each row's chevron (0.4, plan 6.7); rows of older worlds are leaves. |
 | `Harness::tree_v0_1` | method | The tree of a mounted surface or decoration in the 0.1 model, as the host's 0.1 view holds it. |
 | `Harness::type_into_terminal` | method | Keys or text the user types into a pseudo-terminal; `Harness::deliver_io` hands them to the extension as `terminal-input`. |
 | `Harness::ui_api_version` | method |  |
@@ -144,9 +154,16 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `INIT_BUDGET` | const | Instantiation and `surfaces()` together. |
 | `INSTANCES_LIMIT` | const |  |
 | `ListenerEvent` | re-export | `listeners::ListenerEvent` |
+| `MAX_BADGE_CHARS` | re-export | `published::MAX_BADGE_CHARS` |
 | `MAX_CONSECUTIVE_TICK_ERRORS` | const | Consecutive `tick` errors after which a surface's ticks stop until an event on it. |
+| `MAX_DECORATED_PATHS` | re-export | `published::MAX_DECORATED_PATHS` |
+| `MAX_DECORATIONS_PER_CALL` | re-export | `published::MAX_DECORATIONS_PER_CALL` |
+| `MAX_DECORATION_TOOLTIP_BYTES` | re-export | `published::MAX_DECORATION_TOOLTIP_BYTES` |
 | `MAX_LIFTED_TEXT_PER_CALL` | const | String bytes all of one call's host-import arguments may carry together (`push-update`, `log`, and in 0.2 every other import); past it the call traps. |
 | `MAX_LOG_MESSAGE_LEN` | const | Longest `log` message kept; the rest is cut off. It still counts in full toward `MAX_LIFTED_TEXT_PER_CALL`. |
+| `MAX_PUBLISHED` | re-export | `published::MAX_PUBLISHED` |
+| `MAX_PUBLISHED_PER_FILE` | re-export | `published::MAX_PUBLISHED_PER_FILE` |
+| `MAX_PUBLISHES_PER_SECOND` | re-export | `published::MAX_PUBLISHES_PER_SECOND` |
 | `MAX_PUSHED_ITEMS_PER_CALL` | const | Patches plus nodes all of one call's 0.1 pushes may carry; past it the call traps. |
 | `MAX_PUSHED_ITEMS_PER_CALL_V0_2` | re-export | `api_state::MAX_PUSHED_ITEMS_PER_CALL_V0_2` |
 | `MAX_PUSHES_PER_CALL` | const |  |
@@ -188,6 +205,9 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `TestBroker::prompts` | method | How many times the prompt was shown. |
 | `TestBroker::state` | field | The state at the import. `Ask` accepts the request and asks when it is delivered. |
 | `ToolDef` | re-export | `listeners::ToolDef` |
+| `TreeRow` | struct | A row from `Harness::tree_rows`. |
+| `TreeRow::expansion` | field |  |
+| `TreeRow::row` | field |  |
 | `api_version_section` | fn | The version in the component's `fyx:ui-api-version` section, if it has one. |
 | `cache_compiled_components` | re-export | `compile_cache::cache_compiled_components` |
 | `plain_text` | re-export | `terminals::plain_text` |
