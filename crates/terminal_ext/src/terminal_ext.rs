@@ -22,8 +22,8 @@ mod terminal_id;
 
 pub use blocks::CommandBlock;
 pub use decorations::{
-    MenuEntry, TerminalDecorations, new_terminal_menu, set_decorations, tab_indicator,
-    terminal_menu,
+    MenuEntry, TerminalDecorations, new_terminal_menu, panel_sidebar, set_decorations,
+    tab_indicator, terminal_menu,
 };
 pub use env_hook::{
     ACCOUNT_CHOICE_ENV, AccountBadge, EnvAdditions, EnvRequest, TerminalEnvHook, apply_env_hook,

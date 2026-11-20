@@ -1,11 +1,11 @@
-//! The hooks `terminal_view` calls to decorate a terminal's tab, its right-click menu and the
-//! terminal panel's "+" menu.
+//! The hooks `terminal_view` calls to decorate a terminal's tab, its right-click menu, the
+//! terminal panel's "+" menu and the sidebar beside the terminal panel's panes.
 //! `terminal_host` provides them; with no provider set (tests, other binaries) both look as they do
 //! upstream.
 
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Global, SharedString, Window};
+use gpui::{AnyElement, AnyView, App, EntityId, Global, SharedString, Window};
 
 use crate::TerminalExt;
 
@@ -21,6 +21,12 @@ pub trait TerminalDecorations: 'static {
     /// Entries added to a terminal's right-click menu ("Share with <extension>…", §C.3).
     fn terminal_menu(&self, _terminal: &TerminalExt, _cx: &App) -> Vec<MenuEntry> {
         Vec::new()
+    }
+
+    /// A view drawn to the right of the terminal panel's panes of the workspace `workspace` (the
+    /// agent sessions list). The view decides its own width; it is empty while hidden.
+    fn panel_sidebar(&self, _workspace: EntityId, _cx: &App) -> Option<AnyView> {
+        None
     }
 }
 
@@ -70,4 +76,9 @@ pub fn terminal_menu(terminal: &TerminalExt, cx: &App) -> Vec<MenuEntry> {
         .map(|decorations| decorations.0.clone())
         .map(|decorations| decorations.terminal_menu(terminal, cx))
         .unwrap_or_default()
+}
+
+pub fn panel_sidebar(workspace: EntityId, cx: &App) -> Option<AnyView> {
+    let decorations = cx.try_global::<GlobalTerminalDecorations>()?.0.clone();
+    decorations.panel_sidebar(workspace, cx)
 }

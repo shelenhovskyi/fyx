@@ -17,10 +17,7 @@ use terminal_ext::osc::StatusState;
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::TerminalPanel;
 use util::paths::PathStyle;
-use workspace::dock::Panel as _;
 use workspace::{MultiWorkspace, Workspace};
-
-use crate::sessions_panel::AgentSessionsPanel;
 
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -165,10 +162,10 @@ async fn blocked_terminal_in_an_inactive_window_pops_up(cx: &mut TestAppContext)
     );
 }
 
-/// Crash 3: a row's click listener runs inside the sessions panel's update; revealing the
-/// terminal in the same dock deactivated that panel synchronously.
+/// Crash 3: a row's click listener runs inside the sessions list's update (the list is drawn by
+/// the terminal panel); revealing the terminal (re)activated panels synchronously.
 #[gpui::test]
-async fn session_row_click_reveals_the_terminal_in_the_same_dock(cx: &mut TestAppContext) {
+async fn session_row_click_reveals_the_terminal_beside_the_list(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root", json!({})).await;
@@ -177,15 +174,9 @@ async fn session_row_click_reveals_the_terminal_in_the_same_dock(cx: &mut TestAp
         .update(cx, |_, window, cx| {
             workspace.update(cx, |workspace, cx| {
                 let terminal_panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
-                let position = terminal_panel.read(cx).position(window, cx);
                 workspace.add_panel(terminal_panel, window, cx);
-                let sessions = crate::sessions::global(cx)
-                    .unwrap_or_else(|| panic!("sessions are not initialised"));
-                let workspace_handle = cx.weak_entity();
-                let panel = cx.new(|cx| AgentSessionsPanel::new(workspace_handle, sessions, cx));
-                panel.update(cx, |panel, cx| panel.set_position(position, window, cx));
-                workspace.add_panel(panel.clone(), window, cx);
-                panel
+                crate::sessions_panel::sidebar(cx.entity_id(), cx)
+                    .unwrap_or_else(|| panic!("no agent sessions list"))
             })
         })
         .unwrap_or_else(|error| panic!("window closed: {error}"));
@@ -194,11 +185,15 @@ async fn session_row_click_reveals_the_terminal_in_the_same_dock(cx: &mut TestAp
     window
         .update(cx, |_, window, cx| {
             workspace.update(cx, |workspace, cx| {
-                workspace.focus_panel::<AgentSessionsPanel>(window, cx);
+                crate::sessions_panel::toggle(workspace, window, cx)
             })
         })
         .unwrap_or_else(|error| panic!("window closed: {error}"));
     cx.run_until_parked();
+    assert!(
+        cx.read(|cx| sessions_panel.read(cx).open),
+        "the toggle showed the list"
+    );
 
     window
         .update(cx, |_, window, cx| {

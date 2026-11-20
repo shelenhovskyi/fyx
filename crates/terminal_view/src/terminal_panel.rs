@@ -1506,13 +1506,15 @@ impl Render for TerminalPanel {
                 )
                 .child(Label::new(label).color(Color::Muted))
         });
+        let fyx_sidebar = terminal_ext::panel_sidebar(self.workspace.entity_id(), cx); // fyx: agent sessions
         self.workspace
             .update(cx, |workspace, cx| {
                 registrar
                     .track_focus(&self.focus_handle)
                     .size_full()
                     .relative()
-                    .child(self.center.render(
+                    .flex() // fyx: panes, then the sidebar
+                    .child(div().flex_1().min_w_0().h_full().child(self.center.render(
                         workspace.zoomed_item(),
                         None,
                         &workspace::PaneRenderContext {
@@ -1525,7 +1527,8 @@ impl Render for TerminalPanel {
                         },
                         window,
                         cx,
-                    ))
+                    )))
+                    .children(fyx_sidebar) // fyx
                     .children(restoring_placeholder)
             })
             .ok()
