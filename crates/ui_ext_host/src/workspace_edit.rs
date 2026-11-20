@@ -136,7 +136,7 @@ pub(crate) fn is_private_path(abs_path: &Path, cx: &App) -> bool {
     private || !resolved
 }
 
-fn registered(
+pub(crate) fn registered(
     worktree: &OpenWorktree,
     cx: &App,
 ) -> Option<(Option<WeakEntity<Workspace>>, Entity<Project>)> {

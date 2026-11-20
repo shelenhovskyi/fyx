@@ -27,6 +27,7 @@ mod consent_ui_tests;
 mod context_host;
 mod decorations;
 mod diagnostics_host;
+pub mod extension_marks;
 pub mod fyx_extensions_page;
 mod icons;
 pub mod images;
