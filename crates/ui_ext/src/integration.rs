@@ -134,7 +134,7 @@ pub type RelayReply = Box<dyn FnOnce(RelayAnswer) + Send>;
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryFileSpec {
     pub listener: String,
-    /// `${account.<tool>}/…` or `${tmp}/…`.
+    /// `${account.<tool>}/…` or `${tmp}/…`; a folder name may hold `${uid}`.
     pub dir: String,
     /// Under `~/`, used when no account profile applies.
     #[serde(default)]
@@ -487,11 +487,15 @@ fn check_discovery_file(
     } else {
         return Err(at("dir must start with ${account.<tool>} or ${tmp}"));
     };
+    // `${uid}` is the one placeholder a folder name takes (Gemini's `${tmp}/gemini-ide-${uid}`).
+    let plain = rest.replace("${uid}", "uid");
     if !(rest.is_empty() || rest.starts_with('/'))
         || has_parent(rest)
-        || rest.contains(['$', '\\', ':', '\0'])
+        || plain.contains(['$', '\\', ':', '\0'])
     {
-        return Err(at("dir must continue with plain /-separated folder names"));
+        return Err(at(
+            "dir must continue with plain /-separated folder names (${uid} allowed)",
+        ));
     }
     if let Some(default_dir) = &spec.default_dir {
         let under_home = default_dir
@@ -615,6 +619,17 @@ mod tests {
             )
             .is_ok()
         );
+        // Gemini gap 2 (W4): the spec's POSIX folder is `${tmp}/gemini-ide-${uid}`.
+        assert!(
+            check(
+                &ide,
+                &[lock(
+                    "${tmp}/gemini-ide-${uid}",
+                    "gemini-ide-server-${pid}-${port}.json"
+                )]
+            )
+            .is_ok()
+        );
         for bad in [
             lock("${account.claude}", "settings.json"),
             lock("${account.claude}/ide", "${port}.toml"),
@@ -625,6 +640,9 @@ mod tests {
             lock("${home}/x", "${port}.lock"),
             lock("${account.claude}/ide", "${token}.lock"),
             lock("${tmp}x", "${port}.lock"),
+            lock("${tmp}/ide-${port}", "${port}.lock"),
+            lock("${tmp}/${uid}x${home}", "${port}.lock"),
+            lock("${tmp}/${uid", "${port}.lock"),
         ] {
             assert!(check(&ide, std::slice::from_ref(&bad)).is_err(), "{bad:?}");
         }

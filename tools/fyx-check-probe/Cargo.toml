@@ -1,0 +1,18 @@
+[package]
+name = "fyx_check_probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+# A workspace of its own: the probe is a dev-build check tool, not a Fyx workspace member, so it
+# builds without touching the root Cargo.toml. See README.md.
+[workspace]
+
+[lib]
+path = "src/fyx_check_probe.rs"
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+ui_ext_sdk = { path = "../../crates/ui_ext_sdk", features = ["fyx-ui-0-4"] }

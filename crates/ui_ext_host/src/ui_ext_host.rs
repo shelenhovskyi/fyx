@@ -46,6 +46,10 @@ pub mod registry_service;
 #[cfg(test)]
 mod registry_service_tests;
 pub mod review_bridge;
+pub mod settings_form;
+#[cfg(test)]
+mod settings_form_tests;
+pub mod settings_model;
 mod store_actions;
 mod surface;
 pub mod t3_cards;
@@ -90,6 +94,8 @@ pub use registry::{
     DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver,
     T3ShareTarget, UiExtensionRegistry,
 };
+pub use settings_form::open_extension_settings;
+pub use settings_model::{ExtensionSettingsStore, set_extension_settings_store};
 pub use store_actions::{
     InstallUiExtensionFromFile, OpenExtensionPanel, RestartUiExtension,
     RevokeUiExtensionPermission, RollBackUiExtension, TogglePinUiExtension, UninstallUiExtension,
@@ -186,6 +192,27 @@ pub(crate) fn terminal_node_view(
 ) -> Option<gpui::AnyView> {
     let views = cx.try_global::<GlobalTerminalNodeViews>()?.0.clone();
     views(extension_id, handle, window, cx)
+}
+
+/// The §B.11 focus rule: whether one of extension `ext`'s terminals (its pseudo or created
+/// terminals, its profiles' terminals) has keyboard focus now. Called from extension threads.
+/// W1's `terminal_host::terminal_focus` gives it.
+pub type TerminalFocus = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+struct GlobalTerminalFocus(TerminalFocus);
+
+impl gpui::Global for GlobalTerminalFocus {}
+
+/// Sets how `workspace.open` with `focus` learns whether the extension's terminal has focus
+/// (§B.11). Set from `crates/zed/src/main.rs` before the first registry scan, next to
+/// [`set_terminal_host`]; extensions loaded earlier, or without it, never count as focused.
+pub fn set_terminal_focus(focus: TerminalFocus, cx: &mut App) {
+    cx.set_global(GlobalTerminalFocus(focus));
+}
+
+pub(crate) fn terminal_focus(cx: &App) -> Option<TerminalFocus> {
+    cx.try_global::<GlobalTerminalFocus>()
+        .map(|focus| focus.0.clone())
 }
 
 /// The terminal host the runtime gets for 0.4's `terminals` imports (W1's `terminal_host`).

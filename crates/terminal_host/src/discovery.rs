@@ -250,10 +250,40 @@ struct Registry {
     files: Vec<Recorded>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct Recorded {
     path: PathBuf,
     pid: u32,
+    /// The file as Fyx left it (size, modification time), so a stale entry removes only a
+    /// file Fyx wrote and nobody changed since. Entries without it are forgotten, not removed.
+    #[serde(default)]
+    written: Option<Stamp>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct Stamp {
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Self> {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        if !metadata.file_type().is_file() {
+            return None;
+        }
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified_secs: modified.as_secs(),
+            modified_nanos: modified.subsec_nanos(),
+        })
+    }
 }
 
 struct Writer {
@@ -367,6 +397,7 @@ impl Writer {
             |tool| self.context.accounts.get(tool).cloned().unwrap_or_default(),
             self.home.as_deref(),
             &self.tmp,
+            uid(),
         )?;
         let mut contents = serde_json::to_vec_pretty(&content).map_err(|e| e.to_string())?;
         contents.push(b'\n');
@@ -406,6 +437,7 @@ impl Writer {
             .extend(self.written.values().flatten().map(|path| Recorded {
                 path: path.clone(),
                 pid: self.pid,
+                written: Stamp::of(path),
             }));
         registry.files.sort();
         registry.files.dedup();
@@ -429,6 +461,13 @@ impl Writer {
             if file.pid != self.pid && running.contains(&file.pid) {
                 return true;
             }
+            if !self.may_remove(file) {
+                log::info!(
+                    "fyx: not removing {}: not a discovery file Fyx left unchanged",
+                    file.path.display()
+                );
+                return false;
+            }
             if let Err(error) = safe_fs::remove_file(&file.path) {
                 log::warn!(
                     "fyx: removing stale discovery file {}: {error}",
@@ -440,6 +479,33 @@ impl Writer {
         if let Err(error) = save(path, &registry) {
             log::warn!("fyx: saving {}: {error}", path.display());
         }
+    }
+}
+
+impl Writer {
+    /// Whether a stale registry entry names a file Fyx wrote (5.19 review P8): a `.lock` or
+    /// `.json` file under the home or temp folder, with no `..`, unchanged since it was recorded.
+    /// The registry is only a file in the data dir, so nothing else in it is trusted.
+    fn may_remove(&self, file: &Recorded) -> bool {
+        let Some(stamp) = file.written else {
+            return false;
+        };
+        let path = &file.path;
+        let plain = path.is_absolute()
+            && path
+                .components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir));
+        let name_ok = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                !name.starts_with('.') && (name.ends_with(".lock") || name.ends_with(".json"))
+            });
+        let under_base = [self.home.as_deref(), Some(self.tmp.as_path())]
+            .into_iter()
+            .flatten()
+            .any(|base| path.starts_with(base));
+        plain && name_ok && under_base && Stamp::of(path) == Some(stamp)
     }
 }
 
@@ -768,22 +834,22 @@ mod tests {
         std::fs::create_dir(&moved).unwrap();
         // A pid that cannot be running (above any real pid on these systems), and this test's.
         let dead = u32::MAX - 1;
+        let recorded = |path: &PathBuf, pid| Recorded {
+            path: path.clone(),
+            pid,
+            written: Stamp::of(path),
+        };
         save(
             &registry,
             &Registry {
                 files: vec![
-                    Recorded {
-                        path: gone.clone(),
-                        pid: dead,
-                    },
+                    recorded(&gone, dead),
                     Recorded {
                         path: moved.clone(),
                         pid: dead,
+                        written: None,
                     },
-                    Recorded {
-                        path: alive.clone(),
-                        pid: std::process::id(),
-                    },
+                    recorded(&alive, std::process::id()),
                 ],
             },
         )
@@ -799,5 +865,56 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
         assert_eq!(recorded.files.len(), 1);
         assert_eq!(recorded.files[0].path, alive);
+    }
+
+    /// 5.19 review P8: a registry entry is no licence to delete. Only an unchanged `.lock` or
+    /// `.json` file Fyx recorded under the home or temp folder goes.
+    #[test]
+    fn stale_entries_remove_only_files_fyx_left_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let (home, tmp) = (root.path().join("home"), root.path().join("tmp"));
+        let outside = root.path().join("outside");
+        for dir in [&home, &tmp, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let registry = root.path().join("discovery.json");
+        let ours = tmp.join("ide-1.json");
+        let changed = home.join("2.lock");
+        let settings = home.join("settings.toml");
+        let foreign = outside.join("3.lock");
+        let unstamped = home.join("4.lock");
+        let dotted = home.join("..").join("home").join("5.lock");
+        for path in [&ours, &changed, &settings, &foreign, &unstamped, &dotted] {
+            std::fs::write(path, b"{}").unwrap();
+        }
+        let dead = u32::MAX - 1;
+        let stamped = |path: &PathBuf| Recorded {
+            path: path.clone(),
+            pid: dead,
+            written: Stamp::of(path),
+        };
+        let mut files = vec![
+            stamped(&ours),
+            stamped(&changed),
+            stamped(&settings),
+            stamped(&foreign),
+            stamped(&dotted),
+        ];
+        files.push(Recorded {
+            path: unstamped.clone(),
+            pid: dead,
+            written: None,
+        });
+        save(&registry, &Registry { files }).unwrap();
+        std::fs::write(&changed, b"{\"someone\": \"else\"}").unwrap();
+        let writer = writer(&home, &tmp, &registry);
+        writer.remove_stale();
+        assert!(!ours.exists(), "Fyx's unchanged file goes");
+        for kept in [&changed, &settings, &foreign, &unstamped, &dotted] {
+            assert!(kept.exists(), "{} stays", kept.display());
+        }
+        let recorded: Registry =
+            serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
+        assert!(recorded.files.is_empty(), "every stale entry is forgotten");
     }
 }

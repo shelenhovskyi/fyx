@@ -1,17 +1,20 @@
 //! The IDE server on the SDK's 0.4 `listeners`, `context` and `review` (plan 5.14): Claude's
 //! absolute paths map to worktree files through `context.to-file-ref` and
 //! `context.absolute-path`, `openFile` is `context.open`, the editor feed becomes
-//! `selection_changed`, and `openDiff` is a proposal in agent review.
+//! `selection_changed`, and `openDiff` is a proposal in agent review. The hooks' effects
+//! ([`run_hook_effects`]) are agent turns and the terminal's status.
 
-use ui_ext_sdk::{LogLevel, context, listeners, log, review};
+use ui_ext_sdk::{LogLevel, context, listeners, log, review, terminals};
+
+use crate::hooks;
 
 use crate::ide::{
     self, Diagnostic, DiffAnswer, FileRef, IdeHost, McpError, Position, ReviewDecision, Roots,
     Severity, TextRange,
 };
 
-/// The tool session agent review names `openDiff`'s proposals by, until the hooks (through the
-/// relay) name Claude's own sessions.
+/// The tool session agent review names an `openDiff`'s proposal by when the hooks name no one
+/// Claude session in a turn (no hooks, or several sessions at once).
 pub(crate) const SESSION: &str = "Claude Code";
 
 /// A review title: "Claude Code: <file name>", at most 256 bytes.
@@ -144,8 +147,74 @@ pub(crate) fn notify_selection(connection: Option<u64>, params: &str) {
     }
 }
 
+/// A Claude path as a worktree file, for the hooks; `None` outside every worktree.
+pub(crate) fn to_ref(absolute: &str) -> Option<FileRef> {
+    ContextRoots.to_ref(absolute)
+}
+
+fn status_state(state: hooks::StatusState) -> terminals::StatusState {
+    match state {
+        hooks::StatusState::Idle => terminals::StatusState::Idle,
+        hooks::StatusState::Working => terminals::StatusState::Working,
+        hooks::StatusState::Blocked => terminals::StatusState::Blocked,
+        hooks::StatusState::Done => terminals::StatusState::Done,
+    }
+}
+
+/// Performs a hook's effects: agent turns, and the status on `terminal` (none without one).
+pub(crate) fn run_hook_effects(
+    terminal: Option<terminals::TerminalHandle>,
+    effects: &[hooks::Effect],
+) {
+    for effect in effects {
+        let outcome = match effect {
+            hooks::Effect::BeginTurn { session } => review::begin_turn(session),
+            hooks::Effect::EndTurn { session, changed } => {
+                let changed: Vec<ui_ext_sdk::FileRef> = changed.iter().map(sdk_file_ref).collect();
+                review::end_turn(session, &changed)
+            }
+            hooks::Effect::Status(status) => {
+                let Some(terminal) = terminal else {
+                    continue;
+                };
+                let status = status.as_ref().map(|status| {
+                    let mut sdk = terminals::TerminalStatus::new(
+                        status_state(status.state),
+                        status.label.clone(),
+                    );
+                    if let Some(detail) = &status.detail {
+                        sdk = sdk.detail(detail.clone());
+                    }
+                    if status.attention {
+                        sdk = sdk.needs_attention();
+                    }
+                    sdk
+                });
+                terminals::set_status(terminal, status.as_ref())
+            }
+        };
+        if let Err(error) = outcome {
+            log(
+                LogLevel::Warn,
+                &format!("a Claude hook's effect was refused: {}", error.message),
+            );
+        }
+    }
+}
+
 /// The host, through the SDK.
-pub(crate) struct SdkHost;
+pub(crate) struct SdkHost {
+    /// The Claude session proposals are named by.
+    session: String,
+}
+
+impl SdkHost {
+    pub(crate) fn new(session: Option<&str>) -> Self {
+        Self {
+            session: session.unwrap_or(SESSION).to_owned(),
+        }
+    }
+}
 
 impl IdeHost for SdkHost {
     fn roots(&self) -> &dyn Roots {
@@ -208,8 +277,12 @@ impl IdeHost for SdkHost {
     }
 
     fn propose(&mut self, file: &FileRef, new_contents: &str) -> Result<Option<u64>, String> {
-        let proposal =
-            review::Proposal::new_content(sdk_file_ref(file), new_contents, title(file), SESSION);
+        let proposal = review::Proposal::new_content(
+            sdk_file_ref(file),
+            new_contents,
+            title(file),
+            &self.session,
+        );
         match review::propose(&proposal) {
             Ok(id) => Ok(Some(id)),
             Err(error) => {
@@ -531,6 +604,161 @@ mod tests {
             take_host_effects(),
             [HostEffect::Review(ReviewEffect::Withdraw(id))]
         );
+        set_worktree_roots(&[]);
+    }
+
+    fn hook(id: u64, channel: &str, stdin: serde_json::Value) -> IoEvent {
+        IoEvent::RelayRequest((
+            id,
+            channel.into(),
+            Some(9),
+            vec!["--channel".into(), format!("fyx-claude-code/{channel}")],
+            stdin.to_string(),
+        ))
+    }
+
+    fn hook_input(event: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut input = serde_json::json!({
+            "hook_event_name": event,
+            "session_id": "s1",
+            "cwd": "/work/app",
+        });
+        if let (Some(input), Some(extra)) = (input.as_object_mut(), extra.as_object()) {
+            input.extend(extra.clone());
+        }
+        input
+    }
+
+    /// The plugin's hooks through the relay: every one is answered at once with exit 0, a
+    /// prompt begins a turn named by Claude's session, the openDiff of that turn carries the
+    /// session, and a rejected diff ends the turn (Claude sends no Stop then).
+    #[test]
+    fn hooks_through_the_relay_are_turns_and_status() {
+        use ui_ext_sdk::relay::RelayEffect;
+        use ui_ext_sdk::review::{Decision, ReviewEffect, ReviewOutcome};
+        use ui_ext_sdk::terminals::{StatusState, TerminalEffect};
+        set_worktree_roots(&[(1, "/work/app")]);
+        let mut extension = ClaudeCode::new();
+        take_host_effects();
+        let answered = |effects: &[HostEffect], id: u64| {
+            effects.contains(&HostEffect::Relay(RelayEffect {
+                id,
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }))
+        };
+        let status = |effects: &[HostEffect]| {
+            effects.iter().find_map(|effect| match effect {
+                HostEffect::Terminal(TerminalEffect::SetStatus { handle: 9, status }) => {
+                    Some(status.clone())
+                }
+                _ => None,
+            })
+        };
+
+        extension
+            .handle_io(hook(
+                1,
+                "user-prompt",
+                hook_input("UserPromptSubmit", serde_json::json!({ "prompt": "fix" })),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert!(effects.contains(&HostEffect::Review(ReviewEffect::BeginTurn("s1".into()))));
+        assert_eq!(
+            status(&effects).flatten().map(|status| status.state),
+            Some(StatusState::Working)
+        );
+        assert!(answered(&effects, 1), "{effects:?}");
+
+        extension
+            .handle_io(hook(
+                2,
+                "pre-tool",
+                hook_input("PreToolUse", serde_json::json!({ "tool_name": "Edit" })),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert_eq!(
+            status(&effects).flatten().map(|status| status.label),
+            Some("Edit".into())
+        );
+        assert!(answered(&effects, 2));
+
+        extension
+            .handle_io(call(
+                3,
+                "openDiff",
+                &serde_json::json!({
+                    "old_file_path": "/work/app/a.rs",
+                    "new_file_path": "/work/app/a.rs",
+                    "new_file_contents": "new\n",
+                    "tab_name": "tab-a",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (proposal, session) = take_host_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                HostEffect::Review(ReviewEffect::Propose { id, proposal }) => {
+                    Some((id, proposal.session))
+                }
+                _ => None,
+            })
+            .expect("a proposal");
+        assert_eq!(session, "s1", "named by the turn's session");
+
+        extension
+            .handle_io(IoEvent::ReviewDecided((
+                proposal,
+                Ok(ReviewOutcome {
+                    decision: Decision::Rejected,
+                    final_content: String::new(),
+                }),
+            )))
+            .unwrap();
+        let effects = take_host_effects();
+        assert_eq!(
+            responses(effects.clone()),
+            [(3, Ok(ide::DiffAnswer::Rejected.result()))]
+        );
+        assert!(
+            effects.contains(&HostEffect::Review(ReviewEffect::EndTurn {
+                session: "s1".into(),
+                changed: Vec::new(),
+            })),
+            "{effects:?}"
+        );
+        assert_eq!(
+            status(&effects).flatten().map(|status| status.state),
+            Some(StatusState::Done)
+        );
+
+        // An unreadable hook is still answered, so Claude goes on.
+        extension
+            .handle_io(hook(
+                4,
+                "stop",
+                serde_json::json!({ "hook_event_name": "Stop" }),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert!(answered(&effects, 4), "{effects:?}");
+        assert_eq!(status(&effects), None);
+
+        // The session ends: its status is cleared.
+        extension
+            .handle_io(hook(
+                5,
+                "session-end",
+                hook_input("SessionEnd", serde_json::json!({})),
+            ))
+            .unwrap();
+        let effects = take_host_effects();
+        assert_eq!(status(&effects), Some(None));
+        assert!(answered(&effects, 5));
         set_worktree_roots(&[]);
     }
 }

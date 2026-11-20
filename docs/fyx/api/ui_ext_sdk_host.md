@@ -27,12 +27,14 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `HostEffect::ProgressStart` | variant |  |
 | `HostEffect::ProgressUpdate` | variant |  |
 | `HostEffect::Push` | variant |  |
+| `HostEffect::Relay` | variant | `crate::relay::respond` (`fyx:ui` 0.4). |
 | `HostEffect::RemoveDecoration` | variant |  |
 | `HostEffect::RemoveImage` | variant |  |
 | `HostEffect::RemoveSurface` | variant |  |
 | `HostEffect::RequestPermission` | variant | `request_permission`. |
 | `HostEffect::RequestTick` | variant |  |
 | `HostEffect::Review` | variant | A `crate::review` function (`fyx:ui` 0.4). |
+| `HostEffect::Settings` | variant | `crate::settings::open` (`fyx:ui` 0.4, designed). |
 | `HostEffect::ShowSurface` | variant |  |
 | `HostEffect::Spawn` | variant | `spawn`; ids are the shared 1, 2, …. |
 | `HostEffect::StartObserving` | variant |  |

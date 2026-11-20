@@ -143,8 +143,8 @@ fn the_profiles_demo_starts_profile_terminals() {
 }
 
 /// The skeleton of plan 5.15: the manifest loads, the plugin ships in the package, and the
-/// profile runs `claude --ide` with the account the user picks. Its relay and review wiring is
-/// tested natively (`extensions/fyx_claude_code`) until the harness has them (5.14).
+/// profile runs `claude --ide` with the account the user picks. The relay and review wiring is
+/// replayed below (`claude_code_replays_the_compat_transcripts_on_its_listener`).
 #[test]
 fn claude_code_loads_with_its_profile_and_plugin() {
     let package = demo_package("fyx_claude_code");
@@ -281,8 +281,9 @@ fn claude_code_answers_on_its_ide_listener() {
 /// harness against the built component, as far as listeners reach: every recorded message from
 /// Claude goes to the fake `ide` listener; the host's `initialize` and `tools/list` answers and
 /// the extension's answers to the calls that need no path must equal the recorded ones, and
-/// every call is answered. Hooks, review decisions, editor events and the calls with paths wait
-/// for the SDK's relay, review and context (the rest of 5.14).
+/// every call is answered. Each hook goes through the fake relay from the profile terminal and
+/// is answered with exit 0; a hook or review decision with `expect` must make those turns and
+/// leave the last expected status on the terminal's tab.
 #[test]
 fn claude_code_replays_the_compat_transcripts_on_its_listener() {
     use serde_json::Value;
@@ -320,12 +321,14 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
     let package = demo_package("fyx_claude_code");
     let mut compared = 0;
     let mut notified = 0;
+    let mut hooks = 0;
     for (name, text) in TRANSCRIPTS {
         let header: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         let root = header["root"].as_str().expect("a root");
         let mut harness = Harness::load_package(&package).expect("loads");
         harness.set_worktrees(&[(1, root)]);
         let connection = harness.connect("ide").unwrap();
+        let terminal = harness.open_profile("claude", None).unwrap();
         let mut tools = HashMap::new();
         let mut answers: HashMap<String, Value> = HashMap::new();
         let mut notes: VecDeque<Value> = VecDeque::new();
@@ -417,8 +420,32 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                 receive(&mut harness, &mut answers, &mut notes);
                 continue;
             }
+            if event["t"] == "hook" {
+                let turns = harness.review_turns().len();
+                let id = harness
+                    .relay_request(
+                        event["channel"].as_str().unwrap(),
+                        Some(terminal),
+                        &[],
+                        &event["stdin"].to_string(),
+                    )
+                    .unwrap_or_else(|e| panic!("{at}: {e}"));
+                harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
+                receive(&mut harness, &mut answers, &mut notes);
+                assert_eq!(
+                    harness.relay_answer(id),
+                    Some(ui_ext::integration::RelayAnswer::default()),
+                    "{at}: every hook lets Claude go on"
+                );
+                if let Some(expect) = event["expect"].as_array() {
+                    check_hook_effects(&harness, terminal, turns, expect, &at);
+                    hooks += 1;
+                }
+                continue;
+            }
             if event["t"] == "review" {
                 use ui_ext::review::Decision;
+                let turns = harness.review_turns().len();
                 let call = event["call"].to_string();
                 let proposal = proposal_of[&call];
                 let final_content = event["final_content"].as_str().unwrap_or_default();
@@ -436,6 +463,10 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
                 assert!(decided, "{at}: proposal {proposal} is not open");
                 harness.deliver_io().unwrap_or_else(|e| panic!("{at}: {e}"));
                 receive(&mut harness, &mut answers, &mut notes);
+                if let Some(expect) = event["expect"].as_array() {
+                    check_hook_effects(&harness, terminal, turns, expect, &at);
+                    hooks += 1;
+                }
                 continue;
             }
             if event["t"] != "mcp" {
@@ -510,10 +541,56 @@ fn claude_code_replays_the_compat_transcripts_on_its_listener() {
         }
         assert!(harness.open_mcp_calls().is_empty(), "{name}");
         assert!(harness.proposals().is_empty(), "{name}");
+        assert!(harness.waiting_relay_requests().is_empty(), "{name}");
         assert!(notes.is_empty(), "{name}: {notes:?} not in the transcript");
     }
     assert!(compared > 0, "no answer was compared");
     assert!(notified > 0, "no selection_changed was compared");
+    assert!(hooks > 0, "no hook's effects were compared");
+}
+
+/// The turns since the `turns`-th and the terminal's status, against a transcript's `expect` in
+/// `compat::describe`'s form: every `begin-turn` and `end-turn` in order, and the last `status`.
+fn check_hook_effects(
+    harness: &Harness,
+    terminal: u64,
+    turns: usize,
+    expect: &[serde_json::Value],
+    at: &str,
+) {
+    use serde_json::{Value, json};
+    let made: Vec<Value> = harness.review_turns()[turns..]
+        .iter()
+        .map(|turn| match turn {
+            ReviewTurn::Begin(session) => json!({ "begin-turn": session }),
+            ReviewTurn::End(session, changed) => json!({
+                "end-turn": {
+                    "session": session,
+                    "changed": changed.iter().map(|file| file.path.clone()).collect::<Vec<_>>(),
+                }
+            }),
+        })
+        .collect();
+    let expected: Vec<Value> = expect
+        .iter()
+        .filter(|effect| effect.get("status").is_none())
+        .cloned()
+        .collect();
+    assert_eq!(made, expected, "{at}: turns");
+    if let Some(status) = expect.iter().rev().find_map(|effect| effect.get("status")) {
+        let shown = harness
+            .terminal(terminal)
+            .expect("the profile terminal")
+            .status
+            .as_ref()
+            .map_or(Value::Null, |shown| {
+                json!({
+                    "state": format!("{:?}", shown.state).to_lowercase(),
+                    "label": shown.label,
+                })
+            });
+        assert_eq!(&shown, status, "{at}: status");
+    }
 }
 
 /// Plan 5.16: the manifest loads, and the profile runs `gemini` with the account the user
@@ -532,17 +609,69 @@ fn gemini_cli_loads_with_its_profile() {
     );
     let (program, args) = harness.profile_command_line("gemini").unwrap();
     assert_eq!((program.as_str(), args.len()), ("gemini", 0));
+    // The profile's terminal finds the IDE server and loads the hooks shipped in the package.
+    let env: HashMap<String, String> = harness.profile_env("gemini").unwrap().into_iter().collect();
+    assert_eq!(env.len(), 2, "{env:?}");
     assert_eq!(
-        harness.profile_env("gemini").unwrap(),
-        [(
-            "GEMINI_CLI_IDE_SERVER_PORT".to_owned(),
-            harness.listener_port("ide").unwrap().to_string()
-        )]
+        env["GEMINI_CLI_IDE_SERVER_PORT"],
+        harness.listener_port("ide").unwrap().to_string()
     );
+    let defaults = PathBuf::from(&env["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"]);
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&defaults).expect("the package's defaults"))
+            .unwrap();
+    // Every channel has its hook in the file (src/hooks.rs checks the commands).
+    let hooks = settings["hooks"].as_object().expect("hooks");
+    let channels: Vec<String> = harness
+        .relay_channels()
+        .iter()
+        .map(|channel| channel.name.clone())
+        .collect();
+    assert_eq!(
+        channels,
+        [
+            "session-start",
+            "before-agent",
+            "before-tool",
+            "after-tool",
+            "notification",
+            "after-agent",
+            "session-end",
+        ]
+    );
+    for channel in &channels {
+        assert!(
+            hooks.values().any(|hook| hook
+                .to_string()
+                .contains(&format!("--channel fyx-gemini-cli/{channel}"))),
+            "{channel} has no hook"
+        );
+    }
+
     let handle = harness.open_profile("gemini", Some("Personal")).unwrap();
     assert_eq!(
         harness.terminal(handle).unwrap().account.as_deref(),
         Some("Personal")
+    );
+    // A hook from the profile terminal: a turn begins, the tab shows it, and Gemini goes on.
+    let id = harness
+        .relay_request(
+            "fyx-gemini-cli/before-agent",
+            Some(handle),
+            &[],
+            r#"{"hook_event_name":"BeforeAgent","session_id":"g1","cwd":"/work","prompt":"fix"}"#,
+        )
+        .unwrap();
+    harness.deliver_io().unwrap();
+    assert_eq!(
+        harness.relay_answer(id),
+        Some(ui_ext::integration::RelayAnswer::default())
+    );
+    assert_eq!(harness.review_turns(), [ReviewTurn::Begin("g1".to_owned())]);
+    let status = harness.terminal(handle).unwrap().status.clone();
+    assert_eq!(
+        status.map(|status| status.label),
+        Some("Thinking".to_owned())
     );
     harness.close_profile(handle).unwrap();
 
@@ -930,4 +1059,69 @@ fn status_line_or_error(harness: &Harness) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Plan 6.1 (design.md §D): a 0.4 package's `[[fyx_ui.settings]]` load with it, a user's
+/// invalid value gives the extension the default, and a valid one is a change of that key only.
+#[test]
+fn a_package_declares_settings_and_the_user_sets_them() {
+    let package = demo_package("fyx_demo_pseudo_terminal");
+    let manifest = package.join("extension.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(
+        r#"
+[[fyx_ui.settings]]
+key = "scrollback"
+title = "Scrollback lines"
+type = "integer"
+default = 1000
+min = 100
+max = 10000
+
+[[fyx_ui.settings]]
+key = "shell"
+title = "Shell"
+type = "choice"
+default = "bash"
+choices = [{ value = "bash", title = "Bash" }, { value = "pwsh", title = "PowerShell" }]
+"#,
+    );
+    std::fs::write(&manifest, &text).unwrap();
+    let mut harness = Harness::load_package(&package).expect("loads");
+    let keys: Vec<&str> = harness
+        .setting_specs()
+        .iter()
+        .map(|spec| spec.key.as_str())
+        .collect();
+    assert_eq!(keys, ["scrollback", "shell"]);
+    assert_eq!(
+        harness.setting("scrollback").unwrap().value,
+        settings::SettingValue::Integer(1000)
+    );
+
+    let changed = harness
+        .set_user_settings(serde_json::json!({ "scrollback": 50, "shell": "pwsh" }))
+        .unwrap();
+    assert_eq!(changed, ["shell"]);
+    assert!(harness.setting("scrollback").unwrap().is_default);
+    assert!(
+        harness
+            .setting_error("scrollback")
+            .unwrap()
+            .contains("outside")
+    );
+    assert_eq!(
+        harness.setting("shell").unwrap().value,
+        settings::SettingValue::Choice("pwsh".into())
+    );
+    assert_eq!(harness.take_settings_changed(), [vec!["shell".to_owned()]]);
+    assert!(harness.setting("missing").is_none());
+
+    // A broken declaration refuses the package.
+    std::fs::write(&manifest, text.replace("default = 1000", "default = 5")).unwrap();
+    let error = format!(
+        "{:#}",
+        Harness::load_package(&package).err().expect("refused")
+    );
+    assert!(error.contains("outside 100..=10000"), "{error}");
 }

@@ -58,6 +58,7 @@ content does not change.
 | B.12 | Approval cards for a tool's own permission prompts | 5.13 | `ui:approvals` T0 |
 | C.1–C.5 | Consent: T2 accepted at install with checkboxes, T3 at the moment of action, journal, update diff | 5.5–5.7 | `terminal:read` T3, `terminal:write` T3 |
 | C.6 | Multiple accounts: forbidden auth and config-dir names, account profiles, Fyx profiles (variant A) | 5.5, 5.20 | none |
+| D | Extension settings: typed `[[fyx_ui.settings]]`, a host-drawn form, values read and watched | 6.1 | none |
 
 The research's names map to these: `net:listen` is `network:listen` (next to `network:fetch`),
 "relay" is `relay:hooks`, "context" is `context:editor`, "package files" is `package:files`.
@@ -767,6 +768,209 @@ and extension host are global to the process.
 | Upstream edits are minimal hooks | `.claude/CLAUDE.md` | Unchanged: about 25 lines in three Zed files plus the ACP hook (§A). It changes only if the `TeePty` prototype fails and the alacritty fork needs a patch, which then goes to the owner. |
 | Protected paths for extensions | 0.3 design §10, `protected.rs` | Unchanged for extensions. The host writes discovery files by the declared template (§B.8), and `fyx_guard` allows that explicitly. Account dirs join the protected paths. |
 
+## D. Extension settings (plan 6.1)
+
+Status (2026-11-20): **design, for implementation**, written by W4 at the coordinator's request.
+It has to land in this world before it freezes. The SDK side (`ui_ext_sdk::settings`) and the
+harness fake (`fyx_ext_harness::settings`) are built; the host side (W2c model and broker, W3
+UI) and the WIT (W0) are below.
+
+**The problem.** An extension has no way to let the user choose anything. `fyx_claude_code`
+hard-codes that `openDiff` blocks; `fyx_gemini_cli` cannot turn its hooks off; a linter demo
+cannot take a severity. Each would build its own panel form and store nothing, since
+extensions have no storage.
+
+**The answer.** The manifest declares typed settings. The host stores the values in the user's
+settings file, draws the form, checks every value against the declaration, and gives the
+extension only checked values. The extension reads them and is told when they change. It
+never draws the form and never writes a value in 0.4.
+
+### D.1 Manifest: `[[fyx_ui.settings]]`
+
+```toml
+[[fyx_ui.settings]]
+key = "block-on-diff"
+title = "Wait for review"
+description = "Claude waits until you decide on a diff in agent review."
+type = "boolean"
+default = true
+
+[[fyx_ui.settings]]
+key = "max-open-diffs"
+title = "Open diffs at most"
+type = "integer"
+default = 8
+min = 1
+max = 64
+
+[[fyx_ui.settings]]
+key = "severity"
+title = "Report as"
+type = "choice"
+default = "warning"
+choices = [
+    { value = "error", title = "Error" },
+    { value = "warning", title = "Warning" },
+]
+
+[[fyx_ui.settings]]
+key = "extra-args"
+title = "Extra arguments"
+type = "text-list"
+default = []
+max_items = 16
+max_length = 256
+```
+
+| Field | Rule |
+|---|---|
+| `key` | 1 to 64 bytes of `a-z`, `0-9` and `-`, starting with a letter; unique in the manifest. It is also the key in the settings file. |
+| `title` | 1 to 80 bytes, one line. Drawn as the control's label. |
+| `description` | Optional, at most 500 bytes, plain text (no Markdown, no links). |
+| `type` | `boolean`, `integer`, `number`, `text`, `choice` or `text-list`. |
+| `default` | Required, and valid for its own declaration (the same rules as a user's value). |
+| `min`, `max` | `integer` (whole numbers, i64) and `number` (finite f64) only; optional; `min <= max`. |
+| `max_length` | `text` and `text-list` items: at most this many bytes, 1 to 4096; default 256. One line: no control characters. |
+| `max_items` | `text-list` only: 1 to 64, default 16. |
+| `choices` | `choice` only: 2 to 32 entries `{ value, title }`, `value` as a key (unique), `title` 1 to 80 bytes. |
+
+- At most **32 settings** per extension.
+- **No capability.** Reading its own settings gives an extension nothing it did not declare.
+  The install dialog lists nothing for them (they are not consent), and the extension page
+  shows the form.
+- **No secrets.** There is no secret or password type, and a `key` that contains `token`,
+  `secret`, `password`, `api-key` or `apikey` is refused: values sit in the user's plain
+  `settings.json`, which users share. Credentials stay with the tool (`account_tool`, §C.6).
+- **No paths and no commands as types.** A `text` value is a string; what the extension does
+  with it is its own business, under its capabilities. Nothing a setting says widens a
+  capability: a `text` setting cannot add a program to `[[fyx_ui.terminal_programs]]`.
+- The table is refused for a world below 0.4, like the other 0.4 tables (`world_capabilities`).
+
+### D.2 Storage and the effective value
+
+The values live in the **user** settings file, under the extension's id:
+
+```json
+"fyx_extensions": {
+  "fyx-claude-code": { "block-on-diff": false, "max-open-diffs": 4 }
+}
+```
+
+- The effective value of a key is the user's value when it is valid, else the default.
+- An invalid value (wrong type, out of range, unknown choice, too long, too many items) is
+  **not** passed on: the extension gets the default, and the form shows the user's value with
+  the error next to it. An unknown key under the extension's id is ignored and shown greyed out
+  ("not used by this version") so an update that drops a setting loses nothing.
+- **User level only in 0.4.** Project settings (`.zed/settings.json` in a worktree) cannot set
+  `fyx_extensions`, the same rule as M6.1 for review: a repository must not change how an
+  extension behaves without the user. Per-project values are in [Not in 0.4](#not-in-04).
+- Values are never shared between extensions. Uninstalling keeps them (like Zed keeps an
+  extension's settings) until the user deletes them; the extension page offers "Reset".
+
+### D.3 The form (host-drawn)
+
+W3 draws the form from the declarations, on the extension's page in **Fyx Extensions** under
+a **Settings** tab, and links it from the extension's panel menu.
+
+| Type | Control |
+|---|---|
+| `boolean` | switch |
+| `integer`, `number` | number field with `min`/`max` |
+| `text` | one-line text field |
+| `choice` | dropdown of the titles |
+| `text-list` | list of one-line fields with add and remove |
+
+Each control shows the title, the description, a "Reset to default" button when the value is
+not the default, and the error of an invalid value. A change writes the user settings file
+through Zed's settings store (the same write the settings UI makes), so editing
+`settings.json` by hand works too and goes through the same check.
+
+### D.4 Reading and watching
+
+```wit
+/// 0.4. The extension's own settings (design.md §D): declared in `[[fyx_ui.settings]]`, set by
+/// the user, checked by the host. No capability.
+interface settings {
+    use host.{host-error};
+
+    variant setting-value {
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+        /// The choice's `value`, never its title.
+        choice(string),
+        text-list(list<string>),
+    }
+
+    record setting {
+        key: string,
+        value: setting-value,
+        /// False when the user set a valid value (which may equal the default).
+        is-default: bool,
+    }
+
+    /// The effective value of one declared key; `invalid-argument` for a key the manifest does
+    /// not declare.
+    get: func(key: string) -> result<setting-value, host-error>;
+    /// Every declared key, in manifest order.
+    all: func() -> list<setting>;
+    /// Shows the extension's Settings tab; `key` scrolls to that setting. Only while the user
+    /// acts on one of the extension's surfaces (an event call), else `not-permitted`.
+    open: func(key: option<string>) -> result<_, host-error>;
+}
+```
+
+- `io-event::settings-changed(list<string>)`: the keys whose **effective** value changed, in
+  manifest order, delivered through `handle-io` once per settings-file change. A change that
+  leaves every effective value the same (an invalid value replaced by another invalid one, a
+  key the extension does not declare) sends nothing. No watch call: every 0.4 extension with
+  `[[fyx_ui.settings]]` gets it.
+- The values are fixed for the length of one export call: a change made while the extension
+  runs arrives as the next `handle-io`.
+- `get` and `all` are cheap host reads (no I/O); an extension may call them on every event, but
+  the SDK's pattern is to read at `new()` and on `settings-changed`.
+- Reload, disable and uninstall need nothing: values are read, not held by the host for the
+  extension.
+
+### D.5 SDK and harness (W4, built behind `fyx-ui-0-4`)
+
+- `ui_ext_sdk::settings`: `SettingValue` (with `as_bool`, `as_integer`, `as_number`,
+  `as_text`, `as_choice`, `as_text_list`), `Setting`, `get`, `all` and `open`. Until W0
+  stages the interface, the calls return `unavailable` on WASM; off WASM they answer from
+  `set_settings` (for an extension's unit tests) and `open` records `HostEffect::Settings`.
+  `IoEvent::SettingsChanged` and the WASM glue come with the staged WIT.
+- `fyx_ext_harness::settings`: the reference checks of §D.1 and §D.2 on the manifest's TOML
+  (`SettingSpec::parse_all`), and a fake store: `Harness::settings()`,
+  `Harness::set_user_settings(json)` (returns the changed keys, as the host would send them),
+  `Harness::setting(key)`, `Harness::setting_error(key)`, `Harness::take_settings_changed()`.
+  `load_package` reads `[[fyx_ui.settings]]`. Once the WIT is staged,
+  the fake links `settings` and queues `settings-changed` for `deliver_io`.
+- `fyx-ext check` runs the same checks on `[[fyx_ui.settings]]`.
+
+The checks are written once, in the harness, as the reference. W2c ports them into
+`ui_ext::settings` for the host (or makes the harness use them, once they are there);
+`harness_conformance` then pins the two together, as for the other tables.
+
+### D.6 Host side (W2c, W3)
+
+| Owner | Work |
+|---|---|
+| W2c | `ui_ext::settings`: `SettingSpec`, `SettingValue`, the checks of §D.1 (manifest) and §D.2 (values); `FyxUiTable.settings`; the `settings` import in `ui_ext_wasm`; reading `fyx_extensions.<id>` from the user settings store (never project settings), computing effective values, and sending `settings-changed` on a store change |
+| W3 | The Settings tab and its controls (§D.3), "Reset" for one key and for all, the greyed-out unknown keys, `settings.open` |
+| W0 | The WIT below, and `settings` in the V0_4 world lists (`ui_ext_wasm`, `fyx_ext`, harness) |
+
+### D.7 Tests
+
+- A manifest with a duplicate key, a `default` outside `min`/`max`, a `choice` default not in
+  `choices`, a key with `token` in it, or 33 settings is refused; so is the table on a 0.3
+  world.
+- A user value of the wrong type or out of range gives the default to the extension and an
+  error in the form; fixing it sends `settings-changed` with that key only.
+- Project settings that set `fyx_extensions` change nothing.
+- `open` outside an event call is `not-permitted`.
+- The harness and the host agree on every check (`harness_conformance`).
+
 ## WIT diff (for W0)
 
 Copy-forward rule: `types`, `host` and every 0.3 interface are copied byte for byte except where
@@ -913,9 +1117,38 @@ interface approvals {
 // answered per request, not by query().
 ```
 
+Extension settings (§D), for the same staged world:
+
+```wit
+/// 0.4. The extension's own settings (design.md §D). No capability.
+interface settings {
+    use host.{host-error};
+
+    variant setting-value {
+        boolean(bool),
+        integer(s64),
+        number(f64),
+        text(string),
+        choice(string),
+        text-list(list<string>),
+    }
+    record setting { key: string, value: setting-value, is-default: bool }
+
+    get: func(key: string) -> result<setting-value, host-error>;
+    all: func() -> list<setting>;
+    open: func(key: option<string>) -> result<_, host-error>;
+}
+
+// io: `use settings.{}` is not needed (keys are strings); io-event gains, after
+// approval-answered:
+//   /// 0.4. The keys whose effective value changed, in manifest order.
+//   settings-changed(list<string>)
+// world ui-extension: `import settings;` after `import approvals;`.
+```
+
 The manifest gains `[[fyx_ui.terminal_profiles]]`, `[[fyx_ui.terminal_programs]]`,
-`[fyx_ui.terminal_env]`, `[[fyx_ui.listeners]]`, `[[fyx_ui.discovery_files]]` and
-`[[fyx_ui.relay_channels]]`. Each T2 item takes a `reason`. All of them are refused for a world
+`[fyx_ui.terminal_env]`, `[[fyx_ui.listeners]]`, `[[fyx_ui.discovery_files]]`,
+`[[fyx_ui.relay_channels]]` and `[[fyx_ui.settings]]` (§D.1). Each T2 item takes a `reason`. All of them are refused for a world
 below 0.4 (`world_capabilities`, integration-5 A4), and `fyx-ext` and the harness mirror the
 lists.
 
@@ -1039,3 +1272,6 @@ limitation: Gemini's Docker sandbox is refused by the `Host` check (§B.7).
 | SSH and remote terminals for listeners and relay | Phase 6 (5.17): loopback from a remote machine needs a tunnel |
 | Named pipes and Unix sockets for listeners | Loopback TCP on every OS ([Decisions](#decisions-2026-11-19)) |
 | Variant B Fyx profiles (in one process) | §C.6 |
+| Per-project extension settings | §D.2: a repository must not change an extension's behaviour; later, as a user-level "for this project" value, like the per-project account |
+| An extension writing its own settings | §D: the user owns the values; an extension that needs state gets storage, a separate design |
+| Secret settings (tokens, passwords) | §D.1: `settings.json` is plain and shared; credentials stay with the tool |

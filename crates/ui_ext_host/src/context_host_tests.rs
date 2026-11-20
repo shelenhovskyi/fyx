@@ -226,3 +226,17 @@ async fn test_snapshot_of_a_workspace(cx: &mut TestAppContext) {
             .is_err()
     );
 }
+
+/// §B.11: `terminal_focused` asks what `set_terminal_focus` gave when the extension loaded;
+/// without it nothing counts as focused.
+#[gpui::test]
+fn test_terminal_focused_follows_set_terminal_focus(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let before = cx.update(|cx| for_extension("ext", cx));
+    assert!(!before.terminal_focused("acme"));
+    cx.update(|cx| crate::set_terminal_focus(Arc::new(|ext: &str| ext == "acme"), cx));
+    let after = cx.update(|cx| for_extension("ext", cx));
+    assert!(after.terminal_focused("acme"));
+    assert!(!after.terminal_focused("other"));
+    assert!(!before.terminal_focused("acme"));
+}

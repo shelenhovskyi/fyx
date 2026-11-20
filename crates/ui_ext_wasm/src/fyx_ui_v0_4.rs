@@ -33,7 +33,8 @@ use bindings::fyx::ui::{
     decorations as wit_decorations, host as wit_host, images as wit_images, io as wit_io,
     listeners as wit_listeners, network as wit_network, notifications as wit_notifications,
     permissions as wit_permissions, process as wit_process, relay as wit_relay,
-    review as wit_review, terminals as wit_terminals, types as wit, workspace_edit as wit_edit,
+    review as wit_review, settings as wit_settings, terminals as wit_terminals, types as wit,
+    workspace_edit as wit_edit,
 };
 
 conversions::host_imports!(
@@ -483,6 +484,35 @@ impl wit_approvals::Host for UiState {
     }
 }
 
+/// `settings` (design.md §D, plan 6.1): staged in the 0.4 WIT ahead of the host side (W2c's
+/// `ui_ext::settings` store). Until then no setting is known: `get` and `open` are `unavailable`
+/// and `all` is empty.
+impl wit_settings::Host for UiState {
+    fn get(
+        &mut self,
+        key: String,
+    ) -> wasmtime::Result<Result<wit_settings::SettingValue, wit_host::HostError>> {
+        self.count_lifted_text(key.len())?;
+        Ok(Err(settings_unavailable()))
+    }
+
+    fn all(&mut self) -> wasmtime::Result<Vec<wit_settings::Setting>> {
+        Ok(Vec::new())
+    }
+
+    fn open(&mut self, key: Option<String>) -> wasmtime::Result<Result<(), wit_host::HostError>> {
+        self.count_lifted_text(key.as_ref().map_or(0, String::len))?;
+        Ok(Err(settings_unavailable()))
+    }
+}
+
+fn settings_unavailable() -> wit_host::HostError {
+    wit_host::HostError {
+        code: wit_host::HostErrorCode::Unavailable,
+        message: "extension settings are not available yet".into(),
+    }
+}
+
 /// `listeners` (design.md §B.7) over [`crate::listeners::ListenersHandle`]: a listener the
 /// manifest does not declare is `not-permitted`, one that is not granted `denied`, and one that
 /// is granted but not open (yet) `unavailable`. Tools registered before it opens apply when it
@@ -844,6 +874,7 @@ pub(crate) const LINKED_INTERFACES: &[&str] = &[
     "context",
     "review",
     "relay",
+    "settings",
 ];
 
 /// The 0.4 linker: WASI and the interfaces above.
@@ -866,5 +897,6 @@ pub(crate) fn add_to_linker(
     wit_context::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_review::add_to_linker::<_, UiState>(linker, |state| state)?;
     wit_relay::add_to_linker::<_, UiState>(linker, |state| state)?;
+    wit_settings::add_to_linker::<_, UiState>(linker, |state| state)?;
     Ok(())
 }

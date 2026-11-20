@@ -1,5 +1,9 @@
 # vscode-host
 
+> **Unsupported (owner decision, 2026-11-20).** Fyx does not support VS Code extensions. This
+> prototype is kept for reference only and will be removed in a separate step; do not build on it.
+> See `docs/fyx/research/roadmap-and-vscode-port.md`.
+
 A Node 24 sidecar that runs an unmodified VS Code extension (`.vsix` or unpacked folder) against a
 partial `vscode.*` shim, and talks to the Fyx host over JSON-RPC 2.0 (newline-delimited JSON on
 stdin/stdout). UI-ish APIs render as `fyx:ui@0.1.0` trees (the JSON mirror of

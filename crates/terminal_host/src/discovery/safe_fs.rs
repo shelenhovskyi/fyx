@@ -114,6 +114,11 @@ mod platform {
         if metadata.uid() != unsafe { libc::geteuid() } {
             return Err(refused(path, "belongs to another user"));
         }
+        // Another user who may write here could swap the file or a folder below it (a shared
+        // temp dir: W4's Gemini gap 3).
+        if metadata.mode() & 0o022 != 0 {
+            return Err(refused(path, "other users may write to it"));
+        }
         Ok(())
     }
 
@@ -429,6 +434,29 @@ mod tests {
         remove_file(&path).unwrap();
         assert!(!path.exists());
         remove_file(&path).unwrap();
+    }
+
+    /// A folder others may write to (a group- or world-writable one in a shared temp dir) is
+    /// refused, even when it is this user's.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_others_may_write_to_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = tempfile::tempdir().unwrap();
+        let shared = base.path().join("gemini");
+        fs::create_dir(&shared).unwrap();
+        for mode in [0o777, 0o770, 0o1777] {
+            fs::set_permissions(&shared, fs::Permissions::from_mode(mode)).unwrap();
+            let error = prepare_dir(&target(base.path(), &["gemini", "ide"])).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied,
+                "{mode:o}: {error}"
+            );
+            assert!(!shared.join("ide").exists());
+        }
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(prepare_dir(&target(base.path(), &["gemini", "ide"])).is_ok());
     }
 
     #[test]
