@@ -51,6 +51,8 @@ args = ["--ide"]
 cwd = "worktree"
 # The user picks the account (config dir) for each terminal; the extension never sees its path.
 account_tool = "claude"
+# After a restart Fyx reopens the terminal with `--resume <session id>` (the id from the hooks).
+resume_flag = "--resume"
 
 # Profile terminals only by default; "all-new" would ask for the stronger checkbox.
 [fyx_ui.terminal_env]

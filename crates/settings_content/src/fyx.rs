@@ -181,6 +181,16 @@ pub struct FyxTerminalSettingsContent {
     ///
     /// Default: 0
     pub daily_cost_cap: Option<f32>,
+    /// Reopen the terminals you started from an extension's profile ("Open Claude Code as…")
+    /// when the project opens again, with the same profile and account.
+    ///
+    /// Default: true
+    pub restore_profile_terminals: Option<bool>,
+    /// When reopening them, resume the program's last session where the profile can (Claude
+    /// Code's `--resume`); off starts a new session.
+    ///
+    /// Default: true
+    pub resume_profile_sessions: Option<bool>,
 }
 
 /// `fyx.extensions`.

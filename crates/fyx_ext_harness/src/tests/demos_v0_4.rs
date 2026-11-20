@@ -949,6 +949,7 @@ fn profiles_need_their_capabilities() {
         args: args.iter().map(ToString::to_string).collect(),
         cwd: ui_ext::terminal::ProfileCwd::Home,
         account_tool: None,
+        resume_flag: None,
     };
     let load = |capabilities: &[&str]| {
         Harness::load_with_capabilities(&wasm, capabilities).expect("loads")

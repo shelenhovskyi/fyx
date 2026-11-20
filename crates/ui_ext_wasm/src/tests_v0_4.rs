@@ -386,6 +386,7 @@ async fn load(setup: &Setup, cx: &mut TestAppContext) -> Result<UiExtension> {
                 args: Vec::new(),
                 cwd: Default::default(),
                 account_tool: None,
+                resume_flag: None,
             }])
             .unwrap(),
         ),

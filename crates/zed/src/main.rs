@@ -759,6 +759,7 @@ fn main() {
         terminal_host::init_discovery(paths::data_dir(), cx); // fyx: plan 5.12 discovery files
         terminal_host::init_relay(paths::data_dir(), cx); // fyx: plan 5.12 fyx-relay endpoint
         terminal_host::init_usage_meters(paths::data_dir().clone(), cx); // fyx: plan 7.8 meters
+        terminal_host::init_profile_restore(paths::data_dir().clone(), cx); // fyx: plan 7.14 (a)
         if let Some(host) = terminal_host::host(cx) {
             ui_ext_host::set_terminal_host(host, cx); // fyx: before ui_ext_host loads any extension
         }

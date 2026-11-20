@@ -636,6 +636,7 @@ mod tests {
                 args: Vec::new(),
                 cwd: model_terminal::ProfileCwd::Worktree,
                 account_tool: Some("claude".into()),
+                resume_flag: None,
             }])
             .unwrap(),
         );

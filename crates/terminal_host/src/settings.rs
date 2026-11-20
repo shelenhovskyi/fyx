@@ -10,6 +10,9 @@ pub struct FyxTerminalSettings {
     pub shell_integration: bool,
     /// USD; `None` for no cap.
     pub daily_cost_cap: Option<f64>,
+    /// Plan 7.14 (a).
+    pub restore_profile_terminals: bool,
+    pub resume_profile_sessions: bool,
 }
 
 impl Settings for FyxTerminalSettings {
@@ -26,6 +29,12 @@ impl Settings for FyxTerminalSettings {
                 .and_then(|terminal| terminal.daily_cost_cap)
                 .filter(|cap| *cap > 0.0)
                 .map(f64::from),
+            restore_profile_terminals: terminal
+                .and_then(|terminal| terminal.restore_profile_terminals)
+                .unwrap_or(true),
+            resume_profile_sessions: terminal
+                .and_then(|terminal| terminal.resume_profile_sessions)
+                .unwrap_or(true),
         }
     }
 }

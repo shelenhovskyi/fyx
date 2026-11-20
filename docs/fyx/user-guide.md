@@ -548,6 +548,12 @@ what it needs.
 - **Shell integration** in local PowerShell and Git Bash terminals: Fyx knows where each command
   and its output start, so "the last command and its output" can be shared (below).
 
+Terminals you open from an extension's profile in the **+** menu ("Open Claude Code as…") come back
+when you open the project again, with the same account. Claude Code picks up its last
+conversation (`--resume`). To start them fresh instead, set
+`"fyx": { "terminal": { "resume_profile_sessions": false } }`; to not reopen them at all, set
+`"restore_profile_terminals": false`. Closing a tab forgets it; quitting Fyx does not.
+
 ### Installing an extension: one checkbox for each power
 
 When you install an extension (from a folder for now, later from the registry), the dialog has four
