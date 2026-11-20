@@ -648,6 +648,19 @@ pub fn kill(process: u64) -> Result<(), HostError>;
   - a spawn needs an open, trusted worktree;
   - at most 4 processes, 256 arguments (128 KiB), 32 environment pairs;
   - stdin: 1 MiB per write and 4 MiB queued.
+- **On macOS (plan 7.5):** the program runs under a Seatbelt profile (`ui_ext::seatbelt`).
+  - It reads the system, toolchain directories (`~/.cargo`, `~/.rustup`, `~/.nvm`, …, and the
+    home directories on its `PATH`), its own directory and its worktree. The rest of the home
+    directory and other worktrees are denied.
+  - It writes its worktree, except `.git/hooks`, `.git/config`, `.zed`, `.fyx`, `.vscode`,
+    `.idea` and `.envrc`, and its own `TMPDIR`, which is removed when it exits.
+  - It has no network, unless the extension declares `[fyx_ui.network] domains` and holds
+    `network:fetch`. Then `HTTPS_PROXY` points at a Fyx proxy that allows those hosts (ports
+    and loopback are not passed on), and revoking `network:fetch` kills the program.
+  - A project can narrow that with `.fyx/egress.json` in the worktree root,
+    `{"hosts": ["api.github.com", "*.crates.io"]}`. Only declared hosts the list covers stay.
+    A file that does not parse allows nothing.
+  - Windows keeps the job object and Linux the process group for now.
 - **Off WASM:** the calls record `HostEffect::Spawn`, `WriteStdin`, `CloseStdin` and `Kill`.
 
 With the `fyx-ui-0-3` feature, `fyx:ui` 0.3 adds `workspace:edit` and `agent:observe` (design
