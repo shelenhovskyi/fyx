@@ -78,9 +78,19 @@ pub(crate) fn plan(tree: &Tree) -> Vec<ColumnPlan> {
     plans
 }
 
-/// Per node: how many nodes its subtree has, and whether all of them may be cached.
-fn subtree_sizes(tree: &Tree) -> HashMap<NodeId, (usize, bool)> {
-    let mut sizes: HashMap<NodeId, (usize, bool)> = HashMap::default();
+/// A node's subtree, as planning sees it.
+#[derive(Clone, Copy)]
+struct Subtree {
+    nodes: usize,
+    /// Every node in it may be cached.
+    cacheable: bool,
+    /// It holds an input, whose every keystroke renders the chunk it is in.
+    has_input: bool,
+}
+
+/// Per node: its subtree's size and contents.
+fn subtree_sizes(tree: &Tree) -> HashMap<NodeId, Subtree> {
+    let mut sizes: HashMap<NodeId, Subtree> = HashMap::default();
     // Post-order without recursion: a node is summed once all its children are.
     let mut stack: Vec<(NodeId, bool)> = tree.roots().iter().map(|&id| (id, false)).collect();
     while let Some((id, children_done)) = stack.pop() {
@@ -92,14 +102,21 @@ fn subtree_sizes(tree: &Tree) -> HashMap<NodeId, (usize, bool)> {
             stack.extend(node.children().iter().map(|&child| (child, false)));
             continue;
         }
-        let (count, cacheable) = node.children().iter().fold(
-            (1, cacheable_kind(node.props())),
-            |(count, cacheable), child| {
-                let (child_count, child_cacheable) = sizes.get(child).copied().unwrap_or((0, true));
-                (count + child_count, cacheable && child_cacheable)
-            },
-        );
-        sizes.insert(id, (count, cacheable));
+        let own = Subtree {
+            nodes: 1,
+            cacheable: cacheable_kind(node.props()),
+            has_input: matches!(node.props(), Props::Input(_)),
+        };
+        let subtree = node
+            .children()
+            .iter()
+            .filter_map(|child| sizes.get(child))
+            .fold(own, |subtree, child| Subtree {
+                nodes: subtree.nodes + child.nodes,
+                cacheable: subtree.cacheable && child.cacheable,
+                has_input: subtree.has_input || child.has_input,
+            });
+        sizes.insert(id, subtree);
     }
     sizes
 }
@@ -124,15 +141,21 @@ fn cacheable_kind(props: &Props) -> bool {
 
 fn plan_column(
     tree: &Tree,
-    sizes: &HashMap<NodeId, (usize, bool)>,
+    sizes: &HashMap<NodeId, Subtree>,
     column: Option<NodeId>,
     gap: u16,
     align: Align,
     children: &[NodeId],
     plans: &mut Vec<ColumnPlan>,
 ) {
-    let size = |id: &NodeId| sizes.get(id).copied().unwrap_or((0, false));
-    let total: usize = children.iter().map(|id| size(id).0).sum();
+    let size = |id: &NodeId| {
+        sizes.get(id).copied().unwrap_or(Subtree {
+            nodes: 0,
+            cacheable: false,
+            has_input: false,
+        })
+    };
+    let total: usize = children.iter().map(|id| size(id).nodes).sum();
     if total <= CHUNK_NODES {
         return;
     }
@@ -151,9 +174,16 @@ fn plan_column(
         let Some(node) = tree.get(child) else {
             continue;
         };
-        let (count, cacheable) = size(&child);
+        let subtree = size(&child);
+        let count = subtree.nodes;
         let grows = matches!(node.props(), Props::Flex(flex) if flex.grow);
-        if cacheable && !grows && count <= CHUNK_NODES {
+        if subtree.cacheable && !grows && count <= CHUNK_NODES && subtree.has_input {
+            // Typing renders the chunk an input is in: it gets one of its own.
+            flush(&mut run, &mut run_nodes, &mut segments);
+            segments.push(PlannedSegment::Chunk(vec![child]));
+            continue;
+        }
+        if subtree.cacheable && !grows && count <= CHUNK_NODES {
             if run_nodes + count > CHUNK_NODES {
                 flush(&mut run, &mut run_nodes, &mut segments);
             }
@@ -305,11 +335,17 @@ impl Render for SubtreeView {
         {
             self.renders += 1;
         }
+        let started = std::time::Instant::now();
         let members = self.members.clone();
         let content = self
             .surface
             .update(cx, |surface, cx| {
-                surface.render_members(&members, window, cx)
+                let content = surface.render_members(&members, window, cx);
+                surface
+                    .state()
+                    .read(cx)
+                    .add_to_last_render(started.elapsed());
+                content
             })
             .unwrap_or_default();
         let column = v_flex().w_full().relative().gap(px(self.gap.into()));

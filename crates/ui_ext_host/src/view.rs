@@ -814,6 +814,7 @@ impl SurfaceView {
 
 impl Render for SurfaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
         let state = self.state.read(cx);
         let compact = self.compact;
         let container = if compact {
@@ -938,6 +939,7 @@ impl Render for SurfaceView {
                     this.state.update(cx, |state, cx| state.dismiss_error(cx));
                 }))
         });
+        state.record_render(started.elapsed());
         container
             .key_context(crate::keyboard::SURFACE_CONTEXT)
             .track_focus(&self.focus_handle)

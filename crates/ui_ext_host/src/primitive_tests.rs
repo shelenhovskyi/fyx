@@ -528,6 +528,11 @@ async fn bench_redraw_of_a_large_tree(cx: &mut TestAppContext) {
 
 /// A surface of about 4096 texts in rows under a column, with one input first.
 fn large_tree_with_input() -> (Tree, NodeId) {
+    tree_with_input(64)
+}
+
+/// A column holding an input and `rows` rows of 63 texts.
+fn tree_with_input(rows: usize) -> (Tree, NodeId) {
     let flex = |direction| {
         Props::Flex(FlexProps {
             direction,
@@ -549,7 +554,7 @@ fn large_tree_with_input() -> (Tree, NodeId) {
         ),
     ];
     let mut next = 3;
-    for _ in 0..64 {
+    for _ in 0..rows {
         let group = next;
         next += 1;
         nodes.push(node(group, Some(ROOT), flex(FlexDirection::Row)));
@@ -581,9 +586,10 @@ fn static_panel_surface() -> ui_ext::v0_2::Surface {
 #[ignore]
 async fn bench_input_edit_in_a_large_tree(cx: &mut TestAppContext) {
     crate::tests::init_test(cx);
-    for disabled in [true, false] {
+    // The input alone is the floor: what its editor's own frame costs.
+    for (disabled, rows) in [(true, 64), (false, 64), (true, 0)] {
         crate::subtree::DISABLED.set(disabled);
-        let (tree, input) = large_tree_with_input();
+        let (tree, input) = tree_with_input(rows);
         let count = tree.len();
         let backend: Rc<dyn UiBackend> = Rc::new(StaticBackend::default());
         let state =
@@ -641,7 +647,7 @@ fn test_chunk_plan(_: &mut TestAppContext) {
         })
         .collect();
     assert_eq!(chunks.len(), plans[0].segments.len(), "every child is chunked");
-    assert_eq!(chunks[0][0], input);
+    assert_eq!(chunks[0], &vec![input], "an input gets a chunk of its own");
     let members: usize = chunks.iter().map(|members| members.len()).sum();
     assert_eq!(members, 65, "the input and the 64 rows, each once");
     assert!(chunks.iter().all(|members| members.len() * 64 <= CHUNK_NODES + 64));
