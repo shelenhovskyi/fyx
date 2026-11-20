@@ -203,7 +203,8 @@ fn project_folder(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
         .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
 }
 
-/// "+" menu: per tool with accounts, "<Tool>: in this project, use" and a choice of them.
+/// "+" menu: per tool with accounts, a "Default <Tool> account: <current>" submenu to choose the
+/// project's account. The profiles stay at the top level.
 pub(crate) fn menu_entries(window: &Window, cx: &App) -> Vec<MenuEntry> {
     let Some(workspace) = Workspace::for_window(window, cx) else {
         return Vec::new();
@@ -213,31 +214,34 @@ pub(crate) fn menu_entries(window: &Window, cx: &App) -> Vec<MenuEntry> {
     };
     let fs = workspace.read(cx).app_state().fs.clone();
     let settings = settings(cx);
+    let choice_entry = |choice: Choice| {
+        let Choice {
+            label,
+            checked,
+            tool,
+            account,
+        } = choice;
+        let fs = fs.clone();
+        let folder = folder.clone();
+        MenuEntry::Toggle {
+            label: SharedString::from(label),
+            checked,
+            on_select: Rc::new(move |_, cx| {
+                let (folder, tool, account) = (folder.clone(), tool.clone(), account.clone());
+                settings::update_settings_file(fs.clone(), cx, move |content, _| {
+                    set_project_account(content, &folder, &tool, account.as_deref());
+                });
+            }),
+        }
+    };
     menu_model(&settings, &folder)
         .into_iter()
         .map(|item| match item {
             MenuItem::Separator => MenuEntry::Separator,
-            MenuItem::Header(title) => MenuEntry::Header(title.into()),
-            MenuItem::Choice {
-                label,
-                checked,
-                tool,
-                account,
-            } => {
-                let fs = fs.clone();
-                let folder = folder.clone();
-                MenuEntry::Toggle {
-                    label: SharedString::from(label),
-                    checked,
-                    on_select: Rc::new(move |_, cx| {
-                        let (folder, tool, account) =
-                            (folder.clone(), tool.clone(), account.clone());
-                        settings::update_settings_file(fs.clone(), cx, move |content, _| {
-                            set_project_account(content, &folder, &tool, account.as_deref());
-                        });
-                    }),
-                }
-            }
+            MenuItem::Submenu { label, choices } => MenuEntry::Submenu {
+                label: SharedString::from(label),
+                entries: choices.into_iter().map(choice_entry).collect(),
+            },
         })
         .collect()
 }
@@ -245,15 +249,20 @@ pub(crate) fn menu_entries(window: &Window, cx: &App) -> Vec<MenuEntry> {
 #[derive(Debug, PartialEq, Eq)]
 enum MenuItem {
     Separator,
-    Header(String),
-    Choice {
-        label: String,
-        checked: bool,
-        tool: String,
-        /// `None`: no account (the tool's default dir).
-        account: Option<String>,
-    },
+    /// "Default <Tool> account: <current>", with a choice per account.
+    Submenu { label: String, choices: Vec<Choice> },
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct Choice {
+    label: String,
+    checked: bool,
+    tool: String,
+    /// `None`: no account (the tool's default dir).
+    account: Option<String>,
+}
+
+const NO_ACCOUNT: &str = "Default (no profile)";
 
 fn menu_model(settings: &FyxAccountsSettingsContent, folder: &Path) -> Vec<MenuItem> {
     let accounts = settings.accounts();
@@ -270,24 +279,30 @@ fn menu_model(settings: &FyxAccountsSettingsContent, folder: &Path) -> Vec<MenuI
             .iter()
             .find(|account| account.tool == tool)
             .map(|account| account.name.clone());
-        items.push(MenuItem::Separator);
-        items.push(MenuItem::Header(format!(
-            "{}: in this project, use",
-            settings.tool_label(&tool)
-        )));
-        for account in accounts.iter().filter(|account| account.tool == tool) {
-            items.push(MenuItem::Choice {
+        let mut choices = accounts
+            .iter()
+            .filter(|account| account.tool == tool)
+            .map(|account| Choice {
                 label: account.name.clone(),
                 checked: chosen.as_deref() == Some(account.name.as_str()),
                 tool: tool.clone(),
                 account: Some(account.name.clone()),
-            });
-        }
-        items.push(MenuItem::Choice {
-            label: "Default (no profile)".into(),
+            })
+            .collect::<Vec<_>>();
+        choices.push(Choice {
+            label: NO_ACCOUNT.into(),
             checked: chosen.is_none(),
-            tool,
+            tool: tool.clone(),
             account: None,
+        });
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Submenu {
+            label: format!(
+                "Default {} account: {}",
+                settings.tool_label(&tool),
+                chosen.as_deref().unwrap_or("none")
+            ),
+            choices,
         });
     }
     items
@@ -482,24 +497,34 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_offers_each_tools_accounts_with_the_projects_checked() {
+    fn the_menu_has_a_default_account_submenu_per_tool_with_the_projects_checked() {
         let items = menu_model(&two(), Path::new("/src/work"));
-        let checked = items
+        let submenus = items
             .iter()
             .filter_map(|item| match item {
-                MenuItem::Choice {
-                    label,
-                    checked: true,
-                    ..
-                } => Some(label.as_str()),
-                _ => None,
+                MenuItem::Submenu { label, choices } => Some((
+                    label.as_str(),
+                    choices
+                        .iter()
+                        .map(|choice| (choice.label.as_str(), choice.checked))
+                        .collect::<Vec<_>>(),
+                )),
+                MenuItem::Separator => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(checked, ["Work", "Default (no profile)"]);
-        assert!(items.contains(&MenuItem::Header(
-            "Claude Code: in this project, use".into()
-        )));
-        assert!(items.contains(&MenuItem::Header("codex: in this project, use".into())));
+        assert_eq!(
+            submenus,
+            [
+                (
+                    "Default Claude Code account: Work",
+                    vec![("Personal", false), ("Work", true), (NO_ACCOUNT, false)]
+                ),
+                (
+                    "Default codex account: none",
+                    vec![("Me", false), (NO_ACCOUNT, true)]
+                ),
+            ]
+        );
         assert!(menu_model(&FyxAccountsSettingsContent::default(), Path::new("/x")).is_empty());
     }
 
