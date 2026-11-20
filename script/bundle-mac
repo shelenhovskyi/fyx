@@ -109,15 +109,20 @@ script/generate-licenses
 rustup target add $target_triple
 
 echo "Compiling zed binaries"
+# fyx: cargo's JSON on stdout lists every unit of the build, fresh ones included, for
+# fyx-prune-mac-target at the end; diagnostics and progress still go to the terminal.
+units_flag=(--message-format=json-render-diagnostics)
+units_file="target/${target_triple}/${target_dir}/fyx-bundle-units.json"
+mkdir -p "target/${target_triple}/${target_dir}"
 if [[ "$target_dir" = "release" ]]; then
-    cargo --config .cargo/bundle-config.toml rustc ${build_flag} ${zed_features} --package zed --bin fyx --target $target_triple -- -C 'link-arg=-Wl,-unexported_symbol,__R*' # fyx: binary renamed
-    cargo --config .cargo/bundle-config.toml build ${build_flag} --package cli --target $target_triple
+    cargo --config .cargo/bundle-config.toml rustc ${build_flag} ${zed_features} --package zed --bin fyx --target $target_triple "${units_flag[@]}" -- -C 'link-arg=-Wl,-unexported_symbol,__R*' > "$units_file" # fyx: binary renamed, units listed
+    cargo --config .cargo/bundle-config.toml build ${build_flag} --package cli --target $target_triple "${units_flag[@]}" >> "$units_file" # fyx: units listed
 else
-    cargo --config .cargo/bundle-config.toml build ${build_flag} ${zed_features} --package zed --package cli --target $target_triple
+    cargo --config .cargo/bundle-config.toml build ${build_flag} ${zed_features} --package zed --package cli --target $target_triple "${units_flag[@]}" > "$units_file" # fyx: units listed
 fi
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
-cargo --config .cargo/bundle-config.toml build ${build_flag} ${remote_server_features} --package remote_server --target $target_triple
+cargo --config .cargo/bundle-config.toml build ${build_flag} ${remote_server_features} --package remote_server --target $target_triple "${units_flag[@]}" >> "$units_file" # fyx: units listed
 
 echo "Creating application bundle"
 pushd crates/zed
@@ -380,3 +385,6 @@ sign_app_binaries
 # fyx: ${target_dir}, so -d (debug) does not fail on a missing release remote-server
 sign_binary "target/$target_triple/${target_dir}/remote-server"
 gzip -f --stdout --best "target/$target_triple/${target_dir}/remote-server" > target/zed-remote-server-macos-$arch_suffix.gz
+
+# fyx: cargo never deletes superseded units; without this the release target grows ~10 GB a day.
+script/fyx-prune-mac-target "target/${target_triple}/${target_dir}" "$units_file" || echo "fyx-prune-mac-target failed; target/ was not pruned"

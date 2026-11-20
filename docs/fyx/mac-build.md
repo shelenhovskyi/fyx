@@ -35,6 +35,11 @@ your Fyx of that channel before the check.
 The bundle alone: `script/bundle-mac` (release + DMG), `script/bundle-mac -d` (debug `.app`),
 `-i` installs into `/Applications`, `-o` opens the result.
 
+`script/bundle-mac` ends with `script/fyx-prune-mac-target`: it deletes the units in
+`target/<triple>/<profile>/deps` that the build did not use (old hashes from earlier merges, about
+10 GB a day otherwise), and deletes `target/debug` whole when `/` is under 40 GB free
+(`FYX_DISK_GUARD_MIN_GB`). `--dry-run` lists what it would delete.
+
 ## First launch (Gatekeeper)
 
 A build you made on the same Mac is not quarantined and opens normally. A DMG or `.app` that came

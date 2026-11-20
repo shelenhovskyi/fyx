@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# fyx: drop superseded cargo units from a Mac bundle's profile dir, and cap the repo's target/.
+#
+# Cargo never deletes a unit whose hash changed (a dependency bump or feature change from a
+# merge), so target/<triple>/release/deps gains a copy of most rlibs and ~3 GB of fyx and
+# remote_server link objects (split-debuginfo = "unpacked") per rebuild, ~10 GB a day.
+# script/bundle-mac saves cargo's JSON messages, which list every unit of the build, fresh ones
+# included; this deletes the deps/ entries of every other unit. An entry belongs to the unit whose
+# hash is the first `-<16 hex>` in its name (libserde-H.rlib, serde-H.d and serde-H.*.o are one
+# unit). Root units are reported under their uplifted name, which has no hash; for those the
+# newest deps/ entry of that name is kept.
+#
+# Access times cannot replace the JSON: APFS does not update them on every read, so units the
+# link did read look stale. Only deps/ is pruned: build/ and .fingerprint/ are small, and the host
+# dir (target/release) holds proc macros and build scripts, which these messages do not cover.
+# A unit deleted by mistake (one only another command builds) is rebuilt with its dependents.
+#
+# Hard ceiling: if / then has under FYX_DISK_GUARD_MIN_GB (default 40) free, the repo's
+# target/debug is deleted whole (the next test build is cold).
+#
+# Usage: script/fyx-prune-mac-target [--dry-run] PROFILE_DIR UNITS_JSON
+# macOS only (BSD df, /usr/bin/python3 from Xcode).
+set -euo pipefail
+
+dry_run=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+    dry_run=1
+    shift
+fi
+dir="${1:-}"
+units_file="${2:-}"
+if [[ -z "$dir" || ! -d "$dir/deps" || ! -s "$units_file" ]]; then
+    echo "usage: $0 [--dry-run] PROFILE_DIR UNITS_JSON (cargo --message-format=json output)" >&2
+    exit 2
+fi
+repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+min_free_gb="${FYX_DISK_GUARD_MIN_GB:-40}"
+
+free_gb() { df -g / | awk 'NR == 2 { print $4 }'; }
+before="$(free_gb)"
+
+/usr/bin/python3 -I - "$dir/deps" "$units_file" "$dry_run" <<'PYTHON'
+import json
+import os
+import re
+import shutil
+import sys
+
+deps, units_file, dry_run = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+hash_pattern = re.compile(r"-([0-9a-f]{16})(?:\.|$)")
+
+live = set()
+unhashed_stems = set()
+artifacts = 0
+with open(units_file) as messages:
+    for line in messages:
+        if not line.startswith("{"):
+            continue
+        message = json.loads(line)
+        if message.get("reason") != "compiler-artifact":
+            continue
+        artifacts += 1
+        paths = list(message.get("filenames") or [])
+        if message.get("executable"):
+            paths.append(message["executable"])
+        for path in paths:
+            name = os.path.basename(path)
+            found = hash_pattern.search(name)
+            if found:
+                live.add(found.group(1))
+            else:
+                unhashed_stems.add(name.split(".")[0].replace("-", "_"))
+if artifacts == 0:
+    sys.exit(f"prune: {units_file} lists no units; nothing deleted")
+
+entries = []
+for name in os.listdir(deps):
+    found = hash_pattern.search(name)
+    if found:
+        entries.append((name, found.group(1), name[: found.start()]))
+
+newest = {}
+for name, unit, stem in entries:
+    if stem in unhashed_stems:
+        mtime = os.lstat(os.path.join(deps, name)).st_mtime
+        if mtime > newest.get(stem, (0.0, ""))[0]:
+            newest[stem] = (mtime, unit)
+live.update(unit for _, unit in newest.values())
+
+count = 0
+size = 0
+for name, unit, _ in entries:
+    if unit in live:
+        continue
+    path = os.path.join(deps, name)
+    count += 1
+    if os.path.isdir(path) and not os.path.islink(path):
+        size += sum(
+            os.lstat(os.path.join(root, file)).st_size
+            for root, _, files in os.walk(path)
+            for file in files
+        )
+        if not dry_run:
+            shutil.rmtree(path)
+    else:
+        size += os.lstat(path).st_size
+        if not dry_run:
+            os.remove(path)
+    if dry_run:
+        print(f"would delete {path}")
+verb = "would delete" if dry_run else "deleted"
+print(f"prune: {verb} {count} entries ({size / 2**30:.1f} GB) from {deps}; {len(live)} live units")
+PYTHON
+
+free_now="$(free_gb)"
+if [[ -d "$repo/target/debug" ]] && (( free_now < min_free_gb )); then
+    if pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; then
+        echo "prune: / has ${free_now} GB free (under ${min_free_gb} GB), but cargo runs: target/debug kept"
+    elif [[ $dry_run -eq 1 ]]; then
+        echo "prune: / has ${free_now} GB free (under ${min_free_gb} GB): would delete $repo/target/debug"
+    else
+        echo "prune: / has ${free_now} GB free (under ${min_free_gb} GB): deleting $repo/target/debug"
+        rm -rf -- "$repo/target/debug"
+    fi
+fi
+echo "prune: / free ${before} GB -> $(free_gb) GB"
