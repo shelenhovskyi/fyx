@@ -7,7 +7,7 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | Item | Kind | Summary |
 |---|---|---|
 | `API_VERSION` | const |  |
-| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch): 0.2, or the staged 0.3 with the `fyx-ui-0-3` feature. |
+| `API_VERSION` | const | The `fyx:ui` WIT version of the SDK's API and of `register_extension!(T)`, as (major, minor, patch): 0.2, or 0.3 with the `fyx-ui-0-3` feature. |
 | `API_VERSION_SECTION` | const | Name of the custom section `register_extension!` adds to every component, from which the host reads the version before instantiating it. |
 | `API_VERSION_SECTION_BYTES` | const | `API_VERSION` as stored in the section: three big-endian `u16`s, as in Zed's `zed:api-version`. |
 | `API_VERSION_V0_1` | const | The version `register_extension!(T, v0_1)` exports, for hosts that only run 0.1. |
@@ -212,8 +212,8 @@ Every public item, in path order. For signatures, run `script/fyx-api-docs` and 
 | `WorkspaceEdit::file` | method | Edits of one file; at most 64 files per edit, each named once. |
 | `WorkspaceEdit::new` | method | An edit named `label` (1 to 128 bytes, one line): the undo step's name. |
 | `bindings` | module |  |
-| `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or the staged `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
-| `bindings` | module | The staged `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus `terminals`, `listeners`, `context`, `review` and `relay`. |
+| `bindings` | module | The bindings of the SDK's world: `fyx:ui@0.2.0`, or `fyx:ui@0.3.0` with the `fyx-ui-0-3` feature. Only a 0.3 build may link the 0.3 world description, or a 0.1 or 0.2 component would list 0.3 interfaces. |
+| `bindings` | module | `fyx:ui@0.4.0`, with the `fyx-ui-0-4` feature: 0.3 plus `terminals`, `listeners`, `context`, `review` and `relay`. |
 | `bindings::fyx::ui::types::*` | re-export | `bindings::fyx::ui::types::*` |
 | `canvas::*` | re-export | `canvas::*` |
 | `context` | module |  |

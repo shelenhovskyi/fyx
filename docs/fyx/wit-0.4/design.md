@@ -1,10 +1,11 @@
 # `fyx:ui@0.4.0`: terminals and CLI integrations
 
-Status (2026-11-19): **design, for implementation** (platform plan P5). The direction and the rule
+Status (2026-11-20): **frozen** as `fyx:ui@0.4.0` (W0 5097d410e7, after the P5 security review;
+the WIT is `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`). Below, the design as decided (platform plan P5). The direction and the rule
 changes in [§C.7](#c7-rules-that-change-decided-by-the-owner-2026-11-19) were decided by the owner
 on 2026-11-19. The open technical questions were answered by the coordinator the same day
-([Decisions](#decisions-2026-11-19)). Nothing is implemented yet. The WIT below is a diff for W0,
-who stages it in `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` (integrator-only).
+([Decisions](#decisions-2026-11-19)). The WIT blocks below were diffs for W0; the frozen file is the
+source.
 
 **Source.** The owner's research, in Ukrainian: [`terminal-api/research.md`](../terminal-api/research.md)
 (branch `fyx/terminal-api-research`, f21c198c92). That file has the survey (what the terminal code
@@ -1431,7 +1432,7 @@ limitation: Gemini's Docker sandbox is refused by the `Host` check (§B.7).
 | WIT model, manifest, permissions broker, listeners, review bridge, context | W2c | `crates/ui_ext` (0.4 model, manifest tables, forbidden names of §B.4/§C.6), `crates/ui_ext_wasm` (0.4 bindings, `listeners.rs`, `relay.rs` host side), `crates/ui_ext_host/src/permissions.rs` and `consent.rs` (T2-at-install states, T3, journal store) |
 | Consent UI, terminal node, sessions panel, cards | W3 | `ui_ext_host`: install dialog with checkboxes, extension page switches and journal, update diff, T3 cards and "Always allow", `terminal` node in the panel container, agent sessions panel, approval cards |
 | SDK, harness, demos, first extensions | W4 | `ui_ext_sdk` 0.4 module, `fyx_ext_harness` fakes for terminals, listeners, relay and review; `extensions/fyx_demo_pseudo_terminal`, `extensions/fyx_claude_code`, `extensions/fyx_gemini_cli` |
-| Staged WIT | W0 | `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` |
+| Frozen WIT | W0 | `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit` |
 | Registry template | W10 | `tools/fyx-extensions-template` `policy/capability-tiers.json` (T3 counts as T2 for the release tier, so `fyx_registry`'s signed `tier` gains no value), the diff in `registry.py comment` |
 
 ## Tests

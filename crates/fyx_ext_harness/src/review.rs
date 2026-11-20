@@ -1,4 +1,4 @@
-//! A fake agent review for the staged `fyx:ui` 0.4 `review` (design.md B.10), with the checks of
+//! A fake agent review for the `fyx:ui` 0.4 `review` (design.md B.10), with the checks of
 //! W2c's runtime (`ui_ext_wasm::proposals`, plan 5.13): the labels and sizes, a worktree file
 //! that is neither protected nor private, at most [`MAX_OPEN_PROPOSALS`] open, ids that are
 //! never reused, and each outcome delivered at most once, never after `withdraw`.

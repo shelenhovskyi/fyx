@@ -1,4 +1,4 @@
-//! The staged `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
+//! The frozen `fyx:ui@0.4.0` world (`crates/ui_ext/wit/since_v0.4.0`): 0.3's interfaces, as
 //! `v0_3` runs them (this file started as a copy of it), plus `terminals` on the fakes of
 //! [`crate::terminals`] (plan 5.10), `listeners` on those of [`crate::listeners`], `context`
 //! on [`crate::context`], `review` on [`crate::review`] (plan 5.14) and `relay` on
@@ -1562,7 +1562,7 @@ impl wit_context::Host for State {
         Ok(Ok(()))
     }
 
-    // Staged in the 0.4 WIT ahead of the host side, as in the host (plan 6.6 §E, 6.7 §F.2).
+    // In the 0.4 WIT ahead of the host side, as in the host (plan 6.6 §E, 6.7 §F.2).
     fn publish_diagnostics(
         &mut self,
         path: wit::FileRef,

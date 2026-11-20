@@ -1,4 +1,4 @@
-//! Fake terminals for the staged `fyx:ui` 0.4 (design.md B.2-B.5), with the host's checks and
+//! Fake terminals for the `fyx:ui` 0.4 (design.md B.2-B.5), with the host's checks and
 //! limits from `ui_ext::terminal`, so an extension's terminal code runs headless.
 //!
 //! - A **pseudo-terminal** keeps what the extension writes ([`FakeTerminal::output`]); a test

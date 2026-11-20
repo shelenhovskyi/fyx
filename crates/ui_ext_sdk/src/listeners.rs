@@ -1,4 +1,4 @@
-//! `fyx:ui` 0.4, staged: loopback listeners and MCP (design.md B.7), with the `fyx-ui-0-4`
+//! `fyx:ui` 0.4: loopback listeners and MCP (design.md B.7), with the `fyx-ui-0-4`
 //! feature and the `network:listen` capability.
 //!
 //! The host binds every granted `[[fyx_ui.listeners]]` entry on `127.0.0.1:0` when the

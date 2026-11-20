@@ -198,7 +198,7 @@ The harness API: `mount`, `event`, `click(surface, label)`, `rows`, `nodes`, `pr
 `find`, `find_text` and `find_button`, plus `effects()`, `logs()` and `disabled()` for
 assertions. The full list is in the [harness reference](api/fyx_ext_harness.md).
 
-The harness runs `fyx:ui` 0.1, 0.2 and staged 0.3 components. Its methods show the newest model
+The harness runs `fyx:ui` 0.1, 0.2 and 0.3 components. Its methods show the newest model
 (`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data converts without
 loss: tooltips, `secret`, input labels, `selected`, `indent`, `invalidate-rows` and images.
 `event`, `click`, `tick` and `dismiss` return an `Outcome` with the call's effects. The same
@@ -376,7 +376,7 @@ the [SDK reference](sdk-reference.md)). Unknown keys are an error (`deny_unknown
 
 | Key | Rule |
 |---|---|
-| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` and `0.2.0`. `0.3.0` is staged: dev builds load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS`, which works on Dev and Nightly builds only; on an older Stable-channel build set `ZED_RELEASE_CHANNEL=dev` at runtime), and `fyx-ext check` warns. `0.4.0` (terminals and CLI integrations) is staged after it, and only its manifest loads so far. |
+| `api_version` | A semver string. It must be a version this build supports, and it must equal the version the component itself declares (see [Versions](limits-and-gotchas.md#versions)). Releases run `0.1.0` to `0.4.0`: all four are frozen (0.4 since 2026-11-20). A newer version is staged: only dev builds load it, and `fyx-ext check` warns. |
 | `component` | A path inside the extension directory. It must be non-empty and relative, with only normal path segments: `fyx_ui.wasm` and `bin/fyx_ui.wasm` pass, but `./fyx_ui.wasm`, `../x.wasm` and absolute paths are rejected. |
 | `capabilities` | A list of strings, empty by default. Every panel surface needs `"ui:panel"` and every status item needs `"ui:status-bar"`, or loading fails. Each `api_version` takes its own capabilities (see [the `fyx-ext` commands](#the-fyx-ext-commands)); a capability the world does not take fails the load with `<capability> needs fyx:ui 0.3; this extension targets <version>`. |
 
@@ -431,7 +431,7 @@ script/fyx-build-demos --release
 build whose host runs 0.2. It leaves the repository alone: each demo goes to
 `<target>/fyx-demos-v0_2/<demo>/`, with a copy of its `extension.toml` set to
 `api_version = "0.2.0"` and of its `assets/` folder, and the printed `FYX_UI_DEV_EXTENSIONS` line
-points there. `--fyx-ui-0-3` does the same for the staged 0.3 world in
+points there. `--fyx-ui-0-3` does the same for the 0.3 world in
 `<target>/fyx-demos-v0_3/`.
 
 A demo whose newer build needs capabilities that 0.1 refuses keeps the 0.1 list in
@@ -485,7 +485,7 @@ package"), from Zed's installed-extensions directory, and from the environment v
 - **`FYX_UI_DEV_EXTENSIONS`**, read once at startup, needs no consent: setting it is the opt-in.
   It works in dev builds only (ignored, with a log line, in Preview and Stable), and every window
   shows a banner while it is set. Fyx's own builds are on the Dev channel (`crates/zed/RELEASE_CHANNEL`
-  is `dev`), so the variable and the staged worlds work on Dev and Nightly builds. For an older
+  is `dev`), so the variable works on Dev and Nightly builds. For an older
   Stable-channel build, set `ZED_RELEASE_CHANNEL=dev` at runtime.
 
 ### Extension Inspector
@@ -505,8 +505,8 @@ Every capability in `[fyx_ui].capabilities` has a tier:
 |---|---|---|
 | T0 | `ui:panel`, `ui:status-bar` (and the 0.2+ UI ones: `ui:modal`, `ui:notifications`, …) | no prompt; listed in the install dialog and on the extension's chips |
 | T1 | `workspace:read-buffers`, `workspace:read-files`, `workspace:diagnostics` | once, in the install dialog; `fyx_ui: revoke UI extension permission` takes it back |
-| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | 0.3 only: the first use asks, and the extensions page changes the answer; a manifest for 0.1 or 0.2 that asks for one is refused. **(0.4, staged)** T2 is accepted at install, one checkbox per item, unticked by default; the first-use prompt stays only for dev installs without a dialog |
-| T3 | `terminal:read`, `terminal:write` | **(0.4, staged)** at the moment of action, on one terminal; see [Terminals and CLI integrations](#terminals-and-cli-integrations-staged-fyxui-04) |
+| T2 | `network:fetch`, `process:spawn`, `workspace:edit`, `agent:observe` | 0.3 only: the first use asks, and the extensions page changes the answer; a manifest for 0.1 or 0.2 that asks for one is refused. **(0.4)** T2 is accepted at install, one checkbox per item, unticked by default; the first-use prompt stays only for dev installs without a dialog |
+| T3 | `terminal:read`, `terminal:write` | **(0.4)** at the moment of action, on one terminal; see [Terminals and CLI integrations](#terminals-and-cli-integrations-fyxui-04) |
 
 An unknown capability is refused at load, with its name in the error. An update that adds only
 T0 capabilities (or only changes the component) loads silently; one that adds a T1 capability is
@@ -963,17 +963,16 @@ replay every update through the host's own tree model (`ui_ext::Tree`).
 headless test of the counter's contract; run it with
 `fyx-ext test --path extensions/fyx_demo_counter`.
 
-## Newer worlds: `fyx:ui` 0.2 and the staged 0.3
+## Newer worlds: `fyx:ui` 0.2 and 0.3
 
-Releases of Fyx run `fyx:ui` 0.1 and 0.2, which is frozen. The 0.3 world is staged: dev builds
-load it (debug builds, or with `FYX_UI_DEV_EXTENSIONS` set), and `fyx-ext check` warns that it is
-staged. The 0.4 world (terminals and CLI integrations) is staged after it; it has its own section,
-[Terminals and CLI integrations](#terminals-and-cli-integrations-staged-fyxui-04), at the end.
+Releases of Fyx run `fyx:ui` 0.1 to 0.4, all frozen. The 0.4 world (terminals and CLI
+integrations) has its own section,
+[Terminals and CLI integrations](#terminals-and-cli-integrations-fyxui-04), at the end.
 Every snippet below is taken from a demo in `extensions/` that builds and is tested.
 
 ### Choosing a world
 
-The SDK's types are 0.2's by default. The crate feature `fyx-ui-0-3` switches them to the staged
+The SDK's types are 0.2's by default. The crate feature `fyx-ui-0-3` switches them to the
 0.3 world. `register_extension!` exports the world you name, and it converts down where it can:
 
 ```toml
@@ -1225,7 +1224,7 @@ harness.deliver_io()?; // fetch-done, process output and exit, through handle_io
 - **Comparison with the host:** `ui_ext_wasm`'s `harness_conformance*` tests run the same
   components in the host and the harness and compare every effect, so the harness cannot drift.
 
-## Terminals and CLI integrations: staged `fyx:ui` 0.4
+## Terminals and CLI integrations: `fyx:ui` 0.4
 
 `fyx:ui` 0.4 lets an extension be a terminal of its own, and lets anyone build a full integration
 for a command-line tool (Claude Code, Gemini CLI, Codex, OpenCode, …). Fyx has no tool-specific
@@ -1233,13 +1232,11 @@ code for this: it offers generic primitives, and each tool is an extension. The 
 limit and the reasons, is [wit-0.4/design.md](wit-0.4/design.md); this section is the author's
 route through it.
 
-**Status.** 0.4 is staged, like 0.3 was: dev builds load it (debug builds, or with
-`FYX_UI_DEV_EXTENSIONS`). The WIT is `crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`. What works today
-is the loader: it reads the six 0.4 manifest tables and the 0.4 capabilities, and checks them (a
-0.4 component is not instantiated yet). The host functions, the `ui_ext_sdk` 0.4 module, the
-harness fakes and the demo extensions arrive with plan P5 (tasks 5.5–5.16). Until then, use this
-section for the manifest and the WIT names, and the design for behaviour. Snippets here are
-manifest TOML or WIT calls; Rust SDK snippets will replace the calls when the SDK module lands.
+**Status.** 0.4 is frozen (2026-11-20): Stable, Preview and Dev builds load it. The WIT is
+`crates/ui_ext/wit/since_v0.4.0/fyx-ui.wit`. The SDK's `fyx-ui-0-4` feature has the `terminals`,
+`listeners`, `context`, `review` and `relay` modules, the harness fakes them, and the demos
+`fyx_demo_pseudo_terminal`, `fyx_demo_terminal_profiles`, `fyx_claude_code` and `fyx_gemini_cli`
+use them. Snippets here are manifest TOML or WIT calls; the demos show the Rust side.
 
 ### What you can build
 

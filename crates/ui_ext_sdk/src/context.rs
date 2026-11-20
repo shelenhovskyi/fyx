@@ -1,4 +1,4 @@
-//! `fyx:ui` 0.4, staged: editor context and opening files (design.md B.11), with the
+//! `fyx:ui` 0.4: editor context and opening files (design.md B.11), with the
 //! `fyx-ui-0-4` feature.
 //!
 //! - [`watch`] (`context:editor`) starts the editor feed: `IoEvent::ContextChanged` arrives at

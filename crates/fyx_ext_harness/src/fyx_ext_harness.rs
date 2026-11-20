@@ -5,7 +5,7 @@
 //! Apache-2.0, like the SDK, so extensions can use it as a dev-dependency, and host-only, so the
 //! SDK itself never pulls in wasmtime.
 //!
-//! It runs components of `fyx:ui` 0.1, 0.2 and the staged 0.3. Internally every value is the
+//! It runs components of `fyx:ui` 0.1, 0.2 and 0.3. Internally every value is the
 //! newest model (`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data
 //! converts without loss. The unsuffixed methods and [`Outcome`] show that model (decision D5);
 //! the `*_v0_1` methods show the 0.1 model, which is lossless for a 0.1 component and drops
@@ -503,7 +503,7 @@ struct Runtime {
     engine: Engine,
     linker_v0_1: Linker<State>,
     linker_v0_2: Linker<State>,
-    /// What the host implements of the staged 0.3 world; instantiation adds traps for the rest.
+    /// What the host implements of the 0.3 world; instantiation adds traps for the rest.
     linker_v0_3: Linker<State>,
     linker_v0_4: Linker<State>,
 }
@@ -1223,7 +1223,7 @@ impl Harness {
                 v0_2::UiExtension::instantiate(&mut store, &component, &runtime.linker_v0_2)
                     .map(Bindings::V0_2)
             }
-            // What the host does not implement of the staged 0.3 world traps when called, as in
+            // What the host does not implement of the 0.3 world traps when called, as in
             // the host; a component that never calls it loads and runs.
             ApiVersion::V0_3_0 => {
                 let mut linker = runtime.linker_v0_3.clone();
