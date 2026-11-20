@@ -1219,8 +1219,6 @@ pub fn list_row(index: u32, build: impl FnOnce(&mut TreeBuilder)) -> Result<List
     let mut tree = TreeBuilder::new(&mut ids);
     build(&mut tree);
     let row = ListRow {
-        #[cfg(feature = "fyx-ui-0-4")]
-        expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
         index,
         indent: 0,
         nodes: tree.finish(),
