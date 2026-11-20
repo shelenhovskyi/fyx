@@ -285,6 +285,25 @@ starts from these and looks for the same faults everywhere else.
      approve-and-update);
    - the list scrolls inside the dialog with no sign that more is below; the hook list is cut
      off at the bottom edge.
+3. **After Enable, no "what next"**: the owner enabled `fyx-claude-code` and could not tell what
+   it added or where. Nothing points to its one entry point, **Claude Code** in the terminal
+   panel's **+** menu. Fix: after Enable, a toast "Claude Code is ready: open it from the
+   terminal panel's + menu" with a button that opens the panel and that menu; and on the card a
+   short "Adds" line built from the manifest (terminal profile "Claude Code", panel names,
+   status items) with the same open buttons. Every extension that contributes UI gets this.
+4. **Fyx Extensions page** (the card after enabling):
+   - "The registry is off (fyx.extensions.registry_url)" shows a setting key as the
+     explanation; say what it means and how to turn it on, or hide it until 7.10;
+   - "Available: Nothing to show." with the registry off is a dead section;
+   - the card's title is the id `fyx-claude-code`, not the name; the folder path is the
+     second line;
+   - every permission reads "…: on" next to a switch that already says on;
+   - the same raw templates and ids as the dialog (`${package}`, `${listen.ide.port}`,
+     `mcpwebsocket`, the hook channels with `on failure: exit 0`);
+   - the Usage log prints capability ids (`fs:discovery-file#${port}.lock turned on`) instead
+     of the names used above it;
+   - twelve rows with switches on one card and no grouping: group by tier as in the dialog,
+     T0/T1 folded into one line, T2 rows expanded.
 
 ## Deferred after 1.0
 
