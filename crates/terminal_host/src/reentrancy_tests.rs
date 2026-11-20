@@ -2,10 +2,12 @@
 //! each runs its handler the way gpui does, inside the update of a real `MultiWorkspace` window
 //! (and of the panel or view whose listener or subscription it is).
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
+use gpui::{
+    AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle,
+};
+use project::trusted_worktrees::{PathTrust, TrustedWorktrees};
 use project::{FakeFs, Project};
 use serde_json::json;
 use settings::SettingsStore;
@@ -24,6 +26,11 @@ fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let store = SettingsStore::test(cx);
         cx.set_global(store);
+        // The notification window's options read the release channel.
+        let version = "0.0.0"
+            .parse()
+            .unwrap_or_else(|error| panic!("bad version: {error}"));
+        release_channel::init(version, cx);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
         terminal_view::init(cx);
@@ -90,11 +97,22 @@ async fn trusted_worktree_check_inside_the_clicked_window(cx: &mut TestAppContex
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/trusted", json!({ "a.txt": "" })).await;
     fs.insert_tree("/other", json!({ "b.txt": "" })).await;
+    cx.update(|cx| project::trusted_worktrees::init(Default::default(), cx));
+    let (clicked, workspace) = open_window("/trusted", &fs, cx).await;
     cx.update(|cx| {
-        let trusted = HashMap::from_iter([(None, HashSet::from_iter([PathBuf::from("/trusted")]))]);
-        project::trusted_worktrees::init(trusted, cx);
+        let project = workspace.read(cx).project().clone();
+        let store = project.read(cx).worktree_store();
+        let worktrees = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| PathTrust::Worktree(worktree.read(cx).id()))
+            .collect();
+        if let Some(trust) = TrustedWorktrees::try_get_global(cx) {
+            trust.update(cx, |trust, cx| trust.trust(&store, worktrees, cx));
+        }
     });
-    let (clicked, _) = open_window("/trusted", &fs, cx).await;
+    // A menu click updates the window, not its root view: the handler reads the `MultiWorkspace`.
+    let clicked: AnyWindowHandle = clicked.into();
     // Another window is read through its handle, the clicked one through `window`.
     let (_other, _) = open_window("/other", &fs, cx).await;
     cx.run_until_parked();
