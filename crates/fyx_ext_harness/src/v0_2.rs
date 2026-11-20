@@ -307,6 +307,7 @@ impl From<wit::Update> for model::Update {
 impl From<wit::ListRow> for model::ListRow {
     fn from(row: wit::ListRow) -> Self {
         Self {
+            expansion: model::Expansion::Leaf,
             index: row.index,
             indent: row.indent,
             nodes: row.nodes.into_iter().map(Into::into).collect(),
@@ -376,6 +377,8 @@ impl From<model::UiEvent> for wit::UiEvent {
             model::UiEvent::InputSubmitted(id, text) => Self::InputSubmitted((id, text)),
             model::UiEvent::RowClick(id, row) => Self::RowClick((id, row)),
             model::UiEvent::RowSelected(id, row) => Self::RowSelected((id, row)),
+            // Never sent: a 0.2 row has no chevron.
+            model::UiEvent::RowToggled(id, row, _) => Self::RowSelected((id, row)),
             model::UiEvent::Dismissed(reason) => Self::Dismissed(match reason {
                 model::DismissReason::Escape => wit::DismissReason::Escape,
                 model::DismissReason::FocusLost => wit::DismissReason::FocusLost,

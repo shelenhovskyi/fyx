@@ -144,7 +144,14 @@ conversions::conversions! {
             x: click.x.0,
             y: click.y.0,
         }),
+        // Never sent: a 0.3 row has no chevron.
+        model::UiEvent::RowToggled(id, row, _) => Self::RowSelected((id, row)),
     }
+}
+
+/// A row before 0.4 has no chevron (§F.4).
+fn list_row_expansion(_: &wit::ListRow) -> model::Expansion {
+    model::Expansion::Leaf
 }
 
 /// The `fyx:ui` 0.3 interfaces [`add_to_linker`] links.

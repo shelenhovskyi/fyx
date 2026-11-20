@@ -1026,8 +1026,10 @@ impl Mounted {
                     list.selected = Some(*row);
                 }
             }
+            // The extension answers a toggle with new rows; the renderer keeps none of its own.
             model::UiEvent::Click(_)
             | model::UiEvent::RowClick(..)
+            | model::UiEvent::RowToggled(..)
             | model::UiEvent::Dismissed(_)
             | model::UiEvent::NotificationAction(_)
             | model::UiEvent::NotificationClosed(..)

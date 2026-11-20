@@ -273,6 +273,8 @@ impl ApiState {
             }
             v0_2::UiEvent::InputChanged(..)
             | v0_2::UiEvent::RowSelected(..)
+            // A chevron toggle is no gesture (§F.4).
+            | v0_2::UiEvent::RowToggled(..)
             | v0_2::UiEvent::ProgressCancelRequested(_) => {}
         }
     }

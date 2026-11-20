@@ -484,6 +484,27 @@ pub struct ListRow {
     pub indent: u8,
     /// A subtree whose single root has `parent: None`. Ids are row-local.
     pub nodes: Vec<Node>,
+    /// 0.4 (plan 6.7, design wit-0.4 §F.1): the row's chevron; always `leaf` from older worlds.
+    /// Left out of the JSON form when `leaf`, so older rows read and write as before.
+    #[serde(default, skip_serializing_if = "Expansion::is_leaf")]
+    pub expansion: Expansion,
+}
+
+/// 0.4 (plan 6.7): a tree row's chevron. `leaf` draws an empty chevron slot, so leaves line up
+/// with their siblings; no slot is drawn while every row of a list is a `leaf`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Expansion {
+    #[default]
+    Leaf,
+    Collapsed,
+    Expanded,
+}
+
+impl Expansion {
+    pub fn is_leaf(&self) -> bool {
+        *self == Self::Leaf
+    }
 }
 
 impl ListRow {
@@ -523,6 +544,10 @@ pub enum UiEvent {
     ProgressCancelRequested(u64),
     /// 0.3 (§13). A click on a clickable canvas, in canvas coordinates; a gesture, like `click`.
     CanvasClick(crate::canvas::CanvasClick),
+    /// 0.4 (plan 6.7, §F.1). The list node, the row index, and `true` when the row asks to be
+    /// expanded: a chevron click, or Right/Left on the focused list. The host changes no rows.
+    /// Not a gesture: expanding is browsing.
+    RowToggled(NodeId, u32, bool),
 }
 
 impl UiEvent {
@@ -533,7 +558,8 @@ impl UiEvent {
             | UiEvent::InputChanged(id, _)
             | UiEvent::InputSubmitted(id, _)
             | UiEvent::RowClick(id, _)
-            | UiEvent::RowSelected(id, _) => Some(*id),
+            | UiEvent::RowSelected(id, _)
+            | UiEvent::RowToggled(id, ..) => Some(*id),
             UiEvent::CanvasClick(click) => Some(click.canvas),
             UiEvent::Dismissed(_)
             | UiEvent::NotificationAction(_)
@@ -755,6 +781,7 @@ impl From<v0_1::Update> for Update {
 impl From<v0_1::ListRow> for ListRow {
     fn from(row: v0_1::ListRow) -> Self {
         Self {
+            expansion: Expansion::Leaf,
             index: row.index,
             indent: 0,
             nodes: row.nodes.into_iter().map(Into::into).collect(),
@@ -797,6 +824,7 @@ impl TryFrom<UiEvent> for v0_1::UiEvent {
                 Err(not_in_v0_1("notification and progress events"))
             }
             UiEvent::CanvasClick(_) => Err(not_in_v0_1("the canvas-click event")),
+            UiEvent::RowToggled(..) => Err(not_in_v0_1("the row-toggled event")),
         }
     }
 }
@@ -986,6 +1014,7 @@ mod tests {
     #[test]
     fn indent_is_clamped_when_drawn() {
         let row = |indent| ListRow {
+            expansion: Expansion::Leaf,
             index: 0,
             indent,
             nodes: Vec::new(),
@@ -1101,6 +1130,7 @@ mod tests {
             })
         );
         let row = ListRow {
+            expansion: Expansion::Leaf,
             index: 1,
             indent: 2,
             nodes: Vec::new(),
@@ -1108,6 +1138,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&row).expect("serializes"),
             serde_json::json!({ "index": 1, "indent": 2, "nodes": [] })
+        );
+        let row = ListRow {
+            expansion: Expansion::Collapsed,
+            ..row
+        };
+        assert_eq!(
+            serde_json::to_value(&row).expect("serializes"),
+            serde_json::json!({ "index": 1, "indent": 2, "nodes": [], "expansion": "collapsed" })
         );
     }
 
