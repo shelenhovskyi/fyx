@@ -290,6 +290,17 @@ struct ProfileItem {
     account_choice: Option<String>,
 }
 
+/// A shell started with a command to run (`-c`, `-e`, `/c`): what it runs is in its arguments,
+/// not typed by the user.
+fn runs_its_arguments(profile: &TerminalProfile) -> bool {
+    profile.args.iter().any(|arg| match arg.0.as_slice() {
+        [ui_ext::terminal::TemplatePart::Literal(text)] => {
+            text == "-c" || text == "-e" || text.eq_ignore_ascii_case("/c")
+        }
+        _ => false,
+    })
+}
+
 fn profile_items(
     integrations: &[(String, Arc<TerminalIntegration>)],
     settings: &FyxAccountsSettingsContent,
@@ -298,10 +309,12 @@ fn profile_items(
     let mut items = Vec::new();
     for (ext, integration) in integrations {
         for profile in &integration.profiles {
-            let marker = if profile.runs_any_code() {
-                " (runs any command you type)"
-            } else {
+            let marker = if !profile.runs_any_code() {
                 ""
+            } else if runs_its_arguments(profile) {
+                " (runs the command in its arguments)"
+            } else {
+                " (runs any command you type)"
             };
             let base = format!("{} — {}", profile.name, integration.extension_name);
             let tool_accounts = profile
@@ -788,6 +801,35 @@ mod tests {
                 ("Claude Code — Personal — Claude", Some("claude=Personal")),
                 ("Claude Code — Work — Claude", Some("claude=Work")),
                 ("Bash — Shells (runs any command you type)", None),
+            ]
+        );
+        let mut scripted = integration(&[]);
+        scripted.extension_name = "Shells".into();
+        scripted.profiles = ["-c", "-e", "/C"]
+            .into_iter()
+            .map(|flag| TerminalProfile {
+                name: format!("Shell {flag}"),
+                program: if flag == "/C" { "cmd" } else { "bash" }.into(),
+                args: vec![
+                    template(flag, TemplateUse::ProfileArg),
+                    template("make watch", TemplateUse::ProfileArg),
+                ],
+                ..profile("shell", None)
+            })
+            .collect();
+        let scripted = profile_items(
+            &[("shells".into(), Arc::new(scripted))],
+            &accounts_settings(),
+        );
+        assert_eq!(
+            scripted
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Shell -c — Shells (runs the command in its arguments)",
+                "Shell -e — Shells (runs the command in its arguments)",
+                "Shell /C — Shells (runs the command in its arguments)",
             ]
         );
         let no_accounts = profile_items(
