@@ -49,6 +49,16 @@ fn checked_images(
     .map(|()| update)
 }
 
+/// One row of [`UiExtension::list_row_trees_v0_2`].
+#[derive(Debug)]
+pub struct RowTree {
+    pub index: u32,
+    /// [`model::ListRow::indent_levels`]: what to draw.
+    pub indent: u8,
+    pub expansion: model::Expansion,
+    pub tree: model::tree::Tree,
+}
+
 impl UiBindings {
     pub(crate) async fn instantiate(
         version: ApiVersion,
@@ -418,6 +428,59 @@ impl UiExtension {
         })
     }
 
+    /// [`Self::mount_v0_2`] as the validated tree itself: the nodes go into it without a copy, and
+    /// the caller does not build it a second time.
+    pub async fn mount_tree_v0_2(
+        &self,
+        surface_id: &str,
+    ) -> Result<EffectReply<model::tree::Tree>> {
+        let (nodes, effects) = self.mount_unchecked(surface_id).await?;
+        match model::tree::Tree::from_nodes(nodes, self.limits)
+            .with_context(|| format!("invalid tree from mount({surface_id:?})"))
+        {
+            Ok(tree) => Ok(EffectReply {
+                effects,
+                value: tree,
+            }),
+            Err(error) => Err(self.rejected(error, effects)),
+        }
+    }
+
+    /// [`Self::list_rows_v0_2`] as validated trees, built once and without copying the nodes.
+    pub async fn list_row_trees_v0_2(
+        &self,
+        surface_id: &str,
+        list_node: model::NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<EffectReply<Vec<RowTree>>> {
+        let (rows, effects) = self
+            .list_rows_unchecked(surface_id, list_node, start, count)
+            .await?;
+        let requested = start..start.saturating_add(count);
+        let trees = rows
+            .into_iter()
+            .map(|row| {
+                let indent = row.indent_levels();
+                let tree =
+                    self.row_tree(surface_id, list_node, &requested, row.index, row.nodes)?;
+                Ok(RowTree {
+                    index: row.index,
+                    indent,
+                    expansion: row.expansion,
+                    tree,
+                })
+            })
+            .collect::<Result<Vec<_>>>();
+        match trees {
+            Ok(trees) => Ok(EffectReply {
+                effects,
+                value: trees,
+            }),
+            Err(error) => Err(self.rejected(error, effects)),
+        }
+    }
+
     /// The tick `request-tick` asked for. The update applies to `surface_id`, like an event's.
     /// A 0.1 component is never ticked: it answers `unchanged` without a call into it.
     pub async fn tick(&self, surface_id: &str) -> Result<EffectReply<model::Update>> {
@@ -560,7 +623,8 @@ impl UiExtension {
         rx.await.expect("the queue runs")
     }
 
-    async fn mount_checked(
+    /// `mount`'s nodes as the guest returned them, not yet validated.
+    async fn mount_unchecked(
         &self,
         surface_id: &str,
     ) -> Result<(Vec<model::Node>, Vec<HostEffect>)> {
@@ -578,8 +642,17 @@ impl UiExtension {
             )
             .await?;
         let nodes = self.guest_result(result, &effects)?;
-        // Validated as a 0.2 tree. Only the 0.1 API builds the 0.1 copy: on the 0.2 path it was
-        // a second tree, built on the main thread and dropped, on every mount.
+        Ok((nodes, effects))
+    }
+
+    /// `mount`'s nodes, validated as a 0.2 tree, for callers that want the nodes themselves.
+    async fn mount_checked(
+        &self,
+        surface_id: &str,
+    ) -> Result<(Vec<model::Node>, Vec<HostEffect>)> {
+        let (nodes, effects) = self.mount_unchecked(surface_id).await?;
+        // Only the 0.1 API builds the 0.1 copy: on the 0.2 path it was a second tree, built on
+        // the main thread and dropped, on every mount.
         match model::tree::Tree::from_nodes(nodes.clone(), self.limits)
             .with_context(|| format!("invalid tree from mount({surface_id:?})"))
         {
@@ -588,7 +661,8 @@ impl UiExtension {
         }
     }
 
-    async fn list_rows_checked(
+    /// The rows of `list-rows` as the guest returned them, not yet validated.
+    async fn list_rows_unchecked(
         &self,
         surface_id: &str,
         list_node: model::NodeId,
@@ -609,22 +683,49 @@ impl UiExtension {
             })
             .await?;
         let rows = self.guest_result(rows, &effects)?;
+        Ok((rows, effects))
+    }
+
+    /// The row as a 0.2 tree, checked to be one of the rows asked for.
+    fn row_tree(
+        &self,
+        surface_id: &str,
+        list_node: model::NodeId,
+        requested: &std::ops::Range<u32>,
+        index: u32,
+        nodes: Vec<model::Node>,
+    ) -> Result<model::tree::Tree> {
+        anyhow::ensure!(
+            requested.contains(&index),
+            "list-rows({surface_id:?}, {list_node}) returned row {index} outside {requested:?}",
+        );
+        model::tree::Tree::from_row(nodes, self.limits).with_context(|| {
+            format!("invalid row {index} from list-rows({surface_id:?}, {list_node})")
+        })
+    }
+
+    /// The rows of `list-rows`, each validated as a 0.2 tree, for callers that want the rows.
+    async fn list_rows_checked(
+        &self,
+        surface_id: &str,
+        list_node: model::NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<(Vec<model::ListRow>, Vec<HostEffect>)> {
+        let (rows, effects) = self
+            .list_rows_unchecked(surface_id, list_node, start, count)
+            .await?;
         let requested = start..start.saturating_add(count);
-        // Each row validated as a 0.2 tree; the 0.1 copies are built by the 0.1 API only, not
-        // for every visible row on every scroll.
+        // The 0.1 copies are built by the 0.1 API only, not for every visible row on every scroll.
         let checked = rows.iter().try_for_each(|row| {
-            anyhow::ensure!(
-                requested.contains(&row.index),
-                "list-rows({surface_id:?}, {list_node}) returned row {} outside {requested:?}",
+            self.row_tree(
+                surface_id,
+                list_node,
+                &requested,
                 row.index,
-            );
-            model::tree::Tree::from_row(row.nodes.clone(), self.limits).with_context(|| {
-                format!(
-                    "invalid row {} from list-rows({surface_id:?}, {list_node})",
-                    row.index
-                )
-            })?;
-            Ok(())
+                row.nodes.clone(),
+            )
+            .map(drop)
         });
         match checked {
             Ok(()) => Ok((rows, effects)),

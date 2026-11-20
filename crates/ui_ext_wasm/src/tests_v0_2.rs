@@ -354,6 +354,37 @@ async fn test_v0_2_mount_and_rows_carry_the_new_props(cx: &mut TestAppContext) {
     assert_eq!(rows[4].indent_levels(), 32);
 }
 
+/// The tree-returning calls the host uses give the same trees as building them from the nodes.
+#[gpui::test]
+async fn test_v0_2_mount_and_rows_as_trees_match_the_nodes(cx: &mut TestAppContext) {
+    let extension = load(cx).await;
+    let limits = ui_ext::TreeLimits::default();
+
+    let nodes = extension.mount_v0_2(SURFACE).await.expect("mount").value;
+    let tree = extension.mount_tree_v0_2(SURFACE).await.expect("mount").value;
+    let expected = ui_ext::v0_2::tree::Tree::from_nodes(nodes, limits).expect("valid");
+    assert_eq!(tree.to_nodes(), expected.to_nodes());
+
+    let rows = extension
+        .list_rows_v0_2(SURFACE, 4, 30, 5)
+        .await
+        .expect("rows")
+        .value;
+    let trees = extension
+        .list_row_trees_v0_2(SURFACE, 4, 30, 5)
+        .await
+        .expect("rows")
+        .value;
+    assert_eq!(rows.len(), trees.len());
+    for (row, tree) in rows.into_iter().zip(trees) {
+        assert_eq!(tree.index, row.index);
+        assert_eq!(tree.indent, row.indent_levels());
+        assert_eq!(tree.expansion, row.expansion);
+        let expected = ui_ext::v0_2::tree::Tree::from_row(row.nodes, limits).expect("valid");
+        assert_eq!(tree.tree.to_nodes(), expected.to_nodes());
+    }
+}
+
 #[gpui::test]
 async fn test_v0_2_push_update_returns_a_result(cx: &mut TestAppContext) {
     let extension = load(cx).await;

@@ -93,6 +93,7 @@ pub use effects::{
 };
 pub use ui_ext::v0_2::{CAPABILITY_EDITOR_DECORATIONS, CAPABILITY_MODAL};
 
+pub use dispatch::RowTree;
 use dispatch::UiBindings;
 
 /// Compiled code of UI components, kept for the process so a reload of an unchanged component

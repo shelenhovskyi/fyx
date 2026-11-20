@@ -9,10 +9,7 @@
 use anyhow::Result;
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use semver::Version;
-use ui_ext::{
-    TreeLimits,
-    v0_2::{ListRow, NodeId, UiEvent, Update, tree::Tree},
-};
+use ui_ext::v0_2::{NodeId, UiEvent, Update, tree::Tree};
 use ui_ext_wasm::{EffectReply, EffectReplyError, UiExtension};
 
 pub use ui_ext_wasm::HostEffect;
@@ -220,9 +217,8 @@ impl UiBackend for UiExtension {
         let this = self.clone();
         let surface_id = surface_id.to_string();
         async move {
-            convert_reply(this.mount_v0_2(&surface_id).await, |nodes| {
-                Ok(Tree::from_nodes(nodes, TreeLimits::default())?)
-            })
+            // Validated and built once, in the instance (no second tree here).
+            convert_reply(this.mount_tree_v0_2(&surface_id).await, Ok)
         }
         .boxed_local()
     }
@@ -249,20 +245,18 @@ impl UiBackend for UiExtension {
         let surface_id = surface_id.to_string();
         async move {
             convert_reply(
-                this.list_rows_v0_2(&surface_id, list_node, start, count)
+                this.list_row_trees_v0_2(&surface_id, list_node, start, count)
                     .await,
-                |rows: Vec<ListRow>| {
-                    rows.into_iter()
-                        .map(|row| {
-                            let indent = row.indent_levels();
-                            Ok(Row {
-                                index: row.index,
-                                indent,
-                                expansion: row.expansion,
-                                tree: Tree::from_row(row.nodes, TreeLimits::default())?,
-                            })
+                |rows| {
+                    Ok(rows
+                        .into_iter()
+                        .map(|row| Row {
+                            index: row.index,
+                            indent: row.indent,
+                            expansion: row.expansion,
+                            tree: row.tree,
                         })
-                        .collect()
+                        .collect())
                 },
             )
         }

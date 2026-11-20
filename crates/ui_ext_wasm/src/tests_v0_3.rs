@@ -248,6 +248,19 @@ async fn test_v0_3_image_replies(cx: &mut TestAppContext) {
             error.downcast_ref::<EffectReplyError>().is_some(),
             "{error:#}"
         );
+        let error = extension.mount_tree_v0_2(surface).await.unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_some(),
+            "{error:#}"
+        );
+        let error = extension
+            .list_row_trees_v0_2(surface, 7, 0, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<EffectReplyError>().is_some(),
+            "{error:#}"
+        );
     }
     // The panel mounts, and nothing above was fatal.
     extension.mount_v0_2(SURFACE).await.expect("mounts");
