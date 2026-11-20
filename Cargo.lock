@@ -7122,6 +7122,9 @@ name = "fyx_update_host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-compression",
+ "async-tar",
+ "async_zip",
  "base64 0.22.1",
  "futures 0.3.34",
  "fyx_update",
@@ -7133,11 +7136,14 @@ dependencies = [
  "release_channel",
  "ring",
  "semver",
+ "serde",
  "serde_json",
  "settings",
  "sha2",
+ "smol",
  "tempfile",
  "ui",
+ "util",
  "workspace",
 ]
 
