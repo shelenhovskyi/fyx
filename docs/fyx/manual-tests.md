@@ -166,7 +166,9 @@ Covers: W1 rebrand and de-cloud.
 
    - Expect: `$seen` is empty. The DNS cache has no `zed.dev`, `cloud.zed.dev`, `api.zed.dev`,
      `collab.zed.dev`, sentry or telemetry hosts. Any entry from another process on the machine is
-     noise: rerun with other apps closed before calling it a FAIL.
+     noise: rerun with other apps closed before calling it a FAIL. This needs a profile with no
+     Zed extensions from the registry installed: with one installed, Fyx checks `api.zed.dev`
+     for its update at startup, which is expected.
    - The 200 ms poll can miss a short connection. Before you call a PASS, also run once with
      `pktmon start --capture --comp nics` (stop with `pktmon stop`, convert with
      `pktmon etl2txt PktMon.etl`) or watch Resource Monitor → Network.

@@ -104,6 +104,10 @@
       "hidden_status_items": [],
       // The Fyx extension registry (https://, http://localhost or file://). Empty: off.
       "registry_url": "",
+      // Zed's extension registry (themes, languages, language servers) on the Extensions page.
+      // Only that page, installs and update checks of installed Zed extensions use it; the rest
+      // of Zed's cloud stays off with `server_url`. Zed's terms apply. Empty: off.
+      "zed_registry_url": "https://api.zed.dev",
       "network": {
         // Host names UI extensions may reach on your private network (10/8, 172.16/12,
         // 192.168/16, 100.64/10, fc00::/7) when they also declare them; "*.corp.example"

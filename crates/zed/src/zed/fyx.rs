@@ -128,5 +128,12 @@ mod tests {
         assert_eq!(defaults["telemetry"]["diagnostics"], false);
         assert_eq!(defaults["auto_update"], false);
         assert_eq!(defaults["agent"]["default_model"]["provider"], "anthropic");
+        // Zed's extension registry stays on while the rest of Zed's cloud is off (owner,
+        // 2026-11-20).
+        assert_eq!(
+            defaults["fyx"]["extensions"]["zed_registry_url"],
+            "https://api.zed.dev"
+        );
+        assert_eq!(defaults["suggest_extensions"], false);
     }
 }

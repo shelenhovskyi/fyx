@@ -45,8 +45,10 @@ Things that differ from Zed:
   - Edit predictions are off (`"provider": "none"`), because Zed's provider needs an account.
     Bring your own provider, such as a local llama.cpp server: see
     [Edit predictions without zed.dev](#edit-predictions-without-zeddev).
-- **No Zed extension registry.** Fyx does not install extensions from Zed's registry or suggest
-  them. Zed extensions you install as dev extensions still work.
+- **Zed's extension registry, without the rest of Zed's cloud.** The Extensions page lists and
+  installs Zed extensions (themes, languages, language servers) from `api.zed.dev`, as Zed does.
+  It is the only zed.dev service Fyx uses, and Zed's terms apply to it. Fyx does not suggest or
+  auto-install Zed extensions. See [Zed's extension registry](#zeds-extension-registry).
 - **Dev builds only.** Fyx is a prototype, built and tested on Windows 11 only. There are no
   releases, installers or signed binaries yet. To build it, see the [README](../../README.md).
 
@@ -59,7 +61,8 @@ override any of them in your settings.
 
 | What | Fyx default | Effect |
 |---|---|---|
-| `server_url` | `"http://127.0.0.1:0"` | Every zed.dev address (sign-in, collaboration, extension registry, telemetry upload, update checks) is built from this value. It points nowhere, so these requests fail before anything is sent. |
+| `server_url` | `"http://127.0.0.1:0"` | Every zed.dev address (sign-in, collaboration, telemetry upload, update checks) is built from this value. It points nowhere, so these requests fail before anything is sent. |
+| `fyx.extensions.zed_registry_url` | `"https://api.zed.dev"` | Zed's extension registry, the one exception. See [Zed's extension registry](#zeds-extension-registry). |
 | `telemetry.diagnostics`, `telemetry.metrics` | `false` | No telemetry and no crash reports. |
 | `auto_update` | `false` | No update checks. Fyx has no update feed. |
 | `edit_predictions.provider` | `"none"` | No edit prediction requests. |
@@ -70,6 +73,23 @@ override any of them in your settings.
 To use Zed's services anyway, set `"server_url": "https://zed.dev"` in your settings. Zed's terms
 then apply. The `ZED_SERVER_URL` environment variable also overrides the setting.
 
+### Zed's extension registry
+
+The Extensions page (`zed: extensions`) lists, installs and updates Zed extensions from Zed's
+registry at `https://api.zed.dev`, the address in `fyx.extensions.zed_registry_url`. Only these
+requests use it: the rest of Zed's cloud stays off through `server_url`. Zed's terms apply to the
+registry.
+
+- **When Fyx connects.** When you open the Extensions page or search it, when you install an
+  extension, and at startup when Zed extensions from the registry are installed, to check them
+  for updates. With none installed, nothing is sent at startup.
+- **Turning it off.** Set `"fyx": { "extensions": { "zed_registry_url": "" } }` in your settings.
+  The registry address then comes from `server_url` again, which points nowhere. Installed
+  extensions keep working, and dev extensions install from a folder either way.
+- **Fyx's own folders.** Fyx does not see extensions installed in Zed: install them again in Fyx.
+
+<!-- crates/extension_host/src/fyx_zed_registry.rs; crates/extension_host/src/extension_host.rs (fyx:); assets/settings/fyx.json -->
+
 ### Network at startup
 
 On a fresh profile, with no folder open and no AI keys set, Fyx makes no connection outside your
@@ -79,7 +99,11 @@ registry agent.
 
 <!-- tasks/progress/W1.md "Verification"; crates/project/src/agent_registry_store.rs (fyx:) -->
 
-Fyx still connects in these cases. None of them goes to zed.dev.
+Fyx still connects in these cases. Only the first goes to zed.dev.
+
+- **Zed's extension registry**, at startup only while Zed extensions from the registry are
+  installed (an update check), and when you use the Extensions page. See
+  [Zed's extension registry](#zeds-extension-registry).
 
 - **AI providers, on first use.** With an AI key in the environment or the keychain, providers
   start when you first open the model picker or send a prompt, not at startup. Some then download

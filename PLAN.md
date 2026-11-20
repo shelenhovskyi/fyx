@@ -86,7 +86,11 @@ running more than 2–3 compiling streams at once.
   getfyx.com.
 - Trademark: several US FYX marks exist in classes 9 and 42; talk to a trademark lawyer before any
   commercialisation.
-- Whether the build may talk to Zed's extension registry at all (Zed ToS apply).
+
+**Decided:** Fyx uses Zed's extension registry by default (owner, 2026-11-20). Only the registry:
+`fyx.extensions.zed_registry_url` (`https://api.zed.dev`) gives it its own address, and the rest of
+Zed's cloud stays off through `server_url`. Zed's terms apply to the registry; the user guide says
+so. No suggestions or auto-installs from it. Code: `crates/extension_host/src/fyx_zed_registry.rs`.
 
 **Decided:** Fyx does not support VS Code extensions: no Node sidecar, no `.vsix` import or
 conversion as a feature (owner, 2026-11-20). Backlog item 12 is dropped; the W8 code stays in the

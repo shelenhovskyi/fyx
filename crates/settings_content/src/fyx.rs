@@ -179,6 +179,14 @@ pub struct FyxExtensionsSettingsContent {
     ///
     /// Default: ""
     pub registry_url: Option<String>,
+    /// Zed's extension registry (themes, languages, language servers): an `http(s)://` base URL.
+    /// Only the Extensions page, installs and update checks of installed Zed extensions use it;
+    /// sign-in, telemetry and the rest of Zed's cloud stay off with `server_url`. Zed's terms
+    /// apply to the registry. Empty builds the address from `server_url`, which in Fyx points
+    /// nowhere, so the registry is off.
+    ///
+    /// Default: "https://api.zed.dev"
+    pub zed_registry_url: Option<String>,
     /// What UI extensions may reach over the network.
     pub network: Option<FyxExtensionsNetworkSettingsContent>,
 }
