@@ -49,5 +49,6 @@ project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 terminal = { workspace = true, features = ["test-support"] }
 terminal_view = { workspace = true, features = ["test-support"] }
+theme.workspace = true
 workspace = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
