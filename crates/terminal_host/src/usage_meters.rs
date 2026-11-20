@@ -9,10 +9,13 @@
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
+    time::Instant,
 };
 
 use acp_thread::{AcpThread, AcpThreadEvent, ThreadStatus};
-use gpui::{App, AppContext as _, Context, DismissEvent, Entity, EntityId, Global, Subscription};
+use gpui::{
+    App, AppContext as _, Context, DismissEvent, Entity, EntityId, Global, Subscription, WeakEntity,
+};
 use serde::{Deserialize, Serialize};
 use settings::Settings as _;
 use workspace::notifications::{
@@ -236,6 +239,10 @@ fn today() -> String {
 
 struct Watched {
     key: SessionKey,
+    /// Plan 7.9: the Agent Sessions board lists live threads.
+    thread: WeakEntity<AcpThread>,
+    /// When the thread last changed state, for the board's order.
+    changed: Instant,
     _subscription: Subscription,
 }
 
@@ -282,6 +289,24 @@ pub fn init(data_dir: Option<PathBuf>, cx: &mut App) {
     .detach();
 }
 
+/// Events that change what the Agent Sessions board shows for a thread; streamed content does not.
+fn board_changed(event: &AcpThreadEvent) -> bool {
+    matches!(
+        event,
+        AcpThreadEvent::StatusChanged
+            | AcpThreadEvent::ActivityConfirmedIdle
+            | AcpThreadEvent::TitleUpdated
+            | AcpThreadEvent::ToolAuthorizationRequested(_)
+            | AcpThreadEvent::ToolAuthorizationReceived(_)
+            | AcpThreadEvent::ElicitationRequested(_)
+            | AcpThreadEvent::ElicitationResponded(_)
+            | AcpThreadEvent::Stopped { .. }
+            | AcpThreadEvent::Error
+            | AcpThreadEvent::ConnectionLost
+            | AcpThreadEvent::Refusal
+    )
+}
+
 impl LiveMeters {
     pub fn meters(&self) -> &UsageMeters {
         &self.meters
@@ -291,6 +316,14 @@ impl LiveMeters {
     pub fn thread_usage(&self, thread: EntityId) -> Option<&SessionUsage> {
         let watched = self.threads.get(&thread)?;
         self.meters.session(&watched.key)
+    }
+
+    /// Live threads and when each last changed state (plan 7.9).
+    pub fn threads(&self) -> Vec<(Entity<AcpThread>, Instant)> {
+        self.threads
+            .values()
+            .filter_map(|watched| Some((watched.thread.upgrade()?, watched.changed)))
+            .collect()
     }
 
     pub fn today(&self) -> Vec<Cost> {
@@ -309,9 +342,17 @@ impl LiveMeters {
 
     fn watch(&mut self, thread: Entity<AcpThread>, cx: &mut Context<Self>) {
         let id = thread.entity_id();
-        let subscription = cx.subscribe(&thread, |meters, thread, event, cx| match event {
-            AcpThreadEvent::TokenUsageUpdated(_) => meters.report(&thread, cx),
-            _ => meters.enforce_cap(&thread, cx),
+        let subscription = cx.subscribe(&thread, |meters, thread, event, cx| {
+            if board_changed(event) {
+                if let Some(watched) = meters.threads.get_mut(&thread.entity_id()) {
+                    watched.changed = Instant::now();
+                }
+                cx.notify();
+            }
+            match event {
+                AcpThreadEvent::TokenUsageUpdated(_) => meters.report(&thread, cx),
+                _ => meters.enforce_cap(&thread, cx),
+            }
         });
         cx.observe_release(&thread, move |meters, _, cx| {
             if let Some(watched) = meters.threads.remove(&id) {
@@ -325,6 +366,8 @@ impl LiveMeters {
             id,
             Watched {
                 key,
+                thread: thread.downgrade(),
+                changed: Instant::now(),
                 _subscription: subscription,
             },
         );

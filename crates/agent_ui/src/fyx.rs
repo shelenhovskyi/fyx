@@ -185,3 +185,28 @@ mod tests {
         );
     }
 }
+
+/// Plan 7.9: the Agent Sessions board (`terminal_host`) brings a thread to the front through
+/// `acp_thread::fyx_focus`: its window's agent panel opens the thread and takes focus.
+pub(crate) fn install_thread_focuser(cx: &mut App) {
+    acp_thread::fyx_focus::set_thread_focuser(
+        Rc::new(|thread, window, cx| {
+            let Some(workspace) = Workspace::for_window(window, cx) else {
+                return;
+            };
+            let (session_id, title) = {
+                let thread = thread.read(cx);
+                (thread.session_id().clone(), thread.title())
+            };
+            workspace.update(cx, |workspace, cx| {
+                if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                    panel.update(cx, |panel, cx| {
+                        panel.open_thread(session_id, None, title, window, cx)
+                    });
+                }
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+        }),
+        cx,
+    );
+}

@@ -6,6 +6,7 @@ mod connection;
 pub mod content;
 mod diff;
 pub mod elicitation;
+pub mod fyx_focus; // fyx: Agent Sessions board focuses a thread
 pub mod fyx_review; // fyx: agent write review gate
 pub mod fyx_secrets; // fyx: secret references in agent terminals
 mod mention;

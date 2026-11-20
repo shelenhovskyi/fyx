@@ -687,6 +687,7 @@ pub fn init(
     agent::ThreadStore::init_global(cx);
     prompt_store::init(cx);
     agent_review::init(Some(fs.clone()), cx); // fyx: host review of agent edits
+    fyx::install_thread_focuser(cx); // fyx: Agent Sessions board (7.9)
 
     cx.set_global(agent_skills::SkillsUpdatedHook(std::rc::Rc::new(|cx| {
         let workspaces: Vec<_> = workspace::AppState::global(cx)
