@@ -186,6 +186,7 @@ impl VsCodeSettings {
             agent_review: None, // fyx: agent_review
             fyx_security: None, // fyx: fyx_guard
             fyx: None,          // fyx: settings of Fyx crates
+            fyx_extensions: None, // fyx: plan 6.1
             audio: None,
             auto_update: None,
             base_keymap: Some(BaseKeymapContent::VSCode),
