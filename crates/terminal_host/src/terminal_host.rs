@@ -190,6 +190,11 @@ pub fn extension_terminal_view(
     Some(view.into())
 }
 
+/// Plan 7.8: cost and context meters for every agent thread; day totals in `data_dir`.
+pub fn init_usage_meters(data_dir: std::path::PathBuf, cx: &mut App) {
+    usage_meters::init(Some(data_dir), cx);
+}
+
 pub fn init(cx: &mut App) {
     init_host(cx);
     sessions::init(cx);

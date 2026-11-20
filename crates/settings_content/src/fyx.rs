@@ -102,6 +102,12 @@ pub struct FyxTerminalSettingsContent {
     ///
     /// Default: true
     pub shell_integration: Option<bool>,
+    /// A soft daily cap on agents' cost in US dollars, from the cost they report (plan 7.8).
+    /// Reaching it stops the running agent turns with a notice; "Continue today" lifts it until
+    /// the next day. 0 means no cap.
+    ///
+    /// Default: 0
+    pub daily_cost_cap: Option<f32>,
 }
 
 /// `fyx.extensions`.
