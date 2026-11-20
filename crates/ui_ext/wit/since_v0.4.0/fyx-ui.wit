@@ -1197,6 +1197,28 @@ interface review {
         final-content: string,
     }
 
+    /// 0.4 (plan 7.2). A comment's hunk: accepted (follow-up work), rejected (why) or still open.
+    enum comment-state { accepted, rejected, pending }
+    record review-comment {
+        path: file-ref,
+        /// Lines of the file after the change, 1-based and inclusive (`end` < `start`: lines were
+        /// removed after `start`); none when the review showed a fragment of the file.
+        lines: option<tuple<u32, u32>>,
+        state: comment-state,
+        /// The first changed line, at most 80 characters.
+        excerpt: string,
+        text: string,
+    }
+
+    /// 0.4 (plan 7.2). The user's comments on this extension's proposals, sent as one batch.
+    record review-comments {
+        /// The proposals' `session`.
+        session: string,
+        comments: list<review-comment>,
+        /// The comments as one prompt for the agent, with paths relative to the project.
+        prompt: string,
+    }
+
     /// The outcome arrives as `io-event::review-decided` with the returned id.
     propose: func(request: proposal) -> result<u64, host-error>;
     /// The tool closed its diff (Gemini's `closeDiff`, Claude's `close_tab`): an undecided
@@ -1325,7 +1347,7 @@ interface io {
     use permissions.{t2-capability, permission-state};
     use terminals.{terminal-handle, terminal-info};
     use listeners.{mcp-call, mcp-session};
-    use review.{review-outcome};
+    use review.{review-outcome, review-comments};
     use context.{editor-context};
     use approvals.{approval-option};
     use types.{file-ref};
@@ -1373,6 +1395,8 @@ interface io {
         relay-request(tuple<u64, string, option<terminal-handle>, list<string>, string>),
         /// 0.4.
         review-decided(tuple<u64, result<review-outcome, string>>),
+        /// 0.4 (plan 7.2, design.md §B.10). Comments the user sent on this extension's proposals.
+        review-comments(review-comments),
         /// 0.4.
         context-changed(editor-context),
         /// 0.4. The files whose diagnostics changed, at most 200; empty when more changed (anything
