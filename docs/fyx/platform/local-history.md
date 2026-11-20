@@ -1,8 +1,8 @@
 # Local history and agent timeline (plan 6.3)
 
-Status: design and core only. `crates/fyx_history` holds the store, the timelines, restore and
-pruning, with its tests. Nothing is wired into the app yet, and the crate is not a workspace
-member yet (W0 lines below).
+Status: core (`crates/fyx_history`) and host (`crates/fyx_history_host`) written and tested.
+`fyx_history_host::init` still needs its call in `main.rs` (W0), after `agent_review` is set up.
+Not seen in a running build yet.
 
 ## Goals
 
@@ -54,35 +54,37 @@ distinct contents fit `max_total_bytes` (256 MiB). A change goes with all its fi
 and the newest save or change is always kept. The index is rewritten atomically and unreferenced
 blobs are deleted. The host prunes when it opens a store and after every 100 records.
 
-## What the host does (not done yet)
+## What the host does (`fyx_history_host`)
 
-A `fyx_history_host` crate, owned by the stream that owns `agent_review` (W5), on a background
-thread with one `History` per worktree behind a mutex:
+One `History` per worktree behind a mutex, used from background tasks only.
 
-- **Saves:** subscribe to `BufferEvent::Saved` of the project's local buffers (no upstream hook
-  needed) and call `record_save` with the saved text.
-- **Agent turns:** on the first landed write of an `agent_review` turn call `begin_turn(session,
-  label)` and keep the `TurnId` → `ChangeId` map for the run (`TurnId` is not stable across runs,
-  `ChangeId` is). For each landed write call `record_turn_file` with the file's text before and
-  after; for writes that bypassed review (`AgentReviewEvent::UnreviewedChanges`) use the observed
-  before-snapshot and the disk content. Accepted, rejected and auto-accepted files are all
-  recorded as they landed.
-- **UI:** a "Local History" timeline for the active file and an "Agent Turns" list: each turn with
-  its files and "Undo Turn"; the conflict list from `plan` with "Restore Anyway"; "Restore This
-  Version" on a file snapshot. Open buffers reload from disk after a restore.
-- **Settings:** `fyx.history.enabled` (default on, local only), `fyx.history.max_total_mb`,
-  `fyx.history.max_age_days`, `fyx.history.max_file_mb`.
+- **Saves:** every local project's buffers are watched for `BufferEvent::Saved`; the buffer text
+  with the buffer's line ending goes to `record_save` (no upstream hook).
+- **Agent turns:** `agent_review` calls a decided-file observer (`set_decided_file_observer`,
+  `DecidedFile`) for every file decided in a turn, with the old text and the text the decision
+  lands. The first file of a turn starts a history change (`TurnId` → `ChangeId` for the run).
+  The file's line ending on disk is applied to both texts. A file the turn created has no
+  "before". Limits: turns are recorded only while `agent_review` reviews (review mode on, or a
+  rule applies); writes that bypassed review are not recorded; a deleted file is recorded as
+  emptied, so undoing it shows a conflict and needs "Restore Anyway".
+- **UI:** "fyx: local history" opens a modal for the active file's worktree: agent turns and
+  restores with "Undo Turn" / "Undo Restore", the active file's versions with "Restore This
+  Version", and, when files changed since, their list with "Restore Anyway" and "Cancel". Open
+  buffers reload from disk on their own.
+- **Settings:** `fyx.history.enabled` (default true), `max_total_mb` (256), `max_age_days` (30),
+  `max_file_mb` (8), in `settings_content::FyxHistorySettingsContent` and `assets/settings/fyx.json`.
 
 ## Lines for W0, the integrator
 
-- Root `Cargo.toml`: `"crates/fyx_history", # fyx` in `members`, and
-  `fyx_history = { path = "crates/fyx_history" } # fyx` in `[workspace.dependencies]`.
-- `Cargo.lock`: regenerate. All dependencies (`hex`, `serde`, `serde_json`, `sha2`, `thiserror`,
-  `tempfile` for tests) are already in the workspace at the locked versions.
-- Check: `cargo nextest run -p fyx_history` (10 tests).
+- Done: both crates are members, `zed` depends on `fyx_history_host` (c06dd72515).
+- `Cargo.lock`: regenerate for the host crate's dependencies (agent_review, anyhow, fyx_history,
+  gpui, language, log, paths, project, settings, ui, workspace; dev: tempfile).
+- `main.rs`: `fyx_history_host::init(cx);` after `agent_review` is initialised (the observer is
+  set on its global; without it agent turns are not recorded and a warning is logged).
+- Check: `cargo nextest run -p fyx_history -p fyx_history_host -p agent_review`.
 
 ## Open items
 
-- The host crate and the UI above (W5 or whoever takes `agent_review`).
+- Record writes that bypass review and real deletions; a keybinding for "fyx: local history".
 - Done when (plan): accept an agent turn, then undo the whole turn from the timeline in one step.
   Not seen in a running build yet.
