@@ -213,6 +213,7 @@ Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
 | 7.13 | owner (repo settings) + W0 (check) | **Turn on GitHub Issues for `shelenhovskyi/fyx`**: the crash dialog's "Report on GitHub" (`NEW_ISSUE_URL` in `crates/zed/src/fyx_crash_reports.rs`) opens `issues/new` with the title and body filled in, but Issues are off on the repository (`hasIssuesEnabled: false`), so GitHub answers 404. Turn them on (Settings → Features → Issues, or `gh repo edit shelenhovskyi/fyx --enable-issues`); add a crash-report issue template and a `crash` label; a CI check that fails if the repository named in `NEW_ISSUE_URL` has Issues off | S | — | the crash dialog's button opens a filled-in new issue; the check passes |
 | 7.14 | W1 (`terminal_host`, restore) + W4 (`fyx_claude_code`) + W3 (tab) | **Profile terminals that survive a restart, with a readable tab**: seen by the owner on 2026-11-20 with `fyx-claude-code`. (a) **Restore:** after a restart the "Claude Code" tab comes back as a plain zsh in the same folder and the Claude session is gone. Profile terminals have no restore path: persist the extension id, profile id and account with the tab, and on restore start the profile again; the extension may add resume arguments (for Claude, the `session_id` its SessionStart hook already reports, so `claude --ide --resume <id>`), and the user can turn resume off. (b) **Title:** the tab always reads "Claude Code", the profile's name. Use the program's own title (OSC 0/2, which Claude sets to the session topic; check what 2.1.329 sends) with the profile name as fallback, and the session name when the extension reports one. (c) **Tab layout:** today one line holds the status icon (✓), the account dot and name ("● Work") and the title, all at the same weight. Decide one order and style: title first; the account as a coloured edge or a small chip; the status as one icon that changes (running, waiting for you, done, error) with a tooltip; nothing duplicated between the tab and the sessions list | M | 5.8, 5.15, 5.20 | after a restart the Claude tab resumes the same session; the tab shows the session's topic; a review of the tab with three states and two accounts passes ux-2 (7.12) |
 | 7.15 | W4 (SDK, template, build) + W3 (load, consent) + W2c (build sandbox, toolchain) + W7 (research) | **Agent-written mods**: the user asks the agent in Fyx to change something in the editor, and the agent writes a Rust UI extension (`fyx:ui` SDK), builds it to `wasm32-wasip2`, loads it as a dev extension after the user sees its capabilities, iterates on it from the chat and can publish it to the registry. Rust only; the Rust toolchain is an optional one-time download. See [7.15 below](#715-agent-written-mods) | L (research S, then M + M) | 7.12 (shared consent view), 7.5 (sandboxed build on the Mac), 1.1 (`.cwasm` cache), 3.5 (dev install), 2.x hot reload | "add a status item with the word count" in the agent panel gives a working extension in under two minutes on a warm cache, with its capabilities shown before it runs; a follow-up change rebuilds and reloads in under 10 s; the build cannot write outside its mod folder or reach a host other than the toolchain and crate mirrors |
+| 7.16 | W3 (`fyx_cockpit`: tree, card, merging view) + W1 (`fyx_relay` MCP mode, host resources) + W5 successor (`agent_review` in the card) + W0 (merge queue over the gate) | **Agent cockpit**: the IDE side of many agents, not an orchestration brain. Claude Code keeps planning and delegating; Fyx shows the tree (coordinator, workers, helpers), puts every "needs you" item in one card with one primary action, runs a serialized merge queue over the project's gate, and owns shared resources (build lock, disk, budget). See [7.16 below](#716-agent-cockpit) and [agent-cockpit research](../research/agent-cockpit.md) (§2.8, prototype v2) | L (MVP: S + M + M + M + S) | 7.9 (board), 5.4 (Agent Sessions sidebar, notifications), 5.12 (relay), 7.8 (cost, cap), `agent_review`, `script/fyx-cargo` and `fyx-disk-guard` | two weeks of the owner's ~8 agents: no disk-full incident, a blocked agent is noticed in under 5 minutes, merges no longer go through a human-run integrator thread, and the owner reads the away summary instead of threads |
 
 **Order.** 7.1 first: it gives the owner a Mac build and a Mac check for everything after it.
 Then the agent-review lane in order 7.2 → 7.3 → 7.4. 7.5 follows 4.7 and pairs with 7.4. 7.7 is
@@ -235,7 +236,14 @@ behind a "Fyx Extensions" button that opens a separate page. Plan 3.5 asked for 
   of today's `fyx_extensions_page` (search, install with permission confirmation, pin, roll back,
   held updates). `fyx_ui: open fyx extensions` opens the page on the Fyx tab. The "Fyx
   Extensions" button goes.
-- **Zed tab, registry off (default):** installed Zed extensions only; no request to the registry,
+- **Superseded on 2026-11-20 (14:10, owner):** Zed's registry is **on by default** through
+  `fyx.extensions.zed_registry_url = "https://api.zed.dev"` (commit 78120d1e61), so the two
+  bullets below on the registry being off by default and the "Turn on Zed's registry" button no
+  longer apply. Done in 7.10: the Fyx tab is the default and makes no request to Zed's registry;
+  the Zed tab asks it on first show and carries a short notice (Fyx does not review or sign Zed
+  extensions; language servers and debug adapters can run programs); with the setting empty the
+  Zed tab shows installed extensions only and no "Failed to load" banner.
+- **Zed tab, registry off (old default):** installed Zed extensions only; no request to the registry,
   no error banner, no All / Installed / Not Installed filter. A banner instead: Zed extensions come
   from Zed's registry, which Fyx neither verifies nor signs; language servers and debug adapters
   can download and run binaries with full access; requests go to api.zed.dev. Button **Turn on
@@ -372,6 +380,43 @@ sandbox and capabilities as every other extension and get no extra rights.
   submission flow (3.x); nothing is uploaded without the user's click.
 - **Not in scope:** changing Fyx's own Rust code or upstream crates, mods in languages other than
   Rust, mods that run outside the extension sandbox.
+
+### 7.16 Agent cockpit
+
+Decided by the owner on 2026-11-20 after the prototype v2
+([agent-cockpit-prototype.html](../research/agent-cockpit-prototype.html)). Fyx does not plan,
+split or route work: Claude Code (subagents, agent teams) does. Fyx is where the code, the
+builds and the merges are, and the cockpit is the next step of 7.9, all in a new Fyx crate
+`fyx_cockpit`, with no hooks in `agent_panel.rs`, `sidebar.rs` or `title_bar.rs`.
+
+**Rules from prototype v2 (§2.8), binding for every stage:**
+
+1. Four states: **Needs you, Working, Merging, Done**, as a dot; the reason is one line of text
+   ("Question: …", "Review +88 −12", "A check failed"). Only Needs you interrupts.
+2. Every Needs you item has one place to act, the agent's card; the tree row, the pill, the chat
+   line and the toast only open it.
+3. One primary button per card state (answer, Approve and Merge, Let the Agent Fix It, Resume);
+   Pause, Stop, Open Folder, Open Terminal, cost, branch and build size sit under "Details and
+   controls".
+4. Finished, nested (helpers) and outside-Fyx agents collapse to counts.
+5. Plain words (build files, "a check failed", "Merging into integration"); the status line comes
+   from state in one function, so it never disagrees with it.
+
+**MVP, in order; each stage is usable alone:**
+
+| Stage | Streams | What | Size | Deps |
+| --- | --- | --- | --- | --- |
+| C1 Tree | W3 | 7.9's board as a tree (project, coordinator, workers, helpers) with the four states, Needs you first, Stop and Stop All; external Claude Code sessions read-only from the relay, OSC 7501 and `~/.claude/projects/*.jsonl`; a parent's state rolls up from its children | M | 7.9, 5.4, 5.12 |
+| C2 Card and attention | W3 + W5 successor | The agent card (checklist, last message, `agent_review` hunks with comments back to the agent, one primary action); the "N need you" pill on the cockpit's dock icon; at most one toast with "+N more", only for Needs you, only while the window is unfocused; the away summary on focus after 30+ min | M | C1, 7.2 (comments), 5.4 |
+| C3 Cockpit MCP server | W1 | A mode of `fyx_relay`: `start_worker` (worktree on a `fyx/<name>` branch, `.worktreeinclude`, Claude Code started there, a child row), `report_progress`, `request_decision` (a card; the answer goes back), `ready_for_review`, `enqueue_merge`; the coordinator is plain Claude Code given this server | M | C1, worktrees research §8.3 hooks |
+| C4 Merge queue | W0 + W3 | One at a time: rebase onto the target, run the project's gate (here `script/gate.sh` with `FAST=1`, detected otherwise as `cargo test` / `npm test`), fast-forward on green; on red the branch goes back to its worker with the log, without asking. The "Merging" view with a 3-step bar per branch. A merge into the default branch, a push or a branch delete is always a click | M | C2, C3 |
+| C5 Resources and limits | W1 + W3 | The `script/fyx-cargo` lock and `fyx-disk-guard` as host services (`acquire`/`release` over the MCP server), concurrency cap (4 workers, max 8; depth 2), per-tree budget from 7.8 that pauses with a card at 80%, never kills silently | S | C3, 7.8 |
+
+**Later:** cloud and remote workers (Mac and Windows hand-off), best-of-n (one brief to 2 or 3
+workers, diffs side by side), per-worktree ports and databases, agent-side conflict resolution
+when the rebase fails, cost forecast before `start_worker` and a weekly report, extension cards
+through `fyx:ui` (CI, PR, issues). **Not doing:** our own planner or agent-to-agent messaging, a
+worktree manager replacing upstream's Threads Sidebar, multi-person projects.
 
 ## Deferred after 1.0
 
