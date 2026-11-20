@@ -1,5 +1,6 @@
-//! "Agent Sessions": every terminal in this workspace with a status, the ones that need attention
-//! first; a click jumps to the terminal.
+//! "Agent Sessions": every terminal in this workspace with a status and every agent thread of its
+//! project (plan 7.9), the ones that need you first; a click jumps to the terminal or brings the
+//! thread to the front in the agent panel.
 //!
 //! The list is a sidebar to the right of the terminal panel's panes (like Zed's threads sidebar),
 //! so the terminal stays visible beside it. A status-bar button with the count waiting, or
@@ -8,8 +9,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    App, Context, Entity, EntityId, FocusHandle, Focusable, Global, Subscription, WeakEntity,
-    Window, actions, px,
+    App, Context, Div, Entity, EntityId, FocusHandle, Focusable, Global, Stateful, Subscription,
+    WeakEntity, Window, actions, px,
 };
 use terminal_ext::TerminalStatus;
 use terminal_view::TerminalView;
@@ -19,6 +20,7 @@ use workspace::Workspace;
 use workspace::item::ItemHandle;
 use workspace::{HideStatusItem, StatusItemView};
 
+use crate::agent_board::{self, BoardRow, ThreadPhase, ThreadRow};
 use crate::sessions::{self, Sessions};
 use crate::tab_status::{capitalize, state_text, status_icon, tooltip_text};
 
@@ -122,24 +124,24 @@ impl AgentSessionsPanel {
         }
     }
 
-    fn rows(&self, cx: &App) -> Vec<(Entity<TerminalView>, TerminalStatus)> {
+    fn rows(&self, cx: &App) -> Vec<BoardRow> {
         let Some(workspace) = self.workspace.upgrade() else {
             return Vec::new();
         };
         let workspace = workspace.read(cx);
-        self.sessions
+        let terminals = self
+            .sessions
             .read(cx)
             .list(cx)
             .into_iter()
             .filter(|(view, _)| sessions::workspace_contains(workspace, view, cx))
-            .collect()
+            .collect();
+        let threads = agent_board::thread_rows(workspace.project(), cx);
+        agent_board::board(terminals, threads)
     }
 
     fn waiting(&self, cx: &App) -> usize {
-        self.rows(cx)
-            .iter()
-            .filter(|(_, status)| status.attention)
-            .count()
+        self.rows(cx).iter().filter(|row| row.needs_you()).count()
     }
 
     /// Runs from a row's click listener, i.e. inside this list's update and, as it is drawn by the
@@ -168,7 +170,10 @@ impl AgentSessionsPanel {
             return v_flex()
                 .p_2()
                 .gap_1()
-                .child(Label::new("No terminal reports a status.").size(LabelSize::Small))
+                .child(
+                    Label::new("No agent thread, and no terminal reports a status.")
+                        .size(LabelSize::Small),
+                )
                 .child(
                     Label::new(
                         "Programs that send OSC 7501 (Claude Code 2.1.295 and later) or \
@@ -182,62 +187,121 @@ impl AgentSessionsPanel {
         v_flex()
             .p_1()
             .gap_0p5()
-            .children(rows.into_iter().enumerate().map(|(index, (view, status))| {
-                // Only the session's title and its state; where it came from, the command and the
-                // account are in the tooltip.
-                let terminal = view.read(cx).terminal().read(cx);
-                let terminal_title = terminal.title(true);
-                let accounts = terminal.fyx.accounts();
-                let session_title = status
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| terminal_title.clone());
-                let state = capitalize(state_text(&status));
-                let (status_title, meta) = tooltip_text(&status);
-                let mut tooltip = vec![status_title, terminal_title, meta];
-                tooltip.extend(crate::accounts::describe(&accounts, cx));
-                let tooltip = tooltip.join("
-");
-                let state_color = if status.attention {
-                    Color::Accent
-                } else {
-                    Color::Muted
-                };
-                let icon = status_icon(&status).unwrap_or_else(|| {
-                    Icon::new(IconName::Terminal)
-                        .size(IconSize::Small)
-                        .color(Color::Muted)
-                        .into_any_element()
-                });
-                h_flex()
-                    .id(("fyx-agent-session", index))
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(cx.theme().colors().element_hover))
-                    .tooltip(Tooltip::text(tooltip))
-                    .child(icon)
-                    .child(
-                        Label::new(session_title)
-                            .single_line()
-                            .truncate()
-                            .flex_1(),
-                    )
-                    .child(
-                        Label::new(state)
-                            .size(LabelSize::Small)
-                            .color(state_color)
-                            .single_line(),
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.jump_to(&view, window, cx)),
-                    )
+            .children(rows.into_iter().enumerate().map(|(index, row)| match row {
+                BoardRow::Terminal(view, status) => self.render_terminal(index, view, status, cx),
+                BoardRow::Thread(row) => self.render_thread(index, row, cx),
             }))
             .into_any_element()
     }
+
+    /// Only the session's title and its state; where it came from, the command and the account
+    /// are in the tooltip.
+    fn render_terminal(
+        &self,
+        index: usize,
+        view: Entity<TerminalView>,
+        status: TerminalStatus,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let terminal = view.read(cx).terminal().read(cx);
+        let terminal_title = terminal.title(true);
+        let accounts = terminal.fyx.accounts();
+        let session_title = status
+            .label
+            .clone()
+            .unwrap_or_else(|| terminal_title.clone());
+        let (status_title, meta) = tooltip_text(&status);
+        let mut tooltip = vec![status_title, terminal_title, meta];
+        tooltip.extend(crate::accounts::describe(&accounts, cx));
+        let state_color = if status.attention {
+            Color::Accent
+        } else {
+            Color::Muted
+        };
+        let icon = status_icon(&status).unwrap_or_else(|| {
+            Icon::new(IconName::Terminal)
+                .size(IconSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        });
+        row_frame(
+            ("fyx-agent-session", index),
+            icon,
+            session_title,
+            capitalize(state_text(&status)),
+            state_color,
+            tooltip.join("\n"),
+            cx,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| this.jump_to(&view, window, cx)))
+        .into_any_element()
+    }
+
+    fn render_thread(&self, index: usize, row: ThreadRow, cx: &mut Context<Self>) -> AnyElement {
+        let color = match row.phase {
+            ThreadPhase::NeedsYou => Color::Accent,
+            ThreadPhase::Working => Color::Default,
+            ThreadPhase::Idle => Color::Muted,
+        };
+        let meta = row.meta();
+        let tooltip = if meta.is_empty() {
+            row.title.to_string()
+        } else {
+            format!("{}\n{meta}", row.title)
+        };
+        let thread = row.thread.clone();
+        let icon = Icon::new(IconName::ZedAgent)
+            .size(IconSize::Small)
+            .color(color)
+            .into_any_element();
+        row_frame(
+            ("fyx-agent-thread", index),
+            icon,
+            row.title.to_string(),
+            row.phase.label().to_string(),
+            color,
+            tooltip,
+            cx,
+        )
+        // Deferred like `jump_to`: the agent panel can be revealed in the same dock.
+        .on_click(move |_, window, cx| {
+            let thread = thread.clone();
+            window.defer(cx, move |window, cx| {
+                acp_thread::fyx_focus::focus_thread(&thread, window, cx)
+            });
+        })
+        .into_any_element()
+    }
+}
+
+/// A row: its icon, the title, the state on the right.
+fn row_frame(
+    id: (&'static str, usize),
+    icon: AnyElement,
+    title: String,
+    state: String,
+    state_color: Color,
+    tooltip: String,
+    cx: &App,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_2()
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().colors().element_hover))
+        .tooltip(Tooltip::text(tooltip))
+        .child(icon)
+        .child(Label::new(title).single_line().truncate().flex_1())
+        .child(
+            Label::new(state)
+                .size(LabelSize::Small)
+                .color(state_color)
+                .single_line(),
+        )
 }
 
 impl Render for AgentSessionsPanel {
@@ -245,6 +309,10 @@ impl Render for AgentSessionsPanel {
         if !self.open {
             return div().into_any_element();
         }
+        let today = crate::usage_meters::global(cx).and_then(|meters| {
+            let meters = meters.read(cx);
+            crate::usage_meters::today_line(&meters.today(), meters.cap_state(cx))
+        });
         let colors = cx.theme().colors();
         let (panel_background, border) = (colors.panel_background, colors.border);
         v_flex()
@@ -284,6 +352,18 @@ impl Render for AgentSessionsPanel {
                     .overflow_y_scroll()
                     .child(self.render_rows(cx)),
             )
+            .children(today.map(|(line, reached)| {
+                h_flex()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .child(Label::new(line).size(LabelSize::Small).color(if reached {
+                        Color::Warning
+                    } else {
+                        Color::Muted
+                    }))
+            }))
             .into_any_element()
     }
 }

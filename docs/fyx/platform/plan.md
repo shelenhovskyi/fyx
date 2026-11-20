@@ -212,6 +212,7 @@ Sizes for one stream: S ≤ 3 days, M ≈ 1–2 weeks.
 | 7.12 | W7 (audit) + W3 (fixes) | **Readable prompts and notices (ux-2)**, known cases in [7.12 below](#712-known-cases): the dev-folder notice "The UI extension … is installed but not enabled. It asks for: …" (`ui_ext_host/src/registry.rs`) is one paragraph with every capability, its id, the folder and the buttons run together; the T2 ones (`terminal:env`, `network:listen`, `fs:discovery-file`, `relay:hooks`) look the same as `ui:panel`. **First an audit, in the running Mac build** (ux-1 only read the code): every Fyx-made notification, toast, prompt, consent and install dialog, permission card, banner and empty or error state in `ui_ext_host`, `ui_ext_wasm`, `agent_review`, `terminal_ext`, `fyx_registry` and the `fyx:` hooks, with a screenshot of each; findings in `tasks/reviews/ux-2.md`. **Rules the fixes follow:** a short title that says what happens; capabilities as a list, grouped by tier, T2 first with a warning style, ids secondary or in a details toggle; paths and ids in a muted or code style, never inside the sentence; one decision per prompt with verb buttons ("Enable", not "OK"); details behind "Show details"; the same layout for one consent wherever it appears (dev folder, install, registry, approve-and-update). **Then the fixes**, starting with the consent notice and the install prompt, as a shared consent view in `ui_ext_host` | M | — | `ux-2.md` lists every surface with a screenshot and a verdict; the consent notice and the install prompt show grouped lists with T2 marked; no Fyx prompt is a single paragraph over three lines |
 | 7.13 | owner (repo settings) + W0 (check) | **Turn on GitHub Issues for `shelenhovskyi/fyx`**: the crash dialog's "Report on GitHub" (`NEW_ISSUE_URL` in `crates/zed/src/fyx_crash_reports.rs`) opens `issues/new` with the title and body filled in, but Issues are off on the repository (`hasIssuesEnabled: false`), so GitHub answers 404. Turn them on (Settings → Features → Issues, or `gh repo edit shelenhovskyi/fyx --enable-issues`); add a crash-report issue template and a `crash` label; a CI check that fails if the repository named in `NEW_ISSUE_URL` has Issues off | S | — | the crash dialog's button opens a filled-in new issue; the check passes |
 | 7.14 | W1 (`terminal_host`, restore) + W4 (`fyx_claude_code`) + W3 (tab) | **Profile terminals that survive a restart, with a readable tab**: seen by the owner on 2026-11-20 with `fyx-claude-code`. (a) **Restore:** after a restart the "Claude Code" tab comes back as a plain zsh in the same folder and the Claude session is gone. Profile terminals have no restore path: persist the extension id, profile id and account with the tab, and on restore start the profile again; the extension may add resume arguments (for Claude, the `session_id` its SessionStart hook already reports, so `claude --ide --resume <id>`), and the user can turn resume off. (b) **Title:** the tab always reads "Claude Code", the profile's name. Use the program's own title (OSC 0/2, which Claude sets to the session topic; check what 2.1.329 sends) with the profile name as fallback, and the session name when the extension reports one. (c) **Tab layout:** today one line holds the status icon (✓), the account dot and name ("● Work") and the title, all at the same weight. Decide one order and style: title first; the account as a coloured edge or a small chip; the status as one icon that changes (running, waiting for you, done, error) with a tooltip; nothing duplicated between the tab and the sessions list | M | 5.8, 5.15, 5.20 | after a restart the Claude tab resumes the same session; the tab shows the session's topic; a review of the tab with three states and two accounts passes ux-2 (7.12) |
+| 7.15 | W4 (SDK, template, build) + W3 (load, consent) + W2c (build sandbox, toolchain) + W7 (research) | **Agent-written mods**: the user asks the agent in Fyx to change something in the editor, and the agent writes a Rust UI extension (`fyx:ui` SDK), builds it to `wasm32-wasip2`, loads it as a dev extension after the user sees its capabilities, iterates on it from the chat and can publish it to the registry. Rust only; the Rust toolchain is an optional one-time download. See [7.15 below](#715-agent-written-mods) | L (research S, then M + M) | 7.12 (shared consent view), 7.5 (sandboxed build on the Mac), 1.1 (`.cwasm` cache), 3.5 (dev install), 2.x hot reload | "add a status item with the word count" in the agent panel gives a working extension in under two minutes on a warm cache, with its capabilities shown before it runs; a follow-up change rebuilds and reloads in under 10 s; the build cannot write outside its mod folder or reach a host other than the toolchain and crate mirrors |
 
 **Order.** 7.1 first: it gives the owner a Mac build and a Mac check for everything after it.
 Then the agent-review lane in order 7.2 → 7.3 → 7.4. 7.5 follows 4.7 and pairs with 7.4. 7.7 is
@@ -320,6 +321,38 @@ starts from these and looks for the same faults everywhere else.
    - the extension id only in a tooltip, or as a suffix when two extensions offer profiles of
      the same name;
    - "Default (no profile)" becomes "The tool's default account (~/.claude)", naming the dir.
+
+### 7.15 Agent-written mods
+
+Decided by the owner on 2026-11-20. The user asks the agent to change Fyx itself ("show the
+branch's open PR in the status bar", "a panel with this file's TODOs"), and the agent writes the
+change as a UI extension instead of the user hunting for one. **Rust only:** the owner puts
+performance first, so a JS runtime compiled to WASM is rejected; mods use the same `fyx:ui` SDK,
+sandbox and capabilities as every other extension and get no extra rights.
+
+- **Research first (S, W7 with W2c):** how to fetch the toolchain (rustup with a minimal profile
+  plus the `wasm32-wasip2` target into a Fyx-owned folder, or a pinned standalone archive; size,
+  signature check, updates, offline); how to sandbox `cargo build` (Seatbelt on the Mac via 7.5,
+  job objects on Windows; writes only to the mod folder and the build cache; network only to
+  static.rust-lang.org and the crate index and mirrors, during the build); which capabilities an
+  agent may ask for without the user typing them (T0/T1 by default; T2 only with an explicit
+  consent per capability); crate dependencies (a vetted allow-list or none beyond the SDK);
+  expected build times cold and warm. Findings in `tasks/reviews/mods-research.md`.
+- **Toolchain (W2c):** not bundled. The first time a mod is asked for, a one-time prompt offers
+  the download (about 1 GB, with the size and destination shown); "not now" leaves the agent
+  saying it cannot build mods. A shared target dir and a pre-built SDK keep re-edits to seconds.
+- **Authoring (W4):** a `fyx-ext new --template mod` crate layout the agent fills in, an agent
+  tool (or ACP tool set) "build and load this mod" that returns compiler errors to the agent so
+  it can fix them, and docs written for the agent (the SDK reference, capability list, examples).
+- **Loading (W3):** the build loads as a dev extension under `<data>/mods/<name>`; before it
+  first runs, the shared consent view (7.12) lists what it asks for; later builds that ask for
+  nothing new reload without a prompt, new capabilities prompt again. Mods are listed on the
+  Extensions page with a "Made by the agent" chip and can be disabled, removed or opened as a
+  project.
+- **Publishing (W3 + registry):** "Publish" runs `fyx-ext package` and opens the registry's
+  submission flow (3.x); nothing is uploaded without the user's click.
+- **Not in scope:** changing Fyx's own Rust code or upstream crates, mods in languages other than
+  Rust, mods that run outside the extension sandbox.
 
 ## Deferred after 1.0
 

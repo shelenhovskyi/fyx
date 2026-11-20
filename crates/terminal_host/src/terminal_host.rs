@@ -2,6 +2,7 @@
 //! panel and pop-up notifications, and the `ui_ext::terminal` host for extensions.
 
 mod accounts;
+mod agent_board;
 mod created;
 mod discovery;
 mod host;
