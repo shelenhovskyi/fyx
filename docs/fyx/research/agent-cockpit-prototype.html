@@ -1,0 +1,713 @@
+<title>Fyx Agent Cockpit</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* v2 layout: a calm Fyx window (Zed One Dark). Title bar holds one attention pill. Center = editor / agent card / merge queue.
+   Bottom = terminal + Agent Sessions (needs-you first, done collapsed). Right = coordinator chat (coordinator words only). */
+:root {
+  color-scheme: dark;
+  --desk: #16181d;
+  --bg: #282c33;
+  --panel: #2f343e;
+  --elevated: #3b414d;
+  --border: #3d424d;
+  --border-strong: #464b57;
+  --fg: #dce0e5;
+  --muted: #a9afbc;
+  --dim: #7a808d;
+  --accent: #74ade8;
+  --ok: #a1c181;
+  --warn: #dec184;
+  --bad: #d07277;
+  --violet: #b477cf;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+}
+html, body { height: 100%; }
+body {
+  background: var(--desk); color: var(--fg); font: 13px/1.45 var(--sans);
+  display: flex; flex-direction: column; gap: 10px; box-sizing: border-box;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 12px;
+}
+* { box-sizing: border-box; }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mono { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* prototype controls (not part of the product) */
+.proto { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.proto strong { color: var(--fg); font-weight: 600; letter-spacing: .04em; font-size: 11px; }
+.pbtn { background: transparent; border: 1px dashed var(--dim); border-radius: 4px; padding: 3px 10px; }
+.pbtn:hover { border-color: var(--accent); }
+.pbtn.on { border-style: solid; border-color: var(--warn); color: var(--warn); }
+.proto .hint { flex: 1 1 260px; min-width: 0; }
+.ver { border: 1px solid var(--border-strong); border-radius: 10px; padding: 0 8px; font-size: 11px; }
+
+.win { flex: 1; min-height: 0; display: grid; grid-template-rows: 34px 1fr; border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.titlebar { display: flex; align-items: center; gap: 12px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--border); white-space: nowrap; overflow-x: auto; }
+.tb-proj { font-weight: 600; } .tb-branch { color: var(--dim); }
+.tb-sp { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 2px 10px; border: 1px solid var(--border-strong); background: transparent; color: var(--muted); font-size: 12px; }
+.pill.hot { background: var(--warn); border-color: var(--warn); color: #1b1d22; font-weight: 600; }
+.pill.hot:hover { filter: brightness(1.08); }
+
+.body { display: grid; grid-template-columns: minmax(0,1fr) 330px; min-height: 0; }
+.main { display: grid; grid-template-rows: minmax(0,1fr) minmax(220px, 44%); min-height: 0; border-right: 1px solid var(--border); }
+.center { display: grid; grid-template-rows: 30px 1fr; min-height: 0; }
+.tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tab { border: 0; border-right: 1px solid var(--border); background: transparent; padding: 0 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tab.active { background: var(--bg); color: var(--fg); }
+.tab .x { opacity: .5; padding: 0 2px; } .tab .x:hover { opacity: 1; }
+.pane { overflow: auto; min-height: 0; }
+.code { font: 12.5px/1.6 var(--mono); padding: 10px 0; }
+.code div { padding: 0 14px; white-space: pre; }
+.code .ln { display: inline-block; width: 34px; color: var(--dim); text-align: right; margin-right: 14px; user-select: none; }
+.k { color: var(--violet); } .t { color: var(--warn); } .f { color: var(--accent); } .c { color: var(--dim); }
+
+/* status dots: color + shape so state reads without color too */
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.d-attn { background: var(--warn); }
+.d-work { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.d-merge { background: transparent; border: 2px solid var(--violet); }
+.d-done { background: var(--ok); opacity: .7; }
+.d-off { background: transparent; border: 1.5px solid var(--dim); }
+.d-ext { background: transparent; border: 1.5px dashed var(--dim); }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .d-work { animation: none; } }
+
+/* card */
+.card { padding: 18px 22px 28px; display: grid; gap: 16px; max-width: 820px; }
+.card h2 { margin: 0; font-size: 17px; font-weight: 600; text-wrap: balance; }
+.status { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.status b { color: var(--fg); font-weight: 500; }
+.ask { border: 1px solid var(--warn); border-radius: 8px; padding: 12px 14px; display: grid; gap: 10px; background: rgba(222,193,132,.06); }
+.ask .q { font-size: 14px; }
+.opts { display: grid; gap: 6px; }
+.opts button { text-align: left; border: 1px solid var(--border-strong); background: var(--elevated); border-radius: 6px; padding: 7px 11px; }
+.opts button:hover { border-color: var(--accent); }
+.opts button.rec { border-color: var(--warn); }
+.opts small { color: var(--warn); margin-left: 8px; font-size: 11px; }
+.ask .note { color: var(--dim); font-size: 12px; }
+.primary-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn { border: 1px solid var(--border-strong); background: var(--elevated); border-radius: 6px; padding: 6px 13px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #1b1d22; font-weight: 600; }
+.btn.quiet { background: transparent; border-color: transparent; color: var(--muted); }
+.btn.quiet:hover { color: var(--fg); border-color: var(--border-strong); }
+.btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+.doing { display: grid; gap: 4px; }
+.doing .now { font-size: 13.5px; }
+.prog { height: 4px; background: var(--elevated); border-radius: 2px; overflow: hidden; max-width: 260px; }
+.prog i { display: block; height: 100%; background: var(--accent); }
+details { border-top: 1px solid var(--border); padding-top: 10px; }
+summary { cursor: pointer; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 6px; }
+summary::-webkit-details-marker { display: none; }
+summary::before { content: "›"; display: inline-block; width: 10px; transition: transform .15s; }
+details[open] > summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { summary::before { transition: none; } }
+.dbody { padding: 10px 0 0 16px; display: grid; gap: 10px; }
+.kv { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 4px 16px; font-size: 12.5px; }
+.kv dt { color: var(--dim); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.steps-l { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; color: var(--muted); }
+.steps-l .on { color: var(--fg); } .steps-l .ok { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--border-strong); }
+.hunk { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.hunk-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: var(--panel); padding: 5px 10px; font: 12px var(--mono); color: var(--muted); }
+.hunk-h button { font: 12px var(--sans); background: transparent; border: 1px solid var(--border-strong); border-radius: 4px; padding: 1px 8px; color: var(--muted); }
+.hunk-h button:hover { color: var(--fg); }
+.hunk pre { margin: 0; font: 12px/1.55 var(--mono); overflow-x: auto; padding: 6px 0; }
+.hunk pre span { display: block; padding: 0 10px; white-space: pre; }
+.add { background: rgba(161,193,129,.11); color: #c5dcb0; } .del { background: rgba(208,114,119,.11); color: #e8a9ad; } .conf { background: rgba(222,193,132,.11); color: var(--warn); }
+.comment { display: grid; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); }
+textarea { width: 100%; resize: vertical; background: var(--bg); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 5px; padding: 6px 8px; font: inherit; }
+.sent-c { padding: 6px 10px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+
+/* bottom panel */
+.bottom { display: grid; grid-template-columns: minmax(0,1fr) minmax(300px, 400px); min-height: 0; border-top: 1px solid var(--border); }
+.term { display: grid; grid-template-rows: 28px 1fr; min-height: 0; border-right: 1px solid var(--border); }
+.ptitle { display: flex; align-items: center; gap: 10px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; }
+.ptitle b { color: var(--fg); font-weight: 500; }
+.ptitle .end { margin-left: auto; }
+.termlog { font: 12px/1.55 var(--mono); padding: 6px 10px; overflow: auto; color: var(--muted); }
+.termlog .ok { color: var(--ok); } .termlog .bad { color: var(--bad); } .termlog .me { color: var(--fg); }
+.stoplink { border: 0; background: transparent; color: var(--dim); font-size: 12px; padding: 2px 4px; border-radius: 4px; }
+.stoplink:hover { color: var(--bad); background: rgba(208,114,119,.1); }
+.stopconfirm { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 12px; }
+.stopconfirm button { border-radius: 4px; padding: 1px 8px; border: 1px solid var(--border-strong); background: var(--elevated); font-size: 12px; }
+.stopconfirm .danger { background: var(--bad); color: #1b1d22; border-color: var(--bad); font-weight: 600; }
+
+.tree { display: grid; grid-template-rows: 28px 1fr 28px; min-height: 0; }
+.rows { overflow: auto; padding: 4px 0 8px; }
+.sec { padding: 10px 12px 3px; font-size: 11px; color: var(--dim); display: flex; gap: 6px; align-items: center; }
+.sec.attn { color: var(--warn); }
+.sec button { border: 0; background: transparent; color: inherit; padding: 0; font-size: 11px; }
+.row { display: grid; grid-template-columns: 14px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 5px 12px; cursor: pointer; }
+.row:hover { background: var(--panel); }
+.row.sel { background: var(--elevated); }
+.row .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .why { display: block; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.attn .why { color: var(--warn); }
+.row .rt { color: var(--dim); font-size: 11.5px; white-space: nowrap; }
+.row.attn .rt { color: var(--fg); font-weight: 500; }
+.row.child { padding-left: 30px; }
+.row.grand { padding-left: 48px; }
+.morelink { border: 0; background: transparent; color: var(--dim); font-size: 11.5px; padding: 2px 12px 2px 52px; text-align: left; width: 100%; }
+.morelink:hover { color: var(--fg); }
+.quiet-empty { padding: 10px 12px; color: var(--dim); font-size: 12px; }
+.treefoot { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-top: 1px solid var(--border); background: var(--panel); font-size: 11.5px; color: var(--dim); white-space: nowrap; overflow: hidden; }
+.treefoot .warn { color: var(--warn); }
+
+/* chat */
+.chat { display: grid; grid-template-rows: 30px 1fr auto; min-height: 0; }
+.msgs { overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.msg .who { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.msg .txt { background: var(--panel); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
+.msg.me { align-self: flex-end; max-width: 88%; }
+.msg.me .txt { background: rgba(116,173,232,.14); }
+.msg.ref .txt { background: transparent; border: 1px solid var(--warn); }
+.linkish { color: var(--accent); background: none; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
+.digest { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; background: rgba(116,173,232,.06); }
+.digest ul { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+.digest .sub { color: var(--dim); font-size: 12px; }
+.composer { border-top: 1px solid var(--border); padding: 8px; display: grid; gap: 6px; }
+.composer textarea { min-height: 52px; resize: none; background: var(--panel); border-color: var(--border); }
+.composer .row2 { display: flex; justify-content: space-between; align-items: center; color: var(--dim); font-size: 11px; gap: 8px; }
+
+/* one toast at a time */
+.toasts { position: fixed; right: max(24px, env(safe-area-inset-right, 0px)); bottom: max(24px, env(safe-area-inset-bottom, 0px)); z-index: 30; width: min(320px, calc(100% - 48px)); }
+.toast { background: var(--elevated); border: 1px solid var(--warn); border-radius: 8px; padding: 10px 12px; box-shadow: 0 10px 24px rgba(0,0,0,.5); display: grid; gap: 6px; }
+.toast .tt { font-weight: 600; } .toast .tb { color: var(--muted); font-size: 12px; }
+.toast .act { display: flex; gap: 8px; align-items: center; }
+.toast .more { color: var(--dim); font-size: 11.5px; margin-left: auto; }
+
+/* merge queue view */
+.queue { padding: 18px 22px; display: grid; gap: 12px; max-width: 820px; }
+.qitem { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; display: grid; gap: 6px; }
+.qitem .top { display: flex; gap: 8px; align-items: center; }
+.qitem .sub { color: var(--muted); font-size: 12px; }
+.qsteps { display: flex; gap: 4px; }
+.qsteps i { height: 4px; flex: 1; border-radius: 2px; background: var(--elevated); }
+.qsteps i.ok { background: var(--ok); } .qsteps i.on { background: var(--violet); } .qsteps i.bad { background: var(--warn); }
+
+@media (max-width: 900px) {
+  html, body { height: auto; }
+  .win { grid-template-rows: auto auto; }
+  .titlebar { padding: 6px 10px; }
+  .body { grid-template-columns: 1fr; }
+  .main { grid-template-rows: auto auto; border-right: 0; }
+  .center { grid-template-rows: 30px minmax(320px, auto); }
+  .bottom { grid-template-columns: 1fr; }
+  .term { min-height: 160px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .tree { min-height: 340px; }
+  .chat { min-height: 460px; border-top: 1px solid var(--border); }
+}
+</style>
+
+<div class="proto" role="region" aria-label="Prototype controls">
+  <strong>PROTOTYPE</strong><span class="ver">v2 · calmer</span>
+  <button class="pbtn" id="p-play">▶ Play events</button>
+  <button class="pbtn" id="p-step">Next event</button>
+  <button class="pbtn" id="p-away">Simulate: I'm away</button>
+  <button class="pbtn" id="p-reset">Reset</button>
+  <span class="hint" id="p-hint">Fake data. Press Play, then follow the yellow pill in the title bar.</span>
+</div>
+
+<div class="win">
+  <div class="titlebar" id="titlebar"></div>
+  <div class="body">
+    <div class="main">
+      <div class="center">
+        <div class="tabs" id="tabs"></div>
+        <div class="pane" id="pane"></div>
+      </div>
+      <div class="bottom">
+        <div class="term">
+          <div class="ptitle"><b>Terminal</b><span>Fyx host log</span></div>
+          <div class="termlog" id="termlog" aria-live="off"></div>
+        </div>
+        <div class="tree">
+          <div class="ptitle"><b>Agent Sessions</b><span class="end" id="stopbox"></span></div>
+          <div class="rows" id="rows"></div>
+          <div class="treefoot" id="treefoot"></div>
+        </div>
+      </div>
+    </div>
+    <div class="chat">
+      <div class="ptitle"><b>Coordinator</b><span>Claude Code</span></div>
+      <div class="msgs" id="msgs"></div>
+      <div class="composer">
+        <textarea id="goal" aria-label="Message the coordinator" placeholder="Give the coordinator a goal…"></textarea>
+        <div class="row2"><span>Enter to send</span><button class="btn primary" id="send">Send</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  function h(s) { return String(s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+
+  /* Four things a person cares about: needs me, working, merging, done. Everything else is a reason under one of them. */
+  var GROUP = { ask: "attn", review: "attn", conflict: "attn", working: "work", paused: "off", stopped: "off", queued: "merge", merging: "merge", merged: "done", done: "done", external: "ext", idle: "ext" };
+  var DOT = { attn: "d-attn", work: "d-work", merge: "d-merge", done: "d-done", off: "d-off", ext: "d-ext" };
+
+  var S, timers = [];
+  function later(fn, ms) { var t = setTimeout(fn, ms); timers.push(t); return t; }
+
+  function fresh() {
+    return {
+      base: 6.2, cap: 15, budgetAsk: null, stopped: false, pausedNew: false, away: false, awayLog: [], awayAt: "",
+      tabs: ["editor"], tab: "editor", sel: null, open: {}, showDone: false, showExt: false, stopConfirm: false,
+      nextEvent: 0, playing: false, seq: 0, startedAt: Date.now(),
+      agents: [
+        { id: "c1", kind: "coordinator", parent: null, title: "Plan 7.9 cockpit", state: "working", branch: "integration", wt: "D:\\fyx\\fyx", cost: 0.62, build: 0, add: 0, del: 0, min: 34,
+          steps: ["Split the plan into workers", "Start them in their own folders", "Watch reviews and merges", "Write the handoff"], step: 2, now: "Watching 5 workers. Pings you only for answers and reviews." },
+        { id: "w1", kind: "worker", parent: "c1", title: "Renderer: clip rects", state: "working", branch: "fyx/w-renderer-clip", wt: "D:\\fyx\\wt\\renderer-clip", cost: 1.12, build: 9.8, add: 214, del: 31, min: 28,
+          steps: ["Find callers of paint_quad", "Clip child rects to the parent", "Tests for nested scroll views", "Run the checks"], step: 2, now: "Writing tests for nested scroll views.",
+          hunks: [{ file: "crates/ui_ext_host/src/render.rs", at: "@@ -212 +212 @@", lines: [[" ", "    let bounds = element.bounds(cx);"], ["+", "    let clipped = bounds.intersect(&parent_clip);"], ["+", "    if clipped.is_empty() {"], ["+", "        return Ok(());"], ["+", "    }"], [" ", "    paint_quad(window, clipped, style)?;"]] }] },
+        { id: "s1", kind: "subagent", parent: "w1", title: "Map callers of paint_quad", state: "done", cost: 0.08, build: 0, add: 0, del: 0, min: 3, steps: [], step: 0, now: "Found 6 callers in ui_ext_host." },
+        { id: "s2", kind: "subagent", parent: "w1", title: "Write scroll view tests", state: "working", cost: 0.15, build: 0, add: 96, del: 0, min: 9, steps: [], step: 0, now: "Writing 4 tests." },
+        { id: "w2", kind: "worker", parent: "c1", title: "Review comments for outside agents", state: "working", branch: "fyx/w-review-comments", wt: "D:\\fyx\\wt\\review-comments", cost: 0.74, build: 6.1, add: 132, del: 8, min: 22,
+          steps: ["Comment model in agent_review", "Deliver comments to outside agents", "Tests"], step: 1, now: "Choosing how comments reach Claude Code sessions outside Fyx.",
+          hunks: [{ file: "crates/agent_review/src/comments.rs", at: "@@ -40 +40 @@", lines: [[" ", "pub struct ReviewComment {"], ["+", "    pub hunk: HunkId,"], ["+", "    pub body: SharedString,"], ["+", "    pub delivery: Delivery,"], [" ", "}"]] }] },
+        { id: "w3", kind: "worker", parent: "c1", title: "Registry: signed index", state: "working", branch: "fyx/w-registry-sign", wt: "D:\\fyx\\wt\\registry-sign", cost: 0.51, build: 0.4, add: 88, del: 12, min: 19,
+          steps: ["Sign index.json", "Verify the signature in fyx-ext", "unittest and dry-run"], step: 2, now: "Running unittest and dry-run.",
+          hunks: [{ file: "scripts/build_index.py", at: "@@ -71 +71 @@", lines: [[" ", "    index = render_index(entries)"], ["-", "    write(out / \"index.json\", index)"], ["+", "    payload = canonical_json(index)"], ["+", "    signature = sign(payload, key_path)"], ["+", "    write(out / \"index.json\", payload)"], ["+", "    write(out / \"index.json.sig\", signature)"]] },
+                  { file: "tools/fyx-ext/src/verify.rs", at: "@@ -12 +12 @@", lines: [["+", "pub fn verify_index(payload: &[u8], signature: &Signature) -> Result<()> {"], ["+", "    let key = trusted_key()?;"], ["+", "    key.verify(payload, signature).context(\"index signature does not match\")"], ["+", "}"]] }] },
+        { id: "w4", kind: "worker", parent: "c1", title: "zsh trap guard", state: "queued", branch: "fyx/w-zsh-traps", wt: "D:\\fyx\\wt\\zsh-traps", cost: 0.33, build: 2.2, add: 41, del: 3, min: 41,
+          steps: ["Detect TRAPZERR", "Tests", "Approved by you"], step: 3, now: "Approved by you. Waiting to merge." },
+        { id: "w5", kind: "worker", parent: "c1", title: "Disk guard thresholds", state: "working", branch: "fyx/w-disk-guard", wt: "D:\\fyx\\wt\\disk-guard", cost: 0.29, build: 3.0, add: 27, del: 9, min: 15,
+          steps: ["Read free space on E:", "Sweep build folders above 12 GB"], step: 1, now: "Tuning the sweep threshold." },
+        { id: "x1", kind: "external", parent: null, title: "Claude Code in fyx-w2c", state: "idle", branch: "fyx/w2c", wt: "D:\\fyx\\wt\\w2c", cost: 0, build: 15, add: 0, del: 0, min: 12,
+          steps: [], step: 0, now: "Started outside Fyx. Shown read-only from its session file." }
+      ],
+      asks: {}, queue: [{ id: "w4", phase: 0, status: "waiting" }], merged: [],
+      chat: [
+        { from: "me", text: "Build the cockpit from plan rows 7.8 and 7.9. Keep upstream hooks minimal." },
+        { from: "coord", text: "Started 5 workers, each in its own folder. I'll only ping you when one needs an answer or a review." }
+      ],
+      log: [["me", "$ script/fyx-cargo check -p agent_review"], ["", "waiting for the shared build lock (held by renderer-clip)…"], ["ok", "lock acquired"]],
+      toasts: []
+    };
+  }
+
+  function A(id) { for (var i = 0; i < S.agents.length; i++) if (S.agents[i].id === id) return S.agents[i]; return null; }
+  function spent() { var s = S.base; S.agents.forEach(function (a) { s += a.cost; }); return s; }
+  function g(a) { return GROUP[a.state]; }
+  function attention() { var list = S.agents.filter(function (a) { return g(a) === "attn"; }); if (S.budgetAsk && !S.budgetAsk.answered) list.unshift({ id: "budget", title: "Daily budget", state: "ask", budget: true }); return list; }
+  function log(cls, t) { S.log.push([cls, t]); if (S.log.length > 60) S.log.shift(); }
+  function say(from, text, extra) { var m = { from: from, text: text }; if (extra) for (var k in extra) m[k] = extra[k]; S.chat.push(m); }
+  function clock() { var d = new Date(); return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2); }
+
+  /* Attention vs activity: only "needs you" interrupts. Activity is batched for the digest. */
+  function needYou(a, title, body) {
+    say("ref", title, { link: a.id });
+    if (S.away) { S.awayLog.push({ kind: "needs", text: title }); return; }
+    S.toasts.push({ id: ++S.seq, title: title, body: body, agent: a.id });
+    var tid = S.seq; later(function () { S.toasts = S.toasts.filter(function (x) { return x.id !== tid; }); render(); }, 8000);
+  }
+  function activity(kind, text) { if (S.away) S.awayLog.push({ kind: kind, text: text }); }
+
+  function statusLine(a) {
+    switch (a.state) {
+      case "ask": return "Needs your answer";
+      case "review": return "Ready for your review";
+      case "conflict": return "Needs you: merge conflict";
+      case "working": return a.fixing ? "Working: fixing a failed check" : "Working" + (a.steps.length ? ", step " + Math.min(a.step + 1, a.steps.length) + " of " + a.steps.length : "");
+      case "paused": return "Paused by you";
+      case "stopped": return "Stopped";
+      case "queued": return "Approved, waiting to merge";
+      case "merging": return "Merging: " + ["updating from integration", "running checks", "merging"][(qOf(a.id) || { phase: 0 }).phase];
+      case "merged": return "Merged at " + (a.mergedAt || clock());
+      case "done": return "Done";
+      default: return "Outside Fyx, read-only";
+    }
+  }
+  function reason(a) {
+    if (a.budget) return "$" + spent().toFixed(2) + " of $" + S.cap + " used today";
+    if (a.state === "ask") return "Question: " + (S.asks[a.id] || {}).short;
+    if (a.state === "review") return "Review +" + a.add + " −" + a.del;
+    if (a.state === "conflict") return "Conflict in render.rs";
+    return "";
+  }
+  function rightLabel(a) {
+    if (a.budget || a.state === "ask") return "Answer";
+    if (a.state === "review") return "Review";
+    if (a.state === "conflict") return "Resolve";
+    if (g(a) === "merge") return a.state === "queued" ? "next" : "merging";
+    if (g(a) === "work") return a.min + "m";
+    return "";
+  }
+
+  function qOf(id) { for (var i = 0; i < S.queue.length; i++) if (S.queue[i].id === id) return S.queue[i]; return null; }
+
+  function ask(id, q, short, opts) { S.asks[id] = { q: q, short: short, opts: opts }; var a = A(id); a.state = "ask"; }
+
+  function finishLater(id, ms, msg) {
+    later(function () {
+      var a = A(id); if (!a || S.stopped || a.state !== "working") return;
+      a.state = "review"; a.step = a.steps.length; a.fixing = false; a.now = msg || "Done, and the checks pass in my folder.";
+      needYou(a, a.title + " is ready for your review", "+" + a.add + " −" + a.del);
+      render();
+    }, ms);
+  }
+
+  var EVENTS = [
+    function () { var a = A("w3"); a.state = "review"; a.step = 3; a.now = "unittest and dry-run pass. Two files changed.";
+      needYou(a, "Registry: signed index is ready for your review", "+88 −12, checks pass"); },
+    function () { ask("w2", "How should review comments reach Claude Code sessions that run outside Fyx?", "where outside agents get comments", [
+        { label: "Write them to .fyx/review-comments.md in the agent's folder", rec: true, val: "file" },
+        { label: "Copy them to the clipboard", val: "clip" },
+        { label: "Both", val: "both" }]);
+      A("w2").now = "Waiting for your answer.";
+      needYou(A("w2"), "Review comments for outside agents has a question", "Three options, the recommended one first."); },
+    function () { log("me", "merge queue: start (into integration, one at a time)"); runQueue(); },
+    function () { var a = A("w5"); a.state = "queued"; a.now = "Asked to merge."; S.queue.push({ id: "w5", phase: 0, status: "waiting", failOnce: true }); runQueue(); },
+    function () { var a = A("w1"); a.state = "queued"; a.step = 4; A("s2").state = "done"; a.now = "Asked to merge.";
+      S.queue.push({ id: "w1", phase: 0, status: "waiting", conflict: true }); runQueue(); },
+    function () { S.base += Math.max(0, 12.3 - spent()); S.budgetAsk = { answered: null };
+      say("ref", "The daily budget is at 82%", { link: "budget" });
+      if (S.away) S.awayLog.push({ kind: "needs", text: "Budget at 82%" });
+      else { S.toasts.push({ id: ++S.seq, title: "Daily budget at 82%", body: "$12.30 of $15", agent: "budget" }); } },
+    function () { var x = A("x1"); x.state = "external"; x.min = 0; x.now = "Active just now: edited crates/ui_ext_wasm/src/limits.rs."; x.add = 17; x.del = 4; activity("other", "Claude Code outside Fyx became active in fyx-w2c"); }
+  ];
+  function step() {
+    if (S.nextEvent >= EVENTS.length) { $("p-hint").textContent = "All scripted events played. Reset to start again."; S.playing = false; render(); return; }
+    EVENTS[S.nextEvent++](); render();
+  }
+  function play() {
+    if (S.playing) { S.playing = false; render(); return; }
+    S.playing = true; render();
+    (function tick() { if (!S.playing) return; step(); if (S.nextEvent < EVENTS.length) later(tick, 4200); else { S.playing = false; render(); } })();
+  }
+
+  function runQueue() {
+    if (S.stopped) return;
+    if (S.queue.some(function (q) { return q.status === "running"; })) return;
+    var q = S.queue.filter(function (q) { return q.status === "waiting"; })[0]; if (!q) return;
+    var a = A(q.id); q.status = "running"; q.phase = 0; a.state = "merging"; log("me", "$ git rebase integration   # " + a.branch); render();
+    later(function () {
+      if (q.conflict) {
+        q.status = "blocked"; a.state = "conflict"; log("bad", "CONFLICT crates/ui_ext_host/src/render.rs");
+        a.now = "Someone renamed bounds() to bounds_in_window() on integration.";
+        a.hunks = [{ file: "crates/ui_ext_host/src/render.rs", at: "conflict", conflict: true, lines: [["c", "<<<<<<< integration"], [" ", "    let bounds = element.bounds_in_window(window, cx);"], ["c", "======="], [" ", "    let bounds = element.bounds(cx);"], [" ", "    let clipped = bounds.intersect(&parent_clip);"], ["c", ">>>>>>> " + a.branch]] }];
+        needYou(a, "Renderer: clip rects hit a merge conflict", "render.rs, 2 places");
+        render(); runQueue(); return;
+      }
+      q.phase = 1; log("", "$ FAST=1 script/gate.sh"); render();
+      later(function () {
+        if (q.failOnce) {
+          q.failOnce = false; a.state = "working"; a.fixing = true; a.now = "One check failed (disk_guard::sweeps_only_stale_slots). Fixing it, then I'll ask to merge again.";
+          log("bad", "gate: 1 test failed"); activity("sentback", a.title + " failed a check and went back to its agent");
+          S.queue = S.queue.filter(function (x) { return x !== q; });
+          later(function () { if (S.stopped) return; a.state = "queued"; a.fixing = false; S.queue.push({ id: a.id, phase: 0, status: "waiting" }); log("", "disk-guard fixed the test"); render(); runQueue(); }, 9000);
+          render(); runQueue(); return;
+        }
+        q.phase = 2; render();
+        later(function () {
+          log("ok", "merged " + a.branch + " into integration, folder archived, " + a.build + " GB freed");
+          a.state = "merged"; a.mergedAt = clock(); a.now = "Merged. Its folder is archived and " + a.build + " GB of build files were freed.";
+          S.merged.push(a.id); S.queue = S.queue.filter(function (x) { return x !== q; });
+          activity("merged", a.title + " merged");
+          render(); runQueue();
+        }, 900);
+      }, 3200);
+    }, 1400);
+  }
+
+  function answer(id, idx) {
+    if (id === "budget") {
+      var v = ["pause", "raise", "stop"][idx]; S.budgetAsk.answered = v;
+      if (v === "pause") { S.pausedNew = true; say("coord", "New workers are paused. Running ones finish and merge as usual."); }
+      else if (v === "raise") { S.cap = 20; say("coord", "Today's cap is now $20."); }
+      else stopAll();
+      closeTab("card:budget"); render(); return;
+    }
+    var a = A(id), q = S.asks[id], o = q.opts[idx];
+    say("me", o.label);
+    a.state = "working"; a.step = Math.min(a.step + 1, a.steps.length - 1); a.now = "Going with: " + o.label.toLowerCase() + ".";
+    finishLater(id, 6000); render();
+  }
+  function approve(id) {
+    var a = A(id); a.state = "queued"; a.now = "Approved by you. Waiting to merge."; S.queue.push({ id: id, phase: 0, status: "waiting" });
+    say("me", "Approved " + a.title + "."); runQueue(); render();
+  }
+  function conflictBack(id) {
+    var a = A(id); S.queue = S.queue.filter(function (x) { return x.id !== id; });
+    a.state = "working"; a.fixing = true; a.now = "Updating from integration and switching to bounds_in_window().";
+    say("me", "Send " + a.title + " back to fix the conflict.");
+    later(function () { if (S.stopped) return; a.state = "queued"; a.fixing = false; a.hunks = a.hunks.filter(function (x) { return !x.conflict; }); S.queue.push({ id: id, phase: 0, status: "waiting" }); log("", "renderer-clip updated cleanly"); render(); runQueue(); }, 7000);
+    render();
+  }
+  function conflictMine(id) {
+    var a = A(id); a.hunks = a.hunks.filter(function (x) { return !x.conflict; }); a.state = "queued";
+    var q = qOf(id); if (q) { q.status = "waiting"; q.conflict = false; }
+    say("me", "Resolved the conflict in render.rs myself."); runQueue(); render();
+  }
+
+  function stopAll() {
+    S.stopped = true; S.stopConfirm = false; S.playing = false;
+    S.agents.forEach(function (a) { if (/working|ask|queued|merging/.test(a.state) && a.kind !== "external") { a._prev = a.state === "merging" ? "queued" : a.state; a.state = "stopped"; } });
+    S.queue.forEach(function (q) { if (q.status === "running") q.status = "waiting"; });
+    log("bad", "Stop all: every agent in this tree stopped, merging paused");
+    say("coord", "Everything in this tree is stopped and merging is paused. Nothing was deleted.");
+  }
+  function resumeAll() {
+    S.stopped = false; S.agents.forEach(function (a) { if (a.state === "stopped") a.state = a._prev || "working"; });
+    say("coord", "Resumed."); runQueue();
+  }
+
+  function openCard(id) { var k = "card:" + id; if (S.tabs.indexOf(k) < 0) S.tabs.push(k); S.tab = k; S.sel = id; }
+  function closeTab(k) { S.tabs = S.tabs.filter(function (x) { return x !== k; }); if (S.tab === k) S.tab = S.tabs[S.tabs.length - 1] || "editor"; }
+
+  function sendGoal() {
+    var ta = $("goal"), text = ta.value.trim(); if (!text) return; ta.value = "";
+    say("me", text); render();
+    later(function () {
+      if (S.pausedNew || S.stopped) { say("coord", "New workers are paused. I'll start these when you resume or raise the budget."); render(); return; }
+      var short = text.length > 30 ? text.slice(0, 30) + "…" : text;
+      [["Part 1: " + short, 9000, 63], ["Tests and docs for it", 12000, 120]].forEach(function (p) {
+        var id = "n" + (++S.seq);
+        S.agents.splice(S.agents.length - 1, 0, { id: id, kind: "worker", parent: "c1", title: p[0], state: "working", branch: "fyx/" + id, wt: "D:\\fyx\\wt\\" + id, cost: 0.01, build: 0, add: p[2], del: 4, min: 0, steps: ["Read the brief and the code", "Make the change", "Run the checks"], step: 0, now: "Starting in a fresh folder." });
+        log("", "start_worker " + id + " → D:\\fyx\\wt\\" + id);
+        finishLater(id, p[1]);
+      });
+      say("coord", "Split into 2 workers. You'll hear from me when one needs an answer or a review.");
+      render();
+    }, 900);
+  }
+
+  setInterval(function () {
+    if (S.stopped) return;
+    S.agents.forEach(function (a) { if (a.state === "working" && a.kind !== "external") a.cost += 0.01 + Math.random() * 0.015; });
+    renderFoot();
+  }, 2000);
+  setInterval(function () { if (S.stopped) return; S.agents.forEach(function (a) { if (g(a) === "work") a.min += 1; }); renderTree(); }, 20000);
+
+  function toggleAway() {
+    if (!S.away) { S.away = true; S.awayLog = []; S.awayAt = clock(); render(); return; }
+    S.away = false;
+    var c = function (k) { return S.awayLog.filter(function (i) { return i.kind === k; }).length; };
+    say("digest", "", { digest: { since: S.awayAt, merged: c("merged"), sentBack: c("sentback"), needs: attention().length, total: S.awayLog.length } });
+    render();
+  }
+
+  /* ---------- rendering ---------- */
+  function renderTitle() {
+    var n = attention().length;
+    var pill = n ? '<button class="pill hot" data-act="next">' + n + (n === 1 ? " needs you" : " need you") + " →</button>"
+                 : '<span class="pill">All quiet · ' + S.agents.filter(function (a) { return g(a) === "work"; }).length + " working</span>";
+    $("titlebar").innerHTML = '<span class="tb-proj">fyx</span><span class="tb-branch mono">integration</span><span class="tb-sp"></span>' + pill;
+  }
+
+  function renderTabs() {
+    $("tabs").innerHTML = S.tabs.map(function (k) {
+      var name = k === "editor" ? "cockpit.rs" : k === "queue" ? "Merging" : k === "card:budget" ? "Daily budget" : (A(k.slice(5)) || {}).title;
+      var x = k === "editor" ? "" : '<span class="x" data-act="close" data-k="' + h(k) + '" aria-label="Close tab">×</span>';
+      return '<button class="tab' + (S.tab === k ? " active" : "") + '" data-act="tab" data-k="' + h(k) + '">' + h(name) + x + "</button>";
+    }).join("");
+  }
+
+  var CODE = ['<span class="c">// crates/fyx_cockpit/src/attention.rs (prototype)</span>', '<span class="k">pub enum</span> <span class="t">Attention</span> { NeedsYou(<span class="t">Reason</span>), Working, Merging, Done }', '',
+    '<span class="c">/// Only NeedsYou interrupts. Everything else waits for the digest.</span>',
+    '<span class="k">fn</span> <span class="f">interrupts</span>(a: &amp;<span class="t">Attention</span>) -&gt; <span class="t">bool</span> { <span class="k">matches!</span>(a, <span class="t">Attention</span>::NeedsYou(_)) }', '',
+    '<span class="c">// Press Play above, then follow the yellow pill in the title bar.</span>'];
+
+  function det(key, label, inner) {
+    return '<details data-det="' + key + '"' + (S.open[key] ? " open" : "") + "><summary>" + label + '</summary><div class="dbody">' + inner + "</div></details>";
+  }
+  function hunksHtml(a, canComment) {
+    return (a.hunks || []).map(function (hk, i) {
+      var body = hk.lines.map(function (l) { var c = l[0] === "+" ? "add" : l[0] === "-" ? "del" : l[0] === "c" ? "conf" : ""; return '<span class="' + c + '">' + h((l[0] === "c" ? "" : l[0]) + l[1]) + "</span>"; }).join("");
+      var extra = hk.comment === "open" ? '<div class="comment"><textarea id="cm-' + a.id + i + '" rows="2" aria-label="Comment for the agent" placeholder="What should the agent change here?"></textarea><div class="primary-row"><button class="btn primary" data-act="cm-send" data-id="' + a.id + '" data-i="' + i + '">Send to agent</button><button class="btn quiet" data-act="cm-cancel" data-id="' + a.id + '" data-i="' + i + '">Cancel</button></div></div>'
+        : hk.comment ? '<div class="sent-c">You: ' + h(hk.comment) + "</div>" : "";
+      var btn = canComment && !hk.conflict ? '<button data-act="cm-open" data-id="' + a.id + '" data-i="' + i + '">Comment</button>' : "";
+      return '<div class="hunk"><div class="hunk-h"><span>' + h(hk.file) + "</span>" + btn + "</div><pre>" + body + "</pre>" + extra + "</div>";
+    }).join("");
+  }
+
+  function renderPane() {
+    var p = $("pane");
+    if (S.tab === "editor") { p.innerHTML = '<div class="code">' + CODE.map(function (l, i) { return '<div><span class="ln">' + (i + 1) + "</span>" + l + "</div>"; }).join("") + "</div>"; return; }
+    if (S.tab === "queue") { p.innerHTML = queueHtml(); return; }
+    if (S.tab === "card:budget") { p.innerHTML = budgetHtml(); return; }
+    var a = A(S.tab.slice(5)); if (!a) { S.tab = "editor"; return renderPane(); }
+    var top = "";
+    if (a.state === "ask") {
+      var q = S.asks[a.id];
+      top = '<div class="ask"><div class="q">' + h(q.q) + '</div><div class="opts">' + q.opts.map(function (o, i) { return '<button class="' + (o.rec ? "rec" : "") + '" data-act="answer" data-id="' + a.id + '" data-i="' + i + '">' + h(o.label) + (o.rec ? "<small>recommended</small>" : "") + "</button>"; }).join("") +
+        '</div><div class="note">Not sure? Write your own answer in the coordinator chat.</div></div>';
+    } else if (a.state === "review") {
+      top = '<div class="primary-row"><button class="btn primary" data-act="approve" data-id="' + a.id + '">Approve and merge</button><span style="color:var(--dim);font-size:12px">or comment on a change below to send it back</span></div>' +
+        '<div style="display:grid;gap:10px">' + hunksHtml(a, true) + "</div>";
+    } else if (a.state === "conflict") {
+      top = '<div class="primary-row"><button class="btn primary" data-act="back" data-id="' + a.id + '">Let the agent fix it</button><button class="btn" data-act="mine" data-id="' + a.id + '">I resolved it myself</button></div>' +
+        '<div style="display:grid;gap:10px">' + hunksHtml(a, false) + "</div>";
+    } else if (a.state === "paused" || a.state === "stopped") {
+      top = '<div class="primary-row"><button class="btn primary" data-act="resume1" data-id="' + a.id + '">Resume</button></div>';
+    } else if (g(a) === "merge") {
+      top = '<div class="primary-row"><button class="btn" data-act="tab" data-k="queue">Open Merging</button></div>';
+    }
+    var stepsHtml = a.steps.length ? '<ol class="steps-l">' + a.steps.map(function (s, i) { return '<li class="' + (i < a.step ? "ok" : i === a.step && g(a) === "work" ? "on" : "") + '">' + h(s) + "</li>"; }).join("") + "</ol>" : "";
+    var pct = a.steps.length ? Math.round(Math.min(a.step, a.steps.length) / a.steps.length * 100) : 0;
+    var parent = a.parent ? A(a.parent) : null;
+    var ctl = a.kind === "external" ? "" : (g(a) === "work" ? '<button class="btn quiet" data-act="pause" data-id="' + a.id + '">Pause</button>' : "") + (!/merged|done|stopped/.test(a.state) ? '<button class="btn quiet danger" data-act="stop1" data-id="' + a.id + '">Stop</button>' : "");
+    var details = '<dl class="kv"><dt>Branch</dt><dd class="mono">' + h(a.branch || "—") + '</dd><dt>Folder</dt><dd class="mono">' + h(a.wt || "—") + "</dd><dt>Spent today</dt><dd>$" + a.cost.toFixed(2) + "</dd><dt>Build files</dt><dd>" + (a.build ? a.build + " GB" : "—") + "</dd>" + (parent ? "<dt>Started by</dt><dd>" + h(parent.title) + "</dd>" : "") + "</dl>" +
+      '<div class="primary-row"><button class="btn quiet" data-act="fake" data-msg="Opens the folder in a new Fyx window.">Open folder</button><button class="btn quiet" data-act="fake" data-msg="Opens a terminal in the agent\'s folder.">Open terminal</button>' + ctl + "</div>";
+    var changes = a.state === "review" || a.state === "conflict" || !(a.hunks && a.hunks.length) ? "" : det(a.id + ":changes", "Changes so far · +" + a.add + " −" + a.del, hunksHtml(a, false));
+    p.innerHTML = '<div class="card"><div style="display:grid;gap:6px"><h2>' + h(a.title) + '</h2><div class="status"><span class="dot ' + DOT[g(a)] + '"></span><b>' + h(statusLine(a)) + "</b></div></div>" +
+      top +
+      '<div class="doing"><div class="now">' + h(a.now) + "</div>" + (a.steps.length && g(a) === "work" ? '<div class="prog"><i style="width:' + pct + '%"></i></div>' : "") + "</div>" +
+      (stepsHtml ? det(a.id + ":steps", "All steps", stepsHtml) : "") + changes + det(a.id + ":details", "Details and controls", details) + "</div>";
+  }
+
+  function budgetHtml() {
+    var ans = S.budgetAsk && S.budgetAsk.answered;
+    var opts = [["Pause new workers, let running ones finish", true], ["Raise today's cap to $20", false], ["Stop everything in this tree", false]];
+    return '<div class="card"><div style="display:grid;gap:6px"><h2>Daily budget</h2><div class="status"><span class="dot d-attn"></span><b>' + (ans ? "Answered" : "Needs your answer") + "</b></div></div>" +
+      (ans ? "" : '<div class="ask"><div class="q">This tree used $' + spent().toFixed(2) + " of today's $" + S.cap + ' cap. What now?</div><div class="opts">' + opts.map(function (o, i) { return '<button class="' + (o[1] ? "rec" : "") + '" data-act="answer" data-id="budget" data-i="' + i + '">' + o[0] + (o[1] ? "<small>recommended</small>" : "") + "</button>"; }).join("") + "</div></div>") + "</div>";
+  }
+
+  function queueHtml() {
+    var items = S.queue.map(function (q) {
+      var a = A(q.id);
+      var bars = [0, 1, 2].map(function (i) { var c = q.status === "blocked" && i === 0 ? "bad" : q.status === "running" && i < q.phase ? "ok" : q.status === "running" && i === q.phase ? "on" : ""; return '<i class="' + c + '"></i>'; }).join("");
+      return '<div class="qitem"><div class="top"><span class="dot ' + DOT[g(a)] + '"></span><b>' + h(a.title) + '</b></div><div class="qsteps" aria-hidden="true">' + bars + '</div><div class="sub">' + h(statusLine(a)) + (q.status === "waiting" ? (S.stopped ? " · paused by Stop all" : " · one branch at a time") : "") + "</div></div>";
+    }).join("") || '<div class="quiet-empty">Nothing is waiting to merge.</div>';
+    var done = S.merged.length ? det("q:done", "Merged today (" + S.merged.length + ")", S.merged.map(function (id) { var a = A(id); return "<div>" + h(a.mergedAt) + " · " + h(a.title) + "</div>"; }).join("")) : "";
+    var how = det("q:how", "How merging works", '<div style="color:var(--muted)">Each approved branch is updated from integration, checked with <span class="mono">FAST=1 script/gate.sh</span>, then merged. One at a time. A failed check goes back to its agent without bothering you; a conflict asks you.</div>');
+    return '<div class="queue"><h2 style="margin:0;font-size:17px;font-weight:600">Merging into integration</h2>' + items + done + how + "</div>";
+  }
+
+  function row(a, cls) {
+    var why = reason(a), rt = rightLabel(a), attn = a.budget || g(a) === "attn";
+    var dot = a.budget ? "d-attn" : DOT[g(a)];
+    return '<div class="row ' + (cls || "") + (attn ? " attn" : "") + (S.sel === a.id ? " sel" : "") + '" data-act="row" data-id="' + a.id + '" tabindex="0" role="button">' +
+      '<span class="dot ' + dot + '"></span><span class="nm">' + h(a.title) + (why ? '<span class="why">' + h(why) + "</span>" : "") + '</span><span class="rt num">' + h(rt) + "</span></div>";
+  }
+
+  function renderTree() {
+    var html = "", att = attention();
+    if (att.length) html += '<div class="sec attn">Needs you</div>' + att.map(function (a) { return row(a); }).join("");
+    var c = A("c1");
+    var kids = S.agents.filter(function (a) { return a.parent === "c1"; });
+    var live = kids.filter(function (a) { return g(a) !== "done" && g(a) !== "attn"; });
+    var done = kids.filter(function (a) { return g(a) === "done"; });
+    var order = { work: 0, off: 1, merge: 2 };
+    live.sort(function (x, y) { return order[g(x)] - order[g(y)]; });
+    html += '<div class="sec">' + h(c.title) + "</div>" + row(c);
+    live.forEach(function (w) {
+      html += row(w, "child");
+      var subs = S.agents.filter(function (s) { return s.parent === w.id; });
+      if (subs.length) {
+        if (S.open["subs:" + w.id]) html += subs.map(function (s) { return row(s, "grand"); }).join("") + '<button class="morelink" data-act="subs" data-id="' + w.id + '">Hide helpers</button>';
+        else html += '<button class="morelink" data-act="subs" data-id="' + w.id + '">' + subs.length + " helper agents · " + subs.filter(function (s) { return g(s) === "work"; }).length + " working</button>";
+      }
+    });
+    if (!live.length && !att.length) html += '<div class="quiet-empty">Nothing running. Give the coordinator a goal.</div>';
+    if (done.length) {
+      html += '<div class="sec"><button data-act="toggle-done">' + (S.showDone ? "▾" : "▸") + " Done (" + done.length + ")</button></div>";
+      if (S.showDone) html += done.map(function (a) { return row(a, "child"); }).join("");
+    }
+    var ext = S.agents.filter(function (a) { return a.kind === "external"; });
+    html += '<div class="sec"><button data-act="toggle-ext">' + (S.showExt ? "▾" : "▸") + " Outside Fyx (" + ext.length + ")</button></div>";
+    if (S.showExt) html += ext.map(function (a) { return row(a); }).join("");
+    $("rows").innerHTML = html;
+    $("stopbox").innerHTML = S.stopConfirm
+      ? '<span class="stopconfirm">Stop all agents? <button class="danger" data-act="stop-yes">Stop</button><button data-act="stop-no">Cancel</button></span>'
+      : S.stopped ? '<button class="stoplink" style="color:var(--fg)" data-act="resume">Resume all</button>' : '<button class="stoplink" data-act="stop">Stop all</button>';
+  }
+
+  function renderFoot() {
+    var sp = spent(), pct = sp / S.cap;
+    $("treefoot").innerHTML = '<span class="num ' + (pct >= .8 ? "warn" : "") + '">Today $' + sp.toFixed(2) + " of $" + S.cap + "</span>" + (S.pausedNew ? "<span>· new workers paused</span>" : "") + (S.queue.length ? '<span>·</span><button class="linkish" style="font-size:11.5px" data-act="tab" data-k="queue">' + S.queue.length + " merging</button>" : "");
+  }
+
+  function renderChat() {
+    var m = $("msgs");
+    m.innerHTML = S.chat.map(function (c) {
+      if (c.from === "digest") {
+        var d = c.digest, li = [];
+        if (d.merged) li.push(d.merged + " merged");
+        if (d.sentBack) li.push(d.sentBack + " failed a check and went back to its agent (handled)");
+        if (d.needs) li.push(d.needs + " need you now");
+        if (!li.length) li.push("Nothing changed");
+        return '<div class="digest"><b>While you were away (since ' + h(d.since) + ')</b><ul>' + li.map(function (x) { return "<li>" + h(x) + "</li>"; }).join("") + '</ul><span class="sub">No notifications were sent while you were away; ' + d.total + " updates are summed up here.</span>" + (d.needs ? '<span><button class="linkish" data-act="next">Start with the first one</button></span>' : "") + "</div>";
+      }
+      if (c.from === "ref") {
+        var done = c.link === "budget" ? S.budgetAsk && S.budgetAsk.answered : !(A(c.link) && g(A(c.link)) === "attn");
+        return '<div class="msg ' + (done ? "" : "ref") + '"><div class="who">Coordinator</div><div class="txt">' + h(c.text) + (done ? ' <span style="color:var(--dim)">· handled</span>' : ' · <button class="linkish" data-act="row" data-id="' + c.link + '">Open</button>') + "</div></div>";
+      }
+      return '<div class="msg ' + (c.from === "me" ? "me" : "") + '"><div class="who">' + (c.from === "me" ? "You" : "Coordinator") + '</div><div class="txt">' + h(c.text) + "</div></div>";
+    }).join("");
+    m.scrollTop = m.scrollHeight;
+  }
+
+  function renderToasts() {
+    var live = attention().map(function (a) { return a.id; });
+    S.toasts = S.toasts.filter(function (x) { return x.title === "Prototype" || live.indexOf(x.agent) >= 0; });
+    var t = S.toasts[S.toasts.length - 1];
+    $("toasts").innerHTML = t ? '<div class="toast"><div class="tt">' + h(t.title) + '</div><div class="tb">' + h(t.body) + '</div><div class="act"><button class="btn primary" data-act="row" data-id="' + t.agent + '">Open</button><button class="btn quiet" data-act="dismiss">Later</button>' + (S.toasts.length > 1 ? '<span class="more">+' + (S.toasts.length - 1) + " more</span>" : "") + "</div></div>" : "";
+  }
+  function renderTerm() { var t = $("termlog"); t.innerHTML = S.log.map(function (l) { return '<div class="' + l[0] + '">' + h(l[1]) + "</div>"; }).join(""); t.scrollTop = t.scrollHeight; }
+  function renderProto() {
+    $("p-play").textContent = S.playing ? "❚❚ Pause events" : "▶ Play events"; $("p-play").classList.toggle("on", S.playing);
+    $("p-away").textContent = S.away ? "I'm back (show summary)" : "Simulate: I'm away"; $("p-away").classList.toggle("on", S.away);
+    $("p-step").textContent = "Next event (" + S.nextEvent + "/" + EVENTS.length + ")";
+  }
+  function render() { renderProto(); renderTitle(); renderTabs(); renderPane(); renderTree(); renderFoot(); renderChat(); renderToasts(); renderTerm(); }
+
+  document.addEventListener("toggle", function (e) { var k = e.target.getAttribute && e.target.getAttribute("data-det"); if (k) S.open[k] = e.target.open; }, true);
+  document.addEventListener("click", function (e) {
+    var el = e.target.closest("[data-act]"); if (!el) return;
+    var act = el.getAttribute("data-act"), id = el.getAttribute("data-id"), i = +el.getAttribute("data-i");
+    switch (act) {
+      case "close": e.stopPropagation(); closeTab(el.getAttribute("data-k")); break;
+      case "tab": S.tab = el.getAttribute("data-k"); if (S.tabs.indexOf(S.tab) < 0) S.tabs.push(S.tab); S.sel = S.tab.indexOf("card:") === 0 ? S.tab.slice(5) : null; break;
+      case "row": openCard(id); S.toasts = S.toasts.filter(function (t) { return t.agent !== id; }); break;
+      case "next": var f = attention()[0]; if (f) openCard(f.id); break;
+      case "answer": answer(id, i); return;
+      case "approve": approve(id); return;
+      case "back": conflictBack(id); return;
+      case "mine": conflictMine(id); return;
+      case "pause": A(id).state = "paused"; break;
+      case "resume1": A(id).state = "working"; A(id).now = "Resumed."; finishLater(id, 8000); break;
+      case "stop1": A(id).state = "stopped"; A(id).now = "Stopped by you. Its folder stays as it is."; break;
+      case "stop": S.stopConfirm = true; break;
+      case "stop-no": S.stopConfirm = false; break;
+      case "stop-yes": stopAll(); break;
+      case "resume": resumeAll(); break;
+      case "dismiss": S.toasts.pop(); break;
+      case "subs": S.open["subs:" + id] = !S.open["subs:" + id]; break;
+      case "toggle-done": S.showDone = !S.showDone; break;
+      case "toggle-ext": S.showExt = !S.showExt; break;
+      case "fake": S.toasts.push({ id: ++S.seq, title: "Prototype", body: el.getAttribute("data-msg"), agent: S.sel }); var sid = S.seq; later(function () { S.toasts = S.toasts.filter(function (x) { return x.id !== sid; }); render(); }, 2500); break;
+      case "cm-open": A(id).hunks[i].comment = "open"; render(); var ta = document.getElementById("cm-" + id + i); if (ta) ta.focus(); return;
+      case "cm-cancel": A(id).hunks[i].comment = null; break;
+      case "cm-send":
+        var box = document.getElementById("cm-" + id + i), txt = box ? box.value.trim() : ""; if (!txt) { if (box) box.focus(); return; }
+        var a = A(id); a.hunks[i].comment = txt; a.state = "working"; a.now = "Working on your comment: " + txt;
+        finishLater(id, 6000, "Addressed your comment. The checks pass."); break;
+    }
+    render();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.target.id === "goal" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendGoal(); }
+    else if (e.key === "Enter" && e.target.classList && e.target.classList.contains("row")) { openCard(e.target.getAttribute("data-id")); render(); }
+  });
+  $("send").addEventListener("click", sendGoal);
+  $("p-play").addEventListener("click", play);
+  $("p-step").addEventListener("click", function () { S.playing = false; step(); });
+  $("p-away").addEventListener("click", toggleAway);
+  $("p-reset").addEventListener("click", function () { timers.forEach(clearTimeout); timers = []; S = fresh(); $("p-hint").textContent = "Reset. Press Play, then follow the yellow pill in the title bar."; render(); });
+
+  S = fresh();
+  render();
+})();
+</script>

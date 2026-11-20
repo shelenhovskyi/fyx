@@ -216,6 +216,66 @@ hooks from worktrees research §8.3 (`fyx/<name>` branch, `.worktreeinclude`). N
 on the cockpit's own dock icon. A later `fyx:ui` extension point could let extensions add cards
 (for example a CI card), but the MVP does not need it.
 
+### 2.8 UI/UX research and prototype v2 (2026-11-20)
+
+A clickable prototype lives next to this file
+([agent-cockpit-prototype.html](agent-cockpit-prototype.html)). The owner's verdict on v1: it looks
+good, but parts are cluttered or unclear. This section is the focused UX research and the audit
+that produced v2.
+
+**What calm multi-agent tools do**
+
+- **Group by status, with one "Needs attention" bucket.** Cursor's Agents Window, grouped by
+  status, gets a "Needs Attention" section holding every agent blocked on you (questions, approvals,
+  plans) *plus finished work you have not reviewed*. A parent's status rolls up from its subtasks,
+  so a parent is never shown as stuck behind its children
+  ([Cursor forum](https://forum.cursor.com/tag/agents-window/378),
+  [cloud agents notes](https://cursor.com/docs/release-notes/cloud-agents.md)).
+- **Attention, not activity.** A supervision surface shows what needs judgment; an activity feed
+  shows everything that happened. Mixing them is the main source of noise
+  ([Supervision surfaces](https://blakecrosley.com/blog/agents-need-supervision-surfaces)).
+- **Recede what orients, keep the task in focus.** Linear's 2024 and 2026 refreshes cut tabs,
+  headers and panels, lowered border contrast, and let navigation recede so the current view and
+  its actions read first ([Linear](https://linear.app/now/how-we-redesigned-the-linear-ui),
+  [2026 refresh](https://linear.app/changelog/2026-03-12-ui-refresh)).
+- **Progressive disclosure.** Summary first, steps, tools and costs behind "details"; risk-tiered
+  approval, so only consequential steps ask
+  ([Smashing](https://smashingmagazine.com/2026/02/designing-agentic-ai-practical-ux-patterns/),
+  [UI/UX Atlas](https://uiux-atlas.pages.dev/lessons/emerging/multi-agent-orchestration-ux)).
+- **Simple lists win.** GitHub's agents panel and VS Code's Agent Sessions are a flat list with
+  status, a click to open, stop and archive
+  ([GitHub](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/manage-agents),
+  [VS Code](https://code.visualstudio.com/docs/agents/run/sessions/manage-sessions)). Kanban
+  boards break down when agents are many or interdependent.
+- **Complaints to avoid:** Cursor users report unclear completion alerts, wrong statuses ("waiting
+  for plan approval" shown as complete) and review split across two windows
+  ([forum](https://forum.cursor.com/t/cursor-agents-ui-unreliable-task-switching-ambiguous-message-submission-and-unclear-completion-alerts/170506)).
+
+**Audit of v1 and what v2 changed**
+
+| v1 problem | v2 change |
+| --- | --- |
+| 12 status chips (working, needs you, ready for review, in merge queue, merging, merged, gate red, stopped, paused, idle, done, outside Fyx) | Four buckets the person cares about: **Needs you, Working, Merging, Done**, shown as a dot (color plus shape). The specific reason is one line of text under the name ("Question: …", "Review +88 −12", "Conflict in render.rs") |
+| Decisions lived in three places: chat cards, an Inbox popover and toasts; the same agent also appeared twice in the tree | One place to act: the agent's card. The tree's "Needs you" section, the title-bar pill, the chat line and the toast all just **open that card**. The Inbox popover is gone |
+| Title bar crowded: budget bar, agent count, build slot, Inbox, Stop all | One pill: **"3 need you →"** (opens the next one) or a quiet "All quiet · 4 working". Budget moved to the tree footer and becomes a "Needs you" item only at 80% |
+| Every row showed chip, cost, build size, branch and diff | Row = dot, name, reason only when it needs you, and one right-hand word: Answer / Review / Resolve, or minutes running. Cost, branch, folder, build size sit in the card under **Details and controls** |
+| Card had six equal buttons | **One primary action per state**: answer options; *Approve and merge*; *Let the agent fix it*; *Resume*. Pause, Stop, Open folder, Open terminal moved under Details |
+| Subagents always expanded; merged and outside agents always visible | Subagents collapse to "2 helper agents · 1 working"; **Done** and **Outside Fyx** are collapsed groups |
+| Chat logged every merge and failed gate as system messages | Chat has only the coordinator's words and one line per "needs you" (marked *handled* once done). Merges and auto-handled failures go to the away summary and the terminal |
+| Toasts stacked, also for silent events | At most one toast, "+N more", only for "needs you"; a toast disappears when its item is handled |
+| Jargon: target, gate red, FAST=1 script/gate.sh, build slot, depth 2, in merge queue | Plain words: build files, "a check failed", "Merging into integration", "Approved, waiting to merge". The gate command is under "How merging works" |
+| Merge queue had a tab, a Tree/Queue toggle and a header of five facts | One "Merging" view opened from the footer or a merging card, with a 3-segment progress bar per branch |
+| Status text could disagree with reality (v1 kept stale toasts) | Status line is derived from state in one function, the rule Cursor users asked for |
+
+**Rules v2 encodes (for the real implementation)**
+
+1. Only `NeedsYou(reason)` interrupts; `Working`, `Merging`, `Done` never do.
+2. Every "needs you" item has exactly one place to act, and every pointer to it opens that place.
+3. One primary button per card state; the rest is behind Details.
+4. Show the reason, not the state name.
+5. Collapse what is finished, nested or outside Fyx; show counts instead.
+6. Quiet chrome: low-contrast borders, no colored chips except the yellow "needs you".
+
 ## 3. MVP vs later
 
 ### MVP (in this order; each step usable alone)
