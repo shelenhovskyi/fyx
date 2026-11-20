@@ -65,6 +65,15 @@ pub enum FyxSecurityMode {
     Unrecognized,
 }
 
+impl crate::UserSettingsContent {
+    /// The user's settings object for UI extension `extension_id` (`fyx_extensions.<id>`), as
+    /// written: the extension's declarations check it (`ui_ext::settings`). User level only
+    /// (design wit-0.4 §D.2): project settings files cannot set it.
+    pub fn fyx_extension_settings(&self, extension_id: &str) -> Option<&serde_json::Value> {
+        self.content.fyx_extensions.as_ref()?.get(extension_id)
+    }
+}
+
 /// Fyx's own settings (`fyx` in settings).
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
@@ -377,6 +386,24 @@ fn path_within(path: &Path, root: &Path) -> bool {
 
 #[cfg(test)]
 mod account_tests {
+    #[test]
+    fn extension_settings_are_kept_as_written() {
+        let user: crate::UserSettingsContent = serde_json::from_str(
+            r#"{ "fyx_extensions": { "acme.todo": { "limit": 5, "mode": "x", "extra": [1] }, "acme.bad": 3 } }"#,
+        )
+        .expect("user settings");
+        assert_eq!(
+            user.fyx_extension_settings("acme.todo"),
+            Some(&serde_json::json!({ "limit": 5, "mode": "x", "extra": [1] }))
+        );
+        assert_eq!(
+            user.fyx_extension_settings("acme.bad"),
+            Some(&serde_json::json!(3)),
+            "not an object: the extension's checks report it"
+        );
+        assert_eq!(user.fyx_extension_settings("acme.none"), None);
+    }
+
     use super::*;
 
     fn settings(json: &str) -> FyxAccountsSettingsContent {

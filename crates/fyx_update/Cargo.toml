@@ -1,0 +1,24 @@
+[package]
+name = "fyx_update"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Fyx self-updater core (plan 6.2): Ed25519-signed release manifests, the update offer, artifact checks and the install and rollback plan"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/fyx_update.rs"
+doctest = false
+
+[dependencies]
+base64.workspace = true
+hex.workspace = true
+ring.workspace = true
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
