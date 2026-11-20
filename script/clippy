@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# fyx: one command at a time in the shared cargo target, with fresh artifacts (script/fyx-cargo).
+if [[ -z "${FYX_CARGO_LOCKED:-}" && -x "$(dirname "$0")/fyx-cargo" ]]; then
+    exec "$(dirname "$0")/fyx-cargo" --exec "$0" "$@"
+fi
 
 if [[ ! " $* " == *" -p "* && ! " $* " == *" --package "* ]]; then
     set -- "$@" --workspace
