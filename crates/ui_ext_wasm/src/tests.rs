@@ -632,12 +632,12 @@ fn test_api_version_gating() {
     assert!(api_version_range(false).contains(&Version::new(0, 2, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 1, 0)));
     assert!(api_version_range(false).contains(&Version::new(0, 3, 0)));
-    // 0.4 is staged (plan P5): known, and loaded only where staged versions may.
+    // 0.4 is frozen too (plan 5.19).
     assert_eq!(
         known_api_version(&Version::new(0, 4, 0)),
         Some(ApiVersion::V0_4_0)
     );
-    assert!(!api_version_range(false).contains(&Version::new(0, 4, 0)));
+    assert!(api_version_range(false).contains(&Version::new(0, 4, 0)));
     assert!(api_version_range(true).contains(&Version::new(0, 4, 0)));
     assert!(!staged_api_allowed(false, false));
     assert!(staged_api_allowed(true, false));
@@ -839,20 +839,19 @@ mod harness_conformance {
             fyx_ext_harness::MAX_CONSECUTIVE_TICK_ERRORS,
             crate::ticks::MAX_CONSECUTIVE_TICK_ERRORS
         );
-        // The harness runs every version the host knows; it runs the staged 0.4 on fake
-        // terminals ahead of the host (plan 5.10).
+        // The harness runs every version the host knows (0.4 on fake terminals, plan 5.10).
         let harness_versions = fyx_ext_harness::SUPPORTED_API_VERSIONS;
         assert_eq!(
             harness_versions,
             [
                 MIN_VERSION,
                 Version::new(0, 2, 0),
-                MAX_FROZEN_VERSION,
+                Version::new(0, 3, 0),
                 MAX_VERSION
             ]
         );
         assert!(harness_versions.iter().all(is_supported_api_version));
-        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 3, 0));
+        assert_eq!(MAX_FROZEN_VERSION, Version::new(0, 4, 0));
         assert_eq!(MAX_VERSION, Version::new(0, 4, 0));
     }
 

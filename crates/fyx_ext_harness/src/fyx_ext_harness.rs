@@ -5,7 +5,7 @@
 //! Apache-2.0, like the SDK, so extensions can use it as a dev-dependency, and host-only, so the
 //! SDK itself never pulls in wasmtime.
 //!
-//! It runs components of `fyx:ui` 0.1, 0.2 and the staged 0.3. Internally every value is the
+//! It runs components of `fyx:ui` 0.1, 0.2 and 0.3. Internally every value is the
 //! newest model (`ui_ext::v0_2`, which also holds 0.3's image nodes), into which older data
 //! converts without loss. The unsuffixed methods and [`Outcome`] show that model (decision D5);
 //! the `*_v0_1` methods show the 0.1 model, which is lossless for a 0.1 component and drops
@@ -60,6 +60,7 @@ mod compile_cache;
 mod context;
 mod listeners;
 mod notifications;
+mod published;
 mod relay;
 mod review;
 pub mod settings;
@@ -74,6 +75,11 @@ pub use api_state::{
 pub use compile_cache::cache_compiled_components;
 pub use context::OpenedFile;
 pub use listeners::{ListenerEvent, McpCall, McpError, ToolDef};
+pub use published::{
+    DECORATION_COLORS, FileDecoration, MAX_BADGE_CHARS, MAX_DECORATED_PATHS,
+    MAX_DECORATION_TOOLTIP_BYTES, MAX_DECORATIONS_PER_CALL, MAX_PUBLISHED, MAX_PUBLISHED_PER_FILE,
+    MAX_PUBLISHES_PER_SECOND,
+};
 pub use review::ReviewTurn;
 pub use terminals::{FakeTerminal, plain_text};
 
@@ -294,6 +300,23 @@ pub struct EventOutcome {
     pub touched: BTreeSet<NodeId>,
 }
 
+/// A row's chevron (0.4 `expansion`, plan 6.7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Expansion {
+    /// No chevron, an empty slot of its width.
+    #[default]
+    Leaf,
+    Collapsed,
+    Expanded,
+}
+
+/// A row from [`Harness::tree_rows`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeRow {
+    pub row: model::ListRow,
+    pub expansion: Expansion,
+}
+
 /// What one event or tick did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
@@ -325,6 +348,10 @@ pub(crate) struct State {
     listeners: listeners::FakeListeners,
     /// 0.4 `context`.
     context: context::FakeContext,
+    /// 0.4 `context` publishing: diagnostics and file decorations.
+    published: published::FakePublished,
+    /// The `expansion` of each row of the last 0.4 `list-rows` answer.
+    last_expansions: Vec<(u32, Expansion)>,
     /// 0.4 `review`.
     review: review::FakeReview,
     /// 0.4 `relay`.
@@ -503,7 +530,7 @@ struct Runtime {
     engine: Engine,
     linker_v0_1: Linker<State>,
     linker_v0_2: Linker<State>,
-    /// What the host implements of the staged 0.3 world; instantiation adds traps for the rest.
+    /// What the host implements of the 0.3 world; instantiation adds traps for the rest.
     linker_v0_3: Linker<State>,
     linker_v0_4: Linker<State>,
 }
@@ -732,15 +759,27 @@ impl Bindings {
                 .call_handle_event(&mut *store, surface_id, &event.into())?
                 .and_then(|update| guest_value(model::Update::try_from(update)))
                 .and_then(|update| checked_images(store, surface_id, update)),
-            Self::V0_4(extension) => extension
-                .call_handle_event(&mut *store, surface_id, &event.into())?
-                .and_then(|update| guest_value(model::Update::try_from(update)))
-                .and_then(|update| checked_images(store, surface_id, update))
-                .and_then(|update| {
-                    checked_terminals(store, api_state::update_props(&update))?;
-                    Ok(update)
-                }),
+            Self::V0_4(extension) => {
+                return Self::handle_event_v0_4(extension, store, surface_id, event.into());
+            }
         })
+    }
+
+    /// 0.4 `handle-event`, also for the events the 0.2 model has no case for (`row-toggled`).
+    fn handle_event_v0_4(
+        extension: &v0_4::UiExtension,
+        store: &mut Store<State>,
+        surface_id: &str,
+        event: v0_4::bindings::fyx::ui::types::UiEvent,
+    ) -> wasmtime::Result<std::result::Result<model::Update, String>> {
+        Ok(extension
+            .call_handle_event(&mut *store, surface_id, &event)?
+            .and_then(|update| guest_value(model::Update::try_from(update)))
+            .and_then(|update| checked_images(store, surface_id, update))
+            .and_then(|update| {
+                checked_terminals(store, api_state::update_props(&update))?;
+                Ok(update)
+            }))
     }
 
     fn list_rows(
@@ -806,32 +845,37 @@ impl Bindings {
         start: u32,
         count: u32,
     ) -> wasmtime::Result<std::result::Result<Vec<model::ListRow>, String>> {
-        Ok(guest_value(v0_4::try_collect::<_, model::ListRow>(
-            extension.call_list_rows(&mut *store, surface_id, list, start, count)?,
-        ))
-        .and_then(|rows| {
-            guest_value(
-                store.data().api.check_images(
-                    surface_id,
-                    rows.iter()
-                        .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
-                ),
-            )
-            .map(|()| rows)
-        })
-        .and_then(|rows| {
-            match rows
-                .iter()
-                .flat_map(|row| &row.nodes)
-                .find_map(|node| match node.props {
-                    model::Props::Canvas(_) => Some(ui_ext::TreeError::CanvasInRow(node.id)),
-                    model::Props::Terminal(_) => Some(ui_ext::TreeError::TerminalInRow(node.id)),
-                    _ => None,
-                }) {
-                Some(error) => Err(error.to_string()),
-                None => Ok(rows),
-            }
-        }))
+        let rows = extension.call_list_rows(&mut *store, surface_id, list, start, count)?;
+        store.data_mut().last_expansions = rows
+            .iter()
+            .map(|row| (row.index, row.expansion.into()))
+            .collect();
+        Ok(guest_value(v0_4::try_collect::<_, model::ListRow>(rows))
+            .and_then(|rows| {
+                guest_value(
+                    store.data().api.check_images(
+                        surface_id,
+                        rows.iter()
+                            .flat_map(|row| row.nodes.iter().map(|node| &node.props)),
+                    ),
+                )
+                .map(|()| rows)
+            })
+            .and_then(|rows| {
+                match rows
+                    .iter()
+                    .flat_map(|row| &row.nodes)
+                    .find_map(|node| match node.props {
+                        model::Props::Canvas(_) => Some(ui_ext::TreeError::CanvasInRow(node.id)),
+                        model::Props::Terminal(_) => {
+                            Some(ui_ext::TreeError::TerminalInRow(node.id))
+                        }
+                        _ => None,
+                    }) {
+                    Some(error) => Err(error.to_string()),
+                    None => Ok(rows),
+                }
+            }))
     }
 
     /// A 0.1 component has no `tick`; it can never request one either.
@@ -1196,6 +1240,8 @@ impl Harness {
                 ),
                 listeners: fake_listeners,
                 context: context::FakeContext::default(),
+                published: published::FakePublished::default(),
+                last_expansions: Vec::new(),
                 review: review::FakeReview::default(),
                 relay: relay::FakeRelay::default(),
                 settings: settings::FakeSettings::default(),
@@ -1225,7 +1271,7 @@ impl Harness {
                 v0_2::UiExtension::instantiate(&mut store, &component, &runtime.linker_v0_2)
                     .map(Bindings::V0_2)
             }
-            // What the host does not implement of the staged 0.3 world traps when called, as in
+            // What the host does not implement of the 0.3 world traps when called, as in
             // the host; a component that never calls it loads and runs.
             ApiVersion::V0_3_0 => {
                 let mut linker = runtime.linker_v0_3.clone();
@@ -1919,6 +1965,19 @@ impl Harness {
     /// entries changed.
     pub fn set_diagnostics(&mut self, files: Vec<ui_ext::context::FileDiagnostics>) {
         self.store.data_mut().context.set_diagnostics(files);
+    }
+
+    /// What the extension published with 0.4 `publish-diagnostics` (plan 6.6), by file in the
+    /// order first published; each `FileRef` names its worktree, `source` is `None` (the host
+    /// names the extension) and texts are cut as the host cuts them.
+    pub fn published_diagnostics(&self) -> Vec<ui_ext::context::FileDiagnostics> {
+        self.store.data().published.diagnostics()
+    }
+
+    /// The extension's project-panel decorations (0.4 `decorate-files`, plan 6.7), in the order
+    /// first set.
+    pub fn file_decorations(&self) -> Vec<FileDecoration> {
+        self.store.data().published.decorations()
     }
 
     /// Whether the extension watches diagnostics.
@@ -2816,6 +2875,63 @@ impl Harness {
             .into_iter()
             .map(|(row, _)| row)
             .collect())
+    }
+
+    /// [`Harness::rows`] with each row's chevron (0.4, plan 6.7); rows of older worlds are
+    /// leaves.
+    pub fn tree_rows(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<TreeRow>> {
+        self.store.data_mut().last_expansions.clear();
+        let rows = self.rows(surface_id, list, start, count)?;
+        let expansions = std::mem::take(&mut self.store.data_mut().last_expansions);
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let expansion = expansions
+                    .iter()
+                    .find(|(index, _)| *index == row.index)
+                    .map_or(Expansion::Leaf, |(_, expansion)| *expansion);
+                TreeRow { row, expansion }
+            })
+            .collect())
+    }
+
+    /// A click on the chevron of row `index` of `list`, or Right (`expand`) or Left on it: sends
+    /// 0.4 `row-toggled` and applies the effects and the reply, as [`Harness::event`]. It grants
+    /// no activation. The host changes no rows itself; read them again with
+    /// [`Harness::tree_rows`].
+    pub fn toggle_row(
+        &mut self,
+        surface_id: &str,
+        list: NodeId,
+        index: u32,
+        expand: bool,
+    ) -> Result<Outcome> {
+        anyhow::ensure!(
+            matches!(self.extension, Bindings::V0_4(_)),
+            "row-toggled is a 0.4 event"
+        );
+        anyhow::ensure!(
+            self.mounted.contains_key(surface_id),
+            "surface {surface_id:?} is not mounted"
+        );
+        self.tick_errors.remove(surface_id);
+        let surface = surface_id.to_string();
+        let (result, effects) = self.call(move |extension, store| match extension {
+            Bindings::V0_4(extension) => Bindings::handle_event_v0_4(
+                extension,
+                store,
+                &surface,
+                v0_4::bindings::fyx::ui::types::UiEvent::RowToggled((list, index, expand)),
+            ),
+            _ => Ok(Err("row-toggled is a 0.4 event".to_string())),
+        })?;
+        self.finish(surface_id, "handle-event", result, effects)
     }
 
     /// [`Harness::rows`] in the 0.1 model: each row's index and tree.

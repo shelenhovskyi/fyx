@@ -1,4 +1,4 @@
-//! `fyx:ui` 0.4, staged: command hooks through `fyx-relay` (design.md B.9), with the
+//! `fyx:ui` 0.4: command hooks through `fyx-relay` (design.md B.9), with the
 //! `fyx-ui-0-4` feature and the `relay:hooks` capability.
 //!
 //! A tool's hook runs `"$FYX_RELAY" --channel <extension-id>/<name> [args…]`. The host delivers

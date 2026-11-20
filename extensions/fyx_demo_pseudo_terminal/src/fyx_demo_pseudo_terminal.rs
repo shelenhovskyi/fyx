@@ -288,6 +288,14 @@ impl Extension for PseudoTerminalDemo {
                 self.refresh_status_line()?;
                 self.tree.push(PANEL).map_err(|error| error.message)?;
             }
+            // Settings the user changed (none are declared by this demo itself; a package that
+            // adds `[[fyx_ui.settings]]` sees them here).
+            IoEvent::SettingsChanged(keys) => {
+                for key in keys {
+                    let value = settings::get(&key).map_err(|error| error.message)?;
+                    log(LogLevel::Info, &format!("setting {key} = {value:?}"));
+                }
+            }
             _ => {}
         }
         Ok(())

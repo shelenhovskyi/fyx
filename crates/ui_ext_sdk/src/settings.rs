@@ -7,12 +7,20 @@
 //! `io-event::settings-changed(keys)` arrives in `handle_io`; read the keys again then. An
 //! extension never writes a value; [`open`] shows the user its Settings tab.
 //!
-//! The staged WIT does not have the `settings` interface yet (the diff for W0 is in design.md
-//! §D.4), so on WASM every call fails with `unavailable` until it does. Off WASM the calls
-//! answer from [`set_settings`], for an extension's unit tests, and [`open`] records a
+//! Exported as 0.2 or 0.1, every call fails with `unavailable`. Off WASM the calls answer from
+//! [`set_settings`], for an extension's unit tests, and [`open`] records a
 //! [`HostEffect::Settings`](crate::HostEffect::Settings).
 
-use crate::{HostError, HostErrorCode};
+use crate::HostError;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::HostErrorCode;
+
+#[cfg(target_arch = "wasm32")]
+unsafe extern "Rust" {
+    safe fn __fyx_ui_settings_get(key: &str) -> Result<SettingValue, HostError>;
+    safe fn __fyx_ui_settings_all() -> Result<Vec<Setting>, HostError>;
+    safe fn __fyx_ui_settings_open(key: Option<&str>) -> Result<(), HostError>;
+}
 
 /// `settings.setting-value`.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,21 +123,10 @@ pub fn set_settings(settings: &[Setting]) {
     SETTINGS.with_borrow_mut(|known| *known = settings.to_vec());
 }
 
-#[cfg(target_arch = "wasm32")]
-fn unstaged(call: &str) -> HostError {
-    HostError {
-        code: HostErrorCode::Unavailable,
-        message: format!(
-            "settings::{call} needs the settings interface of fyx:ui 0.4, which the host does not have yet"
-        ),
-    }
-}
-
 /// The effective value of `key`, which the manifest must declare (`invalid-argument` if not).
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 pub fn get(key: &str) -> Result<SettingValue, HostError> {
     #[cfg(target_arch = "wasm32")]
-    return Err(unstaged("get"));
+    return __fyx_ui_settings_get(key);
     #[cfg(not(target_arch = "wasm32"))]
     SETTINGS.with_borrow(|settings| {
         settings
@@ -146,21 +143,96 @@ pub fn get(key: &str) -> Result<SettingValue, HostError> {
 /// Every declared key, in manifest order.
 pub fn all() -> Result<Vec<Setting>, HostError> {
     #[cfg(target_arch = "wasm32")]
-    return Err(unstaged("all"));
+    return __fyx_ui_settings_all();
     #[cfg(not(target_arch = "wasm32"))]
     Ok(SETTINGS.with_borrow(Clone::clone))
 }
 
 /// Shows the extension's Settings tab, scrolled to `key` when given. Only while the user acts on
 /// one of the extension's surfaces (in `handle_event`); otherwise `not-permitted`.
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 pub fn open(key: Option<&str>) -> Result<(), HostError> {
     #[cfg(target_arch = "wasm32")]
-    return Err(unstaged("open"));
+    return __fyx_ui_settings_open(key);
     #[cfg(not(target_arch = "wasm32"))]
     crate::host::record(crate::HostEffect::Settings(SettingsEffect::Open(
         key.map(str::to_owned),
     )))
+}
+
+/// What `register_extension!`'s settings shims call, per exported world.
+#[doc(hidden)]
+pub mod glue {
+    /// The 0.4 import.
+    pub mod newest {
+        use super::super::{Setting, SettingValue};
+        use crate::HostError;
+        use crate::bindings::fyx::ui::settings as wit;
+
+        fn value(value: wit::SettingValue) -> SettingValue {
+            match value {
+                wit::SettingValue::Boolean(value) => SettingValue::Boolean(value),
+                wit::SettingValue::Integer(value) => SettingValue::Integer(value),
+                wit::SettingValue::Number(value) => SettingValue::Number(value),
+                wit::SettingValue::Text(value) => SettingValue::Text(value),
+                wit::SettingValue::Choice(value) => SettingValue::Choice(value),
+                wit::SettingValue::TextList(items) => SettingValue::TextList(items),
+            }
+        }
+
+        pub fn get(key: &str) -> Result<SettingValue, HostError> {
+            wit::get(key).map(value)
+        }
+
+        pub fn all() -> Result<Vec<Setting>, HostError> {
+            Ok(wit::all()
+                .into_iter()
+                .map(|setting| Setting {
+                    key: setting.key,
+                    value: value(setting.value),
+                    is_default: setting.is_default,
+                })
+                .collect())
+        }
+
+        pub fn open(key: Option<&str>) -> Result<(), HostError> {
+            wit::open(key)
+        }
+    }
+
+    /// Worlds without settings: every call is `unavailable`.
+    macro_rules! older {
+        ($world:ident, $version:literal) => {
+            pub mod $world {
+                use super::super::{Setting, SettingValue};
+                use crate::{HostError, HostErrorCode};
+
+                fn unavailable(what: &str) -> HostError {
+                    HostError {
+                        code: HostErrorCode::Unavailable,
+                        message: format!(
+                            "settings::{what} needs fyx:ui 0.4; this extension is exported as {}",
+                            $version
+                        ),
+                    }
+                }
+
+                pub fn get(_key: &str) -> Result<SettingValue, HostError> {
+                    Err(unavailable("get"))
+                }
+
+                pub fn all() -> Result<Vec<Setting>, HostError> {
+                    Err(unavailable("all"))
+                }
+
+                pub fn open(_key: Option<&str>) -> Result<(), HostError> {
+                    Err(unavailable("open"))
+                }
+            }
+        };
+    }
+
+    older!(v0_2, "0.2");
+    older!(v0_1, "0.1");
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -205,5 +277,21 @@ mod tests {
             )))]
         );
         set_settings(&[]);
+    }
+
+    #[test]
+    fn older_worlds_have_no_settings() {
+        assert_eq!(
+            glue::v0_2::get("x").unwrap_err().code,
+            HostErrorCode::Unavailable
+        );
+        assert_eq!(
+            glue::v0_1::all().unwrap_err().code,
+            HostErrorCode::Unavailable
+        );
+        assert_eq!(
+            glue::v0_2::open(None).unwrap_err().code,
+            HostErrorCode::Unavailable
+        );
     }
 }

@@ -15,10 +15,10 @@ test = true
 doctest = false
 
 [features]
-# The SDK's world: fyx:ui 0.2 without it, the staged 0.3 with it. Only a 0.3 build may link the
+# The SDK's world: fyx:ui 0.2 without it, 0.3 with it. Only a 0.3 build may link the
 # 0.3 world description, so a 0.1 or 0.2 component imports nothing of 0.3.
 fyx-ui-0-3 = ["dep:ui_ext_sdk_v0_2"]
-# The staged fyx:ui 0.4 (terminals, plan P5) instead of 0.3. A 0.4 build exports 0.4, 0.2 or 0.1;
+# fyx:ui 0.4 (terminals, plan P5) instead of 0.3. A 0.4 build exports 0.4, 0.2 or 0.1;
 # an extension that also ships as 0.3 builds that copy without this feature.
 fyx-ui-0-4 = ["fyx-ui-0-3"]
 

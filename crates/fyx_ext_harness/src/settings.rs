@@ -5,7 +5,7 @@
 //! `harness_conformance` pins the two together. `fyx-ext check` runs [`SettingSpec::parse_all`]
 //! on the manifest.
 //!
-//! The staged WIT has no `settings` interface yet (the diff for W0 is in design.md), so the
+//! The harness does not wire the 0.4 `settings` interface to the component yet, so the
 //! component cannot call the store: tests set the user's values with
 //! [`Harness::set_user_settings`](crate::Harness::set_user_settings) and read what the
 //! extension would get.

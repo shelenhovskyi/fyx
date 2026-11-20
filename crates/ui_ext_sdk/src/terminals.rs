@@ -1,4 +1,4 @@
-//! `fyx:ui` 0.4, staged: terminals (design.md B.1-B.5, B.11, C.3), with the `fyx-ui-0-4`
+//! `fyx:ui` 0.4: terminals (design.md B.1-B.5, B.11, C.3), with the `fyx-ui-0-4`
 //! feature.
 //!
 //! - **Pseudo-terminals** (`terminal:pseudo`): [`open_pseudo`] opens a terminal with no process;
