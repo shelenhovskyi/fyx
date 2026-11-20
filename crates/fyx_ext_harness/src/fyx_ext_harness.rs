@@ -2037,8 +2037,8 @@ impl Harness {
 
     /// The user edits `fyx_extensions.<id>` in the settings file: `values` is that object. An
     /// invalid value gives the extension its default. Returns the keys whose effective value
-    /// changed, in manifest order: what `io-event::settings-changed` carries once the WIT has
-    /// it (design.md §D.4).
+    /// changed, in manifest order: what `io-event::settings-changed` carries; it is also queued
+    /// for [`Harness::deliver_io`] (design.md §D.4).
     pub fn set_user_settings(&mut self, values: serde_json::Value) -> Result<Vec<String>> {
         self.store
             .data_mut()
@@ -2047,7 +2047,8 @@ impl Harness {
             .map_err(|why| anyhow::anyhow!(why))
     }
 
-    /// The `settings-changed` events the host would have sent, oldest first, and forgets them.
+    /// The `settings-changed` events not yet delivered by [`Harness::deliver_io`], oldest first,
+    /// and forgets them.
     pub fn take_settings_changed(&mut self) -> Vec<Vec<String>> {
         self.store.data_mut().settings.changed.drain(..).collect()
     }
@@ -2314,6 +2315,17 @@ impl Harness {
         }
         while let Some((id, outcome)) = self.store.data_mut().review.events.pop_front() {
             let event = ui_ext::network::IoEvent::ReviewDecided(id, outcome);
+            let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
+                continue;
+            };
+            let (value, effects) =
+                self.call(move |extension, store| extension.handle_io(store, &event))?;
+            let follow_ups = self.apply_effects(&effects);
+            self.run_follow_ups(follow_ups);
+            delivered.push(RawEffects { effects, value });
+        }
+        while let Some(keys) = self.store.data_mut().settings.changed.pop_front() {
+            let event = ui_ext::network::IoEvent::SettingsChanged(keys);
             let Some(event) = self.extension.world_io(HostIo::Model(event)) else {
                 continue;
             };
@@ -3189,6 +3201,8 @@ impl Harness {
                 }
                 // Decoding is the renderer's; the harness checks what it can in check_images.
                 HostEffect::AddImage { .. } | HostEffect::RemoveImage { .. } => {}
+                // Recorded in `effects`; the Settings tab is the host's.
+                HostEffect::OpenSettings { .. } => {}
                 HostEffect::RemoveDecoration { id } => {
                     self.decorations.remove(id);
                     self.mounted.remove(id);

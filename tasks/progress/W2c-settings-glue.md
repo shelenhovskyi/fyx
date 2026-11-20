@@ -33,7 +33,7 @@ pub fyx_extensions: Option<BTreeMap<String, serde_json::Value>>,
    converts it with `serde_json::from_value::<ui_ext::settings::RawValue>(value.clone()).ok()`.
 2. **On every settings change,** observe `SettingsStore`. Then, for each loaded extension,
    `extension.set_user_settings(user_object(cx, &id).as_ref())`. A non-empty result is the
-   `settings-changed` list. The runtime queues it for delivery once W0 stages the WIT, so the
+   `settings-changed` list. The runtime has already sent it to the running instance, so the
    host does nothing more with it.
 3. **The Settings tab (§D.3):**
    - Draw it from `extension.setting_specs()` (types, bounds, choices, titles).
@@ -43,11 +43,14 @@ pub fyx_extensions: Option<BTreeMap<String, serde_json::Value>>,
    - Write through the settings store as the settings UI does:
      `update_settings_file(..., |content| content.fyx_extensions[id][key] = value)`.
    - "Reset" removes the key. "Reset all" removes the extension's object.
-4. **`settings.open`** waits for the WIT (W0). The runtime will check the event call and ask
-   the host to show the tab.
+4. **`settings.open`**: the runtime checks the gesture and the key, then emits
+   `HostEffect::OpenSettings { key }`. Its arm in `ui_ext_host/src/registry.rs` only logs for
+   now. W3 replaces it with "show this extension's Settings tab, scrolled to `key`".
 
-## W0: WIT
+## Linked (W2c, after W0's df1d2bc395)
 
-Use the `settings` interface and `io-event::settings-changed(list<string>)` from design §D.4,
-with `settings` in the V0_4 world lists. Then W2c links `get`/`all`/`open` in
-`fyx_ui_v0_4.rs` over `SettingsHandle` and delivers the queued lists.
+- `settings.get`, `all` and `open` go over `SettingsHandle` in `fyx_ui_v0_4.rs`.
+- `IoEvent::SettingsChanged` is forwarded to `handle-io`.
+- The harness links its `FakeSettings`, and `deliver_io` delivers `settings-changed`.
+- Left over: the SDK's WASM glue in `ui_ext_sdk::settings`, which still answers
+  `unavailable` on WASM.
