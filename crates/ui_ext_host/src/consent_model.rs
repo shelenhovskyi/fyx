@@ -61,9 +61,12 @@ pub fn diff_text(diff: &ConsentDiff) -> String {
     parts.join(" ")
 }
 
-/// When an entry happened.
+/// When an entry happened. The journal is a file on disk: a time past what `SystemTime` holds (a
+/// damaged or hand-edited line) reads as the epoch rather than panicking while the page renders.
 pub fn entry_time(entry: &JournalEntry) -> std::time::SystemTime {
-    std::time::UNIX_EPOCH + std::time::Duration::from_millis(entry.at_ms)
+    std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_millis(entry.at_ms))
+        .unwrap_or(std::time::UNIX_EPOCH)
 }
 
 /// How the extension page words an entry.
@@ -127,5 +130,34 @@ pub fn journal_line(kind: &JournalKind) -> String {
             "{item_key} {}",
             if *allowed { "turned on" } else { "turned off" }
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_at(at_ms: u64) -> JournalEntry {
+        JournalEntry {
+            at_ms,
+            kind: JournalKind::TerminalRead {
+                terminal: "t".into(),
+                scope: "lines:20".into(),
+                bytes: 10,
+            },
+        }
+    }
+
+    /// `u64::MAX` ms overflows Windows' `SystemTime` (100 ns ticks in a `u64`); Unix's holds it.
+    #[test]
+    fn an_entry_time_past_what_system_time_holds_does_not_panic() {
+        let far = entry_time(&entry_at(u64::MAX));
+        if cfg!(windows) {
+            assert_eq!(far, std::time::UNIX_EPOCH);
+        }
+        assert_eq!(
+            entry_time(&entry_at(1_000)),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)
+        );
     }
 }
