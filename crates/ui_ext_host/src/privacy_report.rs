@@ -86,9 +86,14 @@ impl UseLine {
 /// Who the report is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Actor {
-    Extension { id: Arc<str>, name: SharedString },
+    Extension {
+        id: Arc<str>,
+        name: SharedString,
+    },
     /// An agent session by its id; `None` for uses outside a session.
-    Agent { session: Option<String> },
+    Agent {
+        session: Option<String>,
+    },
 }
 
 /// One actor's part of the report.
@@ -236,7 +241,9 @@ pub(crate) fn register(workspace: &mut Workspace) {
             return;
         };
         let fs = workspace.app_state().fs.clone();
-        workspace.toggle_modal(window, cx, move |_, cx| PrivacyReport::new(registry, fs, cx));
+        workspace.toggle_modal(window, cx, move |_, cx| {
+            PrivacyReport::new(registry, fs, cx)
+        });
     });
 }
 
@@ -323,21 +330,31 @@ impl PrivacyReport {
             })
             .when_some(extension_id, |this, id| {
                 this.when(!report.revocable.is_empty(), |this| {
-                    this.child(h_flex().flex_wrap().gap_1().children(
-                        report.revocable.iter().enumerate().map(|(button, capability)| {
-                            let id = id.clone();
-                            let capability_name = capability.clone();
-                            Button::new(
-                                SharedString::from(format!("fyx-privacy-revoke-{index}-{button}")),
-                                format!("Revoke {capability}"),
-                            )
-                            .style(ButtonStyle::Outlined)
-                            .size(ButtonSize::Compact)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.revoke(&id, &capability_name, cx)
-                            }))
-                        }),
-                    ))
+                    this.child(
+                        h_flex().flex_wrap().gap_1().children(
+                            report
+                                .revocable
+                                .iter()
+                                .enumerate()
+                                .map(|(button, capability)| {
+                                    let id = id.clone();
+                                    let capability_name = capability.clone();
+                                    Button::new(
+                                        SharedString::from(format!(
+                                            "fyx-privacy-revoke-{index}-{button}"
+                                        )),
+                                        format!("Revoke {capability}"),
+                                    )
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.revoke(&id, &capability_name, cx)
+                                        },
+                                    ))
+                                }),
+                        ),
+                    )
                 })
             })
             .when(is_agent, |this| {
@@ -348,9 +365,7 @@ impl PrivacyReport {
                     )
                     .style(ButtonStyle::Outlined)
                     .size(ButtonSize::Compact)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(ManageSecrets), cx)
-                    }),
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(ManageSecrets), cx)),
                 )
             })
     }

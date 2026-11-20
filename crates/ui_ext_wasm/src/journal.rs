@@ -68,9 +68,15 @@ pub enum JournalKind {
         outcome: String,
     },
     /// `network:fetch` requests to `host`, summed over at most [`USAGE_FLUSH`] (plan 7.6).
-    Fetched { host: String, count: u32 },
+    Fetched {
+        host: String,
+        count: u32,
+    },
     /// `workspace:edit` changes applied to a worktree file, summed like [`JournalKind::Fetched`].
-    FileEdited { path: String, count: u32 },
+    FileEdited {
+        path: String,
+        count: u32,
+    },
     /// A T2 or T3 consent change, by [`crate::permissions::ConsentItem::key`]
     /// (`terminal:read#always` for "Always allow").
     ConsentChanged {
@@ -245,7 +251,11 @@ mod usage_tests {
         assert_eq!(*recorded.0.lock().unwrap(), first, "the first uses at once");
         usage.fetched("api.example.com");
         usage.fetched("api.example.com");
-        assert_eq!(*recorded.0.lock().unwrap(), first, "later ones within the minute");
+        assert_eq!(
+            *recorded.0.lock().unwrap(),
+            first,
+            "later ones within the minute"
+        );
         drop(usage);
         let mut all = first;
         all.push(fetched(2));

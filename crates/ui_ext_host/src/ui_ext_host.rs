@@ -89,11 +89,11 @@ pub use install::{
     describe_capabilities,
 };
 pub use keyboard::{Activate, FocusNext, FocusPrevious, SelectPageDown, SelectPageUp};
-pub use privacy_report::OpenPrivacyReport;
 pub use panel::{
     ExtensionPanel, ExtensionStatusGroup, ExtensionStatusItem, PANEL_SLOTS, SHARED_SLOT,
     SurfaceInfo,
 };
+pub use privacy_report::OpenPrivacyReport;
 pub use registry::{
     DEV_EXTENSIONS_ENV, ExtensionSource, LoadedSurface, RegistryEvent, RelayObserver,
     T3ShareTarget, UiExtensionRegistry,

@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 use serde_json::{Map, Value, json};
 
 use crate::settings_form::{
@@ -174,6 +174,27 @@ fn test_open_extension_settings_leaves_a_pending_open(cx: &mut TestAppContext) {
         );
         assert_eq!(take_pending_open(cx), None);
     });
+}
+
+/// §D.6: the `open-settings` effect opens the extension's Settings tab at the key.
+#[gpui::test]
+fn test_open_settings_effect(cx: &mut TestAppContext) {
+    crate::tests::init_test(cx);
+    let registry = cx.new(|_| crate::UiExtensionRegistry::trusting());
+    registry.update(cx, |registry, cx| {
+        registry.apply_effect(
+            "ext",
+            ui_ext_wasm::HostEffect::OpenSettings {
+                key: Some("severity".into()),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(take_pending_open),
+        Some(("ext".to_string(), Some("severity".to_string())))
+    );
 }
 
 /// Plan 6.1: the real store reads `fyx_extensions.<id>` from the user settings file only, and the
