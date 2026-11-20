@@ -198,8 +198,12 @@ impl AgentSessionsPanel {
                         )
                     }),
             )
+            // Deferred like `jump_to`: the agent panel can share this panel's dock.
             .on_click(move |_, window, cx| {
-                acp_thread::fyx_focus::focus_thread(&thread, window, cx);
+                let thread = thread.clone();
+                window.defer(cx, move |window, cx| {
+                    acp_thread::fyx_focus::focus_thread(&thread, window, cx)
+                });
             })
     }
 }

@@ -201,7 +201,7 @@ pub(crate) fn install_thread_focuser(cx: &mut App) {
             workspace.update(cx, |workspace, cx| {
                 if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                     panel.update(cx, |panel, cx| {
-                        panel.open_thread(session_id, None, title, window, cx)
+                        show_thread(panel, thread, session_id, title, window, cx)
                     });
                 }
                 workspace.focus_panel::<AgentPanel>(window, cx);
@@ -209,4 +209,30 @@ pub(crate) fn install_thread_focuser(cx: &mut App) {
         }),
         cx,
     );
+}
+
+/// Shows the conversation that holds `thread` when the panel already has it (active or kept in
+/// the background), so a click never starts a second connection for a live thread; otherwise
+/// opens it by session id.
+fn show_thread(
+    panel: &mut AgentPanel,
+    thread: &Entity<acp_thread::AcpThread>,
+    session_id: agent_client_protocol::v2::schema::SessionId,
+    title: Option<SharedString>,
+    window: &mut Window,
+    cx: &mut Context<AgentPanel>,
+) {
+    let held = panel.conversation_views().into_iter().find(|view| {
+        view.read(cx)
+            .root_thread(cx)
+            .is_some_and(|root| &root == thread)
+    });
+    let Some(view) = held else {
+        panel.open_thread(session_id, None, title, window, cx);
+        return;
+    };
+    let thread_id = view.read(cx).thread_id;
+    if panel.active_thread_id(cx) != Some(thread_id) {
+        panel.activate_retained_thread(thread_id, true, window, cx);
+    }
 }
