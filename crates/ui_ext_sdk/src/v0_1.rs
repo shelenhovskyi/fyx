@@ -594,8 +594,6 @@ mod tests {
             })
         );
         let rows = rows(vec![ListRow {
-            #[cfg(feature = "fyx-ui-0-4")]
-            expansion: crate::bindings::fyx::ui::types::Expansion::Leaf,
             index: 4,
             indent: 2,
             nodes: vec![Node {
