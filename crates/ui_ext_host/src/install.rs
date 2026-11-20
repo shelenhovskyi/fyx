@@ -163,6 +163,12 @@ pub fn describe_capability_ids(capabilities: &[String]) -> Vec<String> {
             "workspace:diagnostics" => format!(
                 "Reads errors and warnings (asks once, here; you can revoke it) ({capability})"
             ),
+            "diagnostics:publish" => format!(
+                "Shows problems in your files (asks once, here; you can revoke it) ({capability})"
+            ),
+            "workspace:file-decorations" => format!(
+                "Marks files in the project panel (asks once, here; you can revoke it) ({capability})"
+            ),
             "network:fetch" => format!(
                 "Connects to the internet, to the hosts below (asks the first time) ({capability})"
             ),
@@ -216,6 +222,8 @@ pub fn capability_chip_label(capability: &str) -> String {
         "workspace:read-buffers" => "Reads Open Files".into(),
         "workspace:read-files" => "Reads Project Files".into(),
         "workspace:diagnostics" => "Reads Diagnostics".into(),
+        "diagnostics:publish" => "Shows Problems".into(),
+        "workspace:file-decorations" => "Marks Files".into(),
         "network:fetch" => "Network".into(),
         "process:spawn" => "Runs Programs".into(),
         "workspace:edit" => "Edits Files".into(),

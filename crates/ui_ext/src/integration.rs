@@ -16,6 +16,10 @@ pub const CAPABILITY_REVIEW_PROPOSE: &str = "review:propose";
 pub const CAPABILITY_CONTEXT_EDITOR: &str = "context:editor";
 pub const CAPABILITY_WORKSPACE_OPEN: &str = "workspace:open";
 pub const CAPABILITY_WORKSPACE_DIAGNOSTICS: &str = "workspace:diagnostics";
+/// Plan 6.6, design.md §E.
+pub const CAPABILITY_DIAGNOSTICS_PUBLISH: &str = "diagnostics:publish";
+/// Plan 6.7, design.md §F.2.
+pub const CAPABILITY_FILE_DECORATIONS: &str = "workspace:file-decorations";
 pub const CAPABILITY_APPROVALS: &str = "ui:approvals";
 
 /// §B.7.

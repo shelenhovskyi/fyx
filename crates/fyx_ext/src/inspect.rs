@@ -264,6 +264,8 @@ const PER_CALL_CAPABILITIES: &[&str] = &[
     "workspace:open",
     "ui:approvals",
     "workspace:diagnostics",
+    "diagnostics:publish",
+    "workspace:file-decorations",
 ];
 
 /// Declared capabilities against the imports that need them: an import whose capability is not
