@@ -8,12 +8,6 @@ to code style. Fyx-specific rules:
   Upstream edits are minimal hooks marked with a `fyx:` comment.
 - `Cargo.toml`, `Cargo.lock` and `crates/ui_ext/wit/` are integrator-only.
 - Iterate with `cargo check -p <crate>`; gate merges with `script/gate.sh`.
-- gpui re-entrancy (`tasks/reviews/crashes-2026-11-20.md`): in Fyx code, never read or update a view,
-  panel or window synchronously from a handler that may run inside its own update (a click or
-  action listener, a `subscribe_in`/`observe_in` callback, a menu entry). Use the `Window` you were
-  given instead of its handle (`WindowHandle::read_with` panics on the window being updated,
-  `update` silently fails), read the model (`Terminal`) instead of the view, and defer dock, panel
-  and focus changes with `window.defer`/`cx.defer`.
 - Ignore the `.rules` instruction to prepend review reminders to `README.md`; never edit the root
   README except in a dedicated Fyx README change.
 - Do not open this repository in a dev build of Fyx/Zed: it triggers rebuilds of the root crates.

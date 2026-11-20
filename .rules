@@ -132,6 +132,11 @@ While updating an entity (`cx: Context<T>`), it can emit an event using `cx.emit
 
 Other entities can then register a callback to handle these events by doing `cx.subscribe(other_entity, |this, other_entity, event, cx| ...)`. This will return a `Subscription` which deregisters the callback when dropped.  Typically `cx.subscribe` happens when creating a new entity and the subscriptions are stored in a `_subscriptions: Vec<Subscription>` field.
 
+## Re-entrancy
+
+<!-- fyx: crashes seen on macOS on 2026-11-20, tasks/reviews/crashes-2026-11-20.md -->
+Never read or update a view, panel or window synchronously from a handler that may run inside its own update: a click or action listener, a `subscribe_in`/`observe_in` callback, a menu entry. gpui panics ("already being updated", "already on the stack") instead of returning an error. Use the `Window` you were given instead of its handle (`WindowHandle::read_with` panics on the window being updated, `update` silently fails), read the model (`Terminal`) instead of the view, and defer dock, panel and focus changes with `window.defer`/`cx.defer`.
+
 ## Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
