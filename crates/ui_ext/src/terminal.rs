@@ -736,6 +736,12 @@ pub struct TerminalProfileSpec {
     /// The tool whose account profile the user picks for this terminal (§C.6).
     #[serde(default)]
     pub account_tool: Option<String>,
+    /// Plan 7.14 (a): the flag that resumes the program's session, given the session id after it
+    /// (`--resume` for Claude Code). With it, Fyx restarts the terminal after a restart with
+    /// `<flag> <session id>`, the id taken from the `session_id` its hooks send through
+    /// `fyx-relay`.
+    #[serde(default)]
+    pub resume_flag: Option<String>,
 }
 
 /// A checked profile, for the "+" menu.
@@ -749,6 +755,7 @@ pub struct TerminalProfile {
     pub args: Vec<Template>,
     pub cwd: ProfileCwd,
     pub account_tool: Option<String>,
+    pub resume_flag: Option<String>,
 }
 
 impl TerminalProfile {
@@ -762,6 +769,27 @@ impl TerminalProfile {
             reason: None,
         })
     }
+}
+
+/// `--resume`: two dashes, a lowercase letter, then up to 31 of `[a-z0-9-]`.
+fn is_resume_flag(flag: &str) -> bool {
+    flag.strip_prefix("--").is_some_and(|name| {
+        name.len() <= 32
+            && name.starts_with(|first: char| first.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
+}
+
+/// A session id a program's hook reported (plan 7.14 (a)), safe to pass after a resume flag: 1 to
+/// 128 of `[A-Za-z0-9_-]`, not starting with `-`.
+pub fn is_session_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Checks `[[fyx_ui.terminal_profiles]]`.
@@ -791,6 +819,11 @@ pub fn check_profiles(specs: Vec<TerminalProfileSpec>) -> Result<Vec<TerminalPro
             {
                 return Err(at("account_tool must be [a-z0-9-]{1,32}".into()));
             }
+            if let Some(flag) = &spec.resume_flag
+                && !is_resume_flag(flag)
+            {
+                return Err(at("resume_flag must be --[a-z][a-z0-9-]{0,31}".into()));
+            }
             if spec.args.len() > MAX_PROFILE_ARGS {
                 return Err(at(format!("at most {MAX_PROFILE_ARGS} args")));
             }
@@ -815,6 +848,7 @@ pub fn check_profiles(specs: Vec<TerminalProfileSpec>) -> Result<Vec<TerminalPro
                 args,
                 cwd: spec.cwd,
                 account_tool: spec.account_tool,
+                resume_flag: spec.resume_flag,
             })
         })
         .collect()
@@ -1281,6 +1315,7 @@ mod tests {
             args: args.iter().map(|arg| arg.to_string()).collect(),
             cwd: ProfileCwd::Worktree,
             account_tool: Some("claude".into()),
+            resume_flag: Some("--resume".into()),
         };
         let checked =
             check_profiles(vec![spec("claude", &["--ide", "${package}/x", "${relay}"])]).unwrap();
@@ -1298,6 +1333,15 @@ mod tests {
             vec![spec("a", &["${account.claude}"])],
         ] {
             assert!(check_profiles(bad.clone()).is_err(), "{bad:?}");
+        }
+        for flag in ["resume", "-r", "--Resume", "--", "--resume=x", "--a b"] {
+            let mut bad = spec("a", &[]);
+            bad.resume_flag = Some(flag.into());
+            assert!(check_profiles(vec![bad]).is_err(), "{flag}");
+        }
+        assert!(is_session_id("0b6f1c2e-9d3a-4f6e-8a1b-2c3d4e5f6a7b"));
+        for id in ["", "-x", "a b", "a;b", "../a", &"a".repeat(129)] {
+            assert!(!is_session_id(id), "{id}");
         }
         let mut path_program = spec("a", &[]);
         path_program.program = "bin/tool".into();

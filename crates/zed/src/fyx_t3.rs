@@ -149,6 +149,8 @@ fn deliver_relay_request(
         stdin,
         reply,
     } = delivery;
+    // Plan 7.14 (a): a profile terminal's session id, to resume it after a restart.
+    terminal_host::note_relay_stdin(terminal, &stdin, cx);
     let handle = terminal_host::relay_terminal_handle(&extension_id, terminal, cx);
     if let Err(error) = registry.read(cx).relay_request(
         &extension_id,

@@ -16,14 +16,14 @@
 //! account's dir (the presets' and the user's `fyx.accounts.tools`) are dropped whatever the
 //! manifest check let through.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, Global, SharedString, Window};
+use gpui::{App, AppContext as _, Entity, Global, SharedString, Window};
 use settings::Settings as _;
 use settings::settings_content::{FyxAccount, FyxAccountsSettingsContent};
 use terminal::terminal_settings::TerminalSettings;
@@ -36,6 +36,7 @@ use util::paths::PathStyle;
 use workspace::Workspace;
 
 use crate::accounts;
+use crate::restore::Record;
 
 /// What an extension declared and the user granted for terminals.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -71,6 +72,21 @@ pub(crate) fn set(ext: String, integration: TerminalIntegration, cx: &mut App) {
     } else {
         integrations.0.insert(ext, Arc::new(integration));
     }
+    crate::restore::integration_changed(cx);
+}
+
+/// Plan 7.14 (a): every loaded `(extension, profile)`.
+pub(crate) fn loaded_profiles(cx: &App) -> HashSet<(String, String)> {
+    integrations(cx)
+        .into_iter()
+        .flat_map(|(ext, integration)| {
+            integration
+                .profiles
+                .iter()
+                .map(|profile| (ext.clone(), profile.id.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn integrations(cx: &App) -> Vec<(String, Arc<TerminalIntegration>)> {
@@ -388,30 +404,33 @@ pub(crate) fn menu_entries(cx: &App) -> Vec<MenuEntry> {
         entries.push(MenuEntry::Entry {
             label,
             on_select: Rc::new(move |window, cx| {
-                launch(
-                    &item.ext,
-                    &item.profile,
-                    item.account_choice.clone(),
-                    window,
-                    cx,
-                )
+                let Some(workspace) = Workspace::for_window(window, cx) else {
+                    return;
+                };
+                let record = Record {
+                    ext: item.ext.clone(),
+                    profile: item.profile.clone(),
+                    account_choice: item.account_choice.clone(),
+                    session: None,
+                };
+                launch(workspace, record, window, cx)
             }),
         });
     }
     entries
 }
 
-/// Starts `ext`'s profile in the window's terminal panel.
-fn launch(
-    ext: &str,
-    profile_id: &str,
-    account_choice: Option<String>,
+/// Starts the record's profile in the workspace's terminal panel; with its session, resumed when
+/// the profile can (plan 7.14 (a)).
+pub(crate) fn launch(
+    workspace: Entity<Workspace>,
+    record: Record,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(workspace) = Workspace::for_window(window, cx) else {
-        return;
-    };
+    let (ext_id, profile_key) = (record.ext.clone(), record.profile.clone());
+    let ext = ext_id.as_str();
+    let profile_id = profile_key.as_str();
     let Some(integration) = integrations(cx)
         .into_iter()
         .find(|(id, _)| id == ext)
@@ -432,7 +451,7 @@ fn launch(
         .filter(|root| crate::created::in_trusted_worktree(root, Some(window), cx))
         .cloned();
     let relay = crate::relay::relay_binary(cx);
-    let start = match plan(
+    let mut start = match plan(
         profile,
         &integration,
         &roots,
@@ -445,6 +464,22 @@ fn launch(
             return;
         }
     };
+
+    let resume = profile
+        .resume_flag
+        .clone()
+        .zip(record.session.clone())
+        .filter(|(_, session)| {
+            ui_ext::terminal::is_session_id(session) && crate::restore::resume_enabled(cx)
+        });
+    let session = resume.as_ref().map(|(_, session)| session.clone());
+    if let Some((flag, session)) = resume {
+        start.args.push(flag);
+        start.args.push(session);
+    }
+    let restore_key = crate::restore::key(&roots);
+    let record = Record { session, ..record };
+    let account_choice = record.account_choice.clone();
 
     let settings = accounts::settings(cx);
     let terminal_accounts =
@@ -499,6 +534,11 @@ fn launch(
                 let terminal = cx.new(|cx| builder.subscribe(cx));
                 // 7.14 (b): the program's own title once it sets one, the profile's name before.
                 terminal.read(cx).fyx.set_fallback_title(Some(title));
+                // 7.14 (a): Fyx reopens it as the profile, not as a shell.
+                terminal.read(cx).fyx.set_profile_terminal(true);
+                if let Some(key) = restore_key {
+                    crate::restore::started(&terminal, key, record, cx);
+                }
                 workspace
                     .update(cx, |workspace, cx| {
                         crate::pseudo::add_tab(workspace, terminal, None, true, window, cx)
@@ -510,7 +550,7 @@ fn launch(
     .detach();
 }
 
-fn local_roots(workspace: &Workspace, cx: &App) -> Vec<PathBuf> {
+pub(crate) fn local_roots(workspace: &Workspace, cx: &App) -> Vec<PathBuf> {
     let project = workspace.project().read(cx);
     if !project.is_local() {
         return Vec::new();
@@ -674,6 +714,7 @@ mod tests {
             args: vec![template("--ide", TemplateUse::ProfileArg)],
             cwd: ProfileCwd::Worktree,
             account_tool: account_tool.map(Into::into),
+            resume_flag: Some("--resume".into()),
         }
     }
 

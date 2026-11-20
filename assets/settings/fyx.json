@@ -133,6 +133,12 @@
       // A soft daily cap on agents' cost in US dollars: reaching it stops the running agent
       // turns with a notice. 0 means no cap.
       "daily_cost_cap": 0,
+      // Reopen the terminals started from an extension's profile ("Open Claude Code as…") when
+      // the project opens again, with the same profile and account.
+      "restore_profile_terminals": true,
+      // When reopening them, resume the program's last session where the profile can (Claude
+      // Code's --resume); false starts a new session.
+      "resume_profile_sessions": true,
     },
     // Several accounts of one tool, each in its own config dir. Fyx only sets the tool's
     // config-dir variable in a terminal or an agent; sign in with the tool's own command.

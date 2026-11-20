@@ -12,6 +12,7 @@ mod pseudo;
 #[cfg(test)]
 mod reentrancy_tests;
 mod relay;
+mod restore;
 mod sessions;
 mod sessions_panel;
 mod settings;
@@ -192,6 +193,14 @@ pub fn extension_terminal_view(
     });
     Some(view.into())
 }
+
+/// Plan 7.14 (a): reopens profile terminals when their project opens again; the list lives in
+/// `data_dir`.
+pub fn init_profile_restore(data_dir: std::path::PathBuf, cx: &mut App) {
+    restore::init(data_dir, cx);
+}
+
+pub use restore::note_relay_stdin;
 
 /// Plan 7.8: cost and context meters for every agent thread; day totals in `data_dir`.
 pub fn init_usage_meters(data_dir: std::path::PathBuf, cx: &mut App) {

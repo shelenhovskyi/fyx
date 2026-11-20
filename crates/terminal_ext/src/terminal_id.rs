@@ -173,6 +173,9 @@ pub(crate) struct Shared {
     pub(crate) accounts: Mutex<Vec<AccountBadge>>,
     /// Plan 7.14 (b): the tab's title until the program sets its own (OSC 0/2).
     pub(crate) fallback_title: Mutex<Option<String>>,
+    /// Plan 7.14 (a): an extension's profile started it; Fyx restores it as that profile, so the
+    /// workspace does not restore it as a shell.
+    pub(crate) profile_terminal: std::sync::atomic::AtomicBool,
     pub(crate) raw_tap: Option<Tap>,
 }
 
@@ -331,6 +334,7 @@ impl TerminalExt {
                 origin: Mutex::default(),
                 accounts: Mutex::default(),
                 fallback_title: Mutex::default(),
+                profile_terminal: std::sync::atomic::AtomicBool::new(false),
                 raw_tap,
             }),
             pseudo: None,
@@ -375,6 +379,19 @@ impl TerminalExt {
     /// Claude Code sets to the session's topic) and this until it sets one.
     pub fn fallback_title(&self) -> Option<String> {
         lock(&self.shared.fallback_title).clone()
+    }
+
+    /// Plan 7.14 (a): whether Fyx restores this terminal as an extension's profile.
+    pub fn is_profile_terminal(&self) -> bool {
+        self.shared
+            .profile_terminal
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_profile_terminal(&self, profile_terminal: bool) {
+        self.shared
+            .profile_terminal
+            .store(profile_terminal, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_fallback_title(&self, title: Option<String>) {

@@ -1320,10 +1320,18 @@ program = "claude"            # resolved like [[fyx_ui.processes]]: PATH outside
 args = ["--ide"]              # literal; may contain ${package} and ${relay}
 cwd = "worktree"              # "worktree" or "home"
 account_tool = "claude"       # optional: the user picks an account profile for it
+resume_flag = "--resume"      # optional: --[a-z][a-z0-9-]{0,31}, resumes a session (below)
 ```
 
 The menu shows the full command line on hover, and marks a shell or interpreter "runs any command
 you type". At most 16 profiles, and `args` of at most 64 items of 1 KiB.
+
+Fyx reopens a profile's terminals when their project opens again, with the same account
+(`fyx.terminal.restore_profile_terminals`). With `resume_flag`, it starts the program with
+`<resume_flag> <session id>` instead, the id being the last top-level `session_id` that the
+terminal's hooks sent through `fyx-relay` (Claude Code's hook input has one). Fyx passes only an
+id of 1 to 128 `[A-Za-z0-9_-]` that does not start with `-`, and the user can turn resuming off
+(`fyx.terminal.resume_profile_sessions`).
 
 ### Pseudo-terminals and the `terminal` node (`terminal:pseudo`, T1)
 
