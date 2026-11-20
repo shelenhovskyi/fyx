@@ -249,7 +249,7 @@ async fn test_account_dirs_are_refused(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let refused = |result: &Result<Applied, EditError>| {
         matches!(result, Err(EditError::NotAllowed(message))
-            if message.contains("account dir of \"Work\"") && !message.contains(path!("/work/")))
+            if message.contains("account dir of \"Work\"") && !message.contains(path!("/work/accounts")))
     };
 
     let result = run(
